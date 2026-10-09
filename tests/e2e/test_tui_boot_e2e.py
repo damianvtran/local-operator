@@ -314,10 +314,14 @@ def _stage_config(config_dir: Path, home: Path) -> Path:
     A provider and a model must be configured or the viewer never engages a
     runtime (``OperatorApp._runtime_can_start``) and the "resources finished
     loading" half of this test has nothing to load. The base URL is a loopback
-    port nothing listens on, deliberately: the boot path does not call the
-    provider (measured — no request, no error in the log), so standing a stub
-    HTTP server up would add a fixture to babysit without buying coverage.
-    What the value has to do is resolve a provider/model pair.
+    port nothing listens on, deliberately — and since this PR's first-run work
+    the boot DOES reach it: a fresh config dir with a resolvable provider/model
+    pair routes into her conversation and arms her greeting, whose turn calls
+    the provider and fails. That is the shape this fixture wants (the call
+    fails in milliseconds on a port nothing can answer, so the leg stays
+    hermetic and no stub server has to be stood up and babysat); the clean-log
+    contract at the end of the test allows those failure lines and forbids only
+    a crash marker or a traceback. What the pair has to do is RESOLVE.
 
     The MCP config is a REAL stdio peer, because MCP servers coming up is what
     the operator's crash log shows the app doing when it died. It is copied

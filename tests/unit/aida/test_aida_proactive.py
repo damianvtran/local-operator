@@ -302,6 +302,57 @@ async def test_pause_invokes_config_hold_and_supervisor_marker(isolated_root: Pa
 
 
 @pytest.mark.asyncio
+async def test_a_contended_store_lock_is_a_quiet_retryable_refusal(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A peer's lock hold is the lock module's documented refusal, not an error.
+
+    Two attended armers run concurrently at boot — the launch hook's asyncio
+    task (``tui/__init__.py``) and the app's first-run route — and each takes
+    the store lock for the row write and again for the escalation tray, so the
+    loser waits out ``state.LOCK_WAIT_S`` and is refused. Logged as
+    ``ensure_armed failed`` WITH a traceback that refusal tripped the clean-log
+    contract in ``tests/e2e/test_tui_boot_e2e.py`` on CI (``tui-e2e
+    (ubuntu-latest, 1)``, run 37886200214; the reviewer measured 2 runs in 10)
+    for a first-run boot that was working correctly.
+
+    Pinned at the same place the drain-notes test pins visibility — the level,
+    not the text — because "benign" is exactly the claim: the word says so, an
+    INFO line says so, and nothing at WARNING or above (which is where a
+    traceback rides) may appear. The e2e contract can only catch this from the
+    outside and only when the race lands; this cell is deterministic.
+    """
+    from local_operator.wakes.lock import WakeLockBusy
+
+    _root_with_session(isolated_root)
+
+    class _Held:
+        def __enter__(self) -> None:
+            raise WakeLockBusy("held by a peer")
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    monkeypatch.setattr(state, "locked", lambda *a, **k: _Held())
+    with caplog.at_level(logging.INFO, logger="local_operator.aida.proactive"):
+        word = await proactive.ensure_armed(isolated_root, SESSION_ID)
+
+    assert word == "busy"
+    words = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name.startswith("local_operator.aida")
+    ]
+    assert words, "the refusal is quiet, never silent"
+    noisy = [
+        (record.name, record.levelname, record.getMessage())
+        for record in caplog.records
+        if record.name.startswith("local_operator.aida") and record.levelno >= logging.WARNING
+    ]
+    assert noisy == [], noisy
+
+
+@pytest.mark.asyncio
 async def test_ensure_armed_words(isolated_root: Path) -> None:
     # No session on disk → nothing to arm against.
     assert await proactive.ensure_armed(isolated_root, SESSION_ID) == "no-session"

@@ -209,10 +209,19 @@ async def test_a_born_journal_does_not_settle_the_greeting_or_arm_the_cadence(
 
     assert onboarding.cadence_allowed(isolated_root) is False
     assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_OWED
-    # Nothing was spent: the greeting is not settled, so an attended exit that
-    # finds the install fresh (as it does once the boot's own session is the
-    # one her id names) still arms it.
-    assert onboarding.greeting_record(isolated_root).get("skipped_at") is None
+    # Nothing was spent: read the STAMP off the ledger, not ``greeting_record``
+    # — that projection exposes only {state, surface, requested_at, armed_at,
+    # delivered_at} for the routes, so a `.get("skipped_at")` there is None
+    # whatever the file says and the assertion could never fail (review round
+    # 2, found by reverting the skip and watching this cell stay green).
+    ledger = isolated_root / "aida" / "onboarding.json"
+    greeting = (
+        json.loads(ledger.read_text(encoding="utf-8")).get("greeting", {})
+        if ledger.exists()
+        else {}
+    )
+    assert "skipped_at" not in greeting, greeting
+    assert greeting.get("state") in (None, onboarding.GREETING_OWED), greeting
 
 
 def test_a_torn_transcript_still_settles_the_greeting(
@@ -234,6 +243,35 @@ def test_a_torn_transcript_still_settles_the_greeting(
 
     assert onboarding.cadence_allowed(isolated_root) is True
     assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_SKIPPED
+
+
+def test_her_own_conversation_is_read_through_the_real_path(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_her_conversation_had`` must resolve HER transcript through the config dir.
+
+    The reader it delegates to (``session_has_durable_history``) appends
+    ``sessions/<id>/`` itself, so passing the SESSIONS root — which this call
+    did — asked for ``<config>/sessions/sessions/<id>/``: a path that never
+    exists, so every install answered False and the "met her before the ledger
+    existed" branch was dead code. Pinned with a real message row in her
+    transcript; revert the argument and this cell goes red, which nothing else
+    in the suite did (review round 2).
+    """
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    _root_with_session(isolated_root)
+    state.update_state(isolated_root, session_id=SESSION_ID)
+    (isolated_root / "sessions" / SESSION_ID / "transcript.jsonl").write_text(
+        '{"type": "message", "payload": {"kind": "message"}}\n', encoding="utf-8"
+    )
+
+    assert onboarding._her_conversation_had(isolated_root) is True
+    # And the direction of the other predicate is pinned with it: HER
+    # engagement is not the operator's, so the install still counts as fresh
+    # (``other_user_sessions`` excludes the session her own state names) —
+    # which is why ``_her_conversation_had`` exists as its own signal rather
+    # than being inferred from ``first_run_pending``.
+    assert onboarding.first_run_pending(isolated_root) is True
 
 
 def test_a_legacy_greeted_at_stamp_reads_as_delivered(isolated_root: Path) -> None:
