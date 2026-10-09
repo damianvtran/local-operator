@@ -133,7 +133,7 @@ describe("running", () => {
 		render(
 			<Transcript
 				pid="9"
-				entries={[entry({ details: liveDetails({ progress: 0.42 }) })]}
+				entries={[entry({ details: liveDetails({ progress_fraction: 0.42 }) })]}
 			/>,
 		);
 		const bar = screen.getByRole("progressbar");
@@ -148,7 +148,14 @@ describe("running", () => {
 				pid="9"
 				entries={[
 					entry({
-						details: liveDetails({ logs: ["step 1", "step 2", "step 3", "step 4"] }),
+					details: liveDetails({
+						log_lines: [
+							{ message: "step 1", timestamp: "2026-10-09T00:00:00Z" },
+							{ message: "step 2", timestamp: "2026-10-09T00:00:01Z" },
+							{ message: "step 3", timestamp: "2026-10-09T00:00:02Z" },
+							{ message: "step 4", timestamp: "2026-10-09T00:00:03Z" },
+						],
+					}),
 					}),
 				]}
 			/>,
@@ -253,6 +260,21 @@ describe("settled states", () => {
 		expect(screen.queryByRole("button", { name: "steer" })).toBeNull();
 	});
 
+	it("a cancel that landed (error-shaped, stage cancelled) is not a failure", () => {
+		/* The canonical cancel settle: the tool result is error-shaped while
+		   its details name the cancel — the card must state `cancelled`, not
+		   paint a deliberate stop in the failure ink. */
+		render(
+			<Transcript
+				pid="9"
+				entries={[
+					entry({ tool_state: "failed", details: liveDetails({ stage: "cancelled" }) }),
+				]}
+			/>,
+		);
+		expect(screen.getByText("cancelled")).toBeTruthy();
+	});
+
 	it("the restart and steer slots call through when a caller wires them", () => {
 		const onRestart = vi.fn();
 		const onSteer = vi.fn();
@@ -307,5 +329,28 @@ describe("cancel gating", () => {
 			expect(screen.queryByText("cancelling…")).toBeNull(),
 		);
 		expect(screen.getByRole("button", { name: "cancel" })).toBeTruthy();
+	});
+});
+
+describe("the canonical stage word", () => {
+	it("the wire's own cancelling holds the card before any press", () => {
+		/* The press-driven hold is captured by the cancel-gating tests above;
+		   this one arrives only from the feed (`stage: "cancelling"`) and
+		   must render the same hold — no press, no cancel control to press
+		   twice. */
+		render(
+			<Transcript
+				pid="9"
+				entries={[
+					entry({
+						tool_state: "running",
+						details: liveDetails({ stage: "cancelling" }),
+					}),
+				]}
+			/>,
+		);
+		expect(screen.getByText("cancelling…")).toBeTruthy();
+		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
 	});
 });
