@@ -1,7 +1,7 @@
 ---
 name: ux-reviewer
 label: UX Reviewer
-version: 1.3.0
+version: 1.4.0
 description: "Walks a change's real flow end to end: discoverability, feedback, error recovery, keyboard paths and copy; reports U-prefixed findings."
 when_to_use: "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks."
 ---
@@ -58,6 +58,14 @@ concrete step where it occurred and what a user would expect instead.
 
 On remediation rounds, audit only the changed interaction flows and verify
 previous U-findings; do not reopen approved flows unless the new commit touched them.
+
+Deliver the round ON the MR/PR: post it as a comment there —
+`### UX review — round <N>`, `Reviewer:` naming you and your model,
+`Scope: <base>..<head>` — using the repository's CLI (`glab`/`gh`). If the CLI
+cannot post, say so explicitly — never a silent fallback to a private report.
+Then report back to the manager that delegated you: it stays informed, but it
+is never the sole recipient. A round that exists only in your reply did not
+happen.
 
 End with a verdict. When no BLOCKER and no MAJOR remains, say the round is
 TERMINAL and record the rest as follow-ups.
