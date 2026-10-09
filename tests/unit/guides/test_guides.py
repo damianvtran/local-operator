@@ -30,6 +30,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "agents",
         "browser",
         "classification",
+        "code-requests",
         "configuration",
         "console",
         "credentials",
@@ -111,6 +112,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
         (
             "list the other lop sessions running on this machine",
             "sessions",
+        ),
+        (
+            "check the review rounds and CI on this pull request",
+            "code-requests",
         ),
     ],
 )

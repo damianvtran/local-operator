@@ -689,6 +689,11 @@ def test_inventory_block_matches_default_tool_order() -> None:
             # Presence-only, same rule as the two above: `project`/
             # `project_delete` are createIf-gated on a store being attached.
             project_registry=object(),
+            # `code_requests` is createIf-gated on the session's own DIRECTORY
+            # (its derived index lives beside the transcript) — context DATA,
+            # presence-only here like the registries above, and never read
+            # because the tool is not called by an ordering test.
+            session_dir="/stub-session",
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)

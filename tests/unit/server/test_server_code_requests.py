@@ -21,6 +21,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from local_operator.code_requests import cache as code_requests_cache
 from local_operator.code_requests import ledger
 from local_operator.code_requests.refs import HostContext, Remote
 from local_operator.config import ConfigManager
@@ -32,8 +33,41 @@ CWD = HostContext(remotes=(Remote("origin", "github.com", "damianvtran/local-ope
 PR = "https://github.com/damianvtran/local-operator/pull/1904"
 
 
+@pytest.fixture
+def fetch_kicks(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Record ``service.schedule_session_refresh`` calls instead of running them.
+
+    TWO ROLES, one patch. First, it is this module's network guard: the GET and
+    POST paths schedule a background FETCH pass, and the real one resolves a
+    credential first — a ``gh`` KEYCHAIN login is HOME-independent, so on a
+    developer's machine it would succeed and the "fetch" would really talk to
+    the forge, inside the unit suite. Second, it records WHAT was scheduled so
+    a test can assert the scheduling contract. The fetch behaviour itself is
+    exercised in ``tests/unit/code_requests`` against mock transports.
+
+    ``desktop`` depends on this fixture, so every test in the module gets the
+    patch whether or not it inspects the list.
+    """
+    kicks: list[dict[str, Any]] = []
+
+    def _record(config_dir, session_id, rows, *, keys=None, force=False):
+        kicks.append(
+            {
+                "session_id": session_id,
+                "keys": [dict(row).get("key") for row in rows],
+                "keys_filter": list(keys) if keys else None,
+                "force": force,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(desktop_code_requests.service, "schedule_session_refresh", _record)
+    return kicks
+
+
 @pytest_asyncio.fixture
-async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fetch_kicks):
+    del fetch_kicks  # taken for its monkeypatch side effect; see its docstring
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -256,9 +290,53 @@ async def test_refresh_rescans_and_says_what_it_did_not_do(desktop):
     assert response.status_code == 202
     receipt = response.json()["result"]
     assert receipt["accepted"] is True
-    assert "link-only" in receipt["note"] and "later change" in receipt["note"]
+    assert "queued a refresh" in receipt["note"]
+    assert "link-only" in receipt["note"]
     listing = await client.get(f"/v1/desktop/sessions/{SESSION}/code-requests")
     assert {row["number"] for row in listing.json()["result"]["rows"]} == {1904, 2001}
+
+
+@pytest.mark.asyncio
+async def test_refresh_queues_a_fetch_pass_for_the_tracked_rows(desktop, fetch_kicks):
+    client, root = desktop
+    session_dir = _seed_session(root)
+    ledger.refresh(root, SESSION, session_dir, context=CWD, force=True)
+    response = await client.post(
+        f"/v1/desktop/sessions/{SESSION}/code-requests/refresh", json={"force": True}
+    )
+    assert response.status_code == 202
+    receipt = response.json()["result"]
+    assert receipt["force"] is True
+    assert fetch_kicks, "the fetch pass must be scheduled for the tracked rows"
+    assert fetch_kicks[-1]["session_id"] == SESSION
+    assert fetch_kicks[-1]["force"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_kicks_a_fetch_pass_when_a_row_has_never_been_fetched(desktop, fetch_kicks):
+    """The GET half of the design's refetch rule: missing entry → schedule one pass."""
+    client, root = desktop
+    session_dir = _seed_session(root)
+    ledger.refresh(root, SESSION, session_dir, context=CWD, force=True)
+    response = await client.get(f"/v1/desktop/sessions/{SESSION}/code-requests")
+    assert response.status_code == 200
+    assert fetch_kicks, "a never-fetched row is eligible"
+    assert fetch_kicks[-1]["session_id"] == SESSION
+
+
+@pytest.mark.asyncio
+async def test_cooling_hosts_are_reported_in_the_payload(desktop):
+    client, root = desktop
+    _seed_session(root)
+    code_requests_cache._reset_for_tests()
+    code_requests_cache.note_rate_limited("github.com")
+    try:
+        response = await client.get(f"/v1/desktop/sessions/{SESSION}/code-requests")
+        body = response.json()["result"]
+        assert set(body["cooling"]) == {"github.com"}
+        assert body["cooling"]["github.com"] > time.time()
+    finally:
+        code_requests_cache._reset_for_tests()
 
 
 @pytest.mark.asyncio
