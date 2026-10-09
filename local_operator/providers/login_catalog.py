@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from local_operator.providers.registry import (
     ProviderDefinition,
     is_decision_only,
+    is_media_only,
     is_speech_only,
     list_login_providers,
 )
@@ -100,6 +101,7 @@ DESCRIPTIONS: dict[str, str] = {
     "elevenlabs": "Speech only (voice on the phone); not for chat",
     "openai-key": "Speech only (voice); not for chat",
     "typesafe": "Classification only; not for chat",
+    "fal": "Media only (image and video); not for chat",
 }
 
 
@@ -165,6 +167,7 @@ PICKER_DESCRIPTIONS: dict[str, str] = {
     "elevenlabs": "Speech only; not for chat",
     "openai-key": "Speech only; not for chat",
     "typesafe": "Classification only; not for chat",
+    "fal": "Media only; not for chat",
 }
 
 #: The picker's NAME for a row: the short human label, where the registry's
@@ -211,6 +214,7 @@ PICKER_LABELS: dict[str, str] = {
     "elevenlabs": "ElevenLabs",
     "openai-key": "OpenAI speech",
     "typesafe": "Typesafe",
+    "fal": "FAL",
 }
 
 #: The widest a PICKER label may be, in cells (see :data:`PICKER_LABELS`). The
@@ -260,8 +264,20 @@ def picker_description(provider_id: str) -> str:
 
 
 def is_non_chat(provider_id: str) -> bool:
-    """A login that stores a credential no chat turn can use."""
-    return is_speech_only(provider_id) or is_decision_only(provider_id)
+    """A login that stores a credential no chat turn can use.
+
+    Three classes, one rule — the rule being this docstring's own words, which
+    is why MEDIA joined it when FAL landed (2026-10-08): its key exists so the
+    image/video cascade can run, and a session hosting it could never answer a
+    turn, which is the same fact ``registry.is_media_only`` protects at every
+    chat door. The consequence is the intended one at both call sites: the
+    setup picker, whose question is "connect an AI account" for chat, hides
+    these rows, and ``lop login`` lists them under "Not for chat" so the key
+    stays storable.
+    """
+    return (
+        is_speech_only(provider_id) or is_decision_only(provider_id) or is_media_only(provider_id)
+    )
 
 
 def _is_key_login(definition: ProviderDefinition) -> bool:
