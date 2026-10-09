@@ -439,15 +439,18 @@ def test_a_row_whose_blob_columns_hold_text_reads_as_no_provider_rows(tmp_path: 
 
 
 def test_every_row_declares_capabilities_from_the_closed_vocabulary() -> None:
-    """The field is a frozenset over ``{chat, tts, stt}``, on every row.
+    """The field is a frozenset over ``{chat, tts, stt, image, video}``, on every row.
 
     A row that predates the field keeps the default ``{"chat"}`` -- today's
     truth for a wire that answers chat completions -- so this pins the
-    vocabulary rather than the set each row happens to carry.
+    vocabulary rather than the set each row happens to carry. ``image``/
+    ``video`` joined with the image-generation workstream: FAL's row is the
+    first wire fact to need them, and the radient row now declares them as the
+    factual wire description its media tools serve.
     """
     from local_operator.providers.registry import CAPABILITY_VOCABULARY
 
-    assert CAPABILITY_VOCABULARY == frozenset({"chat", "tts", "stt"})
+    assert CAPABILITY_VOCABULARY == frozenset({"chat", "tts", "stt", "image", "video"})
     for definition in PROVIDER_REGISTRY:
         assert isinstance(definition.capabilities, frozenset), definition.id
         assert definition.capabilities, f"{definition.id} declares no capability"
@@ -520,7 +523,7 @@ def test_provider_brand_strips_one_trailing_parenthetical() -> None:
 
 
 def test_every_registry_brand_is_pinned() -> None:
-    """All 25 brands, spelled out.
+    """All 26 brands, spelled out.
 
     Written as a table rather than derived from ``name`` in the test, because a
     property written the way the code computes it agrees with the code by
@@ -556,5 +559,6 @@ def test_every_registry_brand_is_pinned() -> None:
         "alibaba-token-plan": "QwenCloud",
         "alibaba-token-plan-oauth": "QwenCloud Token Plan",
         "typesafe": "TypeSafe",
+        "fal": "FAL",
         "test": "Test",
     }
