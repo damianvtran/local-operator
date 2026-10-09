@@ -206,3 +206,33 @@ def test_an_acted_detection_is_recorded_with_its_act(tmp_path):
     assert _record(session, detections) == 1
     _, details = session._transcript.rows[0]
     assert details["kind"] == "acted" and details["act"] == "merge"
+
+
+def test_an_unattributed_create_carries_its_candidates_into_the_evidence(tmp_path):
+    """Q5/Q6: an ``unknown`` row must say WHICH urls the call printed.
+
+    The rule refused to choose; the evidence is where a reader does the choosing, so the
+    candidate keys are written into the event alongside the rule and the exit code.
+    """
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    session = FakeSession(directory)
+    detections = hook.classify(
+        session,
+        "bash",
+        {"command": "gh pr create -f && python3 report.py"},
+        "exit code: 0\n--- stdout ---\n"
+        "https://github.com/damianvtran/local-operator/pull/4\n"
+        "https://github.com/damianvtran/local-operator/pull/77\n"
+        "\n--- stderr ---\n(empty)",
+        is_error=False,
+        context=CWD,
+    )
+    assert [item.kind for item in detections] == ["unknown"]
+    assert _record(session, detections) == 1
+    _, details = session._transcript.rows[0]
+    assert details["evidence"]["rule"] == "gh-pr-create-unattributed"
+    assert details["evidence"]["candidates"] == [
+        "github.com/damianvtran/local-operator#4",
+        "github.com/damianvtran/local-operator#77",
+    ]

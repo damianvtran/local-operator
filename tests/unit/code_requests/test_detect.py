@@ -389,7 +389,10 @@ def test_split_stages_ignores_heredocs_and_quotes():
     stages = split_stages(
         "cat > /tmp/x <<'EOF'\ngh pr create --title x\nEOF\necho 'a && b' && gh pr merge 3"
     )
-    assert stages == ["cat > /tmp/x <<'EOF'", "echo 'a && b'", "gh pr merge 3"]
+    # The redirect and its target are neither arguments nor stage boundaries:
+    # the ``> /tmp/x`` is dropped from the first stage (see ``_skip_redirect``),
+    # which is what keeps ``2>&1`` from splitting a real create command in two.
+    assert stages == ["cat  <<'EOF'", "echo 'a && b'", "gh pr merge 3"]
 
 
 def test_parse_bash_result_reads_the_harness_shapes():
@@ -451,12 +454,21 @@ def test_a_later_forge_stage_means_the_first_url_is_the_create():
 
 
 def test_benign_compounds_still_open_the_pr_they_created():
+    """Only a create can print a bare URL here, so the create's line is its own.
+
+    ``gh pr view --web`` is NOT in this list: it is a forge CLI with no ref in its own
+    arguments, so statically it could print a URL of its own and the call is
+    unattributable (the fail-closed rule the round-2 review asked for, M2/Q5).
+    """
     created = "https://github.com/damianvtran/local-operator/pull/4"
     for command in (
         "gh pr create -f",
-        "gh pr create -f && gh pr view --web",
         "cd ~/wt && gh pr create --title t",
         "gh pr create -f | cat",
+        "gh pr create -f | tee x",
+        "gh pr create -f 2>&1 | tail -1",
+        "git push && gh pr create -f",
+        "gh pr create -f && echo done",
     ):
         assert _kinds(_bash(command, created)) == [
             ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#4", None)
@@ -484,3 +496,165 @@ def test_glab_compound_create_still_reads_its_own_herald_and_url():
     created = detections[0].ref
     assert created is not None and created.number == 53
     assert created.project == "minervaai/minerva-skills"
+
+
+# -- review round 2 / QA round 2: attribution is fail-closed -----------------
+
+
+def _created(number: int) -> str:
+    return f"https://github.com/damianvtran/local-operator/pull/{number}"
+
+
+def test_only_a_create_can_print_the_url_here():
+    """QA round-2 PASS rows 3b, 3c, 3d and the r1 controls — every one must stay ``opened``.
+
+    Each command below has exactly ONE stage that can print a bare URL of its own: the
+    create. A push, a warning line, a shell builtin, a filter with no file operand and a
+    ``bash -c`` body all either cannot print one or print only what they received.
+    """
+    url = _created(4)
+    for command in (
+        "git push && gh pr create -f",  # 3b
+        "gh pr create -f",  # 3c
+        "gh pr create -f | tee x",  # 3d
+        "(cd wt && gh pr create -f)",  # 3d
+        "{ gh pr create -f; } | tee x",  # 3d
+        "bash -c 'gh pr create -f'",  # 3d
+        "gh pr create -f 2>&1 | tail -1",  # 2>&1 must not split a stage
+        "gh pr create -f | cat",
+        "gh pr create -f && echo done",  # a literal echo prints no url
+        "gh pr create -f && gh pr view 5 --json url",  # the view names #5 in its args
+    ):
+        assert _kinds(
+            _bash(command, url if "view" not in command else f"{url}\n{_created(5)}")
+        ) == [
+            ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#4", None)
+        ], command
+
+
+def test_a_warning_line_is_not_a_candidate_and_neither_is_a_ref_named_by_another_stage():
+    """3c: prose carrying a different URL is whitespace-prefixed, so it is never a line.
+
+    The second half is the round-1 control: ``gh pr create -f && gh pr view 5 --json url``
+    prints #4 then #5, and #5 is explained by the view's OWN arguments — so #4 is the
+    create's rather than a coin toss.
+    """
+    detections = _bash(
+        "gh pr create -f",
+        f"Warning: see {_created(9)} for details\n{_created(4)}",
+    )
+    assert _kinds(detections) == [
+        ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#4", None)
+    ]
+
+
+def test_a_later_script_makes_the_whole_stdout_unattributable():
+    """Q5a / 3g: ``gh pr create -f && python3 report.py`` printed #4 and #77.
+
+    The script could have printed either line, so neither is chosen. The row is
+    ``unknown`` ("possibly opened") and BOTH candidates ride as evidence.
+    """
+    for command in (
+        "gh pr create -f && python3 report.py",
+        "gh pr create -f && ./notify.sh",
+        "gh pr create -f && cat summary.txt",
+        "gh pr create -f > /dev/null && cat summary.txt",
+    ):
+        detections = _bash(command, f"{_created(4)}\n{_created(77)}")
+        assert [item.kind for item in detections] == ["unknown"], command
+        assert detections[0].rule == "gh-pr-create-unattributed"
+        assert "possibly opened" in (detections[0].reason or "") or "cannot be attributed" in (
+            detections[0].reason or ""
+        )
+        assert [item["key"] for item in (detections[0].hint or {}).get("candidates", [])] == [
+            "github.com/damianvtran/local-operator#4",
+            "github.com/damianvtran/local-operator#77",
+        ]
+
+
+def test_an_earlier_forge_act_makes_it_unattributable():
+    """Q5b / 3h: ``gh pr edit 7 … && gh pr create -f && gh pr view --web``.
+
+    The edit's line (#7) could be the create's and vice versa, and ``gh pr view --web``
+    names no ref, so nothing eliminates it. The act on #7 still records; the create does
+    not claim a number.
+    """
+    detections = _bash(
+        "gh pr edit 7 -t x && gh pr create -f && gh pr view --web",
+        f"{_created(7)}\n{_created(4)}",
+    )
+    assert _kinds(detections) == [
+        ("acted", "gh-pr-act", "github.com/damianvtran/local-operator#7", "edit"),
+        (
+            "unknown",
+            "gh-pr-create-unattributed",
+            "github.com/damianvtran/local-operator#4",
+            None,
+        ),
+    ]
+
+
+def test_three_creates_map_positionally_instead_of_dropping_the_middle():
+    """Q6: three creates print three URLs, in stage order — one row each, in order.
+
+    Positional mapping is chosen over downgrading all three because every URL-printing
+    stage here IS a create and each create prints exactly one line, so the assignment is
+    forced; the alternative loses two real rows for a case with no ambiguity in it.
+    """
+    detections = _bash(
+        "gh pr create -f -B a && gh pr create -f -B b && gh pr create -f -B c",
+        f"{_created(4)}\n{_created(5)}\n{_created(6)}",
+    )
+    assert _kinds(detections) == [
+        ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#4", None),
+        ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#5", None),
+        ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#6", None),
+    ]
+    # Two creates and one URL is NOT positional: it is unattributable.
+    short = _bash("gh pr create -f -B a && gh pr create -f -B b", _created(4))
+    assert [item.kind for item in short] == ["unknown"]
+
+
+def test_a_create_the_tokeniser_cannot_see_is_unknown_not_silent():
+    """3f: ``URL=$(gh pr create -f) && echo $URL`` and a create inside a loop body.
+
+    Both are EXECUTED shell text that ``split_stages`` cannot see through, so the call used
+    to record nothing at all. The design's rule for a create whose evidence is out of reach
+    is ``unknown`` ("possibly opened") — a miss is not an answer.
+    """
+    for command in (
+        "URL=$(gh pr create -f) && echo $URL",
+        "echo `gh pr create -f`",
+        "for b in a b; do gh pr create -f -B $b; done",
+        "while read b; do gh pr create -f -B $b; done < branches.txt",
+    ):
+        detections = _bash(command, f"{_created(4)}\n{_created(5)}")
+        assert [item.kind for item in detections] == ["unknown"], command
+        assert detections[0].rule == "create-unreachable"
+        assert "possibly opened" in (detections[0].reason or "")
+        assert len((detections[0].hint or {}).get("candidates", [])) == 2
+
+    # The heredoc false positive stays refused: a python program's string literal is not
+    # executed shell text, so it is neither an `opened` NOR an unreachable-create `unknown`.
+    heredoc = (
+        "python3 - <<'EOF'\n"
+        "import json\n"
+        'TEXT = "run gh pr create --title x to open it"\n'
+        "print(json.dumps({'note': TEXT}))\n"
+        "EOF"
+    )
+    assert _bash(heredoc, "gh pr create --title x") == []
+
+
+def test_a_create_the_tokeniser_reaches_is_never_double_counted():
+    """A visible create stage suppresses the unreachable-shape rule: one fact, one row.
+
+    The substitution stage still counts as a url printer — it can print one, which is the
+    whole of row 3f — so the visible create's line is unattributable and the answer is the
+    create's own ``-unattributed`` rule, never a second ``create-unreachable`` row for the
+    same command.
+    """
+    detections = _bash("gh pr create -f && URL=$(gh pr create -f)", _created(4))
+    assert len(detections) == 1
+    assert detections[0].kind == "unknown"
+    assert detections[0].rule == "gh-pr-create-unattributed"
