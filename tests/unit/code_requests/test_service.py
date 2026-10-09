@@ -19,10 +19,19 @@ from local_operator.code_requests import cache
 from local_operator.code_requests import credentials as code_credentials
 from local_operator.code_requests import ledger, service
 from local_operator.code_requests.adapters import base, github
-from local_operator.code_requests.refs import parse_any
+from local_operator.code_requests.refs import Ref, parse_any
 
-REF = parse_any("https://github.com/o/r/pull/7")
-assert REF is not None
+
+def _ref(url: str) -> Ref:
+    """A parsed ref, typed: ``parse_any`` returns ``Ref | None`` and a module
+    constant narrowed by an ``assert`` does not stay narrowed inside functions,
+    which is exactly where these tests consume it."""
+    ref = parse_any(url)
+    assert ref is not None, url
+    return ref
+
+
+REF = _ref("https://github.com/o/r/pull/7")
 
 ROW = {"key": REF.key, "ref": REF.to_payload(), "relation": "acted", "relations": ["acted"]}
 LINK_ONLY_ROW = {

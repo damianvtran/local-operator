@@ -10,11 +10,20 @@ import pytest
 
 from local_operator.code_requests import cache, ledger
 from local_operator.code_requests import tool as code_requests_tool
-from local_operator.code_requests.refs import parse_any
+from local_operator.code_requests.refs import Ref, parse_any
 from local_operator.harness.types import ToolContext
 
-REF = parse_any("https://github.com/o/r/pull/7")
-assert REF is not None
+
+def _ref(url: str) -> Ref:
+    """A parsed ref, typed: ``parse_any`` returns ``Ref | None`` and a module
+    constant narrowed by an ``assert`` does not stay narrowed inside functions,
+    which is exactly where these tests consume it."""
+    ref = parse_any(url)
+    assert ref is not None, url
+    return ref
+
+
+REF = _ref("https://github.com/o/r/pull/7")
 SESSION = "abcdef123456"
 
 
@@ -126,12 +135,16 @@ def test_build_gate_needs_a_store_root(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_list_renders_rows_and_the_empty_case(tmp_path: Path) -> None:
     context = _context(tmp_path)
-    empty = await code_requests_tool.execute_code_requests("c0", {"op": "list"}, context=context)
+    empty = await code_requests_tool.execute_code_requests(
+        "c0", {"op": "list"}, None, None, context
+    )
     assert "No code requests tracked" in empty.text
 
     _seed_index(tmp_path)
     _seed_entry(tmp_path)
-    result = await code_requests_tool.execute_code_requests("c1", {"op": "list"}, context=context)
+    result = await code_requests_tool.execute_code_requests(
+        "c1", {"op": "list"}, None, None, context
+    )
     assert not result.is_error
     text = result.text
     assert "1 code request(s)" in text
@@ -146,7 +159,7 @@ async def test_show_quotes_remote_text_as_data(tmp_path: Path) -> None:
     # render INSIDE the quotation fence, after the data-not-instructions note.
     hostile = _entry_with_hostile_comment(tmp_path)
     result = await code_requests_tool.execute_code_requests(
-        "c2", {"op": "show", "ref": REF.url}, context=context
+        "c2", {"op": "show", "ref": REF.url}, None, None, context
     )
     assert not result.is_error
     text = result.text
@@ -192,12 +205,16 @@ def _entry_with_hostile_comment(tmp_path: Path) -> str:
 async def test_show_refuses_junk_and_reports_link_only(tmp_path: Path) -> None:
     context = _context(tmp_path)
     junk = await code_requests_tool.execute_code_requests(
-        "c3", {"op": "show", "ref": "not a ref"}, context=context
+        "c3", {"op": "show", "ref": "not a ref"}, None, None, context
     )
     assert junk.is_error and "not a PR/MR URL" in junk.text
 
     link_only = await code_requests_tool.execute_code_requests(
-        "c4", {"op": "show", "ref": "https://bitbucket.org/t/r/pull-requests/9"}, context=context
+        "c4",
+        {"op": "show", "ref": "https://bitbucket.org/t/r/pull-requests/9"},
+        None,
+        None,
+        context,
     )
     assert not link_only.is_error
     assert "link-only" in link_only.text
@@ -206,5 +223,7 @@ async def test_show_refuses_junk_and_reports_link_only(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_show_without_ref_is_a_validation_error(tmp_path: Path) -> None:
     context = _context(tmp_path)
-    result = await code_requests_tool.execute_code_requests("c5", {"op": "show"}, context=context)
+    result = await code_requests_tool.execute_code_requests(
+        "c5", {"op": "show"}, None, None, context
+    )
     assert result.is_error and "ref" in result.text

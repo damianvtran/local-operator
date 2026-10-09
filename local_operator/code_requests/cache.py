@@ -475,12 +475,11 @@ def note_rate_limited(
     clears it.
     """
     moment = time.time() if now is None else now
-    until: float | None = None
     if reset_at is not None and moment < reset_at <= moment + MAX_COOLING_S:
         until = float(reset_at)
     elif retry_after is not None and 0 < retry_after <= MAX_COOLING_S:
         until = moment + float(retry_after)
-    if until is None:
+    else:
         step = _COOLING_STEP.get(host, 0)
         until = moment + min(BACKOFF_BASE_S * (2**step), BACKOFF_MAX_S)
         _COOLING_STEP[host] = min(step + 1, 20)

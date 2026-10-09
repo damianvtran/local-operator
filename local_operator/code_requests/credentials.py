@@ -314,10 +314,16 @@ def _store_secret(config_dir: Path | None) -> str:
     refusing, only a fetch that degrades to link-only.
     """
     try:
+        # Resolved OUTSIDE the store try-block: ``SecretStoreError`` is caught
+        # below, and an import that lands inside the try leaves the name
+        # unbound at the ``except`` (pyright's reportPossiblyUnboundVariable —
+        # a real hazard, not a style note).
         from local_operator.secrets import access
         from local_operator.secrets.errors import SecretStoreError
         from local_operator.secrets.keys import store_path
-
+    except Exception:  # noqa: BLE001 - no secrets package, nothing configured here
+        return ""
+    try:
         base = config_dir
         if not store_path(base).exists():
             return ""
