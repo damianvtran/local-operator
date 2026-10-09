@@ -2991,7 +2991,10 @@ SETTINGS: tuple[Setting, ...] = (
         label="Classifier state (chars)",
         kind=Kind.INT,
         default=1200,
-        help="Bound on the state the materiality check receives.",
+        help=(
+            "Bound on the changed lines the materiality check receives "
+            "(the monitor's name and purpose ride along, clipped separately)."
+        ),
         minimum=0,
     ),
     Setting(
