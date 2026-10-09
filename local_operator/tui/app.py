@@ -52624,6 +52624,17 @@ class OperatorApp(App[None]):
         EXTENDED in place (`NoticeBlock.restate`) the moment it lands. A miss
         leaves the notice exactly as rendered; nothing here raises, and a bare
         harness without a running worker degrades to the unextended notice.
+
+        A CLEARED SESSION REFERENCE IS A DELIBERATE MISS (QA round 1, Q1). The
+        provider identity is read off the live session's model label, so a
+        turn end processed while `_session` is already None — the session-swap
+        window a `/reload` can open before the replacement lands — leaves the
+        provider unknown, the Radient gate declines, and the row keeps its
+        bare text with no further attempt. The sync render above derives the
+        provider the same way and takes the same empty answer. Not fixed by
+        probing on an unresolved provider: the rendered 402 names no provider,
+        and decorating some other provider's 402 with Radient account advice
+        would be worse than the missed hint on a single reload-window notice.
         """
         try:
             from local_operator.providers.radient_recovery import (

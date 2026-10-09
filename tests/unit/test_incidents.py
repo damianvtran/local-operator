@@ -139,8 +139,11 @@ def test_the_reasoning_echo_hint_does_not_claim_a_retry_that_may_not_have_run():
         # a follower attached to an older owner) still carries. It must classify
         # billing too: its "quota" wording is what used to win the rate-limit rule.
         "rate limit or quota exceeded (HTTP 402): insufficient credits",
-        # Provider-side wording with no harness label at all (a relayed body).
+        # Provider-side wording with no harness label at all (a relayed body):
+        # the LATE billing rule still claims both spellings through its `credit`
+        # marker, now that the early rule no longer keys on wording (R1-1).
         "insufficient credits",
+        "out of credits",
     ],
 )
 def test_an_http_402_out_of_credits_refusal_is_billing_never_rate_limit(raw: str) -> None:
@@ -168,6 +171,27 @@ def test_a_429_rate_limit_and_a_bare_402_digit_run_stay_rate_limit() -> None:
     )
     # ``used 402000 tokens`` is a token count, and it mentions a quota.
     assert classify_incident("quota: used 402000 tokens this window").category == "rate-limit"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Agent review round 1, R1-1's repros: the words describe a balance, but
+        # the STATUS owns the failure — a rejected bearer and a throttle.
+        ("authentication failed (HTTP 401): insufficient credits to refresh", "auth"),
+        ("rate limit or quota exceeded (HTTP 429): out of credits? retry in 5s", "rate-limit"),
+        (
+            "rate limit or quota exceeded (HTTP 429): insufficient credits for this tier, "
+            "slow down",
+            "rate-limit",
+        ),
+    ],
+)
+def test_billing_wording_never_outranks_the_status_that_owns_the_failure(
+    raw: str, expected: str
+) -> None:
+    """The early 402 rule keys on the status token; wording stays downstream."""
+    assert classify_incident(raw).category == expected
 
 
 def test_unknown_has_no_invented_hint():

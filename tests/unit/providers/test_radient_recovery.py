@@ -25,6 +25,7 @@ import pytest
 
 from local_operator.providers import radient_recovery as rr
 from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.failover import ProviderError
 
 RENDERED_QUOTA = "out of credits (HTTP 402): insufficient credits"
 #: What a runtime older than the 402 label split rendered for the same failure.
@@ -214,9 +215,21 @@ def test_the_bonus_line_needs_every_figure_and_a_definite_false(first_topup: Any
 
 @pytest.mark.parametrize(
     "unsafe",
-    ["http://insecure.example/x", "https://a b/x", "https://x/\x1b[31m", "javascript:alert(1)", 7],
+    [
+        "http://insecure.example/x",
+        "https://a b/x",
+        "https://x/\x1b[31m",  # C0 ESC
+        # Agent review round 1, R1-3: a C1 CSI reaches a terminal as an escape
+        # introducer, a Cf bidi override reorders what the reader sees, and a
+        # userinfo lookalike reads as the console host while addressing evil.
+        "https://x.example/\x9b31m",
+        "https://x.example/\u202e",
+        "https://console.radienthq.com@evil.example/p",
+        "javascript:alert(1)",
+        7,
+    ],
 )
-def test_a_non_https_or_control_character_url_is_never_echoed(unsafe: Any) -> None:
+def test_a_non_https_control_or_lookalike_url_is_never_echoed(unsafe: Any) -> None:
     """URLs are printed into a terminal: fall back to the known console page."""
     verified = rr.recovery_line(_verified_facts({**_BONUS_ON_OFFER, "topup_url": unsafe}))
     assert rr.TOPUP_URL in verified and str(unsafe) not in verified
@@ -260,7 +273,7 @@ def test_every_branch_text_is_inside_the_dedupe_family() -> None:
         rr._neutral_text(),
     ]
     for text in texts:
-        assert any(marker in text for marker in rr._FAMILY_MARKERS), text
+        assert rr._carries_family_text(text), text
         assert rr.append_recovery_line_once(f"err\n{text}", texts[0]) == f"err\n{text}"
 
 
@@ -595,7 +608,8 @@ def test_pending_is_false_for_every_off_trigger(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Family dedupe — keyed on OUR sentence, never on a payload-supplied URL
+# Family dedupe — keyed on phrases unique to OUR copy, never on provider prose
+# or a payload-supplied URL
 # ---------------------------------------------------------------------------
 
 
@@ -615,6 +629,38 @@ def test_the_family_dedupe_is_independent_of_the_claim_url() -> None:
     assert pending_line.startswith("You haven't verified your email yet") and custom in pending_line
     assert expired_line.startswith("You haven't verified your email yet")
     assert rr.append_recovery_line_once(text, expired_line) == text
+
+
+def test_a_provider_body_quoting_our_opener_does_not_suppress_the_remedy() -> None:
+    """R1-2's repro, pinned: the guard must read OUR copy, not the provider's.
+
+    On the pre-fix head, ``str(ProviderError(402, "You're out of credits. Add
+    funds to continue."))`` carried the old "You're out of credits" marker, so
+    the substring guard returned the text unchanged even though the trigger
+    applies.
+    """
+    raw = str(ProviderError(402, "You're out of credits. Add funds to continue."))
+
+    assert rr.usage_limit_recovery_applies(raw, "radient")
+    assert not rr._carries_family_text(raw)
+    line = rr.recovery_line(_facts())
+    assert rr.append_recovery_line_once(raw, line) == f"{raw}\n{line}"
+
+
+@pytest.mark.asyncio
+async def test_a_colliding_body_still_gains_the_remedy_end_to_end(tmp_path, monkeypatch) -> None:
+    store = _oauth_store(tmp_path)
+
+    async def probe(token: str):
+        return _verification(grant_amount=5)
+
+    monkeypatch.setattr(rr, "_probe_verification_async", probe)
+
+    raw = str(ProviderError(402, "You're out of credits. Add funds to continue."))
+    out = await rr.append_usage_limit_recovery_async(raw, "radient", store=store)
+
+    assert out.startswith(raw)
+    assert "Check your inbox" in out
 
 
 @pytest.mark.asyncio
