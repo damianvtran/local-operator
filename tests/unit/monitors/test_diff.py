@@ -89,3 +89,11 @@ def test_has_line_difference_is_a_sequence_compare() -> None:
     assert diff.has_line_difference("a\nb", "a\nc")
     assert not diff.has_line_difference("", "")
     assert not diff.has_line_difference("a\nb", "a\nb")
+
+
+def test_is_pure_addition_from_empty_output() -> None:
+    """``grep``/``ls`` printing nothing and then a first match (review R3)."""
+    from local_operator.monitors.diff import is_pure_addition
+
+    assert is_pure_addition("", "ERROR x")
+    assert not is_pure_addition("", "")

@@ -121,8 +121,10 @@ default keep "difference" honest:
   hint does not say so — it can mean "suppressed", not only "unchanged".
 - A `read` of a file numbers its lines (`12| …`), truncates at ~8 KB and prints a
   `[truncated … N more lines]` footer. A log that grows past that window only
-  shows its head, so the monitor cannot see appended lines: watch the tail with
-  `bash` (`tail -n 20 <file>`) or `grep -c`, not `read`.
+  shows its head, so the monitor cannot see appended lines: watch it with
+  `bash` instead (`wc -l <file>`, `grep -c <pattern> <file>`, or `tail -n 20`).
+  Those are counters or rolling windows, i.e. a changed line rather than an
+  addition, so they go through the gate — which is why the `description` matters.
 
 Deltas are bounded and honest: counts, up to ~12 short previews, and a
 `… and N more changed lines` marker; the full output is never injected. The
