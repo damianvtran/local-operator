@@ -39,7 +39,7 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -651,13 +651,15 @@ async def run_post_tool_hooks(
     return [note for notes in results for note in notes]
 
 
-def format_notes(event_notes: list[str | TaggedNote], event: str) -> str:
+def format_notes(event_notes: Sequence[str | TaggedNote], event: str) -> str:
     """The block appended to the tool result, one per note.
 
     ``event`` is the event the notes came from: the caller knows whether the
     tool call failed, and a failure note labelled ``PostToolUse`` would report
     the wrong event to whatever reads the tag. A :class:`TaggedNote` supplies
-    its own tag instead.
+    its own tag instead. ``Sequence`` (not ``list``) because the loop's hook is
+    typed to return ``list[str]``: a list is invariant, so a list-typed
+    parameter would reject the plain-strings case at the call site.
     """
     rendered: list[str] = []
     for item in event_notes:
