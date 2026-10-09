@@ -5775,6 +5775,17 @@ class ServingSessionHandle(SessionHandle):
         opened nor can see in any list. Settled rather than deferred, and the
         same absence of contention as the silenced arm above: no claim, no
         release, and the durable mark left exactly as another surface needs it.
+
+        A PROCESS WHOSE HOME IS NOT THE USER'S DOES NOT CLIMB IT, silently
+        (``tui.notify.desktop_belongs_to_this_process(report=False)``): the
+        third arm, for the shapes the first two structurally cannot catch —
+        ``lop exec`` and agent-runtime-svc's per-run ``HOME`` do not declare
+        themselves with a switch and can host real providers. Nothing here can
+        reach the user's screen, and before this arm every such run paid the
+        ladder's claim/release churn plus a one-shot WARNING in its stderr
+        (which the adapter persists as an audit event). SETTLED for the same
+        reason as above: the unseen mark stays, so the user's own surfaces are
+        unaffected.
         """
         try:
             from local_operator.tui.notify import notifications_enabled
@@ -5782,6 +5793,25 @@ class ServingSessionHandle(SessionHandle):
             if not notifications_enabled():
                 return _ANNOUNCE_SETTLED
             if not _session_may_announce(getattr(self, "_session", None)):
+                return _ANNOUNCE_SETTLED
+            from local_operator.tui.notify import desktop_belongs_to_this_process
+
+            # A RUN, NOT A PERSON: this process's HOME is not the user's
+            # (``lop exec``, a per-run agent-runtime-svc home), so nothing this
+            # arm raises could land on a screen the user is in front of, and
+            # SETTLED is the honest answer — nothing is owed TO THIS PROCESS.
+            # Before this check the arm fell through to ``detached_notify``,
+            # whose own identity gate refused, and the refusal armed the
+            # 2/8/30 s retry ladder and printed a one-shot WARNING into the
+            # run's stderr (which the agent-runtime-svc adapter persists as an
+            # audit event) on EVERY per-run execution.
+            #
+            # ``report=False``: the warning exists for a human who lost toasts
+            # to a redirected home; an automation run is not one, and its one
+            # line per process became one line per run. A containerised user
+            # still hears it from their interactive path, because the report is
+            # per process, not per call.
+            if not desktop_belongs_to_this_process(report=False):
                 return _ANNOUNCE_SETTLED
             if self._watching_surfaces():
                 # Rung 1. Cheap and first: no store read, no filesystem probe.
