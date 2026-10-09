@@ -355,7 +355,18 @@ html :focus-visible {
 }
 @media (prefers-reduced-motion: reduce) {
 	.lo-loadbar-fill {
+		/*
+		 * Full-width and dimmed (design D2). The sweep IS the motion, so with
+		 * the animation gone a half-width rest would sit as a static 50%
+		 * fill — a fraction this bar never carried, on a bar whose entire job
+		 * is not stating one. A full-width muted fill says only "live,
+		 * unquantified", the same reduction the card's state word makes, and
+		 * the colour stays the element's own `bg-accent` role. Shared with
+		 * the transcript's lazy-load bar, which gets the same honest rest.
+		 */
 		animation: none;
+		width: 100%;
+		opacity: 0.4;
 	}
 }
 
@@ -378,6 +389,32 @@ html :focus-visible {
 }
 @media (prefers-reduced-motion: reduce) {
 	.lo-shimmer-bar {
+		animation: none;
+	}
+}
+
+/* The image-generation tile: the square the finished picture will land in,
+   swept by the same highlight the streaming text uses (`lo-shimmer`'s own
+   keyframes), so the placeholder reads as work flowing toward the artifact
+   rather than as a broken or empty image. The ramp stays on the GROUND
+   tokens (sunken -> elevated): the tile is a placeholder, and the accent is
+   reserved for the live control beside it — a tile pulsing in accent ink
+   would compete with the progress bar for the same "here it comes" signal.
+   Reduced motion drops the sweep and keeps the resting ground, matching
+   every other lo-* animation on this surface. */
+.lo-gen-tile {
+	background-color: var(--color-sunken);
+	background-image: linear-gradient(
+		100deg,
+		transparent 40%,
+		var(--color-elevated) 50%,
+		transparent 60%
+	);
+	background-size: 200% 100%;
+	animation: lo-shimmer 1.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+	.lo-gen-tile {
 		animation: none;
 	}
 }
