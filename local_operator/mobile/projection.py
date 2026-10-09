@@ -79,6 +79,7 @@ from local_operator.harness.types import (
     AgentEvent,
     AgentMessage,
     AgentStartEvent,
+    AttachmentContent,
     CompactionEndEvent,
     CompactionStartEvent,
     CustomMessage,
@@ -441,7 +442,7 @@ def _compact_multiline(text: str, limit: int) -> str:
 
 
 def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
-    """Lightweight references to a user message's image blocks — index + mime,
+    """Lightweight references to a message's image blocks — index + mime,
     never the bytes. The phone fetches the pixels lazily from the image
     endpoint (see daemon.api_session_image), which reads them back out of the
     on-disk transcript by the same index. Carrying only the reference keeps a
@@ -450,9 +451,29 @@ def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
     A block with an empty ``data`` (an attachment reference that no longer
     resolves) is still listed: the endpoint degrades it to a broken-image
     marker, which is more honest than silently dropping the attachment row.
+
+    TWO BLOCK SHAPES COUNT, on one shared index: an inline ``ImageContent``
+    (a paste, a screenshot the model reads) and an output artifact of kind
+    ``image`` (``AttachmentContent``), whose bytes live in the attachment
+    store rather than in ``data``. ``daemon._image_bytes`` walks the same
+    pair — the index is the whole contract between producer and consumer, so
+    both sides change together or not at all. Artifacts of other kinds do NOT
+    count: no player endpoint exists for them yet, and counting one would
+    shift every later index onto the wrong bytes.
     """
     content = getattr(message, "content", None)
-    if not isinstance(content, list):
+    return _image_refs_for_content(content if isinstance(content, list) else None)
+
+
+def _image_refs_for_content(content: list[Any] | None) -> list[dict[str, Any]]:
+    """The walk both carriers share — a message's blocks or a result's blocks.
+
+    Split out because a LIVE ``ToolExecutionEndEvent`` hands this fold a
+    ``ToolResult``, not a ``Message``: both carry ``content`` lists with the
+    same two image shapes, and the index emitted here must be the one
+    ``daemon._image_bytes`` resolves against, so the walk exists once.
+    """
+    if not content:
         return []
     refs: list[dict[str, Any]] = []
     # ``index`` counts IMAGE blocks only (a text caption does not shift it),
@@ -461,6 +482,9 @@ def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
     for block in content:
         if isinstance(block, ImageContent):
             refs.append({"index": image_index, "mime_type": block.mime_type or "image/png"})
+            image_index += 1
+        elif isinstance(block, AttachmentContent) and block.kind == "image":
+            refs.append({"index": image_index, "mime_type": block.content_type or "image/png"})
             image_index += 1
     return refs
 
@@ -1626,6 +1650,14 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                     "" if receipt else result_text,
                     result_details if isinstance(result_details, dict) else None,
                 )
+                # Output-artifact media rides the row as REFERENCES (index +
+                # mime), the same lazy contract user attachments use: bytes
+                # are fetched from the image endpoint on demand, never re-sent
+                # per projection repaint. Set only when non-empty, so a result
+                # with no media leaves the row shape unchanged.
+                refs = _image_refs(message)
+                if refs:
+                    entry.images = refs
                 # The expansion flag is set on the CALL and must survive the
                 # result settling the row.
                 if entry.details.get("user_run"):
@@ -2147,6 +2179,17 @@ class ProjectionFold:
             row.diff_added, row.diff_removed = _diff_counts(result.details)
             if result.is_error:
                 row.error = _compact(result.text, 200)
+            # Output-artifact media rides the live row as the same lazily
+            # fetched references the history fold attaches: the result's
+            # content is walked by the one shared index (see
+            # ``_image_refs_for_content``), so a phone watching live shows
+            # a generated image the moment the call settles — and after a
+            # reconnect the replayed row shows the identical references.
+            refs = _image_refs_for_content(
+                result.content if isinstance(result.content, list) else None
+            )
+            if refs:
+                row.images = refs
             row.details = self._tool_details(
                 self._tool_args.pop(event.tool_call_id, {}), result.text, result.details
             )
