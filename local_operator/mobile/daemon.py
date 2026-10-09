@@ -1627,6 +1627,20 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
     the bytes appended since. The projection object itself is rebuilt on
     every call (callers mutate and fence it), so what is cached is the fold,
     not the projection.
+
+    THE OPEN-FRAME SEAM (first-paint lanes T2/T3). This function is where the
+    phone's first frame is assembled: the fold's replay, then
+    ``ProjectionFold.fold_history``, then ``_cap_tail``. The desktop's
+    ``open_frame: 1`` page builder (``docs/DESKTOP_API.md``,
+    ``local_operator/session/open_frame.py``; docs-only at the time of
+    writing) serves the same question — the rows a surface paints, with the
+    turn facts and the bookkeeping stripped — so the day it lands, THIS is the
+    call to replace: the run facts would come from the server instead of being
+    re-derived here, and the phone would negotiate on the ``open_frame`` key
+    the relay already lifts from ``server/features.py``. Nothing here depends
+    on that landing: the fold's own boundary (``DurableFoldState.keep_start_id``)
+    is the anchor a bounded-suffix fold needs, so lane T3 can bound this read
+    without touching the shape above it.
     """
     from local_operator.mobile.projection import (
         SUBAGENT_ERROR_CHARS,
@@ -2470,6 +2484,28 @@ async def _engage_and_publish(
     return detail
 
 
+def _archive_page(
+    directory: Path,
+    state: Any,
+    *,
+    before: str,
+    limit: int,
+) -> tuple[list[Any], bool]:
+    """The rows behind the newest compaction, or an honest end-of-history.
+
+    The fold starts its replay at the newest compaction's first-kept entry, so
+    rows a compaction dropped are absent from ``state.render``; the journal
+    itself still holds them and the desktop pages them. ``None`` from the reader
+    means the cursor names no journal row at all (an anchor pruned between
+    scrolls, or a marker row's minted id), and the client then treats the answer
+    as end-of-history rather than looping on the same rows.
+    """
+    from local_operator.mobile.durable import journal_rows_older_than
+
+    rows = journal_rows_older_than(directory, state.prunes, before_id=before, limit=limit)
+    return rows if rows is not None else ([], False)
+
+
 def _history_page(
     session_id: str, before: str | None, limit: int, *, durable_only: bool = True
 ) -> tuple[list[Any], bool]:
@@ -2481,6 +2517,14 @@ def _history_page(
     tail since — not the whole-file re-parse every page used to pay. Runs off
     the event loop (``asyncio.to_thread`` at the call site): even the cached
     path touches disk and the fold is not loop-safe work.
+
+    REACH, not just speed: the render begins at the newest compaction's window,
+    so paging it alone stopped a phone reader at the last compaction — measured
+    on the S6 fixture, 640 of 3,348 journal rows were reachable and the rest
+    were only evidence of a conversation the phone could not show. Once the
+    render is exhausted the page continues into the journal itself
+    (:func:`_archive_page`), which is the same reader and the same rows the
+    desktop's history route serves.
     """
     if durable_only:
         directory = _durable_user_session_dir(session_id)
@@ -2507,19 +2551,40 @@ def _history_page(
         return [], False
 
     if before:
-        # A ``before`` that resolves to nothing means the client's anchor was
-        # pruned (a compaction between scrolls). Serving the newest page then
-        # would duplicate the client's live window — return empty and let the
-        # client treat it as end-of-history rather than loop on the same rows.
         anchor = next((i for i, e in enumerate(entries) if e.id == before), None)
         if anchor is None:
-            return [], False
+            # Two different misses, one answer. Either the cursor is a row this
+            # route served from BEHIND the newest compaction — the journal holds
+            # it and the page continues there — or the client's anchor was
+            # pruned (a compaction between scrolls), and serving the newest page
+            # would duplicate the client's live window. Return empty in the
+            # second case and let the client treat it as end-of-history rather
+            # than loop on the same rows.
+            return _archive_page(directory, state, before=before, limit=limit)
         cut = anchor
     else:
         cut = len(entries)
     older = entries[:cut]
     page = older[-limit:] if len(older) > limit else older
     has_more = len(older) > len(page)
+    if before and not has_more and state.keep_start_id is not None:
+        # The page reaches the render's head, which is where the newest
+        # compaction CLOSED the replay: everything above it is on disk. Fill the
+        # rest of the page from the journal so a scroll-up crosses the boundary
+        # in one request instead of needing a probing round trip first.
+        filled = max(0, limit - len(page))
+        if filled:
+            archive, has_more = _archive_page(
+                directory, state, before=state.keep_start_id, limit=filled
+            )
+            page = archive + page
+        else:
+            # Exactly a full page of rendered rows and the head is reached, so
+            # whether more exists is the archive's answer and it is not known
+            # yet. Claiming yes costs one request that a genuinely empty archive
+            # answers with the empty page above; claiming no would stop a reader
+            # one page short of their own conversation.
+            has_more = True
     return page, has_more
 
 

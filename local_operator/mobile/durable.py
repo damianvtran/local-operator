@@ -49,16 +49,12 @@ import logging
 import os
 import threading
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Container
 
-from local_operator.harness.types import (
-    AgentMessage,
-    CustomMessage,
-    Message,
-    TextContent,
-)
+from local_operator.harness.types import AgentMessage, Message, TextContent
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
@@ -68,8 +64,10 @@ from local_operator.session.transcript import (
     ENTRY_PRUNE,
     TRANSCRIPT_FILENAME,
     TranscriptEntry,
+    _compaction_marker,
     _entry_to_message,
     _journal_injection_ids,
+    read_transcript_page,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,6 +129,13 @@ class DurableFoldState:
     directory: Path
     history: list[AgentMessage] = field(default_factory=list)
     render: list[Any] = field(default_factory=list)
+    #: The newest replayed compaction's ``first_kept_entry_id``: the journal entry
+    #: ``history`` begins at, and therefore the boundary the scroll-back archive
+    #: (:func:`journal_rows_older_than`) pages below. ``None`` when the replay
+    #: reaches the journal's first row — there is then nothing behind it to page.
+    #: Kept here rather than re-derived by scanning the file: the fold has already
+    #: located this row, and a second scan would be a second answer to one question.
+    keep_start_id: str | None = None
     prunes: dict[str, str] = field(default_factory=dict)
     #: Transcript entries consumed so far. Not read by the fold itself — it is
     #: the cheap invariant that says the incremental cursor and the file agree,
@@ -341,7 +346,7 @@ class DurableFoldCache:
             if custom_type in _TRACKED_CUSTOM_TYPES and custom_type not in latest_customs:
                 latest_customs[str(custom_type)] = dict(entry.payload.get("details", {}))
         state.injection_ids = _journal_injection_ids(entries)
-        state.history = _replay(entries)
+        state.history, state.keep_start_id = _replay(entries)
         state.render = _fold(state.history)
         state.prunes = {
             str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
@@ -354,7 +359,7 @@ class DurableFoldCache:
         state.fingerprint = fingerprint
 
 
-def _replay(entries: list[TranscriptEntry]) -> list[AgentMessage]:
+def _replay(entries: list[TranscriptEntry]) -> tuple[list[AgentMessage], str | None]:
     """``Transcript.build_llm_history`` semantics over parsed entries.
 
     Kept beside the cache rather than reused THROUGH a ``Transcript`` instance
@@ -362,6 +367,12 @@ def _replay(entries: list[TranscriptEntry]) -> list[AgentMessage]:
     entries — everything this module exists to avoid. The semantics are the
     contract: latest compaction wins, preserved user turns re-injected
     verbatim, prunes applied last.
+
+    Returns the replayed history and the id of the journal entry it begins at
+    (``None`` when that is the journal's own first row). The second value is the
+    scroll-back archive's boundary and has to come from HERE: ``start`` is where
+    the newest compaction's window opens, and any second derivation of it in the
+    archive reader would be a second answer to one question.
     """
     compaction_index: int | None = None
     for i in range(len(entries) - 1, -1, -1):
@@ -370,6 +381,7 @@ def _replay(entries: list[TranscriptEntry]) -> list[AgentMessage]:
             break
 
     start = 0
+    keep_start_id: str | None = None
     prefix: list[AgentMessage] = []
     if compaction_index is not None:
         compaction = entries[compaction_index]
@@ -389,6 +401,13 @@ def _replay(entries: list[TranscriptEntry]) -> list[AgentMessage]:
                     "durable fold: first_kept_entry_id %s not found; replaying full history",
                     first_kept_id,
                 )
+                start = 0
+        # The boundary is the row the kept window OPENS at. A compaction with no
+        # rows left below it opens at the compaction row itself, so the archive
+        # still knows which line everything older than the window sits behind.
+        boundary = start if start < len(entries) else compaction_index
+        if boundary > 0:
+            keep_start_id = entries[boundary].id
 
     prunes = {
         str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
@@ -406,7 +425,7 @@ def _replay(entries: list[TranscriptEntry]) -> list[AgentMessage]:
         if notice is not None and isinstance(message, Message):
             _apply_prune_to(message, notice)
         out.append(message)
-    return out
+    return out, keep_start_id
 
 
 def _compaction_prefix(
@@ -422,18 +441,17 @@ def _compaction_prefix(
     here because the fold's incremental rebuild has only the new entry in hand,
     not the journal — see the note at its call site for why passing ``None``
     there is correct rather than a gap.
+
+    The marker itself comes from the transcript module's own
+    ``_compaction_marker`` rather than being built here: that helper stamps
+    ``id=entry.id``, and a locally built copy that let pydantic mint a uuid made
+    the phone disagree with every other surface about which row it was holding.
+    It was not cosmetic — the web client pages history with the id of its OLDEST
+    row, so a marker id that changed on every fold made the cursor unresolvable
+    and stopped scroll-back dead at the compaction for any session whose render
+    was short enough to start with the marker.
     """
-    details: dict[str, Any] = {"summary": compaction.payload.get("summary", "")}
-    preserve_data = compaction.payload.get("preserve_data")
-    if preserve_data is not None:
-        details["preserve_data"] = preserve_data
-    prefix: list[AgentMessage] = [
-        CustomMessage(
-            custom_type="compaction_summary",
-            attribution="system",
-            details=details,
-        )
-    ]
+    prefix: list[AgentMessage] = [_compaction_marker(compaction)]
     preserved_turns = compaction.payload.get("preserved_user_turns") or ()
     if preserved_turns:
         from local_operator.compaction.cutpoint import (
@@ -481,6 +499,16 @@ def _rebuild_history_after_compaction(state: DurableFoldState, entry: Transcript
         if index is None:
             return False
         kept = state.history[index:]
+        # The scroll-back archive boundary moves with the newest window, and it
+        # moves HERE too: a compaction that arrives on the tail path (a live
+        # session compacting while the phone is attached) leaves the cached
+        # history beginning at the new marker, so anything that still read the
+        # old boundary would page rows the render already holds. ``index > 0``
+        # is the same condition ``_replay`` uses — a window that opens at the
+        # history's own first row dropped nothing, so the boundary it had is
+        # still the right one.
+        if index > 0:
+            state.keep_start_id = str(first_kept_id)
     # Prunes journalled before this marker already shaped the kept window;
     # re-apply the map so a kept message blanked by an older prune stays
     # blanked (idempotent — same notice, same result).
@@ -504,6 +532,134 @@ def _fold(history: list[AgentMessage]) -> list[Any]:
     from local_operator.mobile.projection import fold_messages_to_entries
 
     return fold_messages_to_entries(history)
+
+
+#: Journal entries read per backward step of the archive walk. The reader's own
+#: ceiling (``api_session_history`` clamps ``limit`` to 200) so the archive never
+#: asks the file for more than the route could have served.
+_ARCHIVE_READ_LIMIT = 200
+
+
+def _journal_entry_id(row_id: str) -> str:
+    """The journal entry id a rendered row id names.
+
+    ``fold_messages_to_entries`` composes a tool row's id from its message plus
+    the call (``<message id>:<call id>``, and ``<message id>:stop`` for the
+    budget stop), while the transcript reader's cursor is an ENTRY id. Callers
+    legitimately hold either — the web client's page cursor is the row id it was
+    served — so the narrowing happens HERE, once, rather than at each call site
+    that has to remember it. Message ids are uuids and carry no colon, which is
+    what makes the first segment the entry.
+    """
+    return row_id.partition(":")[0]
+
+
+def journal_rows_older_than(
+    directory: Path,
+    prunes: Mapping[str, str],
+    *,
+    before_id: str,
+    limit: int,
+) -> tuple[list[Any], bool] | None:
+    """Phone rows for the journal entries OLDER than ``before_id``.
+
+    WHY THIS EXISTS, and it is a reach bug rather than a speed one. The durable
+    fold starts its replay at the newest compaction's ``first_kept_entry_id``, so
+    everything a compaction dropped is absent from ``state.render`` — and
+    ``_history_page`` pages the RENDER. On the S6 fixture that made 640 of the
+    journal's 3,348 rows reachable from the phone: ``/history`` anchored at the
+    oldest unfolded row answered the one row above it and then
+    ``has_more: false``, so a phone reader could not scroll back past the last
+    compaction at all. The desktop has always reached those rows — its history
+    route pages the JOURNAL through :func:`read_transcript_page`, which is
+    exactly what this function calls — so the two surfaces disagreed about what
+    the same conversation contains.
+
+    BOUNDED BY THE PAGE, NOT THE FILE, and that is the point of reusing the
+    journal reader rather than re-folding a segment of the file: the reader
+    byte-locates the cursor and walks one chunk plus the page (see its
+    docstring), so a scroll-back costs the page it returns. Folding is still
+    :func:`fold_messages_to_entries`, the ONE phone fold — the rows behind a
+    compaction have the same shapes as the rows in front of it, and a parallel
+    renderer here is how the two would drift.
+
+    ``prunes`` is the fold state's own map (the ``[pruned]`` blanks the replay
+    applies). It arrives from the caller rather than being re-derived per page:
+    a prune marker is written ABOVE the row it blanks, so a backward page walk
+    reaches it after the row and a local scan would serve un-blanked content the
+    live fold had already hidden.
+
+    ``before_id`` is a rendered ROW id, not necessarily a bare journal entry id:
+    the web client pages with the id it was served, and a tool row's id carries
+    its call. :func:`_journal_entry_id` narrows it back to the entry the reader
+    walks from.
+
+    Returns ``None`` when ``before_id`` names no journal row — the cursor a
+    client holds can outlive the file it came from (a compaction that landed
+    mid-scroll, a replaced transcript) — so the caller keeps its own
+    end-of-history answer instead of serving a duplicate tail. A ``before_id``
+    the reader cannot locate is reported as the tail with ``reconciled=True``,
+    which is what makes that distinguishable from a genuine miss.
+    """
+    rows: list[Any] = []
+    has_more = False
+    cursor = _journal_entry_id(before_id)
+    while len(rows) < limit:
+        page = read_transcript_page(directory, before_id=cursor, limit=_ARCHIVE_READ_LIMIT)
+        if page.reconciled:
+            return None
+        entries = page.entries
+        if not entries:
+            has_more = False
+            break
+        messages: list[AgentMessage] = []
+        for entry in entries:
+            if entry.type == ENTRY_COMPACTION:
+                # A compaction row a reader scrolls past: the desktop paints it
+                # where it sits in the journal, and dropping it here would make
+                # the archived stretch look like a conversation that simply
+                # continued across a summary that never happened. Same helper the
+                # live prefix uses, so both markers are one object shape.
+                messages.append(_compaction_marker(entry))
+                continue
+            if entry.type != ENTRY_MESSAGE:
+                continue
+            message = _entry_to_message(entry, _attachments())
+            if message is None:
+                continue
+            if entry.id in prunes and isinstance(message, Message):
+                _apply_prune_to(message, prunes[entry.id])
+            messages.append(message)
+        if messages:
+            rows = _fold(messages) + rows
+        cursor = entries[0].id
+        has_more = page.has_more
+        if not page.has_more:
+            break
+    if not rows:
+        return [], False
+    if len(rows) > limit:
+        # Keep the rows NEXT to the cursor: the older ones are what the caller's
+        # next page is for, and the walk above may overshoot by a fold's fan-out
+        # (one message can paint several rows).
+        cut = len(rows) - limit
+        # EXCEPT that the cut has to fall on a row GROUP boundary. The cursor a
+        # caller holds is narrowed back to the message it names
+        # (:func:`_journal_entry_id`) and a message's rows are ordered own-row
+        # first, then one per tool call — so a page that STARTS mid-group makes
+        # the next page start strictly below the message, and the rows above the
+        # cut are never asked for again. Measured: on the S6 fixture 2 of 1,813
+        # folded rows were unreachable exactly this way; on this module's own
+        # fixture, a message with more rows than a page stranded its own row and
+        # its first call. So the cut MOVES BACK to the group's first row and the
+        # page is that much longer — bounded by one message's fan-out, and the
+        # reader pays rows it was going to be served in the next page anyway.
+        base = _journal_entry_id(str(rows[cut].id))
+        while cut > 0 and _journal_entry_id(str(rows[cut - 1].id)) == base:
+            cut -= 1
+        rows = rows[cut:]
+        has_more = True
+    return rows, has_more
 
 
 @dataclass
