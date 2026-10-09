@@ -616,3 +616,165 @@ async def test_the_two_new_reads_run_off_the_event_loop(api, monkeypatch) -> Non
     assert timeline_threads, "the timeline route stopped calling project_timeline_entry"
     assert all(ident != loop_thread for ident in search_threads)
     assert all(ident != loop_thread for ident in timeline_threads)
+
+
+# ---------------------------------------------------------------------------
+# The deliberate force-close door: `force_done` on PATCH and the dedicated
+# `project_done_incomplete` refusal. Before it, the done gate's sentence told the
+# caller to "pass force_done=true" while `ProjectPatch` (extra="forbid") 422'd
+# that very field, so no desktop client could ever close over open milestones.
+# ---------------------------------------------------------------------------
+
+OPEN_MILESTONE_SENTENCE = (
+    "cannot set status 'done': 1 milestone still incomplete ('open ms') — "
+    "complete them, or pass force_done=true to close with them open"
+)
+
+
+async def _project_with_open_milestone(client, name: str = "closing") -> str:
+    """A project holding one OPEN, overdue milestone and one completed one."""
+    created = await client.post("/v1/desktop/projects", json={"name": name})
+    project_id = created.json()["result"]["id"]
+    for body in (
+        {"name": "open ms", "target_date": "2020-01-01"},
+        {"name": "shipped ms", "completed": True},
+    ):
+        added = await client.post(f"/v1/desktop/projects/{project_id}/milestones", json=body)
+        assert added.status_code == 200
+    return project_id
+
+
+async def test_done_over_open_milestones_is_the_dedicated_422(api) -> None:
+    client, root = api
+    project_id = await _project_with_open_milestone(client)
+
+    refused = await client.patch(f"/v1/desktop/projects/{project_id}", json={"status": "done"})
+
+    assert refused.status_code == 422
+    # The machine code, the byte-identical sentence, and the names to list.
+    assert refused.json()["detail"] == {
+        "code": "project_done_incomplete",
+        "message": OPEN_MILESTONE_SENTENCE,
+        "incomplete": ["open ms"],
+    }
+    # Refused means refused: nothing was written.
+    row = json.loads((root / "projects" / f"{project_id}.json").read_text())
+    assert row["status"] == "active" and row["completed_at"] is None
+
+
+async def test_force_done_closes_over_open_milestones_and_says_so(api) -> None:
+    client, root = api
+    project_id = await _project_with_open_milestone(client)
+
+    forced = await client.patch(
+        f"/v1/desktop/projects/{project_id}", json={"status": "done", "force_done": True}
+    )
+
+    assert forced.status_code == 200
+    result = forced.json()["result"]
+    assert result["status"] == "done"
+    assert result["completed_at"] is not None
+    assert result["milestones_total"] == 2 and result["milestones_completed"] == 1
+    # The store records nothing about a forced close; this flag is the client's
+    # only trace of it (see ProjectPatched).
+    assert result["forced_done"] is True
+
+    # The side effect on disk: closed, stamped, milestones STILL open, and the
+    # request flag was never persisted as a row field.
+    row = json.loads((root / "projects" / f"{project_id}.json").read_text())
+    assert row["status"] == "done" and row["completed_at"] == result["completed_at"]
+    by_name = {m["name"]: m for m in row["milestones"]}
+    assert by_name["open ms"].get("completed_at") is None
+    assert by_name["shipped ms"]["completed_at"] is not None
+    assert "force_done" not in row and "forced_done" not in row
+
+
+async def test_force_done_is_a_no_op_unless_it_actually_forced(api) -> None:
+    client, _root = api
+    project_id = await _project_with_open_milestone(client)
+
+    # Not a done transition: the flag does nothing and is not an error.
+    other = await client.patch(
+        f"/v1/desktop/projects/{project_id}", json={"status": "paused", "force_done": True}
+    )
+    assert other.status_code == 200
+    assert other.json()["result"]["status"] == "paused"
+    assert other.json()["result"]["forced_done"] is False
+
+    # An explicit false is the default: the gate still refuses.
+    off = await client.patch(
+        f"/v1/desktop/projects/{project_id}", json={"status": "done", "force_done": False}
+    )
+    assert off.status_code == 422
+    assert off.json()["detail"]["code"] == "project_done_incomplete"
+
+    # Nothing open: force_done is harmless and the close is NOT reported forced.
+    clean = await client.post("/v1/desktop/projects", json={"name": "all-shipped"})
+    clean_id = clean.json()["result"]["id"]
+    await client.post(
+        f"/v1/desktop/projects/{clean_id}/milestones", json={"name": "m", "completed": True}
+    )
+    closed = await client.patch(
+        f"/v1/desktop/projects/{clean_id}", json={"status": "done", "force_done": True}
+    )
+    assert closed.status_code == 200
+    assert closed.json()["result"]["status"] == "done"
+    assert closed.json()["result"]["forced_done"] is False
+
+
+async def test_done_without_the_flag_is_untouched_when_nothing_is_open(api) -> None:
+    client, _root = api
+    bare = await client.post("/v1/desktop/projects", json={"name": "no-plan"})
+    bare_id = bare.json()["result"]["id"]
+    closed = await client.patch(f"/v1/desktop/projects/{bare_id}", json={"status": "done"})
+    assert closed.status_code == 200
+    assert closed.json()["result"]["forced_done"] is False
+
+    complete = await client.post("/v1/desktop/projects", json={"name": "complete-plan"})
+    complete_id = complete.json()["result"]["id"]
+    await client.post(
+        f"/v1/desktop/projects/{complete_id}/milestones", json={"name": "m", "completed": True}
+    )
+    closed = await client.patch(f"/v1/desktop/projects/{complete_id}", json={"status": "done"})
+    assert closed.status_code == 200 and closed.json()["result"]["status"] == "done"
+
+
+@pytest.mark.parametrize("bad", ["yes", "true", 1, None, []])
+async def test_force_done_must_be_a_real_boolean(api, bad) -> None:
+    """The flag overrides a safety check, so only a JSON boolean arms it."""
+    client, root = api
+    project_id = await _project_with_open_milestone(client)
+    refused = await client.patch(
+        f"/v1/desktop/projects/{project_id}", json={"status": "done", "force_done": bad}
+    )
+    assert refused.status_code == 422
+    row = json.loads((root / "projects" / f"{project_id}.json").read_text())
+    assert row["status"] == "active"
+
+
+async def test_unknown_patch_fields_are_still_refused(api) -> None:
+    client, _root = api
+    project_id = await _project_with_open_milestone(client)
+    refused = await client.patch(
+        f"/v1/desktop/projects/{project_id}", json={"status": "done", "forced": True}
+    )
+    assert refused.status_code == 422
+
+
+async def test_the_force_done_capability_is_its_own_key(api) -> None:
+    client, _root = api
+    caps = await client.get("/v1/capabilities")
+    features: dict[str, Any] = caps.json()["result"]["features"]
+    assert features["projects_force_done"] == 1
+    # Not a bump of `projects`: an older renderer must keep reading 2.
+    assert features["projects"] == 2
+
+
+async def test_the_listing_rows_do_not_grow_the_patch_only_flag(api) -> None:
+    client, _root = api
+    project_id = await _project_with_open_milestone(client)
+    await client.patch(
+        f"/v1/desktop/projects/{project_id}", json={"status": "done", "force_done": True}
+    )
+    row = (await client.get("/v1/desktop/projects")).json()["result"]["projects"][0]
+    assert "forced_done" not in row

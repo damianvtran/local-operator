@@ -24,7 +24,9 @@ the two HTTP surfaces cannot drift apart in behaviour:
 * **Refusals** map to the desktop's status codes and machine codes:
   ``404 project_not_found`` (with up to two prefix-matched names as a remedy),
   ``409 project_name_exists`` / ``409 project_schema_newer``,
-  ``422 project_invalid`` / ``422 project_confirm_mismatch``, and
+  ``422 project_invalid`` / ``422 project_confirm_mismatch`` /
+  ``422 project_done_incomplete`` (the ``done`` gate: open milestones; the way
+  through is ``force_done: true`` on the PATCH), and
   ``503 project_store_busy`` for a lock timeout — retryable, not malformed.
 
 TRANSPORT DIFFERENCES, and only these. The daemon's handlers speak flat JSON
@@ -57,12 +59,14 @@ from pydantic import ValidationError
 from local_operator.projects import (
     MilestoneEdit,
     Project,
+    ProjectDoneGateError,
     ProjectEdit,
     ProjectNameConflictError,
     ProjectRegistry,
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
     build_project_view,
+    closed_with_open_milestones,
     readable_error,
     scan_runtime_states,
     stale_after_s,
@@ -75,6 +79,7 @@ from local_operator.server.models.desktop_projects import (
     ProjectDelete,
     ProjectPatch,
     linked_session_view,
+    project_patched,
     project_summary,
     project_view,
 )
@@ -98,13 +103,23 @@ class ProjectRouteError(Exception):
     ``status`` and ``code`` are the desktop route's own numbers and machine
     codes (see the module docstring); ``message`` is written for the reader,
     the way every daemon refusal is.
+
+    ``extra`` is the ADDITIVE carriage for machine-readable fields beyond
+    ``error``/``code`` (today only ``incomplete`` on ``project_done_incomplete``,
+    the milestone names a confirm sheet lists). The daemon merges it into the
+    body next to ``error`` and ``code``, so an existing client that reads only
+    those two keys is unaffected; it defaults empty so every other refusal is
+    byte-identical to before.
     """
 
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(
+        self, status: int, code: str, message: str, extra: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.extra: dict[str, Any] = dict(extra or {})
 
 
 def _registry(config_dir: Path) -> ProjectRegistry:
@@ -180,6 +195,18 @@ def _refusal(exc: Exception) -> ProjectRouteError:
     if isinstance(exc, ProjectRegistryLockTimeout):
         # Contention is transient; the client retries.
         return ProjectRouteError(503, "project_store_busy", str(exc))
+    if isinstance(exc, ProjectDoneGateError):
+        # The desktop route's mapping, field for field: 422 with its own code
+        # because the remedy (complete the milestones, or resend with
+        # `force_done: true`) is a choice the phone can offer only if it can
+        # tell this from a malformed value. The sentence is the store's own;
+        # the names ride `extra` so the body stays `{error, code, incomplete}`.
+        return ProjectRouteError(
+            422,
+            "project_done_incomplete",
+            _reader_error(exc),
+            {"incomplete": list(exc.incomplete)},
+        )
     return ProjectRouteError(422, "project_invalid", _reader_error(exc))
 
 
@@ -295,24 +322,37 @@ def create_payload(config_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
 def patch_payload(config_dir: Path, key: str, body: dict[str, Any]) -> dict[str, Any]:
     """``PATCH /api/projects/{key}`` — a partial edit; omitted keys are untouched."""
     payload = _selected(body, _PATCH_FIELDS)
+    # `force_done` is a flag about THIS call, not a field of the row (the
+    # desktop route's rule): it never reaches `ProjectEdit` and rides the
+    # registry keyword instead. There is no pydantic model on this path, so the
+    # desktop's strict-bool rule is restated here — only a real JSON boolean
+    # may arm a flag that overrides a safety check; `"yes"`/`1` are a 422.
+    force_done = payload.pop("force_done", False)
+    if not isinstance(force_done, bool):
+        raise ProjectRouteError(422, "project_invalid", "force_done must be true or false")
     registry = _registry(config_dir)
     found = _find(registry, key)
     if found is None:
         raise _not_found(registry, key)
     try:
         fields = ProjectEdit(**payload)
-        outcome = registry.update_project(found.id, fields, reporter="operator")
+        outcome = registry.update_project(
+            found.id, fields, reporter="operator", force_done=force_done
+        )
     except _STORE_REFUSALS as exc:
         raise _refusal(exc) from exc
     updated = outcome.project
     live = _live_counts(registry, [updated])
     return {
         "ok": True,
-        "project": _summary_payload(
+        # The desktop's `ProjectPatched` shape: the summary plus `forced_done`,
+        # the only place a forced close is visible (the store records none).
+        "project": project_patched(
             updated,
             live_sessions=live.get(updated.id, 0),
             window=stale_after_s(registry.config_dir),
-        ),
+            forced_done=closed_with_open_milestones(updated, force_done=force_done),
+        ).model_dump(mode="json"),
     }
 
 

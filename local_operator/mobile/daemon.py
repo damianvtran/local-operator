@@ -6217,7 +6217,11 @@ def build_app(daemon: MobileDaemon):
         try:
             payload = await asyncio.to_thread(fn, *args)
         except mobile_projects.ProjectRouteError as exc:
-            return JSONResponse({"error": exc.message, "code": exc.code}, status_code=exc.status)
+            # `extra` is empty for every refusal but `project_done_incomplete`
+            # (its `incomplete` names), so the common body stays {error, code}.
+            return JSONResponse(
+                {"error": exc.message, "code": exc.code, **exc.extra}, status_code=exc.status
+            )
         return JSONResponse(payload)
 
     async def api_projects(request: Request) -> Response:
