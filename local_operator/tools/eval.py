@@ -83,6 +83,7 @@ from local_operator.tools.builtin import (
     _bash_output_summary,
     _display_target,
     _error,
+    _eval_pad_write_check,
     _guard,
     _safe_cwd,
     _text,
@@ -1479,7 +1480,9 @@ async def execute_eval(
         kernel.marker_written = await asyncio.to_thread(
             _write_marker, session_dir, kernel.generation
         )
-    result = await _render(tool_call_id, response or {}, context, on_update, reset=reset)
+    result = await _render(
+        tool_call_id, response or {}, context, on_update, code=params.code, reset=reset
+    )
     details: dict[str, Any] = {
         **(result.details or {}),
         "kernel_generation": kernel.generation,
@@ -1501,6 +1504,7 @@ async def _render(
     response: dict[str, Any],
     context: ToolContext | None,
     on_update: Callable[[AgentToolUpdate], None] | None,
+    code: str,
     reset: str | None = None,
 ) -> ToolResult:
     """Build the ToolResult from one worker response.
@@ -1565,6 +1569,7 @@ async def _render(
         error,
         display,
         context,
+        code,
         reset,
         tool_failures,
         failure_count,
@@ -1612,6 +1617,7 @@ def _build_render_result(
     error: Any,
     display: list[str],
     context: ToolContext | None,
+    code: str,
     reset: str | None = None,
     tool_failures: list[dict[str, Any]] | None = None,
     failure_count: int = 0,
@@ -1639,6 +1645,14 @@ def _build_render_result(
         # head-biased truncation keeps the one statement a failed call must not
         # lose (see ``_tool_failures_notice``).
         notice.append(_tool_failures_notice(list(tool_failures or []), failure_count))
+    # The pad audit rides the same head window as the notices above, ranked
+    # BELOW the cell's own failures: a failed tool() call is about this cell,
+    # while the pad line is state of the pad the cell named (see
+    # ``_eval_pad_write_check``). It costs nothing when it does not fire, which
+    # is the ordinary cell — the gate is then pure string work.
+    pad_line = _eval_pad_write_check(code, context)
+    if pad_line:
+        notice.append(pad_line)
     # The result leads so head-biased truncation keeps it: it is the one line
     # the call existed to produce.
     if ok:
