@@ -41,8 +41,8 @@ covers the general rules for handling them.
 ## Cost
 
 - **Radient** reports the generation's cost (`cost_usd` in the result) and
-  bills your account credits; when the balance cannot fund the request the
-  rung is skipped and the next provider runs.
+  bills your account credits; when the balance cannot fund the request that
+  provider is skipped and the next one runs.
 - **FAL** and **OpenAI** bill the key you supplied; OpenAI bills **per
   image**. `num_images` multiplies cost on every provider — it is the spend
   knob, and the approval prompt states the quantity before anything is spent.
@@ -63,7 +63,7 @@ default "ask" mode). In unattended modes there is no prompt — treat
 `image_size` accepts `square_hd`, `square`, `portrait_4_3`, `portrait_16_9`,
 `landscape_4_3`, `landscape_16_9` and is mapped per provider. `seed` runs only
 where the provider supports it (Radient and FAL; OpenAI ignores it — do not
-promise reproducibility on that rung).
+promise reproducibility there).
 
 ## Editing an image (image-to-image)
 
