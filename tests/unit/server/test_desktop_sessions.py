@@ -9580,19 +9580,22 @@ async def test_the_ask_attachments_feature_is_published(draft_api) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_list_route_serves_the_delegated_cleanup_notice_exactly_once(draft_api) -> None:
-    """The ONE-TIME "delegated sessions were cleaned up" notice rides the list.
+async def test_the_list_route_peeks_the_delegated_cleanup_notice_until_acked(draft_api) -> None:
+    """The notice is a READ-ONLY peek on the list; the ack route consumes it.
 
-    Consumed on read: the first answer carries it and flips the on-disk
-    acknowledgement, the second does not — so steady-state hourly sweeps (which
-    never re-arm it) stay silent, and so does a client that polls every 2 s.
+    Many readers poll this route — the app's own attach and auth probes among
+    them — and consuming on read let a main-process read eat the once-per-store
+    notice before the renderer could render it, permanently (the UI PR's
+    round-1 review). Every read carries it until the renderer acknowledges
+    through the ack route; the flag on disk is what a restart reads.
     """
     import json
 
     client, root = draft_api
     sessions = root / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
-    (sessions / ".delegated-retention.json").write_text(
+    state_path = sessions / ".delegated-retention.json"
+    state_path.write_text(
         json.dumps({"removed_total": 3, "max_age_hours": 48, "notice_acknowledged": False})
     )
     first = (await client.get("/v1/desktop/sessions")).json()["result"]
@@ -9600,12 +9603,41 @@ async def test_the_list_route_serves_the_delegated_cleanup_notice_exactly_once(d
     assert notice["removed"] == 3 and notice["in_progress"] is False
     assert "Cleaned up 3 delegated sessions" in notice["message"]
     assert "Your own conversations were not touched." in notice["message"]
+    # A second read still carries it, and NOTHING was flipped on disk.
     second = (await client.get("/v1/desktop/sessions")).json()["result"]
-    assert second["delegated_cleanup_notice"] is None
+    assert second["delegated_cleanup_notice"] == notice
+    assert json.loads(state_path.read_text())["notice_acknowledged"] is False
+    # The renderer acknowledges; from then on it is gone — and the persisted
+    # flag is what any later process (a restart) reads: null.
+    ack = await client.post("/v1/desktop/delegated-cleanup-notice/ack")
+    assert ack.status_code == 200, ack.text
+    assert ack.json()["result"] == {"acknowledged": True}
+    assert json.loads(state_path.read_text())["notice_acknowledged"] is True
+    third = (await client.get("/v1/desktop/sessions")).json()["result"]
+    assert third["delegated_cleanup_notice"] is None
+    again = await client.post("/v1/desktop/delegated-cleanup-notice/ack")
+    assert again.status_code == 200 and again.json()["result"] == {"acknowledged": True}
 
 
 @pytest.mark.asyncio
 async def test_the_list_route_carries_no_notice_when_nothing_was_ever_removed(draft_api) -> None:
-    client, _root = draft_api
+    client, root = draft_api
     answer = (await client.get("/v1/desktop/sessions")).json()["result"]
     assert "delegated_cleanup_notice" in answer and answer["delegated_cleanup_notice"] is None
+    # The ack route is idempotent and invents nothing when there is no record.
+    ack = await client.post("/v1/desktop/delegated-cleanup-notice/ack")
+    assert ack.status_code == 200 and ack.json()["result"] == {"acknowledged": True}
+    assert not (root / "sessions" / ".delegated-retention.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_list_route_tolerates_a_malformed_notice_record(draft_api) -> None:
+    """A malformed record yields null, never an error — on the read and the ack."""
+    client, root = draft_api
+    sessions = root / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / ".delegated-retention.json").write_text("{nope")
+    answer = (await client.get("/v1/desktop/sessions")).json()["result"]
+    assert answer["delegated_cleanup_notice"] is None
+    ack = await client.post("/v1/desktop/delegated-cleanup-notice/ack")
+    assert ack.status_code == 200 and ack.json()["result"] == {"acknowledged": True}

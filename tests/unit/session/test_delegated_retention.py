@@ -655,6 +655,49 @@ def test_permanent_keeps_at_the_head_of_the_queue_do_not_stall_the_drain(root: P
     assert len(second.removed) == 5
 
 
+def test_a_pass_whose_removals_are_all_refused_stops_at_the_budget(tmp_path: Path) -> None:
+    """Review F2: a foreign/read-only store must not walk the whole candidate list.
+
+    An unmarked store refuses every removal (``remove_session_dir`` fails
+    closed), so no batch of removals ever completes — with the deadline checked
+    only at batch boundaries the pass walked all 250 candidates with
+    ``budget_exhausted`` false and ``remaining`` 0, stamping the store clean.
+    A full batch of refused attempts is the failure-direction evidence that lets
+    the deadline end the pass instead.
+    """
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    for index in range(250):  # NOT marked: every removal attempt is refused
+        _mk(tmp_path, f"c{index:04d}")
+    attempts = {"n": 0}
+    real_remove = dr.remove_session_dir
+
+    def counting_remove(*args: Any, **kwargs: Any) -> bool:
+        attempts["n"] += 1
+        return real_remove(*args, **kwargs)
+
+    dr.remove_session_dir = counting_remove  # type: ignore[assignment]
+    try:
+        result = _pass(tmp_path, batch_size=10, budget_s=0.001)
+    finally:
+        dr.remove_session_dir = real_remove  # type: ignore[assignment]
+    assert result.scanned == 250 and result.removed == []
+    assert result.budget_exhausted and result.remaining > 0
+    # The walk is bounded by the refusal window: one full batch of refused
+    # attempts (10) plus at most the one in flight when the deadline is seen.
+    assert attempts["n"] <= 11, f"walked {attempts['n']} candidates instead of stopping"
+
+
+def test_a_marked_store_with_a_generous_budget_still_drains_normally(root: Path) -> None:
+    """The F2 control: bounding the unproductive walk changes no real drain."""
+    for index in range(250):
+        _mk(root, f"c{index:04d}")
+    result = _pass(root, batch_size=10, budget_s=30.0)
+    assert result.budget_exhausted is False
+    assert len(result.removed) == 250 and result.remaining == 0
+    assert _names(root) == set()
+
+
 def test_a_pass_stops_between_batches_on_the_stop_event(root: Path) -> None:
     for index in range(12):
         _mk(root, f"s{index:02d}")
@@ -779,6 +822,38 @@ def test_the_removing_runtimes_own_viewer_announces_first(root: Path) -> None:
     assert dr.take_unannounced_delegated_notice(sessions, runtime_pid=os.getppid()) is not None
 
 
+def test_the_peek_returns_the_notice_without_consuming_it(root: Path) -> None:
+    """The desktop list route's read half: repeatable until someone ACKNOWLEDGES."""
+    _mk(root, "a")
+    _pass(root)
+    sessions = root / "sessions"
+    first = dr.peek_unannounced_delegated_notice(sessions)
+    assert first is not None and first["removed_total"] == 1
+    second = dr.peek_unannounced_delegated_notice(sessions)
+    assert second == first  # nothing was flipped
+    assert dr.read_state(sessions)["notice_acknowledged"] is False
+
+
+def test_acknowledge_flips_the_flag_once_and_repeats_cleanly(root: Path) -> None:
+    """The desktop ack route's write half: idempotent, and it silences take too."""
+    _mk(root, "a")
+    _pass(root)
+    sessions = root / "sessions"
+    assert dr.acknowledge_delegated_notice(sessions) is True
+    assert dr.read_state(sessions)["notice_acknowledged"] is True
+    assert dr.peek_unannounced_delegated_notice(sessions) is None
+    assert dr.take_unannounced_delegated_notice(sessions, defer_to_writer=False) is None
+    assert dr.acknowledge_delegated_notice(sessions) is True  # idempotent
+
+
+def test_the_notice_reads_tolerate_no_record(root: Path) -> None:
+    """No record: the peek answers nothing and the ack invents no file."""
+    sessions = root / "sessions"
+    assert dr.peek_unannounced_delegated_notice(sessions) is None
+    assert dr.acknowledge_delegated_notice(sessions) is True
+    assert not (sessions / dr.STATE_NAME).exists()
+
+
 def test_the_parent_class_record_is_untouched_by_a_delegated_removal(root: Path) -> None:
     _mk(root, "a")
     _pass(root)
@@ -806,7 +881,10 @@ def test_the_notice_formats_any_shape(payload: object) -> None:
 
 def test_a_malformed_state_file_announces_nothing(root: Path) -> None:
     (root / "sessions" / dr.STATE_NAME).write_text("{nope")
-    assert dr.take_unannounced_delegated_notice(root / "sessions") is None
+    sessions = root / "sessions"
+    assert dr.take_unannounced_delegated_notice(sessions) is None
+    assert dr.peek_unannounced_delegated_notice(sessions) is None
+    assert dr.acknowledge_delegated_notice(sessions) is True  # nothing to flip, no error
 
 
 # --------------------------------------------------------------------------
