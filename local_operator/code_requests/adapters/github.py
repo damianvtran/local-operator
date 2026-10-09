@@ -147,17 +147,40 @@ def _raise_for_status(response: httpx.Response, piece: str) -> None:
     raise ForgeHTTPError("http", piece, code)
 
 
+def _origin_of(url: httpx.URL) -> tuple[str, str, int]:
+    """``(scheme, host, port)`` — the pin a followed ``Link`` must match.
+
+    ``httpx.URL.port`` resolves the scheme's default, so ``https://x/y`` and
+    ``https://x:443/y`` are one origin.
+    """
+    return (url.scheme, str(url.host or ""), int(url.port or 0))
+
+
 def _next_link(response: httpx.Response) -> str | None:
-    """The ``rel="next"`` URL from a ``Link`` header, or ``None``."""
+    """The ``rel="next"`` URL from a ``Link`` header, or ``None``.
+
+    The next page is followed WITH the same bearer token, and ``httpx`` strips
+    auth on cross-origin REDIRECTS only — a followed Link is a fresh request.
+    A forge (or a hostile proxy in front of one) answering ``Link: …,
+    <https://evil/x>`` would therefore hand our credential to another host
+    (review round 1, F8). Pin the candidate to the origin of the response it
+    arrived on; anything else ends pagination here, with the pages already
+    read kept.
+    """
     link = response.headers.get("link")
     if not link:
         return None
+    origin = _origin_of(response.request.url) if response.request is not None else None
     for part in link.split(","):
         if 'rel="next"' not in part.replace(" ", ""):
             continue
         target = part.split(";")[0].strip().strip("<>")
-        if target.startswith("http"):
-            return target
+        if not target.startswith("http"):
+            continue
+        if origin is None or _origin_of(httpx.URL(target)) != origin:
+            logger.warning("code-requests: ignored a rel=next page outside the API origin")
+            return None
+        return target
     return None
 
 
@@ -310,6 +333,36 @@ class GitHubAdapter:
             if own_client:
                 await http.aclose()
 
+    async def probe_pull(
+        self, ref: Any, token: str, *, client: httpx.AsyncClient | None = None
+    ) -> str:
+        """Whether a qualified ref's number is a pull request: one unconditional GET.
+
+        ``"pull"`` (200), ``"issue"`` (404 — GitHub numbers issues and pull
+        requests from one sequence, so a missing pull request at N means the
+        number is an issue, or invisible to this login), ``"unknown"`` for
+        anything else. Rate-limit and auth outcomes raise
+        :class:`ForgeHTTPError` so the caller can cool the host or degrade;
+        they are not silently flattened into ``"unknown"``.
+
+        The credential gate ran in the caller before this is reached, so the
+        token only ever travels to an authenticated host.
+        """
+        url = f"{api_base(ref.host)}/repos/{ref.project}/pulls/{ref.number}"
+        own_client = client is None
+        http = client or httpx.AsyncClient(timeout=_TIMEOUT_S, follow_redirects=True)
+        try:
+            response = await self._get(http, url, token, None)
+            if response.status_code == 200:
+                return "pull"
+            if response.status_code == 404:
+                return "issue"
+            _raise_for_status(response, "shorthand")
+            return "unknown"
+        finally:
+            if own_client:
+                await http.aclose()
+
     async def _get(
         self,
         http: httpx.AsyncClient,
@@ -432,16 +485,28 @@ class GitHubAdapter:
         try:
             response = await self._get(http, url, token, validators.get("ci"))
         except ForgeHTTPError:
-            outcome.pieces["ci"] = {"fetched": False, "runs": [], "total": None, "url": None}
-            return
+            # A NETWORK failure is not evidence about CI. Propagate it: the
+            # service keeps the stored "ci" piece AND its validator, so the
+            # next pass revalidates against them (review round 1, F4b/c —
+            # writing `{"fetched": False}` here used to wipe a real CI and
+            # leave the stale validator paired with empty data, so every
+            # later 304 kept the row stuck on "not fetched"). `_fetch_one`
+            # treats the propagated error as the pass's failure, which is the
+            # same posture as any other piece's network error.
+            raise
         if response.status_code == 304:
             outcome.not_modified.add("ci")
             return
         if response.status_code == 404:
             # Checks disabled, or a head commit this token cannot read. A
             # definitive "not fetched" beats failing the whole refresh for the
-            # garnish.
+            # garnish — and it clears the old validator (the FetchOutcome
+            # convention for "replaced, nothing conditional left"): without
+            # that, the next pass would send the stale ETag, take a 304 for
+            # the emptied piece and stay stuck on "not fetched" (review
+            # round 1, F4c).
             outcome.pieces["ci"] = {"fetched": False, "runs": [], "total": None, "url": None}
+            outcome.validators["ci"] = {}
             return
         _raise_for_status(response, "ci")
         data = response.json()

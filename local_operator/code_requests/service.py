@@ -63,6 +63,13 @@ logger = logging.getLogger(__name__)
 #: bounds a pathological one (a script that opened fifty PRs) without failing.
 MAX_REFS_PER_PASS = 24
 
+#: The piece names whose content the round parser reads (GitHub's
+#: ``comments``/``reviews``, GitLab's ``notes``). A pass that fetched ANY of
+#: these has full bodies in hand and (re)parses; a pass that fetched none of
+#: them replays the stored ``convention`` parse instead of re-reading bodies
+#: the size bound has truncated (cross-round finding X1).
+_COMMENT_PIECES = frozenset({"comments", "reviews", "notes"})
+
 #: The state words whose lane's "awaiting review" default applies (the parser's
 #: ``is_open`` argument): a merged/closed request is not awaiting anything.
 _OPEN_STATES = frozenset({"open", "draft"})
@@ -138,6 +145,34 @@ def plan(
     return out
 
 
+def link_only_hint(ref: Mapping[str, Any] | None) -> str:
+    """One line of remedy copy for a link-only row, per FORGE (finding X3).
+
+    A UI cannot infer this: a gitea row is not "sign in with gh" — there is no
+    CLI in scope for a detect-and-link-only forge at all — and naming the
+    wrong CLI teaches the wrong fix. gh and glab are the two logins this slice
+    can actually consume, so only they are named, each against its own family.
+    """
+    data = ref if isinstance(ref, Mapping) else {}
+    forge = str(data.get("forge") or "")
+    host = str(data.get("host") or "")
+    if forge == "github":
+        remedy = (
+            "sign in with the gh CLI"
+            if host == "github.com"
+            else f"sign in with the gh CLI (`gh auth login --hostname {host}`)"
+        )
+        return f"Link only — {remedy} to track this one."
+    if forge == "gitlab":
+        remedy = (
+            "sign in with the glab CLI"
+            if host == "gitlab.com"
+            else f"sign in with the glab CLI (`glab auth login --hostname {host}`)"
+        )
+        return f"Link only — {remedy} to track this one."
+    return "Link only — this host isn't tracked yet."
+
+
 def view_row(
     raw: Mapping[str, Any],
     entry: Mapping[str, Any] | None,
@@ -176,6 +211,9 @@ def view_row(
         row["link_only"] = True
         row["summary"] = None
         row["lanes"] = None
+        # The remedy copy, per forge (finding X3) — a flat row field the UI
+        # renders instead of guessing a CLI from the forge id itself.
+        row["link_only_hint"] = link_only_hint(ref_map)
         reason = skip_reason or str((entry or {}).get("refresh_error") or "")
         reason = reason or str(raw.get("unknown_reason") or "")
         if reason:
@@ -202,6 +240,12 @@ def view_row(
             }
             row["summary"]["ci"] = entry.get("ci")
             row["summary"]["url"] = str(ref_map.get("url") or "")
+            # The UI's row contract reads ``summary.comments``
+            # (DesktopCodeRequestSummary.comments in the desktop contract): the
+            # count the host reported, null when a host did not — never a
+            # rendered 0 (QA round 1, Q7).
+            total = entry.get("comments_total")
+            row["summary"]["comments"] = int(total) if isinstance(total, (int, float)) else None
         lanes = entry.get("lanes")
         row["lanes"] = lanes if isinstance(lanes, list) else None
         if entry.get("fetched_at") is not None:
@@ -271,6 +315,8 @@ def view_for_ref(config_dir: Any, ref: Ref) -> dict[str, Any] | None:
         "number": ref.number,
         "link_only": not has_pieces,
         "link_only_reason": ref.reason,
+        # Same per-forge remedy copy the route's row carries (finding X3).
+        "link_only_hint": link_only_hint({"forge": ref.forge, "host": ref.host}),
         "summary": None,
         "ci": None,
         "lanes": None,
@@ -330,7 +376,12 @@ def view_rows(config_dir: Any, rows: Sequence[Mapping[str, Any]]) -> list[dict[s
 
 
 async def show(
-    config_dir: Any, ref: Ref, *, force: bool = False, timeout_s: float = 25.0
+    config_dir: Any,
+    ref: Ref,
+    *,
+    force: bool = False,
+    timeout_s: float = 25.0,
+    session_id: str = "",
 ) -> dict[str, Any]:
     """Fetch-on-demand for the tool's ``show``: AWAIT a real fetch when needed.
 
@@ -340,9 +391,22 @@ async def show(
     backoff still refuse (a rate-limited host must not be hammered by a
     model's curiosity); the caller renders whatever is stored, which is the
     same degraded answer a UI gets. A timeout degrades the same way.
+
+    ``session_id`` makes the session's own DIRTY MARKS honour-able here too
+    (review round 1, F6): the acted seam marks the ref it just touched, and a
+    ``show`` of that ref must not answer from the pre-act state until the TTL
+    lapses. The key's mark is consumed on the attempt, under the same ``since``
+    race guard the pass uses.
     """
     entry = fetch_cache.read_entry(config_dir, ref)
     needs = force or entry is None or fetch_cache.is_expired(entry, forge=ref.forge)
+    dirty_at: float | None = None
+    if not needs and session_id:
+        dirty = fetch_cache.read_dirty(config_dir, session_id)
+        at = dirty.get("at")
+        dirty_at = at if isinstance(at, (int, float)) else None
+        marked = bool(dirty.get("all")) or ref.key in {str(k) for k in dirty.get("keys") or ()}
+        needs = marked
     if needs and adapter_for(ref) is not None:
         cooling = fetch_cache.cooling_until(ref.host)
         backing_off = fetch_cache.key_backoff_until(ref.key)
@@ -353,6 +417,8 @@ async def show(
                 )
             except asyncio.TimeoutError:
                 logger.debug("code-request show timed out for %s", ref.key)
+            if session_id:
+                fetch_cache.clear_dirty(config_dir, session_id, keys=[ref.key], since=dirty_at)
     view = view_for_ref(config_dir, ref)
     if view is not None:
         return view
@@ -411,6 +477,47 @@ def _key_lock(config_dir: Any, key: str) -> asyncio.Lock:
     return lock
 
 
+async def probe_shorthand(
+    config_dir: Any, ref: Ref, *, timeout_s: float = 15.0
+) -> tuple[str, Ref | None]:
+    """Resolve an ambiguous ``owner/repo#N`` for ``show``: ``(verdict, ref)``.
+
+    A qualified ref cannot say whether #N is an issue or a pull request, and
+    the tool doc + guide advertise the form, so ``show`` makes it work rather
+    than advertise dead syntax (QA round 1, Q3). One pull request probe: 200
+    promotes the ref to full — the normal show path then fetches and caches it
+    — and a 404 reports ``"issue"`` (GitHub numbers issues and pull requests
+    from one sequence, so the number exists as an issue, or is invisible to
+    this login). Rate limits cool the host; every other outcome is
+    ``"unknown"`` and the caller keeps the link-only row it already had. The
+    probe never writes the ledger, and the credential gate inside
+    :func:`resolve` means an unauthenticated host makes ZERO requests.
+    """
+    adapter = adapter_for(ref)
+    probe = getattr(adapter, "probe_pull", None) if adapter is not None else None
+    if probe is None:
+        return "unknown", None
+    try:
+        token = await asyncio.to_thread(resolve, ref.host, ref.forge)
+    except CredentialError:
+        return "unknown", None
+    try:
+        verdict = await asyncio.wait_for(probe(ref, token.value), timeout=timeout_s)
+    except ForgeHTTPError as exc:
+        if exc.kind == "rate_limited":
+            fetch_cache.note_rate_limited(
+                ref.host, reset_at=exc.reset_at, retry_after=exc.retry_after
+            )
+        return "unknown", None
+    except asyncio.TimeoutError:
+        return "unknown", None
+    if verdict == "pull":
+        # The same identity, now certain: a full ref enters the normal fetch
+        # and cache path (and only there does anything get stored).
+        return "pull", Ref(ref.forge, ref.host, ref.project, ref.number, ref.url, full=True)
+    return (verdict, None) if verdict == "issue" else ("unknown", None)
+
+
 async def refresh_keys(
     config_dir: Any, refs: Sequence[Ref], *, force: bool = False
 ) -> RefreshReport:
@@ -429,6 +536,21 @@ async def refresh_keys(
     report = RefreshReport()
     for ref in refs:
         async with _key_lock(config_dir, ref.key):
+            # RE-CHECK the throttles per ref: the plan's snapshot is taken once,
+            # but a 429 on an earlier ref sets HOST cooling mid-pass, and the
+            # remaining refs on that host must make zero calls (review round 1,
+            # F4a / QA round 1, Q4 — a sibling's success used to clear the
+            # cooling within the same pass and the host got hammered anyway).
+            # Unconditional, force included: a force must never defeat the
+            # host's own rate limit.
+            cooling_until = fetch_cache.cooling_until(ref.host)
+            if cooling_until is not None:
+                report.cooling[ref.host] = cooling_until
+                continue
+            backoff_until = fetch_cache.key_backoff_until(ref.key)
+            if backoff_until is not None:
+                report.backing_off[ref.key] = backoff_until
+                continue
             if not force:
                 current = await asyncio.to_thread(fetch_cache.read_entry, config_dir, ref)
                 checked = (current or {}).get("checked_at")
@@ -465,18 +587,26 @@ async def refresh_session(
     be bypassed). The ``since`` guard keeps a mark that landed DURING the pass.
     """
     moment = time.time()
-    dirty_at = fetch_cache.read_dirty(config_dir, session_id).get("at") if session_id else None
+    dirty = fetch_cache.read_dirty(config_dir, session_id) if session_id else {}
+    dirty_at = dirty.get("at")
     planned = plan(config_dir, session_id, rows, force=force, keys=keys, now=moment)
     report = RefreshReport(cooling=dict(planned.cooling), backing_off=dict(planned.backing_off))
     if planned.refs:
         report = _merge_reports(report, await refresh_keys(config_dir, planned.refs, force=force))
     if session_id:
         attempted_keys = [ref.key for ref in planned.refs]
+        # Consume the turn-end/wake ``all`` mark on THIS pass too: the plan above
+        # selected every fetchable row (a plan truncated at MAX_REFS_PER_PASS
+        # does not pass the flag on), so the mark has been serviced — leaving it
+        # would refetch the session on every GET (QA round 1, Q2). Guarded by
+        # the same ``since`` snapshot as the keys.
+        consume_all = bool(dirty.get("all")) and len(planned.refs) < MAX_REFS_PER_PASS
         fetch_cache.clear_dirty(
             config_dir,
             session_id,
             keys=attempted_keys,
             since=dirty_at if isinstance(dirty_at, (int, float)) else None,
+            consume_all=consume_all,
         )
         if report.changed:
             # The completion signal (design §D.6): the index's own ``updated_at``
@@ -547,11 +677,11 @@ async def _fetch_one(config_dir: Any, ref: Ref, *, force: bool = False) -> bool:
     try:
         token = await asyncio.to_thread(resolve, ref.host, ref.forge)
     except CredentialError as exc:
-        _record_failure(config_dir, ref, prior, exc.message)
+        changed = _record_failure(config_dir, ref, prior, exc.message)
         # A gentle per-key backoff so a poll cannot re-spawn the login probe on
         # every GET; a sign-in is picked up on the next attempt after it.
         fetch_cache.note_key_failure(ref.key)
-        return True
+        return changed
     try:
         outcome = await adapter.fetch(
             ref,
@@ -581,9 +711,9 @@ async def _handle_fetch_error(
         try:
             fresh = await asyncio.to_thread(resolve, ref.host, ref.forge, fresh=True)
         except CredentialError:
-            _record_failure(config_dir, ref, prior, _REJECTED)
+            changed = _record_failure(config_dir, ref, prior, _REJECTED)
             fetch_cache.note_key_failure(ref.key)
-            return True
+            return changed
         adapter = adapter_for(ref)
         assert adapter is not None
         try:
@@ -595,9 +725,9 @@ async def _handle_fetch_error(
             )
         except ForgeHTTPError as second:
             if second.kind == "unauthorized":
-                _record_failure(config_dir, ref, prior, _REJECTED)
+                changed = _record_failure(config_dir, ref, prior, _REJECTED)
                 fetch_cache.note_key_failure(ref.key)
-                return True
+                return changed
             return await _handle_fetch_error(config_dir, ref, prior, second, fresh)
         fetch_cache.clear_key_backoff(ref.key)
         fetch_cache.note_host_success(ref.host)
@@ -611,18 +741,22 @@ async def _handle_fetch_error(
     if exc.kind in ("server", "network"):
         fetch_cache.note_key_failure(ref.key)
         suffix = f" {exc.status}" if exc.status else ""
-        _record_failure(
+        return _record_failure(
             config_dir,
             ref,
             prior,
             f"refresh failed ({exc.kind}{suffix}); keeping the last known data",
         )
-        return False
     if exc.kind == "not_found":
-        _record_failure(config_dir, ref, prior, "not found at the forge")
-        return True
-    _record_failure(config_dir, ref, prior, f"refresh failed (HTTP {exc.status})")
-    return False
+        # A 404 is a row-level condition and a THROTTLED one (review round 1,
+        # F3): the row keeps its last known data with the reason, ``checked_at``
+        # moves so the TTL paces the retry, and the key backs off — a repeating
+        # 404 used to return "changed" every pass, which moved the feed
+        # revision and drove a client refetch loop.
+        fetch_cache.note_key_failure(ref.key)
+        return _record_failure(config_dir, ref, prior, "not found at the forge")
+    fetch_cache.note_key_failure(ref.key)
+    return _record_failure(config_dir, ref, prior, f"refresh failed (HTTP {exc.status})")
 
 
 _REJECTED = "credential rejected — sign in again with gh/glab, then refresh"
@@ -641,11 +775,18 @@ def _validators_of(prior: Mapping[str, Any] | None) -> dict[str, dict[str, str]]
 
 def _record_failure(
     config_dir: Any, ref: Ref, prior: Mapping[str, Any] | None, message: str
-) -> None:
-    """Keep the last known row, add ``stale`` + ``refresh_error`` (design §D.4).
+) -> bool:
+    """Keep the last known row, add ``stale`` + ``refresh_error``; True when the
+    RENDERED row changed.
 
-    A failure on a never-fetched ref still records the entry: the route renders
-    its ``refresh_error`` as the link-only reason, which is exactly the
+    A failure is a cache state like any other (review round 1, F3):
+    ``checked_at`` moves so the TTL paces retries instead of every poll
+    refetching, and the return value is a CONTENT comparison — a repeated
+    identical error must not report "changed", or ``refresh_session`` would
+    touch the index and drive the client's refetch loop off a failure that is
+    not moving (QA round 1: 5 passes against a 404 moved the revision every
+    time). A failure on a never-fetched ref still records the entry: the route
+    renders its ``refresh_error`` as the link-only reason, which is exactly the
     "sign in with gh/glab" copy the design asks for.
     """
     entry = dict(prior or {})
@@ -654,9 +795,14 @@ def _record_failure(
     entry.setdefault("host", ref.host)
     entry.setdefault("project", ref.project)
     entry.setdefault("number", ref.number)
+    changed = (
+        not prior or not prior.get("stale") or str(prior.get("refresh_error") or "") != message
+    )
     entry["refresh_error"] = message
     entry["stale"] = True
+    entry["checked_at"] = round(time.time(), 3)
     fetch_cache.write_entry(config_dir, entry, ref=ref)
+    return changed
 
 
 def _build_entry(
@@ -671,6 +817,15 @@ def _build_entry(
     derivation: the top-level ``comments`` (convention bodies only) and
     ``lanes`` are what every reader renders, and keeping a second copy of
     every body would double the entry for the same bytes.
+
+    THE PARSE IS A FETCH-TIME ARTEFACT (cross-round finding X1). It runs on
+    the FULL bodies whenever this pass fetched a comment-bearing piece, and its
+    result is STORED (``convention``); a rebuild that did not refetch the
+    comments replays that stored parse instead of re-parsing bodies the size
+    bound has since truncated. Before this, a verdict past the 4 KiB cap —
+    #2106's round-2 review keeps its verdict at char 6708 of 6979 — parsed as
+    ``terminal`` on the fetch that saw the full text and as ``unstated`` on the
+    next 304 that re-read the capped copy.
     """
     moment = round(time.time(), 3)
     pieces, validators = fetch_cache.merge_pieces(prior, outcome)
@@ -687,7 +842,16 @@ def _build_entry(
     # how every lane silently reads "freshness unknown".
     summary = dict(summary_piece) if isinstance(summary_piece, Mapping) else {}
     summary["state"] = state
-    report = rounds.parse(all_comments, head_sha=head_sha or None, is_open=state in _OPEN_STATES)
+    fresh_comments = bool(_COMMENT_PIECES & set(outcome.pieces))
+    report: Any = None
+    if not fresh_comments and isinstance(prior, Mapping):
+        stored = prior.get("convention")
+        if isinstance(stored, Mapping):
+            report = rounds.RoundReport.from_payload(stored)
+    if report is None:
+        report = rounds.parse(
+            all_comments, head_sha=head_sha or None, is_open=state in _OPEN_STATES
+        )
     states = report.states(head_sha or None, is_open=state in _OPEN_STATES)
     lanes = [item.to_payload() for item in states]
     entry: dict[str, Any] = {
@@ -705,6 +869,12 @@ def _build_entry(
         "state": state,
         "ci": adapter.ci(pieces) if state else None,
         "lanes": lanes,
+        # The fetch-time parse, replayed across non-refetching rebuilds; see
+        # the docstring. Small: passes carry verdict text, not bodies.
+        "convention": {
+            "passes": [item.to_payload() for item in report.passes],
+            "ignored": list(report.ignored),
+        },
         "comments_total": len(all_comments),
         "checked_at": moment,
         "fetched_at": moment if outcome.pieces else (prior or {}).get("fetched_at", moment),

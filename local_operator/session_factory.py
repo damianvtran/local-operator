@@ -3046,14 +3046,36 @@ class _DeterministicRecommendation:
 
 #: Review/CI vocabulary for the ledger-gated arm of the trigger. Deliberately
 #: COMPOUND and specific — "review" alone would fire on "request a review from
-#: the doctor" and "merge" alone on "merge these two CSVs", which the design's
-#: negative set forbids. A round number, a CI word, or an explicit
-#: review/pull-request phrase is what a code-request question actually looks
-#: like when it names no ref.
+#: the doctor" and "merge" alone on "merge these two CSVs". The unambiguous
+#: tier fires on its own; the ambiguous tier needs the anchor window below.
 _CODE_REVIEW_VOCAB = re.compile(
-    r"(?i)\b(?:round\s+\d+|ci\b|pipeline\b|code review\b|review round\b|"
-    r"review findings\b|merge request\b|pull request\b)"
+    r"(?i)\b(?:round\s+\d+|review\s+round|review\s+findings|agent\s+review|"
+    r"design\s+review|code\s+review|qa\s+report)\b"
 )
+
+#: Vocabulary that is ambiguous ALONE. ``ci``/``pipeline`` matched "fix the
+#: CI/CD pipeline docs" and "our data pipeline needs a retry"; bare "pull
+#: request" matched "what is a pull request" — all on unrelated turns, even
+#: with a non-empty ledger (review round 1, F9). These fire only when a
+#: build-status, review-outcome or PR/MR word sits within the same approximate
+#: sentence (40 characters either side): "is CI green on the PR" and "merge it
+#: once CI is green" fire; the negatives above do not.
+_AMBIGUOUS_VOCAB = re.compile(r"(?i)\b(?:ci|pipeline|pull\s+request|merge\s+request)\b")
+_AMBIGUOUS_ANCHOR = re.compile(
+    r"(?i)\b(?:green|red|pass(?:ed|es|ing)?|fail(?:ed|s|ing)?|clear|clean|waiting|pending|"
+    r"blocked|running|broken|status|checks?|rerun|re-run|ready|merg(?:e[ds]?|ing)|"
+    r"land(?:ed|ing)?|ship(?:ped|ping)?|approv\w*|pr\b|mr\b|round\s+\d+|"
+    r"review\s+round)\b"
+)
+
+
+def _ambiguous_vocab_fires(query: str) -> bool:
+    """Whether an ambiguous term is talking about THIS session's build/request."""
+    for match in _AMBIGUOUS_VOCAB.finditer(query):
+        window = query[max(0, match.start() - 40) : match.end() + 40]
+        if _AMBIGUOUS_ANCHOR.search(window):
+            return True
+    return False
 
 
 def _code_requests_recommendation(
@@ -3076,7 +3098,7 @@ def _code_requests_recommendation(
     from local_operator.code_requests import refs as code_request_refs
 
     if next(iter(code_request_refs.iter_refs(query)), None) is None:
-        if _CODE_REVIEW_VOCAB.search(query) is None:
+        if _CODE_REVIEW_VOCAB.search(query) is None and not _ambiguous_vocab_fires(query):
             return None
         probe = hooks.code_requests_ledger
         if probe is None or not probe():
@@ -4511,6 +4533,15 @@ async def _prepare(
     tool_context = ToolContext(
         cwd=effective_cwd,
         session_id=transcript_dir.name,
+        # The session's own directory. This context is the WARM snapshot
+        # (``create_tools`` below), and a capability tool gated on the store
+        # root must see the same answer here as a live turn does: with
+        # ``session_dir`` missing, ``code_requests`` was built for the live
+        # session but not for this inventory, so the two surfaces disagreed
+        # (QA round 1, Q1: the model was shown the recommendation for a tool
+        # that was never in its tool list). Nothing is materialised here —
+        # only the path travels.
+        session_dir=str(transcript_dir),
         agent_id=agent_id,
         has_ui=has_ui,
         request_approval=request_approval,

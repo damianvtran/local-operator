@@ -598,6 +598,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``code_requests``: the derived index under the store root and the scan cache "
         "under ``cache/`` — the ``monitors`` twin, both regenerable from the transcript",
     ),
+    "local_operator/code_requests/cache.py": (
+        1,
+        "``_DIRTY_DIRNAME`` (``.dirty``): the session dirty-mark directory under "
+        "``<config>/cache/code_requests/`` — cached fetch state, regenerable from the "
+        "transcript and the TTLs, and never an entry of a session directory (the "
+        "``ledger.py`` / ``monitors`` case; review round 1, F5)",
+    ),
+    "local_operator/code_requests/detect.py": (
+        1,
+        "``SELF_TOOL_NAME``: the code-request TOOL's name — an identifier resolved "
+        "through the tool registry (the ``reply_channel``/``action-tool`` "
+        "identifier-not-a-path case), never a file a session directory holds",
+    ),
     "local_operator/monitors/state.py": (
         1,
         "``state`` under ``monitors/``: the per-monitor counters/snapshot directory",

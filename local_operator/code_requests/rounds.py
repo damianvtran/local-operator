@@ -240,6 +240,47 @@ class ReviewPass:
             payload["remediation"] = [item.to_payload() for item in self.remediation]
         return payload
 
+    @staticmethod
+    def from_payload(raw: object) -> "ReviewPass | None":
+        """Reconstruct one pass from :meth:`to_payload` — a fetch-time parse, replayed.
+
+        The service parses comment bodies ONCE, at fetch time, from the full
+        text and stores the result; a later rebuild that did not refetch the
+        comments re-reads this payload instead of re-parsing bodies the size
+        bound has since truncated (cross-round finding X1: a verdict past the
+        4 KiB cap used to degrade to ``unstated`` on the next 304)."""
+        if not isinstance(raw, Mapping):
+            return None
+        lane = str(raw.get("lane") or "")
+        kind = str(raw.get("kind") or "")
+        if not lane or not kind:
+            return None
+        remediation = tuple(
+            Remediation(
+                finding=str(item.get("finding") or ""),
+                disposition=str(item.get("disposition") or ""),
+                sha=str(item["sha"]) if item.get("sha") else None,
+                verbatim=str(item.get("verbatim") or ""),
+            )
+            for item in raw.get("remediation") or ()
+            if isinstance(item, Mapping)
+        )
+        round_value = raw.get("round")
+        sequence_value = raw.get("sequence")
+        return ReviewPass(
+            lane=lane,
+            kind=kind,
+            round=int(round_value) if isinstance(round_value, (int, float)) else None,
+            qualifier=str(raw.get("qualifier") or ""),
+            sequence=int(sequence_value) if isinstance(sequence_value, (int, float)) else 0,
+            reviewer=str(raw.get("reviewer") or ""),
+            reviewed_head=str(raw["reviewed_head"]) if raw.get("reviewed_head") else None,
+            verdict=str(raw.get("verdict") or ""),
+            verdict_class=str(raw.get("verdict_class") or STATE_UNSTATED),
+            remediation=remediation,
+            comment_id=str(raw.get("comment_id") or ""),
+        )
+
 
 @dataclass(frozen=True)
 class LaneState:
@@ -295,6 +336,17 @@ class RoundReport:
 
     def lane_passes(self, lane: str) -> list[ReviewPass]:
         return [item for item in self.passes if item.lane == lane]
+
+    @classmethod
+    def from_payload(cls, raw: object) -> "RoundReport | None":
+        """Reconstruct a report from ``{passes, ignored}`` — see ``ReviewPass.from_payload``."""
+        if not isinstance(raw, Mapping):
+            return None
+        passes = [ReviewPass.from_payload(item) for item in raw.get("passes") or ()]
+        return cls(
+            passes=[item for item in passes if item is not None],
+            ignored=[str(item) for item in raw.get("ignored") or ()],
+        )
 
     def states(self, head_sha: str | None = None, *, is_open: bool = True) -> list[LaneState]:
         """One :class:`LaneState` per lane that has a comment (plus ``agent`` on an open PR).

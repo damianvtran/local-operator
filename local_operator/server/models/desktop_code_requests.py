@@ -84,7 +84,8 @@ class CodeRequestRow(BaseModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     first_at: float | None = None
     last_at: float | None = None
-    #: Filled by the adapter slice: ``{state, draft, title, head_sha, ci, updated_at}``.
+    #: Filled by the adapter slice: ``{state, draft, title, head_sha, ci, comments,
+    #: updated_at}`` — ``comments`` is the host's comment count, null when not reported.
     summary: dict[str, Any] | None = None
     #: The parsed review lanes, once comments have been fetched.
     lanes: list[dict[str, Any]] | None = None

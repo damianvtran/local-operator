@@ -165,15 +165,31 @@ def _retry_after(headers: Mapping[str, str]) -> float | None:
         return None
 
 
+def _origin_of(url: httpx.URL) -> tuple[str, str, int]:
+    """``(scheme, host, port)`` — the pin a followed ``Link`` must match."""
+    return (url.scheme, str(url.host or ""), int(url.port or 0))
+
+
 def _next_link(response: httpx.Response) -> str | None:
+    """The ``rel="next"`` URL from a ``Link`` header, or ``None``.
+
+    Pinned to the response's own origin, like the GitHub twin: a followed Link
+    is a fresh request that carries the bearer, so a cross-origin one must
+    stop pagination rather than leak the token (review round 1, F8).
+    """
     link = response.headers.get("link")
     if not link:
         return None
+    origin = _origin_of(response.request.url) if response.request is not None else None
     for part in link.split(","):
         if 'rel="next"' in part.replace(" ", ""):
-            url = part.split(";")[0].strip().strip("<>")
-            if url.startswith("http"):
-                return url
+            target = part.split(";")[0].strip().strip("<>")
+            if not target.startswith("http"):
+                continue
+            if origin is None or _origin_of(httpx.URL(target)) != origin:
+                logger.warning("code-requests: ignored a rel=next page outside the API origin")
+                return None
+            return target
     return None
 
 

@@ -33,6 +33,18 @@ THE RULES THIS MODULE KEEPS, because it is the one place a token exists as a val
    cache; the service calls it when the forge rejects a token, and a second
    rejection degrades the row to ``link_only`` with "credential rejected" —
    never an error wall.
+4. **Only an AUTHENTICATED host gets a token.** A URL can name any host; a
+   token may only travel to one this device is actually signed in to. The
+   per-host CLI probes ARE the membership test — each runs with every
+   ``*_TOKEN`` environment variable stripped (:data:`_ENV_TOKEN_NAME`), so a
+   ``gh``/``glab`` answer can only come from its own stored login, never from
+   an env var echoing itself back for an arbitrary ``--host`` (the vectors
+   review round 1, F1, measured). The one env exception is by construction:
+   ``GH_TOKEN``/``GITHUB_TOKEN`` are github.com's own token and ``GITLAB_TOKEN``
+   is gitlab.com's (QA round 1, Q5 — a headless device authenticated by env);
+   neither vouches for any other host. The ``GITLAB_TOKEN`` STORE secret is
+   likewise canonical-host only. A host that resolves to no credential makes
+   ZERO requests and degrades to ``link_only`` with the sign-in remedy.
 
 NO NETWORK HERE. Both reference CLIs are asked for a token only — a local
 keychain/config read — so no network child process is spawned and the
@@ -43,6 +55,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -66,6 +79,20 @@ _CLI_TIMEOUT_S = 10.0
 #: ``github.GH_FALLBACK_BIN_DIRS`` for the same reason: a launchd-spawned
 #: process gets a minimal PATH where a Homebrew glab is invisible.
 _GLAB_FALLBACK_BIN_DIRS: tuple[str, ...] = ("/opt/homebrew/bin", "/usr/local/bin")
+
+#: Token-valued environment variables, per family, stripped from every CLI
+#: child this module spawns. WHY: ``gh auth token --hostname H`` and ``glab
+#: config get token --host H`` echo the corresponding env variable for ANY H,
+#: so an unstripped child would make an unknown host look signed-in (measured:
+#: ``GITLAB_TOKEN=[redacted] glab config get token --host evil.example`` prints
+#: the token). With the strip in place, only the CLI's own stored, per-host
+#: login can answer — which is exactly the membership check the fetch needs.
+_ENV_TOKEN_NAME = re.compile(r"^(GH|GITHUB|GITLAB|GLAB)_?.*TOKEN$", re.IGNORECASE)
+
+#: Which host each family's canonical env token may speak for. ``GH_TOKEN`` is
+#: github.com's own token; it must never vouch for a GHES host, and
+#: ``GITLAB_TOKEN`` likewise means gitlab.com only.
+_CANONICAL_HOSTS = {"github": "github.com", "gitlab": "gitlab.com"}
 
 
 class CredentialError(Exception):
@@ -157,22 +184,56 @@ def resolve(
 
 
 def _resolve_github(host: str, home: Path | None) -> Token:
-    """GitHub's ladder, reusing the mesh adapter's own probes.
+    """GitHub's ladder — and the host-authentication gate for GHES.
 
     ``github.com`` goes through ``read_gh_token`` — its two-step resolution
     (hosts file, then ``gh auth token``) is the tested one, and duplicating it
-    here would be a second implementation to drift. A GHES host asks the gh CLI
-    directly (``--hostname <host>``), which covers both storage modes; with no
-    gh binary there is nothing to consult, and the row degrades to link-only.
+    here would be a second implementation to drift. When that reports
+    ``absent``, an env-only ``GH_TOKEN``/``GITHUB_TOKEN`` still counts: a
+    headless device authenticated by environment IS signed in to github.com,
+    and only to github.com (QA round 1, Q5).
+
+    A GHES host is served ONLY by the gh CLI's own stored login for that exact
+    host: the probe runs with every ``*_TOKEN`` environment variable stripped
+    (:func:`_cli_env`), so ``GH_ENTERPRISE_TOKEN`` cannot vouch for a host
+    nobody signed in to (review round 1, F1). No login for the host, no
+    token — and the caller then makes no request at all.
     """
     from local_operator.network.credentials import github as github_credentials
 
     if host == "github.com":
         try:
             value = github_credentials.read_gh_token(home)
+            return Token(host=host, forge="github", value=value, source="gh")
         except github_credentials.GithubGhError as exc:
-            raise _github_refusal(exc.kind) from exc
-        return Token(host=host, forge="github", value=value, source="gh")
+            if exc.kind != "absent":
+                raise _github_refusal(exc.kind) from exc
+        value = _env_token("github")
+        if value:
+            return Token(host=host, forge="github", value=value, source="env")
+        # ASK GH ITSELF when its DEFAULT hosts file has nothing (cross-round
+        # finding X2): gh honours ``GH_CONFIG_DIR``, the OS keyring and its own
+        # defaults, and its answer can only come from THIS host's stored login
+        # — the probe env strips every ``*_TOKEN`` variable, so an env token
+        # cannot echo back (the explicit arm above already covers that case,
+        # deliberately, for github.com only).
+        exe = github_credentials.find_gh(home)
+        if exe is not None:
+            try:
+                value = _cli_token(
+                    [exe, "auth", "token", "--hostname", "github.com"],
+                    remedy="sign in with the gh CLI (`gh auth login`)",
+                    forge="github",
+                    allow_empty=True,
+                )
+            except CredentialError:
+                # A gh that cannot produce a github.com token here means the
+                # same thing as no login: degrade to the sign-in remedy (the
+                # F1 contract), never an error wall.
+                value = ""
+            if value:
+                return Token(host=host, forge="github", value=value, source="gh")
+        raise _github_refusal("absent")
 
     exe = github_credentials.find_gh(home)
     if exe is None:
@@ -181,8 +242,28 @@ def _resolve_github(host: str, home: Path | None) -> Token:
         [exe, "auth", "token", "--hostname", host],
         remedy=f"sign in with the gh CLI (`gh auth login --hostname {host}`)",
         forge="github",
+        # An empty answer for THIS host is the absent signal (the glab
+        # probe's contract); a refusal with output is still "unusable".
+        allow_empty=True,
     )
+    if not value:
+        raise _github_refusal("absent")
     return Token(host=host, forge="github", value=value, source="gh")
+
+
+def _env_token(forge: str) -> str:
+    """The CANONICAL host's env token, or ``""``.
+
+    ``GH_TOKEN``/``GITHUB_TOKEN`` for github.com, ``GITLAB_TOKEN`` for
+    gitlab.com — consulted only for those hosts, so an env variable can never
+    vouch for another (review round 1, F1; QA round 1, Q5).
+    """
+    names = ("GH_TOKEN", "GITHUB_TOKEN") if forge == "github" else ("GITLAB_TOKEN",)
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _github_refusal(kind: str) -> CredentialError:
@@ -199,14 +280,19 @@ def _github_refusal(kind: str) -> CredentialError:
 
 
 def _resolve_gitlab(host: str, home: Path | None, config_dir: Path | None) -> Token:
-    """GitLab's ladder: the glab CLI's own login, then the ``GITLAB_TOKEN`` secret.
+    """GitLab's ladder — glab's own per-host login first, canonical env and
+    store secret LAST and ONLY for gitlab.com.
 
     Order is the design's (``glab config get token --host H`` is named as the
     sibling of ``gh auth token``): the CLI login needs no setup beyond what a
-    user of ``glab`` already did. The store secret is the durable arm for an
-    instance with no glab login. A self-hosted host is resolved with the same
-    ``--host`` flag; glab answers empty for a host it does not know, which
-    lands on the ''absent'' arm rather than a wrong host's token.
+    user of ``glab`` already did, and the probe runs with every ``*_TOKEN``
+    environment variable stripped (:func:`_cli_env`), so glab can only answer
+    from its own stored config — a stored login for ``H`` IS the proof that
+    ``H`` is authenticated (review round 1, F1: before the strip,
+    ``$GITLAB_TOKEN`` came back for ANY ``--host``). The store secret and the
+    env arm are canonical-host only, so a self-hosted instance with no glab
+    login degrades to link_only with the sign-in remedy rather than borrowing
+    gitlab.com's credential.
     """
     exe = _find_glab(home)
     cli_error: CredentialError | None = None
@@ -225,9 +311,13 @@ def _resolve_gitlab(host: str, home: Path | None, config_dir: Path | None) -> To
             value = ""
         if value:
             return Token(host=host, forge="gitlab", value=value, source="glab")
-    value = _store_secret(config_dir)
-    if value:
-        return Token(host=host, forge="gitlab", value=value, source="secret-store")
+    if host == _CANONICAL_HOSTS["gitlab"]:
+        value = _env_token("gitlab")
+        if value:
+            return Token(host=host, forge="gitlab", value=value, source="env")
+        value = _store_secret(config_dir)
+        if value:
+            return Token(host=host, forge="gitlab", value=value, source="secret-store")
     if cli_error is not None:
         # The CLI was present and refused: report the real diagnosis rather than
         # the vaguer ''absent'' that only the no-login path should carry.
@@ -286,13 +376,18 @@ def _cli_token(
 
 
 def _cli_env() -> dict[str, str]:
-    """The child environment for a token query: prompts and colour off.
+    """The child environment for a token query: prompts off, colour off, and
+    EVERY token-valued variable stripped.
 
-    No token EVER rides this env (unlike the mesh delivery, which is the point
-    of the split): ``gh``/``glab`` read their own stored login, which is what
-    makes this route the zero-setup one.
+    ``gh auth token --hostname H`` and ``glab config get token --host H``
+    print the corresponding environment variable for ANY ``H`` (measured), so
+    an unstripped child would hand this module a token for a host the operator
+    never signed in to — the F1 vector. With the strip, the child can only
+    answer from its own stored, per-host login, which is the membership test
+    itself. The canonical env tokens are read by :func:`_env_token` in THIS
+    process, never through a child.
     """
-    env = dict(os.environ)
+    env = {name: value for name, value in os.environ.items() if not _ENV_TOKEN_NAME.match(name)}
     env.update(
         {
             "GH_PROMPT_DISABLED": "1",

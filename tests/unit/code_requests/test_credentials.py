@@ -10,6 +10,8 @@ there.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from local_operator.code_requests import credentials
@@ -136,3 +138,172 @@ def test_resolved_values_are_registered_for_scrubbing(monkeypatch) -> None:
     scrubbed = redaction.scrub("before gho_scrubme_value_9 after")
     assert "gho_scrubme_value_9" not in scrubbed
     assert "before" in scrubbed and "after" in scrubbed
+
+
+# ---------------------------------------------------------------------------
+# F1 — a token only travels to an AUTHENTICATED host
+# ---------------------------------------------------------------------------
+
+
+def test_cli_env_strips_every_token_valued_variable(monkeypatch) -> None:
+    """The strip is the membership check: gh/glab echo an env token for ANY host."""
+    for name in (
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITLAB_TOKEN",
+        "GITLAB_ANYTHING_TOKEN",
+        "GLAB_TOKEN",
+    ):
+        monkeypatch.setenv(name, "tok-value")
+    env = credentials._cli_env()
+    for name in (
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITLAB_TOKEN",
+        "GITLAB_ANYTHING_TOKEN",
+        "GLAB_TOKEN",
+    ):
+        assert name not in env, name
+    # Non-token variables survive: PATH is what makes the child runnable.
+    assert env.get("PATH")
+
+
+def test_store_secret_only_serves_gitlab_com(monkeypatch) -> None:
+    monkeypatch.setattr(credentials, "_find_glab", lambda home: None)
+    monkeypatch.setattr(credentials, "_store_secret", lambda config_dir: "store-secret-value")
+    monkeypatch.delenv("GITLAB_TOKEN", raising=False)
+    token = credentials.resolve("gitlab.com", "gitlab")
+    assert token.source == "secret-store" and token.value == "store-secret-value"
+    credentials._reset_for_tests()
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("evil.example.invalid", "gitlab")
+    assert caught.value.kind == "absent"
+    assert "glab auth login" in caught.value.message
+
+
+def test_env_gitlab_token_only_speaks_for_gitlab_com(monkeypatch) -> None:
+    monkeypatch.setattr(credentials, "_find_glab", lambda home: None)
+    monkeypatch.setattr(credentials, "_store_secret", lambda config_dir: "")
+    monkeypatch.setenv("GITLAB_TOKEN", "env-value")
+    token = credentials.resolve("gitlab.com", "gitlab")
+    assert token.source == "env" and token.value == "env-value"
+    credentials._reset_for_tests()
+    with pytest.raises(credentials.CredentialError):
+        credentials.resolve("evil.example.invalid", "gitlab")
+
+
+def test_an_env_token_echoed_by_a_fake_cli_is_stripped_out(tmp_path: Path, monkeypatch) -> None:
+    """End-to-end: a CLI that prints the ENV token for any host resolves nothing.
+
+    This is the reviewer's measured vector (``GITLAB_TOKEN=… glab config get
+    token --host evil`` prints the token). The fake below behaves exactly like
+    the real CLI, and the child env has the variable stripped, so the answer is
+    empty and the host stays unauthenticated.
+    """
+    fake = tmp_path / "fake-glab"
+    fake.write_text("#!/bin/sh\nprintf '%s' \"${GITLAB_TOKEN:-}\"\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("GITLAB_TOKEN", "env-token-must-not-leak")
+    monkeypatch.setattr(credentials, "_find_glab", lambda home: str(fake))
+    monkeypatch.setattr(credentials, "_store_secret", lambda config_dir: "")
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("evil.example.invalid", "gitlab")
+    assert caught.value.kind == "absent"
+
+
+def test_an_env_token_echoed_by_a_fake_gh_is_stripped_out_for_ghes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "fake-gh"
+    fake.write_text("#!/bin/sh\nprintf '%s' \"${GH_ENTERPRISE_TOKEN:-}\"\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("GH_ENTERPRISE_TOKEN", "ghes-token-must-not-leak")
+    monkeypatch.setattr(gh_credentials, "find_gh", lambda home: str(fake))
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("ghe.example.com", "github")
+    assert caught.value.kind == "absent"
+
+
+def test_env_gh_token_counts_for_github_com_but_never_for_ghes(monkeypatch) -> None:
+    """QA round 1, Q5: a headless device authenticated by environment IS signed in."""
+
+    def refuse(home):
+        raise gh_credentials.GithubGhError("absent", "no hosts.yml login")
+
+    monkeypatch.setattr(gh_credentials, "read_gh_token", refuse)
+    monkeypatch.setenv("GH_TOKEN", "env-gh-token")
+    token = credentials.resolve("github.com", "github")
+    assert token.source == "env" and token.value == "env-gh-token"
+    credentials._reset_for_tests()
+    monkeypatch.setattr(gh_credentials, "find_gh", lambda home: None)
+    with pytest.raises(credentials.CredentialError):
+        credentials.resolve("ghe.example.com", "github")
+
+
+# ---------------------------------------------------------------------------
+# X2 — the gh lookup honours GH_CONFIG_DIR and the keyring path
+# ---------------------------------------------------------------------------
+
+
+def _script(tmp_path: Path, name: str, body: str) -> str:
+    path = tmp_path / name
+    path.write_text(body)
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_gh_is_asked_when_the_default_hosts_file_is_absent(tmp_path: Path, monkeypatch) -> None:
+    """X2: a login stored under GH_CONFIG_DIR (or the keyring) still resolves —
+    by asking gh itself, the CLI's own resolution."""
+
+    def refuse(home):
+        raise gh_credentials.GithubGhError("absent", "no gh CLI login is stored here")
+
+    monkeypatch.setattr(gh_credentials, "read_gh_token", refuse)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    cfg = tmp_path / "gh-config"
+    cfg.mkdir()
+    (cfg / "token").write_text("relocated-token-value\n")
+    exe = _script(tmp_path, "fake-gh", '#!/bin/sh\ncat "$GH_CONFIG_DIR/token" 2>/dev/null\n')
+    monkeypatch.setattr(gh_credentials, "find_gh", lambda home: exe)
+    monkeypatch.setenv("GH_CONFIG_DIR", str(cfg))
+    token = credentials.resolve("github.com", "github")
+    assert token.source == "gh" and token.value == "relocated-token-value"
+
+
+def test_the_probe_cannot_echo_an_env_token_back(tmp_path: Path, monkeypatch) -> None:
+    """The X2 probe keeps the F1 rule: the child env is stripped, so a gh that
+    would echo GH_TOKEN for any request stays silent here."""
+
+    def refuse(home):
+        raise gh_credentials.GithubGhError("absent", "no gh CLI login is stored here")
+
+    monkeypatch.setattr(gh_credentials, "read_gh_token", refuse)
+    monkeypatch.setenv("GH_TOKEN", "env-token")
+    exe = _script(tmp_path, "fake-gh", '#!/bin/sh\nprintf "%s" "${GH_TOKEN:-}"\n')
+    monkeypatch.setattr(gh_credentials, "find_gh", lambda home: exe)
+    # The explicit env arm answers first (github.com only, by design)...
+    assert credentials.resolve("github.com", "github").value == "env-token"
+    # ...and with the env arm gone the stripped probe answers nothing.
+    credentials._reset_for_tests()
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("github.com", "github")
+    assert caught.value.kind == "absent"
+
+
+def test_no_login_anywhere_is_still_absent(tmp_path: Path, monkeypatch) -> None:
+    def refuse(home):
+        raise gh_credentials.GithubGhError("absent", "no gh CLI login is stored here")
+
+    monkeypatch.setattr(gh_credentials, "read_gh_token", refuse)
+    monkeypatch.setattr(gh_credentials, "find_gh", lambda home: None)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("github.com", "github")
+    assert caught.value.kind == "absent"
+    assert "gh auth login" in caught.value.message

@@ -402,6 +402,7 @@ def clear_dirty(
     *,
     keys: Iterable[str] | None = None,
     since: float | None = None,
+    consume_all: bool = False,
 ) -> None:
     """Consume consumed keys, or the whole mark when ``keys is None``.
 
@@ -411,6 +412,12 @@ def clear_dirty(
     ``since`` guards the consume-then-a-new-mark race: the file is only
     removed/edited when its own ``at`` is not NEWER than the snapshot the
     refresher took, so a mark that landed while the refresh ran survives.
+
+    ``consume_all`` additionally clears the ``all`` flag (review round 1, F2):
+    the refresher sets it when its pass PLANNED AND ATTEMPTED every row the
+    mark could select, so the mark has been serviced — leaving it in place is
+    what made every later GET refetch the whole session (QA round 1, Q2). A
+    pass truncated at ``MAX_REFS_PER_PASS`` simply does not pass it.
     """
     path = dirty_path(config_dir, session_id)
     try:
@@ -426,10 +433,12 @@ def clear_dirty(
             return
         drop = {str(item) for item in keys}
         remaining = [str(item) for item in data.get("keys") or [] if str(item) not in drop]
-        if not remaining and not data.get("all"):
+        all_flag = bool(data.get("all")) and not consume_all
+        if not remaining and not all_flag:
             path.unlink()
             return
         data["keys"] = remaining
+        data["all"] = all_flag
         _write_json(path, data)
     except OSError:
         pass
@@ -525,11 +534,14 @@ def clear_key_backoff(key: str) -> None:
 
 def _reset_for_tests() -> None:
     """Drop every in-memory layer. Tests that force cooling/backoff call this."""
+    global _SWEPT_AT, _SWEEP_CURSOR
     with _LOCK:
         _MEMORY.clear()
     _COOLING.clear()
     _COOLING_STEP.clear()
     _KEY_BACKOFF.clear()
+    _SWEPT_AT = 0.0
+    _SWEEP_CURSOR = 0
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +549,12 @@ def _reset_for_tests() -> None:
 # ---------------------------------------------------------------------------
 
 _SWEPT_AT = 0.0
+
+#: The rotating walk's resume point: the INDEX of the host the next sweep
+#: starts at. A store holding more files than :data:`_SWEEP_LIMIT` visits a
+#: different prefix each pass rather than the same one forever (review round
+#: 1, F10). Module state, like the throttle maps.
+_SWEEP_CURSOR = 0
 
 
 def sweep(
@@ -546,9 +564,15 @@ def sweep(
 
     Bounded on purpose: the walk stops after :data:`_SWEEP_LIMIT` files so a
     pathological store cannot make a routine fetch pay a full-tree scan. The
-    sweep is an optimisation; skipping files is always safe.
+    sweep is an optimisation; skipping files is always safe — and because the
+    walk ROTATES its starting host, a store over the limit still gets every
+    host visited across passes (the cursor resumes past the host the limit
+    fired in). One caveat: a single host holding more than ``_SWEEP_LIMIT``
+    files is re-entered from its start each pass, so its tail is reached only
+    if it shrinks; that is accepted — the alternative is per-host cursors for
+    a store shape no session has shown.
     """
-    global _SWEPT_AT
+    global _SWEPT_AT, _SWEEP_CURSOR
     moment = time.time() if now is None else now
     if moment - _SWEPT_AT < min_interval_s:
         return 0
@@ -557,10 +581,16 @@ def sweep(
     seen = 0
     root = fetch_dir(config_dir)
     try:
-        hosts = [item for item in root.iterdir() if item.is_dir() and not item.name.startswith(".")]
+        hosts = sorted(
+            (item for item in root.iterdir() if item.is_dir() and not item.name.startswith(".")),
+            key=lambda item: item.name,
+        )
     except OSError:
         return 0
-    for host_dir in hosts:
+    if not hosts:
+        return 0
+    start = _SWEEP_CURSOR % len(hosts)
+    for offset, host_dir in enumerate(hosts[start:] + hosts[:start]):
         try:
             files = list(host_dir.iterdir())
         except OSError:
@@ -568,6 +598,9 @@ def sweep(
         for path in files:
             seen += 1
             if seen > _SWEEP_LIMIT:
+                # Resume PAST the host the limit fired in: the prefix already
+                # walked this pass is not re-walked next pass.
+                _SWEEP_CURSOR = (start + offset + 1) % len(hosts)
                 return removed
             try:
                 stat = path.stat()
@@ -579,6 +612,7 @@ def sweep(
                     removed += 1
                 except OSError:
                     continue
+    _SWEEP_CURSOR = (start + len(hosts)) % len(hosts)
     return removed
 
 
