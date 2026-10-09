@@ -158,7 +158,11 @@ def imagegen_state_word(card_state: str, provider_state: str | None = None) -> s
 # value that does not fit its shape reads as absent — the card renders the
 # reduced state rather than a number nobody sent.
 
-#: 1-based position in the provider's queue, when the producer reports one.
+#: Queue depth from the provider — "the number of requests ahead of yours",
+#: present only while the call is queued (FAL's own documented semantics).
+#: Zero is a REAL reading (nothing ahead), so the guard tolerates it
+#: deliberately rather than dropping a producible state (reviewer F2); a
+#: negative, bool or non-int value still reads as absent.
 _QUEUE_POSITION_KEY = "queue_position"
 #: Progress as a FRACTION of the work, 0..1. Percent-scale shapes are NOT
 #: accepted here: a value in ``2..100`` is ambiguous (percent? step index?),
@@ -255,6 +259,8 @@ def live_from_details(details: object) -> ImagegenLive:
 
     queue_position: int | None = None
     raw_queue = details.get(_QUEUE_POSITION_KEY)
+    # ``>= 0`` is deliberate: the field counts requests AHEAD of ours, and 0
+    # is "nothing ahead", not a malformed value (reviewer F2).
     if isinstance(raw_queue, int) and not isinstance(raw_queue, bool) and raw_queue >= 0:
         queue_position = raw_queue
         seen.append(_QUEUE_POSITION_KEY)
@@ -400,13 +406,19 @@ def progress_graphic(fraction: float | None, time_ms: float | None = None) -> Te
     tests and capture scripts pin a frame deterministically.
     """
     if fraction is not None:
-        filled = int(round(fraction * PROGRESS_CELLS))
-        filled = max(0, min(PROGRESS_CELLS, filled))
+        # Fill and label derive from ONE number — the label's own percent,
+        # floor-divided into cells. Rounding them separately let 0.99 paint
+        # ten filled cells under a "99%" label (reviewer F3): the bar read
+        # ahead of its own number. The floor keeps the fill at or below the
+        # label, so the bar can never claim more progress than the percent
+        # beside it; only a true 100% fills the last cell.
+        percent = round(fraction * 100)
+        filled = max(0, min(PROGRESS_CELLS, percent * PROGRESS_CELLS // 100))
         bar = Text()
         bar.append("▰" * filled, style=Style(color=theme_mod.semantic_color("accent"), bold=True))
         bar.append("▱" * (PROGRESS_CELLS - filled), style=_dim_style())
         bar.append(
-            f" {round(fraction * 100)}%",
+            f" {percent}%",
             style=Style(color=theme_mod.semantic_color("muted")),
         )
         return bar
