@@ -48,7 +48,7 @@
  * progress number, or add transport. Live fields render only as the feed
  * carries them (see the adapter); absence renders the reduced state.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { sendCommand } from "../api";
 import { imageGenView } from "../lib/image-gen";
 import { AttachmentImage } from "./attachment-image";
@@ -91,6 +91,22 @@ export function ImageGenCard({
 	   drops it loses nothing a repaint does not re-state. */
 	const [cancelRequested, setCancelRequested] = useState(false);
 	const view = imageGenView(entry, cancelRequested);
+
+	/* A SETTLE RETIRES THE HOLD (review round 1, F2). Rendered behaviour was
+	   already honest — a settle always outranks the flag, and never paints
+	   "cancelled" off the press — but the flag itself outlived the settle, so
+	   a wire that ever re-reported the same entry as live would resurrect
+	   "cancelling…" with no new press. Clearing it when the view leaves every
+	   not-yet-settled state (the hold itself is one of those, so a press
+	   persists exactly as long as the state it describes) means a re-lived
+	   row shows `running` and a fresh control, never a dead press. */
+	const live =
+		view.state === "queued" ||
+		view.state === "running" ||
+		view.state === "cancelling";
+	useEffect(() => {
+		if (!live) setCancelRequested(false);
+	}, [live]);
 
 	/* THE ROW IS PART OF THE CARD'S STATEMENT, so it must not disagree with
 	   it. The row's own palette is keyed off the wire settle, and for the
@@ -188,8 +204,15 @@ export function ImageGenCard({
 							) : (
 								/* The hold, spelled out. Never "cancelled": the
 								   press is a request and this state ends when the
-								   wire settles one way or the other. */
-								<span className="shrink-0 text-meta text-ink-dim">
+								   wire settles one way or the other. The test id is
+								   shipped markup, not a harness-only hook — the
+								   capture rig's geometry dump reads it (review
+								   round 1, F3: a dump that names a line it cannot
+								   see is an instrument reporting nothing). */
+								<span
+									data-testid="image-gen-hold"
+									className="shrink-0 text-meta text-ink-dim"
+								>
 									cancelling…
 								</span>
 							)}
