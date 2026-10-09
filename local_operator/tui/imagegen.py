@@ -10,13 +10,17 @@ place to change when the harness lane freezes the wire details:
 - :data:`IMAGE_GEN_TOOLS` / :func:`is_image_gen_tool` — the detection set. The
   card keys its whole variant off this predicate, so a rename reaches every
   renderer by editing one line.
-- :func:`live_from_details` — the ADAPTER. Structured live fields (queue
-  position, progress fraction, log tail, provider error payload, artifact
-  reference) will ride the existing tool-execution update events'
-  ``details`` mapping; their exact key names freeze later. The key names below
-  are PROVISIONAL and deliberately live only here: when the freeze lands, this
-  module's key constants move and no widget is touched. The adapter never
-  invents a value — an absent or malformed field renders as the reduced state.
+- :func:`live_from_details` — the ADAPTER. The canonical live fields ride the
+  existing tool-execution update events' ``details`` mapping, and their key
+  names are FROZEN as of PR #2089 (``feat(media): emit the canonical progress
+  fields``): the canonical six — ``stage``, ``queue_position``,
+  ``progress_fraction``, ``log_lines``, ``error``, ``error_type`` — are
+  carried by every update, ``None`` where no provider supplied a value. (The
+  artifact reference this adapter also reads is NOT one of the six: it belongs
+  to the attachment contract, separately — see :data:`_ARTIFACT_KEY`.) The
+  adapter never invents a value — an absent or malformed field renders as the
+  reduced state — and a null ``progress_fraction`` is INDETERMINATE (the
+  canvas), never a synthesized bar.
 - :func:`imagegen_state_word` — the state vocabulary, mapped from the card's
   own lifecycle states in one place. The live card paints the live arms
   (``queued`` / ``running`` / ``cancelling``); the settled arms are the
@@ -107,32 +111,21 @@ _CARD_STATE_WORDS: dict[str, str] = {
     "interrupted": STATE_CANCELLED,
 }
 
-#: Producer words normalized to the frozen vocabulary. PROVISIONAL with the
-#: rest of the wire mapping: an unknown word reads as "no state reported" and
-#: the card falls back to its own, which is the honest reduced state.
+#: The canonical ``stage`` values -> the surface's vocabulary (PR #2089 froze
+#: the set: ``queued | in_progress | completed | cancelled | cancelling``;
+#: ``None`` on a mid-walk failure, whose semantics ride ``error``/``error_type``
+#: instead). An unknown word reads as "no state reported" and the card falls
+#: back to its own word, which is the honest reduced state. ``completed`` and
+#: ``cancelled`` arrive on LIVE updates too (the cancel flow's terminal emits),
+#: and they map to the settled arms here but are never paintable live — see
+#: :data:`LIVE_STATE_WORDS`: the card's own lifecycle carries the interim until
+#: the result lands, so a live terminal word can never preempt the settle.
 _PROVIDER_STATE_WORDS: dict[str, str] = {
     "queued": STATE_QUEUED,
-    "pending": STATE_QUEUED,
-    "waiting": STATE_QUEUED,
-    "running": STATE_RUNNING,
     "in_progress": STATE_RUNNING,
-    "in-progress": STATE_RUNNING,
-    "processing": STATE_RUNNING,
-    "generating": STATE_RUNNING,
     "cancelling": STATE_CANCELLING,
-    "canceling": STATE_CANCELLING,
-    "stopping": STATE_CANCELLING,
-    "done": STATE_DONE,
     "completed": STATE_DONE,
-    "complete": STATE_DONE,
-    "succeeded": STATE_DONE,
-    "success": STATE_DONE,
-    "failed": STATE_FAILED,
-    "failure": STATE_FAILED,
-    "error": STATE_FAILED,
     "cancelled": STATE_CANCELLED,
-    "canceled": STATE_CANCELLED,
-    "aborted": STATE_CANCELLED,
 }
 
 
@@ -155,10 +148,10 @@ def imagegen_state_word(card_state: str, provider_state: str | None = None) -> s
 # The adapter: structured live fields -> one view
 # ---------------------------------------------------------------------------
 #
-# PROVISIONAL WIRE KEYS. The harness lane freezes the exact names shortly;
-# until then these are the adapter's whole vocabulary, and this block is the
-# only place a freeze (or a rename) lands. Each key is read defensively and a
-# value that does not fit its shape reads as absent — the card renders the
+# FROZEN WIRE KEYS (PR #2089, ``feat(media): emit the canonical progress
+# fields``): every ``generate_image`` update carries every key, ``None`` where
+# no provider supplied a value. Each key is still read defensively — a value
+# that does not fit its shape reads as absent — so the card renders the
 # reduced state rather than a number nobody sent.
 
 #: Queue depth from the provider — "the number of requests ahead of yours",
@@ -167,29 +160,37 @@ def imagegen_state_word(card_state: str, provider_state: str | None = None) -> s
 #: deliberately rather than dropping a producible state (reviewer F2); a
 #: negative, bool or non-int value still reads as absent.
 _QUEUE_POSITION_KEY = "queue_position"
-#: Progress as a FRACTION of the work, 0..1. Percent-scale shapes are NOT
+#: Progress as a FRACTION of the work, 0..1; ``None`` until a provider reports
+#: one — and per the freeze none does today, so null is the INDETERMINATE read
+#: (the canvas), never synthesized into a bar. Percent-scale shapes are NOT
 #: accepted here: a value in ``2..100`` is ambiguous (percent? step index?),
-#: and a bar drawn from a misread number is worse than no bar. If the freeze
-#: defines a percent field, the conversion lands on this line and nowhere else.
+#: and a bar drawn from a misread number is worse than no bar.
 _FRACTION_KEY = "progress_fraction"
-#: Per-request log tail: a string (split on newlines) or a sequence of rows.
+#: The provider's own log list passed through verbatim (PR #2089):
+#: ``[{message, timestamp}]`` rows, or ``None`` where the payload carried
+#: none. Only a row with a string ``message`` is a log line; the timestamp
+#: stays unused (nothing renders it).
 _LOG_KEY = "log_lines"
-#: The caller's state word for this call, normalized against
-#: :data:`_PROVIDER_STATE_WORDS`.
-_STATE_KEY = "state"
-#: The provider's error payload. TWO keys, frozen by the harness lane (manager,
-#: 2026-10-08): ``error`` is a stable platform sentence that is safe to paint
-#: as-is — the card renders it VERBATIM and never substitutes a sentence of its
-#: own — and ``error_type`` is the structured code beside it (FAL's own code
-#: when it exists, or one of the platform codes ``media_rejected |
-#: media_failed | media_rate_limited | media_unavailable``).
+#: The canonical stage (PR #2089): ``queued`` | ``in_progress`` |
+#: ``completed`` | ``cancelled`` | ``cancelling``, normalized against
+#: :data:`_PROVIDER_STATE_WORDS`. ``None`` on a mid-walk failure — the update
+#: then carries no state word, and the pair below is the semantics.
+_STATE_KEY = "stage"
+#: The provider's error payload. TWO keys (PR #2089): ``error`` is a stable
+#: platform sentence that is safe to paint as-is — the card renders it
+#: VERBATIM and never substitutes a sentence of its own — and ``error_type``
+#: is the structured code beside it: a rung failure's reason class
+#: (``timeout``, ``network``, ``insufficient_credits``, ...), a media code, or
+#: the cancel conflict below.
 _ERROR_KEY = "error"
 #: The structured code beside ``error``: parsed so the surface can branch on
 #: STRUCTURE (the cancel conflict below) instead of parsing prose. Kept raw.
 _ERROR_TYPE_KEY = "error_type"
 
 #: A cancel that finds the generation already finished comes back as a
-#: CONFLICT with this type, not as a failure: the surface's words for it are
+#: CONFLICT with this type, not as a failure — its real producer is the tool's
+#: cancel path (PR #2089: ``stage`` ``cancelled``, with the platform sentence
+#: beside this code). The surface's words for it are
 #: :data:`ALREADY_FINISHED_NOTE` and it must never wear the error ink or glyph.
 ALREADY_FINISHED_TYPE = "media_already_completed"
 #: The ONE definition of what that conflict says on a surface.
@@ -236,9 +237,10 @@ class ImagegenLive:
     #: it (see :data:`ALREADY_FINISHED_TYPE`) rather than parsing the sentence.
     error_type: str | None = None
     artifact_ref: str | None = None
-    #: Every recognized key this snapshot carried. A tuple (not a set) to keep
-    #: the frozen dataclass hashable; read by tests as "what did this update
-    #: actually carry".
+    #: Every recognized key this snapshot carried a USABLE value for —
+    #: canonical updates carry every key, ``None`` for what no provider
+    #: supplied, so this reads as "what did this update actually say". A tuple
+    #: (not a set) to keep the frozen dataclass hashable; read by tests.
     keys: tuple[str, ...] = ()
 
 
@@ -280,14 +282,18 @@ def live_from_details(details: object) -> ImagegenLive:
     log_dropped = 0
     raw_logs = details.get(_LOG_KEY)
     rows: list[str] | None = None
-    if isinstance(raw_logs, str):
-        rows = raw_logs.splitlines()
-    elif (
-        isinstance(raw_logs, Sequence)
-        and not isinstance(raw_logs, (str, bytes))
-        and all(isinstance(row, str) for row in raw_logs)
-    ):
-        rows = list(raw_logs)
+    if isinstance(raw_logs, Sequence) and not isinstance(raw_logs, (str, bytes)):
+        # Canonical rows (PR #2089): ``{message, timestamp}`` dicts straight
+        # from the provider. Only a string ``message`` is a log line; a row
+        # without one is not a row and never pads the count.
+        collected: list[str] = []
+        for row in raw_logs:
+            if not isinstance(row, Mapping):
+                continue
+            message = row.get("message")
+            if isinstance(message, str):
+                collected.append(message)
+        rows = collected or None
     if rows is not None:
         # Bound BEFORE cleaning: a payload that printed a hundred thousand
         # rows must cost the same as one that printed twenty (the card's own
