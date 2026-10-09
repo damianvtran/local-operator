@@ -27,9 +27,17 @@ from local_operator.session.peer_rows import clear_cache
 from tests.unit.network.test_relay_e2e import devices  # noqa: F401 — fixtures
 from tests.unit.network.test_session_plane import (
     Devices,
+    _call,
     _create_named_session_on_a_real_peer,
+    _dial_to,
+    _listen,
     _NamedRemoteCreate,
+    _pair,
+    _seed_journal,
 )
+
+#: One peer-owned id, shared with the session-plane cells this rig comes from.
+SESSION = "9f3ac1e0b7d2"
 
 
 @pytest.fixture()
@@ -282,8 +290,132 @@ async def test_the_desktop_bridge_reads_and_prompts_a_peers_session(
         await asyncio.to_thread(created.stop)
 
 
+@pytest.mark.asyncio
+async def test_a_cold_peer_read_serves_the_owners_stored_journal(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D5-core, end to end: the defect was that this page was EMPTY.
+
+    The operator's report ("at times I can't see the full conversation — it says
+    it's the end of the conversation when it's not") traced to here: a peer
+    session with no runtime answered ``{entries: [], has_more: false}``, the same
+    envelope a conversation with no rows produces, while the rows sat on the
+    owner's disk. Three facts are asserted, and the second is the one that keeps
+    the fix from being a warm-on-read:
+
+    * the page carries the OWNER's rows — real ids, real timestamps, in order;
+    * the OWNER IS STILL COLD afterwards: no runtime was spawned, which is what
+      makes this work at all for a session that was deliberately stopped;
+    * the DTO is the local page's shape, so the renderer needs no second path.
+
+    The rig is deliberately the real one -- two relays, a paired mesh, a real
+    journal on the peer and NO runtime behind it -- because the code under test
+    spans four processes' worth of boundaries (route -> relay -> link -> owner
+    store) and a stub would pin the seam rather than the behaviour.
+    """
+    from local_operator.server.utils.desktop_sessions import DesktopSessions
+
+    server_a, server_b, _host_a, _port_a = peer_pair
+    ids = _seed_journal(server_b.root, SESSION, ["first from the peer", "second"])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    pool = DesktopSessions(server_a.root)
+    try:
+        clear_cache()
+        async with pool.session(SESSION, read=True) as bridge:
+            assert bridge.remote_row is not None, "the pool did not resolve the peer's row"
+            page = await bridge.history(limit=50)
+        assert [entry["id"] for entry in page["entries"]] == ids, page
+        assert [entry["ts"] for entry in page["entries"]] == [1_700_000_000.0, 1_700_000_001.0]
+        assert page["has_more"] is False
+        assert page["cursor_missing"] is False
+        # THE READ STARTED NOTHING. This is the requirement that rules out every
+        # warm-on-read design: a stopped session can never be engaged, so a page
+        # that costs a spawn is a page that does not exist for exactly the
+        # conversations the operator was complaining about.
+        states = [
+            row.get("state")
+            for row in server_b.local_session_rows()
+            if row.get("session_id") == SESSION
+        ]
+        assert states == ["stored"], f"a cold desktop read left the owner at {states}"
+    finally:
+        await pool.close()
+        link.close("test")
+
+
+@pytest.mark.asyncio
+async def test_a_stored_page_and_a_wire_window_merge_by_id(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race this change must not create: two sources, ONE id space.
+
+    A cold read serves journal rows and a warm read serves wire rows for the same
+    conversation, and a renderer merges them by ``id``. That is only safe because
+    the wire's message id IS the entry id (``transcript.encode_message_payload``
+    drops ``id`` from the payload precisely because the row already carries it) —
+    so the stored page's rows and a later window's rows dedupe rather than
+    double-painting the same message.
+
+    Both sources are read for ONE real conversation (a real turn behind a real
+    ``RuntimeServer``), and the property pinned is the id space, not the order
+    the two are read in: the stored page's message rows are a SUBSET of the
+    window's, because the journal legitimately carries rows the wire window does
+    not (custom entries), while every row the window carries comes from that same
+    journal. A stop-and-restart of the owner's runtime is deliberately NOT part
+    of this cell: that exercises the spawn path, which the engage and create
+    cells already cover, and it is the IDS that make the merge safe.
+    """
+    from local_operator.server.utils.desktop_sessions import DesktopSessions
+
+    created = _create_named_session_on_a_real_peer(
+        peer_pair, monkeypatch, name="merge-by-id", prompt="hello from the peer"
+    )
+    pool = DesktopSessions(created.server_a.root)
+    try:
+        # BOTH SOURCES READ AFTER THE TURN SETTLES, so the comparison is between two
+        # complete views of one conversation rather than between a page read
+        # mid-turn and a window read after it.
+        await asyncio.to_thread(created.owner.wait_for_turn)
+
+        # THE STORED SOURCE, through the op the cold fallback itself calls.
+        stored = _call(
+            created.server_a.root,
+            "peer_session_history",
+            peer=created.peer_token,
+            session_id=created.session_id,
+            limit=50,
+        )["detail"]
+        stored_ids = [entry["id"] for entry in stored["entries"]]
+        assert stored_ids, stored
+
+        clear_cache()
+        async with pool.session(created.session_id, read=True) as bridge:
+            wire = await bridge.history(limit=50)
+        wire_ids = [entry["id"] for entry in wire["entries"]]
+        assert wire_ids, wire
+
+        # ONE ID SPACE. The window's rows come out of the journal, so every row it
+        # carries is a row the stored page also names under the SAME id -- which is
+        # the whole reason a renderer can merge the two by id rather than painting
+        # a message twice when a cold page is followed by a warm window. (The
+        # reverse is not claimed, and must not be: the journal also holds custom
+        # entries the message window does not carry.)
+        assert set(wire_ids) <= set(stored_ids), (wire_ids, stored_ids)
+        assert set(stored_ids) & set(wire_ids), "the two sources share no row at all"
+
+        # AND THE MERGE A RENDERER PERFORMS IS LOSSLESS: keying both sources by id
+        # paints every row once, which is the property a duplicated id would break.
+        merged = {entry["id"]: entry for entry in (*stored["entries"], *wire["entries"])}
+        assert set(merged) == set(stored_ids) | set(wire_ids)
+    finally:
+        await pool.close()
+        await asyncio.to_thread(created.stop)
+
+
 def _png_bytes(width: int, height: int) -> bytes:
-    """A real, decodable PNG with enough entropy to clear the externalise floor.
+    """A real, decodable PNG, with enough entropy to clear the externalise floor.
 
     Noise rather than a flat colour on purpose: a constant image compresses to a
     few hundred bytes and would land UNDER ``transcript._ATTACHMENT_FLOOR_BYTES``,

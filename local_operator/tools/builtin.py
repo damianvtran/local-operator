@@ -100,6 +100,7 @@ from local_operator.harness.secret_sinks import refusal_text as _secret_sink_ref
 from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
 from local_operator.harness.subagent import (
     configured_effort_tiers,
+    depth_closed_the_tier_choice,
     describe_effort_tiers,
     effort_tier_rejection,
     is_inherit_tier_sentinel,
@@ -518,6 +519,79 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
     "COMPOSER_NO_INTERACTION": "1",
     "CLOUDSDK_CORE_DISABLE_PROMPTS": "1",
 }
+
+
+def own_launcher_path_injection(
+    shim_root: Path | str | None = None, parent_path: str | None = None
+) -> dict[str, str]:
+    """``{"PATH": ...}`` with a ``lop``-ONLY shim directory prepended when ``lop`` is absent.
+
+    Agent instructions name ``lop`` commands (Aida's ``lop aida note``, the
+    ``lop exec`` delegation fallback), and a desktop-managed backend runs from
+    a private venv the user's shell PATH never names — so on exactly the
+    install a first-run user has, ``lop aida note`` answered ``command not
+    found`` and her first recording silently failed (audit A4's verification
+    item). The fix is to make the instruction true rather than to teach every
+    seed a ``python -m`` spelling: when ``lop`` does not resolve on the child's
+    PATH and the running interpreter's own script directory ships one, this
+    puts that launcher on the child's PATH. It is the SAME build the session
+    runs, never a different install, and an operator whose PATH already
+    resolves ``lop`` keeps it untouched — so a pinned global launcher still
+    wins.
+
+    WHY A SHIM DIRECTORY AND NOT THE SCRIPT DIRECTORY (review round 1, R-1).
+    Prepending ``Path(sys.executable).parent`` prepends the app's whole venv
+    ``bin``, so the child also sees that venv's ``python``, ``python3``,
+    ``pip`` and every console script it carries — an agent running
+    ``python3 -m venv .venv`` or ``python build.py`` then silently uses the
+    app's interpreter instead of the user's, on precisely the install this
+    exists for. The shim directory holds ONE entry (a ``lop`` link to this
+    build's own launcher) and nothing else.
+
+    ``shim_root`` is the session's scratchpad root, the session's own removable
+    space and a directory that is guaranteed to exist by the time the bash tool
+    builds a child env (``ensure_scratchpad_dir`` runs on the same path). With
+    no root, nothing is injected: a hard-coded writable location would be a
+    second, undocumented side-effect directory, and the alternative — leaving
+    ``lop`` unresolved — is the pre-fix behaviour rather than a new failure.
+    """
+    path = os.environ.get("PATH", "") if parent_path is None else parent_path
+    if shutil.which("lop", path=path) is not None:
+        return {}
+    launcher = Path(sys.executable).parent / ("lop.exe" if os.name == "nt" else "lop")
+    if not launcher.exists() or shim_root is None:
+        return {}
+    shim = _launcher_shim_dir(Path(shim_root), launcher)
+    if shim is None:
+        return {}
+    return {"PATH": os.pathsep.join(part for part in (str(shim), path) if part)}
+
+
+def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
+    """``root/bin`` holding only a ``lop`` entry for ``launcher``, or ``None``.
+
+    Idempotent (an existing entry is left alone, so every bash call in a session
+    re-links nothing and the child's PATH text stays stable) and best-effort: a
+    root this session cannot write falls back to the pre-fix behaviour — no
+    injection — rather than failing the tool call. A symlink is preferred so the
+    shim tracks the install; where symlinks are unavailable (Windows without the
+    privilege) the launcher is copied, which is the same build's binary either
+    way.
+    """
+    bin_dir = root / "bin"
+    target = bin_dir / launcher.name
+    try:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        if not target.is_file():
+            try:
+                target.symlink_to(launcher)
+            except OSError:
+                shutil.copyfile(launcher, target)
+                target.chmod(0o755)
+        return bin_dir
+    except OSError:
+        logger.debug("could not build the lop shim directory under %s", root, exc_info=True)
+        return None
 
 
 def may_delegate_env_injection(context: object | None) -> dict[str, str]:
@@ -3941,7 +4015,13 @@ async def execute_bash(
     # ``ensure_scratchpad_dir`` runs HERE because this is where the path is handed
     # over: a shell cannot create a missing parent the way ``write``/``edit`` do,
     # so the advertised path has to exist by the time the child starts.
-    injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
+    scratch_root = scratchpad_dir_of(context)
+    # `lop` must resolve to THIS build in the child, through a shim directory that
+    # carries nothing but `lop` (see the helper's docstring for why the venv's own
+    # ``bin`` must not be prepended). Ordered before the scratchpad export because
+    # the shim lives under that root; both are computed from the same value.
+    injections.update(own_launcher_path_injection(scratch_root))
+    injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratch_root)))
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
     if github_env:
@@ -5698,6 +5778,38 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     return _text(tool_call_id, "read", f"{header}\n{body}", details=details)
 
 
+#: Chars of context kept on each side of a hit when a ``spill://?q=`` match
+#: line is longer than :data:`_SPILL_MATCH_LINE_CHARS`.
+_SPILL_MATCH_CONTEXT_CHARS = 200
+
+#: A matched line longer than this is cut to a window around its first hit.
+_SPILL_MATCH_LINE_CHARS = 2 * _SPILL_MATCH_CONTEXT_CHARS + 100
+
+
+def _spill_match_window(line: str, regex: re.Pattern[str]) -> str:
+    """``line``, or a window around its first hit when the line is very long.
+
+    The window says how much it dropped on each side, so the model knows the
+    line continues and can read the whole line with a ``range`` on its number.
+    """
+    if len(line) <= _SPILL_MATCH_LINE_CHARS:
+        return line
+    hit = regex.search(line)
+    start = max((hit.start() if hit else 0) - _SPILL_MATCH_CONTEXT_CHARS, 0)
+    end = min((hit.end() if hit else 0) + _SPILL_MATCH_CONTEXT_CHARS, len(line))
+    before = f"[\u2026{start} chars] " if start else ""
+    after = f" [{len(line) - end} chars\u2026]" if end < len(line) else ""
+    return f"{before}{line[start:end]}{after}"
+
+
+#: The most matches ONE ``?q=`` call will ask the store to materialize. A page
+#: is addressed by match number, so serving page N needs N matches retained; the
+#: ceiling bounds that (a 4 MB entry matched on every line is the pathological
+#: case) and a page beyond it is refused with the limit named rather than
+#: answered with a false "past the last match".
+_SPILL_SEARCH_PAGE_MAX = 10_000
+
+
 def _search_spill(
     tool_call_id: str,
     store: SpillStore,
@@ -5712,9 +5824,41 @@ def _search_spill(
     page to find one traceback costs more than the truncation ever saved;
     finding the line number for ~200 tokens and reading 40 lines around it
     costs almost nothing.
+
+    THE RANGE DECIDES THE SEARCH LIMIT, because a page is addressed by match
+    NUMBER and the store only retains as many matches as the limit allows. With
+    the fixed default, following this tool's own pointer to page 2 answered
+    "That page is past the last match" for every range from 101 up: the store
+    had returned the first 100 of 714 matches and the page asked for 101-200
+    (agent review / QA round 2, F1/Q3).
     """
+    limit = SPILL_SEARCH_MATCH_LIMIT
+    first_match_index = 1
+    page_end: int | None = None
+    if range_spec:
+        # Documented in the schema: on a search the range pages through
+        # MATCHES. Slicing lines here instead would silently return nothing
+        # whenever the matches fell outside the requested line window.
+        try:
+            first_match_index, page_end = _parse_line_range(range_spec)
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "read", str(exc))
+        # An open range ("101-") still needs a page's worth past its start.
+        wanted = page_end if page_end is not None else first_match_index + limit - 1
+        if wanted > _SPILL_SEARCH_PAGE_MAX:
+            return _text(
+                tool_call_id,
+                "read",
+                f"One search serves at most {_SPILL_SEARCH_PAGE_MAX} matches, so page "
+                f"'{range_spec}' is beyond what a single call returns. Narrow the query, "
+                f'or read the lines around a match with read(path="{ref.handle}", '
+                f'range="<line>-<line>")',
+                useless=True,
+                details={"url": f"{ref.handle}?q={ref.query}", "useless": True},
+            )
+        limit = max(limit, wanted)
     try:
-        found = store.search(ref.handle, ref.query, SPILL_SEARCH_MATCH_LIMIT)
+        found = store.search(ref.handle, ref.query, limit)
     except re.error as exc:
         # Malformed, same as grep's pattern: the `?q=` fragment rides inside a
         # URL string, so no schema can reject a bad regex before it parses.
@@ -5724,17 +5868,35 @@ def _search_spill(
         # could not serve it. Stays `execution`.
         return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
     matches, total_matches, total_lines = found
+    # Whether the STORE has matches at all, read before this page's slice: the
+    # two "empty" cases need different answers (see below).
+    store_has_matches = bool(matches)
     if range_spec:
-        # Documented in the schema: on a search the range pages through
-        # MATCHES. Slicing lines here instead would silently return nothing
-        # whenever the matches fell outside the requested line window.
-        try:
-            start, end = _parse_line_range(range_spec)
-        except InvalidToolArgumentsError as exc:
-            return _invalid_arguments(tool_call_id, "read", str(exc))
-        matches = matches[start - 1 : end]
-    details = {"url": f"{ref.handle}?q={ref.query}"}
+        matches = matches[first_match_index - 1 : page_end]
+    # The page the caller asked for decides the NEXT page's width: continuing a
+    # "1-5" page with "6-10" is what they were reading.
+    page_size = max(len(matches), 1)
+    details = {
+        "url": f"{ref.handle}?q={ref.query}",
+        "total_matches": total_matches,
+        "first_match": first_match_index,
+    }
     if not matches:
+        if store_has_matches:
+            # A page PAST the last match says nothing about whether lines match:
+            # the store holds matches, this request asked for a window beyond
+            # them. Answering "No lines match" is a false statement about the
+            # content that sends the model looking elsewhere (agent review
+            # round 1, NIT 4).
+            return _text(
+                tool_call_id,
+                "read",
+                f"That page is past the last match: {total_matches} match(es) for "
+                f"'{ref.query}' exist in {ref.handle}. Ask for a page starting at or "
+                f"before {total_matches}.",
+                useless=True,
+                details={**details, "useless": True},
+            )
         return _text(
             tool_call_id,
             "read",
@@ -5743,13 +5905,42 @@ def _search_spill(
             details={**details, "useless": True},
         )
     width = len(str(matches[-1][0]))
-    body = "\n".join(f"{number:>{width}}| {line}" for number, line in matches)
+    # THE SEARCH PATH HAD NO OUTPUT BOUND. A match is a whole stored LINE, and
+    # the payloads this store holds are often one enormous line (an MCP JSON
+    # result, minified JS): measured on the fleet, every ``read`` result over
+    # 20k chars since 2026-09-29 came from here, up to 382k chars for one call.
+    # So each matched line is cut to a window around its hit, and the match list
+    # stops at the same budget a ranged spill read uses, with the next page named.
+    regex = re.compile(ref.query)
+    rows: list[str] = []
+    used = 0
+    for number, line in matches:
+        row = f"{number:>{width}}| {_spill_match_window(line, regex)}"
+        if rows and used + len(row) + 1 > READ_OUTPUT_LIMIT_CHARS:
+            break
+        rows.append(row)
+        used += len(row) + 1
+    body = "\n".join(rows)
     header = (
-        f"{len(matches)} of {total_matches} match(es) for '{ref.query}' in "
+        f"{len(rows)} of {total_matches} match(es) for '{ref.query}' in "
         f"{ref.handle} ({total_lines} lines)"
     )
-    if total_matches > len(matches):
-        header += "; 'range' pages through matches"
+    # THE CONTINUATION IS COMPUTED FROM THE MATCH COUNT, NOT from whether this
+    # slice happened to be clipped. A page that consumes its slice exactly used
+    # to advertise nothing, so page 2 was a dead end for a query with 90 matches
+    # (agent review / QA round 1, Q2). The pointer is exact — clamped to the last
+    # match, so it never names a page that cannot exist.
+    shown_last = first_match_index + len(rows) - 1
+    remaining = total_matches - shown_last
+    if remaining > 0:
+        next_start = shown_last + 1
+        next_end = min(next_start + page_size - 1, total_matches)
+        header += (
+            f"; {remaining} more match(es) \u2014 next page of matches: "
+            f'range="{next_start}-{next_end}"'
+        )
+    else:
+        header += "; that is every match"
     footer = (
         f'\n[read around a hit with read(path="{ref.handle}", '
         f'range="{max(matches[0][0] - 10, 1)}-{matches[0][0] + 30}")]'
@@ -11370,16 +11561,10 @@ class InitPhase(BaseModel):
 class TodoParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Per-op semantics live in ``read tool://todo`` (``TOOL_NOTES["todo"]``):
+    # the enum literals are self-describing and this text rode every request.
     op: Literal["init", "add", "done", "block", "drop", "view"] = Field(
-        description=(
-            "init: replace the whole list, optionally grouped into named phases "
-            "(pass `phases`); add: append newly discovered work without "
-            "rewriting the list, optionally into a named `phase`; done: mark "
-            "items finished; block: "
-            "mark items that cannot proceed until a user decides or an "
-            "external service answers (requires 'reason'); drop: abandon "
-            "items that are no longer needed; view: show the list."
-        )
+        description="init replaces the list; block needs 'reason'. Per-op: `read tool://todo`."
     )
     items: list[str] = Field(
         default_factory=list,
@@ -11606,6 +11791,37 @@ def _todo_progress(current: list[dict[str, str]]) -> str:
     return f"{resolved}/{len(current)}"
 
 
+#: Per-item cap in a mutation receipt (``done``/``add``/``block``/``drop``).
+#: The model just SENT those texts, so echoing them back in full re-bills
+#: what it already holds; a measured session paid up to 16k chars per receipt.
+#: 40 chars is enough to recognise the item, and ``view`` stays complete.
+_TODO_RECEIPT_ITEM_CHARS = 40
+
+#: How many item names a mutation receipt lists before folding the rest into a
+#: ``+N more`` count. The count, not the names, is what the receipt is for.
+_TODO_RECEIPT_MAX_NAMES = 8
+
+
+def _todo_receipt_names(texts: list[str]) -> str:
+    """``N item(s): a, b, …`` — truncated names for a compact mutation receipt.
+
+    Only receipts use this. The partial-match error keeps the full text of the
+    still-open items, because the model must echo those texts EXACTLY to act on
+    them, and ``view`` keeps every open row in full for the same reason.
+    """
+    names = [
+        (
+            text
+            if len(text) <= _TODO_RECEIPT_ITEM_CHARS
+            else text[: _TODO_RECEIPT_ITEM_CHARS - 1].rstrip() + "\u2026"
+        )
+        for text in texts[:_TODO_RECEIPT_MAX_NAMES]
+    ]
+    rest = len(texts) - len(names)
+    listed = ", ".join(names) + (f", +{rest} more" if rest else "")
+    return f"{len(texts)} item(s): {listed}"
+
+
 def _todo_rows(items: list[dict[str, str]]) -> list[str]:
     """One ``- [mark] text`` row per item, blocked rows carrying their reason."""
     rows: list[str] = []
@@ -11641,7 +11857,15 @@ def _todo_view_text(phases: list[TodoPhase]) -> str:
     blocks: list[str] = []
     for phase in phases:
         items = phase["items"]
-        blocks.append(f"{phase['name']} · {_todo_progress(items)}")
+        header = f"{phase['name']} · {_todo_progress(items)}"
+        # A FULLY RESOLVED phase folds to its header line. Its rows carry no
+        # work left to do, and a long phased list re-sent them on every view
+        # (one measured view reached 131k chars). Any phase with an open or
+        # blocked item still renders every row, so nothing actionable is hidden.
+        if items and all(item.get("status") in _TODO_RESOLVED for item in items):
+            blocks.append(f"{header} — all resolved")
+            continue
+        blocks.append(header)
         blocks.extend(_todo_rows(items))
     return "\n".join(blocks)
 
@@ -11702,7 +11926,9 @@ def _todo_miss_error(
     """
     lines = []
     if applied:
-        lines.append(f"Applied '{op}' to: {', '.join(item['text'] for item in applied)}.")
+        lines.append(
+            f"Applied '{op}' to {_todo_receipt_names([item['text'] for item in applied])}."
+        )
     lines.append(f"No todo matching: {', '.join(repr(text) for text in missing)}.")
     still_open = [item for item in current if item.get("status") in ("pending", "blocked")]
     if still_open:
@@ -11817,8 +12043,7 @@ async def execute_todo(
         return _text(
             tool_call_id,
             "todo",
-            f"Added {len(added)} item(s): {', '.join(added)} "
-            f"({_todo_progress(current)} resolved).",
+            f"Added {_todo_receipt_names(added)} ({_todo_progress(current)} resolved).",
         )
 
     if params.op in ("done", "block", "drop"):
@@ -11868,7 +12093,7 @@ async def execute_todo(
                     f"No open items in phase {params.phase!r} "
                     f"({_todo_progress(current)} resolved).",
                 )
-            text = f"{verb}: {', '.join(item['text'] for item in matched)}"
+            text = f"{verb} {_todo_receipt_names([item['text'] for item in matched])}"
             if target == "blocked":
                 text += f" — reason: {reason}"
             changed()
@@ -11889,7 +12114,7 @@ async def execute_todo(
             changed()
         if missing:
             return _todo_miss_error(tool_call_id, params.op, matched, missing, current)
-        text = f"{verb}: {', '.join(item['text'] for item in matched)}"
+        text = f"{verb} {_todo_receipt_names([item['text'] for item in matched])}"
         if target == "blocked":
             text += f" — reason: {reason}"
         return _text(tool_call_id, "todo", f"{text} ({_todo_progress(current)} resolved).")
@@ -12934,24 +13159,14 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
         name="send",
         label="Peer send",
         describe_approval=_describe_send_approval,
+        # The addressing rules live ONCE, on ``target``; delivery modes, the
+        # mesh and the fresh-session refusal are in ``read tool://send``
+        # (``TOOL_NOTES["send"]``) — the description rode every request.
         description=(
-            "Hand a message to another local lop session on this machine (no cmux). "
-            "Address the peer by EXACTLY ONE of `target` (name/cwd substring), `pid` "
-            "(exact), or `session` (exact session id) — they are alternatives, and "
-            "passing a `target` together with a `pid`/`session` is refused as an "
-            "ambiguous recipient rather than resolved. The `sessions` tool lists "
-            "what is running (`lop sessions` is the fallback; `--all` adds "
-            "stored ones), and `target` "
-            "matches them by name. By default the message lands in the peer's "
-            "mailbox AND wakes the peer if it is idle, so an idle peer responds "
-            "right away; `wake=False` is the quiet "
-            "mailbox drop (read on the peer's next turn), and `now=True` steers "
-            "mid-turn (opens a turn if the peer is idle). The result says how the "
-            "peer received it. A session with no message sent in it yet (a fresh "
-            "`/new`) is not a recipient: sends to it are refused. With `peer`, the "
-            "target addresses a session on that device (mesh): the send drives a turn "
-            "there and returns the owner's reply; `wake`/`now`/`patience`/`model` are "
-            "local-only and refused."
+            "Message another local lop session (or, with `peer`, one on another "
+            "device). Address it by exactly one of `target`, `pid` or `session`. "
+            "Default delivery wakes an idle peer; `wake=False` is a quiet drop, "
+            "`now=True` steers mid-turn. Details: `read tool://send`."
         ),
         parameters=SendParams.model_json_schema(),
         # write tier: a delivery can start an autonomous turn in ANOTHER session
@@ -13916,15 +14131,12 @@ def _sessions_tool_description() -> str:
         "Manage OTHER local `lop` sessions (top-level and stored; subagents are"
         " `hub`'s)."
         f" Inputs per op (anything else is refused) — {summary}."
-        " `spawn` opens a listed workstream for USER-requested work"
-        " (`visibility='ephemeral'` hides a throwaway run); `resume` reopens a"
-        " stored/stopped session headlessly, or a SET (`paused`/`failed`/`all`)"
-        " as a bounded batch; `stop` ends gracefully; `peek` reads a"
-        " transcript window"
-        "; `peer` acts on another device's session over the mesh (`list` shows those"
-        " rows beside local ones; `scope` filters them). Address exactly one of"
-        " `session` (id), `target`"
-        " (name/cwd) or `pid`. Steering mid-turn: `send` now=True."
+        # What each op DOES (spawn for user-requested work, resume's batch SET,
+        # peek's window, the mesh `peer`) is the ``op='help'`` reference's
+        # per-op summary; restating it here rode every request (context diet).
+        # The per-op INPUTS above stay: they are the incident fix.
+        " `spawn` is for USER-requested work. Address exactly one of `session`"
+        " (id), `target` (name/cwd) or `pid`. What each op does: op='help'."
     )
 
 
@@ -14074,6 +14286,9 @@ def _sessions_reference_body() -> str:
         "Address a session with exactly one of `session` (exact id), `target`"
         " (name/id/cwd substring; live, then stored) or `pid`. Anything outside"
         " the accepted set below is refused, and the refusal names the set.",
+        # Moved here from the tool description (context diet): the steer path
+        # is a different tool, and this reference is where a caller looks.
+        "Steering a session mid-turn is `send` with now=True, not this tool.",
         "",
     ]
     for op in _SESSIONS_OP_ORDER:
@@ -14867,8 +15082,15 @@ def _session_row_brief(row: Mapping[str, Any]) -> str:
         bits.append(str(row["model_label"]))
     if row.get("busy"):
         bits.append("busy")
-    if row.get("pending"):
-        bits.append(f"pending {row['pending']}")
+    # THE ROW-LEVEL RULE, not the raw field: a STORED row carries no needs
+    # claim, whatever its producer said (``network.types.row_needs_claim``) —
+    # "pending ask" on a session with no runtime advertises a gate nothing can
+    # answer and no receipt can clear.
+    from local_operator.network.types import row_needs_claim
+
+    needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
+    if needs:
+        bits.append(f"pending {needs}")
     # ``uptime_s`` is meaningful only for a row with a PROCESS: a stored row
     # carries the empty default (0.0, not None), and rendering it as ``up 0ms``
     # would dress a dead session as a just-started one — the exact
@@ -14972,6 +15194,14 @@ async def _sessions_list(
         merged.extend(local_rows)
     if scope in ("all", "remote"):
         merged.extend(remote_rows)
+    # THE MACHINE PAYLOAD GETS THE SAME RULE AS THE TEXT (agent review round 1,
+    # F1): ``details["rows"]`` hands consumers these dicts verbatim, so a legacy
+    # peer's stored-row claim is dropped HERE rather than only inside
+    # ``_session_row_brief`` — one row, one shape, whichever half of the result
+    # a caller reads.
+    from local_operator.network.types import row_without_stored_claims
+
+    merged = [row_without_stored_claims(row) for row in merged]
     deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in merged:
@@ -15162,8 +15392,12 @@ def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> st
         parts.append(f"pid {row['pid']}")
     if row.get("busy"):
         parts.append("busy")
-    if row.get("pending"):
-        parts.append(f"pending {row['pending']}")
+    # No needs claim on a stored row (``network.types.row_needs_claim``).
+    from local_operator.network.types import row_needs_claim
+
+    needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
+    if needs:
+        parts.append(f"pending {needs}")
     if row.get("model_label"):
         parts.append(str(row["model_label"]))
     return ", ".join(parts) + "\n" + _sessions_facts_line(extras)
@@ -15232,8 +15466,12 @@ async def _sessions_info_mesh(
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
         bits.append(str(row["model_label"]))
-    if row.get("pending"):
-        bits.append(f"pending {row['pending']}")
+    # No needs claim on a stored row (``network.types.row_needs_claim``).
+    from local_operator.network.types import row_needs_claim
+
+    needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
+    if needs:
+        bits.append(f"pending {needs}")
     text = (
         ", ".join(bits) + f"\nheld by {device} — the session, its directory and its "
         "transcript live on that device; peek reads its live tail there, resume warms "
@@ -22617,8 +22855,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             # to `read tool://browser`.
             "Drive the user's REAL browser — the desktop app's tab by default, their "
             "paired extension, or a cmux panel ('backend' names a host for a fresh "
-            "'open'): open/goto, read, snapshot, click, type, scroll, logs, styles, "
-            "hit_test, ancestors, screenshot, tabs, close. Cookies and logins persist "
+            "'open'; actions: `read tool://browser`). Cookies and logins persist "
             "across calls and sessions, and the user can sign in by hand when you ask "
             "them to, so this reaches authenticated pages a throwaway browser cannot. "
             "A fresh 'open' creates one NEW tab owned by this session; reuse it because "
@@ -23767,6 +24004,12 @@ ADVERTISED_EFFORT_KEY = "advertised_effort"
 #: the members it advertises.
 ADVERTISED_MODEL_CHOICE_KEY = "advertised_model_choice"
 
+#: Key carrying how many delegation hops sit above the session that is calling
+#: ``task``/``agent`` (0 = the top-level session). See
+#: :func:`~local_operator.harness.subagent.model_may_choose_tier` for why the
+#: depth, and not only ``subagents.model_choice``, decides who may pick a tier.
+ADVERTISED_DELEGATION_DEPTH_KEY = "advertised_delegation_depth"
+
 #: Key carrying the ``provider/model`` label of the SESSION that built the tool.
 #:
 #: The third piece of build-time provenance, published beside the two above and
@@ -23844,6 +24087,19 @@ _ADVERTISED_MODEL_CHOICE: ContextVar[bool | None] = ContextVar(
 #: inventing a model.
 _ADVERTISED_SESSION_MODEL: ContextVar[str] = ContextVar("advertised_session_model", default="")
 
+#: The delegation depth of the session executing the tool, published by
+#: :func:`_with_advertised_effort` beside the records above.
+#:
+#: This is the BUILD-time half; :func:`effort_validation_context` takes the larger
+#: of it and the depth of the ``ToolContext`` the call arrives with (rebuilt
+#: every turn from the live session). A child's ``task`` tool is first built by
+#: the session constructor, BEFORE ``_build_child_session`` stamps the child's
+#: depth, so a tool object can briefly carry a depth-0 schema; reading the
+#: call's own context is what keeps the gate closed for that window, for any
+#: host that forgets to rebuild, and for a direct executor call that never went
+#: through the wrapper at all.
+_ADVERTISED_DELEGATION_DEPTH: ContextVar[int] = ContextVar("advertised_delegation_depth", default=0)
+
 
 def _with_advertised_effort(
     executor: ToolExecutor,
@@ -23851,6 +24107,7 @@ def _with_advertised_effort(
     *,
     model_choice: bool,
     session_model_label: str = "",
+    delegation_depth: int = 0,
 ) -> ToolExecutor:
     """Publish what this build advertised for the duration of one call.
 
@@ -23867,6 +24124,9 @@ def _with_advertised_effort(
     reason — it is the label the schema description was rendered from, and the
     refusal copy must name the SAME model the enum promised, not whatever the
     session has become by the time a stale tool is invoked.
+
+    ``delegation_depth`` is the depth the tool was built at; the call's own
+    ``ToolContext`` can only RAISE it (see :func:`effort_validation_context`).
     """
     advertised = advertised_effort_members(parameters)
 
@@ -23880,24 +24140,39 @@ def _with_advertised_effort(
         token = _ADVERTISED_EFFORT.set(advertised)
         choice_token = _ADVERTISED_MODEL_CHOICE.set(model_choice)
         label_token = _ADVERTISED_SESSION_MODEL.set(session_model_label)
+        depth_token = _ADVERTISED_DELEGATION_DEPTH.set(delegation_depth)
         try:
             return await executor(tool_call_id, args, signal, on_update, context)
         finally:
             _ADVERTISED_EFFORT.reset(token)
             _ADVERTISED_MODEL_CHOICE.reset(choice_token)
             _ADVERTISED_SESSION_MODEL.reset(label_token)
+            _ADVERTISED_DELEGATION_DEPTH.reset(depth_token)
 
     wrapper.__name__ = getattr(executor, "__name__", "execute")
     wrapper.__qualname__ = wrapper.__name__
     return wrapper
 
 
-def effort_validation_context() -> dict[str, Any]:
-    """Validation context carrying the advertised ``effort`` members and policy."""
+def effort_validation_context(tool_context: ToolContext | None = None) -> dict[str, Any]:
+    """Validation context carrying the advertised ``effort`` members and policy.
+
+    ``tool_context`` is the context the executor was called with. Its
+    ``delegation_depth`` can only RAISE the published build-time depth, never
+    lower it: a depth recorded by either side is evidence the caller is a
+    subagent, and the gate is closed by the larger of the two.
+    """
+    call_depth = getattr(tool_context, "delegation_depth", 0) if tool_context is not None else 0
+    # ``type(...) is int``, not ``isinstance``: a bool is an int, and ``True``
+    # would count as depth 1. Harmless (the depth can only be raised) but it
+    # would make the gate's answer depend on a value that is not a depth.
     return {
         ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get(),
         ADVERTISED_MODEL_CHOICE_KEY: _ADVERTISED_MODEL_CHOICE.get(),
         SESSION_MODEL_LABEL_KEY: _ADVERTISED_SESSION_MODEL.get(),
+        ADVERTISED_DELEGATION_DEPTH_KEY: max(
+            _ADVERTISED_DELEGATION_DEPTH.get(), call_depth if type(call_depth) is int else 0
+        ),
     }
 
 
@@ -23926,6 +24201,13 @@ def _advertised_model_choice(info: ValidationInfo) -> bool | None:
         return None
     choice = context.get(ADVERTISED_MODEL_CHOICE_KEY)
     return choice if isinstance(choice, bool) else None
+
+
+def _delegation_depth(info: ValidationInfo) -> int:
+    """Hops above the calling session; ``0`` when unrecorded (an operator-side caller)."""
+    context = info.context if isinstance(info.context, dict) else None
+    depth = context.get(ADVERTISED_DELEGATION_DEPTH_KEY) if context else None
+    return depth if type(depth) is int and depth > 0 else 0
 
 
 def _tier_runs_on(tier: str, session_model_label: str | None) -> str | None:
@@ -24069,6 +24351,38 @@ def _operator_choice_pin_rejection(tier: str, session_model_label: str | None = 
     )
 
 
+def _nested_task_rejection(tier: str) -> str:
+    """The ``task`` refusal for a tier chosen by a session that is itself a subagent.
+
+    Wording is NOT the ``operator`` arm's: that one names ``subagents.model_choice``
+    as the remedy, and at depth >= 1 the key is not what refuses
+    (``model_choice=model`` is exactly the config the incident ran under), so
+    sending the delegating model to "the operator's setting" would be false and
+    would invite it to retry differently. The remedy is simply to omit the
+    field: a nested child inherits the model THIS session is running on.
+    Short and remedy-first for the same card-truncation reason the operator
+    arm documents.
+    """
+    return (
+        f"Relaunch without 'effort' (got '{tier}'): subagents of a subagent "
+        "inherit this session's model; only the top-level session may pick a tier."
+    )
+
+
+def _nested_pin_rejection(tier: str) -> str:
+    """The ``agent`` create/update refusal for a role pin written by a subagent.
+
+    A pin written below the top level would be picked up by every later launch
+    of that role, nested or not, so allowing it would re-open the leak through
+    the registry. Pins stay the operator's (profile editor) or the top-level
+    session's call.
+    """
+    return (
+        f"A subagent cannot pin a role to a model tier (got '{tier}'): only the "
+        "top-level session may. Omit 'effort', or pass 'inherit' to clear a pin."
+    )
+
+
 def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exception | None:
     """Refuse an ``effort`` the operator has not delegated to the model, or ``None``.
 
@@ -24090,18 +24404,44 @@ def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exc
     ``AgentParams`` for an operator's own edit). That is an operator-side
     caller, so it is ALLOWED: the key gates a model's choice, never the
     operator's, and an absent context cannot be evidence of a model at all.
+
+    **Depth >= 1 follows the same split, on purpose.** A subagent's tool is built
+    with ``model_choice=False`` (``model_may_choose_tier(depth)``), so the field
+    was never offered and any tier it sends is invented: a ``ValueError``, the
+    model's fault, exactly as under ``model_choice=operator``. Refusing (rather
+    than silently dropping the tier and inheriting) is also the consistent
+    choice: a dropped ``effort`` would let the model believe its ``hi`` scouts
+    ran on ``hi`` and report them as such, which is the misattribution the
+    operator arm's refusal exists to prevent. The only departure is the copy
+    (:func:`_nested_task_rejection`), which cannot point at
+    ``subagents.model_choice`` because that key is not what refuses.
     """
-    if model_may_choose_tier():
+    depth = _delegation_depth(info)
+    if model_may_choose_tier(depth):
         return None
     advertised_choice = _advertised_model_choice(info)
-    if advertised_choice is None:
+    if advertised_choice is None and depth == 0:
         return None
     label = _advertised_session_model(info)
-    message = (
-        _operator_choice_pin_rejection(value, label)
-        if pin
-        else _operator_choice_task_rejection(value, label)
-    )
+    if depth_closed_the_tier_choice(depth):
+        # Below the top, under ``model_choice=model``, the refusal is about WHO
+        # is asking, not the key, so the operator-arm copy (which names
+        # ``subagents.model_choice`` as the remedy) would send the model to a
+        # setting that is not the cause. Under ``operator`` the key IS the cause
+        # at every depth, so the operator-arm copy below is the true one.
+        message = _nested_pin_rejection(value) if pin else _nested_task_rejection(value)
+    else:
+        message = (
+            _operator_choice_pin_rejection(value, label)
+            if pin
+            else _operator_choice_task_rejection(value, label)
+        )
+    if advertised_choice is None:
+        # Only reachable at depth >= 1 (above, an unrecorded build at depth 0 is
+        # an operator-side caller and returned). A real ToolContext says the
+        # caller is a subagent, so the refusal stands, but with no record of
+        # what the model was shown it is not billed to the model's accuracy.
+        return EnvironmentDependentRejectionError(message)
     if advertised_choice and value in (_advertised_effort(info) or frozenset()):
         return EnvironmentDependentRejectionError(message)
     return ValueError(message)
@@ -24321,8 +24661,18 @@ _OPERATOR_CHOICE_EFFORT_SENTENCE = (
     "children inherit this session's model — do not pass 'effort'."
 )
 
+#: The same sentence for a session that is itself a subagent. It cannot reuse the
+#: one above: that names ``subagents.model_choice=operator``, which is false at
+#: depth >= 1 under ``model_choice=model`` (the config the nested-tier incident
+#: ran under), and a description that blames a setting the operator never set
+#: sends the model hunting for a switch instead of omitting the field.
+_NESTED_EFFORT_SENTENCE = (
+    "No effort tiers are yours to choose (you are a subagent; only the top-level "
+    "session picks tiers): children inherit this session's model — do not pass 'effort'."
+)
 
-def _task_tool_description(model_choice: bool) -> str:
+
+def _task_tool_description(model_choice: bool, delegation_depth: int = 0) -> str:
     """The ``task`` tool description, with the effort sentence matching the schema.
 
     A model told "effort picks a configured model tier" while no tier is
@@ -24330,13 +24680,21 @@ def _task_tool_description(model_choice: bool) -> str:
     say which state it is in. One sentence either way — prompt text is paid on
     every turn. ``model_choice`` is the flag the accompanying schema was
     rendered from, passed in rather than re-read so the description and the
-    schema cannot disagree about which arm they are in.
+    schema cannot disagree about which arm they are in. The one live read is
+    ``configured_effort_tiers()`` (the tier list) and, for a subagent,
+    :func:`~local_operator.harness.subagent.depth_closed_the_tier_choice`
+    (which reads ``subagents.model_choice``): both are consulted only to pick
+    WORDING within the arm the flag already fixed, never to change the arm.
     """
     if not model_choice:
         # The whole field is gone from this schema, so the description is the
         # only place left to say so — and it must, or a model that remembers
         # `effort` from another session's prompt has nothing telling it no.
-        effort = _OPERATOR_CHOICE_EFFORT_SENTENCE
+        effort = (
+            _NESTED_EFFORT_SENTENCE
+            if depth_closed_the_tier_choice(delegation_depth)
+            else _OPERATOR_CHOICE_EFFORT_SENTENCE
+        )
     else:
         tiers = configured_effort_tiers()
         if tiers:
@@ -25099,7 +25457,7 @@ async def execute_task(
     between children.
     """
     try:
-        params = TaskParams.model_validate(args, context=effort_validation_context())
+        params = TaskParams.model_validate(args, context=effort_validation_context(context))
     except ValidationError as exc:
         return _validation_error(tool_call_id, "task", exc)
 
@@ -25193,7 +25551,11 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
     # ONE read of the policy per build, handed to the schema renderer, the
     # description and the validator's wrapper, so the three cannot disagree
     # about which arm this tool instance is in.
-    model_choice = model_may_choose_tier()
+    # The depth is part of the policy, not an afterthought to it: a subagent's
+    # tool is built with the tier field REMOVED even under ``model_choice=model``
+    # (see ``model_may_choose_tier`` for the incident).
+    depth = context.delegation_depth
+    model_choice = model_may_choose_tier(depth)
     parameters = _advertise_effort_tiers(
         TaskParams.model_json_schema(),
         description=_effort_tier_field_description(context.session_model_label),
@@ -25203,7 +25565,7 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
         name="task",
         label="Subagent task",
         describe_approval=_describe_task_approval,
-        description=_task_tool_description(model_choice),
+        description=_task_tool_description(model_choice, depth),
         parameters=parameters,
         # Spawns autonomous child work, so it rides the write gate just like
         # scheduling a wake: the user approves starting the child.
@@ -25215,6 +25577,7 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
             parameters,
             model_choice=model_choice,
             session_model_label=context.session_model_label,
+            delegation_depth=depth,
         ),
     )
 
@@ -25588,6 +25951,241 @@ def build_wait_tool(context: ToolContext) -> AgentTool | None:
     )
 
 
+#: ANSI sequences a full-screen redraw starts with: clear-screen (``ESC[2J``),
+#: cursor-home + clear-to-end (``ESC[H ESC[J``) and full reset (``ESC c``).
+#: One control sequence: CSI (``ESC[`` params + a final letter) or a bare RIS.
+_ESCAPE_SEQ = r"\x1b\[[0-9;?]*[A-Za-z]|\x1bc"
+
+#: A screen clear, INCLUDING the cursor moves around it. `clear`/`tput clear`
+#: emit `ESC[H ESC[2J`, and a redrawing printer commonly writes `ESC[H ESC[J`
+#: (home, then erase-below), so the erase is matched with an optional 0-3
+#: parameter rather than as a literal `[2J`. Matching only the erase code alone
+#: left the cursor-home escape dangling at the end of the previous chunk — a line
+#: the kept frame does not have, which failed containment and made every
+#: `clear`-cleared screen uncollapsible (QA round 2, Q5). The cluster is bounded
+#: to CONTROL sequences, so it cannot swallow text.
+_CLEAR_SCREEN_RE = re.compile(rf"(?:{_ESCAPE_SEQ})*\x1b\[[0-3]?J(?:{_ESCAPE_SEQ})*|\x1bc")
+
+#: A frame must carry at least this many non-blank lines to count as a redraw.
+#: Below it, a recurring line is more likely an ordinary repeated log line.
+_FRAME_MIN_LINES = 3
+
+#: How many distinct recurring lines are tried as frame headers before giving
+#: up. Every candidate is fully validated, so this only bounds the work: the
+#: payload of one peek is at most the job's output tail (~64 KB), and a real
+#: redraw's header is among the most-repeated lines.
+_FRAME_HEADER_CANDIDATES = 12
+
+
+def _verified_redraw_chunks(text: str) -> list[str] | None:
+    """The frames of ``text`` when it is VERIFIABLY one frame redrawn, else ``None``.
+
+    WHY THIS IS NOT A SIMILARITY TEST. The first version of this collapse
+    compared the last two chunks with a Jaccard threshold and treated the first
+    line that happened to recur as a frame header. Measured over the operator's
+    real spill store (2026-10-08, agent review round 1): 16 firings elided
+    155,916 chars and dropped 714 distinct lines that appear in NO kept frame —
+    a shell result whose body was a git diff was reduced to 105 of 8,380 chars
+    under a note calling the missing part "earlier repeated frames" — and, in
+    the other direction, an ordinary six-host shell loop folded to its last
+    three lines, hiding the one anomalous row. A threshold a normal log can hit
+    cannot license a claim about what was dropped.
+
+    So the rule here is containment, and it is checked against EVERY chunk:
+
+    * the payload must split into frames at a repeating boundary — an explicit
+      clear-screen sequence, or a line that starts at least two frames; and
+    * the kept (last) frame must be at least :data:`_FRAME_MIN_LINES` distinct
+      lines long, and every distinct non-blank line of every earlier chunk must
+      appear in it.
+
+    Containment is what makes the elision free rather than lossy: nothing that
+    was dropped is absent from what is returned. The caller additionally
+    refuses to collapse when the original could not be spilled, so an elided
+    frame is always one ``read`` away even when containment is the only thing
+    standing between the model and the bytes.
+
+    WHAT THIS DELIBERATELY DOES NOT DO: a watcher whose frames EVOLVE (``gh run
+    watch`` marking jobs done, a timestamp ticking) differs by real content, so
+    containment fails and the whole delta is returned. That is the trade the
+    review asked for — an unverifiable nine-fold cut of live output is worse
+    than the bytes — and it keeps the note's claim true when it does fire.
+    """
+    spans = _clear_screen_spans(text)
+    if spans is None:
+        spans = _repeating_header_spans(text)
+    if spans is None:
+        return None
+    chunks = [text[spans[i][1] : spans[i + 1][0]] for i in range(len(spans) - 1)]
+    chunks.append(text[spans[-1][1] :])
+    leading = text[: spans[0][0]]
+    if leading.strip():
+        chunks.insert(0, leading)
+    if not _chunks_are_one_frame_redrawn(chunks):
+        return None
+    return chunks
+
+
+def _clear_screen_spans(text: str) -> list[tuple[int, int]] | None:
+    """The span of each clear-screen marker, or ``None`` when there is none.
+
+    A span, not an offset, because the marker is the boundary BETWEEN frames:
+    the chunk before it ends where it starts and the chunk after it begins where
+    it ends, which is what keeps one frame's escape out of its neighbour's line
+    set (they differ by exactly those bytes, and containment then fails).
+    """
+    marks = list(_CLEAR_SCREEN_RE.finditer(text))
+    if not marks:
+        return None
+    return [mark.span() for mark in marks]
+
+
+def _repeating_header_spans(text: str) -> list[tuple[int, int]] | None:
+    """Zero-width spans at the best VERIFIED frame header's occurrences.
+
+    A watcher not attached to a TTY writes whole frames with no escape
+    sequences, so the boundary is the frame's first line. Every recurring line
+    is tried as a candidate and the split is validated as a whole
+    (:func:`_chunks_are_one_frame_redrawn`); candidates whose occurrences
+    already look like frame starts are tried first, because that is the shape a
+    frame-at-a-time writer produces.
+
+    One line basis (``splitlines``), used for the candidate scan, the shaped
+    test and the offsets alike, so a line index cannot mean two things.
+    """
+    lines = text.splitlines()
+    offsets = _line_offsets(lines)
+    occurrences: dict[str, list[int]] = {}
+    for index, line in enumerate(lines):
+        if line.strip():
+            occurrences.setdefault(line, []).append(index)
+    for _line, indexes in _header_candidates(lines, occurrences)[:_FRAME_HEADER_CANDIDATES]:
+        spans = [(offsets[index], offsets[index]) for index in indexes]
+        chunks = [text[spans[i][1] : spans[i + 1][0]] for i in range(len(spans) - 1)]
+        chunks.append(text[spans[-1][1] :])
+        leading = text[: spans[0][0]]
+        if leading.strip():
+            chunks.insert(0, leading)
+        if _chunks_are_one_frame_redrawn(chunks):
+            return spans
+    return None
+
+
+def _header_candidates(
+    lines: Sequence[str], occurrences: Mapping[str, list[int]]
+) -> list[tuple[str, list[int]]]:
+    """Recurring lines in the order they are tried as a frame HEADER.
+
+    A frame start sits at the top of the text or directly under a blank line,
+    which is where a frame-at-a-time writer puts it, so those candidates are
+    tried first — then the most frequent, then the earliest.
+
+    WHAT THIS ORDERING IS AND IS NOT. It is a search order, not a correctness
+    lever: every candidate is validated by containment before anything is
+    elided, and the search returns the first one that passes. A brute-force
+    search (uniform repeated units, 5-symbol alphabet, 2-4 repeats) found no
+    payload where two candidates BOTH validate, so the preference only decides
+    which frame is kept in a shape not yet observed; either answer is safe.
+
+    A "header" must REPEAT: lines seen once are not candidates at all, because a
+    single occurrence would split the payload into one frame plus a leading
+    fragment, and a fragment contained in the tail then reads as a verified
+    redraw. That filter lives HERE rather than at the call site so a candidate
+    list can never again mean two things.
+
+    THE EARLIER SPELLING OF THE SHAPED TEST COULD NEVER FIRE. It read
+    `before.rstrip("\n").endswith("\n\n")` off the text before an offset — and
+    the ``rstrip`` removed the very bytes it was looking for, so only a line at
+    the very top of the text ever qualified. A dead preference is worse than
+    none, because the next reader believes it steered something (agent review
+    round 2, F3). It is now read off the line list, and pinned by
+    ``test_the_frame_start_preference_actually_applies``.
+    """
+
+    def frame_start_shaped(line_index: int) -> bool:
+        return line_index == 0 or lines[line_index - 1].strip() == ""
+
+    repeating = {line: at for line, at in occurrences.items() if len(at) >= 2}
+    return sorted(
+        repeating.items(),
+        key=lambda item: (
+            -sum(1 for index in item[1] if frame_start_shaped(index)),
+            -len(item[1]),
+            item[1][0],
+        ),
+    )
+
+
+def _line_offsets(lines: Sequence[str]) -> list[int]:
+    """Char offset of each line, on the same basis ``splitlines()`` produced."""
+    offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line) + 1
+    return offsets
+
+
+def _frame_body_lines(chunk: str) -> list[str]:
+    """A chunk's content lines, compared EXACTLY and split the read path's way.
+
+    ``splitlines()`` is the same basis the spill store serves and ``read``
+    numbers lines on, so what this rule reasons about is what a follow-up read
+    shows. Lines are compared verbatim: an earlier version stripped them first,
+    which let `    indented: deep detail` be elided while the kept frame held
+    the UNINDENTED `indented: deep detail` — the note then claimed a line was
+    preserved that had been altered (agent review / QA round 2, F2).
+
+    Only EMPTY lines are set aside, because they carry no text to lose and
+    frames are routinely separated by them.
+    """
+    return [line for line in chunk.splitlines() if line != ""]
+
+
+def _chunks_are_one_frame_redrawn(chunks: list[str]) -> bool:
+    """The containment rule, applied to EVERY chunk (never only the last two).
+
+    ``True`` only when the last chunk is a real frame and every earlier chunk
+    carries no line the kept frame lacks — so eliding them drops no content.
+    """
+    if len(chunks) < 2:
+        return False
+
+    def body_set(chunk: str) -> set[str]:
+        return set(_frame_body_lines(chunk))
+
+    kept = body_set(chunks[-1])
+    if len(kept) < _FRAME_MIN_LINES:
+        return False
+    elided_any = False
+    for chunk in chunks[:-1]:
+        lines = body_set(chunk)
+        if not lines <= kept:
+            return False
+        elided_any = elided_any or bool(lines)
+    return elided_any
+
+
+def _collapse_refreshing_frames(text: str) -> tuple[str, int]:
+    """``(latest_frame, frames_elided)`` for output that REDRAWS one frame.
+
+    ``gh run watch``, ``watch``, progress UIs and the like print the same frame
+    over and over when they are not on a TTY: one measured peek was 8.5k chars of
+    the same frame repeated, of which only the last copy was news. Only the
+    latest frame is worth returning; ``(text, 0)`` means the payload was not
+    VERIFIABLY a redraw (see :func:`_verified_redraw_chunks` for the rule and
+    the measurements behind it) and the text is returned untouched.
+
+    A trailing status line added once after the last frame — ``FINAL: …`` in the
+    QA rig's watcher — rides the kept frame, because the kept frame runs from
+    its boundary to the end of the text.
+    """
+    chunks = _verified_redraw_chunks(text)
+    if chunks is None:
+        return text, 0
+    return chunks[-1].strip("\n"), len(chunks) - 1
+
+
 def _peek_job(
     tool_call_id: str,
     jobs: Any,
@@ -25633,7 +26231,27 @@ def _peek_job(
             "[warning: output between your cursor and this window was dropped "
             "from the buffer — this excerpt is not contiguous with your last peek]"
         )
-    if text:
+    frame, elided = _collapse_refreshing_frames(text) if text else (text, 0)
+    collapsed_meta = None
+    if elided:
+        # THE ORIGINAL MUST BE SPILLED BEFORE ANYTHING IS ELIDED. Without a
+        # handle the elided frames are unrecoverable, and the note would promise
+        # an expansion that does not exist — so a failed store write falls
+        # through to the untouched output instead (agent review round 1, MAJOR).
+        collapsed_meta = _spill(text, "jobs", context)
+    if collapsed_meta is not None:
+        # The note states exactly what the containment rule verified, in the
+        # words the rule uses: every line of TEXT the dropped frames carried is
+        # in the frame below. "text" is there because empty lines are the one
+        # thing the rule sets aside (they carry nothing), and lines themselves
+        # are compared verbatim — an indentation difference blocks the elision
+        # rather than being silently normalised (agent review round 2, F2).
+        parts.append(
+            f"[{elided} earlier frame(s) elided \u2014 every line of text they carried "
+            f'is in the frame below; the full delta: read(path="{collapsed_meta.handle}")]'
+        )
+        parts.append(frame)
+    elif text:
         parts.append(text)
     elif status == "running":
         parts.append("(no new output since last peek)")
@@ -25648,9 +26266,23 @@ def _peek_job(
         "job_id": job.id,
         "status": status,
         "seq": seq,
+        # The delta the job produced, and what the collapse removed from it. Both
+        # numbers are reported because they differ exactly when frames were
+        # elided, and a receipt that showed only the first looked like the
+        # collapse had returned everything (agent review round 1, NIT 3).
         "new_chars": len(text),
         "gap": gap,
     }
+    if collapsed_meta is not None:
+        details["frames_elided"] = elided
+        details["elided_chars"] = len(text) - len(frame)
+        details["shown_chars"] = len(frame)
+        # A SECOND handle, under its own key: the frames' full delta and the
+        # body-cap's spill are different spans, and a structural consumer (the
+        # mobile/desktop projection, a TUI expand affordance) can only reach the
+        # second one through `spill` — leaving the frames handle in prose alone
+        # hid it from every non-prose reader.
+        details["frames_spill"] = _spill_detail(collapsed_meta)
     if spill_details:
         details.update(spill_details)
     return _text(tool_call_id, "jobs", summary, details=details)
@@ -26230,13 +26862,32 @@ _ACTOR_LABELS: dict[str, str] = {
 }
 
 
-def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolResult:
+#: How many COMPLETED children ``hub op='list'`` renders in full, newest last.
+#: A long-lived manager keeps its whole ``MAX_RECORDS`` history in the roster,
+#: and one measured call (2026-10-08) returned 33,935 chars for 256 children of
+#: which 254 had completed days earlier — every row re-billed on every later
+#: turn for a fact nobody acts on. Children in any OTHER state (running, queued,
+#: paused, failed, cancelled) are always listed: those are the rows a parent
+#: does something about. The older completed rows are summarised as a count and
+#: kept, rendered, behind a ``spill://`` handle, so nothing becomes unreachable.
+HUB_LIST_COMPLETED_SHOWN = 10
+
+
+def _hub_list(
+    tool_call_id: str,
+    comms: Any,
+    scope: str | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
     """Render the subagent roster for ``op='list'``.
 
     Every row states the one thing the caller acts on \u2014 whether the child can
     be resumed \u2014 rather than leaving it to be inferred from the status, since
     ``completed``, ``failed``, ``cancelled`` and ``paused`` are all resumable
     while ``running`` is not, which is the opposite of the intuitive reading.
+
+    Only the newest :data:`HUB_LIST_COMPLETED_SHOWN` completed rows are shown;
+    the full roster is spilled (see the constant for why).
     """
     rows = comms.roster()
     if scope:
@@ -26255,6 +26906,72 @@ def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolRe
             details={"op": "list", "count": 0, "useless": True},
             useless=True,
         )
+    # The newest completed rows survive the fold (the roster is newest-launch-
+    # last); every non-completed row is kept whatever its age.
+    completed_ids = [row.job_id for row in rows if row.status == "completed"]
+    shown_completed = set(completed_ids[-HUB_LIST_COMPLETED_SHOWN:])
+    folded = len(completed_ids) - len(shown_completed)
+    all_lines = _hub_roster_lines(rows)
+    # A FOLD NEEDS SOMEWHERE TO PUT WHAT IT FOLDS. The handle is what keeps the
+    # older rows \u2014 and the ``transcript <id>`` a ``--resume`` needs \u2014 reachable,
+    # so a store that refused the write means NO fold: every row renders, exactly
+    # as before this slice. Folding anyway deleted those rows from both the text
+    # and ``details`` with no note at all (agent review round 1, MINOR 2).
+    meta = _spill("\n".join(all_lines), "hub", context) if folded else None
+    if folded and meta is not None:
+        visible = [
+            row for row in rows if row.status != "completed" or row.job_id in shown_completed
+        ]
+        lines = _hub_roster_lines(visible)
+        lines[0] = f"{len(rows)} subagent(s), {len(visible)} shown:"
+        lines.insert(
+            1,
+            f"+ {folded} older completed subagent(s) not shown \u2014 the full "
+            f'roster is at read(path="{meta.handle}")',
+        )
+    else:
+        folded = 0
+        lines = all_lines
+    if any(row.resumable for row in rows):
+        lines.append("")
+        # ONE footer for the whole roster. It used to be a two-line
+        # ``transcript <id> (read it with lop --resume <id>)`` block under EVERY
+        # resumable row \u2014 the same instruction 254 times in the measured call.
+        lines.append(
+            "Resume one with hub op='resume' and its JOB id, plus an instruction for "
+            "what to do next \u2014 or name several JOB ids to resume a whole batch in "
+            "one call. A 'transcript <id>' is not a job id: `lop --resume <id>` "
+            "opens that child's history for reading and starts no agent."
+        )
+    details: dict[str, Any] = {
+        "op": "list",
+        "count": len(rows),
+        # Every child, folded or not: ``details`` never reaches the provider,
+        # and the mobile/desktop projection reads the whole roster from here.
+        "children": [
+            {
+                "job_id": row.job_id,
+                "label": row.label,
+                "status": row.status,
+                "resumable": row.resumable,
+                "session_id": row.session_id,
+                # Mirrored into the details payload too (not only the
+                # rendered line) so the mobile/desktop projection can show
+                # WHO stopped a child without re-deriving it from prose.
+                "ended_by": row.ended_by,
+            }
+            for row in rows
+        ],
+    }
+    if folded:
+        details["folded_completed"] = folded
+    if meta is not None:
+        details["spill"] = _spill_detail(meta)
+    return _text(tool_call_id, "hub", "\n".join(lines), details=details)
+
+
+def _hub_roster_lines(rows: list[Any]) -> list[str]:
+    """The roster rows for ``hub op='list'``: a count line, then one block per child."""
     lines = [f"{len(rows)} subagent(s):"]
     # FUNCTION-LOCAL: ``builtin`` is a denied-module boundary (see the note
     # above); the module is stdlib-only and cheap.
@@ -26276,6 +26993,14 @@ def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolRe
             if clause:
                 idle = f", {clause}"
         extras = "resumable" if row.resumable else (row.detail or "not resumable")
+        # The session id only where it can be acted on. It is the id
+        # ``--resume`` takes (NOT the job id beside the label), and this roster
+        # is the only surface that shows it now that children are kept out of
+        # the ``/resume`` picker. Printed for resumable rows alone: on a row that
+        # cannot be resumed it is a string to mistake for the job id rather than
+        # something to type. Inline, with the how-to stated ONCE in the footer.
+        if row.resumable and row.session_id:
+            extras += f", transcript {row.session_id}"
         lines.append(f"- {row.label} ({row.job_id}): {row.status}{age}{idle} — {extras}")
         # WHO ended it, and why. The field the old ``del reason`` discarded:
         # without this line a cancelled child read as a bare ``cancelled`` with
@@ -26315,47 +27040,7 @@ def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolRe
             from local_operator.incidents import render_cut_off_reason
 
             lines.append(f"    cut off: {render_cut_off_reason(row.cut_off_cause)}")
-        # The session id only where it can be acted on. It is the id
-        # ``--resume`` takes (NOT the job id on the line above), and this
-        # roster is the only surface that shows it now that children are kept
-        # out of the ``/resume`` picker. Printed for resumable rows alone: on a
-        # row that cannot be resumed it is a string to mistake for the job id
-        # rather than something to type.
-        if row.resumable and row.session_id:
-            lines.append(
-                f"    transcript {row.session_id} (read it with lop --resume {row.session_id})"
-            )
-    if any(row.resumable for row in rows):
-        lines.append("")
-        lines.append(
-            "Resume one with hub op='resume' and its JOB id, plus an instruction for "
-            "what to do next \u2014 or name several JOB ids to resume a whole batch in "
-            "one call. The transcript id above is not a job id: it opens the "
-            "child's history for reading and starts no agent."
-        )
-    return _text(
-        tool_call_id,
-        "hub",
-        "\n".join(lines),
-        details={
-            "op": "list",
-            "count": len(rows),
-            "children": [
-                {
-                    "job_id": row.job_id,
-                    "label": row.label,
-                    "status": row.status,
-                    "resumable": row.resumable,
-                    "session_id": row.session_id,
-                    # Mirrored into the details payload too (not only the
-                    # rendered line) so the mobile/desktop projection can show
-                    # WHO stopped a child without re-deriving it from prose.
-                    "ended_by": row.ended_by,
-                }
-                for row in rows
-            ],
-        },
-    )
+    return lines
 
 
 async def _hub_peek(tool_call_id: str, comms: Any, params: Any, ids: list[str]) -> ToolResult:
@@ -26495,7 +27180,7 @@ async def _execute_hub_parent(
         return _validation_error(tool_call_id, "hub", exc)
 
     if params.op == "list":
-        return _hub_list(tool_call_id, comms, scope)
+        return _hub_list(tool_call_id, comms, scope, context)
 
     if scope and params.to and "parent" in params.to:
         # A lead still reports up through the same tool it drives its pod with.
@@ -26922,18 +27607,52 @@ def _promote_credential(store: Any, key: str, description: str) -> str:
     return promote_session_credential_guarded(store, key, description=description).message
 
 
-def _ask_report(questions: list[AskQuestion], answers: dict[str, list[str]]) -> str:
+def _ask_report(
+    questions: list[AskQuestion],
+    answers: dict[str, list[str]],
+    image_counts: Mapping[str, int] | None = None,
+    images_missing: int = 0,
+) -> str:
     """The answers as text the model can act on, keyed by the ids it chose.
 
     Each question is echoed with its answer rather than only the id: the ask
     may be several turns back by the time the model reads this, and an id on
     its own ("purge: Drop them") does not say what was agreed to.
+
+    ``image_counts`` is how many pictures answer each question (queued asks
+    only; the blocking path never passes it, so its report is byte-identical).
+    The pictures themselves are NOT in this string -- they ride the same user
+    turn as image blocks after it -- so the text has to POINT at them, per
+    question, or the model sees a screenshot and cannot tell which question it
+    answers. An image-only answer is a legal answer (core completeness is on
+    keys), and reads "(image attached, shown below)" rather than "(not answered)",
+    which would be a false statement about the user's reply.
+
+    ``images_missing`` is how many attached images could not be loaded back from
+    the store at delivery. It is said in words, once, rather than leaving a
+    "shown below" that points at nothing.
     """
+    counts = image_counts or {}
     lines: list[str] = []
     for question in questions:
         chosen = [text for text in answers.get(question.id, []) if text.strip()]
+        attached = int(counts.get(question.id, 0))
         lines.append(f"{question.id} — {question.question}")
-        lines.append(f"  answer: {'; '.join(chosen) if chosen else '(not answered)'}")
+        if chosen and attached:
+            noun = "image" if attached == 1 else "images"
+            body = f"{'; '.join(chosen)} (+{attached} {noun}, shown below)"
+        elif attached:
+            body = (
+                "(image attached, shown below)"
+                if attached == 1
+                else f"({attached} images attached, shown below)"
+            )
+        else:
+            body = "; ".join(chosen) if chosen else "(not answered)"
+        lines.append(f"  answer: {body}")
+    if images_missing:
+        noun = "image" if images_missing == 1 else "images"
+        lines.append(f"({images_missing} attached {noun} could not be loaded and is not shown.)")
     return "The user answered:\n" + "\n".join(lines)
 
 
@@ -26945,20 +27664,16 @@ def _ask_report(questions: list[AskQuestion], answers: dict[str, list[str]]) -> 
 #: it would let the two modes drift into disagreeing about what warrants asking,
 #: which is the one thing about this tool that must not vary.
 _ASK_DESCRIPTION_RESTRAINT = (
-    "Ask the user to choose. LAST RESORT, not a checkpoint: research it, run "
-    "it, or delegate it to a subagent and decide yourself, then report what you "
-    "chose. Use this when the action is destructive or irreversible and the "
-    "user has not EXPLICITLY approved that action, when the REQUEST ITSELF has "
-    "two plausible readings and no evidence picks between them, when you need "
-    "something only the user has (a credential, an access decision), or when "
-    "the answer is genuinely theirs to state (a preference, a name, a roster). "
-    "Two technical approaches is not ambiguity: weigh them, pick one, and say "
-    "why. Work the user already asked for is authorized: do not stop to confirm "
-    "it, re-ask what the conversation answered, or seek permission to continue "
-    "— but that never extends to an irreversible step by implication. "
-    "Once you have decided a question is needed, this tool is the only channel: "
-    "never put the question in your reply text. Not stopping for an answer? Then "
-    "do not phrase it as a question; full mechanics are in `read tool://ask`."
+    "Ask the user to choose. LAST RESORT, not a checkpoint: research it, run it, "
+    "or delegate it to a subagent and decide yourself, then report what you chose. "
+    "Ask only when: the action is destructive or irreversible and the user has not "
+    "EXPLICITLY approved that action; the REQUEST ITSELF has two plausible readings "
+    "and no evidence picks between them; you need something only the user has (a "
+    "credential, an access decision); or the answer is genuinely theirs to state. "
+    "Two technical approaches is not ambiguity. Work the user already asked for is "
+    "authorized: do not stop to confirm it — but that never extends to an "
+    "irreversible step by implication. Never put the question in your reply text; "
+    "mechanics: `read tool://ask`."
 )
 
 #: The tail for a host whose ``ask`` BLOCKS — the KILL-SWITCH arm.
@@ -26998,27 +27713,14 @@ _ASK_DESCRIPTION_INLINE = (
 #: urgent case needs its own instruction (resolve it another way) because the
 #: timeout notice repeats it.
 _ASK_DESCRIPTION_QUEUED = (
-    "Ask everything you need in ONE call. This call returns at once "
-    "with a RECEIPT: it confirms the ask is queued and when it will time out. "
-    "The ANSWER ARRIVES LATER, as its own turn. A RECEIPT IS NOT CONSENT: do not "
-    "run anything the ask was meant to authorise until the answer arrives. "
-    "Continue with work that does not depend on it; if nothing else remains, "
-    "end the turn saying what is queued rather than idling. Set `timeout` to how "
-    "long this should really wait — 1 h (3600) is routine, 5-10 minutes when "
-    "someone is expected to answer now, up to 24 h for something genuinely "
-    "non-urgent; the floor is 2 minutes. When the deadline passes with no answer "
-    "you get a timeout notice: take your own recommendation then, say in one "
-    "line what you assumed, and carry on. A late answer still reaches you and "
-    "says it was late. An urgent ask's timeout notice also tells you to resolve "
-    "the question without the operator (a `task` subagent); do that rather than "
-    "waiting. At most 8 asks can be open at once — do not re-ask a question you "
-    "already queued, and a second ask with identical question text, or a second "
-    "open secret question for a key already asked for, is refused. "
-    "For a credential, password or API key, set secret=true on that question "
-    "(options empty, id = the env-var name): the value reaches session memory "
-    "when the user answers it and is injected into bash — only the key name is "
-    "returned, and it never appears in this conversation. persist=true also "
-    "saves it to the operator's encrypted long-term store."
+    "Ask everything you need in ONE call. It returns at once with a RECEIPT; the "
+    "ANSWER ARRIVES LATER, as its own turn. A RECEIPT IS NOT CONSENT: do not run "
+    "anything the ask was meant to authorise until the answer arrives — continue "
+    "other work, or end the turn saying what is queued. `timeout`: 1 h (3600) is "
+    "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
+    "(floor 2 min); on a timeout notice take your own recommendation and say what "
+    "you assumed. At most 8 asks can be open at once; duplicates are refused. "
+    "Credentials: secret=true on that question (see `read tool://ask`)."
 )
 
 

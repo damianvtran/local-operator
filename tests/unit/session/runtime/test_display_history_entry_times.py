@@ -1,0 +1,340 @@
+"""The entry-time join on a display page: shipped only to a viewer that asked.
+
+The hazard is the one :mod:`tests.unit.session.runtime.test_display_history_audit_capability`
+records, one field over. :class:`DisplayHistoryWindow` sets ``extra="forbid"``,
+so a viewer built before ``entry_times`` existed RAISES when it validates a page
+carrying the field — a FAILED ATTACH, not a degrade. Mixed builds against one
+sessions directory are routine here (the global runtime is a separate uv-tool
+install updated on its own schedule), so ``entry_times`` must reach only a
+viewer that negotiated ``display-history-entry-times-v1``, on all THREE
+serialization routes.
+
+The join is also the wire's only honest source of a row's true entry time: the
+wire carries MESSAGES, and a message has no entry time of its own, so without it
+a reader downstream can only stamp a row with the moment it was served — which
+is the defect this capability exists to close.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from local_operator.harness.types import Message
+from local_operator.session.history_window import (
+    DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY,
+    ENTRY_TIME_WIRE_FIELDS,
+    DisplayHistoryWindow,
+    display_window,
+)
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
+from local_operator.session.transcript import Transcript
+from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
+
+
+async def _server(tmp_path: Path, rows: list[Message]):
+    directory = tmp_path / "sessions" / "entry-times-capability"
+    await seed_transcript(directory, rows)
+    session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    return server
+
+
+async def _attach(server: RuntimeServer, *, announce_entry_times: bool) -> dict[str, Any]:
+    """Attach as a viewer that does or does not know the entry-time capability.
+
+    Speaks the wire protocol directly rather than through ``AttachClient``,
+    because the point is to reproduce a viewer whose BUILD predates the field —
+    which the current client can no longer be talked into being.
+    """
+    record = server._record
+    reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+    auth = {
+        "key": record.control_key,
+        "client": "attach",
+        "locality": "local",
+        "frontend_state": True,
+        "display_window": True,
+    }
+    if announce_entry_times:
+        auth["display_history_entry_times"] = True
+    writer.write(json.dumps(auth).encode() + b"\n")
+    await writer.drain()
+    frames = []
+    try:
+        while True:
+            line = await asyncio.wait_for(reader.readline(), timeout=10)
+            if not line:
+                break
+            frame = json.loads(line)
+            frames.append(frame)
+            if frame.get("op") == "frontend_sync":
+                return frame["data"]
+    finally:
+        writer.close()
+    raise AssertionError(f"no frontend_sync frame arrived: {frames}")
+
+
+@pytest.mark.asyncio
+async def test_owner_advertises_the_entry_time_capability_beside_the_window_one(tmp_path) -> None:
+    server = await _server(tmp_path, [Message.user("row")])
+    try:
+        assert DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY in server._record.capabilities
+        assert "display-history-window-v1" in server._record.capabilities
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_that_did_not_negotiate_receives_no_entry_times(tmp_path) -> None:
+    """The attach break, asserted end to end.
+
+    An old viewer's page model forbids extra keys, so the payload it receives
+    must not contain them — and the proof is that the page model validates it.
+    """
+    server = await _server(tmp_path, [Message.user(f"row {i}") for i in range(5)])
+    try:
+        payload = await _attach(server, announce_entry_times=False)
+        window = payload["display_history"]
+        assert window is not None
+        for name in ENTRY_TIME_WIRE_FIELDS:
+            assert name not in window, f"{name} leaked to a viewer that cannot accept it"
+
+        # An old viewer would validate exactly this dict under extra="forbid".
+        # Rebuilt from the model with the new field removed, so the assertion is
+        # about the WIRE payload rather than about a hand-written schema.
+        legacy_fields = {
+            name: field
+            for name, field in DisplayHistoryWindow.model_fields.items()
+            if name not in ENTRY_TIME_WIRE_FIELDS
+        }
+        assert set(window) <= set(legacy_fields)
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_that_negotiated_receives_the_join_for_every_carried_row(tmp_path) -> None:
+    """Negotiated, the join rides — and it is TOTAL over the rows on the page.
+
+    Both halves matter. Presence alone would pass on a map that covered nothing;
+    totality alone would pass on a map delivered unasked (which would break an
+    older viewer). So this asserts the key set of the join IS the id set of the
+    page's own messages, which is also the "subtracted rows are ABSENT, not
+    joinless" rule: whatever the display replay dropped is in neither list.
+    """
+    server = await _server(tmp_path, [Message.user(f"row {i}") for i in range(5)])
+    try:
+        payload = await _attach(server, announce_entry_times=True)
+        window = payload["display_history"]
+        for name in ENTRY_TIME_WIRE_FIELDS:
+            assert name in window
+        DisplayHistoryWindow.model_validate(window)
+        join = window["entry_times"]
+        carried = {message["id"] for message in window["messages"]}
+        assert carried, "the fixture served no rows, so totality would be vacuous"
+        assert set(join) == carried
+        assert all(isinstance(value, (int, float)) and value > 0 for value in join.values())
+    finally:
+        server.close()
+
+
+async def _rpc_frontend_sync(
+    server: RuntimeServer, *, announce_entry_times: bool
+) -> dict[str, Any]:
+    """Attach, drain the push frames, then CALL the frontend_sync RPC op.
+
+    Deliberately NOT the pushed ``frontend_sync`` FRAME that ``_attach`` reads:
+    the frame and the op are different code paths, and covering only one of them
+    is how the audit fields' third route shipped unstripped in round 1.
+    """
+    record = server._record
+    reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+    auth = {
+        "key": record.control_key,
+        "client": "attach",
+        "locality": "local",
+        "frontend_state": True,
+        "display_window": True,
+    }
+    if announce_entry_times:
+        auth["display_history_entry_times"] = True
+    writer.write(json.dumps(auth).encode() + b"\n")
+    await writer.drain()
+
+    # Wait for the pushed sync so the connection is fully established, exactly
+    # as a real viewer does before it ever issues a refresh.
+    while True:
+        line = await asyncio.wait_for(reader.readline(), timeout=10)
+        if not line:
+            raise AssertionError("connection closed before the push frame")
+        if json.loads(line).get("op") == "frontend_sync":
+            break
+
+    # The RPC under test.
+    writer.write(json.dumps({"op": "frontend_sync", "req": 1}).encode() + b"\n")
+    await writer.drain()
+    try:
+        while True:
+            line = await asyncio.wait_for(reader.readline(), timeout=10)
+            if not line:
+                raise AssertionError("connection closed before the result frame")
+            frame = json.loads(line)
+            if frame.get("op") == "result" and frame.get("req") == 1:
+                return frame["data"]
+    finally:
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_frontend_sync_rpc_strips_the_join_for_an_old_viewer(tmp_path) -> None:
+    """An old viewer's history REFRESH must not receive a field it forbids.
+
+    The steady-state path, not a race: ``_refresh_display_history`` calls this
+    op whenever the frontend's ``history_generation`` moves, so an old viewer
+    attached to a new owner hits it as soon as the owner appends a row.
+    """
+    server = await _server(tmp_path, [Message.user("row")])
+    try:
+        data = await _rpc_frontend_sync(server, announce_entry_times=False)
+    finally:
+        server.close()
+    window = data.get("display_history")
+    assert isinstance(window, dict), "the RPC returned no display page"
+    for name in ENTRY_TIME_WIRE_FIELDS:
+        assert name not in window, f"{name} leaked through the frontend_sync RPC"
+
+
+@pytest.mark.asyncio
+async def test_frontend_sync_rpc_keeps_the_join_for_a_new_viewer(tmp_path) -> None:
+    """CANARY (known-positive): the same probe must SEE the field when the
+    viewer did negotiate, or the stripped-case assertion above cannot tell a fix
+    apart from a route that never carries the join at all."""
+    server = await _server(tmp_path, [Message.user("row")])
+    try:
+        data = await _rpc_frontend_sync(server, announce_entry_times=True)
+    finally:
+        server.close()
+    window = data.get("display_history")
+    assert isinstance(window, dict), "the RPC returned no display page"
+    assert "entry_times" in window, "probe is dead: a negotiating viewer saw no join"
+    assert window["entry_times"], "probe is dead: the join was emitted empty"
+
+
+@pytest.mark.asyncio
+async def test_a_history_page_rpc_strips_the_join_for_an_old_viewer(tmp_path) -> None:
+    """The third emission point. Stripping only the sync routes would produce a
+    viewer that attaches cleanly and then fails on its first scroll up."""
+    rows = [Message.user(f"row {index}") for index in range(300)]
+    server = await _server(tmp_path, rows)
+    try:
+        record = server._record
+        reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+        writer.write(
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "locality": "local",
+                    "frontend_state": True,
+                    "display_window": True,
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        sync = None
+        while sync is None:
+            line = await asyncio.wait_for(reader.readline(), timeout=10)
+            frame = json.loads(line)
+            if frame.get("op") == "frontend_sync":
+                sync = frame["data"]
+        token = sync["display_history"]["before_token"]
+        assert token, "the fixture must be long enough to page"
+        writer.write(
+            json.dumps({"op": "history_page", "req": "r1", "before": token}).encode() + b"\n"
+        )
+        await writer.drain()
+        page = None
+        while page is None:
+            line = await asyncio.wait_for(reader.readline(), timeout=10)
+            frame = json.loads(line)
+            if frame.get("req") == "r1":
+                assert frame.get("op") == "result", frame
+                page = frame["data"]
+        for name in ENTRY_TIME_WIRE_FIELDS:
+            assert name not in page
+        writer.close()
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_new_viewer_against_an_owner_without_the_capability_is_safe(tmp_path) -> None:
+    """The reverse direction, which is safe by construction and worth pinning.
+
+    The field is absent from the payload, pydantic supplies the empty default,
+    and the reader therefore treats every row as unstamped rather than failing.
+    """
+    transcript = Transcript(tmp_path / "s")
+    await transcript.append_messages([Message.user("row")])
+    page = display_window(
+        transcript,
+        conversation_id="c",
+        owner_epoch="e",
+        through_id=transcript.entries()[-1].id,
+    )
+    payload = page.model_dump(mode="json")
+    for name in ENTRY_TIME_WIRE_FIELDS:
+        payload.pop(name)
+    restored = DisplayHistoryWindow.model_validate(payload)
+    assert restored.entry_times == {}
+
+
+@pytest.mark.asyncio
+async def test_the_oversized_fallback_page_carries_no_join(tmp_path, monkeypatch) -> None:
+    """R-6: a page whose rows were BLANKED must not keep a join over them.
+
+    The push frame's overflow path replaces the page with an empty
+    ``full_required`` one so the transport survives. ``model_copy`` keeps every
+    field it is not told to drop, so without naming ``entry_times`` the fallback
+    travels with a map of instants for rows the same page says it does not have —
+    a join over absent ids, which is the one shape this whole feature exists to
+    refuse. Harmless only because a reader raises on ``status != "ok"`` before it
+    looks; the page should still be internally honest.
+
+    The oversize is FORCED rather than built, because a real one needs a frame
+    past the 1 MiB line limit and the fallback has to hold while it is measured:
+    the first report reports, every later one (the re-measure of the reduced
+    frame) is honest.
+    """
+    from local_operator.session import frontend_state as frontend_module
+
+    real_report = frontend_module.oversized_frame_report
+    calls = {"n": 0}
+
+    def report_once(frame, limit):  # noqa: ANN001, ANN202
+        calls["n"] += 1
+        return "forced oversize" if calls["n"] == 1 else real_report(frame, limit)
+
+    monkeypatch.setattr(frontend_module, "oversized_frame_report", report_once)
+
+    server = await _server(tmp_path, [Message.user(f"row {i}") for i in range(5)])
+    try:
+        payload = await _attach(server, announce_entry_times=True)
+    finally:
+        server.close()
+
+    page = payload["display_history"]
+    assert page["status"] == "full_required", page
+    assert page["messages"] == []
+    assert (
+        page["entry_times"] == {}
+    ), "the fallback page kept a join describing rows it no longer carries"

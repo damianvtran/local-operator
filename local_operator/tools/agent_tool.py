@@ -88,6 +88,7 @@ from local_operator.agent_profiles import (
 )
 from local_operator.harness.subagent import (
     configured_effort_tiers,
+    depth_closed_the_tier_choice,
     describe_effort_tiers,
     model_may_choose_tier,
 )
@@ -1071,8 +1072,12 @@ async def _op_sync(
 
     The hub arm needs a Radient credential and network access; without either
     it degrades to ``unavailable`` per row while the local seed updates still
-    run (design §9.2). Nothing here is called on boot — sync is only ever the
-    word a caller typed.
+    run (design §9.2). The seed arm is no longer boot-idle as of #2060: the
+    startup seam classifies every launch (``agent_profiles
+    .startup_seed_update_pass``) and auto-applies the rows the revision ledger
+    proves unedited, so a clean starter can move without anyone typing
+    ``sync`` — but an EDITED starter is only ever changed by an explicit call,
+    and never by this tool (it cannot force).
     """
 
     side = (resolve or "").strip().lower()
@@ -1140,10 +1145,11 @@ async def _op_sync(
         return "\n".join(parts) if parts else seed.render()
 
     rendered = await asyncio.to_thread(run)
-    if "re-run with force" in rendered or "differs from the packaged starter" in rendered:
-        # The seed arm's refusal sentence is shared with the CLI, where --force
-        # still exists. A model has no force (it must never be able to discard a
-        # user's edits), so point it at the explicit, echoing path instead.
+    if "differs from the packaged starter" in rendered:
+        # The seed arm's refusal sentence is shared with the CLI (where the
+        # remedy it names is ``lop agents sync --name X --replace --yes``). A
+        # model has no force (it must never be able to discard a user's
+        # edits), so point it at the explicit, echoing path instead.
         rendered += (
             "\n\nThis tool cannot overwrite an edited starter. To take the packaged text, "
             "ask the user, then use op='reset' name=<role> (it prints what it replaced)."
@@ -1296,8 +1302,8 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
         # The sync baseline rides along for the same reason, and the failure
         # without it is concrete: `seed_sha256:`/`hub_sha256:` is the fingerprint
         # `sync` compares against, so a tool-side edit that dropped it would make
-        # an UNMOVED starter read as "differs — re-run with force" (divergence
-        # plus no install record) instead of "no update to pull". Copying it is
+        # an UNMOVED starter read as "differs from the packaged starter"
+        # (divergence plus no install record) instead of "no update to pull". Copying it is
         # exactly as truthful as `seed:` is: it records what was installed, not
         # what the row now says, and the comparison is what detects the edit.
         for marker_prefix in (
@@ -1430,7 +1436,7 @@ async def execute_agent(
     """
 
     try:
-        params = AgentParams.model_validate(args, context=effort_validation_context())
+        params = AgentParams.model_validate(args, context=effort_validation_context(context))
     except ValidationError as exc:
         return _validation_error(tool_call_id, "agent", exc)
 
@@ -1459,7 +1465,9 @@ async def execute_agent(
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 
 
-def _effort_pin_description(model_choice: bool, session_model_label: str | None = None) -> str:
+def _effort_pin_description(
+    model_choice: bool, session_model_label: str | None = None, delegation_depth: int = 0
+) -> str:
     """The ``effort`` description for create/update, matching the live schema.
 
     With model choice ON and tiers configured it names what each resolves to so
@@ -1471,8 +1479,21 @@ def _effort_pin_description(model_choice: bool, session_model_label: str | None 
     not "no tiers are configured" — the operator owns the choice, so the enum
     is ``inherit`` even where tiers exist. Saying "no tiers are configured"
     there would be FALSE, which is why this takes the flag rather than reading
-    ``configured_effort_tiers()`` for its zero-tier arm.
+    ``configured_effort_tiers()`` for its zero-tier arm. The flag is still the
+    arm: the only live config read besides the tier list is
+    :func:`~local_operator.harness.subagent.depth_closed_the_tier_choice`, which
+    picks the WORDING for a subagent (depth, not the key, closed the picker
+    under ``model_choice=model``; under ``operator`` the key did) and never
+    changes which arm renders.
     """
+    if not model_choice and depth_closed_the_tier_choice(delegation_depth):
+        # A subagent is refused for who it is, not for the key, so the operator
+        # copy below (which names ``subagents.model_choice=operator``) would be
+        # false under ``model_choice=model`` — see ``model_may_choose_tier``.
+        return (
+            "create/update: no effort tiers are yours to choose (you are a subagent; "
+            "only the top-level session pins tiers); 'inherit' clears a pin."
+        )
     if not model_choice:
         # Names the OPERATOR's route as well as the model's, in place of the
         # older "the operator sets tier pins": that sentence said the operator
@@ -1511,10 +1532,11 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         return None
     # ONE read of the policy per build, shared by the schema, the description
     # and the validator's wrapper — see ``build_task_tool``.
-    model_choice = model_may_choose_tier()
+    depth = context.delegation_depth
+    model_choice = model_may_choose_tier(depth)
     parameters = _advertise_effort_tiers(
         AgentParams.model_json_schema(),
-        description=_effort_pin_description(model_choice, context.session_model_label),
+        description=_effort_pin_description(model_choice, context.session_model_label, depth),
         extra=(INHERIT_EFFORT,),
         model_choice=model_choice,
     )
@@ -1549,5 +1571,6 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
             parameters,
             model_choice=model_choice,
             session_model_label=context.session_model_label,
+            delegation_depth=depth,
         ),
     )

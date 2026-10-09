@@ -314,6 +314,21 @@ def feature_flags() -> dict[str, Any]:
         # render is exactly the stale-paint defect the frame exists to
         # fix.
         "frontend_replace": 1,
+        # THE ENTRY-TIME VOCABULARY. `entry_ts=1` on `GET .../{id}/history` (and
+        # the snapshot route beside it, whose embedded page is served by the same
+        # reader) declares that this renderer can consume the per-row `ts_source`
+        # values `entry` / `unstated` / `served`, so a wire row with no provable
+        # entry time arrives as `ts: null` + `unstated` rather than a fabricated
+        # serve-stamp.
+        #
+        # Its own key for the rule `session_search` states above: an older
+        # renderer sends nothing and keeps today's bytes, and gating any EXISTING
+        # surface on this would hide a working panel from a backend that merely
+        # cannot say where a stamp came from. `ts_source` itself is additive and
+        # ignored by an older reader, so nothing breaks in either direction — the
+        # key exists so the NEW renderer can tell whether asking is worthwhile
+        # before it sends a flag the old backend ignores.
+        "entry_ts": 1,
         # ``/info``'s host read and ``/session``'s one-snapshot ledger
         # report. A NEW key rather than a bump of `catalogues`, and the
         # rule is the one `session_search` states above: a renderer
@@ -668,6 +683,20 @@ def feature_flags() -> dict[str, Any]:
         # renderer reads this key). Two faces, deliberately separate: they
         # gate two different wires, and neither implies the other.
         "input_mode": 1,
+        # IMAGES ON A QUEUED-ASK ANSWER: the optional ``images`` list on
+        # ``POST /v1/desktop/sessions/{id}/answers`` (``Answer.images``, the
+        # Other door's attachments), plus the ``attachments`` refs the folded ask
+        # rows then carry. WHY A KEY -- the ``input_mode`` argument verbatim:
+        # ``Answer`` is ``extra="forbid"``, so an ungated send to an older backend
+        # 422s the user's own answer. Gated, the answer card draws no attach
+        # affordance and behaves exactly as today; absence is the legacy path.
+        #
+        # THE OWNER-SIDE HALF is a different negotiation on a different wire: the
+        # runtime advertises ``ask-attachments-v1`` in its record and the sender
+        # REFUSES, rather than strips, when it is missing (a runtime outlives the
+        # daemon that serves this route, so this key being present does not prove
+        # the owner behind a given session can keep the pictures).
+        "ask_attachments": 1,
         # THE SPEECH SURFACE: `GET /v1/stt/paths` (the ordered cascade report)
         # and `POST /v1/stt/transcriptions` (the executor, with its 409
         # `stt_unavailable` structured refusal), plus the audio-accepting

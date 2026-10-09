@@ -79,6 +79,7 @@ from local_operator.harness.types import (
     AgentEvent,
     AgentMessage,
     AgentStartEvent,
+    AttachmentContent,
     CompactionEndEvent,
     CompactionStartEvent,
     CustomMessage,
@@ -159,6 +160,28 @@ TOOL_OUTPUT_TAIL_CHARS = 8_000
 
 #: Same bound for the args side of an expanded tool row.
 TOOL_ARGS_CHARS = 4_000
+
+#: The canonical live-detail keys a tool UPDATE may carry and the phone folds
+#: through onto its row verbatim (the harness lane's frozen `generate_image`
+#: bag, PR #2089: the six fields, `None` when no provider supplied a value,
+#: plus the producing `tool_name`). The fold is the TRANSPORT SEAM for these —
+#: a producer reports them as update details, and until this allowlist the
+#: update arm carried none of an update's details onto the row, so the field
+#: names the card's adapter reads never reached the phone on a real stream
+#: (the capture fixtures seed the fold's OUTPUT, which is why a replay could
+#: look green without it). Keys outside the list are never copied, so other tools' update
+#: details stay untaxed on the wire, and a key ABSENT from an update is left
+#: as it was: the same "absent means absent" tolerance the card's adapter
+#: renders.
+LIVE_IMAGE_DETAIL_KEYS: tuple[str, ...] = (
+    "tool_name",
+    "stage",
+    "queue_position",
+    "progress_fraction",
+    "log_lines",
+    "error",
+    "error_type",
+)
 
 #: How much of a subagent's launch prompt the roster row carries on the wire.
 #: The list projection is a full repaint pushed ~30x/s and every subagent row
@@ -441,7 +464,7 @@ def _compact_multiline(text: str, limit: int) -> str:
 
 
 def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
-    """Lightweight references to a user message's image blocks — index + mime,
+    """Lightweight references to a message's image blocks — index + mime,
     never the bytes. The phone fetches the pixels lazily from the image
     endpoint (see daemon.api_session_image), which reads them back out of the
     on-disk transcript by the same index. Carrying only the reference keeps a
@@ -450,9 +473,29 @@ def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
     A block with an empty ``data`` (an attachment reference that no longer
     resolves) is still listed: the endpoint degrades it to a broken-image
     marker, which is more honest than silently dropping the attachment row.
+
+    TWO BLOCK SHAPES COUNT, on one shared index: an inline ``ImageContent``
+    (a paste, a screenshot the model reads) and an output artifact of kind
+    ``image`` (``AttachmentContent``), whose bytes live in the attachment
+    store rather than in ``data``. ``daemon._image_bytes`` walks the same
+    pair — the index is the whole contract between producer and consumer, so
+    both sides change together or not at all. Artifacts of other kinds do NOT
+    count: no player endpoint exists for them yet, and counting one would
+    shift every later index onto the wrong bytes.
     """
     content = getattr(message, "content", None)
-    if not isinstance(content, list):
+    return _image_refs_for_content(content if isinstance(content, list) else None)
+
+
+def _image_refs_for_content(content: list[Any] | None) -> list[dict[str, Any]]:
+    """The walk both carriers share — a message's blocks or a result's blocks.
+
+    Split out because a LIVE ``ToolExecutionEndEvent`` hands this fold a
+    ``ToolResult``, not a ``Message``: both carry ``content`` lists with the
+    same two image shapes, and the index emitted here must be the one
+    ``daemon._image_bytes`` resolves against, so the walk exists once.
+    """
+    if not content:
         return []
     refs: list[dict[str, Any]] = []
     # ``index`` counts IMAGE blocks only (a text caption does not shift it),
@@ -461,6 +504,9 @@ def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
     for block in content:
         if isinstance(block, ImageContent):
             refs.append({"index": image_index, "mime_type": block.mime_type or "image/png"})
+            image_index += 1
+        elif isinstance(block, AttachmentContent) and block.kind == "image":
+            refs.append({"index": image_index, "mime_type": block.content_type or "image/png"})
             image_index += 1
     return refs
 
@@ -484,6 +530,20 @@ def _tool_row_details(
         # Diff payloads ride through whole — the expanded row renders the
         # coloured unified diff from them.
         for key in ("diff", "added", "removed", "lines_added", "lines_removed"):
+            if key in result_details:
+                details[key] = result_details[key]
+        # THE SETTLE PATH CARRIES THE CANONICAL BAG TOO (review round 1, F1).
+        # This function REPLACES the row's details at settle, so the live
+        # update pass-through (``LIVE_IMAGE_DETAIL_KEYS``) is discarded here
+        # — and without this read the card's settle arms (a landed cancel's
+        # ``stage``, the ``media_already_completed`` conflict) are unreachable
+        # on a real stream: the capture fixtures seed THIS function's output,
+        # so they cannot see the drop. Same tolerance as the update arm —
+        # present-key verbatim (`None` included), absent key not written —
+        # which also keeps live and replayed rows identical: updates are
+        # live-only, so a replayed row could never reproduce a retained live
+        # value.
+        for key in LIVE_IMAGE_DETAIL_KEYS:
             if key in result_details:
                 details[key] = result_details[key]
     return details
@@ -1289,6 +1349,15 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # would put a raw '(alarm) The session resumed…' line in the
                 # transcript as if the user had typed it.
                 details = message.details or {}
+                if details.get("hidden"):
+                    # A HIDDEN delivery paints nothing on the phone either —
+                    # the same decision the TUI replay and the desktop window
+                    # make through ``details.hidden``. This branch is reached
+                    # BEFORE the shared ``is_harness_notice_row`` check below,
+                    # so it has to ask itself: without it a patience fire, and
+                    # Aida's first-run trigger, painted as a wake notice above
+                    # her reply on the mobile feed (audit A4).
+                    continue
                 if not details.get("wake_catchup"):
                     # Strip the model-facing envelope with the SAME helper the
                     # TUI's WakeBlock uses. The raw payload is
@@ -1626,6 +1695,14 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                     "" if receipt else result_text,
                     result_details if isinstance(result_details, dict) else None,
                 )
+                # Output-artifact media rides the row as REFERENCES (index +
+                # mime), the same lazy contract user attachments use: bytes
+                # are fetched from the image endpoint on demand, never re-sent
+                # per projection repaint. Set only when non-empty, so a result
+                # with no media leaves the row shape unchanged.
+                refs = _image_refs(message)
+                if refs:
+                    entry.images = refs
                 # The expansion flag is set on the CALL and must survive the
                 # result settling the row.
                 if entry.details.get("user_run"):
@@ -2082,6 +2159,15 @@ class ProjectionFold:
             text = getattr(event.partial_result, "text", "") or ""
             if text:
                 row.details["partial"] = text[-TOOL_OUTPUT_TAIL_CHARS:]
+            # The canonical live bag folds through VERBATIM (see
+            # ``LIVE_IMAGE_DETAIL_KEYS``): a key the update carries is copied
+            # — `None` included, which is the canonical "no provider value"
+            # statement — and a key it does not carry is left alone.
+            live_details = event.partial_result.details
+            if live_details:
+                for key in LIVE_IMAGE_DETAIL_KEYS:
+                    if key in live_details:
+                        row.details[key] = live_details[key]
         elif isinstance(event, ToolExecutionEndEvent):
             if is_ask_gate_divert_details(event.result.details):
                 # THE DIVERT SETTLES NOTHING (design docs/design/ask-gate.md
@@ -2147,6 +2233,17 @@ class ProjectionFold:
             row.diff_added, row.diff_removed = _diff_counts(result.details)
             if result.is_error:
                 row.error = _compact(result.text, 200)
+            # Output-artifact media rides the live row as the same lazily
+            # fetched references the history fold attaches: the result's
+            # content is walked by the one shared index (see
+            # ``_image_refs_for_content``), so a phone watching live shows
+            # a generated image the moment the call settles — and after a
+            # reconnect the replayed row shows the identical references.
+            refs = _image_refs_for_content(
+                result.content if isinstance(result.content, list) else None
+            )
+            if refs:
+                row.images = refs
             row.details = self._tool_details(
                 self._tool_args.pop(event.tool_call_id, {}), result.text, result.details
             )

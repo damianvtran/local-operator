@@ -421,7 +421,7 @@ def test_an_unbumped_update_does_not_render_as_a_no_op() -> None:
     )
 
     rendered = report.render()
-    assert "reviewer: updated to the packaged starter (1.0.0, text moved)" in rendered
+    assert "reviewer: updated to the packaged starter (1.0.0, text revised)" in rendered
     assert "1.0.0 -> 1.0.0" not in rendered
 
 
@@ -437,3 +437,136 @@ def test_the_payload_carries_every_verdict_field_and_a_kind(tmp_path) -> None:
     assert by_name["hunter"]["kind"] == "hub"
     assert by_name["hunter"]["hub_id"] == "abc-123"
     assert payload["summary"]["up-to-date"] == 1
+
+
+def test_an_available_update_renders_as_available_not_updated() -> None:
+    """A READ-ONLY classification must not claim a write (F2's over-claim trap).
+
+    ``counts()`` used to bucket any ``outdated-clean`` as "updated" and the
+    renderer printed "updated to the packaged starter" unconditionally — both
+    were true only while a clean row was ALWAYS applied on the spot. Under
+    ``--check``/``--dry-run`` it is written nowhere, so both halves must learn
+    the distinction, and the applied form keeps its old words.
+    """
+
+    def verdict(*, applied: bool) -> SeedSyncVerdict:
+        return SeedSyncVerdict(
+            name="reviewer",
+            verdict="outdated-clean",
+            installed_version="1.0.0",
+            packaged_version="2.0.0",
+            applied=applied,
+        )
+
+    available = SyncReport(entries=(verdict(applied=False),))
+    text = available.render()
+    assert "update available (1.0.0 -> 2.0.0)" in text
+    assert "updated to the packaged starter" not in text
+    assert available.counts()["available"] == 1
+    assert available.counts()["updated"] == 0
+
+    applied = SyncReport(entries=(verdict(applied=True),))
+    assert "updated to the packaged starter (1.0.0 -> 2.0.0)" in applied.render()
+    assert applied.counts()["updated"] == 1
+    assert applied.counts()["available"] == 0
+
+
+def test_a_capability_delta_says_so_on_the_render_surface() -> None:
+    """The review surface names what a held row changes (design D2 / UX U4 / QA Q4).
+
+    The startup pass holds a ``tools`` delta and sends the user to ``--check``
+    - which used to print the same bland line as a prose tweak. The clean arm
+    now appends the capability note (unapplied: the short form and a remedy
+    carrying ``--name``; applied: the long form), so the boundary the pass
+    refused to cross unattended is visible before the typed command crosses
+    it.
+    """
+
+    def verdict(*, applied: bool) -> SeedSyncVerdict:
+        return SeedSyncVerdict(
+            name="reviewer",
+            verdict="outdated-clean",
+            installed_version="1.2.0",
+            packaged_version="2.0.0",
+            applied=applied,
+            diverged_fields=("tools",),
+        )
+
+    available = SyncReport(entries=(verdict(applied=False),)).render()
+    assert (
+        "reviewer: update available (1.2.0 -> 2.0.0), changes tool access — "
+        "run `lop agents sync --name reviewer` to apply it" in available
+    )
+
+    applied = SyncReport(entries=(verdict(applied=True),)).render()
+    assert "reviewer: updated to the packaged starter (1.2.0 -> 2.0.0)" in applied
+    assert " — changes the role's tool access" in applied
+
+
+def test_the_render_puts_actionable_lines_first() -> None:
+    """Refusals before receipts, receipts before up-to-date (UX round 1, U7).
+
+    A 365-line run buried its single actionable line under nine prompt
+    echoes; the order is now actionable-first with the stable sort keeping
+    each rank's input order.
+    """
+
+    report = SyncReport(
+        entries=(
+            SeedSyncVerdict(name="aida", verdict="up-to-date"),
+            SeedSyncVerdict(name="coder", verdict="outdated-clean", applied=True),
+            SeedSyncVerdict(
+                name="reviewer",
+                verdict="outdated-diverged",
+                detail="differs from the packaged starter in instructions. Left alone.",
+            ),
+        )
+    )
+
+    rendered = report.render()
+    assert rendered.index("reviewer:") < rendered.index("coder:") < rendered.index("aida:")
+
+
+def test_the_summary_uses_the_round_one_vocabulary() -> None:
+    """``3 updates available`` / ``2 differ from the packaged starter`` (D5).
+
+    ``counts()`` keys stay stable for the desktop reader; only the rendered
+    nouns changed. Singular counts read singular.
+    """
+
+    report = SyncReport(
+        entries=(
+            *(SeedSyncVerdict(name=f"s{i}", verdict="outdated-clean") for i in range(3)),
+            *(SeedSyncVerdict(name=f"d{i}", verdict="outdated-diverged") for i in range(2)),
+        )
+    )
+
+    rendered = report.render()
+    assert "3 updates available" in rendered
+    assert "2 differ from the packaged starter" in rendered
+    assert "diverged" not in rendered.splitlines()[0]
+
+    single = SyncReport(entries=(SeedSyncVerdict(name="solo", verdict="outdated-clean"),))
+    assert "1 update available" in single.render()
+
+
+def test_a_forced_replace_renders_the_discarded_label_and_tags() -> None:
+    """The echo block carries the label and tag names a replace dropped (U5)."""
+
+    report = SyncReport(
+        entries=(
+            SeedSyncVerdict(
+                name="reviewer",
+                verdict="outdated-diverged",
+                applied=True,
+                diverged_fields=("instructions",),
+                replaced_instructions="OLD TEXT",
+                replaced_label="Chief",
+                replaced_tags=("mine", "keepme"),
+            ),
+        )
+    )
+
+    rendered = report.render()
+    assert "your label: Chief" in rendered
+    assert "your tags: mine, keepme" in rendered

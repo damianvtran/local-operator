@@ -420,7 +420,7 @@ def read_model_choice() -> str:
     return DEFAULT_MODEL_CHOICE
 
 
-def model_may_choose_tier() -> bool:
+def model_may_choose_tier(delegation_depth: int = 0) -> bool:
     """May a DELEGATING MODEL pick the model a child runs on?
 
     The policy half of the ``task``/``agent`` schemas: when this is ``False``
@@ -428,8 +428,47 @@ def model_may_choose_tier() -> bool:
     for one anyway is refused at the tool-argument boundary with a message that
     says what to do instead. See :func:`read_model_choice` for why the default
     is the restrictive one.
+
+    ``delegation_depth`` is the hops between the asking session and the
+    top-level one (``Session._delegation_depth``): **a session that is itself a
+    subagent (depth >= 1) never may, whatever ``subagents.model_choice`` says**.
+    The key is the OPERATOR delegating the choice to the model they are talking
+    to, and that grant stops at the first hop. Measured incident (session
+    3463fc25dade): ``model_choice=model`` with ``models.hi`` on Claude Sonnet,
+    session model Radient auto. A depth-1 subagent launched five ``scout``
+    children with ``effort='hi'``; they ran on Sonnet (``owns_model=True``)
+    instead of inheriting Radient auto — roughly $5 of Sonnet spend against
+    $0.76 on auto, invisible in the panel rows, which show only the depth-1
+    child's own usage. The operator had agreed to the model they were driving
+    choosing tiers, not to a fan-out of delegated models re-deciding the bill
+    one level down, where nothing reviews the choice. So below the top the
+    policy is exactly ``operator``: children inherit the launching session's
+    model, and only an operator-authored ROLE pin (``profile.effort``, resolved
+    at launch by ``Session._resolve_subagent_model``) can still move a nested
+    child — that is the operator's own decision, not the model's, and it is
+    deliberately untouched here.
+
+    The default of ``0`` keeps every existing caller (and every top-level
+    session) on the pure config read.
     """
+    if delegation_depth >= 1:
+        return False
     return read_model_choice() == MODEL_CHOICE_MODEL
+
+
+def depth_closed_the_tier_choice(delegation_depth: int) -> bool:
+    """Is the picker closed BY DEPTH, i.e. would the key alone have left it open?
+
+    True only for a subagent under ``model_choice=model``. Under ``operator``
+    the key already closes the picker for everyone, so a nested session is
+    refused for the same reason the top level is, and the copy it is shown must
+    say so: telling it "only the top-level session may pick a tier" would be
+    false there (nobody on the model side can), and would drop the operator's
+    route (``subagents.model_choice``) that the operator-arm copy carries. The
+    nested wording exists for exactly the case where the key says "model" and a
+    reader would otherwise be told the picker is open to it.
+    """
+    return delegation_depth >= 1 and read_model_choice() == MODEL_CHOICE_MODEL
 
 
 def configured_effort_tiers() -> dict[str, str]:
@@ -858,7 +897,10 @@ def _session_lineage(session: "Session") -> tuple[str, ...]:
 
 def _session_depth(session: "Session") -> int:
     depth = getattr(session, "_delegation_depth", 0)
-    return depth if isinstance(depth, int) and depth >= 0 else 0
+    # ``type(...) is int``: a bool is an int, and ``True`` would be depth 1. The
+    # tool-side readers (``effort_validation_context``/``_delegation_depth``)
+    # apply the same rule, so every reader of a depth agrees on what one is.
+    return depth if type(depth) is int and depth >= 0 else 0
 
 
 def lookup_team(session: "Session", name: str) -> Any:
@@ -2886,6 +2928,12 @@ async def _construct_child_session(
     # ordinary builtin inventory. Keep tool construction keyed to actual role
     # policy (plus scout's explicit read-only fallback), not the MCP boundary.
     role_limited = (profile is not None and bool(profile.tools)) or agent == "scout"
+    #: The names this child's ALLOWLIST actually named — the deferral pins below
+    #: read this and not ``profile.tools``, because an allowlist is not always a
+    #: profile: the scout fallback restricts through ``READ_ONLY_TOOLS`` with no
+    #: profile at all (CI round 3). Empty for a freely-inventoried child, which
+    #: must pay the deferral like any other session.
+    allowlist_names: frozenset[str] = frozenset()
     if role_limited:
         # The prior full-inventory-then-filter path exposed tools in registry
         # order; select that same order up front so createIf builders run only
@@ -2898,6 +2946,7 @@ async def _construct_child_session(
         allowed_names = set(profile.tools or ()) if profile is not None else set()
         if agent == "scout" and (profile is None or not profile.tools):
             allowed_names.update(SCOUT_TOOL_ALLOWLIST)
+        allowlist_names = frozenset(allowed_names)
         builtin_names = [name for name in DEFAULT_TOOL_NAMES if name in allowed_names]
         for name in DEFAULT_TOOL_NAMES:
             if name in READ_ONLY_NETWORK_TOOLS and name not in builtin_names:
@@ -2976,6 +3025,11 @@ async def _construct_child_session(
 
     host_has_browser, host_has_console = host_capability_probes()
 
+    #: The child's ``GoalState``, filled in once the child Session exists (the
+    #: provider is built before it). Empty means "not built yet": the parent's
+    #: reading answers until then.
+    child_holder: list[Any] = []
+
     def system_blocks_provider(model_label: str = "") -> list[str]:
         # ``model_label`` is passed by the child Session each turn (its own
         # ``model_label``), which for a subagent is the resolved effort-tier
@@ -3035,7 +3089,16 @@ async def _construct_child_session(
             # builder would infer (``ask``) is a tool no child has
             # (``build_ask_tool`` refuses without a hook), which is exactly what the
             # round-1 reviews found this child being told to use (BLOCKER).
-            interactive=parent_session.interactivity(),
+            #
+            # Read through the CHILD's own holder once it exists: that holder
+            # carries the parent's probe OBJECT (installed below) and latches it
+            # at the child's own turn boundary (``GoalState.latch_interactivity``),
+            # so a transient detach inside a child turn publishes nothing. Reading
+            # ``parent_session.interactivity()`` instead would serve the PARENT's
+            # snapshot, frozen at the parent's turn start for the whole child run.
+            interactive=(
+                child_holder[0].interactivity() if child_holder else parent_session.interactivity()
+            ),
             channel=CHANNEL_HUB,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
@@ -3162,6 +3225,10 @@ async def _construct_child_session(
     parent_probe = parent_session.interactivity_probe
     if parent_probe is not None:
         child._goal_state.interactive_probe = parent_probe
+        # Only when the parent HAS a probe: a child of an unmeasured parent keeps
+        # reading ``parent_session.interactivity()`` (``None``), never a holder
+        # with no probe, which would read the same but by accident.
+        child_holder.append(child._goal_state)
     if child_stream is not parent_stream:
         child.add_dispose_hook(child_stream.close)
     # Undo ``Session.__init__``'s capability merge, DEPTH-AWARE. The set is
@@ -3194,6 +3261,21 @@ async def _construct_child_session(
     #
     # ``refresh_tools`` rather than touching ``_tools``: it is the committed
     # hook and it keeps the loop's ``context.tools`` in step.
+    # DEFERRED SCHEMAS (``tools/deferral.py``): a role that NAMES a tool in its
+    # allowlist keeps its schema published — the allowlist above already decided
+    # what the child HOLDS; this decides only what its request array carries.
+    # The set itself is the same one every session uses (see that module for why
+    # a child-only set was measured and dropped).
+    #
+    # ``allowlist_names``, NOT ``profile.tools``, and the difference is a real
+    # child: the scout fallback restricts through ``READ_ONLY_TOOLS`` with no
+    # profile, so reading the profile pinned nothing and withheld two schemas
+    # from a role whose read-only allowlist names both (``list_variables``,
+    # ``read_variable``) — the exact rule this comment states, broken on the one
+    # path that reaches an allowlist without a profile (CI round 3).
+    set_deferral = getattr(child, "set_tool_deferral", None)
+    if callable(set_deferral):
+        set_deferral(pins=allowlist_names)
     merged_in = {tool.name for tool in child._tools} - {tool.name for tool in tools}
     if profile is not None:
         may_delegate = profile.may_delegate
@@ -3306,6 +3388,17 @@ async def _construct_child_session(
         child.active_team = target.team
         child._team_lineage = tuple(target.team_lineage)
         child._delegation_depth = target.depth
+        # THE DEPTH LANDS AFTER THE TOOLS WERE BUILT. The constructor's
+        # capability merge rendered this child's ``task``/``agent`` at depth 0
+        # (``Session._delegation_depth`` defaults to 0), i.e. WITH the tier
+        # field under ``model_choice=model``. Re-render them now that the stamp
+        # is in, or a nested child is advertised a picker the call-time gate
+        # then refuses (see ``model_may_choose_tier`` for why it may not have
+        # one). Only tools already in the inventory are replaced, so a child
+        # whose ``task`` was pruned above stays without it; a no-op for the
+        # ``operator`` default, where the field was already absent.
+        if target.depth >= 1:
+            child._rebuild_effort_tier_tools()
     if mcp is not None:
         mcp.attach(child)
         # Diagnostics only, and BORROWED: unlike attach_mcp_dispose this adds no

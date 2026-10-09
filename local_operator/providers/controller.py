@@ -51,6 +51,7 @@ from local_operator.providers.registry import (
     credential_provider_id,
     get_provider_definition,
     is_decision_only,
+    is_media_only,
     is_speech_only,
     list_login_providers,
     resolve_env_key,
@@ -276,9 +277,11 @@ class ControllerAuthStore(Protocol):
 def _chat_providers() -> list[ProviderDefinition]:
     """The registry rows that may contribute CHAT models to a catalogue.
 
-    Decision-only providers (``registry.is_decision_only`` — TypeSafe's Jev) and
+    Decision-only providers (``registry.is_decision_only`` — TypeSafe's Jev),
     speech-only ones (``registry.is_speech_only`` — ElevenLabs and ``openai-key``,
-    whose wires serve speech and no chat route at all) are dropped HERE, at the one place
+    whose wires serve speech and no chat route at all) and media-only ones
+    (``registry.is_media_only`` — FAL, whose queue serves generative media and no
+    chat route at all) are dropped HERE, at the one place
     every catalogue is assembled, rather than inside the three builders below or
     in each consumer of them. A provider whose wire rejects ``chat/completions``
     on every host must not appear as a model the user can pick: selecting one
@@ -360,7 +363,9 @@ def _chat_providers() -> list[ProviderDefinition]:
     chat = [
         definition
         for definition in PROVIDER_REGISTRY
-        if not is_decision_only(definition.id) and not is_speech_only(definition.id)
+        if not is_decision_only(definition.id)
+        and not is_speech_only(definition.id)
+        and not is_media_only(definition.id)
     ]
     ids = {definition.id for definition in chat}
     return [
@@ -632,6 +637,23 @@ class ProviderController:
         definition = get_provider_definition(provider)
         if definition is not None and definition.allows_missing_api_key:
             return True
+        if definition is not None and definition.store_credentials_as:
+            # The SAME flavour rule :meth:`usable_providers` applies: a login
+            # flavour (``radient-key``, ``anthropic-key``) is not a separate
+            # usable alternative while its base provider holds an OAuth sign-in.
+            # The two predicates had silently disagreed on that case; it only
+            # became reachable once a key flavour existed for a provider with a
+            # subscription login (``anthropic-key``), and one answer to one
+            # question is the contract both docstrings state.
+            storage = credential_provider_id(provider)
+            try:
+                if any(
+                    row.credential_type == "oauth"
+                    for row in self.auth_store.list_credentials(storage)
+                ):
+                    return False
+            except (sqlite3.Error, OSError):
+                pass
         if self.has_any_credential(provider):
             return True
         return bool(resolve_env_key(provider))
@@ -1041,6 +1063,13 @@ class ProviderController:
         # is never served and the new key misses to a live fetch). The
         # asymmetry is spelled out in full on ``auth_cli._invalidate_cached_usage``.
         self.invalidate_cached_usage(storage)
+        if storage == "radient":
+            # The sign-in proved who the operator is: put it in the stable
+            # prefix every session reads (``aida.profile`` docstring). Same
+            # call as ``auth_cli.run_login`` so the two hosts agree.
+            from local_operator.aida.profile import record_radient_login
+
+            record_radient_login(result, config_dir=self.config_dir)
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."

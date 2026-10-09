@@ -51,6 +51,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     SerializerFunctionWrapHandler,
+    field_validator,
     model_serializer,
     model_validator,
 )
@@ -341,7 +342,136 @@ class AudioContent(BaseModel):
     marker: int | None = Field(default=None, exclude=True)
 
 
-Content = TextContent | ImageContent | AudioContent
+class AttachmentContent(BaseModel):
+    """A first-class reference to binary media produced or fetched by a turn.
+
+    The OUTPUT half of the attachment contract. Where an image the MODEL must
+    see rides :class:`ImageContent` (base64, provider-bound), an artifact the
+    user's surfaces must RENDER rides this block: a small, pointer-shaped
+    record whose bytes live once, content-addressed, in the attachment store
+    (``local_operator.session.attachments``). Generic over ``kind`` by
+    construction — images ship first, video and audio ride the same fields,
+    and nothing here assumes pixels or a screen.
+
+    WHY A REFERENCE AND NOT INLINE BYTES. Generated media is arbitrarily
+    large (a video dwarfs every payload the transcript was built for), and a
+    durable row that carried it inline would be re-read on every page, every
+    replay and every move of the session. The digest is machine-independent;
+    a surface fetches bytes on demand through the same digest-keyed route
+    user-pasted images already use, and a surface that cannot fetch falls
+    back to ``source_url`` or its own unavailable state.
+
+    WHY NOT REUSE ``ImageContent``. An image block IS an image block on the
+    wire — its shape is what providers accept (``{type, data, mime_type}``)
+    — and its ``marker`` is composer-chip presentation. An artifact needs
+    facts no image block has (dimensions, duration, provider URL, generic
+    content type) and must stay legal for media no provider accepts (video,
+    audio). One generic model keeps every surface on ONE render path for all
+    kinds instead of an image-shaped special case growing video fields.
+
+    DURABLE SHAPE — the encoder dumps with ``exclude_defaults``, so a durable
+    row carries only the set fields and NO ``type`` discriminant (it is the
+    default). Readers identify a durable artifact by ``kind`` plus a media
+    fact (``content_type``/``attachment``/``source_url``), NEVER by ``type``
+    — the same rule image blocks learned (``session/transcript.py``), and
+    :func:`coerce_content_blocks` is where that routing lives.
+
+    ``data`` is deliberately NOT a field: producers cache bytes through
+    ``attachments.cache_media`` and hand back the digest; nothing inlines
+    artifact bytes into a frame or a row. A consumer that needs pixels reads
+    the store, and if the store is gone it degrades visibly — never a
+    silently empty block, because an empty ``data`` is exactly how a missing
+    image disappears without a trace.
+    """
+
+    type: Literal["attachment"] = "attachment"
+    #: REQUIRED, deliberately, with no default: ``exclude_defaults`` drops
+    #: defaulted fields from every durable row, and a dropped ``kind`` would
+    #: make an image artifact's row indistinguishable from a legacy image
+    #: reference (both would read ``{content_type, attachment}``) — the exact
+    #: ambiguity ``_stamp_audio_discriminants`` had to fix for audio one
+    #: layer down. A required field is always on the row, so the durable
+    #: identity is the format's own invariant rather than a producer habit.
+    kind: Literal["image", "video", "audio"]
+    #: MIME of the cached bytes. NULLABLE, unlike ``kind``: the design rule is
+    #: "absent where unknown", and a hand-built or older block without it must
+    #: parse (surfaces fall back to their own sniffs/constants).  The truthy
+    #: default this class first shipped made three consumer fallbacks —
+    #: ``daemon._image_bytes``'s sidecar mime, the TUI adapter's ``image/png``,
+    #: and the mobile ref walk — unreachable code (agent review round 1, F5).
+    content_type: str | None = None
+    #: Digest of the cached bytes in the attachment store — the LOCAL copy
+    #: every surface fetches first. ``None`` only when the store refused the
+    #: write (the producer was then told ``None`` by ``cache_media`` and
+    #: should not have built the block at all; a block with no digest renders
+    #: as unavailable, which is the honest degradation).
+    attachment: str | None = None
+    #: Where the bytes came from, when a provider hosted them: provenance (a
+    #: generated artifact says which service produced it) and the re-fetch
+    #: fallback for a session moved without its attachment store.
+    source_url: str | None = None
+    size_bytes: int | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_s: float | None = None
+    #: A short human handle for labels and file-actions ("flux-dev-01.png").
+    #: Never a filesystem path: an artifact is not a file on the user's disk.
+    name: str | None = None
+
+
+#: The media families :class:`AttachmentContent` may name, and — because the
+#: coercion below routes on ``kind`` — the set every durable-shape check is
+#: built on. Closed on purpose: a typo'd kind fails loudly at the ``Literal``
+#: parse seam wherever a block is ROUTED there — every LIVE frame (the
+#: ``type`` discriminant routes it regardless of ``kind``), and durable rows
+#: whose ``kind`` is in this vocabulary. A durable row whose ``kind`` was
+#: mangled OUT of vocabulary is not routed and reads as empty text, silently;
+#: unreachable from in-tree producers (``cache_media`` types its argument),
+#: and stated here rather than papered over (agent review round 1, F6).
+ATTACHMENT_KINDS = frozenset({"image", "video", "audio"})
+
+
+def coerce_content_blocks(value: Any) -> Any:
+    """Route raw content-block dicts to their concrete models before parsing.
+
+    WHY THIS PASS EXISTS AT ALL, measured on this tree (2026-10-08): the
+    ``Content`` union resolves a typed dict by structural match, and a durable
+    attachment block has NO discriminant to match on. A pydantic smart union
+    landed ``{"kind": "image", "content_type": ..., "attachment": ...}`` on
+    ``TextContent`` — the leftmost member, which accepts any dict by ignoring
+    unknown keys — where the artifact read as EMPTY TEXT and vanished with no
+    error anywhere. That is the trap the encoder's own comment records for
+    image blocks ("identify by ``data``, not by ``type``") one level deeper:
+    it is not only a reader's detection that must avoid ``type``, but the
+    model layer's routing too.
+
+    So routing keys on FACTS a durable row carries: a ``kind`` in the media
+    set plus at least one media fact (``content_type``/``attachment``/
+    ``source_url``). Everything else — every existing shape, including the
+    legacy image/audio reference dicts — is handed to the union untouched, so
+    nothing that parsed before parses differently now. An attachment-SHAPED
+    dict that is invalid is handed to ``AttachmentContent`` anyway: a
+    ``ValidationError`` at the parse seam drops the row (or refuses the
+    frame), which is the existing contract for malformed payloads — silently
+    reading it as empty text is not.
+    """
+    if not isinstance(value, (list, tuple)):
+        return value
+    out: list[Any] = []
+    for block in value:
+        if isinstance(block, dict):
+            kind = block.get("kind")
+            if block.get("type") == "attachment" or (
+                isinstance(kind, str)
+                and kind in ATTACHMENT_KINDS
+                and any(key in block for key in ("content_type", "attachment", "source_url"))
+            ):
+                block = AttachmentContent.model_validate(block)
+        out.append(block)
+    return out
+
+
+Content = TextContent | ImageContent | AudioContent | AttachmentContent
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +507,15 @@ class ToolResult(BaseModel):
     # serialized to providers; always a JSON-ish mapping so consumers can
     # index it without probing the value's shape first.
     details: dict[str, Any] | None = None
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _route_content_blocks(cls, value: Any) -> Any:
+        """``coerce_content_blocks``; see there for the routing rule and why
+        it cannot be left to the union (a durable artifact has no ``type``
+        to discriminate on and was swallowed as empty text without this)."""
+        return coerce_content_blocks(value)
+
     # Active wall time is captured beside execution, not reconstructed by a
     # replaying surface whose clock starts when it paints the historical row.
     duration_s: float | None = None
@@ -410,6 +549,13 @@ class Message(BaseModel):
     content: list[Content] = Field(default_factory=list)
     # assistant only: requested tool calls for this turn
     tool_calls: list[ToolCall] = Field(default_factory=list)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _route_content_blocks(cls, value: Any) -> Any:
+        """``coerce_content_blocks``; see there for the routing rule."""
+        return coerce_content_blocks(value)
+
     # tool only: which call this result answers
     tool_call_id: str | None = None
     tool_name: str | None = None
@@ -729,6 +875,12 @@ class AgentToolUpdate(BaseModel):
     content: list[Content] = Field(default_factory=list)
     # Same contract as ``ToolResult.details``: a mapping or nothing.
     details: dict[str, Any] | None = None
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _route_content_blocks(cls, value: Any) -> Any:
+        """``coerce_content_blocks``; see there for the routing rule."""
+        return coerce_content_blocks(value)
 
 
 # --- capability contracts carried on ToolContext ---------------------------
@@ -1242,6 +1394,19 @@ class ToolContext(BaseModel):
     # rather than probed off the launcher's bound session — a tool that has to
     # read a session off a bound method is a coupling nobody declared.
     session_model_label: str = ""
+    # How many delegation hops sit between this session and the top-level one:
+    # 0 for the session an operator talks to, 1 for a subagent it launched, 2
+    # for that subagent's own subagent, and so on. A snapshot taken when this
+    # context is built (``Session._build_tool_context`` re-reads it per turn).
+    #
+    # Its consumer is the ``task``/``agent`` effort policy: a model-chosen
+    # tier is the TOP-LEVEL session's to make and nobody else's (see
+    # ``harness.subagent.model_may_choose_tier`` and the incident recorded at
+    # ``tools.builtin._nested_task_rejection``), so the tool builders and the
+    # tool-argument gate need to know whether the caller is itself a child.
+    # Declared rather than probed off the launcher's bound session, for the
+    # reason ``session_model_label`` above is.
+    delegation_depth: int = 0
     # The DELEGATED-WORK label, set only on a subagent's context: the short
     # name its parent launched it under (``zoom-scroll-fix``, ``bridge-qa``).
     #
@@ -1563,6 +1728,34 @@ class AgentTool(BaseModel):
     hidden: bool = False
     execute: ToolExecuteFn = Field(exclude=True)
     describe_approval: ApprovalDescribeFn | None = Field(default=None, exclude=True)
+    #: TOP-LEVEL property names whose ``anyOf: [T, null]`` the schema collapse
+    #: rewrote into a plain ``T`` (``tools.registry.collapse_optional_nulls``),
+    #: and which the loop's validator must therefore NOT type-check.
+    #:
+    #: WHY THE VALIDATOR NEEDS THIS AT ALL, and it is a correctness contract
+    #: rather than bookkeeping: ``validate_tool_arguments`` skips any property
+    #: with no top-level ``type``, which is exactly the shape every optional
+    #: field used to have — so the loop checked nothing and the TOOL's own
+    #: pydantic model decided, including the coercers several tools ship
+    #: deliberately (``hub``'s ``to`` accepts a bare job id or its JSON;
+    #: ``jobs``' ``job_id`` accepts a number). Collapsing the union puts a
+    #: ``type`` at the top level, so without this set the loop would enforce a
+    #: type the tool is happy to coerce and refuse the call before the tool ran
+    #: (review round 1, MAJOR-1).
+    #:
+    #: HOST-SIDE, deliberately, and ``exclude=True`` is the load-bearing half: an
+    #: earlier revision carried this as an ``x-collapsed-optional-null`` key
+    #: INSIDE the schema, which put 121 occurrences / ~3.4k characters on every
+    #: published request — a third of what this feature saves — and asked strict
+    #: providers to accept a keyword their schema dialect does not list (review
+    #: round 2, MAJOR-2). Nothing about this belongs on the wire: it exists to
+    #: keep the loop's own check off a property, which the loop can read here.
+    #:
+    #: Flat NAMES, not paths: the loop validates top-level arguments only, so a
+    #: name is the whole key even for a property rewritten inside a nested
+    #: ``$defs`` entry. Live MCP schemas never populate it — the collapse runs
+    #: only on builtins (``create_tools``).
+    optional_null_unions: frozenset[str] = Field(default_factory=frozenset, exclude=True)
     #: The MCP server's ``tools/list`` annotations for this tool, when one
     #: built it: ``{readOnlyHint: True, …}``. Read by exactly one consumer —
     #: the monitor read-only evaluator, whose §6.5 rule is

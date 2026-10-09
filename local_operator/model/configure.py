@@ -837,7 +837,9 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         decision_only_message,
         get_provider_definition,
         is_decision_only,
+        is_media_only,
         is_speech_only,
+        media_only_message,
         speech_only_message,
     )
 
@@ -849,7 +851,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # ``config.yml`` is just as easy. Stripping too, because " deepseek" is the same
     # provider as "deepseek" to a human and was a lookup miss to the harness.
     canonical = "test" if hosting.strip().lower() == "noop" else hosting.strip().lower()
-    if is_decision_only(canonical) or is_speech_only(canonical):
+    if is_decision_only(canonical) or is_speech_only(canonical) or is_media_only(canonical):
         # THE LAST DOOR, and the one a running session reaches: this function is the
         # single chokepoint every surface that can put a model on a LIVE session
         # builds its spec through — the TUI's ``/model`` (``_cmd_model``), the
@@ -867,11 +869,12 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # the pickers, and ``ProviderController.provider('typesafe')`` answers with
         # the real definition (it is a shipped provider with a shipped login), so
         # the TUI's unknown-provider gate waves it through.
-        fact = (
-            speech_only_message(canonical)
-            if is_speech_only(canonical)
-            else decision_only_message(canonical)
-        )
+        if is_media_only(canonical):
+            fact = media_only_message(canonical)
+        elif is_speech_only(canonical):
+            fact = speech_only_message(canonical)
+        else:
+            fact = decision_only_message(canonical)
         raise ValueError(
             f"{fact} Pick a chat model instead — the " "session stays on the one it is running."
         )
@@ -1320,6 +1323,7 @@ def validate_model_selection(
     from local_operator.providers.registry import (
         get_provider_definition,
         is_decision_only,
+        is_media_only,
         is_speech_only,
         speech_wire_noun,
     )
@@ -1340,6 +1344,14 @@ def validate_model_selection(
             (
                 f"'{provider}' serves {speech_wire_noun(provider)}, not chat completions, "
                 "so no session can run on it."
+            ),
+        )
+    if is_media_only(provider):
+        raise ModelSelectionRefused(
+            "provider_media_only",
+            (
+                f"'{provider}' serves generative media (images and video), not chat "
+                "completions, so no session can run on it."
             ),
         )
     served = offered_model_ids(provider)

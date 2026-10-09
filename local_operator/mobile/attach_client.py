@@ -72,6 +72,8 @@ from local_operator.operator.sign import effect_copy, sign_challenge
 from local_operator.paths import config_dir
 from local_operator.session.runtime.registry import scan
 from local_operator.session.runtime.types import (
+    ASK_ATTACHMENTS_CAPABILITY,
+    ASK_ATTACHMENTS_UNSUPPORTED,
     DESKTOP_WATCH_CAPABILITY,
     EVENT_MUTE_CAPABILITY,
     EXCLUSIVE_MOVE_CAPABILITY,
@@ -1055,6 +1057,7 @@ class AttachClient:
         self._attention_supported = False
         self._event_mute_supported = False
         self._exclusive_move_supported = False
+        self._ask_attachments_supported = False
         self._connected = False
 
     @property
@@ -1160,6 +1163,10 @@ class AttachClient:
             INPUT_MODE_CAPABILITY in record.capabilities
         )
         self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in record.capabilities
+        # MAY THIS OWNER KEEP IMAGES ON A QUEUED-ASK ANSWER, resolved per dial like
+        # its neighbours. Unlike ``_input_mode_supported`` this gates a REFUSAL, not
+        # a strip: see ``ask_respond``.
+        self._ask_attachments_supported = ASK_ATTACHMENTS_CAPABILITY in record.capabilities
         try:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", record.control_port, limit=_READ_LIMIT_BYTES
@@ -1194,6 +1201,14 @@ class AttachClient:
             # the owner's strip decision a negotiation rather than a guess.
             if "display-history-audit-v1" in record.capabilities:
                 auth["display_history_audit"] = True
+            # Declared separately AGAIN: this build can READ the ``{entry id: ts}``
+            # join that a display page may carry, and an owner that does not
+            # advertise the capability simply never sends it. Announcing it is what
+            # makes the owner's strip decision a negotiation rather than a guess —
+            # an owner that sent the field unasked would fail an older viewer's
+            # page model (it forbids extras).
+            if "display-history-entry-times-v1" in record.capabilities:
+                auth["display_history_entry_times"] = True
         if self._operator_nonce:
             auth["operator_nonce"] = self._operator_nonce
         if self._slash_consumers is not None:
@@ -2415,16 +2430,43 @@ class AttachClient:
             fields["question_index"] = question_index
         return await self._request("ask_answer", deadline_s=deadline_s, **fields)
 
-    async def ask_respond(self, ask_id: str, answers: dict[str, list[str]], *, by: str = "") -> str:
+    async def ask_respond(
+        self,
+        ask_id: str,
+        answers: dict[str, list[str]],
+        *,
+        by: str = "",
+        images: list[dict[str, Any]] | None = None,
+    ) -> str:
         """Answer a QUEUED ask, ATOMIC per ask (design §2.4).
 
         One body for all of the ask's questions, so there is no per-question wire
         race to lose: the blocking path answered one question at a time and a
         client that died mid-way left the ask half-settled.
+
+        ``images`` is a flat list of ``{question_id, data_b64, mime_type}`` — the
+        HTTP body's shape, unchanged, so ``fit_request_frame`` refits it with no
+        second code path. It is OMITTED from the frame when empty: a text-only
+        answer is byte-identical to the frame this method wrote before the field
+        existed, which is what lets an old owner (and every pinned frame test)
+        keep reading it.
+
+        REFUSE, NEVER STRIP. ``_strip_unsupported_annotation`` drops ``input_mode``
+        for an old owner because that is metadata; an image is CONTENT and an
+        answer is terminal (the first ``answered`` event wins), so quietly sending
+        the text of an answer whose pictures an old owner would ignore is the one
+        outcome the user can neither see nor repair. An owner that did not
+        advertise ``ask-attachments-v1`` therefore gets no frame at all: the
+        ``ValueError`` below reaches the user as the refusal on the answer card,
+        the ask stays open, and sending the answer as text remains their choice.
         """
         fields: dict[str, Any] = {"ask_id": ask_id, "answers": answers}
         if by:
             fields["by"] = by
+        if images:
+            if not getattr(self, "_ask_attachments_supported", False):
+                raise ValueError(ASK_ATTACHMENTS_UNSUPPORTED)
+            fields["images"] = list(images)
         return await self._request("ask_respond", **fields)
 
     async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], *, by: str = "") -> str:

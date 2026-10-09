@@ -236,7 +236,7 @@ async def test_the_pre_open_drop_is_exactly_the_watermark(tmp_path, monkeypatch)
         original = bridge.history
         during: list[int] = []
 
-        async def history_and_publish():
+        async def history_and_publish(**_kwargs):
             bridge.publish("event", {"during": "the read"})
             during.append(bridge.sequence)
             return await original()
@@ -283,7 +283,7 @@ async def test_nothing_awaits_between_the_snapshot_state_and_its_watermark(tmp_p
         original = bridge.history
         published: list[int] = []
 
-        async def history_and_publish():
+        async def history_and_publish(**_kwargs):
             bridge.publish("event", {"during": "the read"})
             published.append(bridge.sequence)
             return await original()
@@ -316,7 +316,7 @@ async def test_the_delivery_boundary_is_strictly_above_the_watermark(tmp_path, m
     async with pool.session(sid) as bridge:
         original = bridge.snapshot
 
-        async def snapshot_and_place():
+        async def snapshot_and_place(**_kwargs):
             snapshot = await original()
             for offset, marker in ((0, "at-the-watermark"), (1, "above-the-watermark")):
                 frame = {
@@ -841,6 +841,168 @@ async def test_served_list_order_is_the_catalogs_rank(tmp_path):
     assert served == [entry.id for entry in rank_entries(catalog[::-1])]
     # And concretely: the armed row leads despite being the oldest.
     assert served == ["armed", "newest", "middle"]
+
+
+# ---------------------------------------------------------------------------
+# ``last_user_at``: the Running section's clock, on the SERVED rows.
+#
+# The tracker's own behaviour is pinned in tests/unit/session/test_last_user.py;
+# these assertions are about the WIRE half — the projection that decides which
+# rows buy a scan, and the always-present key the renderer's merge rule needs.
+# ---------------------------------------------------------------------------
+
+
+def _typed_user_row(text: str, ts: float) -> dict[str, Any]:
+    """One typed user row in the writer's compact shape (``TranscriptEntry``)."""
+    return {
+        "id": "u" * 24,
+        "ts": ts,
+        "type": "message",
+        "payload": {"kind": "message", "role": "user", "content": [{"text": text}]},
+    }
+
+
+def _assistant_row(text: str, ts: float) -> dict[str, Any]:
+    return {
+        "id": "a" * 24,
+        "ts": ts,
+        "type": "message",
+        "payload": {"kind": "message", "role": "assistant", "content": [{"text": text}]},
+    }
+
+
+def _append_transcript(session_dir: Path, *entries: dict[str, Any]) -> None:
+    with (session_dir / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        for entry in entries:
+            handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+@pytest.mark.asyncio
+async def test_the_last_user_key_is_on_every_local_row_and_pinned_off_page(tmp_path):
+    """The key is ALWAYS PRESENT on every local row — `pinned`'s rule.
+
+    Both populations come from ONE projection (see ``list()``'s comment), so the
+    off-page pinned row carries exactly the fields a page row carries. With no
+    live record on any session, the value is ``null`` — and ``null`` here is the
+    key's own answer ("not computed"), stated rather than omitted, because the
+    renderer's merge reads an absent key as no claim.
+    """
+    from local_operator.tui.sidebar_pins import read_pins, set_pin
+    from tests.unit.server.test_desktop_feed import _listable_session
+
+    for index in range(4):
+        sid = f"user{index:08x}"
+        directory = _listable_session(tmp_path, sid)
+        (directory / "created_at.json").write_text(str(1000.0 + index))
+        _append_transcript(directory, _typed_user_row("hello", 1000.0 + index))
+    pinned_sid = "user00000000"  # the OLDEST: below a page of 2
+    set_pin(tmp_path, pinned_sid, True)
+    assert read_pins(tmp_path) == [pinned_sid]
+
+    page = await DesktopSessions(tmp_path).list(2)
+
+    assert [row["id"] for row in page.pinned_off_page] == [pinned_sid]
+    for row in (*page.rows, *page.pinned_off_page):
+        assert "last_user_at" in row
+        assert row["last_user_at"] is None, (
+            "no live record on any row: the value is not computed, and null is "
+            "the key's own answer rather than an omission"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_running_rows_value_is_the_newest_typed_ts_and_activity_does_not_move_it(
+    tmp_path,
+):
+    """A float for a live row, and it moves on a SEND, not on a response.
+
+    This is the operator's report in one test: ``mtime`` advances when any row
+    lands, so a response streaming in re-sorted the Running section; this value
+    must not. The append half is asserted through the real listing twice, so
+    both the cold read and the memoised warm read are on the path.
+    """
+    from tests.unit.server.test_desktop_feed import _listable_session, _record_publish
+
+    sid = "busy00000001"
+    directory = _listable_session(tmp_path, sid)
+    _append_transcript(directory, _typed_user_row("the question", 100.0))
+    _record_publish(tmp_path, sid, busy=True)
+
+    page = await DesktopSessions(tmp_path).list(50)
+    row = next(row for row in page.rows if row["id"] == sid)
+    assert row["status"]["code"] == "busy"
+    assert row["last_user_at"] == 100.0
+    assert isinstance(row["last_user_at"], float)
+
+    # A RESPONSE STREAMING IN MUST NOT MOVE THE ORDER.
+    _append_transcript(directory, _assistant_row("working", 150.0), _assistant_row("more", 160.0))
+    page = await DesktopSessions(tmp_path).list(50)
+    row = next(row for row in page.rows if row["id"] == sid)
+    assert row["last_user_at"] == 100.0
+
+    # A SEND DOES.
+    _append_transcript(directory, _typed_user_row("a second question", 200.0))
+    page = await DesktopSessions(tmp_path).list(50)
+    row = next(row for row in page.rows if row["id"] == sid)
+    assert row["last_user_at"] == 200.0
+
+
+@pytest.mark.asyncio
+async def test_delegating_is_covered_and_idle_is_not_computed(tmp_path):
+    """The predicate question the design memo left open, answered on the wire.
+
+    The concern: a ``delegating`` row (subagents_running/queued > 0) might carry
+    an empty ``live_state`` and be missed by a ``live_state or pending`` test.
+    It cannot be: ``delegating`` is a property of counts only a LIVE record
+    reports, and a live record always yields a non-empty ``live_state`` (the
+    assertion below pins "idle" for exactly this row). The exact five-code set
+    still ships rather than that superset, because the superset also covers
+    ``attached``/``idle`` rows — the UI's Today section — and would pay a cold
+    scan per resident session for a value no reader consumes.
+    """
+    from local_operator.server.utils.desktop_sessions import RUNNING_STATUS_CODES
+    from tests.unit.server.test_desktop_feed import (
+        _FOREIGN_LIVE_PID,
+        _extra_live_pid,
+        _listable_session,
+        _record_publish,
+    )
+
+    assert RUNNING_STATUS_CODES == {"busy", "delegating", "approval", "answer", "wedged"}
+
+    delegating = _listable_session(tmp_path, "deleg0000002")
+    _append_transcript(delegating, _typed_user_row("delegate this", 222.0))
+    approval = _listable_session(tmp_path, "appr00000003")
+    _append_transcript(approval, _typed_user_row("approve?", 333.0))
+    idle = _listable_session(tmp_path, "idle00000004")
+    _append_transcript(idle, _typed_user_row("old chat", 444.0))
+
+    # Three records need three LIVE pids; one pid holds one record.
+    with _extra_live_pid() as spawned_pid:
+        _record_publish(
+            tmp_path, "deleg0000002", pid=spawned_pid, detached=True, subagents_running=1
+        )
+        _record_publish(
+            tmp_path, "appr00000003", pid=_FOREIGN_LIVE_PID, detached=True, pending="approval"
+        )
+        _record_publish(tmp_path, "idle00000004", pid=os.getpid(), detached=True)
+        page = await DesktopSessions(tmp_path).list(50)
+
+    by_id = {row["id"]: row for row in page.rows}
+    covered = by_id["deleg0000002"]
+    assert covered["status"]["code"] == "delegating"
+    assert covered["last_user_at"] == 222.0, "a delegating row IS a Running row"
+    assert covered["live_state"] == "idle", (
+        "not empty — so even `live_state or pending` would have covered it; the "
+        "exact set is chosen for cost, not to dodge a miss"
+    )
+    pending = by_id["appr00000003"]
+    assert pending["status"]["code"] == "approval"
+    assert pending["last_user_at"] == 333.0
+    resident = by_id["idle00000004"]
+    assert resident["status"]["code"] == "idle"
+    assert "last_user_at" in resident
+    assert resident["last_user_at"] is None, "idle rows are Today's, and pay no scan"
 
 
 @pytest.mark.asyncio
@@ -1403,6 +1565,312 @@ async def test_a_mid_resync_viewer_still_interrupts_a_live_turn(tmp_path, monkey
             assert result["status"] == "interrupted", result
             assert result["receipt"] == "stopping this turn", result
             assert owner.ops == ["abort"], "a live, mid-resync owner was never dialled"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_live_turn_behind_a_stale_mirror_is_not_idle(tmp_path, monkeypatch):
+    """The 2026-10-07 incident: a live turn behind a mirror that cannot vouch.
+
+    The follower's canonical folds stall while its own re-sync is parked behind
+    the owner's op chain (``session/runtime/server.py`` chains ops per
+    connection — a slow head op parks the rest, and each caller times out at
+    ``ACK_TIMEOUT_S``), so the store is FROZEN at the last turn boundary while
+    the live turn's deltas buffer behind the sync. ``_work_is_running`` then
+    reads false on every term — not because the owner has nothing to stop, but
+    because this mirror cannot see the turn — and the route answered ``idle``
+    without dialling. That is the incident's shape: four stop presses
+    (receipts 3891-3894) were answered ``idle`` while the UI painted live work,
+    and the turn was never stopped.
+
+    THIS TEST FAILS BEFORE THE FIX — the owner is reachable and the abort would
+    land; the stale ``False`` must not be presented as the owner's own answer.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="stopping this turn")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            # What the follower last SAW: a live roster...
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            # ...and then its LAST canonical fold, a turn boundary. The new
+            # turn's deltas are buffered behind the parked re-sync and are not
+            # in this store at all — the mirror does not know they exist.
+            _publish_roster(bridge, streaming=False)
+            # The re-sync is in flight, so the canonical feed is not advancing:
+            # the state above may lag the owner by any amount.
+            bridge.remote._ready_for_events = False
+            assert bridge.remote.is_cold, "the fixture is not the state under test"
+            assert bridge.remote.owner_reachable, "the owner is live"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            # THE CONTRACT: a press must not be answered ``idle`` while the
+            # follower cannot PROVE the owner idle. The owner's own receipt is
+            # the answer instead.
+            assert result["status"] == "interrupted", result
+            assert result["receipt"] == "stopping this turn", result
+            assert owner.ops == ["abort"], "a live turn behind a stale mirror was never dialled"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_live_turn_behind_an_owed_canonical_resync_is_not_idle(tmp_path, monkeypatch):
+    """The other half of the stall: a WARM mirror that KNOWS it is missing a delta.
+
+    A degraded delta sheds its body to stay under the socket limit, so the store
+    is missing whatever fields that frame carried; the canonical re-sync owed
+    for it (``_frontend_resync_pending``) keeps timing out behind the same
+    parked op chain. Between attempts the event feed is OPEN again — so a
+    readiness-only check would vouch for this store — while the one flag that
+    says "this mirror cannot account for a delta it was sent" stands. If the
+    missing delta was the turn's start, ``_work_is_running`` reads false on a
+    session that is streaming.
+
+    THIS TEST FAILS BEFORE THE FIX — ``_ready_for_events`` is true, ``is_cold``
+    is false, and the route read the under-report as settled.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="stopping this turn")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            bridge.remote._ready_for_events = True
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            _publish_roster(bridge, streaming=False)
+            # The owed re-sync: a shed delta's fields are missing until it
+            # lands, so this store is not allowed to speak for the owner.
+            bridge.remote._frontend_resync_pending = True
+            assert not bridge.remote.is_cold, "the fixture must be a WARM mirror"
+            assert bridge.remote.owner_reachable, "the owner is live"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            assert result["status"] == "interrupted", result
+            assert result["receipt"] == "stopping this turn", result
+            assert owner.ops == ["abort"], "a debt-owing mirror was trusted as settled"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_live_turn_behind_a_recovering_dial_is_not_idle(tmp_path, monkeypatch):
+    """The recovery window: the socket dropped mid-turn, and the press must not
+    claim ``idle`` from a mirror whose dial is gone.
+
+    A dropped socket says nothing about the turn — a send timeout under a
+    stalled loop is the common cause, and ``_suspect_generation`` literally
+    records the turn that was live at the drop. Recovery owns the dial until it
+    re-binds (bounded at ``COLD_FALLBACK_S``), so this press cannot be
+    delivered; the honest answer is the ladder's 503, not ``idle``. Answering
+    ``idle`` here is the incident's class one door over: "nothing to stop" is a
+    claim this viewer cannot prove, and the user walks away believing a live
+    turn was ended.
+
+    THIS TEST FAILS BEFORE THE FIX — recovery leaves ``owner_reachable`` false,
+    which the route folds into the same ``idle`` as a cold session.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="stopping this turn")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            bridge.remote._ready_for_events = True
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            # The pump's own order: ``_connected`` is false BEFORE the host's
+            # disconnect handler runs (``attach_client``'s pump end).
+            owner.connected = False
+            bridge.remote._on_disconnected("owner connection reset")
+            assert bridge.remote.recovering, "the fixture is not the state under test"
+            assert not bridge.remote.owner_reachable, "recovery owns the dial"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 503, response.text
+            detail = response.json()["detail"]
+            assert detail["code"] == "runtime_unreachable", detail
+            assert detail["message"] == (
+                "Session owner is unavailable. Reconnect and reconcile before retrying."
+            ), detail
+            assert owner.ops == [], "the dead dial was asked for a receipt it cannot serve"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_mirror_behind_a_recovering_dial_is_not_idle(tmp_path, monkeypatch):
+    """The ``_recovering`` disjunct on its own: a settled-looking mirror behind a
+    dial that recovery owns.
+
+    The sibling test above freezes a LIVE turn at the drop, so its press is
+    already owed a dial by ``_work_is_running``. This one publishes a boundary
+    instead — the drop landed between turns and the last canonical fold reports
+    no work — with every OTHER term of ``canonical_current`` deliberately quiet
+    (synced, no owed re-sync), which leaves exactly one term between this press
+    and a false ``idle``: ``_recovering``. Sabotage check (review round 1, S3a):
+    drop that disjunct alone and this is the only test that reds — the shortcut
+    reads the boundary as settled and answers ``idle`` while recovery still owns
+    the dial. The boundary fold predates the drop, and what the owner did after
+    it is unobservable until recovery re-binds: nothing here may be called
+    settled.
+
+    THIS TEST FAILS WITHOUT THE DISJUNCT — and with it the press answers 503
+    (never ``idle``): no dial can be served, so it is handed to the ladder.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="stopping this turn")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            bridge.remote._ready_for_events = True
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            # THE ONE-LINE VARIANT: the last canonical fold is the boundary, not
+            # a frozen live turn — no term of ``_work_is_running`` fires.
+            _publish_roster(bridge, streaming=False)
+            # The pump's own order: ``_connected`` is false BEFORE the host's
+            # disconnect handler runs (``attach_client``'s pump end).
+            owner.connected = False
+            bridge.remote._on_disconnected("owner connection reset")
+            assert bridge.remote.recovering, "the fixture is not the state under test"
+            assert not bridge.remote.owner_reachable, "recovery owns the dial"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 503, response.text
+            detail = response.json()["detail"]
+            assert detail["code"] == "runtime_unreachable", detail
+            assert owner.ops == [], "the dead dial was asked for a receipt it cannot serve"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_mirror_press_whose_dial_times_out_is_not_idle(tmp_path, monkeypatch):
+    """The unanswerable dial: an ``OwnerAckTimeout`` must never be presented as ``idle``.
+
+    Since the merged companion fix (#2049) ``abort`` is chain-exempt
+    (``_UNCHAINED_OPS = {"ping", "abort"}``), so this is no longer the
+    queued-behind-a-parked-op shape — it is the other way a dial goes unserved:
+    the owner's loop stalls or half-dies and the abort is not answered within
+    ``ACK_TIMEOUT_S`` at all. That raises ``OwnerAckTimeout`` (whose
+    ``owner_alive`` mark says the owner is alive and simply did not answer this
+    request in time), and the route must answer it through its ladder (503,
+    retryable) and NOT fall back to ``idle``: the press was never served, and
+    "nothing to stop" would invent the very answer the owner did not give.
+
+    THIS TEST FAILS BEFORE THE FIX — the stale mirror answered ``idle`` without
+    even sending the abort.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.mobile.attach_client import OwnerAckTimeout
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient()
+            owner.raises = OwnerAckTimeout("owner did not answer 'abort' within 15s")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            _publish_roster(bridge, streaming=False)
+            bridge.remote._ready_for_events = False
+            assert bridge.remote.owner_reachable, "the socket is up; only the op is parked"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 503, response.text
+            detail = response.json()["detail"]
+            assert detail["code"] == "runtime_busy", detail
+            assert detail["retryable"] is True, detail
+            assert owner.ops == ["abort"], "the press never reached for the owner"
     await pool.close()
 
 
@@ -3368,6 +3836,17 @@ async def test_child_transcript_route_is_bearer_gated_and_no_store(tmp_path, mon
     assert body["state"] == "ready"
     assert [row["id"] for row in body["entries"]] == ids[-1:]
     assert body["has_more"] is True
+    # THE FOUR KEYS, ASSERTED THROUGH THE RESPONSE MODEL — which is where R-1's
+    # defect lived and why a pool-level pin could not see it. ``child_transcript``
+    # returns ``row.to_json()`` verbatim, and FastAPI then validates the body
+    # against ``CRUDResponse[ChildTranscriptPage]``; a ``ts_source`` that is
+    # merely DECLARED on that page's row type is materialised onto every row on
+    # the way out, defaults included, so the child route silently gained a
+    # classifying key nobody computed and its own e2e went red. The child page
+    # carries the raw journal envelope and must keep doing exactly that.
+    assert all(set(row) == {"id", "ts", "type", "payload"} for row in body["entries"]), body[
+        "entries"
+    ]
 
     # A 404 whose code is readable: "I cannot read that pair", retryable on the
     # next pulse when the roster snapshot catches up.
@@ -8360,6 +8839,141 @@ async def test_desktop_history_hides_patience_rows_through_the_real_bridge(tmp_p
     assert "file body" in body
 
 
+@pytest.mark.asyncio
+async def test_the_wire_half_of_a_peer_page_drops_the_hidden_rows_too(tmp_path) -> None:
+    """R1-4 (agent review round 1): one method, two sources, ONE visibility rule.
+
+    ``_remote_history`` answers from the WIRE when a runtime is warm and from the
+    owner's stored journal when it is not, and ``harness/rows.py`` is explicit that
+    filtering belongs at the SOURCE "because the desktop client reducer has no
+    filter of its own". The stored half applied it; the wire half did not — so the
+    same conversation painted a ``patience`` ledger row over the mesh that the
+    owner's own ``/history``, and the cold read of that same session, both hide.
+
+    The bridge is the real one and the read takes the real wire branch (``is_cold``
+    False keeps it on the window); only the facade that would hold a live runtime
+    is stood in for.
+
+    ALL THREE CLASSES, not just the patience pair (agent review round 2, F4). The
+    filter is one predicate set over three markers, and a wire half that dropped
+    only the rows its round-1 cell happened to build would pass here while leaking
+    a hidden wake delivery and a diverted ask's RESULT over the mesh — the exact
+    asymmetry this cell exists to catch. Each row is asserted by its own id, so a
+    rename of the marker cannot make the cell pass by dropping nothing.
+    """
+    from local_operator.harness.types import (
+        CustomMessage,
+        Message,
+        TextContent,
+        ToolCall,
+        ToolResult,
+    )
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    # A hidden wake delivery: the ``wake_prompt`` custom row ``fire_details``
+    # stamps with ``hidden`` (``wakes/patience.py``), which stays in the model's
+    # context and on no human surface.
+    wake_row = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        details={"kind": "patience", "hidden": True, "episode_id": "w1", "attempt": 1},
+    )
+    # A diverted ask's RESULT: the gate's marker rides ``provider_payload.details``
+    # (``session/session.py``), which is where the stored-row predicate reads it.
+    gate_row = Message.tool_result(
+        ToolResult(
+            tool_call_id="a1",
+            tool_name="ask",
+            content=[TextContent(text="gate: diverted")],
+            details={"ask_gate": {"hidden": True, "verdict": "diverted", "reason": "queued"}},
+        )
+    )
+
+    wire_window = [
+        Message.user("morning"),
+        wake_row,
+        Message.assistant("", tool_calls=[ToolCall(id="p1", name="patience", arguments={})]),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id="p1",
+                tool_name="patience",
+                content=[TextContent(text="armed 5m")],
+            )
+        ),
+        gate_row,
+        Message.tool_result(
+            ToolResult(tool_call_id="r1", tool_name="read", content=[TextContent(text="file body")])
+        ),
+    ]
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    # The row is what makes this bridge REMOTE (and so picks the wire reader); the
+    # facade is what answers the window on the wire path.
+    bridge.remote_row = cast(Any, SimpleNamespace(owner_device="d_" + "a" * 32))
+    bridge.remote = cast(
+        Any,
+        SimpleNamespace(
+            is_cold=False,
+            history=lambda: list(wire_window),
+            history_before_token=None,
+            # The owner shipped no entry times here (an older owner, or a facade
+            # whose attach did not negotiate), which is the case this cell is
+            # about: every surviving row keeps the serve-stamp.
+            history_entry_times=lambda: {},
+        ),
+    )
+
+    page = await bridge.history(limit=50)
+    body = json.dumps(page["entries"])
+    served = {entry["id"] for entry in page["entries"]}
+
+    assert "armed 5m" not in body and '"patience"' not in body
+    assert wake_row.id not in served, "a hidden wake delivery reached the wire"
+    assert gate_row.id not in served, "a diverted ask's result reached the wire"
+    assert "gate: diverted" not in body
+    assert "morning" in body, "the filter ate a visible row"
+    assert "file body" in body, "the filter ate an ordinary tool row"
+    assert page["cursor_missing"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_stored_pages_through_id_cut_is_exercised_directly(tmp_path) -> None:
+    """Q3 (QA round 1): the stored page's ``through_id`` cut, pinned not dead.
+
+    No HTTP surface passes ``through_id`` any more (``history``'s own docstring says
+    so), which left this branch reachable only by a DIRECT bridge call — which is
+    what this cell is. It is kept because the two sources must answer one request
+    the same way: the wire path cuts at ``through_id`` inclusive, and a stored page
+    that ignored the same bound would silently serve rows a caller had excluded.
+    """
+    page = {
+        "entries": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+        "has_more": False,
+        "cursor_missing": False,
+        "has_newer": None,
+    }
+
+    cut = module.DesktopSessionBridge._cut_stored_page(  # noqa: SLF001 — the branch under test
+        page, before_id=None, through_id="b"
+    )
+    assert [row["id"] for row in cut["entries"]] == ["a", "b"]
+    # The cut is a BOUND, not a reconciliation: the other fields ride unchanged.
+    assert cut["has_more"] is False and cut["cursor_missing"] is False
+
+    # NO CURSOR NAMED IS THE SAME PAGE, and a cursor this page does not hold leaves
+    # it alone rather than emptying it -- the page is the OWNER's, already cut.
+    assert (
+        module.DesktopSessionBridge._cut_stored_page(  # noqa: SLF001
+            page, before_id=None, through_id=None
+        )["entries"]
+        == page["entries"]
+    )
+    assert (
+        module.DesktopSessionBridge._cut_stored_page(  # noqa: SLF001
+            page, before_id=None, through_id="zz"
+        )["entries"]
+        == page["entries"]
+    )
+
+
 # ---------------------------------------------------------------------------
 # POST .../answers — the QUEUED-ASK body (design §4; review/QA round 1)
 # ---------------------------------------------------------------------------
@@ -8602,3 +9216,360 @@ def test_visible_transcript_rows_drops_an_ask_gate_divert_row() -> None:
 
     kept = visible_transcript_rows([marker_row, patience_row, ordinary_ask_row])
     assert kept == [ordinary_ask_row]
+
+
+# ---------------------------------------------------------------------------
+# /history — the ENTRY-TIME vocabulary (design docs/design/mesh-wire-honesty.md
+# §S1). A wire row is a MESSAGE, and a message has no entry time of its own, so
+# the bridge either stamps it with the instant the OWNER shipped (``entry``),
+# admits it has none (``unstated``, and only to a renderer that asked), or keeps
+# the legacy serve-stamp (``served``). The three values are the whole contract;
+# a renderer's sort must not mix them.
+# ---------------------------------------------------------------------------
+
+
+def _remote_bridge_with(tmp_path: Path, rows: list[Any], entry_times: dict[str, float]):
+    """A bridge on the WIRE branch with the rows and join the test hands it."""
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    bridge.remote_row = cast(Any, SimpleNamespace(owner_device="d_" + "a" * 32))
+    bridge.remote = cast(
+        Any,
+        SimpleNamespace(
+            is_cold=False,
+            history=lambda: list(rows),
+            history_before_token=None,
+            history_entry_times=lambda: dict(entry_times),
+        ),
+    )
+    return bridge
+
+
+@pytest.mark.asyncio
+async def test_the_wire_branch_stamps_the_owners_entry_time_when_it_is_shipped(tmp_path) -> None:
+    """``entry``: the join wins over this device's clock, for either renderer.
+
+    A row whose true time the owner shipped is truthful for everyone — the
+    vocabulary ADDS information, so it is not gated on the renderer's flag.
+    """
+    row = Message.user("morning")
+    owner_ts = 1_700_000_000.0
+    bridge = _remote_bridge_with(tmp_path, [row], {row.id: owner_ts})
+
+    # Both renderers, because the value is a fact rather than a negotiation.
+    for asked in (True, False):
+        page = await bridge.history(limit=50, entry_times=asked)
+        entry = next(e for e in page["entries"] if e["id"] == row.id)
+        assert entry["ts"] == owner_ts, "the serve clock replaced the owner's instant"
+        assert entry["ts_source"] == "entry"
+
+
+@pytest.mark.asyncio
+async def test_the_wire_branch_answers_unstated_for_a_renderer_that_asked(tmp_path) -> None:
+    """``unstated``: no instant, and the wire says so instead of inventing one.
+
+    PER ROW rather than per page — the shipped and unshipped rows are in ONE
+    page here, which is the real shape (a live suffix alongside a durable tail).
+    """
+    shipped, unshipped = Message.user("durable"), Message.user("live suffix")
+    owner_ts = 1_700_000_000.0
+    bridge = _remote_bridge_with(tmp_path, [shipped, unshipped], {shipped.id: owner_ts})
+
+    page = await bridge.history(limit=50, entry_times=True)
+    by_id = {entry["id"]: entry for entry in page["entries"]}
+    assert by_id[shipped.id]["ts"] == owner_ts
+    assert by_id[shipped.id]["ts_source"] == "entry"
+    assert by_id[unshipped.id]["ts"] is None, "an unprovable instant was fabricated"
+    assert by_id[unshipped.id]["ts_source"] == "unstated"
+
+
+@pytest.mark.asyncio
+async def test_the_wire_branch_keeps_the_serve_stamp_for_a_renderer_that_did_not_ask(
+    tmp_path,
+) -> None:
+    """``served``: byte-for-byte today's behaviour for every existing client.
+
+    The only addition is the sibling ``ts_source``, which an older reader drops
+    (the entry model is ``extra="ignore"``) and a current one branches on.
+    """
+    row = Message.user("morning")
+    bridge = _remote_bridge_with(tmp_path, [row], {})
+
+    before = time.time()
+    page = await bridge.history(limit=50)
+    after = time.time()
+    entry = next(e for e in page["entries"] if e["id"] == row.id)
+    assert entry["ts_source"] == "served"
+    assert isinstance(entry["ts"], float)
+    assert before <= entry["ts"] <= after, "the serve-stamp is not this device's clock"
+
+
+@pytest.mark.asyncio
+async def test_the_mid_turn_join_puts_the_user_row_on_the_owners_clock(tmp_path) -> None:
+    """THE DEFECT §S1 EXISTS FOR: two clocks in one turn, and only one order.
+
+    A tool row is seeded from the OWNER's ``started_at_epoch`` (the live event's
+    stamp — ``harness/loop.py``), while a wire user row used to carry THIS
+    device's serve time. Ordered together, the user's own message lands after the
+    tool call it prompted. With the join shipped, the user row carries the
+    owner's journal instant, so the two are the same clock and the same order.
+
+    The negative half is what makes this discriminating rather than arithmetic:
+    the fixture's owner clock is far from ``time.time()``, so a serve-stamp
+    cannot satisfy the comparison.
+    """
+    from local_operator.harness.types import TextContent, ToolResult
+
+    user_row = Message.user("run the tests")
+    tool_row = Message.tool_result(
+        ToolResult(tool_call_id="t1", tool_name="bash", content=[TextContent(text="ok")])
+    )
+    owner_entry_ts = 1_700_000_000.0
+    # The owner's own stamp for the call this turn started — the value the UI's
+    # tool row is seeded from. A fraction after the user row, same turn.
+    tool_started_at_epoch = owner_entry_ts + 0.4
+    bridge = _remote_bridge_with(tmp_path, [user_row, tool_row], {user_row.id: owner_entry_ts})
+
+    page = await bridge.history(limit=50, entry_times=True)
+    by_id = {entry["id"]: entry for entry in page["entries"]}
+    served_user_ts = by_id[user_row.id]["ts"]
+
+    assert by_id[user_row.id]["ts_source"] == "entry"
+    # COMPARABLE, which is the whole requirement: one clock, and the order the
+    # turn actually happened in.
+    assert abs(served_user_ts - tool_started_at_epoch) < 1.0
+    assert served_user_ts < tool_started_at_epoch
+    # And it is genuinely the owner's clock, not this machine's: the serve
+    # instant is 70 million seconds away from it.
+    assert abs(time.time() - served_user_ts) > 1_000_000
+
+    # The tool row itself has no entry time of its own — its instant rides its
+    # payload's own vocabulary, and the bridge must not invent one here.
+    assert by_id[tool_row.id]["ts_source"] == "unstated"
+    assert by_id[tool_row.id]["ts"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_stored_peer_page_marks_its_journal_rows_as_entry(tmp_path, monkeypatch) -> None:
+    """The cold peer page is journal rows, so its ``ts`` IS the entry time.
+
+    Stamped at the DOOR (``_peer_stored_history``), which is why this drives that
+    method and not the cut: both answers the door returns — the plain page and
+    the ``through_id``-cut one — must carry the vocabulary, or a reader that
+    paged back would see the same rows change their ``ts_source``.
+    """
+    from local_operator.network import projection as projection_module
+
+    rows = [
+        {"id": "a", "ts": 1.0, "type": "message", "payload": {}},
+        {"id": "b", "ts": 2.0, "type": "message", "payload": {}},
+    ]
+    monkeypatch.setattr(
+        projection_module,
+        "peer_stored_history_page",
+        lambda *_args, **_kwargs: {
+            "entries": [dict(row) for row in rows],
+            "has_more": False,
+            "cursor_missing": False,
+            "has_newer": None,
+        },
+    )
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    bridge.remote_row = cast(Any, SimpleNamespace(owner_device="d_" + "a" * 32))
+
+    page = await bridge._peer_stored_history(  # noqa: SLF001 — the door under test
+        before_id=None, through_id=None, limit=50
+    )
+    assert [row["ts_source"] for row in page["entries"]] == ["entry", "entry"]
+    assert [row["ts"] for row in page["entries"]] == [1.0, 2.0]
+
+    cut = await bridge._peer_stored_history(  # noqa: SLF001
+        before_id=None, through_id="a", limit=50
+    )
+    assert [row["id"] for row in cut["entries"]] == ["a"]
+    assert cut["entries"][0]["ts_source"] == "entry"
+
+
+# ---------------------------------------------------------------------------
+# Image answers on a queued ask (``Answer.images``, feature ``ask_attachments``)
+# ---------------------------------------------------------------------------
+
+
+def _answer_image(
+    question_id: str = "q0", payload: bytes = b"\x89PNG-not-really-a-png"
+) -> dict[str, str]:
+    """One wire image. The route validates shape and size; DECODING is the owner's."""
+    import base64
+
+    return {
+        "question_id": question_id,
+        "data_b64": base64.b64encode(payload).decode(),
+        "mime_type": "image/png",
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_answer_with_images_reaches_the_facade_with_the_flat_list(answers_api) -> None:
+    """One shape end to end: the body's ``images`` is what the facade is handed."""
+    client, app = answers_api
+    seen: dict[str, Any] = {}
+
+    class _Remote(_AskRemote):
+        async def ask_respond(  # type: ignore[override]
+            self, ask_id, answers=None, *, decline=False, revise=False, images=None
+        ):
+            seen["images"] = images
+            return await super().ask_respond(ask_id, answers, decline=decline, revise=revise)
+
+    remote = _Remote()
+    _install_ask_remote(app, remote)
+    image = _answer_image()
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["see screenshot"]}, "images": [image]},
+    )
+    assert result.status_code == 200, result.text
+    assert seen["images"] == [image]
+    assert remote.calls == [("a-1", {"q0": ["see screenshot"]}, False, False)]
+
+
+@pytest.mark.asyncio
+async def test_a_text_only_answer_calls_the_facade_without_the_images_keyword(answers_api) -> None:
+    """OLD UI -> NEW core: no ``images`` key is accepted, and the facade call is the
+    pre-feature call (a facade or double that predates the keyword keeps working)."""
+    client, app = answers_api
+    kwargs_seen: list[dict[str, Any]] = []
+
+    class _Strict:
+        frontend_state = SimpleNamespace(epoch="e")
+
+        async def ask_respond(self, ask_id, answers=None, *, decline=False, revise=False):
+            kwargs_seen.append({"ask_id": ask_id})
+            return "answered"
+
+    _install_ask_remote(app, _Strict())
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert kwargs_seen == [{"ask_id": "a-1"}]
+
+
+@pytest.mark.asyncio
+async def test_the_answer_images_422_matrix(answers_api) -> None:
+    """Every shape the door refuses, none of which may reach the runtime."""
+    client, app = answers_api
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    image = _answer_image()
+    refused: dict[str, dict[str, Any]] = {
+        "images on a decline": {"ask_id": "a-1", "decline": True, "images": [image]},
+        "images with no answers": {"ask_id": "a-1", "images": [image]},
+        "images on a revision": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "revise": True,
+            "images": [image],
+        },
+        "unknown question_id": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [_answer_image("nope")],
+        },
+        "missing question_id": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [{k: v for k, v in image.items() if k != "question_id"}],
+        },
+        "more than eight": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [image] * 9,
+        },
+        "bad mime": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [{**image, "mime_type": "image/bmp"}],
+        },
+        "empty base64": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [{**image, "data_b64": ""}],
+        },
+        "an extra key on an image": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [{**image, "filename": "a.png"}],
+        },
+        "images on a gate answer": {
+            "epoch": "e",
+            "request_id": "r",
+            "approved": True,
+            "images": [image],
+        },
+        "past the body cap": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            # 5 x ~240 kB of base64 clears the per-image cap but not the 900,000 B body cap.
+            "images": [_answer_image(payload=b"\x00" * 180_000)] * 5,
+        },
+    }
+    for label, body in refused.items():
+        result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
+        assert result.status_code == 422, (label, result.status_code, result.text)
+    assert remote.calls == [], "a refused body must not reach the runtime"
+
+
+@pytest.mark.asyncio
+async def test_eight_images_inside_the_body_cap_are_accepted(answers_api) -> None:
+    client, app = answers_api
+
+    class _Remote(_AskRemote):
+        async def ask_respond(  # type: ignore[override]
+            self, ask_id, answers=None, *, decline=False, revise=False, images=None
+        ):
+            assert images is not None and len(images) == 8
+            return await super().ask_respond(ask_id, answers, decline=decline, revise=revise)
+
+    remote = _Remote()
+    _install_ask_remote(app, remote)
+    body = {
+        "ask_id": "a-1",
+        "answers": {"q0": ["x"]},
+        "images": [_answer_image(payload=b"\x00" * 60_000)] * 8,
+    }
+    result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
+    assert result.status_code == 200, result.text
+
+
+@pytest.mark.asyncio
+async def test_an_image_answer_refused_by_an_old_owner_is_a_409_with_the_sentence(
+    answers_api,
+) -> None:
+    """NEW core -> OLD owner runtime: the capability refusal reaches the card verbatim."""
+    from local_operator.session.runtime.types import ASK_ATTACHMENTS_UNSUPPORTED
+
+    client, app = answers_api
+
+    class _Old(_AskRemote):
+        async def ask_respond(  # type: ignore[override]
+            self, ask_id, answers=None, *, decline=False, revise=False, images=None
+        ):
+            raise ValueError(ASK_ATTACHMENTS_UNSUPPORTED)
+
+    _install_ask_remote(app, _Old())
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["x"]}, "images": [_answer_image()]},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == ASK_ATTACHMENTS_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_the_ask_attachments_feature_is_published(draft_api) -> None:
+    """The key a renderer gates the attach affordance on (``Answer`` is
+    ``extra="forbid"``, so an ungated send to an older backend would 422)."""
+    client, _root = draft_api
+    features = (await client.get("/v1/capabilities")).json()["result"]["features"]
+    assert features["ask_attachments"] == 1

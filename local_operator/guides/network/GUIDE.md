@@ -195,11 +195,22 @@ rendering is not a contract.
 
 ## Who the session on the peer runs as
 
-A create on a peer can name the agent PROFILE it runs as and the TEAM it manages, and
-it may also name a legacy agent (`--agent NAME` / `--agent-id ID`) whose model and
-hosting that device will use. The definitions travel with the create:
-`lop network sessions --peer <id> --create --profile reviewer --team release`
-reconciles those two definitions onto that device FIRST (idempotent, by name, only
+A create on a peer can name the agent PROFILE it runs as or the TEAM it manages,
+and it may also name a legacy agent (`--agent NAME` / `--agent-id ID`) whose model
+and hosting that device will use. A profile and a team cannot both be named: a team
+owns the session's agent slot (the same rule `lop exec` refuses that pair with), so
+`--profile` beside `--team` is refused — by the creating device before anything is
+sent, and by the owning device in the same sentence if it arrives anyway (the
+creating device names the team's manager only when it holds that team; otherwise
+it says `its manager is the speaker`) — and no session is made. An `--agent` row
+beside a team is refused when that row's instructions are attachable (a role or a
+specialist) — the creating device refuses it too when it holds that row, and the
+owning device refuses it in every case; a routing-only legacy row beside a team is
+allowed, and — when a first prompt is sent — the receipt says routing-only.
+
+The definitions travel with the create:
+`lop network sessions --peer <id> --create --profile reviewer`
+reconciles the named definitions onto that device FIRST (idempotent, by name, only
 what the frame mentions), so this works against a device that has never seen them —
 including a bare install that was paired a minute ago.
 
@@ -214,12 +225,17 @@ workload that assumed a GitLab or Linear server finds none on a freshly paired p
 `lop network mcp push [--peer <id>|--all-peers]` reconciles this device's user-scope
 MCP servers onto a peer (the mesh-definitions cadence also carries them after pairing,
 so a device converges on its own), and `lop network mcp state` shows what THIS device
-holds and which keys a mirror still needs. **Values never travel**: `env` and
+holds and which keys a mirror still needs. **The push itself carries no values**: `env` and
 `headers` move as `${NAME}` references and per-key state (a literal value stays on
 the device that wrote it), an OAuth server re-registers on the peer instead of
 copying its client secret, and a mirrored server whose key the peer's store lacks is
-NOT hidden — it refuses at connect, by name, and the fix is `lop secret set <KEY>`
-on the device that runs it. A row whose text looks like a credential is withheld and
+NOT hidden — it refuses at connect, by name. The key reaches that device one of two
+ways: `lop secret set <KEY>` on the device that runs it, or a COPY from the owner (a
+secret a pushed bundle declares as `ref:<NAME>` is preselected when the device is
+approved, `lop network credential mark <NAME> sync` preselects any other for later
+approvals, and a device already approved takes it with `lop network credential
+share <NAME> --with <device>`; see "Credentials on a peer"). A row whose text looks like
+a credential is withheld and
 named rather than sent, on both ends.
 
 WHAT A PEER MAY AND MAY NOT BE ASKED FOR, and each is refused in words rather than
@@ -246,9 +262,12 @@ quietly dropped:
   product's rule, not the mesh's), so such a session runs its OWN instructions on that
   agent's model — and the receipt says exactly that instead of implying the whole row
   arrived.
-- **A profile outranks `--model`**, which is this product's precedence on a local
+- **A pinned model outranks `--model`**, which is this product's precedence on a local
   create too (agent > flag > config). The receipt says the requested model was not
-  applied and names the profile that overrode it.
+  applied and names what pinned it: the profile on its own, or — when the `--agent` row
+  carries both its own hosting and its own model — the row, whose routing then outranks
+  the profile's own model (a row carrying only one of the two keeps the profile's pin,
+  or takes the pin as a half when the profile pins nothing).
 - **An edited copy is never overwritten.** Each device remembers what it mirrored; if
   the local copy has been edited since, a later push REFUSES that row by name (`the
   copy of that name here has local edits`) and leaves the edit alone. A row this device
@@ -264,7 +283,7 @@ over a paired mesh. From a shell:
 | `lop network sessions --all-peers --json` | every peer's sessions, merged; each row names the device holding it |
 | `lop network sessions --peer <id\|name> --json` | one device's own catalogue |
 | `lop sessions --peer <id\|name>` / `--all-peers` | the same rows through the ordinary session list |
-| `lop network sessions --peer <id> --create --name <n> [--prompt <p>] [--profile <role>] [--agent <name>] [--team <name>] [--effort <level>]` | create the session ON the peer, which mints its id |
+| `lop network sessions --peer <id> --create --name <n> [--prompt <p>] [--profile <role>] [--agent <name>] [--team <name>] (not --profile with --team) [--effort <level>]` | create the session ON the peer, which mints its id |
 | `lop network sessions --peer <id> --engage <session>` | warm a stored session on the peer |
 | `lop network sessions --peer <id> --stop <session>` | stop it where it lives |
 | `lop network sessions --peer <id> --stop <session> --force` | the same stop on a target whose turn is in flight, or that will not answer its socket — it WAITS for the owner's ladder to resolve, which can be minutes (see below) |
@@ -539,12 +558,48 @@ for work that follows the person, not for work that follows the machine.
 
 ## Credentials on a peer
 
-Credentials are brokered, never mirrored (decision A5). Operationally: never
-copy a token or a key from one device to another, never run a login on a peer,
-and never "fix" an expiry by re-authenticating for someone else. A refresh is
-requested from the device that owns the credential, which lends a short-lived
-access token and never its refresh token (`lop network credential share|revoke`,
-`lop network credentials`).
+Credentials are brokered by default, and TWO CLASSES ARE COPIED (the provisioning
+design, `mesh-consent-provisioning.md` §2.1): rows of kind `api-key-static` (a
+provider API key you signed in with) and rows whose key starts `secret:` (kind
+`store-secret`: anything in the `lop secret` store, a `GITHUB_TOKEN` among them —
+except the provider-owned `LOP_PROVIDER_*` rows, which are never offered). What
+arrives is that device's OWN material, and where it rests depends on the class.
+A `store-secret` copy is re-sealed into the device's own encrypted store under its
+own master key: never plaintext, never the owner's key. An `api-key-static` copy is
+the same row a local sign-in would write, in that device's 0600 `auth.db` — the
+login's at-rest protection, not the store's. The `github` credential itself is
+brokered, never copied: a `GITHUB_TOKEN` marked `sync` puts that token on the device as
+an ordinary secret, while sharing `github` lends it as a short-lived grant (the GitHub
+section below). For everything else the old rule stands: never copy a token
+or a key by hand, never run a login on a peer, and never "fix" an expiry by
+re-authenticating for someone else — a refresh is requested from the device that
+owns the credential, which lends a short-lived access token and never its refresh
+token (`lop network credential share|revoke`, `lop network credentials`).
+
+WHICH store secrets are copied is a standing selection, not a per-share decision.
+`lop network credential mark <NAME> sync` marks a secret for devices approved FROM NOW
+ON: the approval preselects it. The mark writes no grant of its own, so an approved
+device that is not yet sharing it needs
+`lop network credential share <NAME> --with <device>`. `... mark <NAME> local-only`
+keeps it here and ends the copies this device can still reach (the ceiling, below);
+`... mark <NAME> default` clears the mark. An UNMARKED secret is preselected only when
+the pushed bundles declare it (`ref:<NAME>`); otherwise the pairing screens' share list
+(above) shows it as `not offered` and it is not copied. That list can only REDUCE, never
+add, so a `not offered` secret reaches a device by being marked `sync` before the
+approval, or by `credential share` after it.
+
+Un-approving a device (`lop network member rm`) and `credential revoke` each END the
+copies they can reach: a reachable device deletes its copy and confirms, and the
+receipt says so; a device that is unreachable at that instant keeps its copy — and
+the receipt says THAT too, because a removed member is never contacted again. A
+receipt reports what the owner's ledger holds: "no copy ... is recorded" means no
+confirmation arrived, not that nothing is there. Every `member rm` ending, and
+`credential revoke` on a stored secret, closes with the same two lines, because the
+ceiling holds regardless: "This ends the copies the owner can still reach. A copy that
+has left the owner's control can only be ended by rotating the secret at its source."
+`credential revoke` on a provider API key closes with its own sentence for the same
+fact: a copy of that key taken out of the device never expires, so the key is rotated
+at the provider.
 
 Provider logins are shareable by name (except device-bound ones such as kimi),
 and the ledger lists them beside the MCP servers: `lop network credentials`
@@ -624,11 +679,13 @@ command, so a re-login or a token rotation needs no gesture on the node):
    keychain — wherever that install keeps it); the owner is the trusted side,
    and the borrowing device never reads it.
 
-**Designate the repositories first** — on **every node that borrows or serves**:
+**Designate the repositories on the owner**:
 `network.credentials.github.repositories` (search it in `/settings`),
 `owner/repo` entries, e.g. `damianvtran/scratch`. This list is the git helper's
 allow-list, and it is the enforced bound on every route: empty is a refusal,
-never "everything".
+never "everything". The designation travels WITH the grant — the borrowing
+device writes the owner's list into its own config before the git child runs —
+so a node does not maintain one by hand.
 
 Once any source resolves, the flow is: `lop network credential share github
 --with <device>` (device scope; session scope for this key is refused by name),
@@ -687,6 +744,96 @@ the App route than GitHub's OAuth token is — a scoped token can be minted for
 the mesh and revoked alone — so the strong path will mint-or-use a dedicated
 token rather than share the primary login. Until then, GitLab push through the
 mesh is unavailable; public clones and everything non-GitLab are unaffected.
+
+## What a remote node can and cannot inherit
+
+An approved device is provisioned, not cloned. The onboarding run installs a
+build on it, joins the member, anchors the operator's key, supervises the relay
+and writes the grants; the rest of what a node inherits is short and
+deliberate: agent and team DEFINITIONS (they also travel with a create — see
+`lop network definitions push` / `state`), MCP server declarations with their
+brokered logins (values never travel with the push; a key a mirrored server
+needs arrives as a re-sealed copy when the approval's copy-set includes it (a
+`ref:<NAME>` declaration or a `sync` mark), or by `lop secret set` on that
+device — see "Credentials on a peer"; `lop network mcp state` names the keys that
+device still needs), the model and provider logins
+it serves or borrows
+(`lop network credentials`), a git identity seeded from this device's where the
+node has none (one it already has is never overwritten), and the run's own
+provisioning receipts — `invite`, `pre_read`, `install`, `join`, `anchor`,
+`relay`, `grants`, `provision`, `verify` — readable in
+`lop network approvals run <id> --json`.
+
+Everything else a node must have on its own disk, or borrow per use — except the
+copied classes, which land in that node's own credential storage (re-sealed for
+`store-secret`, the login's own 0600 row for `api-key-static`) at the approval or
+by a later `credential share` (see "Credentials on a peer"). The four limits below
+are the ones the live remote-node E2E on `cloud-node-1` paid for.
+Read them before trusting a node with work, and read
+`lop network ready --peer <device>`: every failing row carries the remedy and
+the side it runs on.
+
+### Credentials are grants with scopes, not blanket copies
+
+A push that the node's git helper cannot serve — a repository outside the
+owner's designation, or any push on a device that holds no list — is refused
+exactly like a missing login: `fatal: could not read Username for
+'https://github.com'`, with git exiting 128, because the helper refuses by
+silence. That was the first wall of the remote-node E2E, and it is the
+fail-closed design, not a broken share. The `github` credential is never copied
+to the node: the owner lends a short-lived token per command, and the helper
+serves `https://github.com` for exactly the repositories the OWNER designated
+and nothing else. The designation travels WITH the grant — the borrowing device
+writes the owner's list into its own config before the git child runs — so a
+node does not maintain one by hand, and no credential file is written there.
+`lop network credentials` on either device shows the share and its holders (a
+holder row is a grant; the borrow itself is per command); the push is its own
+check — designated serves, anything else refuses by silence.
+
+### Toolchains do not travel
+
+A build or test on the node fails mid-task with `node: command not found` — or
+`npm`, `make`, `docker` missing — not because the setup failed: the node runs
+what its own disk has, and the mesh moves credentials and definitions, never
+installers. A repository whose build needs a JS toolchain cannot be worked from
+a node without it, and full brokered credentials do not change that.
+`lop network ready`'s tooling row names the gap BEFORE a lane starts (it reads
+and creates nothing on either device). Live, from the E2E node: `cloud-node-1
+has no glab, node, npm, make and docker on its PATH or in ~/.local/bin; has gh
+installed but not on its PATH; has no stored GitHub CLI login: offloaded work
+that needs them will fail there` — with one remedy line per gap (an install, a
+PATH fix, a sign-in; each runs on the node, and the product asks before
+changing anything there). The row reads `warn` on purpose: missing tooling does
+not make a device less onboarded — it makes lanes that need it fail there.
+
+### The build gates the machinery
+
+A capability this guide describes can be absent on the node, because it runs
+ITS build: an older build lacks the newer provisioning, sync and broker
+machinery, and checks that device does not know come back as `peer_too_old`
+rows rather than as a pass. Build parity is not a nit: the readiness `build`
+row is ADMISSION-class — the class that holds the onboarding verdict — so a
+node behind this device is not "ready, with caveats". Read parity from
+`lop network ready`'s build row: `cloud-node-1 runs the same build as this
+device` when level; otherwise it names which side is behind or ahead — work
+offloaded there runs the older build when the node is behind; an ahead node
+means this side may lack capabilities the peer expects — and the remedy runs
+on whichever side is behind: for a behind node, `lop update` there (the same
+updater the onboarding card drives), and its supervised relay rolls onto the
+new build; re-check afterwards.
+
+### Session capability is wired at session start
+
+A credential shared while a session is already running is invisible to it: the
+provider reports `No API key configured for provider '…'` even though
+`lop network credentials` lists the share right there. This is a known
+limitation with a one-step remedy — not a bug to re-share around: the brokering
+rung is built when a session STARTS, so a session that began before this
+device's first borrowable share runs without it for its whole life. Start a new
+session (or restart that one). A session that was already brokering picks up a
+newly shared key on the next pull without a restart — and
+`lop network credentials` prints `note: '…' is now available to borrow on this
+device…` at the moment a pull makes a key newly borrowable.
 
 ## When something looks wrong
 
@@ -764,10 +911,11 @@ Diagnose in this order, and stop at the first answer that explains it:
      the agent's `lop` must be on that release first — `lop-update` moves it
      there.
      Receipts, in order: `invite`, `pre_read`, `install`, `join`, `anchor`,
-     `relay`, `grants`, `verify`. `join` is satisfied when the node is already
-     an active member: no dial is made, and the step's detail reads "<node> is
-     already an active member of <network> (epoch N); admission is satisfied and
-     no re-join was attempted — the invite goes unused and expires." Read it in
+     `relay`, `grants`, `provision`, `verify`. `join` is satisfied when the
+     node is already an active member: no dial is made, and the step's detail
+     reads "<node> is already an active member of <network> (epoch N); admission
+     is satisfied and no re-join was attempted — the invite goes unused and
+     expires." Read it in
      `lop network approvals run <id> --json`: it is the join receipt's `detail`
      (`steps[] | select(.step == "join") | .detail`) — the human run block shows
      only the card's state, so satisfied and freshly joined read the same there.

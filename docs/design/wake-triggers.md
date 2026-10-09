@@ -121,6 +121,13 @@ imports inside the functions that need them.
   vocabulary: `wedged`/`failed`/`raised` move the walk; `started` does not).
 - `serve()` kicks the pass detached at the top of each iteration; `--once`
   awaits it inline so its own state load sees the record and engages it.
+- THE SHARED UNIT SERVES ONE STORE: this machine's default config root
+  (`~/.local-operator`), because one user has exactly one label
+  (`com.local-operator.wakes`, the systemd unit, the Windows task). A store
+  other than that — `LOCAL_OPERATOR_CONFIG_DIR` pointed at an alternate or
+  scratch root — is refused rather than repointed (the 2026-10-08 incident),
+  and wakes there fire only while a session is open; that is the workflow a
+  custom-store user should run, since the shared unit will not supervise it.
 
 ## 7. The project-staleness source
 

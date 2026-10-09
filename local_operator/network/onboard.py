@@ -2215,7 +2215,9 @@ class OnboardRun:
         )
         if grants_credentials:
             try:
-                default_keys = offers_mod.served_keys(offers_mod.build_items(config_dir()))
+                default_keys = offers_mod.served_keys(
+                    offers_mod.build_items(config_dir(), network_id=record.network_id)
+                )
             except offers_mod.OfferEnumerationError:
                 # An unreadable store is not "nothing to share": it is a fact the
                 # receipt must carry, and the shares can be retried (the step is

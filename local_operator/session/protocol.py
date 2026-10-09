@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 140 public members and a POSITIVE
+    than stylistic. This protocol carries 142 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -692,8 +692,15 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     answer and two refusals), 140 once the queued-ask revision rung needed
     ``revise_ask`` — :meth:`respond_ask`'s sanctioned exception (design §10, the
     in-flight answer revision) rides the same atomic whole-ask path and the same
-    cold-arm bind, so it is one more member on that rung rather than a new one), so
-    recompute it rather
+    cold-arm bind, so it is one more member on that rung rather than a new one,
+    141 once the DESK READER needed ``history_entry_times`` — a wire row is a
+    message with no entry time of its own, so the desktop bridge could only stamp
+    it with the moment this device served it until the owner's own
+    ``{entry id: ts}`` join had a seam to read (``Mesh wire honesty`` §S1), 142
+    once the desktop interrupt route needed ``canonical_current`` so a press could
+    not be answered ``idle`` from a mirror that says it is mid-resync, owes a
+    canonical re-sync, or is recovering from a dropped socket), so recompute it
+    rather
     than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -1122,6 +1129,22 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """The newest message in the loaded window, or ``None``."""
         ...
 
+    def history_entry_times(self) -> dict[str, float]:
+        """``{entry id: true entry ts}`` the OWNER shipped for the loaded rows.
+
+        The wire carries MESSAGES, and a message has no entry time of its own —
+        so a reader downstream that must stamp a wire row with the moment it was
+        WRITTEN, rather than the moment it was served, has exactly one honest
+        source: the ``{entry id: ts}`` join the owner puts on a display page when
+        this viewer negotiated ``display-history-entry-times-v1``.
+
+        A row ABSENT from the map has NO provable entry time (it was subtracted
+        from the owner's display replay, or it arrived live after the page); a
+        consumer reads that as "unstated" rather than substituting its own clock.
+        Empty for an owner too old to ship the join.
+        """
+        ...
+
     def pending_display_tool_ids(self) -> set[str]:
         """Tool ids whose result rows have not arrived yet."""
         ...
@@ -1308,6 +1331,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         *,
         decline: bool = False,
         revise: bool = False,
+        images: Sequence[Mapping[str, Any]] | None = None,
     ) -> str:
         """Answer, decline or REVISE a QUEUED ask; returns the owner's receipt.
 
@@ -1322,6 +1346,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ``revise`` selects a DIFFERENT op on the wire (``ask_revise``) rather than
         a flag the far side interprets: design §10 requires the intent to be
         explicit, because value equality is never the marker.
+
+        ``images`` are a FIRST answer's attachments (flat ``{question_id,
+        data_b64, mime_type}`` dicts). An owner that cannot keep them REFUSES the
+        answer in words (``ask-attachments-v1``) rather than recording the text
+        and dropping the pictures.
 
         Declared here because ``server/routes/desktop_sessions.py`` reaches it
         through a duck-typed ``bridge.remote`` binding, where a rename would be
@@ -1503,6 +1532,21 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         read a mid-resync viewer as an absent owner. Declared here because the
         desktop interrupt route reads it off a duck-typed bound facade to choose
         between an ``idle`` answer and dialling the owner.
+        """
+        ...
+
+    @property
+    def canonical_current(self) -> bool:
+        """Whether this facade's canonical mirror may speak for the OWNER.
+
+        The second half of the interrupt route's no-dial rule, declared here for
+        the same reason as :attr:`owner_reachable`: the route reads it off a
+        duck-typed bound facade to decide whether a ``False`` from the
+        follower's state may be presented as an ``idle`` answer. True when the
+        mirror is synced (``_ready_for_events``), owes no canonical re-sync,
+        and is not mid-recovery — i.e. when its own machinery does not say it
+        may be behind the owner. An owner ``Session`` has no mirror and no dial,
+        so the state does not exist for it.
         """
         ...
 

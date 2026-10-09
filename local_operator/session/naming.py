@@ -1955,6 +1955,24 @@ class TitleRefresh:
         return self.outcome == TITLE_REFRESHED
 
 
+def refresh_completer(session: Any) -> Callable[[str, str], Awaitable[str]]:
+    """The completion an on-demand refresh asks: the conversation's OWN model.
+
+    ``/title --refresh`` is a person asking this conversation to name itself,
+    so the model that has been answering it writes the title. The ``lo`` tier
+    ``complete_once`` prefers is a cost preference for unattended naming; it is
+    the wrong model for a typed command, and its slow tail overran the routed
+    8 s budget (see :data:`ROUTED_TITLE_TIMEOUT_S`).
+
+    Probed rather than required: a facade or test double without the
+    session-model seam still refreshes through ``complete_once``.
+    """
+    on_session_model = getattr(session, "complete_once_on_session_model", None)
+    if callable(on_session_model):
+        return cast("Callable[[str, str], Awaitable[str]]", on_session_model)
+    return session.complete_once
+
+
 async def refresh_title(
     current: str,
     complete_fn,
@@ -2101,7 +2119,7 @@ async def routed_refresh(current: str, session: Any) -> TitleRefresh:
         # default (TITLE_TIMEOUT_S, the TUI worker's much looser ceiling) from
         # applying to a routed op that a client is holding a socket for.
         return await refresh_title(
-            current, session.complete_once, turns=turns, timeout=ROUTED_TITLE_TIMEOUT_S
+            current, refresh_completer(session), turns=turns, timeout=ROUTED_TITLE_TIMEOUT_S
         )
 
     # `asyncio.timeout`, NOT `wait_for`, and the difference is load-bearing.

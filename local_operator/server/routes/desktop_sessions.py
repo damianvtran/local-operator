@@ -26,7 +26,11 @@ from pydantic import (
 from starlette.background import BackgroundTask
 
 from local_operator.harness.types import ModelSpec
-from local_operator.media import SUPPORTED_AUDIO_MIME_TYPES, SUPPORTED_IMAGE_MIME_TYPES
+from local_operator.media import (
+    SUPPORTED_AUDIO_MIME_TYPES,
+    SUPPORTED_IMAGE_MIME_TYPES,
+    SUPPORTED_VIDEO_MIME_TYPES,
+)
 from local_operator.network.projection import ProjectionRefusal
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_mesh import MESH_ID_PATTERN
@@ -113,6 +117,7 @@ from local_operator.session.frontend_state import (
     SlashResult,
     sync_wire_payload,
 )
+from local_operator.session.remote_open import PeerSessionUnresolved
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
     SESSION_COPY_FLAG,
@@ -623,12 +628,17 @@ AttachmentDigest = Annotated[str, Path(pattern=r"^[a-f0-9]{32}$")]
 ATTACHMENT_FALLBACK_MIME = "application/octet-stream"
 
 #: Mimes the two attachment-fetch routes may serve as themselves: the image
-#: set above plus the audio sniffer's output set. Same principle the comment
-#: above states (an allowlist of exactly what the media ingress can produce),
-#: extended to recordings now that durable user rows can carry them: a stored
-#: audio block is served as the container its bytes verified as, and anything
-#: else — including every non-audio mime — still falls back to octet-stream.
-ATTACHMENT_SERVABLE_MIME_TYPES = SUPPORTED_IMAGE_MIME_TYPES | SUPPORTED_AUDIO_MIME_TYPES
+#: set above, the audio sniffer's output set, and the output-attachment
+#: contract's video containers. Same principle the comment above states (an
+#: allowlist, not the store's word) extended twice: recordings arrived with
+#: durable user rows, and video arrives with artifacts produced by tools.
+#: Video is the one member with no sniffer behind it — the container is what
+#: the producing tool registered — so for it the set is the contract's closed
+#: vocabulary; anything outside it, for every kind, still falls back to
+#: octet-stream.
+ATTACHMENT_SERVABLE_MIME_TYPES = (
+    SUPPORTED_IMAGE_MIME_TYPES | SUPPORTED_AUDIO_MIME_TYPES | SUPPORTED_VIDEO_MIME_TYPES
+)
 
 
 class Input(BaseModel):
@@ -1067,6 +1077,24 @@ class Image(Input):
         return value
 
 
+class AnswerImage(Image):
+    """One image on a QUEUED-ASK answer, tagged with the question it answers.
+
+    A flat list tagged by ``question_id`` rather than a nested ``{qid: [Image]}``
+    map, deliberately: the HTTP body IS the attach-socket frame (one shape end to
+    end), and ``attach_client.fit_request_frame`` refits ONLY a top-level
+    ``frame["images"]`` list when a line exceeds the socket's 1 MiB read limit. A
+    nested map would need a second refit path; the flat list reuses the existing
+    one unchanged (and ``_refit_images`` keeps extra keys, so ``question_id``
+    survives the re-encode).
+
+    ``extra="forbid"`` is inherited from :class:`Input` — an unknown key on an
+    image is a 422, not a silently ignored field.
+    """
+
+    question_id: str = Field(min_length=1, max_length=128)
+
+
 class Audio(Input):
     """One recorded-audio block on the wire (see ``harness.types.AudioContent``).
 
@@ -1227,9 +1255,51 @@ class Answer(Input):
     #: runtime has to interpret. Accepted while the answer is undelivered, refused
     #: once the response row exists; the runtime decides, not this schema.
     revise: StrictBool | None = None
+    #: IMAGES attached to the answer, each tagged with the question it answers
+    #: (``AnswerImage.question_id``). OMITTED by every client that has none —
+    #: ``Answer`` is ``extra="forbid"``, so a client built before this field must
+    #: be able to keep sending the exact body it always sent (absent ⇒ empty ⇒ a
+    #: text-only answer whose frame is byte-identical to today's), and a client
+    #: that sends it to a BACKEND built before it gets a 422 ``extra forbidden``
+    #: rather than a silent drop; the renderer gates the attach affordance on
+    #: ``capabilities.features.ask_attachments`` so that 422 is the stale-read
+    #: backstop, not the normal path.
+    #:
+    #: v1 limits, all enforced HERE at the door rather than discovered at the
+    #: owner: at most 8, only on a FIRST ``answers`` body (a decline has no
+    #: content to attach; a revision carries text only — an answer's images are
+    #: immutable once sent, design D5), each naming a question the body answers,
+    #: and the whole body under the same 900,000-byte cap ``Prompt.nonempty``
+    #: enforces. SECRET questions are refused later, at the session, because
+    #: whether a question is secret is the ASK's fact and not this body's.
+    images: list[AnswerImage] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode="after")
     def one_answer(self):
+        if self.images:
+            # Checked FIRST and for every shape: the gate shapes (approval / ask
+            # picker) have no use for images either, and a field a shape cannot
+            # honour must be refused in words, never ignored (§10's no-op rule).
+            if self.ask_id is None:
+                raise ValueError("images apply to a queued ask answer")
+            if self.decline is True or not self.answers:
+                raise ValueError("images need answers; a decline carries none")
+            if self.revise is True:
+                raise ValueError(
+                    "a revision carries text only: an answer's images cannot be changed once sent"
+                )
+            unknown = sorted({img.question_id for img in self.images} - set(self.answers))
+            if unknown:
+                raise ValueError(
+                    "images must name a question the answers body answers (unknown: "
+                    + ", ".join(unknown)
+                    + ")"
+                )
+            # The same cap and the same measure as ``Prompt.nonempty``: a body
+            # the control frame cannot carry is refused at the door as a 422 the
+            # client can show, not as a dropped socket line.
+            if len(self.model_dump_json().encode()) > 900_000:
+                raise ValueError("Answer exceeds the canonical control-frame limit")
         if self.ask_id is not None:
             if not self.ask_id:
                 raise ValueError("ask_id must be a non-empty string")
@@ -1814,6 +1884,22 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # pick refuses with, so the two surfaces cannot describe one situation two
         # ways (``mesh-ui.md`` §1.3's degraded states — the finding that produced
         # the shared composer).
+        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+    except PeerSessionUnresolved as error:
+        # A PEER WAS SILENT, SO THIS DEVICE CANNOT SAY THE CONVERSATION IS NOT
+        # ITS OWN — the other half of mesh slice DB2 (design note §S2). The
+        # resolution read missed AND the relay reported devices that did not
+        # answer, which is not evidence of absence: 404 is what the renderer
+        # turns into ``missing`` ("This conversation is no longer on this
+        # machine" with the composer refused), and that is a deletion claim this
+        # device cannot support. 409 with its OWN code, in the same family as
+        # ``session_is_remote`` above and for the same reason — the conversation
+        # is not known to be gone, only unknown — but with a DIFFERENT REMEDY:
+        # there is no device to name, only a link to wait for, so the sentence
+        # names the devices that stayed SILENT and never pins one as the holder.
+        #
+        # The sentence is composed in ``remote_open`` beside the unreachable
+        # one, so the two refusals cannot drift apart on different surfaces.
         raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
     except PeerAttachmentUnavailable as error:
         # The bytes are on the device that holds the conversation, and this
@@ -2426,6 +2512,7 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
     admission in the route.
     """
     from local_operator.network.peers import resolve_peer
+    from local_operator.network.types import peer_number
     from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
     from local_operator.session.peer_rows import seed_peer_row
 
@@ -2435,7 +2522,15 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
     record = reply.get("record")
     record = record if isinstance(record, Mapping) else {}
     started_raw = record.get("started")
-    started = float(started_raw) if isinstance(started_raw, (int, float)) else 0.0
+    # THE SAME BOUNDARY RULE THE POLL READS THE CLAIM WITH (``PeerRow.from_json``
+    # calls this same ``peer_number``), so the seed and the next federated poll
+    # cannot disagree about one claim: a bool (an int subclass — ``float(True)``
+    # is 1.0, the epoch second into 1970 the sidebar dates "56y"), a null, a
+    # garbage string, a negative or an over-long number all become the no-claim
+    # ``0.0``, and a real epoch — including the numeric-string spelling the peer
+    # boundary documents — passes. QA round 1 on #2044: the hand-rolled
+    # ``isinstance`` reading here was a second spelling of the poll's rule.
+    started = peer_number(started_raw, default=0.0)
     name_raw = record.get("conversation_name")
     name = name_raw if isinstance(name_raw, str) and name_raw else UNTITLED_CONVERSATION
     matches = resolve_peer(peer, root)
@@ -2988,7 +3083,11 @@ async def draft_mint(body: DraftMint, request: Request):
 
 
 @router.get("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[SessionSnapshot])
-async def snapshot(session_id: str, request: Request):
+async def snapshot(
+    session_id: str,
+    request: Request,
+    entry_ts: int = Query(default=0, ge=0),
+):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
     # (``READ_ATTACH_BUDGET_S``) and the cold facade serves it with a
@@ -3018,11 +3117,18 @@ async def snapshot(session_id: str, request: Request):
     #   a machine in no network).
     # ``allow_draft``: one of the five doors a new-chat pane may hold before a
     # session exists (spec §1.3); a draft answers the cold/empty shape.
+    #
+    # ``entry_ts=1`` RIDES THIS ROUTE TOO, because the snapshot embeds a history
+    # page (``payload.history``) and that page is served by the same reader — so a
+    # renderer that declared the vocabulary must get the SAME answer from the
+    # embedded page as from ``/history``, or the two frames would disagree about
+    # the same rows. The flag is additive and defaults off, exactly as on
+    # ``/history``.
     async with (
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.snapshot())
+        return reply(await bridge.snapshot(entry_times=bool(entry_ts)))
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -3078,6 +3184,7 @@ async def history(
     before: int | None = Query(default=None, ge=0, le=500),
     after: int | None = Query(default=None, ge=0, le=500),
     limit: int = Query(default=100, ge=1, le=500),
+    entry_ts: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3089,6 +3196,15 @@ async def history(
     # named with a cursor, counts with no anchor) through ``errors()``, so the
     # request fails the same way whichever door it came through; the numeric
     # bounds here are the wire's (0..500 per side) and fail as the ordinary 422.
+    #
+    # ``entry_ts=1`` IS THE SAME KIND OF ADDITIVE NEGOTIATION as
+    # ``frontend_replace`` on ``events`` beside it: it says this renderer can
+    # consume the per-row ``ts_source`` vocabulary, so a wire row with no provable
+    # entry time comes back ``ts: null`` + ``unstated`` instead of a
+    # fabricated serve-stamp. An older client sends nothing, the parameter
+    # defaults to 0, and every row keeps today's serve-stamp and today's bytes
+    # (plus the additive ``ts_source: served``, which an old reader ignores).
+    # The matching feature key is ``entry_ts`` in ``GET /v1/capabilities``' ``features``.
     async with (
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
@@ -3100,6 +3216,7 @@ async def history(
                 before=before,
                 after=after,
                 limit=limit,
+                entry_times=bool(entry_ts),
             )
         )
 
@@ -3842,11 +3959,20 @@ async def answer(session_id: str, body: Answer, request: Request):
             # gate the ask is still there and the user's next move depends on
             # which of those it is.
             try:
+                # ``images`` is passed ONLY when the body carries some, so a
+                # text-only answer calls the facade exactly as it always did —
+                # which keeps every duck-typed ``bridge.remote`` that predates
+                # the keyword (test doubles, an older facade) working, and is the
+                # route-level half of "text-only frames stay byte-identical".
+                image_kwargs: dict[str, Any] = (
+                    {"images": [image.model_dump() for image in body.images]} if body.images else {}
+                )
                 detail = await bridge.remote.ask_respond(
                     body.ask_id,
                     body.answers,
                     decline=bool(body.decline),
                     revise=bool(body.revise),
+                    **image_kwargs,
                 )
             except (ValueError, RuntimeError) as error:
                 # BOTH classes, and the second is not defensive padding: a refusal
@@ -4339,16 +4465,29 @@ def _work_is_running(remote: Any) -> bool:
     LIMIT, STATED RATHER THAN HIDDEN: the owner's ``_turn_lock`` flush window is
     not visible from a follower at all, so a prompt admitted but not yet started
     cannot be told from an idle session by reading canonical state. The activity
-    phase narrows that window to the admission-to-first-work gap, and the residue
-    is not reachable from the desktop: the button and Esc are both offered on the
-    same ``streaming`` flag this reads, so a press cannot exist in a window where
-    this predicate is false.
+    phase narrows that window to the admission-to-first-work gap, and a press CAN
+    land in the gap: the desktop's liveness rides the live-event feed, which can
+    outrun this predicate (the 2026-10-07 incident is that measurement), so this
+    paragraph's old closing claim — "the residue is not reachable from the
+    desktop" — is withdrawn rather than restated. The mitigation is the CALL
+    SITE's, not this predicate's: see the RACE paragraph below.
 
     RACE, STATED RATHER THAN HIDDEN: the follower's roster can lag the owner by a
-    delta. Both directions are benign here. A stale ``False`` cannot swallow a
-    press the user could make, for the reason just given. A stale ``True`` at
-    worst reaches the abort a moment after the turn settled, which is the
-    pre-existing behaviour of a press racing a turn's end.
+    delta. A stale ``True`` at worst reaches the abort a moment after the turn
+    settled, which is the pre-existing behaviour of a press racing a turn's end.
+
+    A STALE ``False`` IS NOT BENIGN, and the sentence that said it was — "a press
+    cannot exist in a window where this predicate is false" — is REFUTED by the
+    2026-10-07 incident rather than merely doubted. The premise was that the UI
+    offers stop on the same ``streaming`` flag this reads, so the two cannot
+    disagree; in production they CAN, because the UI's liveness rides the
+    live-event feed while this predicate reads canonical state that a parked op
+    chain can freeze at the previous turn boundary (see the route's ``execute``
+    for the mechanism). The mitigation is NOT in this predicate — its terms stay
+    exactly "what would the abort stop" — it is at the CALL SITE: a False from
+    this function is presented as ``idle`` only while
+    ``AttachedSession.canonical_current`` vouches the mirror is complete and
+    current, and the unvouched case dials the owner instead.
     """
     if remote.is_streaming:
         return True
@@ -4426,16 +4565,32 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
     outlives the turn that started it — and the receipt names them.
 
     ``idle`` IS A SUCCESS, AND IT IS THE ANSWER FOR ANY SESSION WITH NOTHING TO
-    STOP. A cold session is NOT engaged to answer this (an interrupt is not a
-    reason to spend a process, which is what ``warm`` is for), and a warm one
-    that is merely sitting between turns is answered without dialling its owner
-    at all — see ``_work_is_running`` for the terms, and note that a parked gate
-    WITHOUT a live turn (the orphan card this release also taught ``abort`` to
-    settle) counts as work, because that press really does clear the screen. A
-    client putting an error in front of a press that had nothing to do would be
-    reporting the user's own success as a failure, and a client told
-    ``interrupted`` for a press that stopped nothing would be shown a success
-    that did not happen.
+    STOP — WHEN THE FOLLOWER CAN PROVE IT. A cold session is NOT engaged to
+    answer this (an interrupt is not a reason to spend a process, which is what
+    ``warm`` is for), and a warm one that is merely sitting between turns is
+    answered without dialling its owner at all — see ``_work_is_running`` for
+    the terms, and note that a parked gate WITHOUT a live turn (the orphan card
+    this release also taught ``abort`` to settle) counts as work, because that
+    press really does clear the screen. A client putting an error in front of a
+    press that had nothing to do would be reporting the user's own success as a
+    failure, and a client told ``interrupted`` for a press that stopped nothing
+    would be shown a success that did not happen.
+
+    BUT ONLY A VOUCHED ``False`` MAY BE PRESENTED AS ``idle`` — the rule the
+    2026-10-07 incident added. A slow head op parked the owner's op chain
+    (``session/runtime/server.py`` chains ops per connection); the follower's
+    canonical re-sync parked behind it; its store froze at the last turn
+    boundary while the live turn's deltas buffered; ``_work_is_running`` read
+    false on every term — and four stop presses (receipts 3891-3894) were
+    answered ``idle`` with no dial, while the UI painted the live turn and the
+    presses achieved nothing. So the shortcut now also requires
+    ``AttachedSession.canonical_current``: a mirror whose own flags say it is
+    mid-resync, owed a canonical re-sync, or recovering from a dropped socket
+    cannot speak for the owner, and the press DIALS instead — the owner's
+    receipt is the answer, and a dial that cannot complete is the ladder's 503,
+    never ``idle``. The recovering half is the same rule one layer out: a
+    dropped socket says nothing about the turn (the runtime is usually still
+    running it), so it must not fold into the cold no-op either.
 
     "NO OWNER" MEANS ``owner_reachable``, NOT ``is_cold``, and the difference is
     the whole of review round 1's MAJOR-1: ``is_cold``'s third disjunct is a
@@ -4486,7 +4641,15 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
             # history page load: gating on it read a live streaming turn as `idle`
             # and stopped nothing, which is this PR's own defect class arriving
             # through its own new door (review round 1, MAJOR-1).
-            if not bridge.remote.owner_reachable:
+            #
+            # ``recovering`` IS NOT "NO OWNER", though it is not reachable either.
+            # A dropped socket says nothing about the turn — the runtime is
+            # usually still running it — so folding recovery into this no-op
+            # would answer the press ``idle`` while the OWNER may be mid-turn:
+            # the 2026-10-07 shape one layer out. The press falls through to the
+            # dial instead, and a dial that cannot be served is the ladder's 503,
+            # never a claim this viewer cannot prove.
+            if not bridge.remote.owner_reachable and not bridge.remote.recovering:
                 return {
                     "status": "idle",
                     "receipt": "",
@@ -4494,12 +4657,18 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
                     "background_jobs": 0,
                 }
             # NOTHING FOR THIS RUNG TO STOP IS THE SAME ANSWER as no owner to stop
-            # it with: ``idle``, on a 200, without dialling. That question is asked
-            # of the follower's published roster, which stays readable through a
-            # resync — the store is installed from the attach snapshot and
-            # maintained by deltas, so a mid-refresh viewer still knows whether
-            # work is running.
-            if not _work_is_running(bridge.remote):
+            # it with: ``idle``, on a 200, without dialling — BUT ONLY when the
+            # follower's own state says it can be trusted to speak for the owner
+            # (``canonical_current``), because the roster this reads is only as
+            # good as the feed that maintains it. The 2026-10-07 incident is that
+            # sentence's counterexample: a slow head op parked the runtime's op
+            # chain, the follower's canonical folds stalled behind it, the store
+            # was frozen at the last turn boundary — and stop presses were
+            # answered ``idle`` off a stale ``False``, which stopped nothing while
+            # the owner was mid-turn. A mirror that cannot vouch for itself gets
+            # DIALED: the owner's own receipt is the answer, and a dial that
+            # cannot complete is the ladder's 503 (NOT ``idle``).
+            if not _work_is_running(bridge.remote) and bridge.remote.canonical_current:
                 # Nothing was stopped, so "what survived" is simply what is
                 # running. ``children_running`` is zero by construction (a
                 # running ``task`` job is a term above), while backgrounded
@@ -4666,6 +4835,7 @@ async def events(
     epoch: str | None = Query(default=None, max_length=128),
     after_seq: int = Query(default=0, ge=0),
     frontend_replace: int = Query(default=0, ge=0),
+    entry_ts: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -4735,7 +4905,9 @@ async def events(
             # ``refresh_watch()`` on the cancellation path, both of which were
             # silently skipped there. Closing it *inside* the ``try`` is the
             # load-bearing part: the outer ``finally`` below has not run yet.
-            async with aclosing(bridge.events(sub, epoch=epoch, after_seq=after_seq)) as frames:
+            async with aclosing(
+                bridge.events(sub, epoch=epoch, after_seq=after_seq, entry_times=bool(entry_ts))
+            ) as frames:
                 try:
                     async for frame in frames:
                         yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"

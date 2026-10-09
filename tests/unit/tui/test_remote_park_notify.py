@@ -335,7 +335,7 @@ async def test_the_sidebar_poll_is_the_detector(
 ) -> None:
     """The hook the whole feature rides: the poll's own rows, no second read.
 
-    ``peer_session_rows`` is what ``_refresh_sidebar`` already calls; the park
+    ``read_listing`` is what ``_refresh_sidebar`` already calls; the park
     detector reads edges off its return value, so a listing that paints the
     peer rows is also what announces its park. This cell drives the REAL
     refresh (the method the 2 s timer calls) rather than ``_note_remote_parks``
@@ -345,7 +345,7 @@ async def test_the_sidebar_poll_is_the_detector(
     from local_operator.session import peer_rows as peer_rows_module
 
     rows = (_parked(),)
-    monkeypatch.setattr(peer_rows_module, "peer_session_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(peer_rows_module, "read_listing", lambda *a, **k: (rows, ()))
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
@@ -361,6 +361,81 @@ async def test_the_sidebar_poll_is_the_detector(
                 break
         assert _toast(app).display, "the poll never announced the park"
         assert "Waiting for approval on demo-laptop" in _toast(app).message
+
+
+def _silent_relay(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A relay whose one device stays silent, and a clock that outlasts the TTL.
+
+    The injected clock is the shape that discriminates (R-1 / R2-1): a pair of
+    ``peer_session_rows`` + ``unanswered_peers`` calls is only ONE read while the
+    first finishes inside the cache TTL, and a silent peer is exactly the listing
+    that spends it — so the second call re-dials. Every layer above the catalogue
+    is production code.
+    """
+    from local_operator.network import projection, store
+    from local_operator.session import peer_rows as peer_rows_module
+    from tests.unit.server.test_desktop_remote_open import _JumpingClock
+    from tests.unit.session.test_peer_rows import _Catalog, _Facts
+
+    peer_rows_module.clear_cache()
+    catalog = _Catalog(
+        [_Facts("d_bb", "demo-laptop", reachable=False, reason="connect_failed:Refused")], []
+    )
+    monkeypatch.setattr(store, "find_own_relay", lambda root=None: object())
+    monkeypatch.setattr(projection, "RelayPeerCatalog", lambda root: catalog)
+    monkeypatch.setattr(peer_rows_module, "time", _JumpingClock())
+    return catalog
+
+
+@pytest.mark.asyncio
+async def test_the_closed_list_watch_reads_the_listing_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-1: ``_read_remote_parks`` hands the detector ONE read's rows AND silence."""
+    catalog = _silent_relay(monkeypatch)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        seen: list[tuple[Any, Any]] = []
+        monkeypatch.setattr(
+            app, "_note_remote_parks", lambda rows, unanswered=(): seen.append((rows, unanswered))
+        )
+        catalog.calls = 0
+
+        await app._read_remote_parks()
+
+    assert catalog.calls == 1, "the watch issued a SECOND fan-out for one tick"
+    ((rows, unanswered),) = seen
+    assert rows == ()
+    assert [peer.device_id for peer in unanswered] == ["d_bb"]
+
+
+@pytest.mark.asyncio
+async def test_the_sidebar_refresh_reads_the_listing_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-1: the 2 s refresh is ONE fan-out, and its silence rides the same read."""
+    catalog = _silent_relay(monkeypatch)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        seen: list[tuple[Any, Any]] = []
+        monkeypatch.setattr(
+            app, "_note_remote_parks", lambda rows, unanswered=(): seen.append((rows, unanswered))
+        )
+        app._session_sidebar.set_open(True)
+        if app._sidebar_timer is not None:
+            app._sidebar_timer.pause()
+        catalog.calls = 0
+        app._refresh_sidebar()
+        for _ in range(60):
+            await pilot.pause()
+            if seen:
+                break
+
+    assert seen, "the refresh never reached the park detector"
+    assert catalog.calls == 1, "the refresh issued a SECOND fan-out"
+    assert [peer.device_id for peer in seen[0][1]] == ["d_bb"]
 
 
 @pytest.mark.asyncio
@@ -379,8 +454,7 @@ async def test_a_park_while_the_list_is_closed_is_announced(
     from local_operator.session import peer_rows as peer_rows_module
 
     rows = (_parked(),)
-    monkeypatch.setattr(peer_rows_module, "peer_session_rows", lambda *a, **k: rows)
-    monkeypatch.setattr(peer_rows_module, "unanswered_peers", lambda *a, **k: ())
+    monkeypatch.setattr(peer_rows_module, "read_listing", lambda *a, **k: (rows, ()))
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
@@ -426,8 +500,7 @@ async def test_the_always_on_watch_is_armed_and_fires_on_its_own(
     from local_operator.session import peer_rows as peer_rows_module
 
     rows = (_parked(),)
-    monkeypatch.setattr(peer_rows_module, "peer_session_rows", lambda *a, **k: rows)
-    monkeypatch.setattr(peer_rows_module, "unanswered_peers", lambda *a, **k: ())
+    monkeypatch.setattr(peer_rows_module, "read_listing", lambda *a, **k: (rows, ()))
 
     armed: list[tuple[float, dict[str, Any]]] = []
     original = OperatorApp.set_interval
@@ -509,9 +582,12 @@ async def test_a_silent_device_does_not_withdraw_or_re_announce_its_park() -> No
 async def test_a_stored_unread_completion_raises_no_card() -> None:
     """The §2 discriminator, end to end: a stored row is not a park.
 
-    The relay's stored half writes ``pending: "ask"`` for an unread completion
-    and paints ``live_state: ""``; treating it as a park would page a person
-    for a turn that finished hours ago and needs nobody.
+    The shape a producer that predates the 2026-10-07 correction shipped: a
+    stored row (``live_state: ""``) carrying ``pending: "ask"`` minted from an
+    unread completion. The producer no longer mints it and the row reader
+    drops it (``network.types.row_needs_claim``), but a row that already
+    carries the legacy claim must still not page a person for a turn that
+    finished hours ago and needs nobody.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:

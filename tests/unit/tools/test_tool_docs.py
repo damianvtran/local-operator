@@ -194,17 +194,39 @@ _WALK_DEPTH_CAP = 2
 #: refusals and summaries). Every other entry is byte-identical, and the same
 #: three tools are the whole of ``scripts/bench_context_budget.py``'s raise
 #: (``36,552 -> 37,094``) — the two ledgers move together.
+#: RE-MEASURED 2026-10-08 by the context diet (deferred tool schemas,
+#: ``perf/deferred-tools``). EVERY entry moved, and the whole table moved
+#: DOWN: ``create_tools`` now collapses an optional field's
+#: ``anyOf: [T, null]`` + ``default: null`` to ``T`` and the injected ``i``
+#: description is shorter, and the doc renders the schema it is given. Only
+#: two entries moved UP, and both are moves rather than growth: ``project``
+#: (1077 -> 1102) and ``todo`` (498 -> 524) gained the per-field/per-op prose
+#: their wire schemas gave up (pinned both ways in ``MOVED_WIRE_DETAIL``).
+#: ``send``/``ask`` also gained notes, but their shorter descriptions (which
+#: the doc renders too) outweigh them; ``sessions`` fell 981 -> 802 for the
+#: same reason.
+#: RE-MEASURED 2026-10-08 on the MERGED tree (context diet + image-generation
+#: restore, ``feat/image-generation-tool``) — the merge of the two landed the
+#: same day, so this table was measured once, after both: ``generate_image``
+#: is NEW at 608 — the default surface grew by one createIf-gated tool (bound
+#: in ``scripts/real_tool_surface`` the way the browser/console gates are,
+#: because an unbound answer would depend on which machine ran it), and the
+#: diet's collapse applies to its doc too (635 pre-diet -> 608 here). EVERY
+#: other entry is byte-identical to the diet's table above, and the same
+#: schema is the whole of ``scripts/bench_context_budget.py``'s raise — the
+#: two ledgers move together.
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 849,
-    "ask": 1205,
-    "ask_withdraw": 327,
-    "bash": 313,
-    "browser": 1365,
-    "console": 1141,
-    "edit": 372,
-    "eval": 379,
-    "glob": 94,
-    "grep": 346,
+    "agent": 786,
+    "ask": 1005,
+    "ask_withdraw": 318,
+    "bash": 304,
+    "browser": 1312,
+    "console": 1096,
+    "edit": 351,
+    "eval": 376,
+    "generate_image": 608,
+    "glob": 91,
+    "grep": 337,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
     # rewritten to say that pause/cancel RECORD it as the stop reason. The new
     # wording is SHORTER than the old ("Body. Required for send/ask/steer/resume;
@@ -214,30 +236,30 @@ MEASURED_TOKENS: dict[str, int] = {
     # 673 -> 677 (round 1 remediation, D2/D4): the verb became mechanism-neutral
     # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
     # paused child is halted-and-resumable, not stopped. Re-measured.
-    "hub": 677,
-    "jobs": 365,
-    "list_variables": 61,
-    "lsp": 303,
-    "monitor": 420,
-    "network": 877,
-    "patience": 361,
-    "project": 1077,
-    "project_delete": 98,
-    "read": 358,
-    "read_variable": 74,
-    "secret": 209,
-    "send": 728,
-    "sessions": 981,
-    "task": 505,
-    "team": 540,
-    "team_delete": 93,
-    "todo": 498,
-    "wait": 275,
-    "wake": 357,
-    "web_fetch": 367,
-    "web_read": 234,
-    "web_search": 202,
-    "write": 144,
+    "hub": 650,
+    "jobs": 350,
+    "list_variables": 58,
+    "lsp": 276,
+    "monitor": 357,
+    "network": 874,
+    "patience": 334,
+    "project": 1102,
+    "project_delete": 95,
+    "read": 349,
+    "read_variable": 71,
+    "secret": 188,
+    "send": 697,
+    "sessions": 802,
+    "task": 488,
+    "team": 489,
+    "team_delete": 90,
+    "todo": 524,
+    "wait": 272,
+    "wake": 312,
+    "web_fetch": 352,
+    "web_read": 225,
+    "web_search": 193,
+    "write": 141,
 }
 
 #: The SAME ledger's other arm: ``agent``/``task`` rendered against a
@@ -248,7 +270,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: 716 -> 855 and 585 -> 668, the same moved-here-on-purpose growth the clean
 #: arm documents (the per-op tables and notes now carry what the wire used
 #: to).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 878, "task": 668}
+#: 878/672 -> 815/639 (2026-10-08, context diet): the same collapse and
+#: intent-description cut as the canonical table above.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 815, "task": 639}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
@@ -299,9 +323,11 @@ def default_surface(hermetic_config: Path) -> list[AgentTool]:
 
     Reuses ``scripts/real_tool_surface.build_real_tools`` so these drift tests
     and the ``context-budget`` CI guard cannot disagree about what "the default
-    surface" is: it forces the two machine-probing createIf gates (browser and
-    console) deterministically ON, which is what makes a CI runner and a
-    developer box measure the same 34 tools. Function-scoped (not module-scoped)
+    surface" is: it forces the three machine-probing createIf gates (browser,
+    console and the image provider) deterministically ON, which is what makes a
+    CI runner and a developer box measure the same surface — the count is
+    ``len(DEFAULT_TOOL_NAMES)``, asserted below rather than spelled here.
+    Function-scoped (not module-scoped)
     because the builders read the config at BUILD time, so each test's
     :func:`hermetic_config` must apply to its own render; the fixture is taken
     for its env side effect alone.
@@ -622,8 +648,12 @@ MOVED_WIRE_DETAIL: dict[str, tuple[str, ...]] = {
     # test_project_tool.py::test_the_schema_text_names_the_cap_the_refusal_enforces),
     # so the both-ways assertion cannot hold for it. The milestone-rationale
     # phrase stays as this tool's representative move.
-    "project": ("derived, not stored",),
+    "project": ("derived, not stored", "<= 10 files, <= 5 MB each"),
+    # Context diet (deferred-tools PR): the delivery modes and the fresh
+    # session refusal left the description; the per-op prose left todo.op.
+    "send": ("is not a recipient: sends to it are refused",),
     "task": ("a registered profile or a packaged starter",),
+    "todo": ("Abandon items that are no longer needed",),
 }
 
 

@@ -108,6 +108,41 @@ def mcp_url_from_key(key: str) -> str:
     return key[len(MCP_KEY_PREFIX) :]
 
 
+#: The placement-key namespace for the ENCRYPTED SECRET STORE (design class 2):
+#: ``secret:<NAME>``, one key per ``lop secret`` row. Prefixed for the same reason
+#: ``mcp:<url>`` is (module docstring): a store secret named ``openai`` must not
+#: collide with the provider placement ``openai`` — one placement entry per key,
+#: and a collision would serve the wrong thing rather than refusing.
+SECRET_KEY_PREFIX = "secret:"
+
+#: The placement ``kind`` for a class-2 secret (design ``mesh-consent-provisioning``
+#: §2.1 row 2). Spelled without the provider classes' ``-static``/``-rotating``
+#: suffix on purpose: this class's copy policy is per KEY (the needs-list ∪
+#: ``sync`` marks, §4.2), not a per-kind default.
+SECRET_KIND = "store-secret"
+
+
+def credential_key_for_secret(name: str) -> str:
+    """The placement key for an encrypted-store secret. Identity, spelled once."""
+    return f"{SECRET_KEY_PREFIX}{name}"
+
+
+def is_secret_key(key: str) -> bool:
+    return key.startswith(SECRET_KEY_PREFIX)
+
+
+def secret_name_from_key(key: str) -> str:
+    """The secret NAME inside a ``secret:<name>`` key. Raises on a non-secret key.
+
+    Raising rather than returning ``""`` for the reason the MCP sibling states in
+    this module: a caller that asked for the name of a provider key has a bug, and
+    an empty string would march it on to look up the empty secret.
+    """
+    if not is_secret_key(key):
+        raise ValueError(f"{key!r} is not a secret:<name> placement key")
+    return key[len(SECRET_KEY_PREFIX) :]
+
+
 # ---------------------------------------------------------------------------
 # Device-bound providers
 # ---------------------------------------------------------------------------
@@ -228,6 +263,30 @@ def peer_int(value: Any, *, default: int = 0, maximum: int | None = None) -> int
     return int(peer_number(value, default=default, maximum=maximum))
 
 
+def _bounded_narrowing(value: Any) -> dict[str, Any]:
+    """A ``Grant.narrowing`` map a peer sent, bounded to shapes this build reads.
+
+    The map is OPEN-ENDED on purpose — one key per provider that needs local
+    materialisation at use time (``repositories`` for github today) — so the
+    boundary here is structural rather than per-key: names are short strings,
+    values are short strings or lists of short strings, and every other shape is
+    dropped rather than guessed at. ``{}`` is the total answer, like everything a
+    peer sends reads through this module: "no narrowing", never an error.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for name, item in value.items():
+        if not isinstance(name, str) or not name or len(name) > 64:
+            continue
+        if isinstance(item, str):
+            out[name] = item[:200]
+        elif isinstance(item, (list, tuple)):
+            entries = [entry[:200] for entry in item if isinstance(entry, str) and entry]
+            out[name] = entries[:64]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Refusal codes: the closed set, and what the requester does with each
 # ---------------------------------------------------------------------------
@@ -292,8 +351,36 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     # (review round 1, F1). An honest client never produces it, so it is cached like
     # an authorisation refusal rather than retried.
     "identity_mismatch": 60_000,
+    # The copy path's codes (mesh-consent-provisioning §5; review round 1, R2 —
+    # every code the copy path emits joins this table, so the next consumer does
+    # not meet an unregistered name and silently fall to the default TTL and
+    # sentence. ``malformed_*``/``unknown_key`` are build-bug-or-forgery states,
+    # cached like an authorisation refusal; ``not_copyable`` and
+    # ``member_not_active`` are policy answers no retry can change (`member_not_active`
+    # rather than the transport's ``not_a_member``: the transport's code refuses a
+    # frame at the door for someone not in the network, this one withholds a copy
+    # from a member whose row is no longer active — distinct layers, distinct names);
+    # ``no_value`` is the owner's current supply, which a login can change at any
+    # moment, so it honours the wire's own retry hint (0); ``unavailable`` means
+    # the far side cannot service sync at all (no identity/placement yet).
+    "malformed_frame": 60_000,
+    "malformed_announce": 60_000,
+    "unknown_key": 60_000,
+    "not_copyable": 300_000,
+    "no_value": 0,
+    "member_not_active": 300_000,
+    "generation_out_of_range": 60_000,
+    "unavailable": 60_000,
     "not_implemented": NO_RETRY,
     "internal": 60_000,
+    # S4's two additions, and each caches by what its remedy is. ``local_only``
+    # is a policy answer no retry can change (§4.2's kill switch), cached long
+    # like the other authorisation refusals. ``copy_stale`` (design §6.1's added
+    # code) is self-healing on the owner's next contact — the holder's copy
+    # keeps working meanwhile, and a dead value fails at its own use — so it
+    # caches short, beside the failure it describes.
+    "local_only": 300_000,
+    "copy_stale": 60_000,
 }
 
 BROKER_ERROR_CODES: frozenset[str] = frozenset(BROKER_ERROR_TTL_MS)
@@ -399,6 +486,13 @@ class Grant:
     identity: dict[str, str] = dataclasses.field(default_factory=dict)
     latency_ms: int = 0
     grant_id: str = ""
+    #: Per-grant narrowing metadata the OWNER enforced at serve time, for the
+    #: borrower to materialise locally where a provider needs it at use time —
+    #: github's ``{"repositories": [owner/repo, ...]}`` is the git helper's
+    #: allow-list (design §3.4). Empty for every provider that needs none, so the
+    #: wire shape is unchanged for them; peer values are bounded in
+    #: :func:`_bounded_narrowing`.
+    narrowing: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def usable_at(self, now_ms: float | None = None) -> bool:
         """Whether this grant may still be handed to a request right now."""
@@ -428,6 +522,8 @@ class Grant:
         }
         if self.identity:
             detail["identity"] = dict(self.identity)
+        if self.narrowing:
+            detail["narrowing"] = dict(self.narrowing)
         return detail
 
     @classmethod
@@ -471,6 +567,7 @@ class Grant:
             ),
             latency_ms=peer_int(detail.get("latency_ms")),
             grant_id=str(detail.get("grant_id") or ""),
+            narrowing=_bounded_narrowing(detail.get("narrowing")),
         )
 
 

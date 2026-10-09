@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -2425,5 +2426,294 @@ async def test_a_cursor_cut_read_leaves_the_cold_seed_unset(tmp_path: Path, monk
         await viewer._load_history(None, want_checkpoint=True)
         restored = viewer._cold_seed_usage
         assert restored is not None and restored.context_tokens == 322_546
+    finally:
+        await viewer.dispose()
+
+
+def _write_team(config_dir: Path, name: str, *, manager: str) -> None:
+    """A real registry row, so the cold identity lookup has something to read."""
+    from datetime import datetime, timezone
+
+    from local_operator.teams import Team, TeamMember, TeamRegistry
+
+    TeamRegistry(config_dir).save_team(
+        Team(
+            id=f"t-{name}",
+            name=name,
+            created_date=datetime.now(timezone.utc),
+            manager=manager,
+            members=[TeamMember(role="coder")],
+            instructions="Ship reviewed work.",
+        )
+    )
+
+
+async def _checkpoint(directory: Path, durable: Any) -> Any:
+    """Append one frontend checkpoint row, the way a turn end writes it."""
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    await Transcript(directory).append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cold_resume_derives_the_identity_the_team_binds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Issue #2014 (found by the UI lane's review of the companion PR): the FIRST
+    frame of a team-bound resume already says who is speaking.
+
+    The bug: a cold frame carried ``effective_identity == {}`` while
+    ``active_team`` was set, and ``{}`` is the documented sentinel for "a host
+    older than this field". So a resumed, never-warmed team chat read as an OLD
+    host — the desktop header offered the open picker list until a runtime
+    engaged, then flipped to the closed lock.
+
+    DERIVED, never copied, and that is the point: every checkpoint written before
+    the field existed has no key for it, so a copy would hand the frame ``{}``
+    and the bug would persist for exactly the sessions that already exist. The
+    manager is not on the checkpoint either, so it is resolved best-effort from
+    this machine's registry — the same one the warm session reads.
+
+    The WARM comparison is asserted beside it, because the two must agree: the
+    cold pane is what the user looks at until a runtime engages.
+
+    A client may rely on this cell's value: while a team is attached the triple is
+    ``{"speaker": <manager>, "team": <team>, "role_of_speaker": "manager"}``.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _write_team(tmp_path, "lopdev", manager="manager")
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("carry the roster"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        active_agent="manager",
+        active_team="lopdev",
+    )
+    # THE LEGACY SHAPE, exactly as a pre-#2014 build left it on disk: no key at
+    # all for the field.
+    row = {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")}
+    row["state"].pop("effective_identity", None)
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+
+    await transcript.append_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE, row)
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.active_team == "lopdev"
+        assert state.effective_identity == {
+            "speaker": "manager",
+            "team": "lopdev",
+            "role_of_speaker": "manager",
+        }
+    finally:
+        await viewer.dispose()
+
+    # And the same answer when the checkpoint DOES carry the sentinel: a host
+    # that has the field but never derived it must not win over the rule.
+    await _checkpoint(directory, durable)
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.frontend_state.effective_identity == {
+            "speaker": "manager",
+            "team": "lopdev",
+            "role_of_speaker": "manager",
+        }
+    finally:
+        await viewer.dispose()
+
+    # The warm half: the same session opened with a runtime publishes the SAME
+    # triple, so the pane cannot change its answer when the runtime lands.
+    from local_operator.agents import AgentRegistry
+    from local_operator.resume import write_session_attachment
+    from local_operator.session.session import Session
+    from local_operator.teams import TeamRegistry
+    from tests.unit.session.test_session import MODEL, ScriptedStream
+
+    write_session_attachment(directory, team="lopdev", agent="", goal="")
+    warm = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[]]),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: [],
+        agent_registry=AgentRegistry(tmp_path),
+        team_registry=TeamRegistry(tmp_path),
+    )
+    assert warm.effective_identity == {
+        "speaker": "manager",
+        "team": "lopdev",
+        "role_of_speaker": "manager",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_cold_resume_with_nothing_attached_publishes_the_empty_statement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The other half of the contract, and the one a client keys on to KNOW the
+    difference: no team and no profile is ``{"speaker": "", "team": "",
+    "role_of_speaker": ""}`` — an explicit "nobody" it can render — never ``{}``,
+    which means "this host is older than the field, go and guess".
+
+    A client may rely on the three keys being present on every first frame.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.transcript import Transcript
+
+    await Transcript(directory).append_message(Message.user("no roster here"))
+    await _checkpoint(
+        directory,
+        FrontendSessionState(session_id=SESSION_ID, epoch="previous-owner"),
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.active_team == "" and state.active_agent == ""
+        assert state.effective_identity == {
+            "speaker": "",
+            "team": "",
+            "role_of_speaker": "",
+        }
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_pre_fix_checkpoint_carrying_the_sentinel_still_derives(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """THE compatibility cell: the field present-and-EMPTY beside a bound team.
+
+    ``{}`` means "a host older than this field" to a client, so a restore that
+    COPIES the field from a checkpoint hands back something a header must read as
+    "cannot say" — the bug this derivation exists to fix. Three input shapes can
+    reach that copy, and there is one cell per shape:
+
+    * **present and ``{}``** — THIS cell. Its producers are a reduced/embedded
+      host with no ``effective_identity`` property (``refresh_from_session``
+      takes its ``or {}`` fallback), or a state restored from a pre-field
+      checkpoint before its first refresh. It is NOT what a normal session with
+      nothing attached writes: that sends the explicit empty statement, which is
+      why the sibling cell below can say "never ``{}``" without contradicting
+      this one (agent review on the follow-up, MINOR-1 — the first two drafts of
+      this docstring got that provenance wrong).
+    * **the key ABSENT** — a checkpoint last written by a build that predates the
+      field (``test_a_cold_resume_derives_the_identity_the_team_binds`` pops the
+      key to reproduce it).
+    * **the explicit empty statement with nothing attached** — which must arrive
+      as itself, not as the sentinel
+      (``test_a_cold_resume_with_nothing_attached_publishes_the_empty_statement``).
+
+    The cell asserts the stored shape first (the key present and empty, checked
+    before the checkpoint is written, so it fails LOUDLY at its own precondition
+    if the model ever stops dumping empty fields rather than passing vacuously),
+    then the derived triple. Under the sabotage run (the derivation replaced by
+    ``dict(durable.effective_identity)``) it reds alongside those two siblings —
+    3 failed / 39 passed on the whole file.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _write_team(tmp_path, "lopdev", manager="manager")
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.transcript import Transcript
+
+    await Transcript(directory).append_message(Message.user("carry the roster"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        active_agent="manager",
+        active_team="lopdev",
+    )
+    dumped = durable.model_dump(mode="json")
+    # THE PRE-FIX SHAPE, asserted rather than assumed: the key is present and
+    # empty, which is what every checkpoint on disk from before this field holds.
+    assert dumped["effective_identity"] == {}, dumped["effective_identity"]
+    await _checkpoint(directory, durable)
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.frontend_state.effective_identity == {
+            "speaker": "manager",
+            "team": "lopdev",
+            "role_of_speaker": "manager",
+        }
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_cold_fallback_names_the_team_when_the_registry_cannot_be_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The cold path's VISIBLE LIMIT, pinned because a UI lane keys on it.
+
+    The speaker's NAME comes from this machine's team registry, and that lookup is
+    best-effort on purpose: an unreadable or absent registry must cost a user a
+    roster at worst, never their conversation. When it cannot answer, the TEAM
+    names itself — so a client painting "who is speaking" from ``speaker`` alone
+    sees a roster name where the warm frame would show the manager's profile name
+    (agent review on the follow-up, which found this row had no cell at all while
+    the contract block published it).
+
+    The KIND is unaffected and that is the point of the contract's advice: a team
+    is in force either way, ``role_of_speaker`` still reads ``"manager"``, and
+    ``/agent`` is still refused. Here the team is simply not in this machine's
+    registry, which is the ordinary way the lookup comes up empty.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    # No _write_team: the checkpoint knows the team's NAME, this machine cannot
+    # resolve it, and the open must still succeed.
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.transcript import Transcript
+
+    await Transcript(directory).append_message(Message.user("carry the roster"))
+    await _checkpoint(
+        directory,
+        FrontendSessionState(
+            session_id=SESSION_ID,
+            epoch="previous-owner",
+            active_agent="manager",
+            active_team="lopdev",
+        ),
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.frontend_state.effective_identity == {
+            "speaker": "lopdev",
+            "team": "lopdev",
+            "role_of_speaker": "manager",
+        }
     finally:
         await viewer.dispose()

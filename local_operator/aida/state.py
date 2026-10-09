@@ -249,6 +249,59 @@ def wake_lock(config_dir: Path | str, *, timeout_s: float = LOCK_WAIT_S):
     return WakeWriteLock(directory, timeout_s=timeout_s, name=LOCK_NAME)
 
 
+def note_lock_refusal(what: str, exc: BaseException) -> None:
+    """One quiet line for a lock refusal, at the level its retryability deserves.
+
+    THE REFUSAL IS NORMAL, and it was being logged as a defect. These locks are
+    taken by several ATTENDED writers at once — the TUI launch hook's ensure
+    task, the app's first-run route, the runtime's reconcile, the wake
+    supervisor — so :class:`~local_operator.wakes.lock.WakeLockBusy` is the
+    answer ``wakes.lock`` documents for a peer that held the lock for the whole
+    wait: "a peer's temporary hold and re-running is the fix". The call sites
+    below used to let it reach their broad ``except Exception`` arms, which log
+    ``exc_info=True``, so a first-run boot that was working correctly printed a
+    full traceback into the operator's log; the clean-log contract in
+    ``tests/e2e/test_tui_boot_e2e.py`` watched for exactly that (CI ``tui-e2e
+    (ubuntu-latest, 1)``, run 37886200214, and the reviewer's held-lock
+    reproducer).
+
+    THE SPLIT IS THE POINT, not the silence: a busy lock is a miss for this tick
+    (the loser of an arm writes the same row the winner is writing) and logs at
+    INFO; :class:`~local_operator.wakes.lock.WakeLockUnavailable` will refuse
+    again until the store's permissions change, so it logs at WARNING — with the
+    exception's own sentence, which names the remedy — and still without a
+    stack, because the failure is the store rather than this call path. Every
+    OTHER exception keeps its caller's stack: a defect must stay loud.
+    """
+    from local_operator.wakes.lock import WakeLockBusy
+
+    if isinstance(exc, WakeLockBusy):
+        logger.info("aida: %s deferred: the store lock is held by a peer; retried next time", what)
+        return
+    logger.warning("aida: %s refused: the store lock could not be created (%s)", what, exc)
+
+
+def op_refusal_sentence(verb: str, name: str, exc: BaseException) -> str:
+    """The ONE sentence an attended surface answers a refused control op with.
+
+    ``pause``/``resume`` are reachable from two attended surfaces — the TUI's
+    ``/aida`` handler and the desktop route's POST — and both meet the same
+    refusal: a peer holds the aida store lock for the whole wait, so
+    :func:`locked` raises before the op runs. The COPY is not written here; it is
+    the lock module's own (``str(exc)``: ``WakeLockBusy`` carries
+    ``busy_sentence``, ``WakeLockUnavailable`` names the store), which already
+    says what happened and that re-running is the fix. What this function owns is
+    the SHAPE — in one place, so the terminal's notice and the desktop's refusal
+    body cannot drift into two accounts of one refusal (QA-O1, QA round 3f on
+    #2071; hoisted in review round 1 so the twin is structural rather than a
+    coincidence that only two tests defended).
+
+    ``verb`` is the op word (``"pause"``/``"resume"``), ``name`` her configured
+    display name; :func:`note_lock_refusal` is the log half of the same answer.
+    """
+    return f"could not {verb} {name}: {exc}"
+
+
 def consume_escalations(config_dir: Path | str) -> list[Any]:
     """Read ``escalate.json`` and DELETE it in one step; return its ``wakes`` list.
 

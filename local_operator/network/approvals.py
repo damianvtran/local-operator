@@ -492,6 +492,30 @@ def _find_by_request_id(request_id: str, root: Path | None = None) -> dict[str, 
 # ---------------------------------------------------------------------------
 
 
+@contextmanager
+def _index_flock(root: Path | None = None) -> Iterator[int]:
+    """flock the tombstone index's ONE lock file, as the index's only lock.
+
+    Every read-modify-write of the index must be born under this flock. The
+    appends (one per prune) were; the sweep's ageing REWRITE was not until
+    agent review round 1 (F3): its read could miss an append that landed
+    before its staged replace, and the rewrite silently dropped that tombstone
+    — a race the new boot seat widens, because sweeps now run at relay start
+    as well as at create. Callers re-read INSIDE the lock; that is the point
+    of holding it across the read, not just the write.
+    """
+    import fcntl
+
+    ensure_approvals_dir(root)
+    lock = index_path(root).with_name(f".{INDEX_FILENAME}.lock")
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield fd
+    finally:
+        os.close(fd)
+
+
 def _append_index_row(row: Mapping[str, Any], root: Path | None = None) -> None:
     """Append one tombstone row under the index's own flock, ``O_APPEND``.
 
@@ -499,19 +523,11 @@ def _append_index_row(row: Mapping[str, Any], root: Path | None = None) -> None:
     tombstone guard), so it gets the same discipline the ask log does: a whole
     line per write, appended at the end, torn lines skipped by the reader.
     """
-    import fcntl
-
-    ensure_approvals_dir(root)
     target = index_path(root)
-    lock = target.with_name(f".{INDEX_FILENAME}.lock")
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        line = json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n"
+    line = json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n"
+    with _index_flock(root):
         with open(target, "a", encoding="utf-8") as handle:
             handle.write(line)
-    finally:
-        os.close(fd)
 
 
 def read_index(root: Path | None = None) -> list[dict[str, Any]]:
@@ -1686,12 +1702,19 @@ def sweep(*, root: Path | None = None, now: float | None = None) -> dict[str, in
     """Materialize due expiries, prune 30-day-terminal records, age tombstones.
 
     NO TIMER PROCESS EXISTS by design (§2.4): this runs opportunistically from
-    writer paths (create, below), and the counts it returns are for the caller's
-    audit line. Best-effort by construction — a record locked by a live runner
-    is skipped rather than waited on.
+    writer paths (create, below) and once at relay start (``relay.RelayServer.
+    _sweep_approvals_once``, the 2026-10-07 seat) — a device that stops
+    onboarding stops touching the create path, so terminal records would
+    otherwise sit past their window until a request that may never come. The
+    counts it returns are for the caller's audit line. Best-effort by
+    construction: a record another writer holds is serialized behind its own
+    short flock (this pass waits for that transaction rather than failing on
+    it — the lock is a blocking one), and a record whose guard refuses is
+    skipped rather than failing the pass.
     """
     moment = time.time() if now is None else now
     materialized = pruned = 0
+    tombstones = 0
     directory = approvals_dir(root)
     if directory.is_dir():
         for path in sorted(directory.glob("ap_*.json")):
@@ -1725,21 +1748,29 @@ def sweep(*, root: Path | None = None, now: float | None = None) -> dict[str, in
                         pruned += 1
             except MeshRefusal:
                 continue
-    # Tombstones age out at 180 days: rewrite the index without them. The
-    # rewrite is atomic (staged replace), so a crash leaves the old index whole.
-    rows = read_index(root)
-    fresh = [
-        row
-        for row in rows
-        if isinstance(row.get("pruned_at"), (int, float))
-        and moment - float(row["pruned_at"]) < TOMBSTONE_PRUNE_AGE_S
-    ]
-    if len(fresh) != len(rows):
-        from local_operator.network import store
+        # Tombstones age out at 180 days: rewrite the index without them. The
+        # rewrite is atomic (staged replace), so a crash leaves the old index
+        # whole. RE-READ UNDER THE FLOCK: an append that landed between an
+        # unlocked read and this replace would be dropped by the rewrite — the
+        # race agent review round 1 flagged as F3, widened by the second sweep
+        # trigger (relay start as well as create).
+        with _index_flock(root):
+            rows = read_index(root)
+            fresh = [
+                row
+                for row in rows
+                if isinstance(row.get("pruned_at"), (int, float))
+                and moment - float(row["pruned_at"]) < TOMBSTONE_PRUNE_AGE_S
+            ]
+            if len(fresh) != len(rows):
+                from local_operator.network import store
 
-        text = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in fresh)
-        store._write_private_text(index_path(root), text)
-    return {"materialized": materialized, "pruned": pruned, "tombstones": len(fresh)}
+                text = "".join(
+                    json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in fresh
+                )
+                store._write_private_text(index_path(root), text)
+            tombstones = len(fresh)
+    return {"materialized": materialized, "pruned": pruned, "tombstones": tombstones}
 
 
 # ---------------------------------------------------------------------------

@@ -51,7 +51,16 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Protocol, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Mapping,
+    Protocol,
+    Sequence,
+    cast,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -92,6 +101,8 @@ from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.publication import PublicationGate
 from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
+    ASK_ATTACHMENTS_CAPABILITY,
+    ASK_ATTACHMENTS_UNSUPPORTED,
     ATTACH_MAX_CLIENTS,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
@@ -957,15 +968,53 @@ _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
 #: lands (ADMISSION), this one decides what may run without waiting for an
 #: earlier op to finish (ORDERING).
 #:
-#: ``ping`` alone, and the argument is that its answer cannot depend on session
-#: state: it reports that the runtime's loop is alive and serving. Chaining it
-#: made it report something else entirely — measured over a real socket (review
-#: round 1, UX U3), a ``ping`` sent after a parked ``steer`` on the SAME
-#: connection went unanswered for 8-15 s, so the one request a surface speaks to
-#: ask "are you there" was queued behind a mutation. Everything else keeps its
-#: place in the chain, because ordering is what stops two mutations interleaving
-#: and only a liveness probe has no state to be ordered against.
-_UNCHAINED_OPS = frozenset({"ping"})
+#: ``ping`` and ``abort``. ``ping``: its answer cannot depend on session state: it reports that the
+#: runtime's loop is alive and serving. Chaining it made it report something
+#: else entirely — measured over a real socket (review round 1, UX U3), a
+#: ``ping`` sent after a parked ``steer`` on the SAME connection went unanswered
+#: for 8-15 s, so the one request a surface speaks to ask "are you there" was
+#: queued behind a mutation.
+#:
+#: ``abort``: the kill switch, and the same failure with worse consequences. A
+#: prompt-class op sent while the owner is mid-turn parks inside the handle until
+#: the turn lock frees, and every later op on that connection used to wait for
+#: it — including the Stop. Measured against a real daemon (QA cancel matrix,
+#: F1): a Stop pressed 1 s after such a parked ``prompt`` got no reply for
+#: 15.02 s (the client's ack timeout, a 503 ``runtime_busy``) and stopped
+#: nothing; the running tool lived to its natural end at +56.9 s; and because a
+#: client-side timeout cancels nothing, the abort was still queued and then
+#: executed the moment the parked op settled — aborting the user's NEXT turn
+#: instead of the one the press was for. This is the "cannot stop the session
+#: you are looking at" failure that :data:`_SYNC_PRIORITY_OPS` already refuses
+#: at admission; exempting ``abort`` here extends the same promise to ordering.
+#: Controls on the same daemon: an abort on a fresh connection took 4 ms, on the
+#: same connection with nothing parked 11 ms — so the chain, not the abort, was
+#: the whole delay.
+#:
+#: What the exemption changes, stated plainly: an earlier-admitted ``prompt``
+#: whose turn has NOT begun is no longer waited for. The abort stops the turn
+#: running now — exactly what it does on a fresh connection — and the queued
+#: prompt then runs, unaborted. That is deliberate (a Stop pressed before the
+#: owner has a turn answers ``idle``, and the message the user typed is not
+#: eaten by it); the alternative is the deferred-abort bug above. ``abort`` is
+#: repeat-safe only while it targets the same turn, not idempotent: each press
+#: re-runs the gate and subagent teardown, and two Stops can now overlap within
+#: ``_ABORT_SETTLE_BUDGET_S`` where the chain used to serialise them, so both
+#: may report stopping the same children (harmless).
+#:
+#: ``steer`` is order-dependent (it must not overtake the ``steer`` before it),
+#: so it stays chained. ``stop`` and ``cancel`` are left chained because no
+#: surface sends them on a shared connection (supervisors and ``lop stop`` dial
+#: afresh per request), NOT because they are order-dependent: ``cancel`` with
+#: ``mode="immediate"`` routes straight to ``abort`` and stalls identically
+#: behind a parked op, so it would deserve this same exemption if a surface
+#: ever sends it on a shared connection. The cut is pinned by test so widening
+#: it is a visible choice.
+#:
+#: Everything else keeps its place in the chain, because ordering is what stops
+#: two mutations interleaving. An exempt op never becomes the chain head — see
+#: :meth:`RuntimeServer._dispatch_frame`.
+_UNCHAINED_OPS = frozenset({"ping", "abort"})
 
 
 #: Connection-LOCAL ops admitted alongside the priority set above. Not a widening
@@ -1213,6 +1262,64 @@ def _accepts_kw(fn: Any, name: str) -> bool:
 _KEYWORD_SUPPORT: "weakref.WeakKeyDictionary[Any, dict[str, bool]]" = weakref.WeakKeyDictionary()
 
 
+async def _answer_attachment_kwargs(
+    op: str,
+    method: Any,
+    wire_images: Any,
+    answers: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    """Decode an ``ask_respond`` frame's ``images`` into ``{"attachments": ...}``.
+
+    Every refusal here is a ``ValueError`` -- the dispatch turns it into an
+    ``error`` frame and the viewer shows the sentence on the answer card -- and
+    every one leaves the ask OPEN, because it is raised before the handle is
+    called. Refused, never dropped (see the call site for why).
+
+    * only a first answer carries images: a revision is text-only (an answer's
+      images are immutable once sent), so ``ask_revise`` + images is refused
+      even if a sender skipped its own check;
+    * the handle must take the keyword (``_takes_ask_attachments``) -- a handle
+      that predates it would ignore the images, so this is the owner-side twin of
+      the sender's capability gate for a frame that arrived anyway;
+    * a question's images are decoded with ``image_blocks_in_thread`` (sniffed,
+      bounded, off the loop) and ALL of them must survive: ``image_blocks``
+      drops what it cannot decode, so a short result is the signal to refuse.
+    """
+    if op != "ask_respond":
+        raise ValueError("a revision carries text only; images cannot be changed once sent")
+    if not isinstance(wire_images, list):
+        raise ValueError("images must be a list of image objects")
+    try:
+        accepts = "attachments" in inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if not accepts:
+        raise ValueError(ASK_ATTACHMENTS_UNSUPPORTED)
+    by_question: dict[str, list[dict[str, str]]] = {}
+    for image in wire_images:
+        if not isinstance(image, dict):
+            raise ValueError("images must be a list of image objects")
+        question_id = image.get("question_id")
+        if not isinstance(question_id, str) or question_id not in answers:
+            raise ValueError("every image must name a question the answers body answers")
+        by_question.setdefault(question_id, []).append(
+            {
+                "data_b64": str(image.get("data_b64") or ""),
+                "mime_type": str(image.get("mime_type") or ""),
+            }
+        )
+    attachments: dict[str, list[Any]] = {}
+    for question_id, group in by_question.items():
+        blocks = await image_blocks_in_thread(group)
+        if len(blocks) != len(group):
+            raise ValueError(
+                f"an image attached to question {question_id!r} could not be read, so the "
+                "answer was not recorded; re-attach it or send the answer as text"
+            )
+        attachments[question_id] = list(blocks)
+    return {"attachments": attachments}
+
+
 def _takes_input_mode(handle: Any) -> bool:
     """Whether ``handle``'s ``prompt`` AND ``steer`` take BOTH carriage keywords.
 
@@ -1241,6 +1348,27 @@ def _takes_input_mode(handle: Any) -> bool:
         if "input_mode" not in parameters or "input_path" not in parameters:
             return False
     return True
+
+
+def _takes_ask_attachments(handle: Any) -> bool:
+    """Whether ``handle``'s ``ask_respond`` takes the ``attachments`` keyword.
+
+    Gates the ``ask-attachments-v1`` capability on what the DISPATCH will DO, for
+    ``_takes_input_mode``'s reason: the dispatch passes the keyword only when the
+    literal parameter name is present, so a ``**kwargs``-only method would
+    swallow the images and must not be advertised. Here the stakes are higher
+    than for the carriage metadata -- a handle that advertised the string and
+    dropped the pictures would record the text of a TERMINAL answer and lose the
+    attachments with nothing to say so. An unreadable or missing method answers
+    no, the conservative side.
+    """
+    method = getattr(handle, "ask_respond", None)
+    if method is None:
+        return False
+    try:
+        return "attachments" in inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def receives_message_id(target: Any) -> bool:
@@ -1506,6 +1634,12 @@ class _ClientConn:
     #: frame; see ``DISPLAY_HISTORY_AUDIT_CAPABILITY`` for what emitting them
     #: to a viewer that did not negotiate would do.
     audit_history: bool = False
+    #: This viewer negotiated ``display-history-entry-times-v1`` and can therefore
+    #: be sent the ``{entry id: ts}`` join on a display page. A property of the
+    #: CONNECTION, read where the connection is known and never inferred from the
+    #: frame; see ``DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY`` for what emitting it
+    #: to a viewer that did not negotiate would do.
+    entry_times: bool = False
     #: Whether this viewer negotiated the input-metadata carriage
     #: (``input-mode-v1``). While False, every message-bearing frame this
     #: connection receives sheds ``input_mode``/``input_path`` — the three page
@@ -2027,6 +2161,12 @@ class RuntimeServer:
                 # breaks the attach outright. See
                 # ``DISPLAY_HISTORY_AUDIT_CAPABILITY``.
                 + (["display-history-audit-v1"] if hasattr(handle, "history_page") else [])
+                # A THIRD string for the same op, and again NOT folded into the
+                # audit one: the page model forbids extras, so ``entry_times``
+                # reaching a viewer built before it existed fails that viewer's
+                # validation outright. See
+                # ``DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY``.
+                + (["display-history-entry-times-v1"] if hasattr(handle, "history_page") else [])
                 # INPUT-MODE CARRIAGE, gated on the handle that would HONOUR it
                 # rather than advertised unconditionally: the reader of this
                 # string (the mobile stream) must never send the fields to an
@@ -2035,6 +2175,11 @@ class RuntimeServer:
                 # asks both methods — see ``_takes_input_mode``, which mirrors
                 # the dispatch's own check exactly.
                 + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
+                # IMAGES ON A QUEUED-ASK ANSWER, gated on the handle that would
+                # KEEP them for the reason above, and read by senders that
+                # REFUSE (rather than strip) when it is absent: an image is
+                # content on a terminal answer. See ``ASK_ATTACHMENTS_CAPABILITY``.
+                + ([ASK_ATTACHMENTS_CAPABILITY] if _takes_ask_attachments(handle) else [])
                 # SENDER-MINTED MESSAGE IDENTITY, on the same fail-closed
                 # argument as the carriage above: the string is the sender's
                 # licence to RETRY a send, and a receiver that would silently
@@ -2189,6 +2334,9 @@ class RuntimeServer:
         #: this runtime down and takes the memory with it, so no in-place
         #: clear exists beside the withdrawal op.
         self._desktop_attach_seen: float = 0.0
+        #: In-flight ``_note_attended`` nudges, held so the loop's weak task
+        #: reference cannot collect one mid-flight (R-3's re-arm half).
+        self._attended_nudges: set[asyncio.Task[None]] = set()
         #: The attach connection that reserved an EXCLUSIVE move, or ``None``.
         #: Set on this loop in the same synchronous step that counts the other
         #: observers, so a viewer arriving after the count cannot be missed:
@@ -3597,6 +3745,7 @@ class RuntimeServer:
             )
             from local_operator.session.history_window import (
                 strip_audit_fields,
+                strip_entry_time_fields,
                 strip_input_metadata,
                 wire_payload,
             )
@@ -3609,6 +3758,12 @@ class RuntimeServer:
             # receives the fields it would reject.
             conn.audit_history = bool(frame.get("display_history_audit")) and (
                 "display-history-audit-v1" in self._record.capabilities
+            )
+            # Negotiated exactly like ``audit_history`` above: an older viewer
+            # cannot name the flag, so it never receives ``entry_times`` — the
+            # field its page model would reject.
+            conn.entry_times = bool(frame.get("display_history_entry_times")) and (
+                "display-history-entry-times-v1" in self._record.capabilities
             )
             # The input-metadata twin of the line above: a viewer built before
             # the carriage cannot name ``input_mode``, and one that does not
@@ -3758,6 +3913,9 @@ class RuntimeServer:
                 strip_audit_fields(
                     sync_payload["display_history"], audit_capable=conn.audit_history
                 )
+                strip_entry_time_fields(
+                    sync_payload["display_history"], entry_times_capable=conn.entry_times
+                )
             # The message-level twin of the strip above, and it must walk both
             # carriers this payload has: the display page's messages AND the
             # snapshot's in-flight ``live_events`` seed, whose events serialize
@@ -3787,10 +3945,16 @@ class RuntimeServer:
                         "durable_seed_ids": [],
                         "before_token": None,
                         "snapshot_token": None,
+                        # A JOIN OVER ROWS THE PAGE NO LONGER CARRIES IS NOT A
+                        # JOIN. `model_copy` keeps `entry_times` unless it is
+                        # named here, so the fallback page would describe ids
+                        # that are gone — a page whose map claims instants for
+                        # rows nobody received. Blank it with the rows it maps.
+                        "entry_times": {},
                     }
                 )
                 sync_payload["display_history"] = wire_payload(
-                    fallback, audit_capable=conn.audit_history
+                    fallback, audit_capable=conn.audit_history, entry_times_capable=conn.entry_times
                 )
                 oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
             if oversize is not None:
@@ -4098,6 +4262,7 @@ class RuntimeServer:
         # ``_republish_detached``.
         if kind == "attach":
             self._republish_detached()
+            self._note_attended()
         if kind == "daemon":
             # The daemon is the one client that renders projections (attach
             # clients read the welcome for identity only), so its arrival is
@@ -4303,7 +4468,10 @@ class RuntimeServer:
         frame), and an ordering link must never be an error channel that takes
         the next request down with it.
 
-        ``ping`` is exempt from the chain (see :data:`_UNCHAINED_OPS`): a health
+        ``ping`` and ``abort`` are exempt from the chain (see
+        :data:`_UNCHAINED_OPS`; ``abort`` for the Stop queued behind a parked
+        ``prompt``, the stall that then aborted the NEXT turn). The rest of this
+        paragraph is argued from ``ping`` but holds for every exempt op. A health
         check queued behind a mutation answers the wrong question, and measured
         (review round 1, UX U3) it did exactly that — 8-15 s of silence on a
         connection whose only sin was a parked ``steer``. An exempt op also does
@@ -5121,6 +5289,78 @@ class RuntimeServer:
             attached.add("viewer")
         return frozenset(attached)
 
+    def attended_surfaces(self) -> frozenset[str]:
+        """Which LOCAL human front ends hold this session: ``attach`` / ``desktop``.
+
+        The fire-time gate for Aida's first-run greeting (review round 1, R-3),
+        and deliberately NARROWER than :meth:`attached_surfaces` on exactly two
+        axes, because the requirement is "a person is in the TUI or the desktop
+        UI on this machine", not "something could present a card":
+
+        * ``locality == "local"`` only. A relayed attach (the mobile daemon's
+          dial, a peer's ``/move``) is a remote surface the operator named as
+          NOT one the greeting may land on.
+        * no ``viewer`` (phone watchers) for the same reason.
+
+        And NOT narrower on focus: a TUI reports no focus at all, and the
+        desktop's own focus gating already decides when it presses ``greet``
+        (desktop QA round 2 measured delivery ~7 s after focus). The desktop
+        clause is the same three bounded terms :meth:`attached_surfaces` uses
+        (live lease, the session-scoped 45 s memory, the app's own record naming
+        THIS session), so a renderer re-dial does not read as "nobody here".
+
+        WHY THE RUNTIME AND NOT THE PROCESS. The first version of the gate asked
+        ``activation.human_surface_present`` (a tty, or the desktop token in this
+        process's environment). A TUI's session runs in a DETACHED runtime child
+        spawned with ``stdin=DEVNULL`` (``runtime/launch.py``), so that answer
+        was "no human" for the one surface the greeting is most often requested
+        from. The connection table is the only component that knows.
+        """
+        attended: set[str] = set()
+        # SNAPSHOT BEFORE ITERATING (C8): read from the session's loop while this
+        # loop registers and drops clients in the same dict.
+        for conn in list(self._clients.values()):
+            if conn.kind != "attach" or conn.locality != "local":
+                continue
+            if conn.surface == "desktop":
+                if self._desktop_lease_live(conn):
+                    attended.add("desktop")
+            else:
+                attended.add("attach")
+        if "desktop" not in attended and (
+            self._desktop_attach_recent() or self._desktop_record_shows_this_session()
+        ):
+            attended.add("desktop")
+        return frozenset(attended)
+
+    def _note_attended(self) -> None:
+        """Tell the session a local human surface just arrived (R-3's re-arm half).
+
+        A greeting withheld at fire time goes back to ``requested``, and the
+        engine arms ``requested`` only on a reconcile. A runtime that is still
+        warm when the person comes back would otherwise sit on the request until
+        its next persist, so the arrival itself asks for one. Fire-and-forget on
+        the session's loop; a handle without the hook (every non-Aida session's
+        handle answers it as a no-op) costs nothing.
+        """
+        hook = getattr(self._handle, "aida_attended", None)
+        if not callable(hook) or not self.attended_surfaces():
+            return
+
+        async def _run() -> None:
+            try:
+                await self._handle_call_on_session_loop(hook)
+            except Exception:  # noqa: BLE001 — a nudge is never worth a connection
+                logger.debug("could not tell the session it is attended", exc_info=True)
+
+        try:
+            task = asyncio.get_running_loop().create_task(_run())
+            # Held so the loop's weak reference cannot collect it mid-flight.
+            self._attended_nudges.add(task)
+            task.add_done_callback(self._attended_nudges.discard)
+        except RuntimeError:
+            logger.debug("no running loop to nudge the session from", exc_info=True)
+
     def watching_surfaces(self) -> frozenset[str]:
         """Which KINDS of surface have a HUMAN watching this session right now.
 
@@ -5668,8 +5908,13 @@ class RuntimeServer:
                 # exactly the churn the memory exists to survive (and would
                 # flap the persisted block on a no-notify host, the round-2
                 # churn pin). The explicit withdrawal is its own op, below.
+                first_beat = self._desktop_attach_seen <= 0.0
                 self._desktop_attach_seen = now
                 self._republish_detached()
+                if first_beat:
+                    # Only the FIRST beat of an attachment: a heartbeat every
+                    # few seconds must not become a reconcile every few seconds.
+                    self._note_attended()
                 detail = "desktop lease renewed"
             elif op == "desktop_withdraw":
                 # THE EXPLICIT WITHDRAWAL (the bridge's "the pane left for
@@ -5999,6 +6244,7 @@ class RuntimeServer:
                     conn.locality,
                     conn.slash_consumers,
                     audit_capable=conn.audit_history,
+                    entry_times_capable=conn.entry_times,
                     input_capable=conn.input_metadata,
                     capabilities=conn.capabilities,
                     # Whether THIS connection PROVED it may loosen the gate,
@@ -7018,7 +7264,27 @@ class RuntimeServer:
                 answers = {
                     str(key): [str(item) for item in (value or [])] for key, value in raw.items()
                 }
-                outcome = method(str(frame.get("ask_id", "")), answers, by=str(frame.get("by", "")))
+                ask_kwargs: dict[str, Any] = {}
+                wire_images = frame.get("images")
+                if wire_images:
+                    # ATTACHMENTS (``ask-attachments-v1``). Decoded HERE, per
+                    # question, and REFUSED rather than dropped when anything
+                    # fails -- the opposite of a prompt, where ``image_blocks``
+                    # drops a bad entry because "a half-decoded paste costs one
+                    # image". An answer is TERMINAL (the first ``answered`` event
+                    # wins and nothing re-asks), so an image that quietly vanished
+                    # would leave the user believing the agent saw a screenshot it
+                    # never received, and they could not retry. The ask stays open
+                    # on a refusal.
+                    ask_kwargs.update(
+                        await _answer_attachment_kwargs(op, method, wire_images, answers)
+                    )
+                outcome = method(
+                    str(frame.get("ask_id", "")),
+                    answers,
+                    by=str(frame.get("by", "")),
+                    **ask_kwargs,
+                )
             else:
                 outcome = method(str(frame.get("ask_id", "")), by=str(frame.get("by", "")))
             # ``method`` came from a getattr probe, so what it returns is not
@@ -7188,6 +7454,7 @@ class RuntimeServer:
         locality: ClientLocality = "local",
         consumers: frozenset[str] | None = None,
         audit_capable: bool = False,
+        entry_times_capable: bool = False,
         input_capable: bool = False,
         capabilities: frozenset[str] = frozenset(),
         may_loosen: bool | None = None,
@@ -7200,7 +7467,9 @@ class RuntimeServer:
         the CONNECTION, not of the frame, and only the handle can act on it.
         ``audit_capable`` is a third of the same kind — whether this viewer
         negotiated ``display-history-audit-v1`` — and it decides whether a
-        display page may carry the audit fields at all. ``input_capable`` is
+        display page may carry the audit fields at all. ``entry_times_capable`` is
+        its twin for ``display-history-entry-times-v1``: whether a page may carry
+        the ``{entry id: ts}`` join. ``input_capable`` is
         the fourth: whether this viewer negotiated ``input-mode-v1``, which
         decides whether the two message-level carriage keys may ride a page.
         """
@@ -7462,6 +7731,7 @@ class RuntimeServer:
             )
             from local_operator.session.history_window import (
                 strip_audit_fields,
+                strip_entry_time_fields,
                 strip_input_metadata,
             )
 
@@ -7485,6 +7755,9 @@ class RuntimeServer:
                 # rather than a compaction-only or a racy failure.
                 if isinstance(payload.get("display_history"), dict):
                     strip_audit_fields(payload["display_history"], audit_capable=audit_capable)
+                    strip_entry_time_fields(
+                        payload["display_history"], entry_times_capable=entry_times_capable
+                    )
                 # Both message carriers of a sync payload, same as the pushed
                 # frame above: the page's messages and the live_events seed.
                 strip_input_metadata(payload, input_capable=input_capable)
@@ -7505,9 +7778,23 @@ class RuntimeServer:
                                     "durable_seed_tool_ids": [],
                                     "before_token": None,
                                     "snapshot_token": None,
+                                    # The second of the two fallbacks, and the
+                                    # same rule as the push frame's above: a
+                                    # join over blanked rows is cleared with
+                                    # them, never left describing absent ids.
+                                    "entry_times": {},
                                 }
                             ).model_dump(mode="json"),
                             audit_capable=audit_capable,
+                        )
+                        # Re-serialized from the model a second time, so the
+                        # entry-time join needs its own strip here too — the
+                        # ``model_copy`` above keeps ``entry_times`` (it only
+                        # blanks the row lists), and an older viewer would
+                        # reject the page it rides.
+                        strip_entry_time_fields(
+                            payload["display_history"],
+                            entry_times_capable=entry_times_capable,
                         )
                     if oversized_frame_report(response, _MAX_LINE_BYTES) is not None:
                         raise ValueError("canonical refresh exceeds the transport frame limit")
@@ -7530,10 +7817,12 @@ class RuntimeServer:
             if isinstance(payload, dict):
                 from local_operator.session.history_window import (
                     strip_audit_fields,
+                    strip_entry_time_fields,
                     strip_input_metadata,
                 )
 
                 strip_audit_fields(payload, audit_capable=audit_capable)
+                strip_entry_time_fields(payload, entry_times_capable=entry_times_capable)
                 strip_input_metadata(payload, input_capable=input_capable)
             return payload
         if op == "job_trajectory":

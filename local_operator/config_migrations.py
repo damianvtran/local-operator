@@ -1,11 +1,20 @@
 """One-shot config migrations, run from ONE explicit startup seam.
 
-TWO STORES, ONE SEAM. The first migration here repairs ``config.yml``; the
-second (``agent_profiles.backfill_seed_action_class``) repairs the agent
-registry, for the same class of reason — a release introduced a datum and the
-rows written before it existed need it. Both are called from
-:func:`run_startup_migrations` and nowhere else; the rules below are about the
-seam, not about which file it happens to write.
+THREE STORES, ONE SEAM. The first migration here repairs ``config.yml``; two
+more (``agent_profiles.backfill_seed_action_class`` and
+``agent_profiles.startup_seed_update_pass``) repair the agent registry, and a
+fourth (``projects.migrate_coordination_links``) re-kinds the projects store.
+Each exists for the same class of reason - a release introduced a datum (or
+shipped a newer starter text) and the rows written before it existed need it.
+All are called from :func:`run_startup_migrations` and nowhere else; the
+rules below are about the seam, not about which file it happens to write.
+
+The seed-update arm is the one arm that is not strictly a repair: it applies
+packaged starter updates to rows the revision ledger proves are unedited and
+behind (the #2060 fix), and reports the rest. It keeps this seam's doctrine
+anyway - idempotent predicate, best-effort, never a reason not to start - and
+the display-only exception it adds (``.seed-notices.json``) is documented at
+``agent_profiles._load_seed_notice_state``.
 
 Why a module of its own, and why the seam matters more than the migration:
 
@@ -66,6 +75,14 @@ logger = logging.getLogger(__name__)
 #: never shipped). Harmless and ignored; named so a reader of a config dir
 #: knows what it is. Nothing writes it any more.
 LEGACY_STAMP_NAME = ".migrations"
+
+#: The subcommand spellings whose OWN promise is "change nothing" and which
+#: therefore skip the seed-update arm WHOLE: a startup write under them would
+#: break the promise — and ``config edit agents.auto_update.seeds`` racing the
+#: pass would pre-apply under the OLD value before the user's choice takes
+#: effect (UX round 1, U6b). Canonical spellings are computed by
+#: ``cli._seed_sync_command``; keep the two in sync.
+_NO_WRITE_COMMANDS = frozenset({"agents sync", "config edit agents.auto_update.seeds"})
 
 #: The retired ceilings of the first eviction policy. Removed: nothing reads
 #: them at any version that also carries this module, and an older runtime
@@ -186,7 +203,9 @@ def migrate_session_cleanup(config_dir: Path) -> list[str]:
     return changes
 
 
-def run_startup_migrations(config_dir: Path) -> None:
+def run_startup_migrations(
+    config_dir: Path, *, surface: str = "cli", command: str | None = None
+) -> None:
     """THE seam. Called once by ``cli.main`` for the config dir it will use.
 
     Best-effort in the strongest sense: a migration that raises — for ANY
@@ -196,12 +215,31 @@ def run_startup_migrations(config_dir: Path) -> None:
     have been moments later. No state is recorded: the migration's own
     no-op path is the gate (see the module docstring).
 
-    Three arms: the session-cleanup config migration, the action-class
-    backfill for the agent registry, and the projects coordination re-kind
-    (schema 1 -> 2 — the store-side migration lives in
+    Four arms: the session-cleanup config migration, the action-class
+    backfill for the agent registry, the starter-update pass (``#2060`` —
+    reports drift and auto-applies the rows the ledger proves unedited), and
+    the projects coordination re-kind (schema 1 -> 2 — the store-side
+    migration lives in
     :func:`local_operator.projects.migrate_coordination_links` and shares the
     same doctrine: idempotent predicate, backup-first, abort-if-no-backup).
     Each arm fails on its own; one skipping never skips the others.
+
+    ``surface``/``command`` describe the invocation for the seed-update arm
+    only. ``surface`` is "tui", "cli" or "daemon" and picks the notice
+    channel (the TUI queues lines for its boot hook; the CLI prints them
+    plainly to stderr; a daemon launch is REPORT-ONLY — it writes no row,
+    records nothing and logs at DEBUG, so the first human surface applies
+    and announces) —
+    ONE definition of "which surface is this", computed by
+    ``cli._startup_surface`` and shared with the ``use_tui`` decision so the
+    two cannot drift. ``command`` is the subcommand spelling (e.g. "agents
+    sync") and SKIPS the arm entirely for the commands that do their own
+    read-only/apply work or that change the pass's own switch: a startup
+    write under ``lop agents sync --check`` would break the "change
+    nothing" promise the command makes and race the state it is checking,
+    and ``config edit agents.auto_update.seeds`` must land the new value
+    before the next pass reads it. See ``_NO_WRITE_COMMANDS``; nothing else
+    in the tree promises no-write, so nothing else is carved out.
     """
     try:
         migrate_session_cleanup(config_dir)
@@ -228,6 +266,21 @@ def run_startup_migrations(config_dir: Path) -> None:
     except Exception as exc:  # noqa: BLE001 — never a reason not to start
         logger.warning("config migration: action-class backfill skipped: %s", exc)
         logger.debug("config migration: traceback", exc_info=True)
+    if command not in _NO_WRITE_COMMANDS:
+        try:
+            # THE THIRD AGENT-REGISTRY ARM, and the #2060 fix proper: the
+            # upgrade that brings a newer packaged starter should bring its
+            # text too, reported or applied per the ledger's proof. Imported
+            # lazily - this module must not drag the registry (dill, yaml)
+            # onto every CLI start just because one arm may touch it - and
+            # skipped WHOLE for the commands whose own body does the work (see
+            # ``_NO_WRITE_COMMANDS``).
+            from local_operator.agent_profiles import startup_seed_update_pass
+
+            startup_seed_update_pass(config_dir, surface=surface)
+        except Exception as exc:  # noqa: BLE001 — never a reason not to start
+            logger.warning("config migration: seed update pass skipped: %s", exc)
+            logger.debug("config migration: traceback", exc_info=True)
     try:
         # Lazily imported: the store module (pydantic models, the runtime
         # scan's dependencies) must not ride the import path of every CLI

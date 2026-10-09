@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.resume import write_session_attachment
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.teams import Team, TeamRegistry
@@ -74,8 +75,11 @@ def _registries(root: Path) -> tuple[AgentRegistry, TeamRegistry]:
     return agents, teams
 
 
-def _session(root: Path, agents: Any, teams: Any) -> Session:
-    return Session(
+# Known limit (Q-NIT-2): a ``session_cls`` subclass that strips ``attach_team``
+# cannot restore a STORED team — the constructor attaches the resolved team
+# through that seam and raises TypeError; build stripped shapes on fresh transcripts.
+def _session(root: Path, agents: Any, teams: Any, session_cls: type[Session] = Session) -> Session:
+    return session_cls(
         model=MODEL,
         stream_fn=ScriptedStream([[]]),
         tools=[],
@@ -161,13 +165,19 @@ def _is_on_screen(app: OperatorApp, block: Any) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_the_band_names_the_team_and_agent_a_resume_restored(tmp_path) -> None:
+async def test_the_band_names_the_team_and_its_manager_a_resume_restored(tmp_path) -> None:
     """Before this, both segments were blank on every resume — honestly so, the
-    persona really was gone. Now the state comes back and the band shows it."""
+    persona really was gone. Now the state comes back and the band shows it.
+
+    Issue #2014: a team OWNS the agent slot, so the two segments a resume has to
+    bring back are the team and the MANAGER it claimed. The sidecar here is the
+    pre-#2014 shape — a team AND an unrelated profile — written directly, since
+    the two attaches that would produce it are now refused; what must paint is
+    the team and its manager, NOT the dropped profile.
+    """
     agents, teams = _registries(tmp_path)
-    first = _session(tmp_path, agents, teams)
-    first.attach_team(teams.get_team_by_name("lopdev"))
-    first.attach_agent_profile("auditor")
+    _session(tmp_path, agents, teams)  # creates tmp_path/sess
+    write_session_attachment(tmp_path / "sess", team="lopdev", agent="auditor", goal="")
 
     resumed = _session(tmp_path, agents, teams)
 
@@ -182,7 +192,11 @@ async def test_the_band_names_the_team_and_agent_a_resume_restored(tmp_path) -> 
         # adds nothing over the key paints the RAW NAME (D2), while a custom
         # label would paint itself.
         assert app._status._team == "lopdev"
-        assert app._status._agent_profile == "auditor"
+        # The manager the TEAM claimed — never the unrelated profile the legacy
+        # sidecar also named. Lowercase is what this path paints: the band's
+        # segment goes through the shared display rule, and with no registry row
+        # and no seed label to add information it falls back to the raw key.
+        assert app._status._agent_profile == "manager"
 
 
 @pytest.mark.asyncio
@@ -278,7 +292,6 @@ async def test_the_takeover_adopt_paints_the_restored_attachment(tmp_path) -> No
     agents, teams = _registries(tmp_path)
     first = _session(tmp_path, agents, teams)
     first.attach_team(teams.get_team_by_name("lopdev"))
-    first.attach_agent_profile("auditor")
 
     # Stands in for the remote facade: a different session, nothing attached.
     bare = Session(
@@ -302,7 +315,7 @@ async def test_the_takeover_adopt_paints_the_restored_attachment(tmp_path) -> No
         for _ in range(6):
             await pilot.pause()
         assert app._status._team == "lopdev"  # the shared form, as on resume
-        assert app._status._agent_profile == "auditor"
+        assert app._status._agent_profile == "manager"
 
 
 @pytest.mark.asyncio
@@ -347,3 +360,192 @@ async def test_the_stale_notice_does_not_end_the_empty_state(tmp_path) -> None:
         assert app._welcome_visible is True
         notices = [(n.text() or "") for n in app.query(NoticeBlock)]
         assert any("could not restore" in text for text in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_the_local_detach_verb_paints_both_segments(tmp_path) -> None:
+    """Agent review round 1, MINOR-2: the LOCAL ``/team clear`` branch had no
+    test at all, which is how MINOR-1 (the follower seam skipping the agent-band
+    sync) shipped unnoticed.
+
+    Two facts in one walk. When a team was in force, BOTH segments move — the
+    roster and the manager name the team claimed for the agent slot — so the band
+    cannot disagree with what was released. (The NO-team half — the verb as a true
+    no-op that keeps an attached profile, design round 1 D1 — is asserted on this
+    process's other two seams: ``test_slash_team_clear_with_no_team_keeps_the_
+    profile`` for the routed path and ``test_clearing_a_team_that_is_not_
+    attached_keeps_the_profile`` for the mutator itself; this cell is the
+    coverage the local seam needed at all, agent review round 1 MINOR-2.)
+    """
+    agents, teams = _registries(tmp_path)
+    first = _session(tmp_path, agents, teams)
+    first.attach_team(teams.get_team_by_name("lopdev"))
+
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+        assert app._status is not None
+        assert app._status._team == "lopdev"
+        assert app._status._agent_profile == "manager"
+
+        app._cmd_team("clear", app._notice)
+        for _ in range(6):
+            await pilot.pause()
+
+        assert resumed.active_team_name == ""
+        assert app._status._team == ""
+        # The manager the team claimed leaves with it.
+        assert app._status._agent_profile == ""
+
+
+@pytest.mark.asyncio
+async def test_the_follower_detach_verb_repaints_in_the_same_turn(tmp_path) -> None:
+    """MINOR-1's seam, asserted the way it can actually fail (agent review round
+    2, MINOR-2).
+
+    The first version of this cell paused the pilot six times before asserting,
+    which is exactly enough for the frontend-state delta to repaint the agent
+    segment on its own — so it passed against the PREVIOUS head too and guarded
+    nothing. The band syncs synchronously inside the seam, so the assertion is
+    made in the SAME turn as the call: no `await` between them. The receipt and
+    the released state are checked afterwards.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    agents, teams = _registries(tmp_path)
+    first = _session(tmp_path, agents, teams)
+    first.attach_team(teams.get_team_by_name("lopdev"))
+
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+        assert app._status is not None
+        assert app._status._agent_profile == "manager"
+
+        result = app._team_attach_slash_result("clear", resumed.team_registry, SlashResult)
+
+        # SAME TURN: only the seam's own sync can have produced this.
+        assert app._status._team == ""
+        assert app._status._agent_profile == ""
+
+        for _ in range(6):
+            await pilot.pause()
+
+        assert result.kind == "notice"
+        assert result.text == "no team active; this session uses its base instructions."
+        assert result.data["type"] == "team_attached"
+        assert resumed.active_team_name == ""
+
+
+@pytest.mark.asyncio
+async def test_the_follower_no_op_receipt_is_the_bare_sentence_with_its_keys(tmp_path) -> None:
+    """The follower host's half of the bare no-op — sentence AND its 4-key data.
+
+    The routed twin is pinned in ``test_team_agent_precedence.py``; with nothing
+    in force the verb moved nothing, and this half must word it identically and
+    carry the same ``team_attached`` payload — including ``request`` — or a
+    follower's band keys drift from the owner's. Two producers, one sentence:
+    pinned on both, so a drift in either reddens (agent review round 1, R1).
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    agents, teams = _registries(tmp_path)
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+
+        result = app._team_attach_slash_result("clear", resumed.team_registry, SlashResult)
+
+        assert result.kind == "notice"
+        assert result.style == "info"
+        assert result.text == "no team is attached, so nothing was detached."
+        assert result.data == {
+            "type": "team_attached",
+            "team": "",
+            "manager": "",
+            "request": "",
+        }
+
+
+@pytest.mark.asyncio
+async def test_the_follower_detach_refusal_names_what_the_session_can_do(tmp_path) -> None:
+    """The contract's no-team refusal, byte-pinned on the follower seam.
+
+    A session that cannot run a team at all answers the detach verb with a
+    WARNING, and a refusal must not be published as a detach: no ``data`` rides
+    it, or a client painting from the frame would clear a segment that never
+    moved. Reachable on a viewer (``AttachedSession``, no local detach seam);
+    the words come from the same ``_team_detach_receipt`` the local handler
+    pushes as a plain notice, so the two surfaces cannot drift.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    agents, teams = _registries(tmp_path)
+
+    # The viewer's shape: the LISTING resolves, the DETACH does not. A subclass
+    # rather than attribute surgery on ``Session`` itself (``test_slash_echo``'s
+    # NoAttachSession idiom), so no later cell loses the method.
+    class NoRunTeamSession(Session):
+        attach_team = None  # type: ignore[assignment]
+
+    resumed = _session(tmp_path, agents, teams, session_cls=NoRunTeamSession)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+
+        result = app._team_attach_slash_result("clear", resumed.team_registry, SlashResult)
+
+        assert result.kind == "notice"
+        assert result.style == "warning"
+        assert result.text == (
+            "this session can list and chart teams, but not run one, "
+            "so there is no team to detach"
+        )
+        assert result.data == {}
+
+
+@pytest.mark.asyncio
+async def test_the_team_listing_footer_advertises_the_detach_verb(tmp_path) -> None:
+    """Design round 1, D3: the verb that LEAVES the state is advertised where the
+    listing that invites the state is painted — mirroring ``Detach: /agent
+    clear`` — and disappears when no team is in force, so the hint cannot outlive
+    the attachment it describes."""
+    agents, teams = _registries(tmp_path)
+    first = _session(tmp_path, agents, teams)
+    first.attach_team(teams.get_team_by_name("lopdev"))
+
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+
+        assert app._team_listing_footer() == "Send: /team <name> <message> · Detach: /team clear"
+
+        app._cmd_team("clear", app._notice)
+        for _ in range(6):
+            await pilot.pause()
+
+        assert app._team_listing_footer() == "Send: /team <name> <message>"

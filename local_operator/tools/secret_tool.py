@@ -33,6 +33,7 @@ values.
 from __future__ import annotations
 
 import logging
+import textwrap
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -129,6 +130,23 @@ def build_secret_tool(context: ToolContext) -> AgentTool | None:
         interruptible=False,
         execute=execute_secret,
     )
+
+
+#: Per-row description cap for ``op='list'``. Long enough to tell two similar
+#: credentials apart, short enough that a 100-secret store stays a list of names.
+_LIST_DESCRIPTION_CHARS = 80
+
+#: Above this many chars (after clipping) a ``list`` result drops to names
+#: only, with the full list one ``read`` away behind a spill handle.
+_LIST_SPILL_CHARS = 4_000
+
+
+def _clip_description(description: str | None) -> str:
+    """One line of at most :data:`_LIST_DESCRIPTION_CHARS` chars."""
+    text = " ".join((description or "").split())
+    if len(text) <= _LIST_DESCRIPTION_CHARS:
+        return text
+    return text[: _LIST_DESCRIPTION_CHARS - 1].rstrip() + "\u2026"
 
 
 def _receipt(name: str) -> str:
@@ -288,16 +306,56 @@ async def execute_secret(
                 details={"op": "list", "count": 0},
             )
         width = max(len(record.name) for record in records)
+        header = f"{len(records)} stored secret(s) — names only, never values:"
+        full = "\n".join(
+            [
+                header,
+                *(
+                    f"  {record.name.ljust(width)}  {record.description or ''}".rstrip()
+                    for record in records
+                ),
+            ]
+        )
+        # Descriptions are clipped in the RESULT, and the uncut list is spilled
+        # behind a handle when anything was clipped or the list is long. One
+        # measured call listed 108 secrets in 13.6k chars that every later turn
+        # re-billed; the name is what the agent acts on, and `describe` (or the
+        # handle) returns a full description when one matters.
         rows = [
-            f"  {record.name.ljust(width)}  {record.description or ''}".rstrip()
+            f"  {record.name.ljust(width)}  {_clip_description(record.description)}".rstrip()
             for record in records
         ]
-        return _text(
-            tool_call_id,
-            "secret",
-            "\n".join([f"{len(records)} stored secret(s) — names only, never values:", *rows]),
-            details={"op": "list", "count": len(records)},
+        details: dict[str, Any] = {"op": "list", "count": len(records)}
+        clipped = any(
+            _clip_description(record.description) != (record.description or "").strip()
+            for record in records
         )
+        inline = "\n".join([header, *rows])
+        if not clipped and len(inline) <= _LIST_SPILL_CHARS:
+            return _text(tool_call_id, "secret", inline, details=details)
+        from local_operator.tools.builtin import _spill, _spill_detail
+
+        meta = _spill(full, "secret", context)
+        if meta is None:
+            # No store to expand into: the clipped rows are all there is, and
+            # every NAME stays visible either way.
+            return _text(tool_call_id, "secret", inline, details=details)
+        details["spill"] = _spill_detail(meta)
+        if len(inline) > _LIST_SPILL_CHARS:
+            # Too long even clipped: keep EVERY NAME inline (an agent checking
+            # "is there a credential for X" must not miss one behind a handle)
+            # and move only the descriptions behind it. Names are ~30 chars
+            # each, so a 108-secret store costs ~3.5k chars instead of 13.6k.
+            body = [header, *textwrap.wrap(", ".join(r.name for r in records), 100)]
+            note = "descriptions omitted"
+        else:
+            body = [header, *rows]
+            note = f"descriptions clipped to {_LIST_DESCRIPTION_CHARS} chars"
+        body.append(
+            f'[{note}; the full list is at read(path="{meta.handle}") \u2014 one '
+            f"secret: read(path=\"{meta.handle}?q=<name>\") or op='describe']"
+        )
+        return _text(tool_call_id, "secret", "\n".join(body), details=details)
     except SecretStoreError as exc:
         # Every store failure carries a message written for a human at a
         # terminal; passing it through verbatim is what lets the model act on

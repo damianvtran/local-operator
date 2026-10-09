@@ -66,9 +66,9 @@ from local_operator.mobile.attach_client import (
 )
 from local_operator.network.types import (
     PEER_NUMBER_CEILING,
-    normalise_pending,
     peer_number,
     peer_whole_int,
+    row_needs_claim,
 )
 from local_operator.session.owner import SessionSeed
 from local_operator.session.placement import (
@@ -92,6 +92,12 @@ OP_PEER_FACTS = "peer_session_facts"
 OP_PEER_CREATE = "peer_session_create"
 OP_PEER_ENGAGE = "peer_session_engage"
 OP_PEER_STOP = "peer_session_stop"
+#: The stored-journal read (design ``docs/design/mesh-cold-read-stored-history.md``):
+#: the page a peer serves off its OWN disk, which is what a cold read renders now
+#: that "no runtime" no longer means "no rows". The local name is this device's
+#: own relay being told to ask outward — the same boundary the four above sit on —
+#: and the peer-scope half is ``net_session_history``.
+OP_PEER_HISTORY = "peer_session_history"
 OP_STREAM_OPEN = "stream_open"
 OP_STREAM_SEND = "stream_send"
 OP_STREAM_CLOSE = "stream_close"
@@ -145,14 +151,6 @@ class ProjectionRefusal(Exception):
 #: nothing about the field, so the value this client was built with survives; present means
 #: the peer made a claim, and an unreadable claim falls to that field's fail-safe.
 _ABSENT = object()
-
-#: The ``started`` a peer row carries when its own value could not be read: the epoch plus
-#: a second, NOT zero (QA round 2 / review round 2 m1, one slice over). ``started`` is
-#: rendered through ``as_record``, which spells an absent value as ``time.time()`` — "just
-#: now" — and ``0.0`` is falsy, so a garbled ``started`` used to make a peer of unknown age
-#: look BRAND NEW. A real epoch is a value the renderer cannot reinterpret, and it can only
-#: read as an old peer.
-STARTED_UNKNOWN_S = 1.0
 
 #: The ``age_s`` a peer row carries when its own value could not be read. The age is a
 #: LOWER BOUND on staleness, so the fallback is the largest number this protocol accepts
@@ -225,6 +223,13 @@ class PeerRow:
     pending: str | None = None
     detached: bool = False
     capabilities: tuple[str, ...] = ()
+    #: The peer's claim, as an epoch; ``0.0`` is NO claim (unreadable / absent /
+    #: non-numeric) — the codebase's unknown-timestamp spelling, which every
+    #: renderer's ``<= 0`` rule refuses. NOT the epoch-plus-a-second ``1.0`` it
+    #: used to carry: that tested as "an old peer", but it was a REAL-looking
+    #: epoch — the desktop sidebar dated it "56y", it slipped the ``<= 0``
+    #: refusals, and the create-reply seed spelled the same claim ``0.0``, so
+    #: the two readers disagreed about one claim (QA round 1 on #2044).
     started: float = 0.0
     age_s: float = 0.0
     reachable: bool = True
@@ -260,7 +265,12 @@ class PeerRow:
             model_label=self.model_label,
             control_port=0,
             control_key="",
-            started_at=self.started or time.time(),
+            # The no-claim STAYS a no-claim (``0.0``), NOT ``time.time()``: "just
+            # now" is the one reading that makes an unreadable claim look BRAND
+            # NEW, and it was this spell that once forced the field's sentinel to
+            # be a truthy epoch — which the sidebar then dated "56y" (QA round 1
+            # on #2044). Zero here is the facade's own "no time" answer.
+            started_at=self.started,
             capabilities=list(self.capabilities),
             busy=self.busy,
             pending=self.pending,
@@ -289,16 +299,23 @@ class PeerRow:
             # THE FALLBACK DIRECTION IS THE POINT: a pid that could not be read becomes 0
             # ("no pid this device can dial"), never a value that looks live; an ``age_s``
             # becomes the stalest number this protocol can carry, never a fresh-looking 0;
-            # a ``started`` becomes a real epoch rather than 0 (which the record facade
-            # turns into "just now").
+            # a ``started`` that cannot be read becomes NO claim — ``0.0`` — never ``1.0``
+            # and never a minted epoch. The old default here was ``1.0`` ("the epoch plus
+            # a second", so the record facade could not spell it as "just now"), and it
+            # was wrong for the reason it looked safe: the desktop sidebar DATES any
+            # real-looking value, so ``1.0`` read "56y" and slipped every ``<= 0`` refusal,
+            # while the create-reply seed spelled the same claim ``0.0`` (QA round 1 on
+            # #2044). ``to_record`` below keeps the no-claim instead of re-spelling it,
+            # which is what makes zero safe here again; a claim that IS a number stays the
+            # peer's claim, even an implausibly old one.
             pid=peer_whole_int(data.get("pid"), default=0),
             kind=str(data.get("kind") or "daemon"),
             state=str(data.get("state") or ""),
             busy=_bool("busy"),
-            pending=normalise_pending(data.get("pending")),
+            pending=row_needs_claim(state=data.get("state"), pending=data.get("pending")),
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
-            started=peer_number(data.get("started"), default=STARTED_UNKNOWN_S),
+            started=peer_number(data.get("started"), default=0.0),
             age_s=_peer_age(data.get("age_s")),
             reachable=bool(data.get("reachable", True)),
             placement=SessionPlacement.from_json(data.get("placement")),
@@ -1180,6 +1197,13 @@ class RemoteSessionClient(AttachClient):
             auth["display_window"] = True
             if "display-history-audit-v1" in capabilities:
                 auth["display_history_audit"] = True
+            # The entry-time twin of the audit declaration above, on the same
+            # fail-closed reading: this viewer can read the ``{entry id: ts}``
+            # join, and an owner that does not advertise the string never sends
+            # it, so an older viewer's page model is never handed a field it
+            # forbids.
+            if "display-history-entry-times-v1" in capabilities:
+                auth["display_history_entry_times"] = True
         if self._slash_consumers is not None:
             auth["slash_consumers"] = list(self._slash_consumers)
         if self._surface == "desktop":
@@ -1242,6 +1266,62 @@ class RemoteSessionClient(AttachClient):
         self._connected = True
         self._reader_task = asyncio.get_running_loop().create_task(self._pump())
         self._on_projection(projection)
+
+
+def peer_stored_history_page(
+    root: Path | None,
+    *,
+    device_id: str,
+    session_id: str,
+    before_id: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any] | None:
+    """One page of a PEER's stored journal, or ``None`` when it cannot be served.
+
+    THE COLD READ'S SOURCE. A session another device owns has no wire window until
+    its owner has a runtime, and a deliberately STOPPED one never will — so the
+    page comes from the owner's own durable journal, served by the owner's
+    relay through the same reader the owner's local ``/history`` uses. Nothing is
+    started on the peer and nothing is written here: the ask is one local op on
+    this device's relay, which forwards it (see ``network/relay.py``).
+
+    ``None`` HAS ONE MEANING: THIS PAGE CANNOT BE SERVED — there is no relay on
+    this device, the peer refused, the hop expired, or the answer was not a page.
+    It is deliberately NOT collapsed into an empty page, because "no rows" and
+    "no answer" are different facts about a conversation and the caller has to be
+    able to say so (``cursor_missing``). A refusal and a silent relay are one
+    answer here for the same reason: from a reader's seat both mean the stored
+    page did not arrive, and the peer's refusal sentence is not a sentence about
+    this device's history.
+
+    BLOCKING — it dials this device's relay's control socket. Callers on a loop
+    must hand it to ``asyncio.to_thread``.
+    """
+    from local_operator.network import relay
+
+    reply = _relay_call(
+        root,
+        OP_PEER_HISTORY,
+        # READ-SIZED, derived from the hop it has to outlast rather than guessed:
+        # a client that gives up first reports no answer about a relay still
+        # working, and the reader would then mark a servable page unservable.
+        timeout=relay.session_history_client_bound_s(),
+        peer=device_id,
+        session_id=session_id,
+        before_id=before_id or None,
+        limit=int(limit),
+    )
+    if not reply or reply.get("refused"):
+        return None
+    entries = reply.get("entries")
+    if not isinstance(entries, list):
+        return None
+    return {
+        "entries": entries,
+        "has_more": bool(reply.get("has_more")),
+        "cursor_missing": bool(reply.get("cursor_missing")),
+        "has_newer": reply.get("has_newer"),
+    }
 
 
 def _relay_call(root: Path | None, op: str, **fields: Any) -> dict[str, Any] | None:

@@ -75,7 +75,7 @@ PASTE_IS_API_KEY_ATTR = "__lo_paste_is_api_key__"
 #: surfaces that switch on them (the speech lane's cascade, the desktop's
 #: composer), and a typo'd ``"speech"`` would look like a provider that simply
 #: serves nothing rather than like a mistake.
-CAPABILITY_VOCABULARY = frozenset({"chat", "tts", "stt"})
+CAPABILITY_VOCABULARY = frozenset({"chat", "tts", "stt", "image", "video"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -185,6 +185,17 @@ class ProviderDefinition:
     #: :func:`is_decision_only`, kept in step by
     #: ``tests/unit/providers/test_speech_only.py``.
     speech_only: bool = False
+    #: This provider serves GENERATIVE MEDIA (images and video), never chat completions.
+    #:
+    #: FAL is the case this exists for: the row is login-capable ON PURPOSE (a
+    #: bring-your-own key has to be storable for the image-generation cascade,
+    #: ``local_operator.imagegen``) while its queue answers no chat route at all,
+    #: so a session could never run a turn on it. Same shape as ``speech_only``
+    #: above and enforced at the same doors — every surface that offers or
+    #: resolves a CHAT model asks :func:`is_media_only` beside
+    #: :func:`is_speech_only`, kept in step by
+    #: ``tests/unit/providers/test_media_only.py``.
+    media_only: bool = False
     #: What this provider's WIRE actually serves, from
     #: :data:`CAPABILITY_VOCABULARY` (``chat``/``tts``/``stt``).
     #:
@@ -494,6 +505,44 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         base_url="https://api.anthropic.com",
         wire="anthropic",
     ),
+    # CHAT API-KEY LOGINS for the two providers whose own login is a
+    # subscription sign-in (audit Q1/U10). Before these rows a user holding a
+    # plain OpenAI or Anthropic API key had no `/login` route at all — the only
+    # OpenAI key row was SPEECH-only, and `/login anthropic` demanded a Claude
+    # Pro/Max browser grant — so first run silently pushed them to env vars.
+    # Both are login FLAVOURS (``store_credentials_as``) of the chat provider:
+    # the key lands beside the subscription rows under ``openai``/``anthropic``,
+    # and the wire already routes by credential KIND (an ``api_key`` row goes to
+    # the public API with ``x-api-key``/Bearer; only an ``oauth`` row takes the
+    # ChatGPT/Claude-subscription path — ``providers/clients.py``), so no second
+    # chat provider id exists for the model picker to disagree about.
+    ProviderDefinition(
+        id="openai-api-key",
+        search_aliases=("gpt", "openai-api", "openai-chat-key"),
+        name="OpenAI (API key)",
+        env_keys="OPENAI_API_KEY",
+        login=create_api_key_login(
+            "OpenAI",
+            "https://platform.openai.com/api-keys",
+            "Paste an API key from the OpenAI platform (it starts with sk-).",
+        ),
+        store_credentials_as="openai",
+        base_url="https://api.openai.com/v1",
+    ),
+    ProviderDefinition(
+        id="anthropic-key",
+        search_aliases=("claude", "anthropic-api-key", "claude-api-key"),
+        name="Anthropic (API key)",
+        env_keys=("ANTHROPIC_API_KEY",),
+        login=create_api_key_login(
+            "Anthropic",
+            "https://console.anthropic.com/settings/keys",
+            "Paste an API key from the Anthropic Console (it starts with sk-ant-).",
+        ),
+        store_credentials_as="anthropic",
+        base_url="https://api.anthropic.com",
+        wire="anthropic",
+    ),
     ProviderDefinition(
         id="kimi",
         search_aliases=(
@@ -672,8 +721,10 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="openai-key",
-        search_aliases=("openai-api-key", "openai-speech"),
-        name="OpenAI (API key)",
+        # ``openai-api-key`` moved to the CHAT key row above: a user typing it
+        # wants chat, and the speech row's name now says what it is for.
+        search_aliases=("openai-speech", "openai-tts"),
+        name="OpenAI (speech API key)",
         # NO ``env_keys``, on purpose, and that is the whole safety property of
         # this row: this login exists for OpenAI SPEECH under the user's own API
         # key, and the speech availability rule is "advertised only from a key
@@ -732,6 +783,14 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # place it is written — and the one a hand-set bare value has to agree
         # with on the ``/v1`` segment.
         base_url=DEFAULT_RADIENT_API_BASE_URL,
+        # The wire fact, declared where the wire is: the Radient hub serves
+        # CHAT and the media tools the image-generation cascade calls. No
+        # enforcement flag rides on this — ``media_only`` would be false (the
+        # hub DOES serve chat), and ``speech_only`` is untouched — so nothing
+        # consumes the member yet; it is the fact the surfaces WILL gate on,
+        # kept next to the wire it describes so there is no second table to
+        # drift.
+        capabilities=frozenset({"chat", "image", "video"}),
     ),
     ProviderDefinition(
         id="radient-key",
@@ -830,6 +889,30 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         name="Test (mock)",
         allows_missing_api_key=True,
         wire="mock",
+    ),
+    # Appended at the END of the registry on purpose: the append rule every
+    # picker and listing inherits is that a new row never re-orders the rows
+    # already shipped, so adding a provider cannot churn a surface's stored
+    # selection or its listings' stable order.
+    ProviderDefinition(
+        id="fal",
+        name="FAL",
+        env_keys="FAL_API_KEY",
+        login=create_api_key_login(
+            "FAL",
+            "https://fal.ai/dashboard/keys",
+            "Paste a key from your FAL dashboard.",
+        ),
+        base_url="https://queue.fal.run",
+        # MEDIA-ONLY (agent image generation, 2026-10-08): the key is storable
+        # so the image-generation cascade (``local_operator.imagegen``) can run
+        # a FAL rung; the provider is deliberately absent from every surface
+        # that offers or resolves a CHAT model (``media_only`` above documents
+        # the enforcement sites).
+        media_only=True,
+        # The wire fact behind the flag: FAL's queue serves generative media
+        # (text-to-image, image-to-video app endpoints) and no chat route.
+        capabilities=frozenset({"image", "video"}),
     ),
 ]
 
@@ -1030,6 +1113,38 @@ def speech_only_message(provider_id: str) -> str:
     return (
         f"Hosting '{provider_id}' serves {speech_wire_noun(provider_id)}, not chat "
         "completions, so no session can run on it."
+    )
+
+
+def is_media_only(provider_id: str | None) -> bool:
+    """Whether ``provider_id`` serves generative media and never chat completions.
+
+    The sibling of :func:`is_speech_only`, with the same contract: ONE exported
+    predicate (alias-aware, case/padding-normalised, tolerant of ``None``,
+    ``False`` for unknown ids), so every door that skips a speech-only provider
+    skips a media-only one the same way. FAL is the row this protects: its key
+    exists so the image-generation cascade can run, and a session that selected
+    it as hosting could never answer a turn.
+    """
+    if not provider_id:
+        return False
+    canonical = str(provider_id).strip().lower()
+    definition = get_provider_definition(canonical)
+    return bool(definition is not None and definition.media_only)
+
+
+def media_only_message(provider_id: str) -> str:
+    """The ONE sentence for a media-only provider, refused as a chat hosting.
+
+    Shared by every door that refuses one, for the same reason
+    :func:`speech_only_message` is: the fact must have one spelling, and the
+    sentence stops at the fact so each caller can append the remedy its own
+    surface can offer (``/model`` from inside a session, `local-operator config
+    edit` from a config file).
+    """
+    return (
+        f"Hosting '{provider_id}' serves generative media (images and video), not "
+        "chat completions, so no session can run on it."
     )
 
 

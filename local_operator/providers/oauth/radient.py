@@ -119,6 +119,7 @@ class RadientOAuthFlow(OAuthCallbackFlow):
 
         refresh_token = data.get("refresh_token")
         return {
+            **identity_from_token_response(data),
             # Declared type avoids structural guessing in AuthStore.upsert_credential.
             "type": "oauth",
             # AuthStore standard keys.
@@ -132,6 +133,47 @@ class RadientOAuthFlow(OAuthCallbackFlow):
             "token_type": data.get("token_type", "Bearer"),
             "scope": data.get("scope", ""),
         }
+
+
+def identity_from_token_response(data: dict[str, Any]) -> dict[str, Any]:
+    """``email``/``name``/``account_id`` from the token response's ``id_token``.
+
+    Radient's token endpoint mints an ``id_token`` on both the
+    authorization-code and the refresh grant, carrying ``sub`` (the Radient
+    account id), ``email`` and ``name`` (``agent-server``
+    ``internal/services/auth_service.go``, the ``idTokenClaims`` maps). The
+    login used to drop it, so the install knew WHO had signed in only by
+    asking — and Aida's first conversation asked for an email the sign-in had
+    just proved (audit A5/A6). Decoded WITHOUT signature verification for the
+    reason ``openai.decode_jwt_claims`` documents (straight from the IdP's own
+    token endpoint over TLS); the claims are an identity LABEL, never an
+    authorization input.
+
+    ``account_id`` also gives the auth store a real dedupe key instead of the
+    per-provider ``oauth:radient`` constant, so two Radient accounts on one
+    machine stop collapsing onto one row. Best-effort: a missing or malformed
+    token answers ``{}`` and the login proceeds exactly as before.
+    """
+    token = data.get("id_token")
+    if not isinstance(token, str) or not token:
+        return {}
+    try:
+        from local_operator.providers.oauth.openai import decode_jwt_claims
+
+        claims = decode_jwt_claims(token)
+    except LoginError:
+        return {}
+    identity: dict[str, Any] = {}
+    email = claims.get("email")
+    if isinstance(email, str) and email.strip():
+        identity["email"] = email.strip()
+    name = claims.get("name")
+    if isinstance(name, str) and name.strip():
+        identity["name"] = name.strip()
+    sub = claims.get("sub")
+    if isinstance(sub, str) and sub.strip():
+        identity["account_id"] = sub.strip()
+    return identity
 
 
 async def refresh_radient_token(
@@ -188,6 +230,9 @@ async def refresh_radient_token(
     new_refresh = data.get("refresh_token") or refresh_token
 
     merged = dict(credentials)
+    # The refresh grant re-mints the id_token, so a name changed in the
+    # console reaches the stored label on the next refresh.
+    merged.update(identity_from_token_response(data))
     merged.update(
         {
             "type": "oauth",

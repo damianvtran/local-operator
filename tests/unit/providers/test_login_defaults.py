@@ -517,12 +517,15 @@ def test_every_hosted_cloud_provider_has_a_suggestion() -> None:
             provider.allows_missing_api_key
             or provider.decision_only
             or provider.speech_only
+            or provider.media_only
             or provider.wire == "mock"
         ):
             # A speech-only provider is never a chat hosting (see
             # ``speech_only``), so the card this test guards does not exist for
             # it: a "Suggested: <chat model>" row would offer a model its wire
             # cannot run, which is the dead end the flag exists to prevent.
+            # Media-only (FAL) is the same story one flag over: its login
+            # stores the image cascade's key and writes no hosting.
             continue
         assert suggested_model_for(storage) is not None, storage
 

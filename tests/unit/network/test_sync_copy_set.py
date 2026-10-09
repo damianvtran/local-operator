@@ -283,6 +283,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/config_watch.py": (1, "the same file, watched"),
     "local_operator/config_migrations.py": (1, "the marker recording which migrations ran"),
     "local_operator/logger.py": (1, "the process log at the store root"),
+    "local_operator/agent_profiles.py": (
+        3,
+        "``SEED_NOTICES_NAME`` (``.seed-notices.json``) and ``SEED_SYNC_LOCK_NAME`` "
+        "(``.seed-sync.lock``): the startup notice queue and its write lock at the "
+        "CONFIG root, beside ``config.yml``; ``SEED_REVISIONS_NAME`` "
+        "(``seed_revisions.json``): the revision ledger inside the packaged "
+        "``agent_seeds/`` directory. None is an entry of a session directory.",
+    ),
     "local_operator/update.py": (
         2,
         "the distribution name and the PyPI version cache: names in the update "
@@ -378,6 +386,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``PUSH_WORKER_STATE_NAME``: the mobile push-worker state file under the "
         "config root — not an entry of a session directory",
     ),
+    # The relay transfer's receipt store (`mobile/transfer_receipts.py`): machine
+    # state about moves, not session content. Its ONE construction site passes
+    # `config_dir()` (`mobile/daemon.py`), so the file sits at the config root,
+    # beside the seen-store and the push registries — never an entry of a session
+    # directory, and never met by a copy walk of one.
+    "local_operator/mobile/transfer_receipts.py": (
+        1,
+        "``TRANSFER_RECEIPTS_NAME``: the relay transfer's receipt store under the "
+        "config root, beside the seen-store and the push registries — machine "
+        "state about moves, never an entry of a session directory",
+    ),
     "local_operator/secrets/keys.py": (
         5,
         "``secrets/`` and its registration ticket: the credential store at the config root. "
@@ -462,6 +481,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``network/credentials/<network_id>/``: the broker's per-network record of who owns "
         "a credential and who may borrow it — a store file beside ``sessions/``, never an "
         "entry a session directory holds",
+    ),
+    "local_operator/network/credentials/sync.py": (
+        1,
+        "``.sync.lock`` under ``network/credentials/<network_id>/`` (its ``sync.json`` "
+        "sibling is not a path-shaped constant the derivation reports): the sync "
+        "engine's flock file beside the generation/ack record — a store file beside "
+        "``sessions/``, never an entry a session directory holds",
     ),
     "local_operator/network/credentials/github.py": (
         2,
