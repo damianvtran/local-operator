@@ -1161,8 +1161,19 @@ class AgentRegistry:
         ) or default_label(current_metadata_obj.name)
 
         try:
-            with (agent_dir / "agent.yml").open("w", encoding="utf-8") as f:
-                yaml.dump(current_metadata_obj.model_dump(), f, default_flow_style=False)
+            # Atomic (``_write_text_atomically``) where this used to truncate
+            # with ``open("w")``. The strict metadata scan refuses EVERY profile
+            # for the whole time a short ``agent.yml`` exists on disk, and
+            # several ``lop`` processes (the TUI, a serve, a wake supervisor,
+            # the mobile daemon) share this store and read it concurrently — so
+            # the window between truncate and write is a real launch-refusal
+            # window, exactly the class of reader the helper's docstring
+            # describes. The row is rendered to a string first and lands in one
+            # rename.
+            _write_text_atomically(
+                agent_dir / "agent.yml",
+                yaml.dump(current_metadata_obj.model_dump(), default_flow_style=False),
+            )
         except Exception as e:
             logging.error(
                 f"Failed to save agent.yml for {agent_id}. In-memory state "

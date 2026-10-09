@@ -1072,8 +1072,12 @@ async def _op_sync(
 
     The hub arm needs a Radient credential and network access; without either
     it degrades to ``unavailable`` per row while the local seed updates still
-    run (design §9.2). Nothing here is called on boot — sync is only ever the
-    word a caller typed.
+    run (design §9.2). The seed arm is no longer boot-idle as of #2060: the
+    startup seam classifies every launch (``agent_profiles
+    .startup_seed_update_pass``) and auto-applies the rows the revision ledger
+    proves unedited, so a clean starter can move without anyone typing
+    ``sync`` — but an EDITED starter is only ever changed by an explicit call,
+    and never by this tool (it cannot force).
     """
 
     side = (resolve or "").strip().lower()
@@ -1141,10 +1145,11 @@ async def _op_sync(
         return "\n".join(parts) if parts else seed.render()
 
     rendered = await asyncio.to_thread(run)
-    if "re-run with force" in rendered or "differs from the packaged starter" in rendered:
-        # The seed arm's refusal sentence is shared with the CLI, where --force
-        # still exists. A model has no force (it must never be able to discard a
-        # user's edits), so point it at the explicit, echoing path instead.
+    if "differs from the packaged starter" in rendered:
+        # The seed arm's refusal sentence is shared with the CLI (where the
+        # remedy it names is ``lop agents sync --name X --replace --yes``). A
+        # model has no force (it must never be able to discard a user's
+        # edits), so point it at the explicit, echoing path instead.
         rendered += (
             "\n\nThis tool cannot overwrite an edited starter. To take the packaged text, "
             "ask the user, then use op='reset' name=<role> (it prints what it replaced)."
@@ -1297,8 +1302,8 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
         # The sync baseline rides along for the same reason, and the failure
         # without it is concrete: `seed_sha256:`/`hub_sha256:` is the fingerprint
         # `sync` compares against, so a tool-side edit that dropped it would make
-        # an UNMOVED starter read as "differs — re-run with force" (divergence
-        # plus no install record) instead of "no update to pull". Copying it is
+        # an UNMOVED starter read as "differs from the packaged starter"
+        # (divergence plus no install record) instead of "no update to pull". Copying it is
         # exactly as truthful as `seed:` is: it records what was installed, not
         # what the row now says, and the comparison is what detects the edit.
         for marker_prefix in (

@@ -34,7 +34,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence, Union
 
-from local_operator.agent_profiles import SeedSyncVerdict, sync_installed_seeds
+from local_operator.agent_profiles import SeedSyncVerdict
+from local_operator.agent_profiles import _capability_note as _seed_capability_note
+from local_operator.agent_profiles import sync_installed_seeds
 from local_operator.agents import HubSyncVerdict, sync_hub_agents
 
 #: One entry of a sync run. Two dataclasses and not one: the seed and hub arms
@@ -60,17 +62,29 @@ class SyncReport:
     entries: tuple[SyncEntry, ...] = ()
 
     def counts(self) -> dict[str, int]:
-        """Entry counts by outcome, for summaries."""
+        """Entry counts by outcome, for summaries.
+
+        ``updated`` counts WRITES only: an ``outdated-clean`` seed row that was
+        classified read-only (``--check``/``--dry-run``/the startup pass's
+        classification) is an update AVAILABLE, not an update applied —
+        counting it as updated was this report's own over-claim, the trap F2
+        of #2060 names. ``available`` is additive: the desktop reads summary
+        keys by name and unknown keys are the safe direction, while three
+        renderers consume the entries themselves.
+        """
         counts = {
             "up-to-date": 0,
             "updated": 0,
+            "available": 0,
             "diverged": 0,
             "unavailable": 0,
             "not-installed": 0,
         }
         for entry in self.entries:
-            if entry.applied or entry.verdict in ("outdated-clean", "updated"):
+            if entry.applied or entry.verdict == "updated":
                 counts["updated"] += 1
+            elif entry.verdict == "outdated-clean":
+                counts["available"] += 1
             elif entry.verdict == "up-to-date":
                 counts["up-to-date"] += 1
             elif entry.verdict == "unavailable":
@@ -89,14 +103,45 @@ class SyncReport:
         copy-paste — the guarantee ``op='reset'`` makes, kept here because the
         clean arm overwrites without asking. The tool runs the result through
         ``spill_truncate``; the CLI prints it in full, which is the point of an
-        echo.
+        echo. ORDER IS ACTIONABLE-FIRST (UX round 1, U7): refusals and
+        missing/unavailable rows, then the applied/clean receipts (whose
+        echoes follow them), then the up-to-date list — a 365-line run used to
+        bury its single actionable line under nine prompt echoes. The stable
+        sort keeps the arms' own order inside each rank.
         """
 
         if not self.entries:
             return "nothing to sync: no installed seed or hub-pulled profiles."
-        lines = [_render_entry(entry) for entry in self.entries]
+
+        def _rank(entry: SyncEntry) -> int:
+            if entry.verdict in ("outdated-diverged", "diverged", "not-installed", "unavailable"):
+                return 0
+            if entry.verdict in ("outdated-clean", "updated"):
+                return 1
+            return 2  # up-to-date
+
+        ordered = sorted(self.entries, key=_rank)
+        lines = [_render_entry(entry) for entry in ordered]
         counts = self.counts()
-        summary = ", ".join(f"{count} {label}" for label, count in counts.items() if count)
+
+        def _label(key: str, count: int) -> str:
+            """Summary vocabulary (design round 1, D5): ``counts()`` keys stay
+            stable for the desktop reader; only the RENDERED nouns change.
+            """
+
+            if key == "available":
+                return "update available" if count == 1 else "updates available"
+            if key == "diverged":
+                return (
+                    "differs from the packaged starter"
+                    if count == 1
+                    else "differ from the packaged starter"
+                )
+            return key
+
+        summary = ", ".join(
+            f"{count} {_label(label, count)}" for label, count in counts.items() if count
+        )
         return f"{summary}.\n\n" + "\n".join(lines)
 
 
@@ -121,25 +166,54 @@ def _render_entry(entry: SyncEntry) -> str:
                     # An unbumped body move is a real update (agent review
                     # round 1, M1). "1.0.0 -> 1.0.0" would read as a no-op, so
                     # the receipt says what actually moved instead.
-                    transition = f" ({entry.packaged_version}, text moved)"
+                    transition = f" ({entry.packaged_version}, text revised)"
                 else:
                     transition = f" ({entry.installed_version} -> {entry.packaged_version})"
             else:
                 transition = ""
-            line = f"{entry.name}: updated to the packaged starter{transition}"
+            # A capability-changing row says so on THIS surface too: the row
+            # was held at startup precisely because of the delta, and the
+            # review surface that the held notice sends the user to used to
+            # print the same bland line as a prose tweak (design round 1, D2;
+            # UX round 1, U4; QA Q4).
+            long, short = _seed_capability_note(tuple(entry.diverged_fields))
+            if entry.applied:
+                line = f"{entry.name}: updated to the packaged starter{transition}"
+                if long:
+                    line += f" — changes {long}"
+            elif short:
+                line = (
+                    f"{entry.name}: update available{transition}, changes {short} — "
+                    f"run `lop agents sync --name {entry.name}` to apply it"
+                )
+            else:
+                # READ-ONLY classification (``--check``/``--dry-run``/the
+                # startup pass's report half): claiming "updated" for a
+                # non-write is the over-claim this branch exists to stop.
+                line = (
+                    f"{entry.name}: update available{transition} — "
+                    "run `lop agents sync` to apply it"
+                )
         else:
             fields = ", ".join(entry.diverged_fields) or "unknown fields"
             if entry.applied:
                 line = f"{entry.name}: updated (forced over local edits) — replaced {fields}"
             else:
-                line = (
-                    f"{entry.name}: differs from the packaged starter in {fields} — "
-                    f"{entry.detail}"
-                )
+                # The refusal carries its own full sentence (the ``detail``
+                # field) — stitched from a prefix and a detail it read as two
+                # fragments (design round 1, D6).
+                line = f"{entry.name}: {entry.detail}"
         if entry.applied and entry.replaced_instructions:
             line += "\n  your instructions were:\n" + _indent(entry.replaced_instructions)
         for field, value in entry.replaced_fields:
             line += f"\n  your {field}: {value}"
+        # The forced path discards these too, so they join the echo block: the
+        # wholesale writer resets the label and drops non-seed tags, and
+        # without this neither was recoverable (UX round 1, U5).
+        if entry.applied and entry.replaced_label:
+            line += f"\n  your label: {entry.replaced_label}"
+        if entry.applied and entry.replaced_tags:
+            line += f"\n  your tags: {', '.join(entry.replaced_tags)}"
         return line
 
     if entry.verdict == "up-to-date":
