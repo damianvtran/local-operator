@@ -39,6 +39,8 @@ REASON_CLASSES = frozenset(
         "refused",  # any other 4xx
         "cancelled",  # the PROVIDER reported the job CANCELLED
         "invalid_response",  # unparseable / missing fields in a 2xx payload
+        "unsupported",  # the provider has no route for the request SHAPE (a
+        # skip, never a failure of the provider)
         # The Radient hub's own structured codes (``error_type`` on a FAILED
         # status), carried verbatim so consumers switch on the same tokens the
         # wire uses instead of parsing prose.

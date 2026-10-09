@@ -102,6 +102,36 @@ def _poll_interval(elapsed_s: float) -> float:
     return IMAGE_POLL_INTERVAL_S
 
 
+#: The no-signal poll ceiling (round-1 finding): a caller that can observe
+#: nothing — no progress consumer, no abort signal, so ``pause is None`` —
+#: still WAITS between status reads, backing off by doubling from the base
+#: interval to this cap. Without it the loop hot-polls (the pace only ever
+#: happened inside ``pause``), hammering a provider for no one's benefit;
+#: bounded so the wait can never approach the rung budget, which owns the end.
+IMAGE_POLL_NO_SIGNAL_CAP_S = 8.0
+
+
+def _no_signal_poll_interval(elapsed_s: float) -> float:
+    """2 s -> 4 s -> 8 s(cap) for callers nothing is watching."""
+    return min(
+        IMAGE_POLL_INTERVAL_S * (2 ** int(elapsed_s // IMAGE_POLL_SLOW_AFTER_S)),
+        IMAGE_POLL_NO_SIGNAL_CAP_S,
+    )
+
+
+async def _pace_poll(pause: "PauseFn | None", elapsed_s: float) -> None:
+    """Wait between poll reads — abortably when a signal exists, paced when not.
+
+    The wait is where cancellation lands, so a signal always takes the pause
+    path; without one the bounded back-off keeps a library/headless poller
+    from hammering the provider with back-to-back reads.
+    """
+    if pause is not None:
+        await pause(_poll_interval(elapsed_s))
+    else:
+        await asyncio.sleep(_no_signal_poll_interval(elapsed_s))
+
+
 def _asset_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Asset rows from a result payload, across the sibling key spellings.
 
@@ -589,8 +619,7 @@ async def run_radient(
 
         started = time.monotonic()
         while True:
-            if pause is not None:
-                await pause(_poll_interval(time.monotonic() - started))
+            await _pace_poll(pause, time.monotonic() - started)
             status_payload = await _request_json(
                 http,
                 "GET",
@@ -788,8 +817,7 @@ async def run_fal(
 
         started = time.monotonic()
         while True:
-            if pause is not None:
-                await pause(_poll_interval(time.monotonic() - started))
+            await _pace_poll(pause, time.monotonic() - started)
             status_payload = await _request_json(
                 http,
                 "GET",
