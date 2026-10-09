@@ -9,7 +9,7 @@ no provider calls. That turns the question from "does the advisor work" into
 
 This script benchmarks the whole option space on one axis set:
 
-    A. do nothing            -- the shipped 600k ceiling, advisor off
+    A. do nothing            -- the then-shipped 600k ceiling, advisor off
     B. static lower ceiling  -- threshold_tokens at 300k/400k/500k, advisor off
     C. advisor on            -- shipped defaults and best configuration
     D. combinations          -- advisor on top of a lower ceiling
@@ -67,8 +67,9 @@ from bench_advisor_tokens import (  # noqa: E402
     simulate,
 )
 
-#: Ceilings swept for the static option. 600k is what ships today; the lower
-#: three are the "just lower the default" alternatives the operator named.
+#: Ceilings swept for the static option. 600k was what shipped when this was
+#: written (the default is now 400k); the lower three are the "just lower the
+#: default" alternatives the operator named.
 CEILINGS = (300_000, 400_000, 500_000, 600_000)
 
 
@@ -78,7 +79,8 @@ class TaskShape:
 
     ``own_spans`` is each task's own token weight (a genuine, non-continuation
     user turn through the turn before the next one). ``live_peaks`` is the
-    context each task actually ran against under the shipped 600k ceiling.
+    context each task actually ran against under the 600k ceiling that shipped
+    at the time.
     The two answer different questions and are kept apart deliberately.
     """
 
@@ -190,7 +192,7 @@ def build_options(
     # THIS PR, so a baseline carrying it would not be "do nothing", and every
     # delta below would be measured against a product that does not exist yet.
     add(
-        "A. do nothing (600k, today)",
+        "A. do nothing (600k, former default)",
         Config(
             advisor_enabled=False,
             trigger_tokens=600_000,

@@ -1086,7 +1086,7 @@ drops ``cache_control`` on the most expensive models in the catalogue.
 Over-report and the provider answers 400 naming the real limit, which at least
 says what happened. 200k is therefore deliberately the floor rather than the 1M
 the 5 generation serves: a wrong 1M window puts the compaction threshold
-(``min(0.8 * window, 600k)``) at 600k, so a genuinely-200k model would 400 on
+(``min(0.8 * window, 400k)``) at 400k, so a genuinely-200k model would 400 on
 every turn past 200k instead of merely compacting sooner than it had to.
 
 ``max_tokens`` is the floor among the CURRENT generations (64k) rather than the

@@ -4007,17 +4007,56 @@ def _store_maintenance_thread_main(
                 )
             except Exception:  # noqa: BLE001 — housekeeping never fails session start
                 logger.debug("store maintenance worker failed", exc_info=True)
-                return
+                break
             if acquired:
-                return
+                break
             # Another process owns the lock. Back off rather than abandon retry
             # or spin. The next successful acquire checks the stamp while
             # holding the lock, and reset wakes this bounded wait immediately.
             if stop_event.wait(retry_delay):
                 return
             retry_delay = min(retry_delay * 2, _STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS)
+        # The launch pass is over: release anything awaiting it BEFORE the
+        # sweeps below, which run for the life of the process.
+        done_event.set()
+        _run_delegated_sweeps(config_manager, config_dir, live_dir, stop_event)
     finally:
         done_event.set()
+
+
+def _run_delegated_sweeps(
+    config_manager: ConfigManager,
+    config_dir: Path,
+    live_dir: Path | None,
+    stop_event: threading.Event,
+) -> None:
+    """The delegated-session class's drain and hourly sweep, on THIS daemon thread.
+
+    Not one of the six stamped passes above, deliberately: those are one-shot
+    and coalesced by a 60-second stamp, while this one must (a) CONTINUE a
+    backlog across passes, (b) recur hourly because a 48-hour window needs
+    steady-state sweeps in a runtime that lives for days, and (c) stop at the
+    next batch when the user switches it off. The loop, its own lock and its own
+    freshness stamp live in ``session.delegated_retention``; this thread is only
+    the host, so no new daemon exists. Housekeeping never fails a session.
+    """
+    if stop_event.is_set():
+        return
+    try:
+        from local_operator.session.delegated_retention import (
+            live_policy_provider,
+            run_sweeps,
+        )
+
+        run_sweeps(
+            config_dir,
+            live_policy_provider(config_manager, config_dir),
+            live_dir=live_dir,
+            should_stop=stop_event.is_set,
+            wait=stop_event.wait,
+        )
+    except Exception:  # noqa: BLE001 — housekeeping never fails session start
+        logger.debug("delegated session sweeps failed", exc_info=True)
 
 
 def _start_store_maintenance(

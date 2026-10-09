@@ -223,7 +223,8 @@ from local_operator.tui.costs import (
     LOWER_BOUND_MARK,
     UNKNOWN_COST_CELL,
     SearchSpendSnapshot,
-    job_cost,
+    carry_floor,
+    job_subtree_cost,
     search_spend_is_floor,
     turn_cost,
 )
@@ -21572,6 +21573,27 @@ class OperatorApp(App[None]):
             return
         if body is not None:
             self._system_notice(body, "warning")
+            return
+        # The DELEGATED-work class announces itself ONCE per store, from its own
+        # record (`session.delegated_retention`), never from `last-cleanup.json`:
+        # that file is re-armed by every removing pass of the parent class and
+        # would make each hourly delegated sweep announce again.
+        try:
+            from local_operator.session.delegated_retention import (
+                format_delegated_notice,
+                take_unannounced_delegated_notice,
+            )
+
+            delegated = take_unannounced_delegated_notice(
+                config_dir() / SESSIONS_DIRNAME,
+                runtime_pid=runtime_pid if isinstance(runtime_pid, int) else None,
+            )
+            delegated_body = None if delegated is None else format_delegated_notice(delegated)
+        except Exception:  # noqa: BLE001 — a notice must never take the app down
+            logger.debug("delegated cleanup notice could not be built", exc_info=True)
+            delegated_body = None
+        if delegated_body is not None:
+            self._system_notice(delegated_body, "info")
             return
         if rechecks_left > 0:
             remaining = rechecks_left - STARTUP_CLEANUP_RECHECK_S
@@ -53331,12 +53353,17 @@ class OperatorApp(App[None]):
     def _harvest_subagent_costs(self) -> None:
         """Record each root task's whole subtree, keyed in the root namespace.
 
-        REPLACES each entry because a running subtree grows. Descendants are
-        read live only for display freshness; their owning root row receives a
-        detached summary before settlement, so polling is never the durability
-        mechanism. Keeping one accumulator entry per root also respects the
-        actual uniqueness boundary: independent child managers may reuse the
-        same local job id without overwriting one another.
+        REPLACES each entry because a running subtree grows. The subtree is the
+        LEDGER's own rollup (:func:`~local_operator.model.costs.job_subtree_cost`:
+        the row's calls, its settled descendants, and the live child manager
+        while one is attached), so a running parent's entry includes what its
+        nested children are spending right now and the entries sum to the
+        footer's subagent total. Descendants are read live only for display
+        freshness; their owning root row receives a detached summary before
+        settlement, so polling is never the durability mechanism. Keeping one
+        accumulator entry per root also respects the actual uniqueness boundary:
+        independent child managers may reuse the same local job id without
+        overwriting one another.
         """
         session = self._session
         manager = getattr(session, "jobs", None)
@@ -53348,55 +53375,18 @@ class OperatorApp(App[None]):
             return
         label = getattr(session, "model_label", "")
         for job in jobs:
-            direct = job_cost(job, default_model_label=label)
-            descendant = 0.0
-            components = list(getattr(job, "descendant_usage", ()) or ())
-            child_manager = getattr(job, "child_jobs", None)
-            if child_manager is not None:
-                try:
-                    # The live lease is replaced by the same bounded snapshot at
-                    # settlement, so this branch changes freshness, not totals.
-                    accounting = getattr(child_manager, "accounting_components", None)
-                    if callable(accounting):
-                        snapshot = accounting()
-                        if isinstance(snapshot, (list, tuple)):
-                            components = list(snapshot)
-                    else:
-                        # Reduced/embedder hosts expose only ``list()``. Sum
-                        # within this root instead of assigning manager-local ids
-                        # into the app-wide accumulator, preserving collision
-                        # safety even on that compatibility path.
-                        descendant += self._live_manager_cost(child_manager, label, set())
-                except Exception:  # noqa: BLE001 — one unreadable branch must not hide its siblings
-                    pass
-            unpriceable = False
-            for component in components:
-                provider = getattr(component, "provider", None) or ""
-                model_id = getattr(component, "model_id", None) or ""
-                cost = turn_cost(f"{provider}/{model_id}" if provider else model_id, component)
-                if cost is None:
-                    unpriceable = True
-                    break
-                descendant += cost
-            if unpriceable:
+            cost, lower_bound = job_subtree_cost(job, default_model_label=label)
+            if cost is None:
+                # Unpriced rows are skipped before their id is ever read: reduced
+                # and embedder hosts hand this poll id-less job objects, and an
+                # AttributeError on the 1 Hz timer takes the whole band repaint down.
                 continue
-            if direct is not None or components or descendant:
-                self._subagent_costs[job.id] = (direct or 0.0) + descendant
-
-    def _live_manager_cost(self, manager: Any, default_label: str, seen: set[int]) -> float:
-        """Compatibility total for a live manager lacking durable snapshots."""
-        identity = id(manager)
-        if identity in seen:
-            return 0.0
-        seen.add(identity)
-        total = 0.0
-        for row in manager.list():
-            cost = job_cost(row, default_model_label=default_label)
-            total += cost or 0.0
-            nested = getattr(row, "child_jobs", None)
-            if nested is not None:
-                total += self._live_manager_cost(nested, default_label, seen)
-        return total
+            job_id = getattr(job, "id", None)
+            if job_id is None:
+                continue
+            stored = carry_floor(self._subagent_costs.get(job_id), cost, lower_bound)
+            if stored is not None:
+                self._subagent_costs[job_id] = stored
 
     def _search_spend_is_floor(self) -> bool:
         """Whether the search half makes the band's figure a lower bound.

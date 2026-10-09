@@ -2298,6 +2298,60 @@ def _requested_scope(scope_kind: str, scope_name: str) -> CatalogueScope | None:
     return CatalogueScope(kind, name)
 
 
+async def _delegated_cleanup_notice(request: Request) -> dict[str, Any] | None:
+    """The one-time "delegated sessions were cleaned up" notice as a READ-ONLY peek.
+
+    A read must never consume it: this route is polled, and the app's own
+    main-process reads (the attach probe, the auth probe, the serving-state
+    reads) are among the pollers — consuming on read let them eat the notice
+    before the renderer could render it, permanently, since it is once per
+    store. It rides every listed read until the renderer acknowledges it
+    through ``POST /v1/desktop/delegated-cleanup-notice/ack``; the TUI keeps
+    its consume-on-show read. Read on a worker thread (a few-hundred-byte file,
+    but this route is polled). Never raises into the listing it rides on.
+    """
+    try:
+        from local_operator.session.delegated_retention import (
+            notice_wire,
+            peek_unannounced_delegated_notice,
+        )
+        from local_operator.session.retention import SESSIONS_DIRNAME
+
+        root = pathlib.Path(request.app.state.config_manager.config_dir)
+        payload = await asyncio.to_thread(
+            peek_unannounced_delegated_notice, root / SESSIONS_DIRNAME
+        )
+        return None if payload is None else notice_wire(payload)
+    except Exception:  # noqa: BLE001 — a notice never fails the sidebar
+        logger.debug("delegated cleanup notice unavailable", exc_info=True)
+        return None
+
+
+@router.post(
+    "/v1/desktop/delegated-cleanup-notice/ack", response_model=CRUDResponse[dict[str, Any]]
+)
+async def ack_delegated_cleanup_notice(request: Request):
+    """Acknowledge the one-time delegated-cleanup notice, so it is never served again.
+
+    The write half of the pair whose read half rides ``GET /v1/desktop/sessions``
+    (which only PEEKS: every list read — the app's own attach and auth probes
+    among them — must not consume a once-per-store notice). The renderer calls
+    this after it has shown the band. Idempotent: acknowledging twice, an
+    already-acknowledged record, or no record at all all answer
+    ``{"acknowledged": true}`` — the state the caller asked for, the sibling
+    pin/archive convention; a client that needs the store's own answer re-reads
+    the listing, where the notice is simply gone. A store this process cannot
+    write logs and the notice repeats rather than erroring.
+    """
+    from local_operator.session.delegated_retention import acknowledge_delegated_notice
+    from local_operator.session.retention import SESSIONS_DIRNAME
+
+    root = pathlib.Path(request.app.state.config_manager.config_dir)
+    async with errors(request):
+        await asyncio.to_thread(acknowledge_delegated_notice, root / SESSIONS_DIRNAME)
+    return reply({"acknowledged": True})
+
+
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
 async def list_sessions(
     request: Request,
@@ -2407,6 +2461,7 @@ async def list_sessions(
                 "cursor_missing": page.cursor_missing,
                 "scope": None if scope is None else {"kind": scope.kind, "name": scope.name},
                 "counts": page.counts,
+                "delegated_cleanup_notice": await _delegated_cleanup_notice(request),
             }
         )
 
