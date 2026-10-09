@@ -2762,12 +2762,11 @@ async def _construct_child_session(
     # ``/resume`` as if the user had opened it. Re-stamped on resume as well:
     # ``hub op='resume'`` rebuilds a child on its old directory, and a marker
     # lost to an earlier failed write is worth retrying while we are here.
-    # ``parent`` is the spawning session's id: a forward-looking edge for the
-    # delegated-retention pass (``session/delegated_retention.py``), which today
-    # derives "is a parent still using this child" from the PARENT's roster
-    # because legacy markers carry no link. Optional and additive: absent when the
-    # parent has no id, and nothing reads it yet but diagnostics. Re-stamped on
-    # resume, so a resumed child records the session that resumed it.
+    # ``mark_session_origin`` carries the DURABLE child→parent link: ``parent=`` below is
+    # what lets a later backfill attribute a child's code-request rows to the conversation
+    # that asked for the work, and it is the ONLY writer of that key — a second marker
+    # writer in the same function is how the marker's shape and the directory's mtime
+    # start disagreeing between them.
     parent_id = getattr(parent_session, "session_id", None)
     mark_session_origin(
         session_dir,
@@ -3188,6 +3187,14 @@ async def _construct_child_session(
         ),
     )
     cleanup.push_async_callback(child.dispose)
+    # The LIVE half of the same link: an event this child records for an opened or
+    # acted-on code request is propagated to the parent's transcript as it happens, so
+    # the operator's conversation shows the PR its subagent opened without waiting for
+    # a scan of the child's directory. Best-effort; a session without the handle simply
+    # propagates nothing (the scanner still finds the child's own rows).
+    from local_operator.code_requests.hook import attach_parent
+
+    attach_parent(child, parent_session)
     # THE CHILD CANNOT ANSWER THIS ITSELF, so its own holder gets the PROBE
     # OBJECT rather than a copied value: the child holds no control socket and no
     # registrant, and its only channel to a human is ``hub`` -> parent, so "is an

@@ -588,6 +588,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``monitors`` under the store root: the derived index, the ``wakes`` twin",
     ),
+    # ``INDEX_DIRNAME`` and ``CACHE_DIRNAME`` are both spelled ``code_requests``: the
+    # derived per-session index under the store root and the scan cache under
+    # ``cache/``. Neither is part of a session directory, and both are regenerated
+    # from the transcript by the scanner, so a session travelling between devices
+    # carries neither value (review round 1, Q3).
+    "local_operator/code_requests/ledger.py": (
+        2,
+        "``code_requests``: the derived index under the store root and the scan cache "
+        "under ``cache/`` — the ``monitors`` twin, both regenerable from the transcript",
+    ),
     "local_operator/monitors/state.py": (
         1,
         "``state`` under ``monitors/``: the per-monitor counters/snapshot directory",
@@ -621,8 +631,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     # ---- the desktop app's own feeds and the TUI's per-user state ----
     "local_operator/server/utils/desktop_feed.py": (
-        2,
-        "the agent and team directories the desktop app reads: the profile store",
+        3,
+        "the agent and team directories the desktop app reads (the profile store), plus "
+        "``code_requests``: the derived per-session index the feed's 1 s probe stats to "
+        "invalidate one conversation's rows (review round 1, Q3)",
     ),
     "local_operator/tui/sidebar_pins.py": (1, "the sidebar's pinned-session list"),
     "local_operator/tui/move_targets.py": (1, "the move dialog's recent-targets list"),
