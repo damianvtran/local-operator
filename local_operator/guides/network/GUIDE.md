@@ -357,9 +357,9 @@ lop network sessions --peer <id> --create --name <n> --prompt <p> --json
 The create mints the id on that device, reconciles the definitions it names
 (`--profile`, `--team`, `--agent`) onto it first, and says in the receipt what
 the session runs as. The flag set is the table and the flag paragraph under it in
-"Which device should run this session"; the precedence rule, and the by-name
-refusal for a profile, team or agent that does not resolve there, are in "Who the
-session on the peer runs as".
+"Which device should run this session" (and `--yolo`, in "Who the session on the
+peer runs as"); the precedence rule, and the by-name refusal for a profile, team
+or agent that does not resolve there, are in "Who the session on the peer runs as".
 
 Then drive the conversation where it lives. Each act takes an id OR a name and
 returns the owner's receipt, which names the device that actually acted:
@@ -371,9 +371,9 @@ returns the owner's receipt, which names the device that actually acted:
   it and names the warm-up rather than starting a runtime nobody is watching.
 - `--engage` warms a stored conversation; `--stop` stops the session where it
   lives — a healthy target is ENDED by the plain form even mid-turn, and only a
-  target already leaving after a signal, or one mid-turn whose socket will not
-  answer, is SKIPPED (`outcome: skipped`, rc 1, target left UNTOUCHED), with
-  `--force` the way past either; `--archive`/`--unarchive` hide or restore it
+  target already leaving, or one mid-turn whose socket will not answer, is
+  SKIPPED (`outcome: skipped`, rc 1, target left UNTOUCHED), with `--force` the
+  way past either; `--archive`/`--unarchive` hide or restore it
   there, and `--delete` is a dry run until `--yes`.
 
 The exact flags, the text-positional rule and the `--stop`/`--force` contract
@@ -517,7 +517,7 @@ over a paired mesh. From a shell:
 | `lop network sessions --peer <id> --create --name <n> [--prompt <p>] [--profile <role>] [--agent <name>] [--team <name>] (not --profile with --team) [--effort <level>]` | create the session ON the peer, which mints its id |
 | `lop network sessions --peer <id> --engage <session>` | warm a stored session on the peer |
 | `lop network sessions --peer <id> --stop <session>` | stop it where it lives |
-| `lop network sessions --peer <id> --stop <session> --force` | the same stop on a target whose turn is in flight, or that will not answer its socket — it WAITS for the owner's ladder to resolve, which can be minutes (see below) |
+| `lop network sessions --peer <id> --stop <session> --force` | the same stop, past a SKIP — a target already leaving, or a mid-turn one whose socket will not answer — it WAITS for the owner's ladder to resolve, which can be minutes (see below) |
 | `lop network sessions --peer <id> --archive <session>` | hide it on the device that holds it |
 | `lop network sessions --peer <id> --unarchive <session>` | restore it there |
 | `lop network sessions --peer <id> --delete <session> [--yes]` | delete it where it lives — a dry run until `--yes` |
@@ -637,15 +637,16 @@ mistaken for a complete one.
 A STOP THAT DID NOT ACT EXITS NON-ZERO. `--stop` answers `{"ok": true}` with rc 0
 only for an outcome that ENDED the target: `stopped`, `killed`, `already-gone`, or
 `not_running` (which is itself the answer to "did it stop"). A HEALTHY target is
-ended by the plain form even mid-turn — the ladder asks its socket FIRST, and a
-stop the user asked for is one they want. The skip covers the two states that rung
-cannot reach: a target already leaving after a signal, and one mid-turn whose own
-socket will not answer. That second one is `{"ok": false, "outcome": "skipped",
-"rung": "busy"}` with rc 1, a sentence naming both ways forward, and the target
-LEFT UNTOUCHED — stop it again once the turn ends, or add `--force`. The same rule
-covers `refused`, where the
-owner could not prove the process it would signal was the one it recorded. The
-`outcome` word is what says which happened; rc alone does not.
+ended by the plain form even mid-turn — the ladder asks its socket FIRST, a stop
+the user asked for is one they want, and that turn goes with it. The skip covers
+two states: a target already leaving and not stalled (finishing its turn after a
+signal or for a replaced build), which is checked before the socket is asked, and
+one mid-turn whose own socket will not answer. That second one is `{"ok": false,
+"outcome": "skipped", "rung": "busy"}` with rc 1, a sentence naming both ways
+forward, and the target LEFT UNTOUCHED — stop it again once the turn ends, or add
+`--force`. The same rule covers `refused`, where the owner could not prove the
+process it would signal was the one it recorded. The `outcome` word is what says
+which happened; rc alone does not.
 
 A FORCED STOP CAN TAKE MINUTES, and the wait is the owner's own ladder, not a
 hang. `--force` against a target that will not answer its socket signals it and
@@ -1246,9 +1247,9 @@ lop network identity rotate --json    # for a suspected key compromise
   `invite`/`join`, `member rm`, and the epoch rotation they carry.
 - Do not force a full re-sync, and do not invent a `--force` on a verb that does
   not take one: the only verb in this family with a `--force` is `network sessions
-  --stop`, and it means the owner's own `lop stop --force` — signal a target whose
-  turn is in flight or whose socket will not answer, accepting that the turn goes
-  with it.
+  --stop`, and it means the owner's own `lop stop --force` — signal a target the
+  plain stop skipped (one already leaving, or mid-turn with a socket that will not
+  answer), accepting that the turn goes with it.
 
 ## Reference
 
