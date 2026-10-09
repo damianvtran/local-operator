@@ -4097,8 +4097,11 @@ def test_the_feed_does_not_inherit_the_desktop_pre_open_supersession(tmp_path):
 
 def _index_updated_at(root: Path, session_id: str) -> float:
     """The revision the route reports for one session: the index's ``updated_at`` in ms."""
-    updated = float(json.loads((root / "code_requests" / f"{session_id}.json").read_text())["updated_at"])
-    return updated * 1000
+    index = root / "code_requests" / f"{session_id}.json"
+    # The ROUTE's own conversion, to the digit: ``int(updated_at * 1000)``. Returning the
+    # float would compare 1791570123456.789 against the 1791570123456 the feed publishes
+    # and fail on precision rather than on behaviour.
+    return int(float(json.loads(index.read_text())["updated_at"]) * 1000)
 
 
 def _tick_probe(feed: DesktopFeed) -> None:
@@ -4185,19 +4188,19 @@ def test_a_new_code_request_index_publishes_one_frame_for_that_session(tmp_path)
     # The SAME index does not publish again, and a second session's list is its own frame.
     _tick_probe(feed)
     assert _queued(subscription) == []
-    second = _code_request_index(root, other, rows=2)
+    _code_request_index(root, other, rows=2)
     _tick_probe(feed)
     frames = _queued(subscription)
     assert [frame["session_id"] for frame in frames] == [other]
-    assert frames[0]["payload"]["revision"] == int(float(json.loads(second.read_text())["updated_at"]) * 1000)
+    assert frames[0]["payload"]["revision"] == _index_updated_at(root, other)
 
     # A re-scan that changes WHICH rows are listed moves the token even when the file's
     # length is unchanged, so an edit in place still reaches the client.
-    third = _code_request_index(root, other, rows=1)
+    _code_request_index(root, other, rows=1)
     _tick_probe(feed)
     frames = _queued(subscription)
     assert [frame["session_id"] for frame in frames] == [other]
-    assert frames[0]["payload"]["revision"] == int(float(json.loads(third.read_text())["updated_at"]) * 1000)
+    assert frames[0]["payload"]["revision"] == _index_updated_at(root, other)
     asyncio.run(feed.close())
 
 

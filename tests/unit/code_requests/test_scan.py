@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from local_operator.code_requests.refs import EMPTY_CONTEXT as EMPTY
 from local_operator.code_requests.refs import HostContext, Remote
 from local_operator.code_requests.scan import (
     EVENT_CUSTOM_TYPE,
@@ -95,6 +96,38 @@ def _event(kind: str, *, at: float = 10.0, number: int = 1904) -> dict[str, Any]
                     "full": True,
                 },
                 "evidence": {"tool": "bash", "rule": "gh-pr-create-stdout", "verb": "gh pr create"},
+                "at": at,
+            },
+        },
+    }
+
+
+def _unknown_event(url: str, *, at: float = 30.0) -> dict[str, Any]:
+    """The event the LIVE hook writes for a script-shaped detection."""
+    parsed = url.split("github.com/", 1)[1]
+    project, number = parsed.split("/pull/")
+    return {
+        "id": f"e{at}",
+        "ts": at,
+        "type": "custom",
+        "payload": {
+            "custom_type": EVENT_CUSTOM_TYPE,
+            "details": {
+                "v": 1,
+                "kind": RELATION_UNKNOWN,
+                "ref": {
+                    "key": f"github.com/{project}#{number}",
+                    "forge": "github",
+                    "host": "github.com",
+                    "project": project,
+                    "number": int(number),
+                    "url": url,
+                    "full": True,
+                },
+                "evidence": {"tool": "bash", "rule": "script-stdout"},
+                "reason": (
+                    "a script printed this URL as its last line: possibly opened by this call"
+                ),
                 "at": at,
             },
         },
@@ -229,3 +262,61 @@ def test_rows_sort_opened_first_then_acted_then_mentions():
     rows[0]["payload"]["content"] = [{"text": "look at https://github.com/o/r/pull/9 please"}]
     result = scan_rows(rows, CWD)
     assert [row.relation for row in result.rows] == [RELATION_OPENED, RELATION_MENTIONED]
+
+
+# -- review round 1: F2 (the live shape of the never-seen guard) and F5 ---------
+
+
+def test_a_live_unknown_event_cannot_overwrite_a_mention():
+    """The hook writes an ``unknown`` event for every script-shaped detection.
+
+    A user who pasted the URL and a script that later printed it must read ``mentioned``
+    — the backfill shape — not ``unknown``. Before the fix the event arm applied
+    unconditionally, so the two shapes disagreed about one journal (F2).
+    """
+    url = "https://github.com/o/r/pull/77"
+    rows = [
+        _user(f"have a look at {url}"),
+        _assistant(
+            "running the helper",
+            calls=[{"id": "c9", "name": "bash", "arguments": {"command": "./scripts/open-pr.sh"}}],
+        ),
+        _tool(f"exit code: 0\n--- stdout ---\n{url}\n", "c9"),
+        _unknown_event(url, at=30.0),
+    ]
+    row = scan_rows(rows, CWD).rows[0]
+    assert row.relation == RELATION_MENTIONED
+    assert row.unknown_reason is None
+    # The event is still auditable: its evidence rides the row.
+    assert any(item.get("kind") == RELATION_UNKNOWN for item in row.evidence)
+    # Without the event the same journal reads the same way — that is the point.
+    without = scan_rows(rows[:-1], CWD).rows[0]
+    assert without.relation == RELATION_MENTIONED
+
+
+def test_a_live_unknown_event_still_marks_a_ref_nobody_had_seen():
+    url = "https://github.com/o/r/pull/78"
+    rows = [
+        _assistant(
+            "running the helper",
+            calls=[{"id": "c9", "name": "bash", "arguments": {"command": "./scripts/open-pr.sh"}}],
+        ),
+        _tool(f"exit code: 0\n--- stdout ---\n{url}\n", "c9"),
+        _unknown_event(url, at=30.0),
+    ]
+    row = scan_rows(rows, CWD).rows[0]
+    assert row.relation == RELATION_UNKNOWN
+    assert "possibly opened by this call" in (row.unknown_reason or "")
+
+
+def test_an_enterprise_url_in_a_peer_message_uses_the_scan_context():
+    """F5: inbound text was classified with an EMPTY context, so the same URL read two ways."""
+    enterprise = HostContext(
+        remotes=(Remote("origin", "ghe.internal.acme.io", "acme/api"),),
+    )
+    rows = [_peer("the other session opened https://ghe.internal.acme.io/acme/api/pull/9")]
+    row = scan_rows(rows, enterprise).rows[0]
+    assert row.ref.full is True and row.ref.reason is None
+    # With no way to know the host, the same message says so instead of guessing.
+    blind = scan_rows(rows, EMPTY).rows[0]
+    assert blind.ref.full is False and blind.ref.reason

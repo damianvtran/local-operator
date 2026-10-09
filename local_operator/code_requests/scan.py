@@ -299,7 +299,7 @@ def scan_rows(
         if kind != "message":
             continue
         if payload.get("kind") == "custom":
-            _consume_inbound(payload, row_for, at)
+            _consume_inbound(payload, row_for, at, context)
             continue
         role = payload.get("role")
         if role == "user":
@@ -319,9 +319,7 @@ def scan_rows(
                     calls[call_id] = (name, args, at)
             continue
         if role == "tool":
-            _consume_tool_row(
-                payload, row_for, result, calls, context, servers, by_key, tool_mention_cap
-            )
+            _consume_tool_row(payload, row_for, result, calls, context, servers)
             continue
 
     for row in by_key.values():
@@ -388,12 +386,33 @@ def _consume_event(
             row.acts.append(act)
         row.note(RELATION_ACTED, event_at)
     elif kind == KIND_UNKNOWN:
-        reason = details.get("reason")
-        row.unknown_reason = str(reason) if isinstance(reason, str) else None
-        row.note(RELATION_UNKNOWN, event_at)
+        # THE SAME GUARD THE SCAN-DERIVED PATH APPLIES, and it has to be here too: the
+        # live hook writes an ``unknown`` event for every script-shaped detection, so
+        # without this the guard was shadowed in exactly the case it exists for — a user
+        # who PASTED the URL and a script that later printed it read ``unknown`` live and
+        # ``mentioned`` on a backfill, i.e. the same journal answered differently
+        # depending on whether the hook had run (review round 1, F2). The mention wins;
+        # the event still contributes its evidence above.
+        seen_before = bool(row.relations & {RELATION_OPENED, RELATION_ACTED}) or bool(
+            set(row.mentions) - {SOURCE_TOOL}
+        )
+        if not seen_before:
+            reason = details.get("reason")
+            row.unknown_reason = str(reason) if isinstance(reason, str) else None
+            row.note(RELATION_UNKNOWN, event_at)
 
 
-def _consume_inbound(payload: Mapping[str, Any], row_for: Any, at: float) -> None:
+def _consume_inbound(
+    payload: Mapping[str, Any], row_for: Any, at: float, context: HostContext
+) -> None:
+    """A ``peer_message``/``job_result``/wake text: the one inbound mention source.
+
+    ``context`` is the scan's own host context, and passing it is not decoration: with an
+    empty one, a GitHub-Enterprise-shaped URL in a peer's message read as detect-and-link
+    even when a cwd remote or a CLI login confirmed the host — the same URL in the user's
+    own text was classified correctly, so the two sources disagreed about one ref
+    (review round 1, F5).
+    """
     custom_type = payload.get("custom_type")
     if custom_type not in _INBOUND_CUSTOM_TYPES:
         return
@@ -403,7 +422,7 @@ def _consume_inbound(payload: Mapping[str, Any], row_for: Any, at: float) -> Non
     text = details.get("text")
     if not isinstance(text, str) or not text:
         return
-    for ref in iter_refs(text):
+    for ref in iter_refs(text, context):
         row_for(ref).mention(SOURCE_PEER, at)
 
 
@@ -414,8 +433,6 @@ def _consume_tool_row(
     calls: Mapping[str, tuple[str, Mapping[str, Any], float]],
     context: HostContext,
     servers: Sequence[McpServer],
-    by_key: Mapping[str, Row],
-    tool_mention_cap: int,
 ) -> None:
     """One tool result row: its text is a tool-output mention, its call is classified."""
     text = _content_text(payload)
@@ -560,7 +577,6 @@ __all__ = [
     "SOURCE_USER",
     "TOOL_MENTION_CAP",
     "ScanResult",
-    "TOOL_MENTION_CAP",
     "row_sort_key",
     "scan_rows",
 ]

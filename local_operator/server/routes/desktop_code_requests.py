@@ -252,6 +252,18 @@ def _scan_state(config_dir: Path, session_id: str) -> tuple[str, bool]:
     return ("refreshing", True)
 
 
+def _context_cwd(config_dir: Path, session_id: str, session_dir: Path) -> str:
+    """The cwd a scan's host context is built from: the session's own, else its directory.
+
+    The session's recorded cwd is where the operator was actually working, which is what
+    makes a self-hosted forge URL resolvable through the checkout's remotes. A session
+    that records none (deleted from the runtime registry and never woke) keeps the older
+    behaviour deliberately rather than borrowing THIS PROCESS's cwd — a daemon's own
+    directory is the one directory the session certainly was not working in.
+    """
+    return ledger.session_cwd(config_dir, session_id) or str(session_dir)
+
+
 def _start_scan(config_dir: Path, session_dir: Path, session_id: str, *, force: bool) -> None:
     """Start (or join) the single-flight background scan for one session. Never raises."""
     key = (str(config_dir), session_id)
@@ -261,7 +273,7 @@ def _start_scan(config_dir: Path, session_dir: Path, session_id: str, *, force: 
 
     async def _run() -> None:
         try:
-            context = await load_context_async(str(session_dir))
+            context = await load_context_async(_context_cwd(config_dir, session_id, session_dir))
             await ledger.refresh_async(
                 config_dir, session_id, session_dir, context=context, force=force
             )
@@ -342,7 +354,7 @@ async def code_requests_refresh(session_id: SessionID, body: RefreshBody, reques
     session_dir = _session_dir(config_dir, session_id)
     started_at = time.time()
     try:
-        context = await load_context_async(str(session_dir))
+        context = await load_context_async(_context_cwd(config_dir, session_id, session_dir))
         await ledger.refresh_async(
             config_dir, session_id, session_dir, context=context, force=body.force
         )

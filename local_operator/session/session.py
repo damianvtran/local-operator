@@ -13971,11 +13971,12 @@ class Session:
         # failure is swallowed exactly as the forwarded hooks' is (AGENTS.md: a hook
         # must never break a turn).
         #
-        # OFF THE EVENT LOOP: the detector's inputs — the gh/glab/tea config and the MCP
-        # server list — are file reads with their own caches, and the row append is a
-        # write. Both hop to a worker thread so a cold cache costs latency, never the
-        # loop; the whole path is also gated by ``could_matter`` inside the worker, so an
-        # ordinary tool result costs one thread hop and no work.
+        # CHEAPEST TESTS FIRST, because this runs for EVERY tool result of EVERY session:
+        # ``could_matter`` is a handful of substring checks, while the two loads below are
+        # worker-thread hops that read the operator's gh/glab/tea config and the MCP server
+        # list. Gating first means an ordinary ``ls`` costs the substring scan and nothing
+        # else — review round 1 (F4) caught the loads running ahead of the gate, which put
+        # two executor hops on the hottest path in the runtime.
         await self._detect_code_requests(tool_name, args, call_id, result)
 
         is_child = self._job_id is not None
@@ -14018,6 +14019,8 @@ class Session:
                 return
             from local_operator.code_requests import hook as code_requests_hook
 
+            if not code_requests_hook.could_matter(tool_name, args, result.text):
+                return
             context = await code_requests_hook.load_context_async(self._cwd)
             servers = await asyncio.to_thread(code_requests_hook.load_mcp_servers, self._cwd)
             detections = code_requests_hook.classify(

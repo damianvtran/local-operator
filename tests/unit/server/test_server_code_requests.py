@@ -10,7 +10,10 @@ index and a journal that moved underneath all have to degrade to a ROW rather th
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import time
+from typing import Any
 from pathlib import Path
 
 import pytest
@@ -273,3 +276,98 @@ async def test_refresh_refuses_an_unknown_body_field(desktop):
         f"/v1/desktop/sessions/{SESSION}/code-requests/refresh", json={"keis": ["x"]}
     )
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_the_scan_uses_the_sessions_recorded_cwd(desktop):
+    """F6: a self-hosted URL is confirmed by the CWD's remote, not by the session dir.
+
+    The transcript holds one GitHub-Enterprise-shaped link. With no way to know the host
+    the row is detect-and-link and carries a reason; once the session's recorded working
+    directory names that host as a remote, the same scan confirms it. The scan must read
+    the session's cwd from the wake index — scanning with ``<config>/sessions/<id>`` as
+    the cwd made the remote half of host identification impossible to satisfy.
+    """
+    client, root = desktop
+    session_dir = _seed_session(root)
+    url = "https://ghe.internal.acme.io/acme/api/pull/9"
+    with (session_dir / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "id": "a9",
+                    "ts": time.time() - 20,
+                    "type": "message",
+                    "payload": {
+                        "kind": "message",
+                        "role": "assistant",
+                        "content": [{"text": f"tracked in {url}"}],
+                    },
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+
+    from local_operator.code_requests.hook import load_context_async
+    from local_operator.server.routes.desktop_code_requests import _context_cwd
+    from local_operator.wakes import store as wake_store
+
+    async def rows(*, force: bool = False) -> dict[str, Any]:
+        # The ROUTE'S OWN cwd choice, which is what F6 is about. ``force`` on the second
+        # leg because the scan cache is keyed on the JOURNAL's signature — the cwd is not
+        # part of it, so a session that only gained a wake entry in the meantime is
+        # otherwise answered from the last scan (which is the state a browser refresh
+        # passes ``force`` to escape).
+        await ledger.refresh_async(
+            root,
+            SESSION,
+            session_dir,
+            context=await load_context_async(_context_cwd(root, SESSION, session_dir)),
+            force=force,
+        )
+        response = await client.get(f"/v1/desktop/sessions/{SESSION}/code-requests")
+        # By NUMBER, not by position: the seeded create sorts before a mention.
+        return next(row for row in response.json()["result"]["rows"] if row["number"] == 9)
+
+    # 1. No recorded cwd: the host is unknown, so the row is link-only WITH a reason.
+    blind = await rows()
+    assert blind["number"] == 9 and blind["reason"]
+
+    # 2. The session's own working directory names the host as a remote.
+    # A REAL checkout: ``git -C <dir> config`` refuses a hand-written ``.git/config``
+    # ("not a git repository"), which is exactly the read host identification makes.
+    # ``GIT_CONFIG_SYSTEM=/dev/null`` is hygiene for the whole fleet: the system gitconfig
+    # installs the osxkeychain credential helper, and no test on this machine should give
+    # a helper a reason to run.
+    project = root / "checkouts" / "acme-api"
+    project.mkdir(parents=True)
+    git_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(root),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    for command in (
+        ["git", "init", "-q", str(project)],
+        [
+            "git",
+            "-C",
+            str(project),
+            "remote",
+            "add",
+            "origin",
+            "git@ghe.internal.acme.io:acme/api.git",
+        ],
+    ):
+        subprocess.run(command, check=True, capture_output=True, text=True, env=git_env)
+    wake_store.write_entry(
+        root,
+        SESSION,
+        cwd=str(project),
+        schedules=[{"kind": "at", "at": int(time.time() * 1000) + 600_000}],
+    )
+    confirmed = await rows(force=True)
+    assert confirmed["number"] == 9
+    assert confirmed["reason"] is None
+    assert confirmed["host"] == "ghe.internal.acme.io"

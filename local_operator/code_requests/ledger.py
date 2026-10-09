@@ -51,6 +51,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -119,8 +120,32 @@ def index_dir(config_dir: str | Path) -> Path:
     return Path(config_dir) / INDEX_DIRNAME
 
 
+#: What a session id may look like when it becomes a FILENAME. Session ids are
+#: 12 lowercase hex characters; the bound is generous on purpose (a fork keeps its
+#: parent's id shape, and an id is bookkeeping, never a secret).
+_DERIVED_STEM = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _derived_stem(session_id: str) -> str:
+    """The file stem for one session's derived files, or ``ValueError`` for an id that
+    must not become a path component.
+
+    WHY THIS EXISTS AT ALL, when the HTTP routes already validate ``^[a-f0-9]{12}$``:
+    this module is a library, and the guard in
+    ``tests/unit/session/test_no_session_deletion.py`` asks a stronger question than the
+    routes do — *can the paths this module replaces and unlinks ever name something
+    outside ``<config>/code_requests/``?* The answer is only yes if a caller hands in an
+    id containing a separator or a ``..``, because every path here is
+    ``<dir>/<stem>.json``. Refusing that shape outright is what makes the allow-list row
+    for those calls a statement a reviewer can check rather than a promise about callers.
+    """
+    if not _DERIVED_STEM.match(session_id or ""):
+        raise ValueError(f"not a session id: {session_id!r}")
+    return session_id
+
+
 def index_path(config_dir: str | Path, session_id: str) -> Path:
-    return index_dir(config_dir) / f"{session_id}.json"
+    return index_dir(config_dir) / f"{_derived_stem(session_id)}.json"
 
 
 def cache_dir(config_dir: str | Path) -> Path:
@@ -128,7 +153,7 @@ def cache_dir(config_dir: str | Path) -> Path:
 
 
 def cache_path(config_dir: str | Path, session_id: str) -> Path:
-    return cache_dir(config_dir) / f"{session_id}.json"
+    return cache_dir(config_dir) / f"{_derived_stem(session_id)}.json"
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +259,14 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> bool:
 
 def read_index(config_dir: str | Path, session_id: str) -> dict[str, Any] | None:
     """One session's derived index, or ``None`` when absent/unreadable/stale-schema."""
-    data = _read_json(index_path(config_dir, session_id))
+    try:
+        path = index_path(config_dir, session_id)
+    except ValueError:
+        # An id that cannot become a filename is "nothing recorded", never a crash: the
+        # callers are readers, and a read has no honest way to fail loudly about someone
+        # else's naming.
+        return None
+    data = _read_json(path)
     if data is None or data.get("schema") != INDEX_SCHEMA:
         return None
     return data
@@ -247,7 +279,10 @@ def write_index(config_dir: str | Path, session_id: str, result: ScanResult) -> 
     reader the same stat as an absent one while adding a second thing to keep in
     step. The monitor index makes the same call for an emptied list.
     """
-    path = index_path(config_dir, session_id)
+    try:
+        path = index_path(config_dir, session_id)
+    except ValueError:
+        return False
     if not result.rows and not result.tool_output_only and not result.hints:
         try:
             path.unlink()
@@ -276,7 +311,11 @@ def write_index(config_dir: str | Path, session_id: str, result: ScanResult) -> 
 
 
 def read_cache(config_dir: str | Path, session_id: str) -> dict[str, Any] | None:
-    data = _read_json(cache_path(config_dir, session_id))
+    try:
+        path = cache_path(config_dir, session_id)
+    except ValueError:
+        return None
+    data = _read_json(path)
     if data is None or data.get("schema") != CACHE_SCHEMA:
         return None
     return data
@@ -285,8 +324,12 @@ def read_cache(config_dir: str | Path, session_id: str) -> dict[str, Any] | None
 def write_cache(
     config_dir: str | Path, session_id: str, sig: Mapping[str, Any], result: ScanResult
 ) -> bool:
+    try:
+        path = cache_path(config_dir, session_id)
+    except ValueError:
+        return False
     return _write_json(
-        cache_path(config_dir, session_id),
+        path,
         {
             "schema": CACHE_SCHEMA,
             "session_id": session_id,
@@ -410,12 +453,6 @@ def _sig_of(stat: os.stat_result, last_id: str, offset: int) -> dict[str, Any]:
         "inode": stat.st_ino,
         "last_id": last_id,
         "offset": offset,
-    }
-    return {
-        "size": stat.st_size,
-        "mtime": stat.st_mtime,
-        "inode": stat.st_ino,
-        "last_id": last_id,
     }
 
 
@@ -830,9 +867,60 @@ def index_sessions(
     return entries, False
 
 
+def session_cwd(config_dir: str | Path, session_id: str) -> str:
+    """Where a session was working, best effort; ``""`` when nothing records it.
+
+    WHY THE ROUTE NEEDS IT. The host context that decides whether a ``/pull/N`` URL is a
+    GitHub link or an unconfirmed one is built from the operator's CLI logins and the
+    CWD'S git remotes. Scanning with the session DIRECTORY as the cwd made the remote
+    half of that impossible to satisfy — ``<config>/sessions/<id>`` is not a checkout —
+    so a self-hosted URL that a remote would have confirmed stayed link-only, with a
+    reason sentence that claimed a check that had been made against the wrong directory
+    (review round 1, F6).
+
+    The two sources are the ones ``tui/resume_click`` already reads for the same question,
+    in the same order: the live runtime's discovery record, then the wake index, which
+    keeps a ``cwd`` for cold sessions (a wake cannot be armed without one). Both imports
+    are inside the function because this module is stdlib-only by design and is imported
+    by the session's hot path — the same reason ``append_event`` duck-types its
+    transcript instead of importing the session package.
+    """
+    for reader in (_cwd_from_runtime_record, _cwd_from_wake_entry):
+        try:
+            found = reader(Path(config_dir), session_id)
+        except Exception:  # noqa: BLE001 - an unknown project directory is a mild answer
+            logger.debug("could not read a cwd for %s", session_id, exc_info=True)
+            continue
+        if found:
+            return found
+    return ""
+
+
+def _cwd_from_runtime_record(config_dir: Path, session_id: str) -> str:
+    """The live session's own ``cwd``, when a runtime is running it."""
+    from local_operator.session.runtime import registry
+
+    for record, _state in registry.scan(config_dir):
+        if getattr(record, "session_id", "") == session_id and getattr(record, "cwd", ""):
+            return str(record.cwd)
+    return ""
+
+
+def _cwd_from_wake_entry(config_dir: Path, session_id: str) -> str:
+    from local_operator.wakes import store as wake_store
+
+    entry = wake_store.read_entry(config_dir, session_id) or {}
+    cwd = entry.get("cwd") if isinstance(entry, Mapping) else None
+    return str(cwd) if isinstance(cwd, str) and cwd else ""
+
+
 def drop_session(config_dir: str | Path, session_id: str) -> None:
     """Remove both derived files. Best-effort; used when a session is deleted."""
-    for path in (index_path(config_dir, session_id), cache_path(config_dir, session_id)):
+    try:
+        paths = (index_path(config_dir, session_id), cache_path(config_dir, session_id))
+    except ValueError:
+        return
+    for path in paths:
         try:
             path.unlink()
         except OSError:
