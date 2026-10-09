@@ -157,7 +157,15 @@ export function ImageGenCard({
 							aria-hidden
 							className="lo-gen-tile block h-40 w-40 shrink-0 rounded-sm border border-hairline"
 						/>
-						<div className="flex w-full items-center gap-2 pr-1.5">
+						{/* THE ROW'S HEIGHT IS THE 44px TOUCH FLOOR IN EVERY STATE
+						    (design D1). While the control is a button it is the row's
+						    tallest child; when the hold replaces it with a text span, a
+						    shorter row would re-centre the bar and lift the card's
+						    bottom edge at the stop tap — a reflow the user reads as the
+						    card flinching exactly when they asked it to stop. `min-h-11`
+						    pins the slot so the running -> cancelling swap moves
+						    nothing. */}
+						<div className="flex min-h-11 w-full items-center gap-2 pr-1.5">
 							{view.progress !== null ? (
 								/* The determinate branch, rendered ONLY off a
 								   fraction the feed carried (the adapter maps
