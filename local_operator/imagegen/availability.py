@@ -26,6 +26,13 @@ does here too for FAL/OpenAI by design; what must never differ is a rung
 being advertised with one credential class and spending with a REFUSED one,
 which is why OpenAI's probe and its async twin both read ``api_key`` rows
 only — never a ChatGPT OAuth grant, which is not valid at ``/v1/images``).
+
+**The subscription rung (media wave-2) is the first rung whose probe reads
+the OAuth-GRANT class**: the grant that is invalid at ``/v1/images`` is
+exactly what the Codex backend spends, so
+:func:`openai_subscription_grant` reads ``oauth`` rows under ``openai`` — the
+deliberate inverse of the ``openai-key`` rule, and the shape every breadth
+rung follows: **probe the credential class the rung SPENDS with.**
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
-from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.auth_store import AuthStore, OAuthAccess
 
 logger = logging.getLogger(__name__)
 
@@ -163,14 +170,39 @@ def openai_images_key(config_dir: Path | None = None) -> str | None:
 def image_provider_reachable(config_dir: Path | None = None) -> bool:
     """The ``generate_image`` createIf gate: any rung's credential exists.
 
-    All three probes are sync and socket-free (see the module docstring), so
-    this is safe on every session-build path. Sessions built before a login
-    land the tool at the NEXT session — the commit-time gate is a snapshot by
+    All probes are sync and socket-free (see the module docstring), so this
+    is safe on every session-build path. Sessions built before a login land
+    the tool at the NEXT session — the commit-time gate is a snapshot by
     design, not a per-turn scan.
     """
     return bool(
-        radient_available(config_dir) or fal_key(config_dir) or openai_images_key(config_dir)
+        radient_available(config_dir)
+        or fal_key(config_dir)
+        or openai_images_key(config_dir)
+        or openai_subscription_grant(config_dir)
     )
+
+
+def openai_subscription_grant(config_dir: Path | None = None) -> bool:
+    """Whether a ChatGPT subscription GRANT is stored (the subscription rung).
+
+    The deliberate INVERSE of :func:`openai_images_key`: the images API wants
+    an ``api_key`` row and rejects an OAuth grant, while the Codex-backend
+    rung spends exactly the OAuth grant — so this probe reads ``oauth`` rows
+    under the ``openai`` namespace only, and the two rules must never be
+    blurred into one. Never raises; deliberately NO env leg (a grant is
+    stored by a sign-in, never exported).
+    """
+    try:
+        store = _open_store(config_dir)
+        try:
+            rows = store.list_credentials("openai")
+            return any(getattr(row, "credential_type", None) == "oauth" for row in rows)
+        finally:
+            store.close()
+    except Exception:  # noqa: BLE001 - a probe must never take its caller down
+        logger.debug("openai subscription probe failed; reporting unavailable", exc_info=True)
+        return False
 
 
 async def openai_call_key(store: AuthStore, session_id: str | None = None) -> str | None:
@@ -193,3 +225,19 @@ async def openai_call_key(store: AuthStore, session_id: str | None = None) -> st
         return key
     exported = os.environ.get(OPENAI_ENV_KEY)
     return exported or None
+
+
+async def openai_sub_access(store: AuthStore, session_id: str | None = None) -> OAuthAccess | None:
+    """The identity-carrying grant the subscription rung would send.
+
+    The ASYNC twin of :func:`openai_subscription_grant`, and deliberately the
+    chat path's own resolver (``get_oauth_access``) so refresh, rotation and
+    backoff behave exactly as a chat turn's credential would — one place for
+    those rules. ``None`` means "no grant"; a stored grant that cannot mint a
+    bearer surfaces as a rung failure and fails forward. Never raises.
+    """
+    try:
+        return await store.get_oauth_access("openai", session_id)
+    except Exception:  # noqa: BLE001 - a probe must never take its caller down
+        logger.warning("openai subscription access read failed; reporting none")
+        return None

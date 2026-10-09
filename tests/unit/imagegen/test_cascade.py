@@ -28,6 +28,7 @@ def _pin_probes(
     radient: bool = False,
     fal: bool = False,
     openai: bool = False,
+    openai_sub: bool = False,
 ) -> None:
     async def fake_radient(config_dir, base_url, *, store):
         return radient
@@ -38,6 +39,11 @@ def _pin_probes(
     )
     monkeypatch.setattr(
         image_availability, "openai_images_key", lambda config_dir=None: "ok" if openai else None
+    )
+    monkeypatch.setattr(
+        image_availability,
+        "openai_subscription_grant",
+        lambda config_dir=None: openai_sub,
     )
 
 
@@ -65,6 +71,23 @@ async def test_priority_is_radient_then_fal_then_openai(
 
 
 @pytest.mark.asyncio
+async def test_the_key_rung_still_wins_over_the_subscription(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Manager sign-off #1 (§14.5): v1 is KEY-FIRST — an existing user's path
+    # must not change, and openai-sub runs only when earlier rungs refuse or
+    # are absent. The order constant is the whole mechanism.
+    _pin_probes(monkeypatch, openai=True, openai_sub=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.OPENAI
+
+    _pin_probes(monkeypatch, openai_sub=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.OPENAI_SUB
+    assert resolution.reason == "A ChatGPT subscription sign-in is stored."
+
+
+@pytest.mark.asyncio
 async def test_no_rung_names_every_remedy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _pin_probes(monkeypatch)
     resolution = await cascade.resolve_image_route(tmp_path)
@@ -72,7 +95,8 @@ async def test_no_rung_names_every_remedy(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert "/login radient" in resolution.reason
     assert "lop login fal" in resolution.reason
     assert "openai-key" in resolution.reason
-    assert [rung.available for rung in resolution.rungs] == [False, False, False]
+    assert "sign in to a ChatGPT plan" in resolution.reason
+    assert [rung.available for rung in resolution.rungs] == [False] * len(cascade.IMAGE_RUNG_ORDER)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +272,21 @@ async def test_task_cancellation_propagates_untouched(
     with pytest.raises(asyncio.CancelledError):
         await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path)
     assert calls == [ImageRoute.RADIENT]
+
+
+@pytest.mark.asyncio
+async def test_the_walk_dispatches_the_subscription_rung(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, openai_sub=True)
+    fake, calls = _make_route_script({ImageRoute.OPENAI_SUB: _result("gpt-image-2")})
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    outcome = await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path)
+
+    assert calls == [ImageRoute.OPENAI_SUB]
+    assert outcome.route == ImageRoute.OPENAI_SUB
+    assert outcome.model == "gpt-image-2"
 
 
 @pytest.mark.asyncio
