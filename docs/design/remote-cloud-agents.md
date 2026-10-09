@@ -276,7 +276,7 @@ available).
 | | (a) EKS, namespace per task | (b) ECS Fargate task per agent | (c) Firecracker microVMs | (d) EC2 instance per task |
 |---|---|---|---|---|
 | Isolation | Namespace + NetworkPolicy + ResourceQuota: **shared kernel** unless gVisor (syscall interposition) or Kata (VM per pod) is added. A namespace is a policy boundary, not a security boundary | "Each Fargate task has its own isolation boundary and does not share the underlying kernel, CPU resources, memory resources, or elastic network interface" [F1]. Fargate runs on Firecracker [F3] | A VM per sandbox on KVM [F4]. Strongest at the highest density | Full VM per task (Nitro) |
-| Cold start (estimate; POC must measure) | Warm node: seconds. **Cold Karpenter node: ~2–4 min** [K1] | Unmeasured here; image pull dominates container start (76% in the study AWS cites) [F2]; SOCI lazy loading cuts image-pull-dominated starts 40–60% [F2] | <125 ms VMM boot [F4]; seconds with a snapshot. Lambda MicroVMs: snapshot launch | ~30–90 s boot plus pull |
+| Cold start ((b) measured 2026-10-07; the rest are estimates) | Warm node: seconds. **Cold Karpenter node: ~2–4 min** [K1] | **Measured, 5 runs**: RunTask → first `RUNNING` **24.8 s median** (20.0–25.9 s), which decomposes as **scheduling + ENI attach 15.4 s**, **image pull 4.53 s** (pullStartedAt→pullStoppedAt) and **container start 3.1 s** (pullStoppedAt→startedAt) — the three ECS phases span `createdAt`→`startedAt`, **23.7 s median**, so the ~1.1 s between that and the RunTask figure is the control-plane round trip rather than a phase; RunTask → a first model event **47.8 s median** raw, **26.3 s median** once the 21.2 s whole-filesystem probe scan is subtracted. Pull is ~18% of the arrival, so SOCI's ceiling here is ~4.5 s; SOCI was **not** tested. Evidence: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md) | <125 ms VMM boot [F4]; seconds with a snapshot. Lambda MicroVMs: snapshot launch | ~30–90 s boot plus pull |
 | Compute $/task-hour (Price List API) | m7g.xlarge $0.1819/h ÷ 2 = **$0.091** + CP $0.10/h amortised (≈$0.101 at 10 concurrent, ≈$0.092 at 100) | 2×$0.03565 + 4×$0.00389 = **$0.0869**; Fargate Spot up to 70% off (ECS only, interruptible) | c6g.metal $2.3808/h ÷ 24 ≈ **$0.099** (÷32 ≈ $0.074); nested-virt c8i.xlarge $0.2051/h ÷ 2 ≈ **$0.103** | m7g.large (8 GiB) **$0.091**, per-second billing, 60 s minimum |
 | Fixed monthly floor | EKS CP **$73** + NAT/endpoints; +$133 per idle warm m7g.xlarge | **$0** compute at idle; NAT/endpoints only | +$1,738 for an always-on metal host (or scale-to-zero hosts with slower starts) | $0 compute at idle |
 | Ops burden | Highest: cluster upgrades, Karpenter, CNI policy, admission control, runtime classes | Lowest: task definition, IAM, security groups | High: own scheduler, image/snapshot pipeline, host fleet, jailer. **Or** managed Lambda MicroVMs (see below) | Medium: AMI pipeline, boot scripts, instance reaping |
@@ -356,7 +356,7 @@ transcripts outside our AWS account and region, which conflicts with data reside
 |---|---|---|
 | Built today | Radient is a provider (`providers/registry.py` `radient`, `radient-key`) fronting OpenRouter (`providers/clients.py`). There is no per-task token mint | Broker built (`net_broker`); provider logins and API keys are offered to device members (`offers.py`) |
 | Home offline | Works | Stalls within ≤15 min (§3.4) |
-| Secret on the pod | A per-task Radient token, **budget-capped and expiring at `expires_at`**, injected as an ECS task-level secret. ECS delivers that as a container environment variable, so it is **not on disk but is readable by the agent and anything it spawns**; v1 should have the lop entrypoint read it into the process and unset it before tools run. A leaked token is worth at most the task's remaining budget | A bearer valid ≤900 s, in memory only (credentials §6.2) |
+| Secret on the pod | A per-task Radient token, **budget-capped and expiring at `expires_at`**, injected as an ECS task-level secret. ECS delivers that as a container environment variable, so it is **not on disk**, and Slice 0 implemented and measured the stronger form its own v1 note asked for: the entrypoint takes the value out of its own environment, carries it across a re-exec and hands it to the agent over a file descriptor, so **no process's initial environment carries it** (probe 4e: 0 of every readable `/proc/<pid>/environ`, over 5 runs, with a self-test proving the probe goes red on the old delivery). **v1 must also close the two spawn sites that receive the caller's environment** — `tools/group_reaper.py:229` and `memory_guard._default_runner`, both `ps` invocations — by passing a filtered environment there, or by delivering the token in a way that never enters `os.environ`, because until then the closure is conditional on the image shipping no `ps` (Slice 0's probe 4f and its Dockerfile guard enforce exactly that condition, and only that). The residual is the agent's memory — measured, not asserted: `yama_ptrace_scope=1`, and a same-uid non-descendant could not open `/proc/<pid>/mem` (PermissionError). A leaked token is worth at most the task's remaining budget. Evidence: `remote-cloud-agents-poc-results.md` § Test 4e | A bearer valid ≤900 s, in memory only (credentials §6.2) |
 | Metering | Exact. The gateway already meters tokens in Radient credits | Tokens are billed to the user's own provider account. Radient meters compute only |
 | Data path | Model traffic goes Radient → OpenRouter → upstream provider. **Not Canada-resident** (§7.6) | User's chosen provider |
 | Work needed | Control-plane endpoint to mint and revoke task-scoped gateway tokens with a spend cap | C1, plus documenting the home-online requirement |
@@ -379,6 +379,14 @@ pod's own device key; a per-task model token (budget-capped); a **scoped git cre
 that only the git proxy honours**; nothing else. The ECS **task role has no AWS
 permissions**. The execution role (image pull and logs) is not reachable from inside the
 container.
+
+**Two conditions on the token's delivery** (measured in Slice 0, §6): the closure holds
+for children started under the `allowlist` shell-environment policy, and it **depends on
+the image shipping no `ps`** — `tools/group_reaper.py:229` and
+`memory_guard._default_runner` pass the caller's environment to `ps`, so **v1 must filter
+the environment at those two sites, or deliver the token so it never enters
+`os.environ`**. Probes 4e/4f and the Dockerfile's no-`ps` guard keep the condition
+visible until then (`remote-cloud-agents-poc-results.md` § Test 4e/4f).
 
 | Attack | Blast radius | Control |
 |---|---|---|
@@ -442,7 +450,7 @@ move compute out of Canada as well.
 
 | Option | $/task-hour | Source |
 |---|---|---|
-| ECS Fargate ARM | **0.0869** | Price List API `AmazonECS` ca-central-1 (SKUs `MA9ZGYPG5E2CH64A` vCPU $0.03565, `C96MZB6RGQHW2XHW` GB $0.00389) |
+| ECS Fargate ARM | **0.0869** | Price List API `AmazonECS` ca-central-1 (SKUs `MA9ZGYPG5E2CH64A` vCPU $0.03565, `C96MZB6RGQHW2XHW` GB $0.00389). Confirmed against the bill on both billed days: the settled 0.7833 task-hours (1.5666666651 vCPU-h + 3.1333333349 GB-h) Cost Explorer shows for 2026-10-07 price at $0.0680403 on these SKUs — that day's `SavingsPlanCoveredUsage` — and the 0.0194 task-hours (0.0388888889 + 0.0777777778) on 2026-10-08 at $0.0016889 (§9.4, results doc § Test 6) |
 | ECS Fargate Spot ARM | ≈0.026 (up to 70% off; estimate) | ECS pricing page |
 | EKS on shared m7g.xlarge, 2/node | 0.092–0.101 + disk ≈ 0.094–0.103 | Price List API (m7g.xlarge $0.1819; EKS $0.10/cluster-h) |
 | Firecracker on c6g.metal (24–32/host) | 0.074–0.099 (+ our own control plane; host must run) | Price List API ($2.3808/h) |
@@ -484,7 +492,7 @@ margin (the tunnel doc states an 80% gross margin). For a cloud task:
 
 ---
 
-## 9. POC plan (requires separate approval; nothing here has been run)
+## 9. POC plan — Slice 0 built and run (results: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md); items 1–5 PASS on a real-key run, 6's service proxy reconciled to −1.7% over the whole two billed days (−4.0% on the 40 tasks' own slice) with the tag half still BLOCKED (the tag the criterion names does not attribute), teardown still needs approval)
 
 ### 9.1 Account, first
 
@@ -524,13 +532,26 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 1. IaC (one stack, D7) creates:
    - an ECR repo;
    - a task definition: ARM64, 2 vCPU / 4 GiB, read-only root filesystem except the
-     workspace, non-root user;
+     workspace, non-root user — and the two ARNs this list omitted, which ECS requires:
+     `executionRoleArn` (mandatory the moment a container secret is declared) and
+     `taskRoleArn` (without it the credentials endpoint has no role to serve, which is
+     probe 4a's subject). **ARM64 is read from the task definition, not from
+     `describe-tasks`: Fargate returns no `runtimePlatform` for a task.** The non-root
+     user takes one more thing, measured: the image must declare
+     `VOLUME ["/workspace"]` over a `/workspace` it already chowns to 10001, because
+     when the VOLUME path equals the volume's `containerPath` the ECS agent copies the
+     image's data and ownership into the mount; without it the container cannot write its
+     own workspace and dies on its first `mkdir`;
    - an execution role (ECR pull, Logs) and an **empty task role**;
    - a log group with 14-day retention;
    - a security group: egress 443 only, no inbound. The ECS container-credentials
      endpoint (169.254.170.2) is link-local and served by the Fargate agent, so this rule
-     does not block it; probe 4a below checks it;
-   - an S3 bucket for results: private, KMS, versioned, 7-day lifecycle;
+     does not block it; probe 4a below checks it. Name resolution still works without a
+     UDP/53 rule because AWS exempts the VPC resolver from security-group filtering;
+   - an S3 bucket for results: private, versioned, 7-day lifecycle, and SSE-KMS with the
+     **AWS-managed** `aws/s3` key — expressed as `sseAlgorithm: aws:kms` with **no
+     `kmsMasterKeyId`**. Naming `aws/s3` as the key id passes `preview` and then fails
+     every `PutObject` with `KMS.NotFoundException: Invalid keyId 'aws/s3'`;
    - a controller IAM role allowing only `ecs:RunTask`/`StopTask`/`DescribeTasks` on
      this one task definition, `iam:PassRole` for those two roles, and `s3:PutObject`
      presign. Everything is tagged `lop-poc=true`.
@@ -575,12 +596,31 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
    - (4b) outbound to a non-443 port fails;
    - (4c) no secret is present on the filesystem (`grep -r` for the key prefix finds
      nothing).
-5. Cold start (RunTask → `RUNNING`, and → first model call) measured for 5 runs; results
+5. Cold start (RunTask → `RUNNING`, and → first model EVENT — the first model-produced
+   event on the event stream, not the provider call's return) measured for 5 runs; results
    recorded as evidence and replacing the estimates in §4.
 6. Cost: Cost Explorer for the tag (after the 24 h lag) reconciles within 20% of
    `Σ wall_seconds × $0.0869/3600`.
 7. Teardown of the POC stack (only after approval): `pulumi destroy`/`cdk destroy`
    leaves zero tagged resources.
+
+**Where this stands (2026-10-09; the run it cites is 2026-10-08).** Every item above except 6 and 7 now has a recorded PASS
+on **one** run: `ct_92161251`, a real OpenRouter turn (`anthropic/claude-sonnet-4.5`) on the
+accepted image digest, whose edit to the cloned fixture is verified from the returned bundle
+by `verify` (22 checks, 0 FAIL, 0 BLOCKED). Items 2 and 3 and the real-model half of item 4
+were the ones waiting on a key and are no longer PENDING/BLOCKED. Item 6 is now **measured with
+its service proxy reconciled** — the Cost Explorer lag has cleared for both billed days
+(2026-10-07 and 2026-10-08) and the settled figures are in the results doc's Test 6; the two-day
+Fargate usage prices at $0.0697292747 gross against the model's own 40-task $0.0709 (−1.7% over
+the whole two billed days, a window that includes the real-key run's 10-08 usage; −4.0% on the 40
+tasks' own 10-07 slice — both inside the criterion's 20% band). But the POC's `lop-poc` key is
+not an activated cost-allocation tag in this linked account, so the tag-filtered query the
+criterion names returns $0 and that half stays BLOCKED: the verdict is PARTIAL, not PASS. Item 7
+(teardown) still awaits the operator's approval, and the stack is still up. Per-run evidence, the probe
+readings with the real key, the cold start and the cost: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md)
+§ Real-key acceptance run. **Nothing in §7 is relaxed by that run**: the pod still holds no
+key on disk, egress is still 443-only, the task role is still empty and names no policy, and
+the `ps`-dependent residual (SEC-11) is still deferred product work.
 
 **Slice 1 adds:**
 
@@ -604,6 +644,23 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 | Logs, S3, Secrets Manager | < $1 |
 | **AWS total** | **< $5** |
 | Model spend | **capped at ~$20** (POC key with a hard spend limit) |
+
+**Measured (re-verified 2026-10-09 at 05:36Z, Cost Explorer, account `325492156725`,
+`ca-central-1`, unblended — full reconciliation, commands and caveats in
+[remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md) § Test 6).** The POC's
+whole billed Fargate usage is the **two UTC days 2026-10-07 and 2026-10-08**: **0.7833
+task-hours** on 10-07 (1.5666666651 vCPU-h + 3.1333333349 GB-h) and **0.0194 task-hours** on
+10-08 (0.0388888889 vCPU-h + 0.0777777778 GB-h), together 0.8028 task-hours, an on-demand-
+equivalent **$0.0697292747** (`SavingsPlanCoveredUsage`) that an existing Savings Plan covered and
+negated to a **net unblended $0.0001629696**. The two days' `owner=lopdev` total is
+`$0.1095209298` ($0.0978767782 + $0.0116441516), ≈$0.0396 of it outside ECS (ECR $0.0247,
+Secrets Manager $0.0094, NAT $0.0042, S3 $0.0009, logs $0.0004); the net cash is ≈$0.0398 once
+the `SavingsPlanNegation` is added back, only ≈$0.0002 of that Fargate compute. The only
+POC-specific tag that attributes anything is that one: `lop-poc=true` returns $0 on every day, so
+the `lop-poc` budget is inert (`ActualSpend 0.0`) and `lop-poc-fargate` is the sole working
+backstop. So the estimate above is a ceiling, not a bill: the POC bought 0.80 task-hours across
+two days, not the ten the table prices, and the plan paid for them. Both days still report
+`Estimated: true`, so a further small movement is possible.
 
 ---
 
@@ -639,8 +696,26 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 ## 12. Open questions (answerable by the POC or a spike, not by the operator)
 
 1. Measured Fargate cold start for a ~1.5 GB lop image, with and without SOCI.
+   **Answered for the image as built, without SOCI** (5 runs on the accepted digest,
+   2026-10-07): RunTask → first `RUNNING` 24.8 s median (20.0–25.9 s), decomposing as
+   scheduling + ENI attach 15.4 s, image pull 4.53 s, container start 3.1 s; RunTask → first
+   model event 47.8 s median raw and 26.3 s median with the 21.2 s whole-filesystem probe
+   scan subtracted; the agent's own first token lands ~1.5 s after the probes finish. The
+   pull is ~18% of the arrival rather than the ~57% an earlier revision claimed, so SOCI's
+   ceiling here is ~4.5 s. **With SOCI: not tested.** Numbers and per-run records:
+   [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md).
 2. Can `lop exec` run usefully with a read-only root filesystem and only the workspace
    writable? (Config root, uv cache and scratch locations need checking.)
+   **Answered for the filesystem layout, on 5 runs**: with `readonlyRootFilesystem: true`
+   and `/workspace` the only writable mount, the container wrote its config root, session
+   store, uv cache, scratch and results under `/workspace` (via `HOME`, `TMPDIR`,
+   `LOCAL_OPERATOR_CONFIG_DIR`, the `XDG_*` variables and `UV_CACHE_DIR` pointed there)
+   and probe 4d confirmed the root and `/usr` are read-only while `/workspace` is
+   writable. "Usefully" in the sense of a real model turn that edits the cloned repo is
+   **answered yes** by the real-key run `ct_92161251` (2026-10-08): 10 tool executions
+   (`bash`, `read`, `edit`) against the read-only root, and a commit on `lop/ct_92161251`
+   that `verify` takes from the bundle and passes the fixture's tests on. The mock
+   provider produces a turn and no edits.
 3. Slice 1 (direct path): the pod's relay with `network.listen_address = 0.0.0.0`
    behind a public IPv4. Does the duplicate-link dedupe (transport §6) behave when both
    sides dial? For the blind relay: what framing does the forwarder need so that the

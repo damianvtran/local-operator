@@ -1,0 +1,54 @@
+# CodeBuild buildspec for the Slice-0 POC image (project lop-poc-image-build).
+#
+# Runs on ARM_CONTAINER with aws/codebuild/amazonlinux-aarch64-standard:3.0, so
+# `docker build` produces the linux/arm64 image NATIVELY: no qemu, no cross-build
+# emulation to explain a difference between this image and the one a laptop
+# would build.
+#
+# The tag carries a short sha of the CONTEXT, computed here from the extracted
+# source bytes rather than handed in: the build is then reproducible from the
+# zip alone, and two builds of the same context cannot disagree about the tag.
+# Callers pin the pushed image BY DIGEST (printed below as PUSHED_DIGEST), never
+# by this tag — the tag is for humans reading CloudWatch.
+#
+# EVERY command that contains a colon-space, a brace or a quote is SINGLE-QUOTED.
+# That is not style: CodeBuild's YAML loader reads an unquoted `echo "a: b"` as a
+# MAPPING rather than a string and fails the phase with `Expected Commands[N] to
+# be of string type: found subkeys instead` — measured on the first build that
+# used this file (`: ` inside a plain scalar is a mapping indicator).
+version: 0.2
+
+env:
+  variables:
+    DOCKER_BUILDKIT: "1"
+    # ECR_REPO_URL is supplied by the project's own environment.
+    # LOP_VERSION is NOT set here: it is derived from requirements.in in pre_build,
+    # so the tag cannot drift from the version actually installed in the image
+    # (review SEC-8 — the hand-copied "0.68.3" could).
+
+phases:
+  install:
+    commands:
+      - docker version
+  pre_build:
+    commands:
+      - 'REGISTRY="${ECR_REPO_URL%%/*}"'
+      - 'aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REGISTRY"'
+      - 'CTX_SHA=$(find "$CODEBUILD_SRC_DIR" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)'
+      # The version comes from the ONLY pin that is installed: requirements.in. A tag
+      # a human reads in CloudWatch is worth deriving from the artifact, not copying.
+      - 'LOP_VERSION=$(sed -n "s/^local-operator==//p" "$CODEBUILD_SRC_DIR/requirements.in" | head -1)'
+      - 'if [ -z "$LOP_VERSION" ]; then echo "FATAL: requirements.in does not pin local-operator"; exit 1; fi'
+      - 'IMAGE_TAG="$LOP_VERSION-$CTX_SHA"'
+      - 'echo "context sha=$CTX_SHA tag=$IMAGE_TAG"'
+  build:
+    commands:
+      - 'docker build --platform linux/arm64 -t "$ECR_REPO_URL:$IMAGE_TAG" "$CODEBUILD_SRC_DIR"'
+  post_build:
+    commands:
+      # Smoke the image BEFORE pushing: a `lop` that cannot print its own version
+      # is not a build anyone should pull, and finding that out after the push
+      # means the task definition can pin a broken digest.
+      - 'docker run --rm --entrypoint lop "$ECR_REPO_URL:$IMAGE_TAG" --version'
+      - 'docker push "$ECR_REPO_URL:$IMAGE_TAG"'
+      - 'echo "PUSHED_DIGEST=$(docker inspect --format="{{index .RepoDigests 0}}" "$ECR_REPO_URL:$IMAGE_TAG")"'
