@@ -40,6 +40,7 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import TypeAdapter, ValidationError
+from typing_extensions import TypeForm
 
 from local_operator.harness.types import AgentMessage, FinalResponseCheck, Message
 
@@ -118,6 +119,17 @@ class MarkdownSchema:
     required_sections: tuple[str, ...] = ()
 
 
+#: Everything a contract accepts as its ``schema``: the raw JSON-Schema
+#: vocabulary (a mapping or a bool), the markdown half (:class:`MarkdownSchema`
+#: or its mapping spelling), ``None`` (enforce the format alone), and any type
+#: form ``pydantic.TypeAdapter`` accepts (a model class, a dataclass, a
+#: TypedDict, a generic alias). The ``TypeForm[Any]`` arm is the pydantic-2.14
+#: migration: ``TypeAdapter`` now types its argument ``TypeForm[T]`` (PEP 747),
+#: so the value cannot be spelled bare ``object`` — this union is exactly what
+#: the exclusion branch in ``_build_structured_validator`` narrows to.
+OutputSchemaValue = TypeForm[Any] | MarkdownSchema | Mapping[str, Any] | bool | None
+
+
 @dataclass(frozen=True, slots=True)
 class OutputContract:
     """One session's final-response contract: format, optional schema, retries.
@@ -130,15 +142,15 @@ class OutputContract:
     schema fails BEFORE the first prompt, and a check costs one decode plus
     one validation.
 
-    ``schema`` is deliberately ``object``-typed: for json/yaml/toml it is a
-    raw JSON Schema mapping, or anything ``pydantic.TypeAdapter`` accepts (a
-    model class, a dataclass, a TypedDict, a generic alias); for markdown it
-    is a :class:`MarkdownSchema` or its mapping spelling. ``None`` enforces
-    the format alone.
+    ``schema`` speaks the :data:`OutputSchemaValue` vocabulary: for
+    json/yaml/toml a raw JSON Schema mapping (or boolean), or anything
+    ``pydantic.TypeAdapter`` accepts (a model class, a dataclass, a TypedDict,
+    a generic alias); for markdown a :class:`MarkdownSchema` or its mapping
+    spelling. ``None`` enforces the format alone.
     """
 
     format: OutputFormat
-    schema: object | None = None
+    schema: OutputSchemaValue = None
     retries: int = 2
     # Caches, built once in ``__post_init__``. Declared as fields because a
     # frozen slotted dataclass has no other place to put instance state; they
