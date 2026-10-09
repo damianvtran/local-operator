@@ -21588,6 +21588,11 @@
             "type": "string",
             "title": "Hotkey Scope",
             "default": ""
+          },
+          "unit": {
+            "type": "string",
+            "title": "Unit",
+            "default": ""
           }
         },
         "type": "object",

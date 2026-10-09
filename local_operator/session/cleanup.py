@@ -105,6 +105,29 @@ DEFAULT_MAX_INACTIVE_DAYS = 0
 DEFAULT_MAX_TOTAL_BYTES = 0
 DEFAULT_REMOVE_EMPTY = False
 
+#: The DELEGATED class (hidden-origin sessions: subagents, agent-shell runs,
+#: agent-config runs and any future non-user origin — the one predicate is
+#: ``resume.is_user_session_origin``) has its OWN switch and its OWN clock,
+#: nested one level deeper so it can never be confused with the parent-class
+#: keys above. Unlike ``enabled`` it defaults to TRUE: a delegated transcript is
+#: machine bookkeeping nobody opens (measured on the operator's store, 2026-10-09:
+#: 90% of 71 GB), and the safety rules in ``session/delegated_retention.py`` —
+#: not a default-off switch — are what keep a run that matters.
+DELEGATED_PATH: tuple[str, ...] = CLEANUP_PATH + ("delegated",)
+DEFAULT_DELEGATED_ENABLED = True
+#: Hours since the session's last activity (``retention.session_activity``)
+#: before a delegated session is reapable. 48 h outlives a weekend-length pause
+#: of a parent that is still going to ask its children for a result.
+DEFAULT_DELEGATED_MAX_AGE_HOURS = 48
+#: The accepted range, enforced at WRITE time by ``settings_io`` and re-enforced
+#: by the reader below for a hand-edited file. The floor is the safety property:
+#: nothing can configure this to reap a session that moved less than two hours
+#: ago (a slow turn, a lunch break, a wake that is about to be re-armed). The
+#: ceiling is one month — beyond it the knob would just be "off", which has its
+#: own switch.
+MIN_DELEGATED_MAX_AGE_HOURS = 2
+MAX_DELEGATED_MAX_AGE_HOURS = 720
+
 #: Marker file that a ``sessions/`` directory must carry before
 #: :func:`remove_session_dir` will remove anything inside it. Written by
 #: :func:`mark_store` when the harness creates or migrates its own store.
@@ -153,6 +176,12 @@ class CleanupPolicy:
     max_inactive_days: int = DEFAULT_MAX_INACTIVE_DAYS
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES
     remove_empty: bool = DEFAULT_REMOVE_EMPTY
+    #: The DELEGATED class (see :data:`DELEGATED_PATH`). Deliberately NOT part of
+    #: :attr:`has_any_limit`: the five knobs above govern the PARENT class
+    #: (everything the sidebar lists) and nothing else, so "no parent limits" and
+    #: "delegated cleanup is on" are independent facts.
+    delegated_enabled: bool = DEFAULT_DELEGATED_ENABLED
+    delegated_max_age_hours: int = DEFAULT_DELEGATED_MAX_AGE_HOURS
 
     @property
     def has_any_limit(self) -> bool:
@@ -232,6 +261,57 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return strict_bool(value, default)
 
 
+#: Raw values already complained about, so a hand-edited ``max_age_hours`` is
+#: logged once per process rather than once per hourly sweep.
+_WARNED_HOURS: set[Any] = set()
+
+
+def clamp_delegated_hours(value: Any) -> int:
+    """The age window a (possibly hand-edited) config value means, always in range.
+
+    Total: never raises, never returns less than
+    :data:`MIN_DELEGATED_MAX_AGE_HOURS`. A bool, a non-integral number, text
+    that is not a whole number, ``None`` or a non-positive number is not a
+    duration at all and reads as the DEFAULT (0 in particular must not become
+    "reap after two hours" for someone who typed it meaning "never"); an integer
+    outside the range is CLAMPED to the nearest bound and logged once.
+    """
+    default = DEFAULT_DELEGATED_MAX_AGE_HOURS
+    number: int | None = None
+    if isinstance(value, bool):
+        number = None
+    elif isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        number = int(value) if value.is_integer() else None
+    elif isinstance(value, str):
+        try:
+            number = int(value.strip())
+        except ValueError:
+            number = None
+    if number is None or number <= 0:
+        if value is not None and repr(value) not in _WARNED_HOURS:
+            _WARNED_HOURS.add(repr(value))
+            logger.warning(
+                "session cleanup: session.cleanup.delegated.max_age_hours=%r is not a "
+                "duration; using the default of %d hours",
+                value,
+                default,
+            )
+        return default
+    bounded = max(MIN_DELEGATED_MAX_AGE_HOURS, min(MAX_DELEGATED_MAX_AGE_HOURS, number))
+    if bounded != number and repr(value) not in _WARNED_HOURS:
+        _WARNED_HOURS.add(repr(value))
+        logger.warning(
+            "session cleanup: delegated.max_age_hours=%d is outside %d..%d; using %d",
+            number,
+            MIN_DELEGATED_MAX_AGE_HOURS,
+            MAX_DELEGATED_MAX_AGE_HOURS,
+            bounded,
+        )
+    return bounded
+
+
 def policy_from_config(config_manager: Any) -> CleanupPolicy:
     """Read the policy through :meth:`ConfigManager.get_nested_value` on
     :data:`CLEANUP_PATH` — the exact path ``settings_io`` writes.
@@ -243,7 +323,10 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
     """
     getter: Callable[..., Any] | None = getattr(config_manager, "get_nested_value", None)
     if getter is None:
-        return CleanupPolicy()
+        # A manager that cannot be read is not a reason to run ANYTHING — and
+        # the delegated switch defaults to ON, so the bare default would be a
+        # reaper armed by a stub.
+        return CleanupPolicy(delegated_enabled=False)
 
     def leaf(name: str, default: Any) -> Any:
         try:
@@ -252,6 +335,10 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
             return default
 
     return CleanupPolicy(
+        delegated_enabled=_delegated_enabled(getter),
+        delegated_max_age_hours=clamp_delegated_hours(
+            _delegated_leaf(getter, "max_age_hours", DEFAULT_DELEGATED_MAX_AGE_HOURS)
+        ),
         enabled=_coerce_bool(leaf("enabled", DEFAULT_ENABLED), DEFAULT_ENABLED),
         max_sessions=_coerce_int(leaf("max_sessions", DEFAULT_MAX_SESSIONS), DEFAULT_MAX_SESSIONS),
         max_inactive_days=_coerce_int(
@@ -262,6 +349,40 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
         ),
         remove_empty=_coerce_bool(leaf("remove_empty", DEFAULT_REMOVE_EMPTY), DEFAULT_REMOVE_EMPTY),
     )
+
+
+def _delegated_leaf(getter: Callable[..., Any], name: str, default: Any) -> Any:
+    try:
+        return getter(DELEGATED_PATH + (name,), default)
+    except Exception:  # noqa: BLE001 — a broken config yields the default; see callers
+        return default
+
+
+_ABSENT = object()
+
+
+def _delegated_enabled(getter: Callable[..., Any]) -> bool:
+    """The delegated switch, FAIL-CLOSED where the default is ON.
+
+    Absent reads as the default (on). A value that is present but is not a
+    switch (``"banana"``) or a read that raises reads as OFF: the parent switch
+    can afford to read garbage as its default because its default is off, this
+    one cannot — the cost of a kept delegated session is bytes, the cost of a
+    reaped one is the incident.
+    """
+    try:
+        raw = getter(DELEGATED_PATH + ("enabled",), _ABSENT)
+    except Exception:  # noqa: BLE001
+        return False
+    if raw is _ABSENT:
+        return DEFAULT_DELEGATED_ENABLED
+    from local_operator.settings_io import strict_bool
+
+    # Parse twice with opposite fallbacks: the two agree only when the value
+    # really IS a switch, and disagree exactly when it is garbage — which here
+    # means OFF, not "the default".
+    as_on = strict_bool(raw, True)
+    return as_on if as_on == strict_bool(raw, False) else False
 
 
 # ---------------------------------------------------------------------------
