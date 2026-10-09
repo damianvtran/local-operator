@@ -1,0 +1,854 @@
+{
+  "queued-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 219,
+      "left": 12,
+      "right": 378,
+      "width": 366,
+      "height": 69
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 372,
+      "width": 354,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "queued"
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "queued-pos-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 219,
+      "left": 12,
+      "right": 378,
+      "width": 366,
+      "height": 69
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 372,
+      "width": 354,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "queued \u00b7 position 2"
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "running-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 414,
+      "left": 12,
+      "right": 378,
+      "width": 366,
+      "height": 264
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 372,
+      "width": 354,
+      "height": 44
+    },
+    "tile": {
+      "top": 196,
+      "bottom": 356,
+      "left": 42,
+      "right": 202,
+      "width": 160,
+      "height": 160
+    },
+    "bar": {
+      "box": {
+        "top": 385,
+        "bottom": 387,
+        "left": 42,
+        "right": 292,
+        "width": 250,
+        "height": 2
+      },
+      "valueNow": null,
+      "label": "generating image"
+    },
+    "cancel": {
+      "top": 364,
+      "bottom": 408,
+      "left": 300,
+      "right": 366,
+      "width": 66,
+      "height": 44
+    },
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 655,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 602
+    },
+    "bodyScrollW": 390,
+    "innerW": 390,
+    "frames_differ": true
+  },
+  "cancelling-390x844": {
+    "click": {
+      "clicked": true
+    },
+    "card": {
+      "top": 150,
+      "bottom": 387,
+      "left": 12,
+      "right": 378,
+      "width": 366,
+      "height": 237
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 372,
+      "width": 354,
+      "height": 44
+    },
+    "tile": {
+      "top": 196,
+      "bottom": 356,
+      "left": 42,
+      "right": 202,
+      "width": 160,
+      "height": 160
+    },
+    "bar": {
+      "box": {
+        "top": 372,
+        "bottom": 374,
+        "left": 42,
+        "right": 291,
+        "width": 249,
+        "height": 2
+      },
+      "valueNow": null,
+      "label": "generating image"
+    },
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 655,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 602
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "running-detail-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 478,
+      "left": 12,
+      "right": 378,
+      "width": 366,
+      "height": 328
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 372,
+      "width": 354,
+      "height": 44
+    },
+    "tile": {
+      "top": 196,
+      "bottom": 356,
+      "left": 42,
+      "right": 202,
+      "width": 160,
+      "height": 160
+    },
+    "bar": {
+      "box": {
+        "top": 385,
+        "bottom": 387,
+        "left": 42,
+        "right": 292,
+        "width": 250,
+        "height": 2
+      },
+      "valueNow": "42",
+      "label": "generating image"
+    },
+    "cancel": {
+      "top": 364,
+      "bottom": 408,
+      "left": 300,
+      "right": 366,
+      "width": 66,
+      "height": 44
+    },
+    "restart": null,
+    "stateLines": [
+      "diffusion step 18/30",
+      "sampling 24/30 (cfg 7.5)",
+      "decoding latents"
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 655,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 602
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "done-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 385,
+      "left": 12,
+      "right": 378,
+      "width": 366,
+      "height": 235
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 372,
+      "width": 354,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "image ready"
+    ],
+    "imageCount": 1,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "failed-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 222,
+      "left": 12,
+      "right": 378,
+      "width": 366,
+      "height": 72
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 372,
+      "width": 354,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "This generation failed before producing output."
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "finished-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 219,
+      "left": 12,
+      "right": 378,
+      "width": 366,
+      "height": 69
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 372,
+      "width": 354,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "already finished"
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "cancelled-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 219,
+      "left": 12,
+      "right": 378,
+      "width": 366,
+      "height": 69
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 372,
+      "width": 354,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "cancelled"
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "queued-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 219,
+      "left": 12,
+      "right": 348,
+      "width": 336,
+      "height": 69
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 342,
+      "width": 324,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "queued"
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "queued-pos-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 219,
+      "left": 12,
+      "right": 348,
+      "width": 336,
+      "height": 69
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 342,
+      "width": 324,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "queued \u00b7 position 2"
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "running-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 414,
+      "left": 12,
+      "right": 348,
+      "width": 336,
+      "height": 264
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 342,
+      "width": 324,
+      "height": 44
+    },
+    "tile": {
+      "top": 196,
+      "bottom": 356,
+      "left": 42,
+      "right": 202,
+      "width": 160,
+      "height": 160
+    },
+    "bar": {
+      "box": {
+        "top": 385,
+        "bottom": 387,
+        "left": 42,
+        "right": 262,
+        "width": 220,
+        "height": 2
+      },
+      "valueNow": null,
+      "label": "generating image"
+    },
+    "cancel": {
+      "top": 364,
+      "bottom": 408,
+      "left": 270,
+      "right": 336,
+      "width": 66,
+      "height": 44
+    },
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 591,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 538
+    },
+    "bodyScrollW": 360,
+    "innerW": 360,
+    "frames_differ": true
+  },
+  "cancelling-360x780": {
+    "click": {
+      "clicked": true
+    },
+    "card": {
+      "top": 150,
+      "bottom": 387,
+      "left": 12,
+      "right": 348,
+      "width": 336,
+      "height": 237
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 342,
+      "width": 324,
+      "height": 44
+    },
+    "tile": {
+      "top": 196,
+      "bottom": 356,
+      "left": 42,
+      "right": 202,
+      "width": 160,
+      "height": 160
+    },
+    "bar": {
+      "box": {
+        "top": 372,
+        "bottom": 374,
+        "left": 42,
+        "right": 261,
+        "width": 219,
+        "height": 2
+      },
+      "valueNow": null,
+      "label": "generating image"
+    },
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 591,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 538
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "running-detail-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 478,
+      "left": 12,
+      "right": 348,
+      "width": 336,
+      "height": 328
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 342,
+      "width": 324,
+      "height": 44
+    },
+    "tile": {
+      "top": 196,
+      "bottom": 356,
+      "left": 42,
+      "right": 202,
+      "width": 160,
+      "height": 160
+    },
+    "bar": {
+      "box": {
+        "top": 385,
+        "bottom": 387,
+        "left": 42,
+        "right": 262,
+        "width": 220,
+        "height": 2
+      },
+      "valueNow": "42",
+      "label": "generating image"
+    },
+    "cancel": {
+      "top": 364,
+      "bottom": 408,
+      "left": 270,
+      "right": 336,
+      "width": 66,
+      "height": 44
+    },
+    "restart": null,
+    "stateLines": [
+      "diffusion step 18/30",
+      "sampling 24/30 (cfg 7.5)",
+      "decoding latents"
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 591,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 538
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "done-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 385,
+      "left": 12,
+      "right": 348,
+      "width": 336,
+      "height": 235
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 342,
+      "width": 324,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "image ready"
+    ],
+    "imageCount": 1,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "failed-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 222,
+      "left": 12,
+      "right": 348,
+      "width": 336,
+      "height": 72
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 342,
+      "width": 324,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "This generation failed before producing output."
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "finished-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 219,
+      "left": 12,
+      "right": 348,
+      "width": 336,
+      "height": 69
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 342,
+      "width": 324,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "already finished"
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "cancelled-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": {
+      "top": 150,
+      "bottom": 219,
+      "left": 12,
+      "right": 348,
+      "width": 336,
+      "height": 69
+    },
+    "row": {
+      "top": 150,
+      "bottom": 194,
+      "left": 18,
+      "right": 342,
+      "width": 324,
+      "height": 44
+    },
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [
+      "cancelled"
+    ],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  }
+}

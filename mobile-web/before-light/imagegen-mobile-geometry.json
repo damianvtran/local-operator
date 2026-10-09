@@ -1,0 +1,434 @@
+{
+  "queued-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "queued-pos-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "running-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 655,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 602
+    },
+    "bodyScrollW": 390,
+    "innerW": 390,
+    "frames_differ": true
+  },
+  "cancelling-390x844": {
+    "click": {
+      "clicked": false
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 655,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 602
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "running-detail-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 655,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 602
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "done-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "failed-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "finished-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "cancelled-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "queued-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "queued-pos-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "running-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 591,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 538
+    },
+    "bodyScrollW": 360,
+    "innerW": 360,
+    "frames_differ": true
+  },
+  "cancelling-360x780": {
+    "click": {
+      "clicked": false
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 591,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 538
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "running-detail-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 591,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 538
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "done-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "failed-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "finished-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "cancelled-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "card": null,
+    "row": null,
+    "tile": null,
+    "bar": null,
+    "cancel": null,
+    "restart": null,
+    "stateLines": [],
+    "imageCount": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "bodyScrollW": 360,
+    "innerW": 360
+  }
+}
