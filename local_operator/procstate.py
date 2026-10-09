@@ -498,10 +498,11 @@ BIRTH_SCHEME_PROC_STARTTIME = "proc-starttime-v1"
 #: The `ps` keywords that answer BOTH per-process questions in ONE invocation.
 #:
 #: One probe rather than two because every caller of the identity question is
-#: also asking the zombie question, and the zombie probe's cost is what the
-#: engage loop's cadence is set by (2.4-4.6 ms per fork against the 23-30 µs
-#: budget of one dense poll iteration). `lstart` rides the invocation that was
-#: already being spent instead of adding a second one beside it.
+#: also asking the zombie question, and a `ps` spawn is expensive (quoted at
+#: 2.4-4.6 ms, measured at 255-300 ms under fleet load on 2026-10-09). `lstart`
+#: rides the invocation that was already being spent instead of adding a second
+#: one beside it. On macOS `ps` is now only the FALLBACK: `_sysctl_samples`
+#: reads the same two fields without spawning anything.
 #:
 #: It is also a CORRECTNESS property, not only a cost one: a second fork for the
 #: identity would sample a DIFFERENT instant, so the pid could be recycled
@@ -663,6 +664,116 @@ def _proc_samples(pids: Sequence[int]) -> dict[int, ProcessSample]:
     return samples
 
 
+#: ``sizeof(struct kinfo_proc)`` and the offsets read from it, from xnu's
+#: ``sys/sysctl.h`` / ``sys/proc.h`` (``struct extern_proc`` leads the struct):
+#: ``p_starttime.tv_sec`` (int64 at 0), ``p_stat`` (char at 36), ``p_pid``
+#: (int32 at 40). Identical on arm64 and x86_64. ``_sysctl_samples`` verifies
+#: the size the kernel returns AND that the pid it reads back is the pid it asked
+#: about, so a layout change in some future macOS makes it decline (and ``ps``
+#: answer) rather than read garbage.
+_KINFO_PROC_SIZE = 648
+_KINFO_STARTTIME_OFFSET = 0
+_KINFO_STAT_OFFSET = 36
+_KINFO_PID_OFFSET = 40
+#: ``SZOMB`` in ``sys/proc.h``: "awaiting collection by parent".
+_SZOMB = 5
+_CTL_KERN, _KERN_PROC, _KERN_PROC_PID = 1, 14, 1
+_LSTART_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_LSTART_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)  # fmt: skip
+
+
+def _lstart_token(start_seconds: int) -> str:
+    """``start_seconds`` rendered exactly as :func:`_ps_samples` stores ``lstart``.
+
+    ``ps`` prints ``lstart`` with ``%a %b %e %H:%M:%S %Y`` in the C locale and,
+    under ``_PS_PINNED_ENV``, in UTC; ``_ps_samples`` then collapses its runs of
+    spaces (``%e`` pads the day). This builds the collapsed form directly, with
+    the C locale's names spelled out rather than taken from ``time.strftime`` —
+    whose names follow the PROCESS locale, which is exactly the drift
+    ``_PS_PINNED_ENV`` exists to rule out.
+    """
+    import time
+
+    t = time.gmtime(start_seconds)
+    return (
+        f"{_LSTART_DAYS[t.tm_wday]} {_LSTART_MONTHS[t.tm_mon - 1]} {t.tm_mday} "
+        f"{t.tm_hour:02d}:{t.tm_min:02d}:{t.tm_sec:02d} {t.tm_year}"
+    )
+
+
+def _sysctl_samples(pids: Sequence[int]) -> dict[int, ProcessSample] | None:
+    """The macOS answer WITHOUT spawning ``ps``: ``sysctl(KERN_PROC_PID)``.
+
+    WHY (conversation-first-paint, 2026-10-09). The ``ps`` probe's cost is not
+    ``ps``: it is spawning ANY binary. On this host under fleet load
+    ``subprocess.run(["/usr/bin/true"])`` measured 255-265 ms, the same as
+    ``/bin/ps``, while a bare ``os.fork()`` + exit measured 2.3 ms — so the
+    "2.4-4.6 ms per fork" this module used to quote had become ~100x worse, and
+    every user-facing open that asks :func:`resume.live_runtime_pid` about a
+    LIVE owner paid it: the TUI's sidebar open of a running conversation spent
+    270-500 ms of a 340-620 ms switch inside this one call. ``sysctl`` is the
+    syscall ``ps`` itself reads (``kinfo_proc``); asked directly it costs
+    ~12 µs per pid and creates no process.
+
+    THE TOKEN IS THE SAME TOKEN, and that is a correctness requirement, not a
+    convenience: claims already on disk carry ``ps-lstart-c-v1`` tokens written
+    by ``ps``, and a token that differed for a LIVE writer would read as "the
+    writer is gone" — the one dangerous direction (see ``_PS_PINNED_ENV``). The
+    start time is the same ``p_starttime`` field ``ps`` renders, rendered by
+    :func:`_lstart_token` to the same text. Verified on the 895 live pids of
+    this host (2026-10-09): every (zombie, token) pair equal to
+    ``ps -A -o pid=,state=,lstart=`` under ``_PS_PINNED_ENV``, an unreaped child
+    included; pinned by ``tests/unit/test_procstate.py``.
+
+    Contract, matching :func:`_ps_samples`: a pid the kernel has no entry for
+    is ABSENT from the result. ``None`` means "this probe could not answer at
+    all" (``ctypes`` unavailable, a ``sysctl`` error, or a ``kinfo_proc`` whose
+    size or echoed pid does not match the layout above) and sends the caller to
+    the ``ps`` probe, so doubt degrades to the old cost, never to a guess.
+    """
+    try:
+        import ctypes
+        import struct
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        sysctl = libc.sysctl
+    except Exception:  # noqa: BLE001 — no ctypes/libc: let `ps` answer
+        return None
+    sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_uint,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    ]
+    sysctl.restype = ctypes.c_int
+    samples: dict[int, ProcessSample] = {}
+    buffer = ctypes.create_string_buffer(_KINFO_PROC_SIZE)
+    for pid in pids:
+        mib = (ctypes.c_int * 4)(_CTL_KERN, _KERN_PROC, _KERN_PROC_PID, pid)
+        size = ctypes.c_size_t(_KINFO_PROC_SIZE)
+        if sysctl(mib, 4, buffer, ctypes.byref(size), None, 0) != 0:
+            return None
+        if size.value == 0:
+            # No such process: absent, exactly as `ps` omits a pid it cannot find.
+            continue
+        raw = buffer.raw
+        if size.value != _KINFO_PROC_SIZE:
+            return None
+        (echoed,) = struct.unpack_from("=i", raw, _KINFO_PID_OFFSET)
+        if echoed != pid:
+            return None
+        (start_seconds,) = struct.unpack_from("=q", raw, _KINFO_STARTTIME_OFFSET)
+        samples[pid] = ProcessSample(
+            zombie=raw[_KINFO_STAT_OFFSET] == _SZOMB,
+            birth=_lstart_token(start_seconds),
+        )
+    return samples
+
+
 def process_samples(pids: Iterable[int]) -> dict[int, ProcessSample]:
     """Both facts for a pid set, from the platform's ONE probe.
 
@@ -675,6 +786,10 @@ def process_samples(pids: Iterable[int]) -> dict[int, ProcessSample]:
         return {}
     if os.path.isdir("/proc"):
         return _proc_samples(wanted)
+    if _PLATFORM == "darwin":
+        sampled = _sysctl_samples(wanted)
+        if sampled is not None:
+            return sampled
     return _ps_samples(wanted)
 
 
@@ -851,10 +966,15 @@ def is_zombie(pid: int) -> bool:
     the unrecovered claim this exists to remove.
 
     Deliberately NOT ``psutil``: this module is stdlib-only by contract and
-    ``/proc`` does not exist on macOS, so on POSIX the fallback is a ``ps``
-    fork — measured at 2.4-4.6 ms across runs on an M-series box, tracking
-    host load, against ~1 µs for signal-0. Callers therefore spend it only where the answer changes
-    what they do. Concretely, these are the places that may pay it:
+    ``/proc`` does not exist on macOS. There the probe is ``sysctl
+    (KERN_PROC_PID)`` through ``ctypes`` (:func:`_sysctl_samples`), measured at
+    ~12 µs per pid (~90 µs for a one-pid call) on 2026-10-09; the ``ps`` spawn it
+    replaced was quoted here as 2.4-4.6 ms and measured 255-300 ms under this
+    host's fleet load the same day, because what costs is spawning a binary,
+    not ``ps`` (``/usr/bin/true`` measured the same). ``ps`` remains the
+    fallback when ``sysctl`` cannot answer. Signal 0 is still ~1 µs, so callers
+    still spend the probe only where the answer changes what they do. Concretely,
+    these are the places that may pay it:
 
     - ``session_lease._pid_state`` — every acquisition and reaper decision, and
       the legacy ``.session.pid``-only branch, all of which require a holder to
