@@ -14045,11 +14045,6 @@ class Session:
             # the inherit line named the fallback for a child that would run
             # the selected spec (review round 2, MINOR 1).
             session_model_label=self.model_label,
-            # Stamped on a child by ``_build_child_session`` AFTER construction,
-            # which is why that function rebuilds the effort-tier tools once
-            # the stamp lands. Read per turn here so the tool-argument gate
-            # sees the live value even on a tool object built before it.
-            delegation_depth=self._delegation_depth,
             agent_id=self._agent_id,
             # The delegated name, on a subagent only. Empty on every top-level
             # session, which is what keeps ``_browser_subagent_label``'s
