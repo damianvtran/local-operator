@@ -130,7 +130,9 @@ def make_session(tmp_path, stream, **kwargs) -> Session:
     # effort-carrying tools are offered for the same reason: a rebuild can only
     # replace a tool that is already in the inventory, so the
     # ``subagents.model_choice`` probe (which reads the task tool's BUILT
-    # description) needs one there to read.
+    # description) needs one there to read. The two deferrable tools are offered
+    # for the third reason a probe needs a fixture: ``tools.defer`` can only be
+    # observed if the session actually holds something its schema filter withholds.
     from local_operator.agents import AgentRegistry
     from local_operator.harness.types import ToolContext
     from local_operator.tools.registry import create_tools
@@ -145,7 +147,17 @@ def make_session(tmp_path, stream, **kwargs) -> Session:
                 subagent_launcher=lambda label, prompt, **_: f"job:{label}",
                 agent_registry=AgentRegistry(tmp_path / "agents"),
             ),
-            enabled=("web_search", "web_fetch", "task", "agent"),
+            enabled=(
+                "web_search",
+                "web_fetch",
+                "task",
+                "agent",
+                # Deferrable, and offered so ``tools.defer``'s probe has
+                # something to withhold. Ungated builders, so no fixture work
+                # beyond naming them.
+                "list_variables",
+                "read_variable",
+            ),
         ),
     )
     # ``model`` is overridable so a probe can seat a spec that SEEDS an effort
@@ -330,6 +342,25 @@ def compaction_of(session: Session) -> CompactionSettings:
     settings = session._compaction_settings
     assert isinstance(settings, CompactionSettings)
     return settings
+
+
+def _deferral_reaches_the_wire(session: Session) -> bool:
+    """Whether the next provider call would WITHHOLD a schema.
+
+    The two steps the turn boundary performs — clear the per-turn latch, then
+    take the array ``_wire_tools`` hands the provider — rather than reading
+    ``_tool_deferral``, because the claim is about the REQUEST: the switch can be
+    flipped correctly on the session while the publish filter ignores it, and
+    reading the field would pass on exactly that bug.
+
+    The withheld set must also EQUAL the session's own deferrable set, so a
+    filter that dropped some other tool cannot satisfy this by accident.
+    """
+    session._published_tools = None
+    withheld = {tool.name for tool in session._tools} - {
+        tool.name for tool in session._wire_tools()
+    }
+    return bool(withheld) and withheld == set(session.deferred_tool_names())
 
 
 def _web_tool_offered(session: Session, name: str) -> bool:
@@ -644,6 +675,11 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # Observed through the SAME reconcile the turn start runs, on a session
     # whose inventory starts with both tools, so a disable is seen as the tool
     # leaving. The per-call gate inside the tools is covered separately.
+    # The deferral kill switch. LIVE because ``Session._apply_config_change``
+    # re-reads it into the publish filter and the next turn publishes the array
+    # in force then — a session mid-turn keeps the array it already sent (the
+    # turn latch), which is what makes the array position 0 cache-stable.
+    "tools.defer": (False, lambda s, w: _deferral_reaches_the_wire(s)),
     "web_search.enabled": (False, lambda s, w: _web_tool_offered(s, "web_search")),
     "web_fetch.enabled": (False, lambda s, w: _web_tool_offered(s, "web_fetch")),
     # -- proactive class: the arm path re-reads every bound --------------------

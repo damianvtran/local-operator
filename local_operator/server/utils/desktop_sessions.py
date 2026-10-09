@@ -29,6 +29,15 @@ from anyio import CancelScope
 from fastapi import HTTPException
 
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
+
+# The row-visibility predicate lives in ``harness/rows.py`` beside the three row
+# predicates it composes, because a SECOND caller arrived with the peer-stored
+# history read: the owner's relay serves those rows over ``net_session_history``
+# and must drop the same three classes, and the network layer must not import this
+# HTTP-layer module to do it. Imported here and re-exported under its old name so
+# every existing caller and test stays put; there is ONE definition, in the
+# host-free module (see its docstring).
+from local_operator.harness.rows import visible_transcript_rows  # noqa: F401
 from local_operator.harness.types import ModelSpec
 from local_operator.resume import (
     ORIGIN_AGENT_CONFIG,
@@ -95,6 +104,7 @@ from local_operator.session.frontend_state import (
     job_trajectory_wire_value,
     sync_wire_payload,
 )
+from local_operator.session.last_user import last_user_at
 from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.session.page_cache import load_transcript_page
 
@@ -1186,40 +1196,6 @@ class DesktopSubscription:
     #: deadline is INSPECTABLE: a test asserts it and moves it past, instead of
     #: waiting ``RECONNECT_DWELL_S`` out.
     dwell_until: float = 0.0
-
-
-def visible_transcript_rows(rows: list[Any]) -> list[Any]:
-    """Drop the rows a human transcript must never serve.
-
-    THREE classes, one predicate each, shared with the TUI's folds: a hidden
-    wake delivery (a patience fire — §8.2.2 item 4), a hidden tool row (the
-    ``patience`` arm's ledger pair — UX round 1, U2), and a diverted ask's
-    result (the ask gate's marker — design docs/design/ask-gate.md §3 row 5).
-    Filtering SERVER-side is the point: the client reducer has no filter of
-    its own, so an older build would paint exactly what a current one hides
-    (agent review round 1, R1 / QA round 1, Q1). Rows arrive here in their
-    serialized shape (``{type, payload}``), which is what the predicates
-    duck-type.
-    """
-    from collections.abc import Mapping as _Mapping
-
-    from local_operator.harness.rows import (
-        is_ask_gate_divert_row,
-        is_hidden_tool_row,
-        is_hidden_wake_delivery,
-    )
-
-    out: list[Any] = []
-    for row in rows:
-        payload = row.get("payload") if isinstance(row, _Mapping) else None
-        if isinstance(payload, _Mapping) and is_hidden_wake_delivery(payload):
-            continue
-        if is_hidden_tool_row(row):
-            continue
-        if is_ask_gate_divert_row(row):
-            continue
-        out.append(row)
-    return out
 
 
 class DesktopSessionBridge:
@@ -3138,7 +3114,7 @@ class DesktopSessionBridge:
         self.attention_refresh = task
         return task
 
-    async def snapshot(self) -> dict[str, Any]:
+    async def snapshot(self, *, entry_times: bool = False) -> dict[str, Any]:
         # Decorative, so a busy or damaged receipt sidecar cannot stop a
         # conversation from OPENING. Before this field existed the snapshot
         # never touched `attention.db`; letting it raise here turned routine
@@ -3234,7 +3210,7 @@ class DesktopSessionBridge:
             # and reads stay bounded by their OWN source's cut: see
             # ``read_transcript_page`` for the inclusive-boundary rule it still
             # applies when a caller asks for one.
-            history = await self.history()
+            history = await self.history(entry_times=entry_times)
         # THE WATERMARK IS READ WITH THE STATE IT DESCRIBES, AND NOTHING AWAITS
         # BETWEEN THEM. Both reads used to sit ABOVE the ``history()`` await, so
         # this frame's ``seq`` was a watermark older than the last suspension in
@@ -3272,6 +3248,7 @@ class DesktopSessionBridge:
         before: int | None = None,
         after: int | None = None,
         limit: int = 100,
+        entry_times: bool = False,
     ) -> dict[str, Any]:
         """One page of the durable journal.
 
@@ -3318,6 +3295,13 @@ class DesktopSessionBridge:
         ``load_transcript_page``; that duplicate is deliberate, because the
         façade is a door other callers reach directly and its own contract must
         not depend on this method having run first.
+
+        ``entry_times`` IS THE RENDERER'S DECLARATION that it can consume the
+        per-row ``ts_source`` vocabulary (``docs/DESKTOP_API.md``), threaded from
+        the ``entry_ts`` request flag. It changes the WIRE reader's answer only:
+        a LOCAL page is journal rows, whose ``ts`` is the entry time by
+        construction, so it always reads ``entry``. False — an older renderer —
+        leaves the wire reader exactly as it was, serve-stamp included.
         """
         validate_page_request(before_id, through_id, around_id, before, after, limit)
         if self.remote_row is not None:
@@ -3340,7 +3324,10 @@ class DesktopSessionBridge:
                     "has_newer": None,
                 }
             return await self._remote_history(
-                before_id=before_id, through_id=through_id, limit=limit
+                before_id=before_id,
+                through_id=through_id,
+                limit=limit,
+                entry_times=entry_times,
             )
         try:
             page = await load_transcript_page(
@@ -3359,63 +3346,131 @@ class DesktopSessionBridge:
                 "cursor_missing": bool(before_id or through_id or around_id),
             }
         return {
-            "entries": visible_transcript_rows([json.loads(row.to_json()) for row in page.entries]),
+            # EVERY ROW HERE IS A JOURNAL ENTRY, so its ``ts`` is the entry time by
+            # construction — the ``entry`` value of the closed vocabulary, and the
+            # reason a LOCAL page needs no negotiation to be honest. Stamped here
+            # rather than left to a model default so the wire says so on every row
+            # a consumer might branch on.
+            "entries": visible_transcript_rows(
+                [{**json.loads(row.to_json()), "ts_source": "entry"} for row in page.entries]
+            ),
             "has_more": page.has_more,
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,
         }
 
     async def _remote_history(
-        self, *, before_id: str | None, through_id: str | None, limit: int
+        self,
+        *,
+        before_id: str | None,
+        through_id: str | None,
+        limit: int,
+        entry_times: bool = False,
     ) -> dict[str, Any]:
-        """One page of a PEER's transcript, read off the WIRE.
+        """One page of a PEER's transcript: the wire when it can answer, the
+        owner's stored journal when it cannot.
 
-        WHY NOT ``load_transcript_page``. That reader opens
+        WHY NOT ``load_transcript_page`` ON THIS DEVICE. That reader opens
         ``<root>/sessions/<id>/transcript.jsonl`` -- which, for a conversation on
         another device, is either ABSENT or a DIFFERENT conversation wearing the
         same id, and painting either one is the single local read
-        ``mesh-session-mobility.md`` §3.4 forbids by name ("history comes from the
-        wire, and only the wire"). The peer's own rows are already reachable: the
-        attach's canonical sync carries the newest display window and the owner
-        serves older pages on request, so this projects THAT --
-        ``AttachedSession.history()``, the same list the TUI paints a remote
-        conversation from -- through the entry shape the desktop contract already
-        publishes.
+        ``mesh-session-mobility.md`` §3.4 forbids by name. That prohibition is
+        about the VIEWER's disk and nothing else, which is why the fallback below
+        is not an exception to it: the page it serves is produced by the OWNER's
+        own relay out of the OWNER's own journal -- the wire's own source, reached
+        over the wire -- so no device ever reads a transcript it does not hold.
+        The peer's rows are otherwise already reachable: the attach's canonical
+        sync carries the newest display window and the owner serves older pages on
+        request, so this projects THAT -- ``AttachedSession.history()``, the same
+        list the TUI paints a remote conversation from -- through the entry shape
+        the desktop contract already publishes.
 
-        THE COLD CASE IS AN EMPTY PAGE, NOT A REFUSAL, and that is the renderer's
-        contract rather than leniency: an empty page is its signal to reconcile
-        through ``/history`` (which is this method), and the snapshot beside it
-        carries the ``cold``/``cold_reason``/``attaching`` triple that says WHY
-        there is nothing to paint yet. The attempt below is the SAME bounded read
-        envelope the snapshot pays (``READ_ATTACH_BUDGET_S``), and it never
+        A COLD READ IS NEVER A REFUSAL, and that is the renderer's contract rather
+        than leniency: the snapshot beside this page carries the
+        ``cold``/``cold_reason``/``attaching`` triple that says WHY there is no live
+        state, and the page is the reader's signal to reconcile through
+        ``/history`` (which is this method). The attempt below is the SAME bounded
+        read envelope the snapshot pays (``READ_ATTACH_BUDGET_S``), and it never
         engages: ``attach_existing`` dials an owner that already exists, so a peer
         with no runtime keeps none -- the desktop's own watch lease is what warms
         one (:meth:`refresh_watch`).
 
-        ``ts`` IS THE SERVE TIME, AND THAT IS A STATED LIMIT RATHER THAN A CLAIM.
-        The wire carries MESSAGES, not journal rows, and a message has no entry
-        time of its own: decorating one here with the moment this device happened
-        to read it dates the user's own message to whenever they opened the
-        window, and stamping zero paints 1970. The desktop renderer's own
-        ``history_delta`` producer already makes this choice for wire-sourced rows
-        (one arrival stamp per frame, with the follow-up written down in
-        ``transcript-reducer.ts``), so this matches the neighbouring surface
-        instead of inventing a third rule. The fix is an entry ``ts`` on the
-        window DTO, which cannot ride this change: that DTO is ``extra="forbid"``,
-        so a new key breaks every older viewer's validation.
+        WHEN THE WIRE CANNOT ANSWER, THE OWNER'S STORED JOURNAL DOES, and the two
+        are different sources rather than two spellings of one (design
+        ``docs/design/mesh-cold-read-stored-history.md``). The wire answers only
+        when a runtime is actually ATTACHED (``is_cold`` false): a session that is
+        idle-exited -- or DELIBERATELY STOPPED, which no engage may warm -- has rows
+        on the owner's disk and nothing on the wire. Serving those is what makes a
+        cold peer read mean something: an empty page then means the OWNER HAS NO
+        ROWS, and a page that could not be served says so instead of pretending to
+        be empty (:meth:`_peer_stored_history`). The fallback is taken on an
+        UNREADABLE read -- ``rows is None``, i.e. this facade is not hydrated, which
+        is a different predicate from ``is_cold`` and so also fires on a
+        warm-but-unhydrated facade -- or on a COLD facade's empty read. A WARM
+        runtime answering with no rows keeps the wire: that is a real answer about a
+        conversation that has none.
+
+        ``ts`` IS THE OWNER'S TRUE ENTRY TIME WHERE IT SHIPPED ONE, AND THE SERVE
+        TIME ONLY AS THE LEGACY FALLBACK. The wire carries MESSAGES, not journal
+        rows, and a message has no entry time of its own: decorating one here with
+        the moment this device happened to read it dates the user's own message to
+        whenever they opened the window, and stamping zero paints 1970. The owner
+        now ships the true time as a ``{entry id: ts}`` join on the display window,
+        behind the negotiated ``display-history-entry-times-v1`` capability — that
+        DTO is ``extra="forbid"``, so the field may not ride to a viewer that has
+        not negotiated it; ``AttachedSession.history_entry_times`` is that join as
+        this bridge reads it. Every row says which case it is in ``ts_source``
+        (the closed vocabulary in ``server/models/desktop_sessions``; the consumer
+        contract is in ``docs/DESKTOP_API.md``):
+
+        * the owner shipped this row's entry time — ``ts`` is that instant,
+          ``ts_source: "entry"``;
+        * it did not, and THIS renderer declared it reads the vocabulary
+          (``entry_ts=1``) — ``ts: null``, ``ts_source: "unstated"``: a row with no
+          provable instant, which a consumer orders by position/arrival and
+          displays with no time rather than defaulting to zero;
+        * it did not, and the renderer did NOT declare it (every older client) —
+          the serve-stamp it has always received, ``ts_source: "served"``.
+
+        STORED ROWS CARRY THEIR OWN TIMESTAMPS, and that asymmetry is the point:
+        the stored page is journal rows, so ``ts`` is the time the entry was
+        written rather than the time it was served — ``ts_source: "entry"`` by
+        construction. It is richer than the wire
+        projection (``_wire_row_payload``) because it does not have to be poorer:
+        the reader merges the two sources by ``id``, and the ids match because the
+        wire's message id IS the entry id (``transcript.encode_message_payload``).
         """
         remote = self.remote
         if remote is None:
-            return {
-                "entries": [],
-                "has_more": False,
-                "cursor_missing": False,
-                "has_newer": None,
-            }
+            # NO FACADE AT ALL is the same fact as a cold one for this page's
+            # purposes: nothing on this device can read the wire, so the owner's
+            # stored journal is the only source -- and it does not need a facade.
+            return await self._peer_stored_history(
+                before_id=before_id, through_id=through_id, limit=limit
+            )
         if remote.is_cold:
             with contextlib.suppress(ConnectionError, OSError, TimeoutError):
                 await remote.attach_existing(budget=READ_ATTACH_BUDGET_S)
+        # THE WIRE ANSWERS ONLY WHEN IT CAN ANSWER AT ALL, and there are TWO ways it
+        # cannot (agent review round 1, R1-3 — the predicate this comment used to
+        # describe was ``is_cold`` alone, which is not the predicate the code runs).
+        # ``rows is None`` means the read itself was unreadable: the facade is NOT
+        # HYDRATED, which is a different predicate from ``is_cold`` (``_client is
+        # None or not connected or not _ready_for_events``) and therefore also fires
+        # on a WARM facade whose window has not landed yet. ``cold and not rows`` is
+        # the other: a COLD facade's EMPTY window is not an answer about the
+        # conversation -- it never received one, and its local replay is refused for
+        # a remote placement (the empty rows at §3.4's refusal) -- while a WARM one's
+        # empty window IS the answer "the owner has no rows", and stays on the wire.
+        # ``cold`` is read AFTER the bounded attach above, which is what keeps a
+        # live-but-unattached owner -- the case the attach can still rescue -- on the
+        # wire.
+        cold = remote.is_cold
         rows = self._remote_rows(remote, before_id=before_id, through_id=through_id)
+        if rows is None or (cold and not rows):
+            return await self._peer_stored_history(
+                before_id=before_id, through_id=through_id, limit=limit
+            )
         page, has_more = _remote_page(rows, limit=limit)
         if not has_more and remote.history_before_token:
             # ONE OLDER PAGE PER CALL, not a drain: a reader that scrolls asks
@@ -3429,20 +3484,56 @@ class DesktopSessionBridge:
             except (RuntimeError, ConnectionError, TimeoutError):
                 pass
             else:
-                rows = self._remote_rows(remote, before_id=before_id, through_id=through_id)
-                page, has_more = _remote_page(rows, limit=limit)
-                has_more = has_more or remote.history_before_token is not None
+                older = self._remote_rows(remote, before_id=before_id, through_id=through_id)
+                # A DEHYDRATION RACE KEEPS THE FIRST PAGE, it does not empty it. The
+                # wire answered once already; a second read that comes back unreadable
+                # (``None``) is not evidence that the conversation ended, so the first
+                # page and its ``has_more`` stand and the reader can ask again. Falling
+                # back to the stored journal here would be wrong too: this reader has
+                # a LIVE window in hand, and a stored page would drop the live rows
+                # the window already contributed.
+                if older is not None:
+                    page, has_more = _remote_page(older, limit=limit)
+                    has_more = has_more or remote.history_before_token is not None
         stamp = time.time()
-        return {
-            "entries": [
+        # THE OWNER'S OWN CLOCK WHERE IT SHIPPED IT, this device's clock only as a
+        # legacy fallback. ``history_entry_times`` is the ``{entry id: ts}`` join
+        # the OWNER put on its display page when THIS bridge's attach negotiated
+        # ``display-history-entry-times-v1``. Per-row, so the vocabulary is the
+        # truth about THAT row rather than a claim about the page: a row absent
+        # from the join has no provable entry time (it was subtracted from the
+        # owner's display replay, or it arrived live after the page).
+        true_entry_times = remote.history_entry_times()
+        entries: list[dict[str, Any]] = []
+        for row in page:
+            row_id = str(getattr(row, "id", "") or "")
+            shipped_ts = true_entry_times.get(row_id) if row_id else None
+            if shipped_ts is not None:
+                ts: float | None = shipped_ts
+                ts_source = "entry"
+            elif entry_times:
+                ts = None
+                ts_source = "unstated"
+            else:
+                ts = stamp
+                ts_source = "served"
+            entries.append(
                 {
-                    "id": str(getattr(row, "id", "") or ""),
-                    "ts": stamp,
+                    "id": row_id,
+                    "ts": ts,
+                    "ts_source": ts_source,
                     "type": "message",
                     "payload": _wire_row_payload(row),
                 }
-                for row in page
-            ],
+            )
+        return {
+            # THE SAME FILTER AS THE STORED SOURCE (agent review round 1, R1-4). A
+            # hidden wake delivery, a patience ledger row and a diverted ask's result
+            # are in the journal and therefore in the owner's own display window --
+            # and the client reducer has no filter of its own, so an older build
+            # paints exactly what the current one hides. One method answering from
+            # two sources is only "one contract" if both drop the same rows.
+            "entries": visible_transcript_rows(entries),
             "has_more": has_more,
             "cursor_missing": False,
             "has_newer": None,
@@ -3450,12 +3541,20 @@ class DesktopSessionBridge:
 
     def _remote_rows(
         self, remote: AttachedSession, *, before_id: str | None, through_id: str | None
-    ) -> list[Any]:
+    ) -> list[Any] | None:
         """The peer's loaded rows, cut to ``before_id``/``through_id``.
 
-        ``cursor_missing`` is answered FALSE by the caller rather than here: a
-        ``before_id`` the peer's window no longer holds is a real miss, and the
-        contract's word for it is the page being empty. What must NOT happen is
+        ``None`` MEANS THE WIRE WINDOW COULD NOT BE READ AT ALL -- the facade is not
+        hydrated, which for a remote placement is also what the refused legacy
+        replay leaves behind. It is deliberately distinct from ``[]``, which is a
+        message the wire DID deliver. The caller decides which of the two a COLD
+        facade's empty list is (an ``is_cold`` read that produced no rows is not an
+        answer — see :meth:`_remote_history`) and sends that case to the owner's
+        stored journal (:meth:`_peer_stored_history`).
+
+        ``cursor_missing`` is answered FALSE by the wire path's caller rather than
+        here: a ``before_id`` the peer's window no longer holds is a real miss, and
+        the contract's word for it is the page being empty. What must NOT happen is
         the local reader's other answer for the same call -- a page cut short at a
         cursor -- because there is no local cursor to cut at.
         """
@@ -3464,8 +3563,8 @@ class DesktopSessionBridge:
         except RuntimeError:
             # Not hydrated: a peer whose runtime has not answered yet, or one too
             # old to serve a display window at all (the facade refuses the local
-            # fallback by name). The empty page above is the contract's answer.
-            return []
+            # fallback by name).
+            return None
         if through_id:
             cut = next((index for index, row in enumerate(rows) if row.id == through_id), None)
             if cut is not None:
@@ -3474,6 +3573,89 @@ class DesktopSessionBridge:
             cut = next((index for index, row in enumerate(rows) if row.id == before_id), None)
             rows = rows[:cut] if cut is not None else []
         return rows
+
+    async def _peer_stored_history(
+        self, *, before_id: str | None, through_id: str | None, limit: int
+    ) -> dict[str, Any]:
+        """A page of the OWNER'S STORED JOURNAL, or an unservable answer.
+
+        THE COLD FALLBACK (design ``docs/design/mesh-cold-read-stored-history.md``).
+        The read travels the RELAY rather than the attach socket -- that is why it
+        is not a method on the facade: ``AttachedSession`` speaks one transport to
+        one runtime, and this source has no runtime by definition. It needs only
+        what the bridge already holds: this device's config root (where its own
+        relay's control socket lives) and the peer's device id from the row the
+        pool resolved. It is also why the facade may be absent or cold and this
+        still works.
+
+        AN UNSERVABLE PAGE IS NOT AN EMPTY ONE. When the relay is down, the peer
+        refuses, the hop expires, or the answer is not a page, the answer carries
+        ``cursor_missing: True`` over an empty page -- the contract's existing word
+        for "this page cannot be trusted as complete", which the renderer's own
+        rule (never claim exhaustion over a page whose hydration is unproven)
+        already consumes. The alternative -- the open path's refusal
+        (``session_is_remote``) -- would turn a missing TRANSCRIPT into a missing
+        SESSION, which is a different and worse claim: the session exists, the row
+        resolved, and the reader is merely unable to fetch its rows right now.
+        """
+        from local_operator.network.projection import peer_stored_history_page
+
+        device_id = str(getattr(self.remote_row, "owner_device", "") or "")
+        if device_id:
+            page = await asyncio.to_thread(
+                peer_stored_history_page,
+                self.root,
+                device_id=device_id,
+                session_id=self.session_id,
+                before_id=before_id,
+                limit=limit,
+            )
+            if page is not None:
+                cut = self._cut_stored_page(page, before_id=before_id, through_id=through_id)
+                # ``ts_source: "entry"`` IS THIS SOURCE'S OWN FACT, and it is
+                # stamped at the door rather than inside the cut so the cut stays
+                # a pure bound (its own contract, and its own tests, are about
+                # ``through_id``). These are JOURNAL ROWS: ``ts`` is the time the
+                # entry was written, never the time it was served. Both answers
+                # this door returns carry it, so a reader that pages back does not
+                # see the same rows change vocabulary.
+                return {
+                    **cut,
+                    "entries": [
+                        {**row, "ts_source": "entry"} if isinstance(row, dict) else row
+                        for row in cut.get("entries") or []
+                    ],
+                }
+        return {
+            "entries": [],
+            "has_more": False,
+            "cursor_missing": True,
+            "has_newer": None,
+        }
+
+    @staticmethod
+    def _cut_stored_page(
+        page: dict[str, Any], *, before_id: str | None, through_id: str | None
+    ) -> dict[str, Any]:
+        """Apply this method's cursor cut to a page the OWNER already cut.
+
+        The op takes ``before_id`` and the owner's reader honours it exactly, so
+        only ``through_id`` is left -- and it is left because the op deliberately
+        does not take it (the design settles its params, and NO DESKTOP CALLER
+        PASSES IT ANY MORE; see :meth:`history`). Mirroring the wire path's own
+        cut is what keeps the two sources answering one request the same way for
+        the caller that could still name it, rather than one of them silently
+        ignoring a bound the other honours.
+        """
+        entries = list(page.get("entries") or [])
+        if through_id:
+            cut = next(
+                (index for index, row in enumerate(entries) if row.get("id") == through_id),
+                None,
+            )
+            if cut is not None:
+                entries = entries[: cut + 1]
+        return {**page, "entries": entries}
 
     async def checkpoints(self) -> dict[str, Any]:
         """The checkpoint rail's manifest (design D1/D9), derived per session.
@@ -4328,7 +4510,12 @@ class DesktopSessionBridge:
         return sub
 
     async def events(
-        self, sub: DesktopSubscription, *, epoch: str | None, after_seq: int
+        self,
+        sub: DesktopSubscription,
+        *,
+        epoch: str | None,
+        after_seq: int,
+        entry_times: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         try:
             cutoff = self.sequence
@@ -4337,7 +4524,7 @@ class DesktopSessionBridge:
             replay = (
                 [f for f, _ in self.replay if after_seq < f["seq"] <= cutoff] if not gap else []
             )
-            snapshot = await self.snapshot()
+            snapshot = await self.snapshot(entry_times=entry_times)
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
             # ``snapshot()``'s state and sequence are its last reads with nothing
             # awaiting between them, so no frame can have been published after
@@ -5315,6 +5502,26 @@ class DraftAlreadyMaterialised(ValueError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
+
+
+#: The status codes whose rows the desktop UI files under RUNNING, and the
+#: ONLY rows this listing computes ``last_user_at`` for.
+#:
+#: THE SAME FIVE THE RENDERER USES (local-operator-ui's ``RUNNING_CODES``:
+#: busy, delegating, approval, answer, wedged), spelled here rather than
+#: derived from the wire because the projection decides what to PAY for: the
+#: tracker's cold scan is a real read, and a row the section will not order
+#: must not buy one. ``live_state or pending`` (the shape the design memo
+#: weighed) is a strict SUPERSET — every running code implies a non-empty
+#: live_state or a pending gate, including ``delegating``, whose counts come
+#: from a live record — and is rejected here for exactly that reason: it also
+#: covers ``attached`` and ``idle`` rows, which the UI files under Today, so
+#: it would pay a scan per resident session for a value no reader consumes.
+#: Both halves — the coverage of ``delegating`` and the exclusion of ``idle``
+#: — are pinned in tests/unit/server/test_desktop_sessions.py.
+RUNNING_STATUS_CODES: frozenset[str] = frozenset(
+    {"busy", "delegating", "approval", "answer", "wedged"}
+)
 
 
 class DesktopSessions:
@@ -6561,6 +6768,28 @@ class DesktopSessions:
                             "team": stored.team or None if stored else None,
                         },
                         "preview": session_preview(self.root / "sessions" / entry.id),
+                        # WHEN THE PERSON LAST SENT THIS SESSION A MESSAGE, for
+                        # the Running section's order — and computed ONLY for
+                        # the rows that section will order (see
+                        # ``RUNNING_STATUS_CODES``): the scan is a real read
+                        # (cold: up to the module's cap; warm: the appended
+                        # bytes), and paying it for a Today/Older row would buy
+                        # nothing a renderer reads. The value is a fact about
+                        # the transcript, so it moves when the person types and
+                        # NOT when a response streams — which is the whole
+                        # point: `mtime` advances on every append, so activity
+                        # re-sorted the section under the cursor (9 of 47
+                        # transitions on the operator's store over 235 s).
+                        #
+                        # This runs in the SAME worker thread as the preview
+                        # read beside it (``asyncio.to_thread`` at the bottom of
+                        # this method), and after the first poll it is cheaper
+                        # than that uncached preview read.
+                        "last_user_at": (
+                            last_user_at(self.root / "sessions" / entry.id)
+                            if entry.status_code in RUNNING_STATUS_CODES
+                            else None
+                        ),
                         # ALWAYS PRESENT, BOTH VALUES. See `SessionRow.pinned`:
                         # the renderer's merge reads an absent key as "no claim",
                         # so a `false` here is load-bearing and omitting it would
@@ -7269,10 +7498,35 @@ class DesktopSessions:
                                 ),
                                 None,
                             )
-                        from local_operator.session.remote_open import remote_row_for
+                        from local_operator.session.remote_open import (
+                            PeerSessionUnresolved,
+                            remote_row_and_silence,
+                        )
 
-                        row = remote_row_for(session_id, self.root)
+                        row, silent = remote_row_and_silence(session_id, self.root)
                         if row is None:
+                            # A MISS IS ONLY "UNKNOWN" WHEN SOMEBODY ANSWERED.
+                            # ``remote_row_and_silence`` ends in a genuine read
+                            # (``ttl_s=0``) precisely so a just-created peer id
+                            # resolves; that SAME read also reports the devices
+                            # that did NOT reply, and this is the one place that
+                            # fact is turned into an answer for a route. ONE READ,
+                            # BOTH HALVES: the pair comes back from a single call,
+                            # so no second dial can be paid and no silence older
+                            # than the read that missed can be reported (agent
+                            # review round 1, R-1 — the two-call shape re-dialled
+                            # whenever the listing spent its own documented budget
+                            # and threw away the rows that read had fetched).
+                            #
+                            # WHY IT MATTERS HERE AND NOT ONLY IN THE ROUTE: the
+                            # shared 404 is what the renderer turns into
+                            # "missing" — "This conversation is no longer on this
+                            # machine", composer refused. That is a deletion claim
+                            # this device cannot support while a peer is silent,
+                            # so the two cases must not arrive as one KeyError
+                            # (mesh-wire-honesty.md §S2).
+                            if silent:
+                                raise PeerSessionUnresolved(session_id, silent)
                             raise KeyError("Unknown session")
                         if not row.reachable:
                             # REFUSED BEFORE ANYTHING IS BUILT, and with the SAME

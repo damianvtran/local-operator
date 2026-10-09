@@ -724,7 +724,7 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         help="What this device owns, and what it borrows from whom",
     ).add_argument("--json", action="store_true")
 
-    credential = actions.add_parser("credential", help="Share or revoke one credential")
+    credential = actions.add_parser("credential", help="Share, revoke, or mark one credential")
     credential_actions = credential.add_subparsers(dest="credential_command")
     cred_share = credential_actions.add_parser(
         "share",
@@ -736,7 +736,9 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
             "onboarding anymore: approving a device already shares this device's logins"
         ),
     )
-    cred_share.add_argument("key", help="A provider name, or mcp:<server-url>")
+    cred_share.add_argument(
+        "key", help="A provider name, mcp:<server-url>, or a stored secret's name"
+    )
     cred_share.add_argument(
         "--with",
         required=True,
@@ -767,9 +769,12 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     )
     cred_share.add_argument("--json", action="store_true")
     cred_revoke = credential_actions.add_parser(
-        "revoke", help="Stop letting a device borrow a credential"
+        "revoke",
+        help="Stop letting a device borrow a credential, or end its copy of a stored secret",
     )
-    cred_revoke.add_argument("key", help="A provider name, or mcp:<server-url>")
+    cred_revoke.add_argument(
+        "key", help="A provider name, mcp:<server-url>, or a stored secret's name"
+    )
     cred_revoke.add_argument(
         "--from",
         required=True,
@@ -780,6 +785,29 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "--network", default="", help="Network name or id (default: the only one)"
     )
     cred_revoke.add_argument("--json", action="store_true")
+    cred_mark = credential_actions.add_parser(
+        "mark",
+        # §4.2's selection marks (S4): these are the operator's standing words
+        # about a STORE secret's copy policy — the default set is the needs-list
+        # ∪ `sync`, and `local-only` is the kill switch.
+        help=(
+            "Set a secret's copy policy — 'sync' preselects it for devices approved from now "
+            "on, 'local-only' keeps it here, 'default' clears the mark"
+        ),
+    )
+    cred_mark.add_argument(
+        "key",
+        help="A secret name (or secret:<name>), e.g. GITHUB_TOKEN",
+    )
+    cred_mark.add_argument(
+        "mark",
+        choices=("sync", "local-only", "default"),
+        help="'sync' | 'local-only' | 'default' (clears)",
+    )
+    cred_mark.add_argument(
+        "--network", default="", help="Network name or id (default: the only one)"
+    )
+    cred_mark.add_argument("--json", action="store_true")
 
     uninstall = actions.add_parser(
         "uninstall", help="Remove the LaunchAgent (and --purge the store)"
@@ -1463,6 +1491,7 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     verb's refusal used to be the first word of. Read-only, like everything else here.
     """
     from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.credentials.sync import SyncState, sync_segment
     from local_operator.network.identity import load as load_identity
 
     pulled = _relay_call("credential_placement", timeout=_listing_timeout(), allow_no_answer=True)
@@ -1481,6 +1510,7 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         record = _record_for(document.network_id)
         network_name = record.name if record is not None else document.network_id
         state = PlacementState.load(document.network_id)
+        sync_state = SyncState.load(document.network_id)
         keys: list[dict[str, Any]] = []
         if not document.entries:
             continue
@@ -1514,6 +1544,27 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
             }
             if not row["owned_here"] and entry.is_holder(self_device):
                 row["observation"] = state.status(key) or "not_asked"
+            if row["owned_here"]:
+                # THE OWNER'S OWN VIEW OF EACH HOLDER'S COPY (S3; design §5.2): one
+                # segment per member row — ``synced (gen 7)`` / ``stale (gen 6 of
+                # 7, last acked 14:02)``. Read from the sync document only: a
+                # listing never dials and never reads a store, and a copy
+                # relationship with no generation yet shows NO segment (absent,
+                # never "failed" — the rollout segment's own rule). The §4.2
+                # selection mark rides the same read (S4): one document, so the
+                # mark cannot disagree with the holders it governs.
+                mark = sync_state.mark_for(key)
+                if mark:
+                    row["mark"] = mark
+                current = sync_state.generation(key)
+                if current is not None:
+                    for holder_row in row["holders"]:
+                        if holder_row["device"] == self_device:
+                            continue
+                        acked = sync_state.ack_for(holder_row["device"], key)
+                        segment = sync_segment(acked=acked, current=current)
+                        if segment:
+                            holder_row["sync"] = segment
             keys.append(row)
         if not keys:
             lines.append(f"{network_name}: nothing is shared in this network yet")
@@ -1529,14 +1580,18 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 lines.append(
                     f"  {row['credential_name']:<14} {row['kind']:<15} owner: {owner}{who}"
                 )
+                if row.get("mark"):
+                    mark_tail = " — never crosses" if row["mark"] == "local-only" else ""
+                    lines.append(f"      marked {row['mark']}{mark_tail}")
                 for holder in row["holders"]:
                     # The owner's own row and this device's are not "shares": the first
                     # is what makes the entry coherent and the second is the reader.
                     if holder["device"] in (self_device, row["owner_device"]):
                         continue
+                    sync_tail = f" — {holder['sync']}" if holder.get("sync") else ""
                     lines.append(
                         f"      shared with {holder['name'] or holder['device']} "
-                        f"({holder['scope']})"
+                        f"({holder['scope']}){sync_tail}"
                     )
                 if row.get("observation") and row["observation"] not in ("active", "not_asked"):
                     lines.append(f"      borrowed: {row['observation']}")
@@ -1974,6 +2029,17 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     identity = load_identity()
     if identity is None:
         raise MeshRefusal("no_identity", "this device has no key yet; join a network first")
+    if verb == "mark":
+        # THE MARK VERB HAS NO `--device` (S4): a mark is per (network, key),
+        # not per holder, so it returns before the device resolution the other
+        # verbs need.
+        return _credential_mark(args, record, identity)
+    # THE BARE-NAME SPELLING (QA round 1, Q2): `mark` takes the name `lop
+    # secret list` prints; `share`/`revoke` used to read a bare name as a
+    # provider and hand a store-secret operator a login-flavored remedy. One
+    # resolution, ahead of every downstream read, so the refusal sentences
+    # downstream are only ever about a key this device truly does not hold.
+    key = _canonical_credential_key(key)
     device = _resolve_device(record, args.device)
     if device is None:
         raise MeshRefusal(
@@ -2054,8 +2120,16 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         "owner_device": entry_json.get("owner_device", ""),
     }
     name = _member_name(record, device) or device
+    # PROSE NAMES A STORE SECRET BY THE NAME THE OPERATOR TYPES (design review round 1, D5).
+    # ``mark`` says ``CRM_API_KEY`` and ``share|revoke`` accept it, so a receipt that read
+    # back ``secret:CRM_API_KEY`` made the person recognise one spelling as the other.
+    # Identifiers keep the placement key: the ``--json`` payload above and the listing's
+    # rows are matched on, not read. Every other key comes out as typed.
+    from local_operator.network.credentials.messages import render_key_name
+
+    shown = render_key_name(key)
     lines = [
-        f"{action} {key!r} with {name}" if verb == "share" else f"{action} {key!r} from {name}",
+        f"{action} {shown!r} with {name}" if verb == "share" else f"{action} {shown!r} from {name}",
         f"borrowers now: {', '.join(holders) or 'none'}",
         f"broker_credential on {name}: {capability or 'unchanged'}",
     ]
@@ -2073,6 +2147,8 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # token's own expiry. An incident response that believed "revoked" meant
         # "dead" would stop looking too early, so the payload and the lines say both.
         from local_operator.network.credentials import grant_ttl_s
+        from local_operator.network.credentials import messages as messages_mod
+        from local_operator.network.credentials.types import is_secret_key
 
         ttl_s = int(grant_ttl_s())
         # THE MINT-REVOKE CONTRACT'S IMMEDIATE HALF (github adapter, F4): the
@@ -2095,12 +2171,36 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             if isinstance(detail, dict):
                 revoked_now = int(detail.get("revoked") or 0)
                 payload["minted_tokens_revoked"] = revoked_now
+        if is_secret_key(key):
+            # CLASS-2 COPIES END BY WIPE, not by a broker TTL (S4, §4.3): the receipt says
+            # which happened — a queued notice, an already-wiped copy, or no RECORDED copy —
+            # and carries the ceiling after EVERY one of them (design review round 1, D1: the
+            # state that claims the most used to be the only one without it).
+            copied, wiped = _copy_ledger_state(record.network_id, device, key)
+            payload["copy"] = {
+                "confirmed": copied,
+                "wiped": wiped,
+                "wipe": "done" if (copied and wiped) else ("queued" if copied else "none"),
+            }
+            lines.extend(
+                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+            )
+            lines.extend(messages_mod.COPY_CEILING_LINES)
+            return _emit(args, payload, lines)
         # WHAT A COPY OUTLIVES DEPENDS ON THE CREDENTIAL IN HAND (review round 3, F3).
         # An OAuth access token dies at its own expiry; a STATIC API KEY never expires,
         # so "until the token expires" was a bound that does not exist — false in
         # exactly the case where the remedy matters most. Read from the entry the
         # revoke just wrote, so the receipt describes what was actually lent.
         static = str(entry_json.get("kind") or "") == "api-key-static"
+        copied, wiped = _copy_ledger_state(record.network_id, device, key)
+        if copied:
+            # The class-4 copy half, same vocabulary as class 2's (§4.3: the
+            # receipt says which happened).
+            payload["copy"] = {"confirmed": copied, "wiped": wiped}
+            lines.extend(
+                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+            )
         if github_mod.is_github_key(key):
             # THE M1-RESTATED COPY, to match the mechanism (mint-revoke at the
             # window end + on this revoke; the 60-minute figure is the fallback).
@@ -2136,6 +2236,178 @@ def _cmd_credential(args: argparse.Namespace) -> int:
                 "a bearer copied out of that device stays valid at the provider until the "
                 f"token expires: to end it now, sign out of {key!r} at the provider"
             )
+    return _emit(args, payload, lines)
+
+
+def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bool]:
+    """``(confirmed, wiped)`` for one member's copy of ``key``, from the ledger.
+
+    The same document the listing's segments read, so the receipt and the
+    listing cannot disagree about whether a copy is outstanding. An unreadable
+    ledger confirms nothing — the closed direction, and the receipt then says
+    "no copy ... is recorded" rather than inventing one.
+    """
+    from local_operator.network.credentials.sync import SyncState
+
+    try:
+        state = SyncState.load(network_id)
+    except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
+        return False, False
+    row = state.ack_for(device, key)
+    if not isinstance(row, dict):
+        return False, False
+    return True, bool(row.get("wiped"))
+
+
+def _unconfirmed_copies(network_id: str, device: str) -> int:
+    """How many ledger rows for ``device`` are still NOT ``wiped``.
+
+    The removal receipt's count when there is no relay to run the ending
+    exchange (review round 1, Q1): every open row is a copy nothing confirmed
+    deleted, so the receipt names the open state instead of a clean sweep. The
+    same read ``_copy_ledger_state`` makes, summed over the member instead of
+    one key; an unreadable ledger counts zero rows and the receipt stays as it
+    was rather than inventing copies.
+    """
+    from local_operator.network.credentials.sync import SyncState
+
+    try:
+        state = SyncState.load(network_id)
+    except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
+        return 0
+    rows = state.acks.get(device) or {}
+    return sum(1 for row in rows.values() if isinstance(row, dict) and not row.get("wiped"))
+
+
+def _canonical_credential_key(raw: str) -> str:
+    """A bare name that IS a stored secret resolves to its ``secret:<NAME>`` key.
+
+    WHY (QA round 1, Q2). ``credential mark`` teaches the bare spelling — the
+    name ``lop secret list`` prints — and accepts it, but ``share``/``revoke``
+    read a bare name as a PROVIDER: on a store secret they refused with a
+    provider-flavored remedy ("run 'lop login …' here first") and, for revoke,
+    "no placement for '…'" while the placement existed under ``secret:<NAME>``.
+    The provider reading keeps precedence where BOTH exist — sharing a provider
+    login by its provider name is the older, documented form — so a bare name
+    canonicalises to the secret form only when no provider/MCP login of that
+    name is held here: the store is the fallback reading, never a shadow.
+    """
+    from local_operator.network.credentials import offers
+    from local_operator.network.credentials.types import (
+        credential_key_for_secret,
+        is_secret_key,
+    )
+
+    text = str(raw or "").strip()
+    if not text or is_secret_key(text):
+        return text
+    config_dir = _config_dir()
+    if offers.credential_here(text, config_dir):
+        return text
+    candidate = credential_key_for_secret(text)
+    if offers.credential_here(candidate, config_dir):
+        return candidate
+    return text
+
+
+def _credential_mark(args: argparse.Namespace, record: Any, identity: Any) -> int:
+    """The §4.2 selection marks: ``sync`` / ``local-only`` / ``default``.
+
+    OWNER-ONLY BY CONSTRUCTION: the mark lives in THIS device's sync document
+    for THIS network, and the verb refuses anything this device does not hold —
+    a mark on a name it cannot serve would be a policy row about nothing.
+
+    Class-2 only, in this slice: the mark table exists for the ``lop secret``
+    store's keys (S4's own scope; the provider classes keep their per-kind share
+    defaults). A bare name is prefixed, so the operator types the name they see
+    in ``lop secret list``.
+    """
+    from local_operator.network.credentials import offers as offers_mod
+    from local_operator.network.credentials import sync as sync_mod
+    from local_operator.network.credentials.types import (
+        credential_key_for_secret,
+        is_secret_key,
+        secret_name_from_key,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    raw = str(args.key).strip()
+    key = raw if is_secret_key(raw) else credential_key_for_secret(raw)
+    name = secret_name_from_key(key)
+    if not name:
+        # A bare ``secret:`` (or nothing at all) has no name to mark: refuse by name,
+        # because the no-such-secret arm below would print ``named ''`` and a
+        # ``lop secret set `` remedy that cannot run (O-1, the S4 follow-up).
+        raise MeshRefusal("bad_request", "give the secret to mark by name")
+    if not offers_mod.credential_here(key, _config_dir()):
+        raise MeshRefusal(
+            "no_local_credential",
+            f"this device holds no secret named {name!r}, so there is nothing to mark; "
+            f"store it first ('lop secret set {name}')",
+        )
+    mark = "" if str(args.mark) == "default" else str(args.mark)
+    with sync_mod.mutate(record.network_id) as state:
+        state.record_mark(key, mark or None)
+    outstanding = 0
+    sync_state = sync_mod.SyncState.load(record.network_id)
+    for by_key in sync_state.acks.values():
+        row = by_key.get(key) if isinstance(by_key, dict) else None
+        if isinstance(row, dict) and not row.get("wiped"):
+            outstanding += 1
+    # WHAT EACH RECEIPT PROMISES IS WHAT THE MARK DOES, AND NO MORE (design review round 1,
+    # D6, and the overclaim found beside it). ``sync`` writes the mark and NOTHING ELSE: it
+    # changes what a device approved from now on is PRESELECTED with on the card; a device
+    # that is already approved but not yet sharing it holds no grant for the key, so it
+    # needs the share verb (pinned on the owner's real announce computation in
+    # test_copy_receipts). The first draft said "approved devices get it by default", which
+    # an operator with three approved devices read as "all three have it now".
+    # ``default`` clears the mark and nothing else: a device that already holds a grant is
+    # STILL served the value afterwards - including one whose copy an earlier local-only mark
+    # wiped, which is copied again (derived on the owner's real announce computation) - so the
+    # receipt says "still gets it", not "keeps it".
+    if mark == "sync":
+        lines = [
+            f"'{name}' is marked sync: devices approved from now on get it by default",
+            "an approved device that is not yet sharing it needs 'lop network credential "
+            f"share {name} --with <device>'",
+        ]
+    elif mark == "local-only":
+        lines = [f"'{name}' is marked local-only: it never crosses to another device"]
+        if outstanding:
+            # TWO PARSEABLE LINES (D6). "N copies end with a wipe notice" read as if the
+            # copies acquired a notice, and this surface — where the policy is SET — was the
+            # only one of the four with nothing about a holder that never reconnects.
+            many = outstanding > 1
+            lines.append(
+                f"{outstanding} existing {'copies' if many else 'copy'} will be wiped the next "
+                f"time {'their holders are' if many else 'its holder is'} reached"
+            )
+            lines.append(
+                "a holder that never reconnects keeps its copy — rotating the secret at its "
+                "source is the only ending for that one"
+            )
+    else:
+        lines = [
+            f"'{name}' has no mark: devices approved from now on get it only where their "
+            "own declared needs call for it",
+            "a device already sharing it still gets it; 'lop network credential revoke "
+            f"{name} --from <device>' ends that",
+        ]
+    _audit(
+        "credential.marked",
+        actor=identity.device_id,
+        subject=record.network_id,
+        network_id=record.network_id,
+        detail={"credential_key": key, "mark": mark or "default"},
+    )
+    payload = {
+        "ok": True,
+        "network": record.name,
+        "network_id": record.network_id,
+        "key": key,
+        "mark": mark or "default",
+        "copies_outstanding": outstanding,
+    }
     return _emit(args, payload, lines)
 
 
@@ -2342,10 +2614,33 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # ``allow_no_answer``: a revocation HAS a local spelling — the tombstone, the
     # epoch rotation and the queue write all happen here (below), and the payload
     # says the rotation is queued rather than fanning out.
+    #
+    # ``timeout=REMOVAL_CLI_TIMEOUT_S``, not the 5 s default (review round 2, F1):
+    # the relay's ending exchange is probe (3 s) + a 25 s frame budget by
+    # construction, and a CLI that gave up first would fall back to the LOCAL
+    # write while the relay was still mid-exchange — the double-write
+    # ``allow_no_answer`` exists to prevent, not to enable.
+    from local_operator.network.credentials import messages as messages_mod
+    from local_operator.network.credentials.sync import REMOVAL_CLI_TIMEOUT_S
+
     live = _relay_call(
-        "net_member_rm", network=args.network, device_id=device_id, allow_no_answer=True
+        "net_member_rm",
+        network=args.network,
+        device_id=device_id,
+        allow_no_answer=True,
+        timeout=REMOVAL_CLI_TIMEOUT_S,
     )
     if live is not None:
+        # THE REMOVAL'S COPY SENTENCE (review round 1, Q1): the relay ran the
+        # final ending exchange before the tombstone and these counts are what
+        # it confirmed; rendering them here keeps receipt and ledger in one
+        # place (messages_mod owns both sentences' shapes).
+        endings = messages_mod.render_removal_endings(
+            _member_name(record, device_id) or str(live.get("removed") or device_id),
+            copies=int(live.get("copies") or 0),
+            wiped=int(live.get("wiped") or 0),
+            timed_out=int(live.get("timed_out") or 0),
+        )
         return _emit(
             args,
             {"ok": True, **live},
@@ -2353,6 +2648,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
                 f"removed {live.get('removed')} from {args.network}; "
                 f"epoch is now {live.get('epoch')}",
                 f"queued for {live.get('queued', 0)} offline peer(s)",
+                *endings,
             ],
         )
     imported = _import_relay()
@@ -2360,6 +2656,10 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # of this command and the local write needs nothing the resolution did not already
     # read (review round 2, NIT-2).
     state = store.require_secrets(record.network_id)
+    # THE COPIES THIS PATH CANNOT CONTACT (review round 1, Q1): with no relay there
+    # is no link, so nothing is confirmed deleted — but the receipt must still say
+    # what the ledger shows, or a removal with live copies reads as a clean sweep.
+    copies = _unconfirmed_copies(record.network_id, device_id)
     outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
@@ -2393,10 +2693,16 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             "removed": args.device,
             "epoch": outcome.epoch,
             "relay": "not running — applied locally and queued",
+            "copies": copies,
+            "wiped": 0,
+            "timed_out": 0,
         },
         [
             f"removed {args.device} from {record.name}; epoch is now {outcome.epoch}",
             "the relay is not running, so the rotation is queued for delivery",
+            *messages_mod.render_removal_endings(
+                _member_name(record, device_id) or args.device, copies=copies, wiped=0
+            ),
         ],
     )
 
@@ -5776,6 +6082,37 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             # instructions and the agent's routing. Nothing here silently drops
             # one of them, which is what the old behaviour did to both.
             pass
+        # THE MODEL CHOICE, READ ONCE FOR BOTH ATTEMPTS AND REFUSED HERE RATHER
+        # THAN AT THE PEER. The wire needs a PAIR — ``set_model`` takes a provider
+        # and a model id, and nothing downstream can derive one half from the
+        # other — and ``--model provider/model-id`` is the pair's own spelling, so
+        # it is read as one argument (split on the FIRST ``/``: an aggregator's
+        # genuine namespace like ``ollama/hf.co/...`` keeps the rest). ``--hosting``
+        # keeps today's exact reading: it names the provider half, so ``--model``
+        # is the id verbatim, slash or not. A value that names no provider at all
+        # cannot be honoured, and the sentence it would otherwise get back from
+        # the relay arrives only after the peer has already minted the session —
+        # so it is refused HERE, before a frame is built (the same refusal the
+        # relay composes, said at the door).
+        model_choice: dict[str, str] | None
+        hosting = str(getattr(args, "hosting", "") or "")
+        model_flag = str(getattr(args, "model", "") or "")
+        if hosting:
+            model_choice = {"provider": hosting, "model_id": model_flag}
+        elif model_flag:
+            provider, separator, model_id = model_flag.partition("/")
+            if not (separator and provider and model_id):
+                print(
+                    "--model must name both halves on a peer create: write "
+                    "--model <provider>/<model-id> (for example "
+                    "--model anthropic/claude-sonnet-5-5), or pair a bare model id with "
+                    "--hosting <provider>",
+                    file=sys.stderr,
+                )
+                return 2
+            model_choice = {"provider": provider, "model_id": model_id}
+        else:
+            model_choice = None
         # THE SAVED MODE SUPPLIES THE IMPLIED REQUEST (remote-onboarding §6
         # defect 2, the create half): a device whose ``tool_approval_mode``
         # resolves ``auto`` asks for an unattended session when it asks a peer
@@ -5811,14 +6148,9 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # flag here would leave a granted member unable to say what it wants,
                 # which is the dead end this slice removes.
                 yolo=yolo,
-                model=(
-                    {
-                        "provider": str(getattr(args, "hosting", "") or ""),
-                        "model_id": str(getattr(args, "model", "") or ""),
-                    }
-                    if (getattr(args, "hosting", None) or getattr(args, "model", None))
-                    else None
-                ),
+                # The reading (and the refusal for a value that names no pair)
+                # happened above, once for both attempts: see the comment there.
+                model=model_choice,
                 profile=profile,
                 agent_name=agent_name,
                 agent_id=agent_id,
@@ -5888,10 +6220,18 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             )
         if team_info:
             lines.append(f"team: {team_info.get('name')}")
-        if profile or agent_name or agent_id:
-            model_detail = detail.get("model")
-            if isinstance(model_detail, dict) and model_detail.get("detail"):
-                lines.append(str(model_detail["detail"]))
+        # THE MODEL'S OWN SENTENCE, WHEN THE PEER SENT ONE. This used to be gated
+        # on an identity being named, because a pin override was the only detail
+        # the peer could compose into ``model.detail``. The reply can now also
+        # carry the reason a NAMED choice was not taken (a half-filled pair, a
+        # runtime refusal, a warm-up still joining — see
+        # ``relay._model_choice_refusal``), and a pure ``--model`` create is the
+        # caller who TYPED the model, so it must not be the one caller told
+        # nothing. Non-empty is the whole gate: every sentence the peer composes
+        # here is about a model this caller asked for.
+        model_detail = detail.get("model")
+        if isinstance(model_detail, dict) and model_detail.get("detail"):
+            lines.append(str(model_detail["detail"]))
         # WHAT THIS CREATE DID ABOUT DEFINITIONS (QA round 1, Q1). The receipt reported a
         # session that ran the PEER's divergent copy as a plain success — no key in
         # ``--json``, no word about a push that had been refused — which is the "it
@@ -5978,6 +6318,14 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             if str((row.get("peer") or {}).get("device_id") or "").lower() == wanted
             or str((row.get("peer") or {}).get("name") or "").lower() == wanted
         ]
+    # NO STORED ROW CARRIES A NEEDS CLAIM, in the TEXT or the JSON (agent
+    # review round 1, F1): the rule is the reader's (``types.row_needs_claim``),
+    # so it settles where the answer does — a pre-correction peer's ``"ask"``
+    # (or the legacy bool) must not reach a consumer through ``--json`` when the
+    # table beside it already refuses it.
+    from local_operator.network.types import row_without_stored_claims
+
+    remote = [row_without_stored_claims(row) for row in remote]
     lines: list[str] = []
     cells: list[tuple[str, str, str, str]] = []
     from local_operator.resume import session_state_words
@@ -7085,6 +7433,7 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
     from local_operator.network import store
     from local_operator.network.audit import AuditLog
     from local_operator.network.credentials.repair import repair_checks
+    from local_operator.network.credentials.sync import sync_checks
     from local_operator.network.identity import identity_path
     from local_operator.network.relay import membership_state
 
@@ -7131,6 +7480,11 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
         # the owner of a dead login is exactly the device that needs the notice when
         # nothing else answers it (``credentials/repair.py`` owns the derivation).
         checks.extend(repair_checks(record, log=repair_log))
+        # THE SYNC SEGMENTS (S3), beside the repair rows and for the same reason:
+        # derived from the ledger document, so with the relay down the owner still
+        # sees which holders have not confirmed the current generation. Read-only
+        # and never dialling — a doctor run must not move the state it reports.
+        checks.extend(sync_checks(record))
         for member in record.active_members():
             if member.device_id == record.self_device_id:
                 continue
@@ -7400,17 +7754,19 @@ def _audit(event: str, **fields: Any) -> None:
 def _guard_credential_subcommand(args: argparse.Namespace) -> int:
     """``lop network credential`` with no verb is a usage error, not a default act.
 
-    Neither verb is safe as a default: ``share`` widens who may spend the operator's
-    account, and ``revoke`` silently cuts a working device off. So the verb is
-    required and the message names both, which is the same rule ``member`` states.
+    No verb is safe as a default: ``share`` widens who may spend the operator's
+    account, ``revoke`` silently cuts a working device off, and ``mark`` changes
+    what every future approval copies. So the verb is required and the message
+    names them, which is the same rule ``member`` states.
     """
     verb = getattr(args, "credential_command", None)
-    if verb in ("share", "revoke"):
+    if verb in ("share", "revoke", "mark"):
         return _cmd_credential(args)
     print(
         "usage: lop network credential share  <provider|mcp:<url>> --with <device> "
         "[--scope session|device]\n"
         "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
+        "       lop network credential mark   <secret> sync|local-only|default\n"
         "       lop network credentials [--json]   # what is shared, and with whom",
         file=sys.stderr,
     )

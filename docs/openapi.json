@@ -3,7 +3,7 @@
   "info": {
     "title": "Local Operator API",
     "description": "REST API interface for Local Operator agent",
-    "version": "0.65.0"
+    "version": "0.68.8"
   },
   "paths": {
     "/v1/capabilities": {
@@ -947,6 +947,17 @@
               "type": "string",
               "title": "Session Id"
             }
+          },
+          {
+            "name": "entry_ts",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Entry Ts"
+            }
           }
         ],
         "responses": {
@@ -1121,6 +1132,17 @@
               "minimum": 1,
               "default": 100,
               "title": "Limit"
+            }
+          },
+          {
+            "name": "entry_ts",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Entry Ts"
             }
           }
         ],
@@ -2139,7 +2161,7 @@
           "Desktop sessions"
         ],
         "summary": "Interrupt",
-        "description": "Stop this session's CURRENT WORK, and leave the session running.\n\nTHE OP THE DESKTOP'S STOP BUTTON AND ESC MEAN, and the bug it fixes is\nthat they meant nothing. The renderer posted ``sessions.command`` with\n``command: \"stop\"``, which is not an ``OWNER_COMMAND``, so this API\nanswered an ``native_action`` PRESENTATION for ``POST /v1/desktop/stop``\nand stopped no turn at all: the transport was fine and the button called\nthe wrong op. Pointing it at ``/stop`` instead would have been worse than\nthe bug \u2014 that route is the KILL SWITCH (deny gates, dispose, release the\nwriter lease, unpublish, exit the runtime), and a control that promises\n\"stop this session's current work\" must not end the session.\n\nTHE RUNG IT REUSES IS THE PHONE RELAY'S. ``abort`` already means exactly\nthis on the control socket \u2014 stop the turn, cancel the children it\nstarted, leave the session and its process alive, and report honestly on\nwhat settled \u2014 so this route adds a way to REACH it from HTTP, not a\nsecond implementation of it. The mapping is one line in\n``AttachedSession.interrupt`` (this route) to ``abort`` (the runtime op),\nand the name deliberately avoids ``/abort``: on this surface ``stop``\nalready means \"end the process\", and a route one letter from it is a trap\nfor the next reader.\n\nNO LADDER. A first press stops the turn and its children; a second press\nis simply a second interrupt, a no-op because nothing is left running. The\nkeyboard's Esc ladder can afford a narrow first press because a second one\nis offered on screen (``DOUBLE_STOP_WINDOW_S``); this surface has no such\noffer and nothing rendering \"press again\", so a ladder here would be a\npress that does nothing once and explains itself nowhere. Backgrounded\n``bash`` jobs are never touched \u2014 ``background=true`` exists so a build\noutlives the turn that started it \u2014 and the receipt names them.\n\n``idle`` IS A SUCCESS, AND IT IS THE ANSWER FOR ANY SESSION WITH NOTHING TO\nSTOP. A cold session is NOT engaged to answer this (an interrupt is not a\nreason to spend a process, which is what ``warm`` is for), and a warm one\nthat is merely sitting between turns is answered without dialling its owner\nat all \u2014 see ``_work_is_running`` for the terms, and note that a parked gate\nWITHOUT a live turn (the orphan card this release also taught ``abort`` to\nsettle) counts as work, because that press really does clear the screen. A\nclient putting an error in front of a press that had nothing to do would be\nreporting the user's own success as a failure, and a client told\n``interrupted`` for a press that stopped nothing would be shown a success\nthat did not happen.\n\n\"NO OWNER\" MEANS ``owner_reachable``, NOT ``is_cold``, and the difference is\nthe whole of review round 1's MAJOR-1: ``is_cold``'s third disjunct is a\nRESYNC state which is true of a connected, SERVING session for the duration\nof a frontend sync plus a history page load, so gating on it answered\n``idle`` for a live streaming turn and stopped nothing \u2014 this PR's own defect\nclass, arriving through its own new door.\n\nRECEIPTED ``retry_safe=True``, and both halves are deliberate. Receipted,\nbecause a retry after a lost response must not fire a second interrupt at a\nturn that has since moved on \u2014 the journal replays the stored answer\nverbatim. ``retry_safe=True``, because unlike ``/stop`` and ``/move`` the\noperation is idempotent: \"make the current turn stop\" creates and destroys\nnothing, and a pending row that never ran is re-executed to the same end.\nThat is also why this route does NOT need ``/stop``'s ``assert_admitting``\ncall before the claim (``desktop_lifecycle.stop``): its receipt is\n``retry_safe=False``, so a claimed-but-unrun row is INDETERMINATE for the\nclient, whereas here a retry is the remedy rather than a hazard.\n\nTHE JOURNAL'S 409 ARM CANNOT FIRE HERE, and that is a property of the body\nrather than an omission (review round 1, MINOR-2). A receipt's fingerprint is\na pure function of its request body, and this body has exactly one field, so\nthe same ``request_id`` can only ever arrive with the same fingerprint \u2014\nwhich replays \u2014 or with a body the closed model refuses, which is a 422\nbefore the journal is reached. ``extra=\"forbid\"`` is what makes the second\ncase a shape error rather than a silently-ignored extra, so nothing is lost\nby naming it plainly here instead of documenting a 409 a caller could never\nprovoke. The journal's own rule is unchanged and tested where it lives\n(``test_receipts_survive_adapter_restart_and_reject_changed_body``).\n\nSTATUS CODES are the shared ladder's, with one shape to state because it\nlooks like a bug: an UNKNOWN session id and a MALFORMED one are both 404.\nThe id validator raises ``KeyError`` for a bad shape, and ``errors()``\nanswers that as \"no such session\" \u2014 deliberately not a 422, which is\nreserved for the BODY's shape (a non-UUID ``request_id``, or any extra\nfield). 401 missing or wrong bearer, 403 a disallowed or browser-originated\nOrigin, 503 a desktop capability that is not configured or an owner that\ncannot be reached (``ConnectionError``/``RuntimeError``/``TimeoutError``).",
+        "description": "Stop this session's CURRENT WORK, and leave the session running.\n\nTHE OP THE DESKTOP'S STOP BUTTON AND ESC MEAN, and the bug it fixes is\nthat they meant nothing. The renderer posted ``sessions.command`` with\n``command: \"stop\"``, which is not an ``OWNER_COMMAND``, so this API\nanswered an ``native_action`` PRESENTATION for ``POST /v1/desktop/stop``\nand stopped no turn at all: the transport was fine and the button called\nthe wrong op. Pointing it at ``/stop`` instead would have been worse than\nthe bug \u2014 that route is the KILL SWITCH (deny gates, dispose, release the\nwriter lease, unpublish, exit the runtime), and a control that promises\n\"stop this session's current work\" must not end the session.\n\nTHE RUNG IT REUSES IS THE PHONE RELAY'S. ``abort`` already means exactly\nthis on the control socket \u2014 stop the turn, cancel the children it\nstarted, leave the session and its process alive, and report honestly on\nwhat settled \u2014 so this route adds a way to REACH it from HTTP, not a\nsecond implementation of it. The mapping is one line in\n``AttachedSession.interrupt`` (this route) to ``abort`` (the runtime op),\nand the name deliberately avoids ``/abort``: on this surface ``stop``\nalready means \"end the process\", and a route one letter from it is a trap\nfor the next reader.\n\nNO LADDER. A first press stops the turn and its children; a second press\nis simply a second interrupt, a no-op because nothing is left running. The\nkeyboard's Esc ladder can afford a narrow first press because a second one\nis offered on screen (``DOUBLE_STOP_WINDOW_S``); this surface has no such\noffer and nothing rendering \"press again\", so a ladder here would be a\npress that does nothing once and explains itself nowhere. Backgrounded\n``bash`` jobs are never touched \u2014 ``background=true`` exists so a build\noutlives the turn that started it \u2014 and the receipt names them.\n\n``idle`` IS A SUCCESS, AND IT IS THE ANSWER FOR ANY SESSION WITH NOTHING TO\nSTOP \u2014 WHEN THE FOLLOWER CAN PROVE IT. A cold session is NOT engaged to\nanswer this (an interrupt is not a reason to spend a process, which is what\n``warm`` is for), and a warm one that is merely sitting between turns is\nanswered without dialling its owner at all \u2014 see ``_work_is_running`` for\nthe terms, and note that a parked gate WITHOUT a live turn (the orphan card\nthis release also taught ``abort`` to settle) counts as work, because that\npress really does clear the screen. A client putting an error in front of a\npress that had nothing to do would be reporting the user's own success as a\nfailure, and a client told ``interrupted`` for a press that stopped nothing\nwould be shown a success that did not happen.\n\nBUT ONLY A VOUCHED ``False`` MAY BE PRESENTED AS ``idle`` \u2014 the rule the\n2026-10-07 incident added. A slow head op parked the owner's op chain\n(``session/runtime/server.py`` chains ops per connection); the follower's\ncanonical re-sync parked behind it; its store froze at the last turn\nboundary while the live turn's deltas buffered; ``_work_is_running`` read\nfalse on every term \u2014 and four stop presses (receipts 3891-3894) were\nanswered ``idle`` with no dial, while the UI painted the live turn and the\npresses achieved nothing. So the shortcut now also requires\n``AttachedSession.canonical_current``: a mirror whose own flags say it is\nmid-resync, owed a canonical re-sync, or recovering from a dropped socket\ncannot speak for the owner, and the press DIALS instead \u2014 the owner's\nreceipt is the answer, and a dial that cannot complete is the ladder's 503,\nnever ``idle``. The recovering half is the same rule one layer out: a\ndropped socket says nothing about the turn (the runtime is usually still\nrunning it), so it must not fold into the cold no-op either.\n\n\"NO OWNER\" MEANS ``owner_reachable``, NOT ``is_cold``, and the difference is\nthe whole of review round 1's MAJOR-1: ``is_cold``'s third disjunct is a\nRESYNC state which is true of a connected, SERVING session for the duration\nof a frontend sync plus a history page load, so gating on it answered\n``idle`` for a live streaming turn and stopped nothing \u2014 this PR's own defect\nclass, arriving through its own new door.\n\nRECEIPTED ``retry_safe=True``, and both halves are deliberate. Receipted,\nbecause a retry after a lost response must not fire a second interrupt at a\nturn that has since moved on \u2014 the journal replays the stored answer\nverbatim. ``retry_safe=True``, because unlike ``/stop`` and ``/move`` the\noperation is idempotent: \"make the current turn stop\" creates and destroys\nnothing, and a pending row that never ran is re-executed to the same end.\nThat is also why this route does NOT need ``/stop``'s ``assert_admitting``\ncall before the claim (``desktop_lifecycle.stop``): its receipt is\n``retry_safe=False``, so a claimed-but-unrun row is INDETERMINATE for the\nclient, whereas here a retry is the remedy rather than a hazard.\n\nTHE JOURNAL'S 409 ARM CANNOT FIRE HERE, and that is a property of the body\nrather than an omission (review round 1, MINOR-2). A receipt's fingerprint is\na pure function of its request body, and this body has exactly one field, so\nthe same ``request_id`` can only ever arrive with the same fingerprint \u2014\nwhich replays \u2014 or with a body the closed model refuses, which is a 422\nbefore the journal is reached. ``extra=\"forbid\"`` is what makes the second\ncase a shape error rather than a silently-ignored extra, so nothing is lost\nby naming it plainly here instead of documenting a 409 a caller could never\nprovoke. The journal's own rule is unchanged and tested where it lives\n(``test_receipts_survive_adapter_restart_and_reject_changed_body``).\n\nSTATUS CODES are the shared ladder's, with one shape to state because it\nlooks like a bug: an UNKNOWN session id and a MALFORMED one are both 404.\nThe id validator raises ``KeyError`` for a bad shape, and ``errors()``\nanswers that as \"no such session\" \u2014 deliberately not a 422, which is\nreserved for the BODY's shape (a non-UUID ``request_id``, or any extra\nfield). 401 missing or wrong bearer, 403 a disallowed or browser-originated\nOrigin, 503 a desktop capability that is not configured or an owner that\ncannot be reached (``ConnectionError``/``RuntimeError``/``TimeoutError``).",
         "operationId": "interrupt_v1_desktop_sessions__session_id__interrupt_post",
         "parameters": [
           {
@@ -2293,6 +2315,17 @@
               "minimum": 0,
               "default": 0,
               "title": "Frontend Replace"
+            }
+          },
+          {
+            "name": "entry_ts",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Entry Ts"
             }
           }
         ],
@@ -10003,6 +10036,12 @@
             "title": "Name",
             "description": "Agent's name"
           },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "The display label (free text, spaces allowed) that listings paint through the shared display rule; 'name' remains the addressing key. Empty derives from the name on the next write.",
+            "default": ""
+          },
           "created_date": {
             "type": "string",
             "format": "date-time",
@@ -10283,6 +10322,18 @@
             "type": "string",
             "title": "Name",
             "description": "Agent's name"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label",
+            "description": "The display label (free text, spaces allowed); 'name' remains the addressing key. Omitted (or '') derives from the name."
           },
           "security_prompt": {
             "anyOf": [
@@ -10757,6 +10808,18 @@
             "title": "Name",
             "description": "Agent's name"
           },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label",
+            "description": "The display label (free text, spaces allowed); 'name' remains the addressing key. Omit to leave it alone; '' resets to the derived default."
+          },
           "security_prompt": {
             "anyOf": [
               {
@@ -11132,12 +11195,65 @@
               }
             ],
             "title": "Decline"
+          },
+          "revise": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revise"
+          },
+          "images": {
+            "items": {
+              "$ref": "#/components/schemas/AnswerImage"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "title": "Images"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "Answer",
         "description": "Answer a gate, or a QUEUED ask (design ``docs/design/ask-nonblocking.md`` \u00a74).\n\nThree shapes share one body, which is why the fields are all optional and the\n``one_answer`` validator is what decides which one was sent:\n\n* ``{epoch, request_id, approved}`` \u2014 an approval;\n* ``{epoch, request_id, value, question_index}`` \u2014 the live single-slot ask\n  picker (today's shape, unchanged);\n* ``{ask_id, answers}`` or ``{ask_id, decline}`` \u2014 a QUEUED ask, addressed by\n  its own id. ``epoch`` is IGNORED for this shape and it is not sloppiness:\n  an ask outlives the owner that queued it, so requiring an epoch would\n  refuse exactly the case the feature exists for \u2014 a cold session whose asks\n  are still open. The single-winner rule that replaces the epoch check lives\n  on the ask log (the first ``answered`` event wins), so a stale screen\n  cannot settle a question twice."
+      },
+      "AnswerImage": {
+        "properties": {
+          "data_b64": {
+            "type": "string",
+            "maxLength": 1000000,
+            "title": "Data B64"
+          },
+          "mime_type": {
+            "type": "string",
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "image/gif",
+              "image/webp"
+            ],
+            "title": "Mime Type"
+          },
+          "question_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Question Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "data_b64",
+          "mime_type",
+          "question_id"
+        ],
+        "title": "AnswerImage",
+        "description": "One image on a QUEUED-ASK answer, tagged with the question it answers.\n\nA flat list tagged by ``question_id`` rather than a nested ``{qid: [Image]}``\nmap, deliberately: the HTTP body IS the attach-socket frame (one shape end to\nend), and ``attach_client.fit_request_frame`` refits ONLY a top-level\n``frame[\"images\"]`` list when a line exceeds the socket's 1 MiB read limit. A\nnested map would need a second refit path; the flat list reuses the existing\none unchanged (and ``_refit_images`` keeps extra keys, so ``question_id``\nsurvives the re-encode).\n\n``extra=\"forbid\"`` is inherited from :class:`Input` \u2014 an unknown key on an\nimage is a 422, not a silently ignored field."
       },
       "AnswerReceipt": {
         "properties": {
@@ -11212,6 +11328,18 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Requested By"
+          },
+          "withdrawn_by": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withdrawn By"
           },
           "expires_at": {
             "anyOf": [
@@ -14511,7 +14639,7 @@
         "properties": {
           "entries": {
             "items": {
-              "$ref": "#/components/schemas/HistoryEntry"
+              "$ref": "#/components/schemas/TranscriptEntryEnvelope"
             },
             "type": "array",
             "title": "Entries"
@@ -14542,7 +14670,7 @@
           "state"
         ],
         "title": "ChildTranscriptPage",
-        "description": "One page of a CHILD's transcript, in the parent's own envelope.\n\nDerived by the backend and by nothing else (design \u00a7 9.1): the two stores\nthat know a subagent exists are not witnesses to whether it has written,\nso a renderer inferring ``state`` from a roster row's status would report a\nrunning child as readable the moment it is registered."
+        "description": "One page of a CHILD's transcript, in the parent's own envelope.\n\nDerived by the backend and by nothing else (design \u00a7 9.1): the two stores\nthat know a subagent exists are not witnesses to whether it has written,\nso a renderer inferring ``state`` from a roster row's status would report a\nrunning child as readable the moment it is registered.\n\nDELIBERATELY NOT a subclass of :class:`HistoryPage`, one level up from\n:class:`HistoryEntry`'s own note and for the same reason: this page's\n``entries`` are the RAW journal envelope the child route serves verbatim, so\ninheriting the parent's row type would either 500 the route or (worse)\nmaterialise a classification onto rows nobody classified."
       },
       "CodeExecutionResult": {
         "properties": {
@@ -15245,6 +15373,11 @@
           },
           "model": {
             "$ref": "#/components/schemas/CreatedSessionModel"
+          },
+          "unattended_notice": {
+            "type": "string",
+            "title": "Unattended Notice",
+            "default": ""
           }
         },
         "type": "object",
@@ -15525,6 +15658,13 @@
             "type": "boolean",
             "title": "Audit Available",
             "default": false
+          },
+          "entry_times": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Entry Times"
           }
         },
         "additionalProperties": false,
@@ -15855,9 +15995,24 @@
           },
           "boundary": {
             "type": "string",
-            "const": "next_safe",
+            "enum": [
+              "next_safe",
+              "at_entry"
+            ],
             "title": "Boundary",
             "default": "next_safe"
+          },
+          "entry_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Id"
           }
         },
         "additionalProperties": false,
@@ -15865,7 +16020,8 @@
         "required": [
           "request_id"
         ],
-        "title": "Fork"
+        "title": "Fork",
+        "description": "Where a fork's copy stops, and the optional first turn it carries.\n\n``next_safe`` is the historical form: the child takes the whole committed\nconversation and the runtime waits for a turn boundary if one is running.\n``at_entry`` names a transcript entry (a message the client is showing) and\nthe child stops there \u2014 the committed, paired prefix at-or-before it, with\nevery later conversation row absent. A named point is already committed, so\nthat form never waits for a boundary.\n\nThe two fields are validated together so an ``at_entry`` request can never\narrive without its target: without that, ``at_entry`` would silently fall\nback to a whole-conversation fork, the one failure shape that hands the\ncaller MORE history than it asked for. A blank (or whitespace-only) id is\ntreated exactly like an absent one, since it names nothing either."
       },
       "FrontendModelSpec": {
         "properties": {
@@ -16172,7 +16328,14 @@
             "title": "Id"
           },
           "ts": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Ts"
           },
           "type": {
@@ -16183,6 +16346,15 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Payload"
+          },
+          "ts_source": {
+            "type": "string",
+            "enum": [
+              "entry",
+              "unstated",
+              "served"
+            ],
+            "title": "Ts Source"
           }
         },
         "type": "object",
@@ -16190,9 +16362,11 @@
           "id",
           "ts",
           "type",
-          "payload"
+          "payload",
+          "ts_source"
         ],
-        "title": "HistoryEntry"
+        "title": "HistoryEntry",
+        "description": "A desktop history row: the envelope's four keys plus its stamp's provenance.\n\nDELIBERATELY NOT a subclass of :class:`TranscriptEntryEnvelope`, on the rule\n:class:`MessageAdmission` states for its own fields: ``ts`` widens to ``None``\nhere, and pyright's ``reportIncompatibleVariableOverride`` refuses a field\ntype that changes in a subclass \u2014 correctly, because an inherited field would\nadvertise a non-null instant on the one surface that deliberately admits it\nmay not have one. A field type is the API contract, so this one is stated in\nfull rather than narrowed."
       },
       "HistoryPage": {
         "properties": {
@@ -16277,8 +16451,8 @@
               {
                 "type": "string",
                 "enum": [
-                  "remote",
-                  "local"
+                  "local",
+                  "remote"
                 ]
               },
               {
@@ -16471,6 +16645,12 @@
             "type": "string",
             "title": "Name",
             "description": "Agent's name"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "The display label (free text, spaces allowed) that listings paint through the shared display rule; 'name' remains the addressing key. Empty derives from the name on the next write.",
+            "default": ""
           },
           "created_date": {
             "type": "string",
@@ -18950,6 +19130,24 @@
               }
             ],
             "title": "Answered At"
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments"
           }
         },
         "additionalProperties": true,
@@ -19229,6 +19427,17 @@
               }
             ],
             "title": "Action Class"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
           }
         },
         "additionalProperties": false,
@@ -19337,6 +19546,17 @@
               }
             ],
             "title": "Action Class"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
           }
         },
         "additionalProperties": false,
@@ -21038,6 +21258,17 @@
             ],
             "title": "Subagents Queued"
           },
+          "last_user_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last User At"
+          },
           "opened_by": {
             "anyOf": [
               {
@@ -22076,6 +22307,35 @@
         ],
         "title": "ToolCall",
         "description": "One requested tool invocation as emitted by the model."
+      },
+      "TranscriptEntryEnvelope": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "ts": {
+            "type": "number",
+            "title": "Ts"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "type",
+          "payload"
+        ],
+        "title": "TranscriptEntryEnvelope"
       },
       "TransferPhase": {
         "properties": {

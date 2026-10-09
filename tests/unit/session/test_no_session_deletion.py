@@ -1127,6 +1127,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "that same temp FILE, only while the replace above is failing",
     ),
+    # The relay transfer's receipt store (`mobile/transfer_receipts.py`): one JSON
+    # store at a fixed basename directly under the config root, beside
+    # mobile-seen.json and the push registries — machine state about moves, kept
+    # OUTSIDE `sessions/`. Its ONE construction site passes `config_dir()`
+    # (`mobile/daemon.py`), so no session id and no caller input can name a path
+    # under `sessions/`; the unlink runs only on `_write`'s own error path,
+    # clearing the mkstemp temp this call JUST created.
+    (
+        "local_operator/mobile/transfer_receipts.py::TransferReceipts._write",
+        "os.replace",
+        "temp FILE -> <config_dir>/mobile-transfer-receipts.json; both names are "
+        "config-root-derived with a fixed basename",
+    ),
+    (
+        "local_operator/mobile/transfer_receipts.py::TransferReceipts._write",
+        "os.unlink",
+        "that same temp FILE, only while the replace above is failing",
+    ),
     (
         "local_operator/multiplexer/markers.py::_FileBackend.publish",
         "os.replace",
@@ -1806,6 +1824,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/config_watch.py::ConfigWatcher.subscribe.unsubscribe",
         "<path>.remove",
         "list.remove(listener)",
+    ),
+    (
+        # The startup notice queue's display half (#2060):
+        # ``clear_pending_seed_notices`` removes the lines it just DISPLAYED
+        # from a ``list[str]`` of queued message strings — the receiver is a
+        # container of notices, never a filesystem path. The file the queue
+        # lives in (``<config_dir>/.seed-notices.json``) is written through
+        # ordinary text I/O as a fixed basename beside ``sessions/``.
+        "local_operator/agent_profiles.py::clear_pending_seed_notices",
+        "<path>.remove",
+        "list.remove(displayed notice line); the receiver is a list[str], never a filesystem path",
     ),
     (
         "local_operator/evaluation/adapters/discovery.py::_verified_imports",

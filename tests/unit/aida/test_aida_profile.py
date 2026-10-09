@@ -153,3 +153,47 @@ def test_the_cap_is_the_loaders_own_budget() -> None:
     from local_operator.session_factory import MAX_USER_INSTRUCTIONS_CHARS
 
     assert profile.MAX_FILE_CHARS == MAX_USER_INSTRUCTIONS_CHARS
+
+
+# --------------------------------------------------------------------------- #
+# The Radient sign-in's identity (audit A5/A6)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_radient_login_writes_name_and_email_once(isolated_root: Path) -> None:
+    """Idempotent by replacement: a re-login with the same identity writes
+    nothing; a changed name replaces its own line; her notes stay put."""
+    assert (
+        profile.record_profile_note("Prefers short answers", config_dir=isolated_root) == "recorded"
+    )
+    credential = {"name": "Jane Doe", "email": "jane@x.com", "type": "oauth"}
+    assert profile.record_radient_login(credential, config_dir=isolated_root) == "recorded"
+    first = _text(isolated_root)
+    assert "- Name: Jane Doe (Radient account)" in first
+    assert "- Email: jane@x.com (Radient account)" in first
+
+    assert profile.record_radient_login(credential, config_dir=isolated_root) == "duplicate"
+    assert _text(isolated_root) == first
+
+    renamed = {"name": "Jane Q Doe", "email": "jane@x.com"}
+    assert profile.record_radient_login(renamed, config_dir=isolated_root) == "recorded"
+    text = _text(isolated_root)
+    assert text.count("- Name:") == 1 and "Jane Q Doe" in text
+    assert "- Prefers short answers" in text
+    # The identity sits FIRST under the heading: a stable prefix position.
+    body = text.split(profile.SECTION_HEADING, 1)[1].lstrip("\n").splitlines()
+    assert body[0].startswith("- Name: Jane Q Doe")
+
+
+def test_a_login_without_claims_writes_nothing(isolated_root: Path) -> None:
+    assert profile.record_radient_login({"type": "oauth"}, config_dir=isolated_root) == "empty"
+    assert not (isolated_root / "system_prompt.md").exists()
+
+
+def test_a_hand_written_name_line_is_never_touched(isolated_root: Path) -> None:
+    """Only lines carrying the sign-in's tag are the sign-in's to replace."""
+    profile.record_profile_note("Name: Jay (prefers Jay)", config_dir=isolated_root)
+    profile.record_radient_login({"name": "Jane Doe", "email": ""}, config_dir=isolated_root)
+    text = _text(isolated_root)
+    assert "- Name: Jay (prefers Jay)" in text
+    assert "- Name: Jane Doe (Radient account)" in text

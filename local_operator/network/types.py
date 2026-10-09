@@ -226,10 +226,17 @@ def capabilities_for_role(role: str) -> frozenset[str]:
 #: ``None``; see ``session/runtime/types.py``): ``lop sessions`` prints the value
 #: raw in its NEEDS column and the sidebar maps it to "Approval needed"/"Answer
 #: needed", so a second spelling for one fact shows up as a column nobody can
-#: read. The federated row carries the SAME strings (§9.2), and the stored half
-#: of a catalogue derives its claim from the attention store's ``unseen`` flag —
-#: an unread completion IS the operator being awaited, and it is not an
-#: approval, so that half publishes :data:`NEEDS_ASK`.
+#: read. The federated row carries the SAME strings (§9.2) — and from LIVE
+#: records only, the same source the local row reads. The stored half of a
+#: catalogue carries NO claim: a stored session has no runtime and no gate to
+#: answer, and an earlier cut that synthesised ``NEEDS_ASK`` from the owner's
+#: ``unseen`` flag painted a permanent "needs you" into every sidebar that no
+#: surface could clear (the row carries no completion token, so no receipt can
+#: name the completion — the 2026-10-07 correction). The unread fact lives in
+#: the OWNER's attention store, where its own surfaces — and any viewer that
+#: opens the conversation — can see and clear it. :func:`row_needs_claim` is
+#: the one reader that enforces the stored half's no-claim rule on the
+#: consuming side, so rows from pre-correction producers read identically.
 NEEDS_APPROVAL = "approval"
 NEEDS_ASK = "ask"
 
@@ -256,6 +263,51 @@ def normalise_pending(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     return value.strip() or None
+
+
+def row_needs_claim(*, state: object, pending: object) -> str | None:
+    """The ONE reader of a ROW's needs claim: never a claim on a STORED row.
+
+    ``pending`` answers "what is a person being waited on" — a parked gate on a
+    runtime that can be answered (``approval``/``ask``) — and a stored session
+    has NO runtime, so a claim on its row names a waiting that cannot be
+    answered and a mark nothing can clear: the row carries no completion token,
+    so no receipt can name the completion behind it, and it is delivered by
+    every federated listing to every sidebar. A producer that predates the
+    2026-10-07 correction still mints such claims (an ``"ask"`` synthesised
+    from the owner's ``unseen`` flag, or the legacy bool that preceded it);
+    they are dropped HERE, at the row boundary, so a mixed-version fleet paints
+    one row one way — the rule is the reader's, not each renderer's.
+
+    ``state`` is the row's own state word, compared against the catalogue's
+    ``stored`` token — the same token ``session_state_words`` renders as "not
+    running" — rather than inferred from an absent field: a live row's state
+    is a runtime word (``live``/``wedged``/...), and a row that carries
+    neither state nor pending is "no claim" either way.
+    """
+    if str(state or "").strip() == "stored":
+        return None
+    return normalise_pending(pending)
+
+
+def row_without_stored_claims(row: dict[str, Any]) -> dict[str, Any]:
+    """The row a MACHINE payload may carry: ``row_needs_claim`` applied to a dict.
+
+    The text renderers refuse a stored row's claim per render; a consumer
+    reading a payload dict verbatim would not, so the sessions tool's
+    ``details`` and the network CLI's ``--json`` route their rows through here
+    rather than each re-deriving the rule (agent review round 1, F1). The
+    original dict is returned unchanged when its claim is already clean — the
+    common path allocates nothing — and a legacy spelling is REWRITTEN to the
+    canonical one, so a consumer never has to normalise a claim it reads.
+    """
+    raw = row.get("pending")
+    needs = row_needs_claim(state=row.get("state"), pending=raw)
+    if raw == needs:
+        return row
+    fixed = dict(row)
+    fixed["pending"] = needs
+    return fixed
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +345,17 @@ NET_OPS: tuple[str, ...] = (
     "net_session_create",
     "net_session_engage",
     "net_session_stop",
+    # THE OWNER'S OWN STORED JOURNAL, read over the relay (mesh-cold-read-
+    # stored-history.md, slice D5-core). Its own name rather than a phase of
+    # ``net_session_engage`` because it starts NOTHING on the peer: it is the
+    # read a cold session's viewer used to answer as an empty page, served from
+    # the owner's own stored session journal under the same semantics the
+    # owner's own ``/history`` uses. Capability ``view``, the same row
+    # ``net_session_engage`` and ``net_sync`` carry — the act of opening a
+    # conversation is a read — and its frame names a ``session_id``, so the
+    # authoriser's session-scope rule decides ownership at the chokepoint: a
+    # session this device does not hold is a REFUSAL, never an empty page.
+    "net_session_history",
     # AGENT AND TEAM DEFINITIONS (definitions.py). A peer-scope op of its own
     # rather than part of a session op: a definition is install-wide
     # configuration with no owner device, and a create that named one had
@@ -367,6 +430,11 @@ LOCAL_OPS: tuple[str, ...] = (
     "peer_session_create",
     "peer_session_engage",
     "peer_session_stop",
+    # The client half of ``net_session_history`` (same boundary rule as the four
+    # above): a viewer asking ITS OWN relay to fetch a page of a peer's stored
+    # journal. A local name, so it may never appear in ``OP_CAPABILITY`` — the
+    # peer-scope half is the ``net_session_history`` row.
+    "peer_session_history",
     # The readiness report (readiness.py): a VIEWER asks its own relay whether
     # one peer (or every peer) can complete work offloaded to it — the link's
     # own reachability, then the peer's install facts. A local op by the
@@ -537,6 +605,13 @@ OP_CAPABILITY: dict[str, str | None] = {
     "net_session_create": "prompt",
     "net_session_engage": "view",
     "net_session_stop": "stop",
+    # ``view``, and the conservative end of the choice for the same reason the
+    # three above it record theirs: a member that may WATCH a session here may
+    # read the bytes its runtime would have served anyway. It adds no new
+    # authority — the same rows already cross the wire whenever a runtime is warm
+    # — and it writes nothing on either device, so ``prompt`` (which would let a
+    # viewer start a turn) is broader than the act needs.
+    "net_session_history": "view",
     # ``admin``, and the conservative choice is deliberate. Installing a
     # definition writes DURABLE, install-wide state on the receiving device and
     # changes what every FUTURE session there resolves by name — which is

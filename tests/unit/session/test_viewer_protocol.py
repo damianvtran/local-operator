@@ -1311,9 +1311,23 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # (``Session.respond_ask``) and has no wire to send on. Declared in
     # ``ViewerSessionProtocol`` in the same commit, which is what the
     # undeclared-member check above requires.
-    assert len(viewer_only) == 71, (
+    # 71 → 72 is the DESK READER's rung (``docs/design/mesh-wire-honesty.md``
+    # §S1). ``history_entry_times`` is viewer-only because the join it exposes
+    # exists only on the wire side of a display window: the owner SHIPS it, and a
+    # reader must have an attached facade to have received one. An owner
+    # ``Session`` reads its own journal directly and needs no join — every ``ts``
+    # it serves is already the entry time. Declared in
+    # ``ViewerSessionProtocol`` in the same commit.
+    # 72 → 73 is the STALE-MIRROR rung (the 2026-10-07 interrupt incident):
+    # ``canonical_current`` is viewer-only because it describes a MIRROR and a
+    # dial — the facts a facade holds about an owner that executes turns
+    # elsewhere. An owner ``Session`` is the source of truth rather than a copy
+    # of it and has no dial, so the state does not exist for it. Declared in
+    # ``ViewerSessionProtocol`` in the same commit, which is what the
+    # undeclared-member check above requires.
+    assert len(viewer_only) == 73, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 71, and the aggregate floor is set at 40 against that number. A "
+        "says 73, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

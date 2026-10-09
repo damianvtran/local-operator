@@ -1253,6 +1253,17 @@ class PendingAskState(BaseModel):
     answers: dict[str, list[str]] | None = None
     answered_by: dict[str, Any] | None = None
     answered_at: int | None = None
+    #: REFS to the images attached to the answer, ``{question_id: [{"attachment":
+    #: digest, "mime_type", "bytes"}]}`` -- never bytes (the log is one-line
+    #: appends and this row rides every frame). ``None`` for every ask that never
+    #: carried one. That is the SAME convention as ``answers``/``answered_by``/
+    #: ``answered_at`` just above: this model serialises its ``None`` fields, so a
+    #: text-only row on the attach snapshot/delta carries ``"attachments": null``
+    #: (an added key, NOT a byte-identical row -- the ``pending_row`` projection and
+    #: the phone's ``PendingAskWire`` DO omit it when there is none). It is harmless
+    #: to a reader built before the field: the UI row type is open-ended and an
+    #: unknown key is ignored (``extra="allow"``).
+    attachments: dict[str, list[dict[str, Any]]] | None = None
 
 
 class _FrozenSequence(tuple[Any, ...]):
@@ -2808,6 +2819,44 @@ def _freeze_frontend_usage(value: FrontendUsage) -> _FrozenFrontendUsage:
     return frozen.model_copy(update=updates)
 
 
+def effective_identity_for(
+    *, active_agent: str, team: str, manager: str = "", team_in_force: bool | None = None
+) -> dict[str, str]:
+    """WHO is answering this session, from its two slots — THE rule (#2014).
+
+    One implementation for every producer of the field: the live session
+    (:attr:`Session.effective_identity`, ``local_operator/session/session.py``)
+    and the OWNERLESS paths that have no runtime to ask — ``AttachedSession``'s
+    cold constructors and ``cold_model.synthesise_cold_state``. Two copies of
+    this rule is the disease issue #2014 cures, and a cold pane answering
+    differently from the warm session it is about to attach to is the same
+    confusion one frame later.
+
+    ``team_in_force`` is the AUTHORITY, and it is a bool rather than the name on
+    purpose (design round 1, D7): a team whose name reads ``""`` — a reduced
+    double, a malformed registry row — is still a team in force, and deciding on
+    the name would publish it as a plain profile attach while ``/agent`` is
+    still refused. ``None`` means "the caller only has the name" and falls back
+    to ``bool(team)``; the live session and the cold restore both pass the bool.
+    ``team`` is the name of that team in force, never merely a name on disk: a
+    carried unresolved team name is deliberately not passed, because it is not a
+    team anything is speaking as (the sentinel that means "a host older than
+    this field" is the empty dict, which no producer here emits).
+
+    ``manager`` is the team's manager role, and may be empty — a nameless team,
+    or a cold open whose registry lookup was best-effort — in which case the
+    TEAM names itself as the speaker rather than nothing naming it.
+
+    ``role_of_speaker`` is ``"manager"`` exactly when a team is in force, so it
+    is the key a client reads to tell a team's manager from an attached profile;
+    nothing attached is the explicit empty statement.
+    """
+    in_force = bool(team) if team_in_force is None else team_in_force
+    if in_force:
+        return {"speaker": manager or team, "team": team, "role_of_speaker": "manager"}
+    return {"speaker": active_agent, "team": "", "role_of_speaker": ""}
+
+
 class FrontendSessionState(BaseModel):
     """Versioned JSON-safe source of truth for one standard terminal UI."""
 
@@ -2856,6 +2905,29 @@ class FrontendSessionState(BaseModel):
     goal_history_truncated: bool = False
     active_agent: str = ""
     active_team: str = ""
+    #: WHO is answering, as ONE statement (issue #2014):
+    #: ``{"speaker", "team", "role_of_speaker"}``. The two fields above are
+    #: the state a client can see; this is the rule applied to it, produced by
+    #: ``Session.effective_identity`` so a surface can paint "who you are
+    #: talking to" without re-deriving that an attached team outranks an
+    #: attached profile. A dict rather than three scalars because the three
+    #: halves are one fact and a client should not be able to see two of them
+    #: disagree; ``{}`` means a host that predates the field (the pre-#2014
+    #: mixed state), never "nobody".
+    #:
+    #: Bounded by its own shape: three short identifiers, replaced (never
+    #: appended) on every refresh, so it cannot grow with conversation length
+    #: or child count — the classification this frame guard asks for.
+    #:
+    #: ONE CAVEAT a client must read rather than infer (design round 1, D9): the
+    #: session CATALOGUE row (``cold_model.synthesise_cold_state``) publishes the
+    #: empty statement deliberately, because that frame reports no attachment at
+    #: all — it sets neither ``active_team`` nor ``active_agent``. A client that
+    #: needs the stored binding before a runtime engages reads the row's own
+    #: ``team``/``agent`` pair, then switches to this field on the first frame
+    #: from a session (attached or cold-pane), which always carries all three
+    #: keys.
+    effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None
     last_usage: FrontendUsage | None = None
@@ -6466,6 +6538,11 @@ class FrontendStateStore:
             goal_history=getattr(session, "goal_history", []),
             active_agent=str(getattr(session, "active_agent", "") or ""),
             active_team=str(getattr(session, "active_team_name", "") or ""),
+            # The rule, applied HERE rather than left to the client (issue
+            # #2014). A reduced facade (an embedded SDK or a test double) has
+            # no ``effective_identity``; the empty dict is the documented
+            # "host predates the field" value, not a claim that nobody speaks.
+            effective_identity=dict(getattr(session, "effective_identity", None) or {}),
             selected_model=(
                 selected.model_dump(mode="json") if isinstance(selected, ModelSpec) else selected
             ),
@@ -7883,7 +7960,15 @@ def _validate_state_field(key: str, value: Any) -> Any:
     if adapter is None:
         # The key space is the model's finite field set, so this cache is
         # intrinsically bounded and avoids rebuilding pydantic schemas per delta.
-        adapter = _STATE_FIELD_ADAPTERS[key] = TypeAdapter(field.annotation)
+        annotation = field.annotation
+        if annotation is None:
+            # ``model_fields`` entries are built from class annotations, so a
+            # field reaching here always carries one; the check narrows
+            # ``FieldInfo.annotation``'s ``TypeForm[Any] | None`` (pydantic
+            # 2.14) for the checker and refuses a field without one loudly,
+            # rather than caching a NoneType adapter that rejects every value.
+            raise ValueError(f"frontend state field has no annotation: {key}")
+        adapter = _STATE_FIELD_ADAPTERS[key] = TypeAdapter(annotation)
     return adapter.validate_python(value)
 
 

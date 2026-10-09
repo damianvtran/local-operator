@@ -935,8 +935,16 @@ set reads and writes `~/.local-operator/cache` while believing it is isolated.
 agree:
 
 ```sh
-env HOME=/tmp/iso-run LOCAL_OPERATOR_CONFIG_DIR=/tmp/iso-run/.local-operator ...
+cd /tmp/iso-run && env HOME=/tmp/iso-run LOCAL_OPERATOR_CONFIG_DIR=/tmp/iso-run/.local-operator ...
 ```
+
+**And `cd` into the isolated root before running `lop`.** The CWD is a config
+source too: `lop` reads a project-scoped `.local-operator/mcp.json` from the
+directory it starts in, so a run started with a cwd of `~` reads
+`~/.local-operator/mcp.json` AS PROJECT CONFIG and connects the operator's live
+MCP servers — with `HOME` and `LOCAL_OPERATOR_CONFIG_DIR` both redirected
+(measured in the first-run onboarding audit, 2026-10-08). A cwd inside the
+isolated root has no such file.
 
 **And strip what a `lop` parent exports, because two of its prefixes are read by
 the child product rather than only by a terminal.** `CMUX_*` is the one already
@@ -2476,6 +2484,37 @@ swept a peer's in-progress `tests/unit/session/test_remote_move.py` into a
 that makes that test type-check landed 3m24s later in the peer's own commit
 `06ee21d9e`. The PR's head was red for a defect its own intended change did
 not contain.
+
+**The stash list is repo-global, and `apply` lands whatever it resolves.** The
+before-frame note above is about MAKING a stash in a shared checkout; this is
+about USING one. `refs/stash` lives in the shared `.git`, so every worktree of
+this repository has ONE list — two worktrees answer `git stash list` with the
+same entries — and bare `git stash apply`/`pop` resolves `stash@{0}`: the
+newest stash of the WHOLE repository, made by anyone, on any branch. Entries
+persist until someone drops them, and any push renumbers every `stash@{n}`,
+which is why the stash-commit id is the stable name. Each entry's subject
+names its origin (`On <branch>: <message>` for `-m`, `WIP on <branch>: …`
+otherwise), so read it against your own HEAD before applying; prefer a stash
+you just made in THIS worktree, or the entry by its stash-commit id — and
+`git stash show -p` reads one without landing it (`--include-untracked` for
+`-u` stashes).
+
+A foreign entry that applies CLEANLY is the silent case: nothing in the output
+says the changes are not yours. If it conflicts, you get stage 1/2/3 index
+entries with `AUTO_MERGE` set and none of `MERGE_HEAD`, `CHERRY_PICK_HEAD` or
+`REBASE_HEAD` — stage 1/2/3 plus `AUTO_MERGE` alone is what a conflicted
+cherry-pick or rebase shows too; those heads are the difference, and their
+absence here is the tell, with the entry still listed. On it, stop and
+restore: `git reset --hard HEAD` (plus `git clean -fd` for files the entry
+created) returns the pre-apply tree, but only where you are alone in the
+worktree — this is the same whole-file blast radius the rule below is about.
+Bank any of your OWN uncommitted work first
+(`git diff > <scratch>/mine.patch`), because the reset cannot tell yours from
+the entry's; in a shared checkout,
+recover path by path with the peers. The foreign entry itself is never
+touched. Reported 2026-10-07: an apply in one feature worktree staged five
+files from a stash made weeks earlier on another branch (the patch was banked
+elsewhere, so nothing was lost — the tree was wrong).
 
 **The undo for a mistaken edit is a reverse edit of your own hunk, never a
 whole-file operation.** Everything above is written against a deliberate act —

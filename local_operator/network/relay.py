@@ -86,6 +86,7 @@ from local_operator.network import projection, store, wire
 from local_operator.network.audit import AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.credentials.repair import repair_checks
+from local_operator.network.credentials.sync import sync_checks
 from local_operator.network.handshake import (
     HANDSHAKE_TIMEOUT_S,
     MAX_DECLARED_ENDPOINTS,
@@ -123,7 +124,6 @@ from local_operator.network.invite import release
 from local_operator.network.types import (
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
-    NEEDS_ASK,
     NET_PAIR_OPS,
     Granted,
     LinkContext,
@@ -292,6 +292,33 @@ CLOSE_FLUSH_S = 1.0
 #: link ``stop`` had already snapshotted, and nothing ever closed it. A bare ``0.05``
 #: there reads like the deadline that made the shutdown correct; it never was.
 STOP_BYE_SETTLE_S = 0.05
+
+#: How long :meth:`RelayServer.stop` waits for the page-loop thread to close its
+#: loop before returning (agent review & QA round 2, F1/Q2-1).
+#:
+#: THE JOIN IS A BOUND, NOT A GUARANTEE, and that is worth stating: the thread is
+#: a daemon that closes its own loop whenever ``run_forever`` returns (see
+#: ``RelayServer._page_loop_main``), so a stop that could not wait still leaves
+#: nothing corrupt behind — it would only report shutdown before the close
+#: landed. What the bound buys is determinism in the common case: the close is
+#: done by the time ``stop`` returns, which is what a caller tearing a relay down
+#: and immediately counting fds is entitled to assume. Generous on purpose, since
+#: a page read is milliseconds unless the loop is already wedged.
+#:
+#: IT NOW ALSO BOUNDS THE TEARDOWN'S OWN WORK, by ordering rather than by
+#: arithmetic (M-R-3, agent review round 1). ``_page_loop_main`` cancels the
+#: pending tasks and drains the ready queue BEFORE it closes, so if that work did
+#: not settle then the close has not happened either, and this join is what gives
+#: up: the determinism above is conditional on the collect settling, exactly as it
+#: was already conditional on ``run_forever`` returning. The collect is a cancel
+#: plus one drain (``run_until_complete(sleep(0))`` — three loop iterations, not
+#: one, measured on 3.12.13), which settles in microseconds for the only two
+#: tasks this loop ever carries (a stored-page decode and its shield); a
+#: cancellation handler that blocked would instead cost a lingering loop and its
+#: descriptors for that generation — the fd leak F1/Q2-1 closed — but never a
+#: ``stop`` that fails to return, which is why this is stated rather than given a
+#: second bound of its own.
+PAGE_LOOP_STOP_JOIN_S = 5.0
 
 # ---------------------------------------------------------------------------
 # Slow ops: off-reader dispatch (mesh build plan §0 finding 4)
@@ -1772,6 +1799,26 @@ def capability_change_event(record: NetworkRecord, change: CapabilityChange) -> 
     )
 
 
+def rotation_lock_refusal(record: NetworkRecord, *, now: float | None = None) -> None:
+    """Refuse a rotation the lock covers, in the ONE sentence both readers use.
+
+    TWO READERS, which is why this is a function rather than an inline check:
+    ``rotate_epoch`` itself, and the member-removal handler's precheck (review
+    round 3's QA observation — the ending exchange and the removal must be one
+    unit of decision, so a refusal must fire BEFORE the endings run; measured:
+    a lock-refused ``member rm`` wiped the member's copies while the refusal
+    said nothing about them). Factored the instant it had a second caller, so
+    the sentence cannot drift between the two.
+    """
+    moment = time.time() if now is None else now
+    if record.rotation_lock_until > moment:
+        raise MeshRefusal(
+            "rotation_in_progress",
+            f"a rotation of {record.name} is already in progress; wait "
+            f"{int(record.rotation_lock_until - moment)} s and try again",
+        )
+
+
 def rotate_epoch(
     record: NetworkRecord,
     state: SecretState,
@@ -1799,12 +1846,7 @@ def rotate_epoch(
     from secrets import token_bytes
 
     moment = time.time() if now is None else now
-    if record.rotation_lock_until > moment:
-        raise MeshRefusal(
-            "rotation_in_progress",
-            f"a rotation of {record.name} is already in progress; wait "
-            f"{int(record.rotation_lock_until - moment)}s and try again",
-        )
+    rotation_lock_refusal(record, now=moment)
     previous_epoch = record.epoch
     record.epoch = record.epoch + 1
     state.rotate(wire.b64u(token_bytes(32)), record.epoch)
@@ -2933,6 +2975,176 @@ def stream_close_machine_cause(cause: str) -> str:
 #: and shorter than any front end's patience with a "starting" row.
 ENGAGE_DEADLINE_S = 60.0
 
+#: The page bounds ``net_session_history`` accepts, and they are the DESKTOP
+#: ROUTE'S OWN (``DESKTOP_API.md``: ``GET .../{id}/history`` takes ``limit``
+#: 1..500). Declared here rather than inherited from the route because this frame
+#: arrives from a granted member rather than from the route's FastAPI validator,
+#: and a second, larger bound on the peer path would be a way to ask one device
+#: for a page no surface on it could request.
+SESSION_HISTORY_MIN_LIMIT = 1
+SESSION_HISTORY_MAX_LIMIT = 500
+SESSION_HISTORY_DEFAULT_LIMIT = 100
+
+#: The ENCODED ceiling for ONE ``net_session_history`` reply, and the reason this
+#: op bounds its own by SIZE instead of trusting the link to (agent review round 1,
+#: R1-1). The reply travels as one link record, whose plaintext ceiling is
+#: ``wire.MAX_RECORD_BYTES`` — and ``wire.LinkCrypto.seal`` RAISES
+#: ``wire.LinkCryptoError`` for a larger record, which ``PeerLink._write_loop``
+#: answers by closing the WHOLE link. So an
+#: oversized page was not "refused by the link": it killed the mesh to that peer
+#: (every other op, stream and session on the link with it) and told the reader
+#: nothing, because the hop then expired byte-identically to an unreachable relay.
+#: The handler instead measures the frame it is about to return and serves as many
+#: of the requested rows as fit — ``fit_session_history_reply`` below.
+#:
+#: MEASURED WITH THE ENCODER THAT APPLIES THE BOUND (``session_history_reply_bytes``
+#: uses the same compact JSON, UTF-8), so this is the number ``seal`` checks rather
+#: than an estimate of it; the margin covers the ack frame around ``detail`` and any
+#: future key added to it, and is deliberately far larger than those cost today.
+SESSION_HISTORY_REPLY_MARGIN_BYTES = 64 * 1024
+SESSION_HISTORY_REPLY_BUDGET_BYTES = wire.MAX_RECORD_BYTES - SESSION_HISTORY_REPLY_MARGIN_BYTES
+
+#: The longest a relay's reader thread waits for its OWN page loop. Deliberately
+#: not a service-level bound — a page read is milliseconds, and the VIEWER's own
+#: hop (``session_history_hop_bound_s``) is what bounds a legitimate wait — but a
+#: wait with no bound at all is a reader thread that can never be reclaimed if the
+#: loop is stopped under it, and a parked reader is a link that never closes.
+SESSION_HISTORY_PAGE_READ_BOUND_S = 60.0
+
+
+#: How long THIS relay waits for a peer to answer ``net_session_history``.
+#:
+#: READ-SIZED, not spawn-sized: the owner answers off its own disk (a page is
+#: ~1.7 ms on the operator's 261 MB journal), so the only long legs are the link
+#: itself and ``_ensure_link``'s dial — and an unanswerable hop is refused in
+#: milliseconds. It is deliberately NOT ``engage_hop_bound_s`` (60 s): that budget
+#: exists because a cold engage SPAWNS a runtime, which this op by design never
+#: does, and a viewer whose page read could block for a minute would turn the
+#: desktop's read envelope into a hung request. A hop this expires on is reported
+#: to the reader as an UNSERVABLE page (``cursor_missing``), never as "there are
+#: no rows", which is the failure state the design note picks.
+SESSION_HISTORY_HOP_S = 6.0
+
+#: What a caller of the stored-page read adds over the hop before its own deadline.
+#: Small because there is nothing on this side left to wait for: the answer's trip
+#: back over the control socket, and the client's own read of it. (The move route
+#: uses 10 s + 15 s for the same two legs, but those budget a handoff that can hold
+#: a session for minutes; a page read has no such tail.)
+SESSION_HISTORY_CLIENT_MARGIN_S = 2.0
+
+
+def session_history_hop_bound_s() -> float:
+    """How long THIS relay waits for a peer to answer a stored-page read.
+
+    A FUNCTION beside :func:`engage_hop_bound_s` for the same reason it exists: a
+    caller that has to OUTLAST this hop must derive it rather than guess it, and
+    the two drifting apart is how a client gives up first and reports "no relay
+    answered" about a relay that is still working.
+    """
+    return SESSION_HISTORY_HOP_S
+
+
+def session_history_client_bound_s() -> float:
+    """THE CLIENT BOUND FOR A STORED-PAGE READ, derived from the hop it crosses.
+
+    ``session_history_hop_bound_s()`` plus this side's own margin the whole way
+    down to the reader — the control socket's answer travelling back and the
+    client's read of it. A caller shorter than the hop it asked for does not
+    report a slow peer; it reports no answer, which the reader is required to
+    mark unservable rather than render as an empty conversation.
+    """
+    return session_history_hop_bound_s() + SESSION_HISTORY_CLIENT_MARGIN_S
+
+
+def validate_history_limit(raw: Any) -> int:
+    """THE page-size decision, shared by BOTH halves of a stored-page read.
+
+    ``net_session_history`` validates what a granted PEER put on the frame
+    (``RelayServer._op_session_history``), and ``peer_session_history`` validates
+    what a caller put on the LOCAL control frame (``RelayServer._ctl_peer_history``)
+    — one function so the two cannot answer "what is a bad limit?" differently
+    (agent review round 1, R1-5 / QA round 1, Q2).
+
+    A REFUSAL, never a substitution or a clamp: ``{before_id, limit}`` is a
+    POSITION, and a page served at a limit other than the one asked for reads as
+    complete when it is not. ``None`` is the ONE value that takes the default —
+    "I did not ask" is a request, unlike "I asked for 'abc'". ``bool`` is refused
+    BY NAME ahead of the integer test because ``isinstance(True, int)`` is true in
+    Python, so a JSON ``true`` would otherwise silently become a one-row page.
+    """
+    if raw is None:
+        return SESSION_HISTORY_DEFAULT_LIMIT
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise MeshRefusal("protocol_error", f"limit must be a whole number, not {raw!r}")
+    if not SESSION_HISTORY_MIN_LIMIT <= raw <= SESSION_HISTORY_MAX_LIMIT:
+        raise MeshRefusal(
+            "protocol_error",
+            f"limit must be between {SESSION_HISTORY_MIN_LIMIT} and "
+            f"{SESSION_HISTORY_MAX_LIMIT}, not {raw}",
+        )
+    return raw
+
+
+def session_history_reply_bytes(req: Any, detail: dict[str, Any]) -> int:
+    """The byte length of the reply frame ``wire.LinkCrypto.seal`` will serialize.
+
+    ``_run_handler`` wraps every handler's answer as
+    ``{"op": "ack", "req": …, "detail": …}`` and the writer seals exactly that,
+    with compact JSON that keeps non-ASCII unescaped — so this measures the same
+    bytes the record bound is applied to rather than an estimate of them.
+    """
+    frame = {"op": "ack", "req": req, "detail": detail}
+    return len(
+        json.dumps(frame, sort_keys=False, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    )
+
+
+def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any]:
+    """``detail`` cut to as many of its entries as fit ONE link record (R1-1).
+
+    Keeps the NEWEST rows: the page is the TAIL of the requested window, so the
+    rows dropped are its oldest and the reader reaches them with the same
+    ``before_id`` cursor it pages with — a partial page with ``has_more: True``
+    and no gap. If not even the newest single row fits, this raises a NAMED
+    per-op refusal (``page_too_large``): the reader cannot be served rows this
+    frame physically cannot carry, and the one answer that must never come back
+    is a torn-down link.
+
+    A page that already fits — every ordinary page — is returned untouched.
+    """
+    if session_history_reply_bytes(req, detail) <= SESSION_HISTORY_REPLY_BUDGET_BYTES:
+        return detail
+    entries = list(detail.get("entries") or [])
+    if not entries:
+        return detail
+    # Trimming means older rows are being left behind, and ``has_more`` must say
+    # so rather than let the reader believe it reached the end of the window.
+    bounded = {**detail, "has_more": True}
+    if (
+        session_history_reply_bytes(req, {**bounded, "entries": entries[-1:]})
+        > SESSION_HISTORY_REPLY_BUDGET_BYTES
+    ):
+        raise MeshRefusal(
+            "page_too_large",
+            "this conversation has a single entry too large to serve over the mesh; "
+            "open it on the device that holds it",
+        )
+    # MONOTONE in the rows kept, so the largest fitting suffix is found in
+    # O(log limit) serializations rather than one per row.
+    low, high = 1, len(entries)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if (
+            session_history_reply_bytes(req, {**bounded, "entries": entries[-mid:]})
+            <= SESSION_HISTORY_REPLY_BUDGET_BYTES
+        ):
+            low = mid
+        else:
+            high = mid - 1
+    return {**bounded, "entries": entries[-low:]}
+
 
 def engage_hop_bound_s(op_wait_s: float = wire.OP_WAIT_S) -> float:
     """How long THIS relay waits for a peer to answer an engage (``_local_peer_call``).
@@ -3680,6 +3892,39 @@ def _model_choice(model: Any) -> dict[str, Any] | None:
     return None
 
 
+def _model_choice_refusal(model: Any) -> str:
+    """Why a NAMED model cannot be taken, or ``""`` when there is nothing to explain.
+
+    ``_model_choice``'s companion for the REPLY, and empty means exactly one of
+    two things: no model was named (an absent key, ``None``, an empty choice —
+    all the absent spelling), or the pair is usable and the applied path below
+    reports it. Everywhere else it names the shape it saw — the half-filled pair
+    with the values that arrived, or a value that is not an object at all.
+
+    WHY IT EXISTS. A half-filled choice used to answer ``detail: ""``, which is
+    the vocabulary's "nothing was asked" — so a caller whose request had been
+    dropped read a silent fall back to the device default as the absence of a
+    request. The sentence is the reply's half of the same boundary
+    ``_model_choice`` draws for the runtime.
+    """
+    if isinstance(model, dict):
+        provider = str(model.get("provider") or "")
+        model_id = str(model.get("model_id") or "")
+        if provider and model_id:
+            return ""
+        if not provider and not model_id:
+            return ""
+        return (
+            "the model choice needs both a provider and a model id "
+            f"(got provider={provider!r}, model_id={model_id!r})"
+        )
+    if not model:
+        return ""
+    return (
+        "the model choice must be an object with a provider and a model id " f"(got {str(model)!r})"
+    )
+
+
 def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
     """The working directory a peer create names, or a refusal naming ``owner``.
 
@@ -3860,6 +4105,10 @@ class RelayServer:
             "net_session_create": self._op_session_create,
             "net_session_engage": self._op_session_engage,
             "net_session_stop": self._op_session_stop,
+            # The stored-journal read beside them: same session plane, same
+            # ownership rule, and the ONE op here that neither starts nor stops
+            # anything on this device (see the handler).
+            "net_session_history": self._op_session_history,
             "net_session_lifecycle": self._op_session_lifecycle,
             "net_pair_ready": self._op_pair_ready,
             "net_pair_abort": self._op_pair_abort,
@@ -3879,6 +4128,18 @@ class RelayServer:
         self._slow_lock = threading.Lock()
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
+        #: The ONE event loop every stored-page read runs on, and the lock that
+        #: builds it once (see ``_page_loop_locked``). Lazy for the same reason the
+        #: slow pool is: most relays never serve ``net_session_history``. The lock
+        #: is ALSO what serialises a read against a ``stop``: it is held across
+        #: both the loop's selection and the submit onto it (M-1), and ``stop``
+        #: shelves the loop in a critical section of the same lock.
+        self._page_loop: asyncio.AbstractEventLoop | None = None
+        self._page_loop_thread: threading.Thread | None = None
+        self._page_loop_lock = threading.Lock()
+        #: Set by ``stop``: the next read builds a fresh loop rather than queueing
+        #: work onto one whose thread has finished (see ``_page_loop_locked``).
+        self._page_loop_shelved = False
         self._install_slices()
         self.started_at = time.time()
         #: Computed ONCE: the build stamp is decoration, and asking packaging
@@ -3941,6 +4202,7 @@ class RelayServer:
         self.publish()
         self._flush_outboxes()
         self._run_start_hooks()
+        self._sweep_approvals_once()
 
     def _run_start_hooks(self) -> None:
         """Run each slice's one-shot start hook, on its own daemon thread.
@@ -3963,6 +4225,33 @@ class RelayServer:
 
             thread = threading.Thread(target=_run, name=f"mesh-start-{label}", daemon=True)
             thread.start()
+
+    def _sweep_approvals_once(self) -> None:
+        """One best-effort retention sweep for the device-local approvals store.
+
+        WHY THIS SEAT (2026-10-07). The approvals store's retention rides the
+        CREATE path (``approvals.sweep``'s own docstring: "no timer process" by
+        design), so a device that stops onboarding new devices also stops
+        reaping: measured on the operator's own machine, nine terminal records
+        from a single onboarding week sat untouched, and nothing would have
+        touched them until the next request — which may never come. The relay
+        start is the one non-timer event a device reaches without new approval
+        activity (every update restarts the relay; any mesh verb that finds no
+        relay starts one), so the sweep runs here too: once, off-thread, on the
+        same terms the slice hooks above run under — a failure is reported and
+        swallowed, never a reason a relay or a command fails.
+        """
+
+        def _run() -> None:
+            try:
+                from local_operator.network import approvals
+
+                approvals.sweep(root=self.root)
+            except Exception as exc:  # noqa: BLE001 — see the docstring
+                print(f"mesh relay: approvals sweep failed ({exc})", file=sys.stderr)
+
+        thread = threading.Thread(target=_run, name="mesh-start-approvals", daemon=True)
+        thread.start()
 
     def serve_forever(self) -> None:
         """The foreground runner (``lop network serve``): block until signalled."""
@@ -4042,6 +4331,48 @@ class RelayServer:
         with self._slow_lock:
             if self._slow_pool is not None:
                 self._slow_pool.shutdown(wait=False, cancel_futures=True)
+        # THE PAGE LOOP STOPS WITH THE RELAY, AND IS CLOSED BY ITS OWN THREAD.
+        # ``loop.stop`` only ends ``run_forever``: the loop's selector, its
+        # self-pipe and its default executor stay open until ``loop.close()``, so a
+        # stopped-but-unclosed loop leaks a fixed set of descriptors per generation
+        # (agent review & QA round 2, F1/Q2-1 — six read+stop cycles took fds 8 to
+        # 23 with ``is_closed()`` false on every sample). The close cannot be issued
+        # from HERE: it would race a read still being submitted to the loop. So it
+        # lives in ``_page_loop_main``'s ``finally``, on the loop's own thread, and
+        # the bounded join below is what makes it have happened by the time this
+        # method returns. A read that arrives after all this builds a FRESH loop
+        # rather than hand one to a thread that has finished.
+        #
+        # A READ ALREADY SUBMITTED IS NOT RECLAIMED BY THE QUEUE ORDER, and the
+        # earlier comment here claimed it was. A coroutine awaiting
+        # ``asyncio.to_thread`` never resolves once the loop carrying it has
+        # stopped — ``run_forever`` returns with the task still pending and the
+        # callback that would deliver the decode never runs. What ends it is the
+        # loop's OWN teardown, and it ends it in BOTH of the states a submitted
+        # read can be in when the stop lands: ``_page_loop_main`` cancels the
+        # tasks still pending and drains the ready queue before it closes (M-2,
+        # M-R-1), so a reader parked in ``future.result`` is released as soon as
+        # the bounded join below lands — with its PAGE if its task had already
+        # completed and only the completion notification was still queued, with a
+        # cancellation if the task was still pending — rather than after a
+        # minute. The bound is still the belt for a read the teardown never
+        # reaches at all, one whose loop has not closed by the time it gives up;
+        # there it is the answer it always was: ``TimeoutError`` after
+        # ``SESSION_HISTORY_PAGE_READ_BOUND_S``, an honest wait with an end rather
+        # than a promise that the read completes.
+        with self._page_loop_lock:
+            loop = self._page_loop
+            thread = self._page_loop_thread
+            if loop is not None:
+                loop.call_soon_threadsafe(loop.stop)
+                self._page_loop = None
+                self._page_loop_thread = None
+                self._page_loop_shelved = True
+        # OUTSIDE THE LOCK. The join is bounded but it is still a wait, and a read
+        # that arrives during it should not have to queue on this lock to learn
+        # that it needs a new loop.
+        if thread is not None:
+            thread.join(timeout=PAGE_LOOP_STOP_JOIN_S)
         with self._links_lock:
             links = list(self.links.values())
         for link in links:
@@ -5671,7 +6002,17 @@ class RelayServer:
                     "busy": record.busy,
                     "pending": record.pending,
                     "detached": record.detached,
-                    "started": record.started,
+                    # THE RECORD'S EPOCH, NOT ITS ``started`` BOOL (operator
+                    # report). ``record.started`` is "has run at
+                    # least one real turn"; a consumer reading it as a TIME
+                    # minted ``float(True)`` = 1.0 — an epoch second into 1970
+                    # — so the desktop sidebar dated a live session "56y" and
+                    # filed it under "Older". This key is an EPOCH on the two
+                    # sibling halves below (``_mesh_hosted_rows`` /
+                    # ``_stored_rows``) and on every consumer's read of it; the
+                    # bool's own readers read the RECORD, not a federated row
+                    # (the unengaged send gate, the broadcast/steer admission).
+                    "started": float(record.started_at or 0.0),
                     "pid": record.pid,
                     "kind": record.kind,
                     "capabilities": list(record.capabilities),
@@ -5844,18 +6185,30 @@ class RelayServer:
                     "cwd": "",
                     "model_label": "",
                     "busy": False,
-                    # THE FIELD'S CONTRACT IS A STRING (Q-R7-1). This used to
-                    # publish ``bool(entry.unseen)``, which crashed the ONE
-                    # human reader of the field — `lop sessions --all-peers`
-                    # and `--peer <dev>` render `pending` through
-                    # ``rich.cells.cell_len`` — while the live half of the same
-                    # catalogue published ``SessionRecord.pending``, a string.
-                    # "An unread completion is waiting" is a NEEDS claim, so it
-                    # says so in the record's own vocabulary rather than
-                    # answering a what-is-needed question with a yes/no
-                    # (``types.NEEDS_ASK``, beside the normaliser that reads the
-                    # same field off the wire).
-                    "pending": NEEDS_ASK if entry.unseen else None,
+                    # NO NEEDS CLAIM (correction, 2026-10-07). ``pending``
+                    # answers "what is a person being waited on" in the live
+                    # half's own vocabulary (``types.NEEDS_APPROVAL``/
+                    # ``NEEDS_ASK``, ``SessionRecord.pending``), and a stored
+                    # session has no runtime and therefore no gate. An earlier
+                    # cut synthesised ``"ask"`` here from the owner's
+                    # ``unseen`` flag; the defect that removed it is that NO
+                    # surface could ever clear the claim: this row carries no
+                    # completion token, so no receipt can name the completion,
+                    # while every sidebar paints the row as "needs you" for as
+                    # long as the completion stays unread (measured: 20 dead
+                    # probe sessions on one peer = 20 permanent answer-needed
+                    # marks in every sidebar). The owner's unread fact stays
+                    # where it can be seen and cleared — its attention store,
+                    # read by that device's own surfaces and by any viewer that
+                    # opens the conversation (the receipt hop routes the clear
+                    # to the owner). ``peer_rows.park_edges`` already refused to
+                    # announce these as parks ("a turn that finished on the peer
+                    # hours ago ... needs nobody"); the field now agrees.
+                    # Rows from a producer that predates the correction are
+                    # dropped at the row level, not the value level
+                    # (``types.row_needs_claim``), so a mixed-version fleet
+                    # paints this row the same way.
+                    "pending": None,
                     "detached": True,
                     "started": float(getattr(entry.row, "mtime", 0.0) or 0.0),
                     "pid": 0,
@@ -6449,6 +6802,43 @@ class RelayServer:
         )
         if identity is None:
             raise MeshRefusal("definition_missing", refusal)
+        # THE PAIR THAT CAN NEVER BE HONOURED, REFUSED BEFORE ANYTHING MOVES (#2014's
+        # rule on the seam it missed). A create that would attach BOTH an attachable
+        # identity and a team — ``--profile X --team Y``, or a role/specialist row
+        # named via ``--agent`` beside a team — used to write a sidecar carrying both
+        # (the ``write_session_attachment`` below) and answer a receipt claiming the
+        # profile was applied, while the restore's deliberate team-wins rule dropped
+        # the profile silently: the session ran the team's manager under the profile's
+        # name, which is the exact wrong-thing-under-the-right-name failure the rule
+        # exists to forbid. The refusal lands HERE — after both names resolve (a name
+        # this device does not hold keeps its own sentence above) and before the
+        # mint, the stamp and the sidecar — so a refused create leaves nothing on
+        # disk. The sentence is the SAME one the session and ``lop exec`` use, with
+        # the flag-level fact in front for the caller who typed two flags (see
+        # ``flag_with_team_refusal_message``); the flag named is the attachable
+        # half's own. A routing-only legacy ``--agent`` row is NOT this case — its
+        # instructions are not attachable, so nothing is dropped and the pair stays
+        # allowed — which is why this reads the RESOLVED attachability rather than
+        # the raw flags.
+        if identity.instructions_attachable and identity.team_name:
+            manager = ""
+            try:
+                from local_operator.teams import TeamRegistry
+
+                team_row = TeamRegistry(self.root).get_team_by_name(identity.team_name)
+                manager = str(getattr(team_row, "manager", "") or "")
+            except Exception:  # noqa: BLE001 — a damaged registry costs only the name
+                manager = ""
+            from local_operator.session.errors import flag_with_team_refusal_message
+
+            raise MeshRefusal(
+                "bad_request",
+                flag_with_team_refusal_message(
+                    "--profile" if str(frame.get("profile") or "") else "--agent",
+                    identity.team_name,
+                    manager,
+                ),
+            )
         stale = definitions.check_expected(self.root, frame.get("expect"))
         if stale:
             raise MeshRefusal("definition_stale", stale)
@@ -6576,11 +6966,13 @@ class RelayServer:
         # ``session_factory``'s own precedence for a local session is agent > flag >
         # config, so this is the parity answer rather than a preference of this op's;
         # deciding it here is what keeps the promptless branch (which answers its id and
-        # warms in the background) from applying a flag OVER the profile it was asked to
-        # run. ``identity.birth`` is the profile's pinned model and it reaches the runtime
-        # as the errand's BIRTH SAMPLE — the only channel that lands before the first
-        # provider call — so the flag is not applied on top of it, and ``override`` is the
-        # sentence both receipts carry where they would otherwise claim a model was taken.
+        # warms in the background) from applying a flag OVER the pin it was asked to
+        # run. ``identity.birth`` is the pinned model — the profile's own row, or the
+        # ``--agent`` row's routing when both halves are named — and it reaches the
+        # runtime as the errand's BIRTH SAMPLE, the only channel that lands before the
+        # first provider call, so the flag is not applied on top of it, and ``override``
+        # is the sentence both receipts carry where they would otherwise claim a model
+        # was taken.
         # Applied loudly: a silent override of an explicit request is the shape this whole
         # change exists to remove.
         override = self._profile_overrides_flag(identity, wanted_model)
@@ -6605,10 +6997,10 @@ class RelayServer:
             self._warm_after_create(
                 session_id,
                 cwd=cwd,
-                # A PROFILE THAT PINS A MODEL TAKES THE BIRTH SAMPLE INSTEAD, so the
+                # AN IDENTITY THAT PINS A MODEL TAKES THE BIRTH SAMPLE INSTEAD, so the
                 # background warm applies the same precedence the synchronous path
                 # applies a few lines down: passing the flag here would override the
-                # profile on the path the desktop actually creates on (``/new`` sends no
+                # pin on the path the desktop actually creates on (``/new`` sends no
                 # prompt), which is the silent override this change exists to remove.
                 model=None if override else wanted_model,
                 initial_model=identity.birth,
@@ -6629,14 +7021,15 @@ class RelayServer:
                 "detail": "",
                 "model": {
                     "applied": False,
-                    # WHICH OF THE THREE REASONS, and they are not the same fact: a
-                    # profile that outranks the flag, a warm-up that has not applied the
-                    # model yet, or nothing asked for at all.
+                    # WHICH OF THE REASONS, and they are not the same fact: a
+                    # profile that outranks the flag, a warm-up that has not applied
+                    # the model yet, a choice the wire could not take (its sentence
+                    # names the missing half), or nothing asked for at all.
                     "detail": override
                     or (
                         "the runtime is joining; the model is applied when it arrives"
                         if wanted_model
-                        else ""
+                        else _model_choice_refusal(frame.get("model"))
                     ),
                 },
                 "record": self._row_for(session_id),
@@ -6654,7 +7047,13 @@ class RelayServer:
                 "record": self._row_for(session_id),
             }
 
-        model_result: dict[str, Any] = {"applied": False, "detail": ""}
+        model_result: dict[str, Any] = {
+            "applied": False,
+            # A NAMED choice that could not be taken answers its reason here too
+            # (the warm branch above carries the same sentence); nothing-asked
+            # answers the empty string, exactly as it did before.
+            "detail": _model_choice_refusal(frame.get("model")),
+        }
         if override:
             model_result = {"applied": False, "detail": override}
         elif wanted_model:
@@ -6743,6 +7142,228 @@ class RelayServer:
             return {"engaged": False, "detail": error, "session_id": session_id}
         return {"engaged": True, "detail": "runtime joining", "session_id": session_id}
 
+    def _op_session_history(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """One bounded page of THIS device's stored journal for one of its sessions.
+
+        WHY THE OWNER SERVES ITS OWN DISK (design ``docs/design/mesh-cold-read-
+        stored-history.md``). A cold read of a peer's session used to answer an
+        EMPTY page, because the viewer's only source was the wire and a session
+        with no runtime has no wire window — while a session on the reader's own
+        disk answers from its journal. The rows were never missing; they were on
+        the owner's disk, unreachable. This op reaches them through the SAME
+        reader the owner's own ``/history`` uses (``load_transcript_page`` over
+        ``transcript.py``'s backward page reader), so the two answers are one
+        contract rather than two that can drift.
+
+        IT STARTS NOTHING AND TAKES NO LEASE. The directory check below is a
+        filesystem read, and the page façade is driven on ONE relay-owned loop
+        (:meth:`_stored_page_read`) purely to reach the reader's async entry point
+        (whose own ``to_thread`` keeps the parse off that loop). A viewer must be
+        able to read a session that is DELIBERATELY STOPPED, which no engage may
+        warm by design, so a read that spawned anything on the peer would fail
+        exactly the sessions this exists for.
+
+        ONE LOOP, NOT ONE ``asyncio.run`` PER CALL (agent review round 1, R1-2).
+        ``page_cache``'s cross-thread rule is about THREADS, and its single-flight
+        is keyed by the loop that started the read: this handler runs on the LINK'S
+        reader thread (one per link), so an ``asyncio.run`` per call gave a relay
+        with two viewer links two loops against the SAME module-level cache —
+        single-flight silently lost, and ``get``/``put`` mutated from two threads,
+        which the module names as the shape of the freeze #401 was. Every
+        stored-page read therefore runs on the one loop ``_stored_page_read``
+        owns, so however many viewers ask at once, the façade is touched from one
+        thread.
+
+        THE REPLY IS BOUNDED BY ENCODED SIZE, not by row count (agent review
+        round 1, R1-1). See :func:`fit_session_history_reply`: the frame travels as
+        ONE link record, and exceeding it used to close the whole link.
+
+        OWNERSHIP IS THE CHOKEPOINT'S, not this handler's: the frame names a
+        ``session_id``, so ``Authorizer._session_scope`` has already refused one
+        this device does not hold before dispatch, and ``local_session_ids``
+        (``authorizer.NetworkState.local_session_ids``) is the one rule both ends
+        read. The directory check restates the same fact
+        where the ANSWER is composed (``_engage_locally`` makes the identical
+        check), so "does not hold it" is a refusal while "holds it, no rows yet"
+        is an empty page, even if the two ever disagree.
+
+        The entries are the journal's own serialized rows — ``id``/``ts``/
+        ``type``/``payload``, REAL timestamps — filtered by the same visibility
+        predicate the local ``/history`` applies. A row's attachments are NOT
+        inlined: they live in the owner's store and the page contract has no size
+        cap to hide one in, so the reader degrades to the existing missing-media
+        placeholder (design §"Attachments degrade").
+        """
+        session_id = str(frame.get("session_id") or "")
+        if not session_id:
+            raise MeshRefusal("protocol_error", "net_session_history must name a session_id")
+        directory = self.root / "sessions" / session_id
+        if not directory.is_dir():
+            raise MeshRefusal(
+                "unknown_session", f"{self._own_label()} does not hold a session {session_id}"
+            )
+        raw_before = frame.get("before_id")
+        before_id = str(raw_before) if raw_before else None
+        limit = validate_history_limit(frame.get("limit"))
+
+        from local_operator.harness.rows import visible_transcript_rows
+
+        try:
+            page = self._stored_page_read(directory, before_id=before_id, limit=limit)
+        except FileNotFoundError:
+            # THE LOCAL ROUTE'S OWN ANSWER for a session whose journal has not been
+            # written yet: an empty page, and a cursor into it is a cursor that
+            # cannot be trusted (``desktop_sessions.history``'s reconcile branch).
+            return {
+                "entries": [],
+                "has_more": False,
+                "cursor_missing": bool(before_id),
+                "has_newer": None,
+            }
+        return fit_session_history_reply(
+            frame.get("req"),
+            {
+                "entries": visible_transcript_rows(
+                    [json.loads(row.to_json()) for row in page.entries]
+                ),
+                "has_more": page.has_more,
+                # ``reconciled`` is the reader's word for "the cursor was not found,
+                # so this page is the tail rather than a continuation" — the same
+                # field the local envelope maps to ``cursor_missing``.
+                "cursor_missing": page.reconciled,
+                "has_newer": page.has_newer,
+            },
+        )
+
+    def _stored_page_read(self, directory: Path, *, before_id: str | None, limit: int) -> Any:
+        """Drive ``load_transcript_page`` on THIS relay's ONE page loop (R1-2).
+
+        WHY A SHARED LOOP AND NOT ``asyncio.run``. The page façade serializes its
+        work per LOOP: its single-flight map is keyed by ``(loop, task)``, so two
+        loops against the same key both become leaders and decode the page twice,
+        and the two also mutate the module-level cache from two threads. One loop
+        for every stored-page read in this process is what keeps the façade on one
+        thread however many viewer links ask at once.
+
+        THE SUBMIT IS TAKEN INSIDE ``_page_loop_lock`` (M-1, agent review & QA
+        round 2 residual). Choosing the loop and submitting to it used to be two
+        statements with the lock RELEASED in between, so a ``stop()`` landing in
+        that gap closed the loop under this read and
+        ``asyncio.run_coroutine_threadsafe`` raised ``RuntimeError: Event loop is
+        closed`` — not the bounded wait this read promises. ``stop`` stops and
+        shelves the loop in ONE critical section of the SAME lock, so a submit
+        taken under it either lands on the loop while it is still the relay's live
+        loop, or reads ``_page_loop_shelved`` and is handed a fresh one. The
+        release-to-submit gap was the whole window; there is no gap left.
+        """
+        from local_operator.session.page_cache import load_transcript_page
+
+        with self._page_loop_lock:
+            loop = self._page_loop_locked()
+            future = asyncio.run_coroutine_threadsafe(
+                load_transcript_page(str(directory), before_id=before_id, limit=limit), loop
+            )
+        return future.result(timeout=SESSION_HISTORY_PAGE_READ_BOUND_S)
+
+    def _page_loop_locked(self) -> asyncio.AbstractEventLoop:
+        """The relay's single page loop, started on first use and kept for its life.
+
+        THE CALLER MUST HOLD ``_page_loop_lock``, and the caller that matters is
+        :meth:`_stored_page_read`: it needs the loop it chooses and the submit
+        onto it to be one critical section, which a lock-taking accessor could
+        not give it (this is a plain ``Lock``, not a re-entrant one).
+
+        LAZY, like the slow-op pool: most relays never serve this op, and a thread
+        per relay that never reads a page would be paid for nothing. A DAEMON
+        thread, so a relay that is never stopped cannot hold the process open.
+
+        A STOPPED RELAY BUILDS A FRESH LOOP rather than queueing work onto one
+        whose thread has finished — ``stop`` shelves it — and the flag, not
+        ``is_running``, is what distinguishes the two: ``is_running`` is false for
+        a loop whose thread has not reached ``run_forever`` yet, so reading it here
+        would race the first caller into building a second loop.
+        """
+        if self._page_loop is None or self._page_loop_shelved:
+            loop = asyncio.new_event_loop()
+            self._page_loop_thread = threading.Thread(
+                target=self._page_loop_main,
+                args=(loop,),
+                name="mesh-page-loop",
+                daemon=True,
+            )
+            self._page_loop_thread.start()
+            self._page_loop = loop
+            self._page_loop_shelved = False
+        return self._page_loop
+
+    @staticmethod
+    def _page_loop_main(loop: asyncio.AbstractEventLoop) -> None:
+        """Run the page loop, and CLOSE IT on this thread once it stops (Q2-1).
+
+        NOT ``target=loop.run_forever``, and the difference is the whole point:
+        ``run_forever`` returning is not the loop being finished with. Its
+        selector, its self-pipe and its default executor stay open until
+        ``close()`` — which is also what shuts that executor down
+        (``executor.shutdown(wait=False)``), so the ``to_thread`` pool the page
+        reader uses does not outlive its loop either.
+
+        WHY HERE AND NOT IN ``stop``. ``loop.stop`` is queued behind whatever the
+        loop is already running, so a ``close()`` issued from the stopping thread
+        could land while a read is still being submitted to the same loop; after
+        ``run_forever`` has returned, this thread is the one place the loop is
+        provably idle. ``stop`` joins this thread so the close has happened by the
+        time shutdown returns. The ``finally`` holds the close even if
+        ``run_forever`` raises.
+        """
+        try:
+            loop.run_forever()
+        finally:
+            # THE TASKS STILL PENDING ARE CANCELLED BEFORE THE CLOSE (M-2, agent
+            # review & QA round 2 residual). ``loop.stop`` ends ``run_forever``
+            # with the read's task still PENDING — it is awaiting ``to_thread``,
+            # and the callback that would deliver the decode is one the stopped
+            # loop never runs — so ``loop.close()`` used to destroy a pending
+            # task, which asyncio reports as ``Task was destroyed but it is
+            # pending!`` through asyncio's logger, once per parked read.
+            # Cancelling and collecting them is the standard library's OWN
+            # teardown, the first of the steps ``asyncio.run`` takes before it
+            # closes, and what it buys is that the doomed read ENDS: its waiter is
+            # released at once instead of parking out
+            # ``SESSION_HISTORY_PAGE_READ_BOUND_S``.
+            #
+            # EVERY task on the loop, not only the reader's: ``load_transcript_page``
+            # awaits ``asyncio.shield(task)``, so the decode is a SECOND task
+            # that survives its waiter's cancellation and would itself be the one
+            # destroyed pending.
+            #
+            # AND THE DRAIN IS UNCONDITIONAL (M-R-1, agent review round 1). A read
+            # whose task COMPLETED before the stop landed has nothing left to
+            # cancel — it is not on the pending list — but its completion
+            # notification is a callback still sitting in the loop's ready queue
+            # (``_chain_future``'s ``_call_set_state``, the one that resolves the
+            # ``concurrent.futures.Future`` ``run_coroutine_threadsafe`` returned).
+            # ``close()`` clears that queue, so guarding the drain behind
+            # ``if pending:`` skipped it in exactly that case: the reader parked
+            # out the bound and was told the read failed, with its page already
+            # decoded and thrown away. One drain is the whole difference, so it
+            # runs whether or not anything was pending. ``run_until_complete(
+            # sleep(0))`` is THREE ``_run_once`` iterations, not one (measured on
+            # 3.12.13: the wrapper task's first step, its resume after the bare
+            # yield, then ``_run_until_complete_cb`` that stops the loop), which
+            # is why it also covers a short re-arming ``call_soon`` chain — the reachable
+            # chain here is depth 1 (``_call_set_state``) — and is not a general
+            # quiescence guarantee. The deterministic pin is
+            # ``test_the_page_loop_teardown_delivers_a_completion_still_queued_behind_the_stop``.
+            try:
+                pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(asyncio.sleep(0))
+            finally:
+                loop.close()
+
     def _op_session_stop(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         """Run THIS device's own kill-switch ladder for one of its sessions (§4.3).
 
@@ -6811,24 +7432,41 @@ class RelayServer:
     # -- the two local helpers the ops above share --------------------------
 
     def _profile_overrides_flag(self, identity: Any, wanted_model: Any) -> str:
-        """The sentence a create's receipt carries when the profile pins a model.
+        """The sentence a create's receipt carries when the identity pins a model.
 
         EMPTY MEANS THE FLAG STANDS, and that is the whole return contract: a frame that
-        named no model, or a profile that pins none, has nothing to say here. ONE
+        named no model, or an identity that pins none, has nothing to say here. ONE
         producer for the two receipts that must agree about it (the promptless create's
         immediate answer and the prompted one's ``model`` result) — a second copy of the
         sentence would let one create be explained two ways depending only on whether the
         caller happened to send a first prompt.
 
-        ``identity.birth`` is what the profile pins and what the runtime is handed as the
-        errand's birth sample (``_engage_locally``), so this method answers the one
-        question left: was a model REQUESTED that will not be applied.
+        ``identity.birth`` is the pin — the profile's own row, or the ``--agent`` row's
+        routing when a create names both halves (the fold) — and ``birth_owner`` names
+        the definition the sample came from, so the sentence says WHO overrode the flag
+        instead of assuming the profile: naming the profile when the row pinned it was
+        the false attribution design round 1 (D1) refused, and in the ``auditor`` case
+        it contradicted the very definition it named.
         """
         pin = identity.birth
         if pin is None or not (pin.provider or pin.model_id) or wanted_model is None:
             return ""
+        # The two styles differ only in what they CLAIM: "the agent 'X'" for a
+        # pin the profile's own row supplied, "the --agent row 'X'" for one the
+        # row supplied. The comparison is by NAME, so a row spelled exactly like
+        # the profile reads as the profile's pin — ambiguous, not false (the
+        # name printed is the same either way, and the receipt's own ``agent:``
+        # line is equally ambiguous for identically-named definitions; agent
+        # review F12). A source tag on ``CreateIdentity`` would remove the
+        # class; ``test_a_row_named_like_the_profile_reads_as_the_profiles_pin``
+        # pins the current reading until then.
+        subject = (
+            f"the agent {identity.agent_name!r}"
+            if identity.birth_owner == identity.agent_name
+            else f"the --agent row {identity.birth_owner!r}"
+        )
         return (
-            f"the agent {identity.agent_name!r} pins "
+            f"{subject} pins "
             f"{pin.provider or 'its configured hosting'}/"
             f"{pin.model_id or 'its default model'}, and an agent "
             "outranks a flag on its own device too, so the requested model was "
@@ -6857,9 +7495,9 @@ class RelayServer:
 
         ``initial_model`` is the BIRTH SAMPLE the desktop's draft chip already
         sends (``launch.WarmErrand.initial_model``), and a create that names an
-        agent reuses it for the same reason: it is the only channel that reaches
+        identity reuses it for the same reason: it is the only channel that reaches
         a runtime BEFORE its first provider call, so it is the only one that can
-        make the session's FIRST turn run on the profile's model. Applying the
+        make the session's FIRST turn run on the pinned model. Applying the
         model afterwards over the model RPC (which this op also still does for a
         frame that names one) leaves the session briefly on the device default
         and loses the choice entirely if the owner was already running. It builds
@@ -7952,7 +8590,9 @@ class RelayServer:
             # slow frame rather than failing the ceremony.
             from local_operator.network.credentials import offers as offers_mod
 
-            send_offer, offer_items, offer_detail = _pair_offer_for(handshake, self.root)
+            send_offer, offer_items, offer_detail = _pair_offer_for(
+                handshake, self.root, record.network_id
+            )
             if send_offer:
                 sock.sendall(
                     codec.seal(
@@ -8844,6 +9484,7 @@ class RelayServer:
             "peer_session_create": self._ctl_peer_create,
             "peer_session_engage": self._ctl_peer_engage,
             "peer_session_stop": self._ctl_peer_stop,
+            "peer_session_history": self._ctl_peer_history,
         }
 
     def _ctl_ls(self, frame: dict[str, Any]) -> list[dict[str, Any]]:
@@ -8928,6 +9569,30 @@ class RelayServer:
         resolved = self._require_network(str(frame.get("network") or ""))
         state = store.require_secrets(resolved.network_id, self.root)
         device_id = str(frame.get("device_id") or "")
+        # ONE UNIT OF DECISION (review round 3 QA observation): a removal the
+        # rotation lock will refuse must not run its ending exchange first —
+        # measured, a lock-refused `member rm` wiped the member's copies while
+        # the refusal said nothing about them, and the member stayed an active
+        # holder a tick could re-deliver the copy to. The precheck reads the
+        # record the write will touch; `rotate_epoch` still re-checks inside
+        # the write lock, so a rotation landing in the window between the two
+        # is refused there exactly as before (the pre-existing race).
+        rotation_lock_refusal(store.load(resolved.network_id, self.root))
+        # THE LAST CONTACT THE COPIES GET (review round 1, Q1): the ending exchange
+        # runs BEFORE the tombstone, because afterwards this device's own dial is
+        # refused by design (``_ensure_link_with_reason`` skips inactive members) and
+        # every copy on the removed member would end silently. Bounded inside the
+        # engine (probe + total budget); the counts ride the receipt so an unreachable
+        # member's copies read as OPEN — rotate at the source — rather than gone, and
+        # a give-up that may still be in flight (F1) reads as its own class.
+        from local_operator.network.credentials.sync import sync_for_relay
+
+        engine = sync_for_relay(self)
+        endings = (
+            engine.deliver_removal_endings(device_id)
+            if engine is not None
+            else {"copies": 0, "wiped": 0, "timed_out": 0}
+        )
         with store.mutate(resolved.network_id, self.root) as record:
             outcome = remove_member(
                 record, state, device_id=device_id, by=record.self_device_id, root=self.root
@@ -8953,6 +9618,9 @@ class RelayServer:
             "removed": device_id,
             "epoch": outcome.epoch,
             "queued": len(store.queued_frames(device_id, self.root)),
+            "copies": int(endings.get("copies") or 0),
+            "wiped": int(endings.get("wiped") or 0),
+            "timed_out": int(endings.get("timed_out") or 0),
         }
 
     def _ctl_member_caps(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -9539,6 +10207,61 @@ class RelayServer:
         agent_id = str(frame.get("agent_id") or "")
         team = str(frame.get("team") or "")
         effort = str(frame.get("effort") or "")
+        # A PAIR THAT CAN NEVER BE HONOURED IS REFUSED BEFORE THE PUSH (#2014's rule
+        # on the half that can see the flags). ``lop exec`` refuses ``--profile``
+        # beside ``--team`` at preflight — same flags, same rule — and this half
+        # refuses it in the SAME words, BEFORE ``definitions.push_to_peer`` below:
+        # a create that is going to be refused must not mirror definitions onto the
+        # peer as a side effect of asking, and the refusal must not depend on the
+        # peer answering (or existing) either. The team is named CANONICALLY when
+        # this device holds it (its registry row's name; aliases and case spellings
+        # resolve there exactly as they do for ``lop exec`` — design D3/F5), and a
+        # team this device does not hold is a legitimate create (``definitions
+        # push`` brings it), where the shared sentence states the rule without
+        # naming a speaker.
+        #
+        # THE ``--agent`` DOOR IS REFUSED HERE TOO WHEN THIS DEVICE CAN SETTLE IT:
+        # a row this device HOLDS whose own resolver classifies it as attachable is
+        # refused before the push (agent review F3 / QA Q-2), using the same
+        # ``resolve_create_identity`` the owning device runs — the same information,
+        # no guess. When this device does NOT hold the row, nothing can be
+        # established locally, so the frame travels and the OWNING device refuses;
+        # that residual push is bounded to the frame's own names, idempotent, and
+        # the always-on definitions cadence mirrors these rows to paired members
+        # anyway — a member that cannot hold ``net_definitions`` is skipped and
+        # one refusing on policy is parked for 1800 s, so the refusal merely
+        # stops being the FIRST mirror. A routing-only row is never refused by
+        # either device.
+        if team:
+            from local_operator.session.errors import flag_with_team_refusal_message
+
+            team_key = team
+            manager = ""
+            try:
+                from local_operator.teams import TeamRegistry
+
+                team_row = TeamRegistry(self.root).get_team_by_name(team)
+                if team_row is not None:
+                    team_key = str(getattr(team_row, "name", "") or team)
+                    manager = str(getattr(team_row, "manager", "") or "")
+            except Exception:  # noqa: BLE001 — a damaged registry costs only the name
+                pass
+            if profile:
+                raise MeshRefusal(
+                    "bad_request",
+                    flag_with_team_refusal_message("--profile", team_key, manager),
+                )
+            if agent_name or agent_id:
+                from local_operator.network import definitions
+
+                held, _ = definitions.resolve_create_identity(
+                    self.root, agent_name=agent_name, agent_id=agent_id
+                )
+                if held is not None and held.instructions_attachable:
+                    raise MeshRefusal(
+                        "bad_request",
+                        flag_with_team_refusal_message("--agent", team_key, manager),
+                    )
         named = bool(profile or agent_name or agent_id or team)
         push_reason = ""
         expect: dict[str, Any] = {}
@@ -9683,6 +10406,35 @@ class RelayServer:
             # working. Every other mode answers quickly (skip/refuse) and keeps the
             # default budget.
             timeout=forced_stop_deadline_s() if mode == "immediate" else None,
+        )
+
+    def _ctl_peer_history(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Fetch one page of a peer's STORED journal, for this device's own viewer.
+
+        A READ-SIZED HOP, not the engage/spawn budget ``_local_peer_call``
+        defaults to: the owner answers off its own disk, and a viewer that waited
+        60 s for a page it could have had in milliseconds would read as a hung
+        peer. The bound is :func:`session_history_hop_bound_s` — the same number
+        the client half derives its own deadline from
+        (``session_history_client_bound_s``), so the two cannot drift. A hop that
+        expires is reported to the reader as an UNSERVABLE page rather than as a
+        refusal (see ``DesktopSessionBridge._remote_history``).
+
+        ``limit`` IS VALIDATED HERE TOO, by the SAME function the owner-side op
+        uses (:func:`validate_history_limit`, agent review round 1 R1-5 / QA round
+        1 Q2): this used to substitute the default for anything that was not an
+        ``int`` — silently answering a different page than the one asked for, and
+        turning a JSON ``true`` into a one-row page — while the owner refused a
+        bad limit outright. One decision, one spelling, on both halves of the read.
+        """
+        limit = validate_history_limit(frame.get("limit"))
+        return self._local_peer_call(
+            "net_session_history",
+            str(frame.get("peer") or ""),
+            timeout=session_history_hop_bound_s(),
+            session_id=str(frame.get("session_id") or ""),
+            before_id=(str(frame["before_id"]) if frame.get("before_id") else None),
+            limit=limit,
         )
 
     def _ctl_peer_facts(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -10175,6 +10927,10 @@ class RelayServer:
             # relay by a heartbeat, and the doctor is the one surface that must not
             # report a state its own process has already moved past.
             findings.extend(repair_checks(record, log=self.audit))
+            # THE SYNC SEGMENTS (S3): one derivation, read by this doctor and by
+            # the CLI's local fallback (``sync_checks``), so the two surfaces
+            # cannot disagree about which holders have confirmed which generation.
+            findings.extend(sync_checks(record, root=self.root))
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
                     continue
@@ -10455,9 +11211,13 @@ def build_stamp() -> dict[str, str]:
 
 
 def _pair_offer_for(
-    handshake: Handshake, root: Path
+    handshake: Handshake, root: Path, network_id: str
 ) -> tuple[bool, list[dict[str, Any]], dict[str, Any]]:
     """``(send, items, audit detail)`` for the pair ceremony's share list.
+
+    ``network_id`` is the ceremony's own network: class-2 rows take their
+    per-key default from THAT network's ``sync`` marks (§4.2), so an offer built
+    without it would silently ignore an operator's standing marks.
 
     THE GATE IS THE JOINER'S OWN ADVERTISEMENT: a build that does not know
     ``pair-offer-v1`` never sees the frame (the both-sides rule caps exist for),
@@ -10482,7 +11242,7 @@ def _pair_offer_for(
     if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
         return False, [], {"offer_skip": offers_mod.OWNER_SKIPPED}
     try:
-        items = offers_mod.build_items(root)
+        items = offers_mod.build_items(root, network_id=network_id)
     except offers_mod.OfferEnumerationError:
         empty = offers_mod.digest_of([])
         return (

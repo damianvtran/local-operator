@@ -32,6 +32,7 @@ from local_operator.session.frontend_state import (
     FrontendSessionState,
     MonitorState,
     WakeState,
+    effective_identity_for,
 )
 from local_operator.session.model_selection import (
     StoredModelSelection,
@@ -484,6 +485,22 @@ async def synthesise_cold_state(
             effective_model=model,
             wakes=list(wakes),
             monitors=list(monitors),
+            # Issue #2014: the EMPTY STATEMENT, deliberately not a derivation.
+            # This synthesis reports no attachment at all — it sets neither
+            # ``active_team`` nor ``active_agent``, and reads neither the
+            # session's attachment sidecar nor the team registry — so deriving
+            # a triple here would produce a frame whose identity names a team
+            # while its own ``active_team`` says there is none: the very
+            # contradiction this rule exists to remove. ``{}`` would be worse
+            # still ("a host older than the field"), and it is the value the
+            # cold-PANE path no longer emits either.
+            #
+            # Consumers that need the binding before a runtime engages already
+            # have it: the desktop's session catalogue row carries the stored
+            # ``team``/``agent`` pair (``server/models/desktop_sessions.py``),
+            # which is where the header should read it until the first warm
+            # frame arrives.
+            effective_identity=effective_identity_for(active_agent="", team=""),
         )
 
     return await asyncio.to_thread(_build)

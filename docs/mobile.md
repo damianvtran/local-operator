@@ -160,7 +160,10 @@ Screens, following branding.md §7's agent-output hierarchy:
 - **Login** — minimal, brand mark, password field, 16 px inputs.
 - **Session list** — one card per session: name, cwd, model label, streaming
   shimmer, needs-attention badge (approval/ask pending), running-subagent
-  chip. New-session button with a cwd picker (home + recents).
+  chip. New-session button with a cwd picker (home + recents). While any
+  conversation is unread, a **mark all as read** control rides above the
+  sections and clears the pile in one write (`POST /api/attention/seen`),
+  answering the store's per-item verdicts.
 
   Rows are drawn in the SAME order the terminal sidebar and the desktop app use:
   the daemon sorts every row on the shared catalogue key
@@ -170,8 +173,10 @@ Screens, following branding.md §7's agent-output hierarchy:
   section) and about which list a conversation is in, and the phone's list is
   STABLE across activity refreshes (an early version re-derived the key from
   live state and moved rows as sessions streamed). Two asymmetries, both
-  deliberate: the wake band (the phone's rows carry no wake data, so `wake_rank`
-  is a constant here), and the phone-woken window (a `/wake` accepted but not yet
+  deliberate: the wake band (the phone's session rows carry no wake data, so
+  `wake_rank` is a constant here; wakes and monitors are a separate,
+  machine-wide read — "The armed index" below), and the phone-woken window (a
+  `/wake` accepted but not yet
   discovered is ranked as a live `idle` row so it lands in Active at once — the
   sidebar has no equivalent window, so no equivalent tier). The screen only
   GROUPS what it is sent:
@@ -232,6 +237,137 @@ Screens, following branding.md §7's agent-output hierarchy:
   to the field, and the retained-envelope retry beside it names the instruction
   it would resend — because the field is not where that text necessarily is any
   more.
+
+### The armed index — wakes and monitors (`GET /api/schedules`)
+
+The machine-wide read of what is ARMED: every conversation carrying wakes and
+monitors, in one answer. It is index-backed like the asks aggregate and for
+the same reason — a schedule outlives the runtime it was armed from, so this
+answers with nothing running: one directory scan per store (`wakes/store.py`,
+`monitors/store.py`), no session opened and no owner dialled. The two families
+share one route because they share every surface they are drawn on (the TUI
+paints both into its single wake band), so one fetch feeds the phone's
+Schedules view.
+
+The payload is `{"wakes": …, "monitors": …}`; each value is its desktop
+listing's shape field for field (`GET /v1/desktop/wakes` / `…/monitors`):
+`entries` per carrying conversation (`session_id`, `name`, `cwd`, `origin`,
+`dormant`, `ghost`, `next_due_at`, and the rows beneath), plus `generated_at`,
+`total`, `truncated` and the store's own `read_error` — an index that could
+not be read is reported as such, never as "nothing is armed". The wake listing
+also carries the `supervisor` block (whether anything would actually fire a
+cold wake); the monitor listing deliberately has none — monitors never engage
+a cold session, so a supervisor-shaped field would advertise a watcher that
+does not exist.
+
+The route is READ-ONLY. Arm, edit and cancel stay on the terminal and the
+desktop plane until the phone's write half ships with its own review.
+
+### The checkpoint manifest — one conversation's rail ticks (`GET /api/sessions/{id}/checkpoints`)
+
+The transcript rail's ticks for one conversation: a tick for every user turn
+and for every completed agent turn, each with its outcome and, on completions,
+its naming state. The phone reads it because it cannot derive it from what it
+holds: the phone's transcript is a bounded tail window (the window
+`GET /api/sessions/{id}/history` back-fills), so a rail built from the frames a
+phone happens to carry would silently mark only the tail of the conversation —
+worse than no rail. The manifest is derived from the journal by
+`session/transcript_index.py` — the desktop rail's own derivation — and served
+in the desktop's own wire model (`session_id`, `index{state, built_at}`,
+`checkpoints[]` of `{id, kind, turn, ts, seq, text, outcome, naming}`), so the
+two surfaces cannot drift. It needs no runtime: a conversation nothing is
+serving still has its journal.
+
+`index.state` carries the honesty: `ready` (possibly with no ticks — a
+conversation with nothing written yet), `building` (a scan is in flight and
+`checkpoints` is the previous scan's; the client polls) or `error` (the last
+refresh failed — a journal that fails to read after a successful stat must
+never render as "no checkpoints"; the mobile suite pins the unreadable
+(`chmod 000`) file → `error`). The bound is exactly that: a journal that
+cannot be `stat`'ed at all still maps to `missing` → `ready` + `[]` in the
+shared derivation — pre-existing, deferred: the fix changes the desktop rail's
+and `find`'s semantics and ships separately (recorded on PR #2068).
+`unsupported` cannot arise here: a conversation this relay cannot see locally
+is a 404, not a state.
+
+Read-only by design: the naming warm (`sessions.checkpoints.warm`) is a
+desktop-plane spend and is not served on this route.
+
+### The peers' rows — other devices' sessions (`GET /api/sessions?include_peers`)
+
+The relay half of "sessions and delegation": the sessions OTHER devices hold,
+appended below the local rows. Verified against `origin/main` at
+`924ccd3a7b7c` — before this the relay had no transfer route and no
+`include_peers` anywhere in the package.
+
+**How the relay reaches the mesh.** It does not hold peer links of its own.
+The one process that speaks the mesh is this device's network relay
+(`lop network`, `network/relay.py`), which publishes a `0600` record under
+`run/peers/<pid>.json` and serves a loopback, key-authenticated control socket;
+the daemon reaches the mesh through it exactly as the CLI and the desktop
+plane do — the federated listing (`session/peer_rows.py`, the TTL-cached
+projection the sidebar groups on) read through `mobile/mesh.py`. A machine in
+no network opens no socket (the listing's own zero-relay short circuit, now
+inherited by this route) and reads as "no peer rows", not an error.
+
+Each remote row carries the desktop row's flat locality fields field for
+field — `locality` (`"remote"`), `owner_device`, `owner_device_name`,
+`reachable`, `unreachable_reason` (glossed, like the desktop's, so no client
+keeps a glossary), and `placement`/`origin`/`last_synced_at` as nulls, because
+the federated row carries no owner's stamp and a null is no claim — plus the
+phone row's own fields where they answer (`session_id`, `section`, `pinned`,
+`conversation_name`, `mtime`, `created_at`) and the transport's
+`live_state`/`pending` pair verbatim. The nested transport `peer` block is
+deliberately NOT published, and neither is a third spelling of the state:
+`section` files a remote row into the ordinary bins through the shared
+`catalog.entry_for` rule (`pending`/`live_state` is ACTIVE, else PREVIOUS) —
+there is no separate remote section. An old-build peer's birth stamp can
+arrive as a non-number; it reads as the no-claim zero and sorts last inside
+its bin, never a crash and never special-cased.
+
+The read is a loopback fan-out behind the listing's own TTL cache, run on a
+worker thread. A relay that does not answer contributes no rows — the same
+`peer_session_rows` contract every other surface reads — and the answer stays
+a 200. The list's SSE stream takes the same flag
+(`/api/sessions/events?include_peers=true`) so a phone's screen cannot flap
+between the two answers on its next repaint; without the flag both answers are
+byte-identical to what they were before.
+
+### The transfer verb — a conversation's move (`POST /api/sessions/{id}/transfer`)
+
+The write half, and the relay's half of
+`POST /v1/desktop/sessions/{session_id}/transfer`: body `{to, keep?, wait_s?,
+request_id?}` (`to` a device id or `"local"`), receipt `{phases[], locality,
+owner_device, source_retired, session_id, new_session_id, mode, replayed}`.
+The move itself runs through this device's network relay —
+`mobility.request_move`, the CLI's own entry point, so the phone and a
+terminal cannot disagree about what a move is. The phone plane's error
+vocabulary wins where the two differ: a refusal carries the move's own
+sentence in `error` and its machine `code` beside it, passed through
+un-smoothed. A move refusal this device could not get an answer about is a
+503, never a 409 that reads as "nothing changed"; a control reply the build
+cannot read (`frame_unreadable` / `frame_too_large`) is a 409 with the relay's
+sentence verbatim — the desktop route's own mapping for the same raises.
+
+The request is long-held BY DESIGN — the move is a retirement, a copy and a
+confirmation, and the only bound is `mobility.request_move`'s own per-shape
+client deadline; `wait_s` accepts 0..300 seconds, refused by name outside
+that. It runs on a worker thread, so the phone's stream and the other
+sessions are not parked behind it.
+
+`request_id` is the at-most-once key. A replay returns the recorded receipt
+with `replayed: true` and dials nothing; a same-id retry that arrives
+mid-move waits on the journal's per-key lock and then replays; a same id with
+different input is a 409. An unconfirmed refusal (the request may be in
+flight, or was never answered) and a control reply the build cannot read
+(`frame_unreadable` / `frame_too_large` — the relay answered, so whether the
+move ran is unknown) are RECORDED, so a retry replays them rather than
+re-arming a move nobody can call settled; every other refusal left nothing
+behind and releases the id, so a user who frees the session up and presses
+again is not answered from a refusal forever. The journal is one small bounded
+JSON file under the config root (`mobile-transfer-receipts.json`); an
+unreadable journal refuses with a named 503 rather than resetting, because a
+reset would silently re-open every recorded id.
 
 ## Failure modes and rules
 
@@ -315,9 +451,10 @@ never re-derived per surface.
 | Tool-card detail + copy actions | `tool_card`, `copy_picker` | run details / trace | partial — expand-on-tap exists, but the payload is a bounded window (8k output tail / 4k args); no copy actions (phase 2) |
 | Session info / report | `info_panel`, `report_view`, `session_panel` | info + session panels | missing (phase 3) |
 | Sidebar: pins, subagent layer | `session_sidebar` | chat sidebar | partial — subagent drill-down exists; pins and the layer view are missing (phase 3) |
-| Wakes / schedules | `wake_panel` | schedules | missing (phase 4) |
+| Checkpoint rail (turn ticks) | — | checkpoint rail (`sessions.checkpoints`) | partial — the manifest is served read-only (`GET /api/sessions/{id}/checkpoints`); the phone's rail render is next (phase 4) |
+| Wakes / schedules | `wake_panel` | schedules | partial — the armed index is served read-only (`GET /api/schedules`); the phone view and arm/cancel are next (phase 4) |
 | Settings | `settings_view` | settings | missing (phase 5) |
-| Move session | `move_picker` | move session | missing (phase 5) |
+| Move session | `move_picker` | move session | partial — the relay serves the peers' rows on the session list (`?include_peers`, SSE included) and the transfer verb (`POST /api/sessions/{id}/transfer`); the phone's move picker and remote-row render are next (phase 5) |
 | Org chart / team view | `org_chart_view` | agent hub | missing (phase 5) |
 | Analytics | `analytics_panel` | analytics panel | missing (phase 5) |
 | Aside panel | `aside_panel` | — | missing (phase 5) |

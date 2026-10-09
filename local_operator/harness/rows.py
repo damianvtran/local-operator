@@ -456,6 +456,43 @@ def is_ask_gate_divert_row(row: Any) -> bool:
     return is_ask_gate_divert_details(provider_payload.get("details"))
 
 
+def visible_transcript_rows(rows: list[Any]) -> list[Any]:
+    """Drop the rows a human transcript must never serve.
+
+    THREE classes, one predicate each: a hidden wake delivery (a patience fire —
+    ``mesh-session-mobility`` §8.2.2 item 4), a hidden tool row (the ``patience``
+    arm's ledger pair — UX round 1, U2), and a diverted ask's result (the ask
+    gate's marker — design ``docs/design/ask-gate.md`` §3 row 5). Filtering at
+    the SOURCE is the point: the desktop client reducer has no filter of its own,
+    so an older build would paint exactly what a current one hides (agent review
+    round 1, R1 / QA round 1, Q1).
+
+    It lives HERE, beside the three predicates it composes, rather than in the
+    desktop server module that used to own it: a second caller arrived with the
+    peer-stored history read (``network/relay.py``'s ``net_session_history``),
+    which serves the same journal rows a peer's own ``/history`` serves and must
+    filter them identically — and a relay importing ``server.utils`` would point
+    the network layer at the HTTP layer. ``server.utils.desktop_sessions`` keeps
+    a re-export of this name so its existing callers and tests do not move; the
+    predicate itself has one definition (see the module docstring's rule: a row
+    decision belongs here, not in a host).
+
+    Rows arrive here in their serialized shape (``{type, payload}``), which is
+    what the predicates duck-type.
+    """
+    out: list[Any] = []
+    for row in rows:
+        payload = row.get("payload") if isinstance(row, Mapping) else None
+        if isinstance(payload, Mapping) and is_hidden_wake_delivery(payload):
+            continue
+        if is_hidden_tool_row(row):
+            continue
+        if is_ask_gate_divert_row(row):
+            continue
+        out.append(row)
+    return out
+
+
 def is_ask_gate_divert_message(message: Any) -> bool:
     """Whether a rendered ``Message`` is a diverted ask's RESULT row.
 

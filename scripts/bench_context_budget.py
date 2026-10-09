@@ -59,7 +59,12 @@ sys.path.insert(0, str(REPO))
 
 import local_operator  # noqa: E402
 from local_operator.harness.types import AgentTool  # noqa: E402
-from local_operator.prompts_api import CHANNEL_ASK, build_system_blocks  # noqa: E402
+from local_operator.prompts_api import (  # noqa: E402
+    CHANNEL_ASK,
+    CHANNEL_HUB,
+    build_system_blocks,
+)
+from local_operator.tools.deferral import deferred_tool_names  # noqa: E402
 from local_operator.tools.registry import DEFAULT_TOOL_NAMES  # noqa: E402
 from scripts.real_tool_surface import build_real_tools  # noqa: E402
 
@@ -1240,7 +1245,132 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: so none of this rides the start context until a caller pulls it. The ceiling
 #: is the measured head + 55, the band this file keeps; the tighten band below
 #: (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 37_094
+#:
+#: LOWERED 37,094 -> 34,810 for the CONTEXT DIET, slice B (system prompt trim),
+#: measured with THIS script on both trees, the clean ``env -i`` arm:
+#:
+#:   base (origin/main e3176403b6)  102,969 chars = ~37,039
+#:   head (this branch)              94,872 chars = ~34,127
+#:   delta                           -8,097 chars = ~-2,912
+#:
+#: The whole delta is the ``instructions`` block (32,699 -> 24,602 chars):
+#: ``prompts_md/system.md`` was cut ~44% (18,439 -> 10,342 rendered chars, the
+#: browser arm) by moving tool mechanics that the tool descriptions,
+#: ``tool://`` docs and guides already carry behind those resources, keeping
+#: only the rules a model needs before it knows to look anything up
+#: (pinned by ``tests/unit/test_system_prompt_invariants.py``). Tool schemas,
+#: inventory and knowledge are byte-identical across the arms. Two savings in
+#: the same change do NOT show here because this script feeds fixed stand-ins:
+#: the repo-guidance head (8 -> 4 KiB, ``context_files.GUIDANCE_HEAD_BYTES``)
+#: and the selected-skills short form (``skills.index.short_description``);
+#: their real-input figures are in the PR. Headroom is ~2% (683 tokens), as
+#: the context-diet brief asked, inside the 1,200 tighten band.
+#:
+#: Review round 1 restored rules the first trim dropped rather than moved (the
+#: wake/monitor triggers, "don't notify", no lettered options, never
+#: force-activate a tab, MCP before local-config discovery, the guide rule's
+#: why): +360 chars = ~+129 billed, measured head 95,232 chars = ~34,256. The
+#: ceiling is NOT raised for it — the 554 tokens left (~1.6%) are the headroom.
+#:
+#: LOWERED 34,810 -> 27,210 by the context diet, slice A (deferred tool schemas,
+#: ``perf/deferred-tools``), RE-MEASURED after review rounds 1-2 and CI round 4. Measured
+#: with THIS script, CLEAN arm via ``env -i``, both trees on the same machine
+#: (base re-measured after slice B merged, so the delta is slice A's alone):
+#:
+#:   base (origin/main 5e59e0cd0)    95,232 chars = ~34,256
+#:   head (this branch)              74,159 chars = ~26,676
+#:   delta                          -21,073 chars = ~-7,580
+#:
+#: Instructions, environment and knowledge are byte-identical across the arms;
+#: the delta is the tools array and one inventory line. Components, each
+#: measured rather than apportioned:
+#:
+#:   -11,752 chars  ``tool_schemas``: 9 tools' schemas DEFERRED — still held,
+#:                  callable, approval-gated and documented, but published only
+#:                  once activated (``tools/deferral.py``). ``tool_schemas``
+#:                  counts only what is published, as ``Session._publishable``
+#:                  sends it. Measured as ``--no-defer`` minus the default arm,
+#:                  net of the inventory line below.
+#:   - 4,752 chars  ``tool_schemas``: optional ``anyOf: [T, null]`` +
+#:                  ``default: null`` collapsed to ``T`` (95 ROOT properties on
+#:                  the published surface; ``tools.registry.collapse_optional_nulls``),
+#:                  measured as the published set with the collapse on against
+#:                  the same set with it neutralised
+#:   - 4,874 chars  ``tool_schemas``: description trims (``ask``, ``send``,
+#:                  ``sessions``, ``browser``, ``todo.op``, ``project``, the
+#:                  ``i`` intent) whose prose moved into ``read tool://<name>``
+#:                  — the residual, so the four components sum to the delta
+#:   +   305 chars  ``tool_inventory``: the one "schema on demand" line naming
+#:                  the 9 deferred tools with a purpose phrase each
+#:   = -21,073 chars = ~-7,580 billed
+#:
+#: ``--no-defer`` (the ``tools.defer: false`` kill switch) measures ~30,794 —
+#: the two trims alone — the inverse canary that proves the deferral share is
+#: real. The ceiling is the measured head + ~2% (534), inside the 1,200 band.
+#:
+#: RE-MEASURED DOWN twice, and each time the measurement changed the design.
+#: Round 1 un-deferred ``network`` and the five child-only extras, each measured
+#: collapsing adoption on a live model when its schema was absent. Round 2 moved
+#: the collapse's "I rewrote this" flag OUT of the schema: carried in-schema it
+#: put 121 keys on every published request, which cost 1,209 billed tokens here
+#: (27,354 -> 26,145 across that fix) and asked strict providers to accept a
+#: keyword their dialect does not list. CI round 4 RAISED it by 531 (26,145 ->
+#: 26,676) on purpose: ``ask_withdraw`` was un-deferred after a live probe found
+#: the model settled a queued ask 0/3 with its schema withheld and 3/3 with it
+#: published (``tools/deferral.py``). The child arm did not move — a child holds
+#: no ``ask_withdraw`` (no ask hook) — which is the check that the 531 is that
+#: tool and nothing else. Re-derive with ``--verbose`` after any change to the
+#: deferred set or to the collapse.
+#:
+#: RAISED 27,210 -> 27,217 by the IMAGE-GENERATION RESTORE
+#: (``feat/image-generation-tool``), which merged the same day the diet landed,
+#: so both ledgers here were measured ONCE on the MERGED tree — the same policy
+#: the diet's own entries follow (re-measure on merge, never add two parent
+#: deltas). Same machine, clean arm via ``env -i``:
+#:
+#:   merged head (this branch)       75,510 chars = ~27,162
+#:
+#: against the diet's own head (74,159 = ~26,676): +1,351 chars = ~+486 billed,
+#: exactly the new tool's wire cost rendered through THIS branch's collapse —
+#: 14 name + 186 description + the collapsed JSON schema + its inventory row.
+#: Everything else is byte-identical to the diet's reading. The tool is
+#: createIf-gated on the machine's image credentials, so a session without a
+#: provider pays none of it; the guard measures the fully-capable surface
+#: deliberately (``real_tool_surface`` now binds that predicate the way it
+#: binds the browser and console gates). The band is normalized to the 55-token
+#: band this file keeps — the diet left 48 tokens above its head, so the
+#: ceiling moves by 7: measured head + 55.
+BUDGET_BILLED_TOKENS = 27_217
+
+#: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
+#: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
+#: INVENTORY is smaller (``CHILD_NEVER_HOLDS``: no ``ask``/``ask_withdraw``/
+#: ``wake``/``monitor``/``patience``) and its prompt carries the ``hub``
+#: channel, not because the deferred set differs — it does not, see
+#: ``tools/deferral.py`` for the measurement that dropped the child-only extras.
+#: ~93% of the 30-day ledger's sessions are children, so this is the number most
+#: requests actually pay. Measured with THIS script's child arm on both trees
+#: (base re-derived over an exported ``origin/main`` 5e59e0cd0 with the same
+#: tool filter and channel):
+#:
+#:   base (origin/main 5e59e0cd0)    83,243 chars = ~29,944
+#:   head (this branch)              65,974 chars = ~23,732
+#:   delta                          -17,269 chars = ~-6,212
+#:
+#: ``--no-defer`` measures ~27,334. The ceiling is the measured head + ~2% (475).
+#:
+#: RAISED (with the top arm, same day, same merge) 24,207 -> 24,273 by the
+#: IMAGE-GENERATION RESTORE: the child arm ALSO carries ``generate_image`` (it is
+#: createIf-gated on the machine, not on the parent), measured on the merged
+#: tree —
+#:
+#:   merged child head (this branch) 67,325 chars = ~24,218
+#:
+#: vs the diet's child head (65,974 = ~23,732): the same +1,351 chars = ~+486
+#: billed the top arm carries, which is the check that the delta is that one
+#: tool and nothing else. Band normalized to the 55-token band; the diet's
+#: child head had 475 of headroom, so the ceiling moves by 66: head + 55.
+BUDGET_CHILD_BILLED_TOKENS = 24_273
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
@@ -1277,11 +1407,22 @@ def tool_schema_chars(tools: list[AgentTool]) -> int:
     )
 
 
+#: Tools a SUBAGENT never holds, whatever its role: ``ask``/``ask_withdraw``
+#: need a front end's ask hook (a child's route to the operator is ``hub``),
+#: and ``wake``/``monitor``/``patience`` are pruned or gated off because a
+#: child ends after one prompt (``harness/subagent.py``, the prune after
+#: construction). The child arm measures the unrestricted child — the widest
+#: surface a subagent can carry — so it is the full surface minus these.
+CHILD_NEVER_HOLDS = frozenset({"ask", "ask_withdraw", "wake", "monitor", "patience"})
+
+
 def measure_start_context(
     *,
     user_instructions: str = _SAMPLE_USER_INSTRUCTIONS,
     repo_guidance: str = _SAMPLE_REPO_GUIDANCE,
     inflate_schemas: int = 0,
+    kind: str = "top",
+    defer: bool = True,
 ) -> dict[str, Any]:
     """Character cost of everything a fresh session puts on the wire.
 
@@ -1291,6 +1432,16 @@ def measure_start_context(
     "prove it can fail" demonstrates the guard over the wrong half.
     """
     tools = build_real_tools(str(REPO))
+    if kind == "child":
+        tools = [tool for tool in tools if tool.name not in CHILD_NEVER_HOLDS]
+    # What a session withholds from the wire (``tools/deferral.py``). ONE set
+    # for both kinds — the module records the measurement that dropped the
+    # child-only extras. The inventory block lists these on its "schema on
+    # demand" line instead, and ``tool_schemas`` below counts only what is
+    # published — exactly what ``Session._publishable`` sends. ``defer=False``
+    # is the inverse canary: the pre-deferral surface, every schema published.
+    held = {tool.name for tool in tools}
+    deferred = (deferred_tool_names() & held) if defer else frozenset()
     if inflate_schemas:
         # A new property on the first tool: the shape a real schema regression
         # takes (a tool grows an argument), rather than opaque filler.
@@ -1315,17 +1466,22 @@ def measure_start_context(
         # three (``CHANNEL_ASK``, the TUI/desktop/app case — see
         # ``prompts_api.build_system_blocks``).
         interactive=True,
-        channel=CHANNEL_ASK,
+        # A child's channel to the operator is ``hub`` (its parent), which is
+        # what ``harness/subagent.py`` states for every child it builds.
+        channel=CHANNEL_HUB if kind == "child" else CHANNEL_ASK,
+        deferred_tools=deferred,
     )
+    published = [tool for tool in tools if tool.name not in deferred]
     parts: dict[str, Any] = {
         "instructions": len(blocks[0]),
         "tool_inventory": len(blocks[1]),
         "environment": len(blocks[2]),
         "knowledge": len(blocks[3]),
-        "tool_schemas": tool_schema_chars(tools),
+        "tool_schemas": tool_schema_chars(published),
     }
     parts["TOTAL"] = sum(parts.values())
     parts["n_tools"] = len(tools)
+    parts["n_published"] = len(published)
     # Names, so a short surface can say WHICH tool a host-dependent gate ate.
     parts["names"] = [t.name for t in tools]
     return parts
@@ -1336,8 +1492,8 @@ def main() -> int:
     parser.add_argument(
         "--budget",
         type=int,
-        default=BUDGET_BILLED_TOKENS,
-        help="ceiling in billed tokens (default: the enforced ratchet)",
+        default=None,
+        help="ceiling in billed tokens (default: the enforced ratchet for --kind)",
     )
     parser.add_argument(
         "--inflate",
@@ -1358,8 +1514,28 @@ def main() -> int:
             "component, so the fail-proof lever must reach them too."
         ),
     )
+    parser.add_argument(
+        "--kind",
+        choices=("top", "child"),
+        default="top",
+        help=(
+            "which session to measure: a top-level session (default) or an "
+            "unrestricted subagent, which has a smaller inventory and its own "
+            "budget (BUDGET_CHILD_BILLED_TOKENS)"
+        ),
+    )
+    parser.add_argument(
+        "--no-defer",
+        action="store_true",
+        help=(
+            "measure with every schema published (``tools.defer: false``) — the "
+            "inverse canary: it must bring the pre-deferral number back"
+        ),
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+    if args.budget is None:
+        args.budget = BUDGET_CHILD_BILLED_TOKENS if args.kind == "child" else BUDGET_BILLED_TOKENS
 
     # A measurement tool that can silently measure the WRONG TREE is the same
     # defect class as one that measures the wrong surface. `sys.path.insert(0,
@@ -1381,6 +1557,8 @@ def main() -> int:
     parts = measure_start_context(
         user_instructions=_SAMPLE_USER_INSTRUCTIONS + ("x" * args.inflate),
         inflate_schemas=args.inflate_schemas,
+        kind=args.kind,
+        defer=not args.no_defer,
     )
     total_chars = parts["TOTAL"]
     billed = round(total_chars / CHARS_PER_BILLED_TOKEN)
@@ -1390,13 +1568,21 @@ def main() -> int:
     # measuring a machine no user has. See real_tool_surface._forced_browser_backend.
     n_tools = int(parts["n_tools"])
     parts_names = list(parts["names"])
-    expected_tools = len(DEFAULT_TOOL_NAMES)
-    print(f"tool surface: {n_tools}/{expected_tools} tools")
+    expected_tools = len(DEFAULT_TOOL_NAMES) - (
+        len(CHILD_NEVER_HOLDS) if args.kind == "child" else 0
+    )
+    print(
+        f"tool surface ({args.kind}): {n_tools}/{expected_tools} tools, "
+        f"{parts['n_published']} schemas published"
+    )
     if n_tools != expected_tools:
         # Name the tools, not just the count: the whole point of this check is
         # that a host-dependent gate dropped something, and "which one" is the
         # first question anyone reading a CI log will ask.
-        missing = sorted(set(DEFAULT_TOOL_NAMES) - set(parts_names))
+        expected_names = set(DEFAULT_TOOL_NAMES) - (
+            CHILD_NEVER_HOLDS if args.kind == "child" else set()
+        )
+        missing = sorted(expected_names - set(parts_names))
         print(
             f"FAIL: measured {n_tools} of {expected_tools} default tools.\n"
             f"      missing: {', '.join(missing) or '(none — duplicate names?)'}\n"
@@ -1435,14 +1621,17 @@ def main() -> int:
     # trip it; only a real reduction (or a deliberate tool removal) opens
     # enough slack to require the ratchet to follow it down.
     headroom = args.budget - billed
-    inflating = bool(args.inflate or args.inflate_schemas)
+    # The canary measures a deliberate fiction too (deferral off), so it is
+    # exempt from the tighten band exactly as ``--inflate`` is.
+    inflating = bool(args.inflate or args.inflate_schemas or args.no_defer)
     if not inflating and headroom > TIGHTEN_WHEN_HEADROOM_EXCEEDS:
+        constant = "BUDGET_CHILD_BILLED_TOKENS" if args.kind == "child" else "BUDGET_BILLED_TOKENS"
         print(
             f"FAIL: {headroom:,} billed tokens of headroom exceeds the "
             f"{TIGHTEN_WHEN_HEADROOM_EXCEEDS:,}-token slack band.\n"
             "      The context got smaller — good. Tighten the ratchet so the saving "
             "is defended:\n"
-            f"      set BUDGET_BILLED_TOKENS = {billed + TIGHTEN_WHEN_HEADROOM_EXCEEDS // 2:,} "
+            f"      set {constant} = {billed + TIGHTEN_WHEN_HEADROOM_EXCEEDS // 2:,} "
             "in scripts/bench_context_budget.py."
         )
         return 1

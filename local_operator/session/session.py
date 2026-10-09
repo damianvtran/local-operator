@@ -52,6 +52,7 @@ from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Collection,
     Coroutine,
     Mapping,
     Sequence,
@@ -287,6 +288,7 @@ from local_operator.tools.builtin import (
     todo_fingerprint,
     todo_snapshot,
 )
+from local_operator.tools.deferral import deferred_tool_names, tool_deferral_enabled
 from local_operator.tools.tool_docs import chain_tool_docs
 
 if TYPE_CHECKING:
@@ -612,6 +614,7 @@ _PER_TOKEN_EVENT_TYPES = (
     ToolExecutionUpdateEvent,
 )
 
+
 #: The builtin tools whose createIf gate reads a field only a SESSION can fill
 #: (``subagent_launcher``, ``jobs``, ``wake_scheduler``, ``subagent_comms``, the
 #: ask hook). Named here rather than inline in
@@ -620,6 +623,27 @@ _PER_TOKEN_EVENT_TYPES = (
 #: the merge added, and ``set_ask_handler`` re-runs one entry of it. A tool
 #: added to the registry with a session-gated builder and not added here is
 #: advertised to nobody.
+def _deferred_availability(name: str, published: bool) -> str:
+    """The line a ``tool://`` read appends when it activated a deferred tool.
+
+    Same promise as an ``mcp://server/tool`` enable (``mcp/resources.py``):
+    the schema joins at the next model call only if this turn has not yet
+    published its array; otherwise at the NEXT TURN, because the array is
+    published once per turn (``Session._wire_tools``). Either way the tool is
+    callable NOW — resolution reads the inventory, not the array.
+    """
+    if published:
+        return (
+            f"`{name}` schema loaded: it is in the tool definitions from the next "
+            "model call. It is callable now."
+        )
+    return (
+        f"`{name}` schema loaded: it joins the tool definitions at the NEXT TURN, "
+        "not the next model call, because this turn already published its tool "
+        "list. It is callable now — call it with the parameters above."
+    )
+
+
 SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     "task",
     "wait",
@@ -2531,6 +2555,43 @@ def _read_roster_sidecar(path: Any) -> dict[str, Any] | None:
 _render_compaction_marker = render_compaction_marker
 
 
+def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
+    """Apply one ``[session-state]`` record's ``blocks`` payload to ``blocks``.
+
+    One fold, two readers: the resume path replays EVERY record in the journal
+    to recover what was last shipped, and the compaction re-anchor
+    (:meth:`Session._visible_state_blocks`) replays only the records still in
+    the model's context, to recover what the model can still SEE. Two copies of
+    this loop would be two ways to disagree about the same bytes.
+    """
+    for key, value in record.items():
+        index = int(key)
+        if not (0 <= index < len(blocks)):
+            continue
+        if isinstance(value, Mapping):
+            # Section-granular record: replace exactly the named sections of the
+            # block reconstructed so far; an empty value says that section is
+            # gone. The split of what we hold is deterministic (see
+            # ``split_system_block_sections``), so folding a sequence of records
+            # ends on the bytes the last record's render produced.
+            current = split_system_block_sections(index, blocks[index])
+            updated: dict[str, str] = {}
+            for name, text in current.items():
+                if name in value:
+                    text = str(value[name]) if value[name] else ""
+                if text:
+                    updated[name] = text
+            for name, text in value.items():
+                if name not in current and text:
+                    updated[str(name)] = str(text)
+            blocks[index] = assemble_system_block_sections(index, updated)
+        else:
+            # Whole-block record (the shape every record had before sections,
+            # and the one a block with no known split still gets): the text IS
+            # the block.
+            blocks[index] = str(value)
+
+
 class Session:
     """The session facade. Satisfies ``SessionProtocol``."""
 
@@ -3039,6 +3100,33 @@ class Session:
         #: callable, and the prompt's inventory block reports it through the
         #: usual ``[session-state]`` delta.
         self._published_tools: list[AgentTool] | None = None
+        #: DEFERRED SCHEMAS (``tools/deferral.py``). ``_deferral_pins`` are names
+        #: a role's ``tools:`` list, a team manager's or a host declaration asked
+        #: for, which stay published. ``_activated_tools`` is STICKY for the
+        #: session's life: every activation reprices the whole cached prefix once
+        #: (the array is position 0), so un-deferring again later would pay that
+        #: twice. ``_tool_deferral`` is the ``tools.defer`` kill switch, read
+        #: once at construction and followed live by
+        #: :meth:`_apply_config_change`.
+        #:
+        #: ACTIVATIONS ARE NOT PERSISTED, and this is stated as a DECISION
+        #: rather than as a measured fact, because it is not measured: what a
+        #: resume inside the provider cache TTL does to the cache read is OPEN
+        #: (review round 1, MINOR-3, which could not measure it under the host
+        #: resource hold and neither could this round). What is known is the
+        #: SHAPE of the exposure and it is bounded: the tools array is position
+        #: 0, so a resumed session that had activated a tool republishes the
+        #: smaller array and re-processes ONE turn at write price — the same
+        #: one-time rewrite activation itself already paid, and only for a
+        #: session that both activated a tool and resumed warm. Against that,
+        #: persisting them is a new mechanism with a migration and a freshness
+        #: question (a stale activation would have to be reconciled against a
+        #: changed deferral set or kill switch). Revisit if the rollout watch's
+        #: ``cache_read``/``cache_write`` on activation turns shows the resumed
+        #: case paying more than that single turn.
+        self._deferral_pins: frozenset[str] = frozenset()
+        self._activated_tools: set[str] = set()
+        self._tool_deferral = tool_deferral_enabled()
         #: True while a mid-session model selection has not reached the
         #: transcript yet; the same dispose-flush contract as the title (the
         #: write is a background task, and dispose cancels background tasks,
@@ -3068,38 +3156,9 @@ class Session:
                     payload = entry.payload
                     if payload.get("custom_type") != "session_state":
                         continue
-                    for key, value in payload.get("details", {}).get("blocks", {}).items():
-                        index = int(key)
-                        if not (0 <= index < len(self._last_system_blocks)):
-                            continue
-                        if isinstance(value, Mapping):
-                            # Section-granular record: replace exactly the named
-                            # sections of the block reconstructed so far; an
-                            # empty value says that section is gone. The split
-                            # of what we hold is deterministic (see
-                            # ``split_system_block_sections``), so folding a
-                            # sequence of records ends on the bytes the last
-                            # record's render produced.
-                            current = split_system_block_sections(
-                                index, self._last_system_blocks[index]
-                            )
-                            updated: dict[str, str] = {}
-                            for name, text in current.items():
-                                if name in value:
-                                    text = str(value[name]) if value[name] else ""
-                                if text:
-                                    updated[name] = text
-                            for name, text in value.items():
-                                if name not in current and text:
-                                    updated[str(name)] = str(text)
-                            self._last_system_blocks[index] = assemble_system_block_sections(
-                                index, updated
-                            )
-                        else:
-                            # Whole-block record (the shape every record had
-                            # before sections, and the one a block with no
-                            # known split still gets): the text IS the block.
-                            self._last_system_blocks[index] = str(value)
+                    _fold_state_record(
+                        self._last_system_blocks, payload.get("details", {}).get("blocks", {})
+                    )
                     self._system_state_message_id = entry.id
         # Whether the block provider accepts the live ``model_label`` argument.
         # Computed once here rather than per call: the factory and subagent
@@ -3204,7 +3263,14 @@ class Session:
         # other scheme reaches ``skill_resolver`` exactly as before, and a
         # session constructed with no resolver at all still answers
         # ``tool://``. Mechanism + contract: ``tools/tool_docs.py``.
-        self._skill_resolver = chain_tool_docs(skill_resolver, lambda: self._tools)
+        # ``on_tool_read`` is the deferred-schema hook: a ``read tool://X`` of a
+        # deferred tool is the explicit request for its schema, so it publishes
+        # X (sticky) and the reply says when the schema joins the array. Passed
+        # INTO the link rather than wrapped around it, so the value reaching the
+        # executor is still the identity-checked ``ToolDocsLink``.
+        self._skill_resolver = chain_tool_docs(
+            skill_resolver, lambda: self._tools, on_tool_read=self._activate_on_tool_doc
+        )
         self._request_approval = request_approval
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the
@@ -3772,6 +3838,17 @@ class Session:
             on_job_change=self._schedule_frontend_jobs,
             **_configured_max_running(),
         )
+        #: The config root THIS session's own state resolves to, captured once
+        #: here rather than re-read from the environment at each write. The
+        #: greeting ledger is the case that made this concrete (review round 1,
+        #: R-2): the row is armed by an attended surface against the root IT
+        #: names and settled by this session's wake delivery, so a host whose
+        #: environment moved after construction (or that built this session
+        #: against an injected root) would otherwise stamp ``delivered``
+        #: somewhere the arming root can never read.
+        from local_operator.paths import config_dir as _resolve_session_root
+
+        self._config_dir = _resolve_session_root()
         self._wake = WakeScheduler(
             now=lambda: int(time.time() * 1000),
             # Deliveries route through the indirection hook: at resume the
@@ -3862,6 +3939,15 @@ class Session:
         #: the gate on every aida hook below (load hold, persist reconcile,
         #: config-watch reconcile, delivery guard, after-turn tray drain).
         self._aida_duty = False
+        #: Distinct wake-supervisor refusal reasons already reported (M3). The
+        #: install hook runs on every schedule persist, so the set is what keeps
+        #: "your check-ins need a session open" from printing on every write.
+        self._wake_supervisor_refusals: set[str] = set()
+        #: Live "a LOCAL human front end holds this session" probe, installed by
+        #: the serving runtime (``serving._install_interactivity_probe``) from
+        #: the connection table it owns. ``None`` until then, which the greeting
+        #: gate reads as "no runtime to ask" — see :meth:`_aida_greeting_may_land`.
+        self._aida_attended_probe: Callable[[], bool] | None = None
         #: Set by the deliver trampoline, consumed by the next persist, which
         #: is what stamps ``last_fired_at`` on the wake index entry. See
         #: :meth:`_persist_wake_schedules`.
@@ -5218,6 +5304,7 @@ class Session:
             # the historical live probe.
             host_has_browser=getattr(self._system_blocks_provider, "host_has_browser", None),
             host_has_console=getattr(self._system_blocks_provider, "host_has_console", None),
+            deferred=self.deferred_tool_names(),
         )
         for index, block in enumerate(blocks):
             if block.startswith(TOOL_INVENTORY_HEADING):
@@ -5315,14 +5402,21 @@ class Session:
             self._system_state_message_id is not None
             and compaction_id != self._system_state_compaction_id
         )
+        if lost_state:
+            # RE-ANCHOR AGAINST WHAT THE MODEL CAN STILL SEE, not against
+            # nothing. This branch used to re-ship EVERY section after any
+            # compaction that moved past the last state record — but the frozen
+            # prefix never leaves the request, and records after the cut point
+            # survive in context. A replay of 1,142 transcripts (2026-10-08)
+            # found 1,371 of 1,989 re-anchored sections byte-identical to what
+            # the model could still see (3.03M of 4.73M chars): the team brief,
+            # the tool inventory and the interactivity block re-sent unchanged.
+            previous = self._visible_state_blocks()
         changes: dict[str, dict[str, str]] = {}
         for index, block in enumerate(desired):
             if index == 0:
                 continue
             sections = split_system_block_sections(index, block)
-            if lost_state:
-                changes[str(index)] = sections
-                continue
             prior = (
                 split_system_block_sections(index, previous[index]) if index < len(previous) else {}
             )
@@ -5335,6 +5429,23 @@ class Session:
             if section_changes:
                 changes[str(index)] = section_changes
         return changes, compaction_id
+
+    def _visible_state_blocks(self) -> list[str]:
+        """The system blocks as the model can see them in the LIVE context.
+
+        The frozen prefix folded with every ``[session-state]`` record still in
+        ``_context.messages`` — after a compaction, that is only the records at or
+        after its cut point. This is the baseline a re-anchor must diff against:
+        a section equal to it is already in front of the model, and re-sending it
+        buys nothing but tokens. A section the model cannot see in its current
+        form (changed since the prefix, its carrier compacted away) still differs
+        and still ships, which is the whole of what the re-anchor exists for.
+        """
+        blocks = list(self._frozen_system_blocks or [])
+        for message in self._context.messages:
+            if isinstance(message, CustomMessage) and message.custom_type == "session_state":
+                _fold_state_record(blocks, message.details.get("blocks", {}) or {})
+        return blocks
 
     @staticmethod
     def _system_state_message(changes: dict[str, Any]) -> CustomMessage:
@@ -5611,7 +5722,9 @@ class Session:
                     + "\n"
                     + json.dumps(tool.parameters, sort_keys=True, separators=(",", ":"))
                 )
-                for tool in self._tools
+                # What the provider is SENT, not the inventory: a deferred
+                # tool's schema is not on the wire until it is activated.
+                for tool in self._side_channel_tools()
             ),
             "messages": estimate_messages_tokens(
                 self._render_history(list(self._context.messages))
@@ -5970,8 +6083,64 @@ class Session:
         Mirrors how ``agent_brief`` is surfaced — a read-only view onto the
         volatile tail's holder — so the front end never reaches into
         ``_goal_state`` for it.
+
+        A team's manager reads here too (issue #2014): ``attach_team`` claims
+        the slot for the manager, and that claim is a name WITHOUT a separate
+        brief because the manager's own preamble is already inside
+        ``team_brief``. So a non-empty name beside an empty brief is a normal
+        state, exactly as the A2 hollow profile is.
         """
         return self._goal_state.agent_name
+
+    @property
+    def effective_identity(self) -> dict[str, str]:
+        """WHO is answering this session, as one statement (issue #2014).
+
+        ``{"speaker": ..., "team": ..., "role_of_speaker": ...}``, always all
+        three keys so a client can render a sentence without inferring the
+        missing half from a falsy value:
+
+        * a team is attached — the speaker is that team's manager and
+          ``role_of_speaker`` is ``"manager"``. ``speaker`` falls back to the
+          team name if the team object cannot name its manager (a reduced test
+          double), so the field never reads as "nobody".
+        * otherwise — the speaker is the ``/agent`` profile in force (``""``
+          when none) and both ``team`` and ``role_of_speaker`` are ``""``. An
+          empty statement, not an absent one; the frontend state carries it
+          verbatim.
+
+        Read-only and derived, deliberately: the two slots it summarises are
+        the real state (``active_team`` / ``active_agent``), and a client that
+        wants to know which of them moved keeps reading those. This exists so
+        that "the team's manager, or the attached profile, or neither" is one
+        answer with one author instead of a rule each surface re-implements —
+        the mixed team+agent state that had no defined winner. The rule itself
+        lives in ``frontend_state.effective_identity_for``, shared with the
+        ownerless (cold) producers that have no session to ask.
+
+        "In force" means ``active_team`` is set. Two things set it: ``attach_team``
+        (the user's own act) and ``harness/subagent.py``, which stamps a child's
+        lineage directly — so on a child this reads the lineage's team, whose
+        roster and briefs are NOT in that child's tail (agent review round 2,
+        NIT-3: latent, no shipped path reads it there, recorded so the next
+        reader knows what the predicate covers).
+        """
+        team = self.active_team_name
+        from local_operator.session.frontend_state import effective_identity_for
+
+        return effective_identity_for(
+            active_agent=self.active_agent,
+            team=team,
+            # Gated on the BOOL, not on the name: a nameless team still has a
+            # manager to name, and passing "" because the team's NAME is empty
+            # would publish a speaker-less team (design round 1, D7).
+            manager=self._team_manager_name() if self.active_team is not None else "",
+            # The BOOL, not the name: a team whose name resolves to "" (a
+            # reduced double, a malformed row) is still a team in force, and
+            # keying on the name would publish it as a plain profile attach
+            # (design round 1, D7).
+            team_in_force=self.active_team is not None,
+        )
 
     @property
     def goal_status(self) -> str:
@@ -6197,7 +6366,7 @@ class Session:
             return ""
         return str(getattr(team, "name", "") or "")
 
-    def attach_team(self, team: Any) -> None:
+    def attach_team(self, team: Any) -> str | None:
         """Bind this session as the manager of ``team``.
 
         The team's collaboration and project briefs ride the volatile tail
@@ -6205,7 +6374,33 @@ class Session:
         without rebuilding the session or invalidating the cached persona
         prefix. Children spawned after this inherit the same team via
         :attr:`active_team`.
+
+        A team OWNS the agent slot (issue #2014). Attaching one makes this
+        session's speaker that team's manager, replaces whatever ``/agent``
+        profile was attached before, and closes the slot to ``/agent`` until
+        the team is detached with ``/team clear`` — see
+        :meth:`_claim_agent_slot_for_team` for the rule and why the manager's
+        own instructions stay in ``team_brief`` rather than being stamped
+        twice. Passing ``None`` detaches the team and frees the slot.
+
+        Returns the DISPLAY NAME of the ``/agent`` profile this attach REPLACED,
+        or ``None`` when it replaced nothing (issue #2014). A team silently
+        dropping the profile a user had just chosen is the kind of state change
+        the UI has to be able to explain, and a front end can only report it if
+        the mutation says what it did — so the return is the caller's notice
+        material, not a status code. Detaching returns ``None``: it takes the
+        slot away, it does not replace a profile with another.
+
+        Detaching when NO team is attached is a true no-op (agent-review/
+        design-round 1, F/D1): the slot is released only when a team was
+        actually IN FORCE, or a bare ``/team clear`` would quietly drop an
+        attached profile the user never asked to lose.
         """
+        # Read BEFORE the assignment below: the detach branch needs to know
+        # whether a team was in force, and this is the only place that is still
+        # true. Review round 1 caught a bare ``/team clear`` (no team attached)
+        # wiping an attached profile through ``_release_team_agent_slot``.
+        had_team = self.active_team is not None
         self.active_team = team
         # Either branch is the user acting on the team slot, so a carried
         # unresolved name stops being a recovery hint here (R1): a detach means
@@ -6213,9 +6408,21 @@ class Session:
         self._clear_unresolved("team")
         if team is None:
             self._goal_state.team_brief = ""
+            if had_team:
+                # Detaching FREES the agent slot the team owned: the manager's
+                # identity arrived with the team, so it leaves with it and the
+                # session is back to its base instructions. Without this a
+                # detach would leave ``active_agent`` naming a manager no team
+                # backs — the same unreconcilable pair this rule exists to
+                # remove.
+                self._release_team_agent_slot()
+            # With NO team in force there is nothing to release: whatever is in
+            # the slot got there through ``/agent`` and only ``/agent clear``
+            # may take it away. The persist/refresh below are unconditional
+            # because the team BRIEF is now empty either way.
             self._persist_attachment()
             self.refresh_frontend_state()
-            return
+            return None
         preamble = getattr(team, "manager_preamble", lambda: "")()
         # The manager's own profile instructions (the reusable BASE) sit in
         # front of the team brief so a custom manager keeps its voice when
@@ -6232,6 +6439,10 @@ class Session:
             # path. Both call sites share ``_resolve_profile_or_specialist`` so
             # the order cannot drift between them again.
             kind, profile, specialist_prompt, _ = self._resolve_profile_or_specialist(manager_name)
+            if kind in ("role", "seed") and profile is not None:
+                # The manager's ``tools:`` list pins those schemas published,
+                # exactly as an ``/agent`` attach of the same role would.
+                self.set_tool_deferral(pins=tuple(profile.tools or ()))
             if kind in ("role", "seed") and profile is not None and profile.preamble:
                 preamble = profile.preamble + (preamble or "")
             elif kind == "specialist" and specialist_prompt:
@@ -6245,11 +6456,101 @@ class Session:
                     + (preamble or "")
                 )
         self._goal_state.team_brief = preamble or ""
+        # Read BEFORE the claim, because the claim blanks it: this is the
+        # profile the team is about to replace, and the caller's notice names it.
+        replaced = self._goal_state.agent_name or ""
+        # The team takes the agent slot (issue #2014), AFTER the brief so the
+        # claim can only ever describe a team that is fully attached.
+        self._claim_agent_slot_for_team()
         # Journal the NAME so a resume can rebuild this tail. On change only:
         # the roster moves a handful of times per session, and the brief itself
         # is deliberately not stored (see ``SessionAttachment``).
         self._persist_attachment()
         self.refresh_frontend_state()
+        return replaced or None
+
+    def _team_manager_name(self) -> str:
+        """The manager role name of the attached team ("" when none).
+
+        Read off the team object for the same reason :attr:`active_team_name`
+        is: the team is the source of truth, and a nameless test double must
+        resolve to "" rather than raise.
+        """
+        team = self.active_team
+        if team is None:
+            return ""
+        return str(getattr(team, "manager", "") or "")
+
+    def _claim_agent_slot_for_team(self) -> str:
+        """Make the attached team's manager this session's speaker.
+
+        THE rule from issue #2014, in one place: a session with a team attached
+        runs ONE persona — that team's manager — and the agent slot IS the
+        team's. Three things follow, and they are why this is a claim rather
+        than a second brief:
+
+        * The manager's own instructions are ALREADY in ``team_brief``: the
+          attach above resolves the manager profile through the shared
+          resolver and layers its preamble in front of the team brief. So the
+          slot takes the manager's NAME and no brief — stamping the profile
+          again would put one persona on the tail twice.
+        * Any profile the user attached BEFORE the team is replaced, not
+          stacked: the two-brief state this issue is about cannot survive the
+          attach. ``_attached_profile_tools`` goes with it for the reason
+          ``clear_agent_profile`` documents — a host that bounds itself on the
+          attached role must not keep honouring a role that is no longer the
+          speaker.
+        * ``agent_name`` is what the band and the desktop header read, so the
+          identity is visible from the ordinary surfaces rather than only from
+          :attr:`effective_identity`.
+        """
+        self._goal_state.agent_brief = ""
+        self._goal_state.agent_name = self._team_manager_name()
+        self._attached_profile_tools = ()
+        # The team's manager supersedes any carried unresolved agent name (R1),
+        # exactly as a successful ``/agent`` attach does.
+        self._clear_unresolved("agent")
+        return self._goal_state.agent_name
+
+    def _release_team_agent_slot(self) -> None:
+        """Free the agent slot a detached team owned (the ``/team clear`` half).
+
+        The mirror of :meth:`_claim_agent_slot_for_team`: the slot the team
+        claimed goes back to empty, so the session returns to its base
+        instructions and a later ``/agent`` is accepted again. Idempotent —
+        clearing a slot that was already empty costs nothing.
+        """
+        self._goal_state.agent_brief = ""
+        self._goal_state.agent_name = ""
+        self._attached_profile_tools = ()
+        self._clear_unresolved("agent")
+
+    def _team_agent_slot_refusal(self, action: str) -> str:
+        """The copy for a refused ``/agent`` while a team owns the slot.
+
+        Built here rather than in each front end so the TUI, the routed
+        runtime, the SDK and the ``lop exec`` preflight cannot word the same
+        refusal three ways. ``action`` is ``"attach"`` (a profile was named)
+        or ``"detach"`` (``/agent clear``), and both name the way out: the
+        team is the thing to move, so the remedy is ``/team clear``.
+
+        The ATTACH sentence itself comes from
+        :func:`local_operator.session.errors.team_owns_the_agent_slot_message`,
+        shared with the preflight that refuses ``--team … --profile …`` before a
+        session exists; the detach sentence has no other caller (a preflight has
+        no slot to clear) and stays here beside it.
+        """
+        team = self.active_team_name
+        manager = self._team_manager_name()
+        if action == "detach":
+            named = f" ({manager} is the speaker)" if manager else ""
+            return (
+                f"team {team} owns this session's profile{named}, so there is nothing "
+                "to detach here. Run /team clear to detach the team."
+            )
+        from local_operator.session.errors import team_owns_the_agent_slot_message
+
+        return team_owns_the_agent_slot_message(team, manager)
 
     def _persist_attachment(self) -> None:
         """Journal the attached team/agent/goal beside the transcript.
@@ -6498,7 +6799,13 @@ class Session:
         # is still there (D2/R3). Both of those are also the transient cases the
         # carried-name recovery exists for.
         looked_up_and_absent = True
-        if stored.team and (not live_team or live_team == stored.team):
+        # The cross-slot half of the same guard (issue #2014): a stored TEAM is
+        # skipped when the live AGENT slot is non-empty, because the two cannot
+        # coexist any more — adopting the stored team would claim the slot and
+        # silently drop the profile this life just attached, which is exactly
+        # the revert F1 forbids. "The live state wins" is per SESSION here, not
+        # per slot, wherever the two slots are mutually exclusive.
+        if stored.team and not live_agent and (not live_team or live_team == stored.team):
             team = None
             registry = self.team_registry
             if registry is None:
@@ -6518,7 +6825,17 @@ class Session:
                 # ``active_team`` (what subagents inherit) is restored too, not
                 # just the prompt text.
                 self.attach_team(team)
-        if stored.agent and (not live_agent or live_agent == stored.agent):
+        # A stored agent name is SUPERSEDED, not missing, when the same sidecar
+        # named a team (issue #2014): the team owns the agent slot, so the
+        # manager ``attach_team`` just claimed IS this session's speaker.
+        # Attempting the stored name anyway would raise the slot refusal — and
+        # then record an ``_unresolved_agent`` that the next ``_persist_attachment``
+        # writes straight back into the sidecar, so every later resume would
+        # re-report a profile the rule deliberately replaced. The team wins
+        # quietly here because a RULE dropped it, not a failed lookup, and a
+        # "did not come back" notice would be about the wrong cause.
+        team_owns_slot = self.active_team is not None
+        if stored.agent and not team_owns_slot and (not live_agent or live_agent == stored.agent):
             resolved = None
             try:
                 resolved = self.attach_agent_profile(stored.agent)
@@ -6703,11 +7020,17 @@ class Session:
 
         The instructions ride the volatile tail (see ``build_system_blocks``)
         exactly like :meth:`attach_team`'s brief, so an attach mid-session
-        never invalidates the cached persona prefix. Interaction with a team
-        is deliberate: the two briefs live in SEPARATE fields and coexist — a
-        ``/team`` manager can adopt a specialist's voice without dropping the
-        roster — while a later ``/agent`` replaces only the earlier agent
-        brief, because the user is switching hats, not stacking them.
+        never invalidates the cached persona prefix. A later ``/agent``
+        replaces only the earlier agent brief, because the user is switching
+        hats, not stacking them.
+
+        A TEAM closes this slot (issue #2014). While ``active_team`` is set the
+        session's speaker IS that team's manager — the team claimed the slot at
+        ``attach_team`` — so every ``/agent`` is refused with an
+        :class:`AgentSlotOwnedByTeam` naming the team and the way out
+        (``/team clear``). The refusal is raised BEFORE resolution, on purpose:
+        with a team attached, a name that would not resolve is not the fact the
+        user needs, and reporting a typo would bury the rule.
 
         Resolution ORDER matters and must match ``_agent_profile_rows`` in the
         TUI, or listing and attach disagree. It is delegated to the ONE shared
@@ -6720,6 +7043,10 @@ class Session:
         by that name is a role or specialist (the caller reports it; a typo
         must not half-attach anything).
         """
+        if self.active_team is not None:
+            from local_operator.session.errors import AgentSlotOwnedByTeam
+
+            raise AgentSlotOwnedByTeam(self._team_agent_slot_refusal("attach"))
         kind, profile, specialist_prompt, display_name = self._resolve_profile_or_specialist(name)
         if kind in ("role", "seed") and profile is not None:
             # Recorded BEFORE the brief is stamped, and only on a resolved
@@ -6728,6 +7055,9 @@ class Session:
             # :attr:`attached_profile_tools` for why this is recorded rather
             # than re-resolved on demand.
             self._attached_profile_tools = tuple(profile.tools or ())
+            # A role that NAMES a tool keeps its schema published (see
+            # ``tools/deferral.py``); the lopdev manager names ``project``.
+            self.set_tool_deferral(pins=self._attached_profile_tools)
             return self._stamp_agent_brief(profile.preamble.strip(), profile.name)
         if kind == "specialist":
             # A specialist carries instructions only — the registry row has no
@@ -6748,7 +7078,16 @@ class Session:
         without touching the cached prefix or the separately-held team brief.
         Idempotent — clearing when nothing is attached is a no-op the caller
         can still report plainly.
+
+        Refused while a team owns the slot (issue #2014), for the same reason
+        ``/agent <name>`` is: the profile in force is the team's manager, and
+        clearing it would leave the team attached with nobody named as the
+        speaker. ``/team clear`` is the verb that moves that state.
         """
+        if self.active_team is not None:
+            from local_operator.session.errors import AgentSlotOwnedByTeam
+
+            raise AgentSlotOwnedByTeam(self._team_agent_slot_refusal("detach"))
         self._goal_state.agent_brief = ""
         # The slot this recorded for the detached role goes with it: it is a
         # statement about the profile in force, and "no profile" has no tool
@@ -9082,7 +9421,12 @@ class Session:
         return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
 
     def respond_ask(
-        self, ask_id: str, answers: Mapping[str, Sequence[str]], *, by: str = "unknown"
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]],
+        *,
+        by: str = "unknown",
+        attachments: Mapping[str, Sequence[ImageContent]] | None = None,
     ) -> dict[str, Any]:
         """Answer a queued ask (design §2.4), storing any secret values first.
 
@@ -9096,6 +9440,15 @@ class Session:
         The one sanctioned way to CHANGE a recorded answer is :meth:`revise_ask`
         (design §10, #1936) — a plain repeat of this call keeps its refusal,
         because a repeat tap is a retry, not a change of mind.
+
+        ``attachments`` are images answering particular questions (already
+        decoded and bounded by the owner dispatch). They are refused here, BEFORE
+        the secret hop below, when the queue would refuse them -- a secret
+        question, an unknown one, too many -- so an answer that is going to be
+        turned down for its pictures has not first stored a credential value it
+        will never record (the same probe-before-the-effect order as
+        :meth:`revise_ask`'s). The queue re-checks at the write, which is the
+        authority.
         """
         queue = self.ask_queue()
         if queue is None:
@@ -9106,6 +9459,10 @@ class Session:
         refusal = _ask_refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
+        if attachments:
+            image_refusal = queue.attachment_refusal(record, attachments)
+            if image_refusal:
+                return {"ok": False, "error": image_refusal}
         merged = {str(k): [str(v) for v in (vals or ())] for k, vals in answers.items()}
         if any(q.get("secret") for q in (record.get("questions") or ())):
             # The same hop the blocking path used: it keeps the raw bytes out of
@@ -9121,10 +9478,17 @@ class Session:
                     journal_credential=self.journal_credential_change,
                 )
             )
+        if attachments:
+            return queue.respond(ask_id, merged, by=by, attachments=attachments)
         return queue.respond(ask_id, merged, by=by)
 
     def revise_ask(
-        self, ask_id: str, answers: Mapping[str, Sequence[str]], *, by: str = "unknown"
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]],
+        *,
+        by: str = "unknown",
+        attachments: Mapping[str, Sequence[ImageContent]] | None = None,
     ) -> dict[str, Any]:
         """Revise a queued ask's recorded answer while it is still undelivered.
 
@@ -9152,7 +9516,16 @@ class Session:
         Under the kill switch this refuses in words exactly like
         :meth:`respond_ask`: with no queue there is nothing to revise, and the
         caller hears that rather than a traceback or a silent success.
+
+        ``attachments`` is accepted only to be REFUSED in words (design D5): a
+        revision carries text, and an answer's images are immutable once sent. The
+        parameter exists so a caller that passes images is told so, rather than
+        hitting a ``TypeError`` or -- worse -- having them ignored.
         """
+        if attachments and any(attachments.values()):
+            from local_operator.asks.queue import REVISION_IMAGES_REFUSED
+
+            return {"ok": False, "error": REVISION_IMAGES_REFUSED}
         queue = self.ask_queue()
         if queue is None:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
@@ -9570,7 +9943,7 @@ class Session:
         latch decides.
         """
         if self._published_tools is None:
-            self._published_tools = list(self._tools)
+            self._published_tools = self._publishable(self._tools)
         return self._published_tools
 
     def _side_channel_tools(self) -> list[AgentTool]:
@@ -9591,7 +9964,106 @@ class Session:
         advertised. With nothing published yet this is the live inventory, which
         is what the turn's first call will capture anyway.
         """
-        return list(self._published_tools if self._published_tools is not None else self._tools)
+        if self._published_tools is not None:
+            return list(self._published_tools)
+        return self._publishable(self._tools)
+
+    # -- deferred tool schemas -------------------------------------------------
+
+    def _deferred_now(self) -> frozenset[str]:
+        """Names whose schema is withheld from the array RIGHT NOW.
+
+        The deferral set minus role pins and minus what the session has
+        already activated. Empty when ``tools.defer`` is off, which is the
+        inverse canary: the pre-deferral array comes back.
+        """
+        if not self._tool_deferral:
+            return frozenset()
+        return deferred_tool_names(self._deferral_pins) - self._activated_tools
+
+    def _publishable(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
+        """``tools`` minus the deferred schemas — the array a provider is sent.
+
+        THE one filter, applied by every reader of "what is advertised": the
+        turn's array (:meth:`_wire_tools`), the side channels that must match it
+        byte for byte (:meth:`_side_channel_tools`) and ``context_breakdown``.
+        Resolution never goes through here — ``_plan_call`` reads the full
+        ``context.tools`` — so a deferred tool is callable on the first try,
+        with full validation and the approval gate. Registry order is kept, so
+        an activated tool lands where it always sat rather than at the end
+        (appending saves nothing under tools-first caching).
+        """
+        deferred = self._deferred_now()
+        if not deferred:
+            return list(tools)
+        return [tool for tool in tools if tool.name not in deferred]
+
+    def deferred_tool_names(self) -> frozenset[str]:
+        """The inventory's DEFERRABLE tools for this session (activated or not).
+
+        What the inventory block's "schema on demand" line lists. Deliberately
+        not net of activations: the line must not move when a tool activates,
+        or every activation would also cost a ``[session-state]`` delta.
+        """
+        if not self._tool_deferral:
+            return frozenset()
+        held = {tool.name for tool in self._tools}
+        return deferred_tool_names(self._deferral_pins) & held
+
+    def set_tool_deferral(self, *, pins: Collection[str] | None = None) -> None:
+        """Pin names whose schema must stay published.
+
+        Called by the subagent build (the role's ``tools:`` list), by
+        ``attach_agent_profile``/``attach_team`` (the profile's or manager's
+        list) and by :meth:`set_tool_inventory` (a host's own declaration).
+        Takes effect at the next publish, like any inventory change.
+        """
+        if pins is not None:
+            # ADDITIVE, for the reason activations are sticky: dropping a pin
+            # (an ``/agent clear``, a role switch) would re-defer a schema the
+            # cached prefix already carries and pay a second rewrite for it.
+            self._deferral_pins = self._deferral_pins | frozenset(pins)
+
+    def activate_deferred_tool(self, name: str) -> bool | None:
+        """Publish a deferred tool's schema from the next publish on (sticky).
+
+        Returns ``None`` when ``name`` is not currently deferred (nothing to
+        do), else the same answer :meth:`refresh_tools` gives: ``True`` when the
+        schema can still reach this turn's first call, ``False`` when this turn
+        already published and it joins at the NEXT TURN.
+        """
+        if name not in self._deferred_now():
+            return None
+        if not any(tool.name == name for tool in self._tools):
+            return None
+        self._activated_tools.add(name)
+        return self._published_tools is None
+
+    def _activate_on_tool_doc(self, name: str) -> str | None:
+        """``on_tool_read`` for the ``tool://`` link: activate ``name`` if deferred.
+
+        Returns the availability note to append to the doc, or ``None`` when
+        the read activated nothing (the doc then renders exactly as before).
+        Mirrors ``mcp://server/tool``'s enable reply, including the NEXT TURN
+        wording when this turn's array is already published.
+        """
+        published = self.activate_deferred_tool(name)
+        if published is None:
+            return None
+        return _deferred_availability(name, published)
+
+    def _activate_after_invalid_call(self, tool_name: str, fault: str) -> None:
+        """A deferred tool called with arguments that failed validation.
+
+        The model guessed the shape and guessed wrong, so it needs the schema;
+        a VALID direct call does not activate (it already knew the arguments,
+        and publishing would only rewrite the prefix). Hooked on the ledger
+        callback because that sees every call exactly once, with its fault.
+        """
+        from local_operator.harness.types import FAULT_INVALID_ARGUMENTS
+
+        if fault == FAULT_INVALID_ARGUMENTS and tool_name in self._deferred_now():
+            self.activate_deferred_tool(tool_name)
 
     def _filter_declared(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
         """Narrow a candidate inventory to this session's declared one.
@@ -9844,6 +10316,18 @@ class Session:
                     f"session: refusing to widen {widened_ops}"
                 )
         self._declared_tools = incoming
+        if incoming:
+            # A DECLARATION PINS TOO, exactly as a role's ``tools:`` list does
+            # (``set_tool_deferral``). A host that named this run's tools —
+            # ``lop exec --tools console,bash``, ``AGENTS_CONFIG_TOOLS``, a
+            # child's inherited declaration — asked for them as part of what the
+            # run IS, so withholding a named tool's schema would make the run
+            # discover the very tools it declared. Reachability is unaffected
+            # either way (a deferred tool is callable and named on the
+            # inventory's line); this is about not spending the model's first
+            # calls guessing the shape of a tool the host already chose
+            # (review round 1, MINOR-2).
+            self.set_tool_deferral(pins=incoming)
         if incoming_ops is not None:
             self._declared_tool_ops = incoming_ops
         # ``unattended`` is one-way in the direction that matters, for the same
@@ -10084,6 +10568,12 @@ class Session:
         which is a single bounded ``put_nowait`` onto the recorder's existing
         queue and writer thread.
         """
+        # Before the session-id guard: activation is behaviour, not analytics,
+        # and must work for a session the ledger cannot attribute.
+        try:
+            self._activate_after_invalid_call(tool_name, fault)
+        except Exception:  # noqa: BLE001 — this hook must never break a turn
+            logger.debug("deferred-tool activation failed", exc_info=True)
         if not self._session_id:
             return
         try:
@@ -12844,6 +13334,10 @@ class Session:
             # re-sends that array (see ``_wire_tools`` for why the array may
             # move only here).
             self._published_tools = None
+            # The model-facing attachment reading moves only HERE, at the turn
+            # boundary, so a transient detach inside a turn publishes no
+            # ``[session-state]`` row (see ``GoalState.latch_interactivity``).
+            self._goal_state.latch_interactivity()
             blocks = await self._prepare_system_blocks(commit_state=False)
             self._context.system_blocks = list(blocks)
             self._context.tool_context = self._build_tool_context()
@@ -13551,6 +14045,11 @@ class Session:
             # the inherit line named the fallback for a child that would run
             # the selected spec (review round 2, MINOR 1).
             session_model_label=self.model_label,
+            # Stamped on a child by ``_build_child_session`` AFTER construction,
+            # which is why that function rebuilds the effort-tier tools once
+            # the stamp lands. Read per turn here so the tool-argument gate
+            # sees the live value even on a tool object built before it.
+            delegation_depth=self._delegation_depth,
             agent_id=self._agent_id,
             # The delegated name, on a subagent only. Empty on every top-level
             # session, which is what keeps ``_browser_subagent_label``'s
@@ -17664,7 +18163,7 @@ class Session:
         """One CHEAP, ISOLATED, near-single-attempt provider call for a host errand.
 
         Hosts need the session's configured provider and credentials for small
-        side errands — conversation auto-naming is the only caller — and
+        side errands — conversation and checkpoint naming — and
         rebuilding a client from the spec would duplicate the whole auth
         cascade. The call carries no tools, no history and no abort signal: it
         is not a turn and must not appear in the transcript.
@@ -17754,6 +18253,28 @@ class Session:
             # logs it and returns CALL_FAILED.
             return await self._drain_errand(self._errand_request(session_spec, system, prompt))
 
+    async def complete_once_on_session_model(self, system: str, prompt: str) -> str:
+        """``complete_once``, but answered by the model serving THIS conversation.
+
+        For an errand a person asked for (``/title --refresh``), where the
+        operator's expectation is that the conversation's own model — the one
+        that has been answering every turn — writes the answer. The ``lo`` tier
+        is a cost preference for UNATTENDED errands; spending it on a command
+        someone typed swaps a model they chose for one they did not, and the
+        tier's slow tail (measured up to ~10 s) overran the routed refresh's
+        8 s budget, so the receipt read "could not reach the model" while the
+        session model would have answered in ~2 s.
+
+        Same request shape as :meth:`complete_once` (isolated, not replayable,
+        token-capped, tools-free) and the same effort clamp. No tier fallback
+        and no tier block: the tier is never consulted, so it can neither be
+        blamed for a failure here nor rescue one.
+
+        Fast mode is cleared, as on every errand (see :meth:`_errand_request`).
+        """
+        spec = self._lowest_effort(self.effective_model)
+        return await self._drain_errand(self._errand_request(spec, system, prompt))
+
     def _errand_request(self, model: ModelSpec, system: str, prompt: str) -> ChatRequest:
         """The errand's request shape, in ONE place.
 
@@ -17762,6 +18283,11 @@ class Session:
         ``isolated``, ``replayable=False``, the token cap and the empty tool
         surface by construction rather than by two field lists staying in sync.
         """
+        # Fast mode buys the TURN a priority lane at a priority price. An errand
+        # is decoration, so it never pays that premium, on whichever route it
+        # lands: the tier, the session model, or the retry after a dead tier.
+        if model.fast_mode:
+            model = model.model_copy(update={"fast_mode": False})
         return ChatRequest(
             model=model,
             purpose="naming",
@@ -18982,10 +19508,16 @@ class Session:
         """Drop her ``aida-*`` rows when she is paused, disabled or reactive."""
         try:
             from local_operator.aida import proactive
-            from local_operator.paths import config_dir
 
             return proactive.filter_on_load(
-                schedules, config_dir=config_dir(), class_reactive=self._class_reactive()
+                schedules,
+                # THE SESSION'S OWN ROOT, not the ambient one (review round 2,
+                # M3): the stamp, the withhold and the doorbell all read
+                # ``self._config_dir``, so a session built against an injected
+                # root must not have its rows filtered by a different store
+                # than the one it settles against.
+                config_dir=self._config_dir,
+                class_reactive=self._class_reactive(),
             )
         except Exception:  # noqa: BLE001 — the fire-time guard still holds
             logger.warning("aida: load-time hold failed; arming unfiltered", exc_info=True)
@@ -19002,7 +19534,6 @@ class Session:
         """
         try:
             from local_operator.aida import proactive
-            from local_operator.paths import config_dir
 
             # The stash is cleared BEFORE the reconcile: a token may only ever
             # describe the consume that is about to run, or a crash-window
@@ -19010,9 +19541,10 @@ class Session:
             self._aida_pending_trigger_settle = None
             result = proactive.reconcile(
                 schedules,
-                config_dir=config_dir(),
+                config_dir=self._config_dir,
                 session_id=self._session_id,
                 class_reactive=self._class_reactive(),
+                attended=self._aida_greeting_may_land(),
             )
             if result.notes:
                 await proactive.append_notes(self._transcript, result.notes)
@@ -19478,7 +20010,19 @@ class Session:
         # grace path, and a stale one is retired by the delivery checks.
         from local_operator.wakes.store import is_internal_wake_row
 
-        missed = [entry for entry in missed if not is_internal_wake_row(entry["schedule"])]
+        # HIDDEN rows leave the fold for the same reason: folding one into the
+        # visible catch-up prompt would paint it. Aida's first-run greeting is
+        # the case that made this concrete — an install whose greeting came due
+        # while no runtime was up opened on ``catch-up — 1 missed wake (Aida's
+        # introduction)`` above her reply, the exact trigger row the hidden
+        # flag exists to keep off screen (audit A4). Left out, the row is
+        # re-armed to now + grace by load() and delivers hidden.
+        missed = [
+            entry
+            for entry in missed
+            if not is_internal_wake_row(entry["schedule"])
+            and not getattr(entry["schedule"], "hidden", False)
+        ]
         if not missed:
             return
         now = int(time.time() * 1000)
@@ -19919,14 +20463,26 @@ class Session:
     def _ensure_wake_supervisor(self) -> None:
         """Install-on-demand chokepoint (design §4.2a). Best-effort; the hook
         itself promises never to raise, and this guard is belt-and-braces
-        for the same reason the index write has one."""
+        for the same reason the index write has one.
+
+        A REFUSAL IS SAID OUT LOUD, once (design round 2, M3). The install
+        outcome's reason used to go to ``logger.debug``, so the TUI — the
+        surface most custom-store users meet — never said why check-ins stop
+        when no session is open. The default level is WARNING, which is what
+        "visible" has to mean here. It is deduplicated per distinct reason
+        because this hook runs on EVERY persist that carries schedules: one
+        line when the refusal is first heard, and nothing on the thousandth
+        repeat.
+        """
         try:
             from local_operator.paths import config_dir
             from local_operator.wakes.install import ensure_supervisor_installed
 
             outcome = ensure_supervisor_installed(config_dir())
             if not outcome.installed:
-                logger.debug("wake supervisor not installed: %s", outcome.reason)
+                if outcome.reason not in self._wake_supervisor_refusals:
+                    self._wake_supervisor_refusals.add(outcome.reason)
+                    logger.warning("wake supervisor not installed: %s", outcome.reason)
         except Exception:  # noqa: BLE001
             logger.warning("wake supervisor install hook failed", exc_info=True)
 
@@ -20536,6 +21092,118 @@ class Session:
         """Full-list update from the monitor tool: persists then re-arms."""
         await self._monitors.update(schedules)
 
+    def _stamp_aida_greeting_delivered(self, due: DueWake) -> None:
+        """Move Aida's greeting ledger to ``delivered`` at the actual fire.
+
+        The ledger used to stamp at ARM time, so a row armed and then lost (a
+        crash before the fire, a runtime that never came up) was reported as a
+        greeting the user had seen, and the cadence it now gates would have
+        started on the strength of it. Stamped HERE, after the hold guard has
+        let the fire through and before the turn is spawned, so the stamp
+        means "her greeting turn is running". Best-effort: the ledger is
+        observation, never the delivery's dependency.
+
+        Writes to ``self._config_dir`` (the root resolved when THIS session was
+        built), never to a fresh ``paths.config_dir()`` read: the row this
+        stamp settles was armed by an attended surface against the root that
+        surface named, and a host whose environment moved since (or that built
+        this session against an injected root) would otherwise stamp
+        ``delivered`` in a different root — leaving the arming root pinned at
+        ``armed`` forever, its cadence withheld and its ledger never settling.
+        """
+        try:
+            from local_operator.aida import onboarding
+
+            if due.schedule.id == onboarding.GREETING_WAKE_ID:
+                onboarding.mark_delivered(self._config_dir)
+        except Exception:  # noqa: BLE001 — the turn runs regardless
+            logger.debug("aida: could not stamp the greeting delivery", exc_info=True)
+
+    def _aida_greeting_may_land(self) -> bool:
+        """Whether a due Aida greeting may actually land in THIS runtime.
+
+        The state machine gates the REQUEST; this is the FIRE half (review
+        round 1, R-3). A person asks for the greeting (TUI first contact, or
+        the desktop ``greet`` route) and quits before the armed row comes due:
+        any later runtime that loads her session — a wake-supervisor
+        engagement, ``lop exec``, the mobile daemon — then takes the row,
+        delivers it into a turn nobody can read and stamps ``delivered``, so
+        the greeting is spent where no person could engage with her and the
+        cadence it gates starts on the strength of it.
+
+        THE PREDICATE: "a LOCAL attach or a live desktop pane holds THIS
+        session" — ``RuntimeServer.attended_surfaces``, read through the probe
+        the serving runtime installs. True for a TUI attached to the runtime
+        and for a desktop pane (lease, 45 s memory, or the app's record naming
+        this session); false for ``lop exec`` (no attach at all), the wake
+        supervisor's engagement, a relayed phone or peer attach. Focus is NOT
+        an input: the TUI reports none, and the desktop already decides when to
+        press ``greet`` from its own focus state.
+
+        WHY NOT ``activation.human_surface_present`` (the first version): it
+        asks about THIS PROCESS — a tty, or the desktop token in its env — and a
+        TUI's session runs in a detached runtime child spawned with
+        ``stdin=DEVNULL``, so it answered "nobody" for the one surface the
+        greeting is requested from most. It stays the answer for the one host
+        with no runtime around the session: an in-process session (no probe
+        installed), where the process IS the surface.
+        """
+        try:
+            probe = self._aida_attended_probe
+            if probe is not None:
+                return bool(probe())
+            from local_operator.aida.activation import human_surface_present
+
+            return human_surface_present()
+        except Exception:  # noqa: BLE001 — a gate that cannot read its signal
+            # must withhold: the whole point is that delivery waits for a
+            # person, and the request survives for the next attended moment.
+            logger.debug("aida: could not read the attended signal", exc_info=True)
+            return False
+
+    def aida_attended(self) -> None:
+        """A local human surface just arrived: re-arm a withheld greeting NOW.
+
+        The doorbell for :meth:`_withhold_aida_greeting`. A withheld greeting
+        goes back to ``requested``, and the engine arms ``requested`` only on a
+        reconcile; a runtime still warm when the person returns would otherwise
+        hold the request until its next persist. Cheap for every session that
+        is not hers (one attribute read) and for hers when nothing is owed (the
+        reconcile is a no-op that persists only when something moved).
+        """
+        if not getattr(self, "_aida_duty", False):
+            return
+        try:
+            from local_operator.aida import onboarding
+
+            if onboarding.greeting_state(self._config_dir) != onboarding.GREETING_REQUESTED:
+                return
+        except Exception:  # noqa: BLE001 — the ledger is observation
+            logger.debug("aida: could not read the greeting ledger", exc_info=True)
+            return
+        self._spawn_background(self._aida_reconcile_now())
+
+    def _withhold_aida_greeting(self, due: DueWake) -> None:
+        """Put an unattended greeting fire back to ``requested`` (R-3).
+
+        The row itself is already consumed by the pump (a fire advances the
+        schedule, by design — one broken wake must not become a hot loop), so
+        the ledger is what carries the intent forward: ``armed → requested`` is
+        the same move a pause makes, and it means the user's request survives
+        this runtime. The next attended moment's ``proactive.reconcile`` finds
+        ``requested`` + a provider and arms it again.
+        """
+        logger.info(
+            "aida: withholding greeting %s — no attended surface in this runtime",
+            due.schedule.id,
+        )
+        try:
+            from local_operator.aida import onboarding
+
+            onboarding.clear_greeted(self._config_dir)
+        except Exception:  # noqa: BLE001 — the ledger is observation
+            logger.debug("aida: could not re-owe the withheld greeting", exc_info=True)
+
     async def _deliver_wake(self, due: DueWake) -> None:
         """Deliver one fired wake through the prompt path as a user-attributed
         ``wake_prompt`` custom message. A wake resumed PAST its due time is
@@ -20570,14 +21238,30 @@ class Session:
             await self._deliver_patience_wake(due)
             return
         if getattr(self, "_aida_duty", False):
+            # Two fire-time guards, both keyed on facts the ledger records and
+            # neither of which the state machine can express: the HOLD (a pause
+            # that landed in another process) and the ATTENDED gate (R-3 — the
+            # request was a person's, so the fire must reach a person).
             try:
-                from local_operator.aida import proactive
-                from local_operator.paths import config_dir
+                from local_operator.aida import onboarding, proactive
 
                 if proactive.is_aida_row(due.schedule.id) and not proactive.delivery_allowed(
-                    config_dir(), class_reactive=self._class_reactive()
+                    self._config_dir, class_reactive=self._class_reactive()
                 ):
                     logger.info("aida: dropping held wake %s (%s)", due.schedule.id, "paused")
+                    return
+                if (
+                    due.schedule.id == onboarding.GREETING_WAKE_ID
+                    and not self._aida_greeting_may_land()
+                ):
+                    # FIRE-TIME ATTENDANCE (R-3). Withheld BEFORE any text is
+                    # composed or any turn spawned: a greeting delivered into a
+                    # headless turn is both unreadable to the person who asked
+                    # for it and, until this guard, stamped ``delivered`` —
+                    # spending it where nobody could engage with her. Returning
+                    # here leaves the transcript untouched and re-owes the
+                    # ledger through ``_withhold_aida_greeting``.
+                    self._withhold_aida_greeting(due)
                     return
             except Exception:  # noqa: BLE001 — fail OPEN: the wake is already due
                 logger.debug("aida: delivery guard could not read the hold", exc_info=True)
@@ -20593,18 +21277,29 @@ class Session:
             # CONTINUE that work. Idle-path deliveries stay clean — they open
             # their own turn, so there is no prior work to resume.
             text = self._append_busy_resume_note(text)
+        details: dict[str, Any] = {
+            "wake_id": due.schedule.id,
+            "occurrence": due.occurrence,
+            "text": text,
+            # §14.4: the delivery's control parameter, read by the trigger
+            # record at fold-in; never re-derived later.
+            "notify": bool(due.schedule.notify),
+        }
+        if due.schedule.hidden:
+            # The DISPLAY half of a hidden row: every replay surface (TUI
+            # replay, the desktop history window, the mobile fold) keys on
+            # ``details.hidden`` through ``harness.rows.is_hidden_wake_delivery``,
+            # and the receipt event below is skipped for the live half. Without
+            # this a hidden row's text vanished live and then reappeared as a
+            # wake line on the next resume.
+            details["hidden"] = True
         wake_message = CustomMessage(
             custom_type=WAKE_PROMPT_MESSAGE_TYPE,
             attribution="user",
-            details={
-                "wake_id": due.schedule.id,
-                "occurrence": due.occurrence,
-                "text": text,
-                # §14.4: the delivery's control parameter, read by the trigger
-                # record at fold-in; never re-derived later.
-                "notify": bool(due.schedule.notify),
-            },
+            details=details,
         )
+        if getattr(self, "_aida_duty", False):
+            self._stamp_aida_greeting_delivered(due)
         # The receipt event rides BEFORE the turn spawn so a front end can
         # paint the expandable wake line ahead of the work it triggered —
         # without it the transcript showed the agent starting to work with no
@@ -21380,6 +22075,8 @@ class Session:
           the same validation the constructor applied; an unset or invalid
           value restores the manager's built-in default rather than freezing
           the last explicit one, so "reset to default" on the page means it.
+        * ``tools.defer`` — the deferred-schema kill switch; re-read into the
+          publish filter, so it applies at the next turn's publish.
         * ``hosting`` / ``model_name`` — announce that NEW conversations use
           the default; never mutate this conversation's selection. Explicit
           /model commands select on their owning session, not through a watcher.
@@ -21491,6 +22188,11 @@ class Session:
         if "web_search.enabled" in changed or "web_fetch.enabled" in changed:
             if self._job_id is None:
                 self._web_tools_dirty = True
+        if "tools.defer" in changed:
+            # The kill switch. Read into the field the publish filter consults,
+            # so it lands at the next turn's publish (the turn latch keeps the
+            # array in flight unchanged) — no inventory rewrite needed.
+            self._tool_deferral = tool_deferral_enabled(values)
         if "hosting" in changed or "model_name" in changed or "model_effort" in changed:
             self._on_configured_model_changed(values, local=source == "local", changed=changed)
         # AIDA'S LIVE-CONFIG SEAM. A pause or resume issued from ANOTHER

@@ -184,12 +184,31 @@ def test_to_runner_args_is_accepted_by_the_exec_startup_helpers() -> None:
     assert resolve_startup(args) is None
     assert args.tools == "read,grep"
     assert args.clear_goal is False and args.loop is None and args.control is False
+    # The team key is PRESENT and None (Q-MAJOR-3's fix): the helpers' getattr
+    # reads are answered, and a set key is what lets resolve_startup validate —
+    # and, beside a profile, refuse — a team when one IS named.
+    assert args.team is None
 
     class SessionStub:
         attached_profile_tools = ()
         unresolved_declared_tools = ()
 
     assert declared_tool_inventory(SessionStub(), args) == ("read", "grep")
+
+
+def test_to_runner_args_forwards_a_named_team_for_the_helpers() -> None:
+    """The team reaches ``resolve_startup``; before Q-MAJOR-3's fix it was dropped.
+
+    Team-only opened with no team attached and ``--team X --profile Y`` opened
+    instead of being refused, because the runner-args namespace never carried
+    the key (proven to one key on #2050's re-review). The spec field is the
+    source; this cell pins the adapter's half of the fix.
+    """
+    spec = SessionSpec(team="lopdev")
+    assert spec.to_runner_args().team == "lopdev"
+    assert "team" not in vars(
+        spec.to_namespace()
+    ), "the eight-field narrow namespace stays pinned to exec's factory shape"
 
 
 def test_with_resume_returns_a_copy_and_refuses_empty() -> None:

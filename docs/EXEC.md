@@ -22,7 +22,7 @@ lop --resume SESSION_ID
 | --- | --- |
 | `command` | Literal initial prompt. `-`, or omitted with piped stdin, reads stdin (surrounding whitespace is trimmed). An omitted prompt is allowed for a valid loop. Slash-looking text stays literal. |
 | `--team NAME` | Resolve a saved team and attach it. Unknown names fail before model construction or a detached spawn, and are checked again by the worker. |
-| `--profile NAME` | Attach a registered role, specialist or packaged starter, exactly like `/agent`. Unknown names fail preflight. |
+| `--profile NAME` | Attach a registered role, specialist or packaged starter, exactly like `/agent`. Unknown names fail preflight. A team owns the agent slot, so this flag cannot be combined with `--team`: the pair is refused at preflight with the reason (`/team clear` detaches the team), and there is no manager carve-out — naming the team's own manager is refused too, since the manager is already the speaker the team attached. |
 | `--agent NAME`, `--agent-name NAME` | Existing legacy named-agent selection; creates a missing agent. Not the `/agent` role attachment. |
 | `--agent-id ID` | Select an exact existing legacy agent; mutually exclusive with `--agent`. |
 | `--goal TEXT` | Set the literal standing goal (`clear` is text, not a command). A goal alone does not start a model, and it is not sent as a message — see [Divergence from `/goal`](#divergence-from-goal). |
@@ -53,8 +53,11 @@ arbitrary slash-command interpreter: UI commands and configuration-mutating
 commands are not startup flags.
 
 Resume restores the conversation, team, profile, goal and title first. Explicit
-startup options override only their own slots. Team and profile can coexist;
-a profile does not remove the team's roster. Stored loop progress remains
+startup options override only their own slots. A team and a profile cannot both
+be in force: a team OWNS the agent slot (see `guide://teams`), so attaching one
+makes that team's manager the session's speaker and refuses a `--profile` or
+`/agent` attach until the team is detached. A sidecar written before this rule
+that named both comes back as the team's manager. Stored loop progress remains
 visible, but restarting or resuming never automatically replays iterations.
 Pass a new loop option explicitly to start another loop.
 

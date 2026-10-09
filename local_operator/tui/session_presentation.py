@@ -7,6 +7,7 @@ acknowledgement, or reference to the currently selected app session.
 
 from __future__ import annotations
 
+import base64
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -1720,7 +1721,7 @@ def replay_tool_call(
     from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
     from local_operator.harness.rows import output_limit_call_receipt
     from local_operator.harness.types import FAULT_KEY, INTERRUPTED_FAULTS
-    from local_operator.tui.app import ImageContent, ToolCard, _first_line
+    from local_operator.tui.app import ToolCard, _first_line
     from local_operator.tui.widgets.tool_card import parse_duration
 
     # `display.hide_cross_session`: a hidden `send` mounts NOTHING. The return
@@ -1904,13 +1905,45 @@ def replay_tool_call(
     # Same rule as `on_tool_ended`: a result carrying image blocks shows
     # them under the settled card, so a resumed session's screenshots are
     # back on screen exactly where the live session showed them.
-    self._append_image_blocks(
-        [
-            block
-            for block in (getattr(result, "content", None) or [])
-            if isinstance(block, ImageContent)
-        ]
-    )
+    self._append_image_blocks(tool_result_image_blocks(getattr(result, "content", None)))
+
+
+def tool_result_image_blocks(content: Any) -> list[ImageContent]:
+    """The mountable image blocks of one tool result, artifacts resolved.
+
+    THE one adapter between the output-attachment contract and the
+    transcript's image mount. An inline :class:`ImageContent` passes through
+    untouched; an :class:`AttachmentContent` of kind ``image`` is resolved to
+    bytes HERE, from the content-addressed store, because that block
+    deliberately carries no bytes — the TUI runs on the machine that owns
+    the store (the follower TUI attaches to a local owner), so a store read
+    is a local file read, and a digest that no longer resolves mounts as the
+    :class:`ImageBlock`'s own unavailable receipt rather than erroring the
+    row.
+
+    Only ``kind == "image"`` resolves in v1: video and audio have no
+    transcript mount yet (the surfaces lane owns those players), and mounting
+    their bytes as a picture would be the exact class of lie the unavailable
+    receipt exists to avoid — the block stays in the transcript for surfaces
+    that CAN render it; it just contributes no image block here.
+    """
+    from local_operator.harness.types import AttachmentContent
+    from local_operator.session.attachments import AttachmentStore
+
+    out: list[ImageContent] = []
+    for block in content or ():
+        if isinstance(block, ImageContent):
+            out.append(block)
+            continue
+        if not isinstance(block, AttachmentContent) or block.kind != "image":
+            continue
+        data_b64 = ""
+        if block.attachment:
+            resolved = AttachmentStore().get_bytes(block.attachment)
+            if resolved is not None:
+                data_b64 = base64.b64encode(resolved[0]).decode("ascii")
+        out.append(ImageContent(data=data_b64, mime_type=block.content_type or "image/png"))
+    return out
 
 
 def append_image_blocks(

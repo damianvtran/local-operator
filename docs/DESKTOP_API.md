@@ -560,13 +560,13 @@ readings.
 | POST `/v1/desktop/sessions/draft` | `{request_id, cwd, target?, model?}` | `{draft_id, replayed?}`; registers an in-memory warmable draft — no directory, no runtime, no listing row (`session_draft_warm`) |
 | POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
 | POST `.../{id}/working-directory` | `{request_id, cwd}` | `{cwd,label,outcome:cold\|rebound\|unchanged,will_wait}`; gated by `features.session_move >= 2` AND `features.frontend_replace >= 1` |
-| GET `/v1/desktop/sessions/{id}` | — | snapshot frame below (**read envelope**) |
-| GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` (**read envelope**) |
+| GET `/v1/desktop/sessions/{id}` | optional `entry_ts=1` | snapshot frame below (**read envelope**); `entry_ts=1` also applies to the page embedded in `payload.history` |
+| GET `.../{id}/history` | optional `before_id`, `limit` 1..500, `entry_ts=1` | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner"). `entry_ts=1` asks for the per-row `ts_source` vocabulary — see §"The history entry envelope" |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
-| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing |
+| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers,images?}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing **`images`** (`features.ask_attachments >= 1`): at most 8 `{question_id,data_b64,mime_type}` objects, valid only beside `answers` (never with `decline`, `revise` or a gate body); every `question_id` must be a key of `answers`; the whole body is capped at 900,000 B. A violation of those shapes is the route's generic `422` (`The request has invalid fields.` — the validator's own sentence is not surfaced, so a client pre-gates the shapes). An owner runtime that predates image answers refuses the answer in words (`this session's runtime predates image answers; update the runtime or send the answer as text`, a `409`) and records **nothing** — the text is not kept without its pictures; a secret question refuses images. The images are stored once and the ask row publishes REFS only (`attachments: {question_id:[{attachment,mime_type,bytes}]}`, `null`/absent when none); the model receives them in question order. Revisions stay text-only |
 | GET `/v1/desktop/asks` | — | `{asks:[PendingAsk + {session_id,cwd}]}`, index-backed: served with nothing running, from `<config_dir>/asks/<sid>.json`. **The key is a plain list here**: unlike a session frame, its presence is NOT the queued-ask capability proxy — this route only exists on a build that has the feature, and an empty list is the ordinary "nothing is waiting" answer |
-| GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1` | authenticated SSE, `data: <DesktopSessionFrame>` (**read envelope**) |
+| GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1`, `entry_ts=1` | authenticated SSE, `data: <DesktopSessionFrame>` (**read envelope**). `entry_ts=1` governs the page embedded in the open frame's snapshot, exactly as on `GET .../{id}` |
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 (**read envelope**; the visible lease still creates residency) |
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
 | POST `.../{id}/seen` | `{completion_token}` | `AttentionState`; 409 when the token is not this conversation's current completion |
@@ -1192,6 +1192,133 @@ is available the whole time: with a silent-but-alive owner the read used to be
 refused after ~15 s, while the identical rows came back in 0.02 s with no owner
 at all.
 
+The same rule holds for a conversation ANOTHER device owns, and there the
+"durable answer" has a different source. A peer's runtime is the only thing that
+can serve its display window, so a cold one — idle-exited, or deliberately
+**stopped**, which no engage may warm — used to answer `/history` with
+`{entries: [], has_more: false, cursor_missing: false}`: byte-identical to a
+conversation with no rows, which is the defect
+`docs/design/mesh-cold-read-stored-history.md` fixes. The page now comes from the
+OWNER's stored journal, served by the OWNER's own relay over the mesh (the op
+`net_session_history`, capability `view`), through the same reader and the same
+visibility filter the owner's own `/history` uses — never from this device's
+`<root>/sessions/<id>`, which for a peer's id is absent or a different
+conversation wearing the same id (`mesh-session-mobility.md` §3.4). Three
+consequences a client can rely on:
+
+* **an empty page on a peer means the OWNER HAS NO ROWS**, because an answer that
+  could not be produced is not published as one (below);
+* **entries carry their own `ts`**, unlike the wire path's serve-time stamp — the
+  source is journal rows, not messages, so the ordering and the timestamps are
+  the owner's own (`id`/`ts`/`type`/`payload`, the shape a local page has). Such
+  a row is `ts_source: "entry"` — every row on a local page is, for the same
+  reason. See §"The history entry envelope: where a row's `ts` came from";
+* **a read starts nothing on the peer**: no runtime is spawned and no lease is
+taken, which is what makes a stopped session readable at all and keeps the GET
+side-effect free across the mesh too;
+* **a page can come back SHORTER than `limit`**, and then it says so: the reply
+travels as ONE mesh record (8 MiB), so the owner serves as many of the requested
+rows as fit — newest first, `has_more: true` for the older ones it left behind,
+which the same `before_id` cursor then pages back — rather than letting the frame
+oversize and take the whole peer link down with it. A single entry too large to
+fit that record is refused by name (`page_too_large`), which a reader sees as the
+unservable page above.
+
+When the stored page cannot be SERVED — this device has no relay, the peer
+refuses, or the hop expires — the answer is an empty page marked
+`cursor_missing: true`. That is the contract's existing word for "this page cannot
+be trusted as complete", and it is deliberately not the open path's refusal
+(`409 session_is_remote`): the session exists and the row resolved, so the reader
+is missing a TRANSCRIPT, not a SESSION. A renderer must therefore never claim
+exhaustion over a peer page whose `cursor_missing` is true — the same rule it
+already applies to a local page it could not anchor.
+
+### An unresolved id is not a missing conversation (`409 session_unresolved`)
+
+When this device cannot place an id at all — the id is not local and the peer
+listing does not hold it — the answer used to be the shared `404` for every
+reason, and the two reasons are not the same fact:
+
+* **every device answered, and none holds the id** — the honest `404`
+  (`"Requested session, profile, team or subscription not found"`). Unchanged.
+* **a device did not answer the read that missed** — this device does not know
+  whether the conversation exists. The answer is `409` with `code`
+  `"session_unresolved"` and a sentence naming the devices that stayed **silent**:
+
+  ```
+  a1b2c3d4e5f6: build-box did not answer, so this conversation may be on that
+  device. Retry once the connection is back; /network doctor diagnoses the link.
+  ```
+
+  (One line on the wire; wrapped here. With two silent devices the list is
+  coordinated — `build-box and radiant-m4` — and the clause reads `one of them`.)
+
+The distinction is the point: a renderer maps the `404` to `missing` and paints
+"This conversation is no longer on this machine" with the composer refused — a
+deletion claim this device cannot support about a conversation the user is
+looking at. `session_unresolved` is deliberately **in the same 409 family as
+`session_is_remote`** (the conversation is not known to be gone) and just as
+deliberately a **different code**, because the remedy differs: there is no device
+to name, only a connection to wait for.
+
+What a client may rely on:
+
+* **the sentence headlines what the devices DID, not what the id is not.** It
+  opens on the silence (`<id>: <names> did not answer`), never on the resolution
+  miss: "could not be resolved" is this product's own wording for NOT FOUND
+  (the UI's `mini-copy.ts` captions its *missing* state that way), so opening with
+  it would state the reading this whole code exists to prevent.
+* **the sentence never claims ownership, and never pins one device as the
+  holder.** Silence is not evidence about WHERE the conversation is — with more
+  than one silent device the sentence says "one of them", and a silent device is
+  named only as a device that did not answer. A device the membership never named
+  still appears, as the app's own `"unnamed device"` (`resume.UNNAMED_DEVICE`).
+* **absence is never stated.** The sentence says where the conversation may be
+  and stops; it does not report it deleted, and it does not raise the deletion
+  word in order to deny it either (design round 1, D2).
+* **the state carries no transcript, no row and no seed** — it is a resolution
+  answer, not a session. Nothing is created or written on this device for it.
+* **it is not a retry loop's answer.** One resolution, one answer: the silence
+  and the rows come back from ONE call (`peer_rows.read_listing`), which is the
+  one listing read a miss pays, so the refusal cannot cost a second fan-out and
+  cannot report a silence older than the read that missed.
+* **`/network doctor` is named bare, deliberately.** It is the only spelling
+  valid on both surfaces: `/network doctor <device>` is rejected by the CLI's
+  parser (`doctor` declares only `--peer`) and `/network doctor --peer <device>`
+  is mangled by the TUI's own translation of the command. A refusal that names a
+  device in the pointer must use `--peer` and is CLI-only.
+* **it inherits through the door**: `sessions.get` (snapshot), `/history` and
+  `/events` all reach it through the same error ladder, so a client sees one code
+  for one situation whichever read it made. The same miss refuses with the same
+  sentence on the shell: `lop --resume <id>` (its startup pre-check composes it
+  from the same read, for a real session id only — the bare `--resume` sentinel
+  and a path-shaped string keep their own refusals) and the TUI's in-app
+  `/resume` (the `viewer_factory` arm in `cli.py`, which guards the mid-session
+  path). `lop network <verb>` resolves through its own refusal taxonomy
+  (`session_unknown` / `peer_unreachable`) on the id-resolution path; it can still
+  raise `session_unresolved` through `open_remote_viewer` when a row resolved from
+  the cache and the later open then misses, so the composer is shared there too.
+
+**The surface contract (the UI lane's half, `mesh-wire-honesty.md` §S2):** an
+unresolved id must not be presented as a deletion and must not close the
+composer; a Retry/reconnect affordance replaces "Start a new chat" as the only
+action offered. A `404` keeps today's behaviour exactly.
+
+**The boundary, stated** (QA round 1, Q2): the state covers silence *reported by
+this device's own relay* — "a device the relay named as not answering" — because
+that is the only silence signal the listing read carries. If this device's **own
+relay** is stopped or unreachable while the peer is up, every peer is unreachable
+from here, no row arrives, and the answer is still the shared `404`. That is the
+documented residual `peer_rows.park_edges` also records (a whole-relay failure
+has no answered/not-answered signal to read); it is not a regression, and no peer
+row is on the user's screen to contradict it. Do not read this code as covering a
+relay-wide outage.
+
+One limit is stated rather than hidden: the genuinely-unknown `404` copy ("no
+longer on this machine") is the UI lane's to refine — this route does not change
+it, and nothing here is a claim that it is accurate once every device HAS
+answered.
+
 The snapshot frame reports WHY it is cold, in a TOKEN rather than a sentence
 (the copy belongs to the app, the same discipline `code` follows in the error
 ladder), and it also reports an in-flight attempt:
@@ -1250,6 +1377,53 @@ part of this queue. `retry_after_ms` (2 s) is deliberately shorter than the
 envelope: it is the pause before the next attempt, and the retry spends its own
 3 s waiting for the owner, so refuse + pause cycles keep three attempts inside
 a 20 s client deadline.
+
+### The history entry envelope: where a row's `ts` came from
+
+A `snapshot` or `/history` page is a list of entries, and every entry is
+`{id, ts, ts_source, type, payload}`. `ts_source` is ADDITIVE: a daemon that
+predates it omits it, and an older renderer drops an unknown key (the entry
+model's extra policy is `ignore`), so nothing here breaks in either direction.
+It exists because a row's `ts` has three provenances, and a renderer that treats
+them as one orders a turn wrongly:
+
+| `ts_source` | what `ts` is | how a consumer must treat it |
+| --- | --- | --- |
+| `"entry"` | the row's TRUE entry time (seconds): the moment the owner wrote the journal entry | safe to order by and to display |
+| `"unstated"` | `null`: no instant exists for this row | order by position/arrival and display **no** time; never default it to `0` |
+| `"served"` | a transport arrival approximation — the moment THIS machine served the page | NOT a stated instant: do not order it as a clock and never display it as the message's time |
+
+The vocabulary is CLOSED: those three strings and nothing else.
+
+**The consumer contract** (the renderer's half). A row without a true stamp is
+ordered and labelled by the CONSUMER's own rule — by its position in the turn it
+arrived in — and displays no time it does not have. It is never defaulted to
+zero (which paints 1970) and never dressed in the reader's clock (which dates a
+user's own message to whenever they opened the window). The two clocks that must
+agree are the OWNER's: a tool row's `started_at_epoch` (the live event's stamp,
+`harness/loop.py`) and a user row's `ts` under `"entry"` are the same clock, so
+the mid-turn join sorts in the order the turn happened. `"served"` is exactly
+the value that is NOT on that clock.
+
+**When a row is `"entry"`.** Every row on a LOCAL page: the page is journal rows,
+so `ts` is the write time by construction. A peer page is `"entry"` for the same
+reason where its rows come from the OWNER's stored journal — the daemon stamps
+them as it serves them, since the mesh op that fetches that page (`net_session_history`)
+returns journal rows verbatim and classifies nothing. The WIRE path is the one
+that may not know: it carries MESSAGES, and a
+message has no entry time of its own. The owner puts the true times on the
+display window it serves (an owner-side, mesh-internal capability), and the
+daemon stamps each wire row from that join when it has it. A row ABSENT from the
+join — one the owner's display replay subtracted, or one that arrived live after
+the page — has no provable instant, and that is what `"unstated"` says.
+
+**Negotiation.** `entry_ts=1` on `GET .../{id}/history`, `GET .../{id}` and
+`GET .../{id}/events` declares that this renderer reads the vocabulary. WITH it,
+a wire row the daemon cannot stamp comes back `ts: null`,
+`ts_source: "unstated"`. WITHOUT it — every client built before this — nothing
+changes: the row keeps the serve-stamp it has always received and carries
+`ts_source: "served"`. The matching capability key is `entry_ts` in
+`GET /v1/capabilities`' `features`, so a renderer can check before asking.
 
 ### Admission and retry semantics
 
@@ -2060,6 +2234,8 @@ absent.
 | `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and its session's frames carry the empty pair they always have (the opt-in is per session, so an app that opens no reader for ANY child gets exactly today's frames) |
 | `session_draft_warm` | 1 | `POST /v1/desktop/sessions/draft`, the `draft_id` field on `POST /v1/desktop/sessions`, and the five-door resolution of a registered draft id (`snapshot`, `history`, `watch`, `warm`, `events`) | the app never mints a draft and sends every create exactly as today (`draft_id` omitted), paying the cold engage on a new chat's first send; it must NOT gate any existing surface on this key — the warm is an optimisation on a send path that already works |
 | `session_catalogue_page` | 1 | `scope_kind`/`scope_name`/`cursor`/`with_counts` on `GET `/v1/desktop/sessions``, and `next_cursor`/`cursor_missing`/`scope`/`counts` in its answer | the app keeps today's exact behaviour: one unscoped `limit=500` request is the only shape it may send. It must NOT send a scope or a cursor to a daemon that does not advertise this key -- unknown query parameters are IGNORED rather than refused, so a scope would be answered with the unfiltered listing drawn under that group's name, and a cursor with page one again |
+| `ask_attachments` | 1 | the optional `images` list on `POST .../{id}/answers` (and the identical `images` key of the `ask_respond` socket frame), and the `attachments` refs on a `PendingAsk` row. The key is a BUILD fact; whether the owner behind a given session can keep the pictures is a separate, per-owner `ask-attachments-v1` runtime capability, and its absence is refused in words rather than stripped | the answer card offers no attach affordance and sends text only. A new UI that sends `images` to an old backend gets a `422` (`Answer` forbids unknown keys) — never a silent drop |
+| `entry_ts` | 1 | `entry_ts=1` on `GET .../{id}/history`, `GET .../{id}` and `GET .../{id}/events`, which turns on the per-row `ts_source` vocabulary for wire rows (`ts: null` + `"unstated"` where the owner shipped no true entry time) | the renderer sends no `entry_ts` and reads no `ts_source`, keeping today's serve-stamp ordering exactly. It must NOT gate any existing surface on this key: `ts_source` itself is additive and ignored by an older reader, so nothing breaks in either direction — the key only lets a NEW renderer tell whether asking is worthwhile |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already

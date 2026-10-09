@@ -92,6 +92,41 @@ class UnansweredPeer(NamedTuple):
     reason: str
 
 
+def read_listing(
+    root: Path | None = None,
+    *,
+    now: float | None = None,
+    ttl_s: float = _TTL_S,
+    catalog: object | None = None,
+) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
+    """ONE listing read, handing back BOTH halves: the rows and the silence.
+
+    WHY THIS IS A FUNCTION RATHER THAN TWO CALLS (agent review round 1, R-1).
+    The two halves are one relay answer, and a caller that needs both used to
+    ask twice — ``peer_session_rows`` then ``unanswered_peers`` — which is only
+    the same read while the first one completes inside the TTL: the cache entry
+    carries the moment the read STARTED (``_read_all``), and a listing that
+    spends its own documented budget (``relay.LISTING_CLIENT_TIMEOUT_S``, which
+    equals ``_TTL_S``) is exactly the case this exists for — a member that
+    black-holes, i.e. the silence a resolution miss must consult. The second
+    call then re-dialled, and the re-dial's ROWS were discarded by
+    ``unanswered_peers``, so an id the listing had just been seen to hold could
+    answer "not a peer's". Both failures are impossible here by construction:
+    one call, one read, one answer.
+
+    ``ttl_s=0`` on a resolution miss is the ONE FORCED READ those seams pay, so
+    both halves describe the same fan-out. Callers that want one half keep
+    :func:`peer_session_rows` and :func:`unanswered_peers`, which are now this
+    function's two projections.
+    """
+    key = "" if root is None else str(root)
+    moment = time.monotonic() if now is None else now
+    cached = _CACHE.get(key)
+    if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
+        return cached[1], cached[2]
+    return _read_all(root, catalog, moment, key)
+
+
 def peer_session_rows(
     root: Path | None = None,
     *,
@@ -122,12 +157,7 @@ def peer_session_rows(
     catalogue (``network/projection.PeerCatalog``); production passes nothing and
     gets this device's own relay.
     """
-    key = "" if root is None else str(root)
-    moment = time.monotonic() if now is None else now
-    cached = _CACHE.get(key)
-    if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
-        return cached[1]
-    return _read_all(root, catalog, moment, key)[0]
+    return read_listing(root, now=now, ttl_s=ttl_s, catalog=catalog)[0]
 
 
 def unanswered_peers(
@@ -155,12 +185,7 @@ def unanswered_peers(
     from an absent section, which would report every peer with no sessions as
     gone.
     """
-    key = "" if root is None else str(root)
-    moment = time.monotonic() if now is None else now
-    cached = _CACHE.get(key)
-    if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
-        return cached[2]
-    return _read_all(root, catalog, moment, key)[1]
+    return read_listing(root, now=now, ttl_s=ttl_s, catalog=catalog)[1]
 
 
 def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | None:
@@ -442,6 +467,36 @@ def _read_all(
     return rows, unanswered
 
 
+def _started_epoch(peer_row: object) -> float:
+    """The peer's ``started`` claim as an epoch — or ``0.0``, NO claim, for anything else.
+
+    ONE READING FOR BOTH consumers in ``_read`` (the row's ``mtime`` and its
+    ``created_at``), because the two must not disagree about when the peer says
+    the row began.
+
+    WHY A BOOL IS REFUSED RATHER THAN COERCED (operator report).
+    The live half of a federated listing published ``SessionRecord.started`` —
+    the "has run a real turn" BOOL — under this key, and ``float(True)`` is
+    ``1.0``: an epoch second into 1970, rendered by the desktop sidebar as
+    "56y" and filed under "Older". ``bool`` is excluded explicitly because
+    ``isinstance(True, int)`` is True: a claim that is not a number is NO
+    claim, and it lands where a missing key lands — ``0.0``, "an unknown start
+    sorts last" — never minted into an epoch. The type check is also what
+    keeps this reader's "nothing here raises" contract for a string claim: a
+    bare ``float()`` here raised for a non-numeric claim and silently minted
+    an epoch for a numeric-looking one.
+
+    THE PARSE IS THE FIRST REFUSAL NOW (``PeerRow.from_json`` reads an
+    unreadable claim as the no-claim ``0.0``); this is the belt for the shapes
+    no parse produced — a raw row-object from another catalogue implementation,
+    or a test double (QA round 1 on #2044: doubles were all this guard saw).
+    """
+    value = getattr(peer_row, "started", 0.0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value or 0.0)
+
+
 def _read(
     root: Path | None, catalog: object | None
 ) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
@@ -504,7 +559,7 @@ def _read(
         rows.append(
             SessionRow(
                 session_id,
-                float(getattr(peer_row, "started", 0.0) or 0.0),
+                _started_epoch(peer_row),
                 # ONE NAME FOR ONE CONDITION, shared with the local half
                 # (design round 2, D14). This fell back to the session's own
                 # 12-hex id while a nameless row THIS device holds paints
@@ -529,9 +584,10 @@ def _read(
                 # a soft form of the per-device segregation the merged bins
                 # exist to remove. ``started`` is the only per-row time the
                 # wire has, it is already this row's ``mtime`` (its age
-                # column), and an unknown start sorts last — the honest
+                # column), and an unknown start — missing, or a claim that is
+                # not a number (``_started_epoch``) — sorts last, the honest
                 # direction. See ``resume.SessionRow.created_at``.
-                created_at=float(getattr(peer_row, "started", 0.0) or 0.0),
+                created_at=_started_epoch(peer_row),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

@@ -219,6 +219,7 @@ class MeshCredentialBroker:
         client: MeshCredentialClient | None = None,
         identity: Any = None,
         github_minter: Any = None,
+        server: Any = None,
     ) -> None:
         # NO ``placement`` ATTRIBUTE, on purpose (F2): a document held here is a copy
         # that a revoke in the CLI process never reaches. See :meth:`_document`.
@@ -228,6 +229,11 @@ class MeshCredentialBroker:
         self.network_id = network_id
         self.audit = audit
         self.identity = identity
+        #: The relay this broker serves, for the sync engine's member half (S3).
+        #: ``None`` when a test constructs the broker directly; only an
+        #: ``announce`` reaching this broker needs it, and that path is the
+        #: relay's (``relay_handler``) in every production construction.
+        self._server = server
         self._auth_store = auth_store
         self._client = client
         #: The github adapter's minter seam (a test injects a fake transport here)
@@ -271,6 +277,16 @@ class MeshCredentialBroker:
             # into (``broker_for_relay``).
             broker = broker_for_relay(server)
             if broker is None:
+                # THE MEMBER HALF NEEDS NO BROKER (sync engine, S3): a device that
+                # owns nothing can still be a HOLDER, and an ``announce`` is
+                # addressed to exactly that device — behind the by-name refusal
+                # below it could never receive one, and the whole cadence would
+                # be inert for every borrower-only peer. Only ``announce`` is
+                # routed here; every other kind keeps the pre-existing refusal.
+                if str((frame or {}).get("kind") or "") == "announce":
+                    from local_operator.network.credentials import sync as sync_mod
+
+                    return sync_mod.member_announce(server, link, frame)
                 return refuse(link, frame)
             return broker.on_broker(link, frame)
 
@@ -302,6 +318,10 @@ class MeshCredentialBroker:
             audit=getattr(server, "audit", None),
             identity=identity,
             client=MeshCredentialClient.for_relay(server),
+            # THE RELAY THIS BROKER SERVES (S3): the sync engine's member half
+            # needs the dial seam and the loop, and a second object holding them
+            # would hold a second set of in-flight guards.
+            server=server,
         )
 
     # -- the relay's peer handler ------------------------------------------
@@ -331,7 +351,18 @@ class MeshCredentialBroker:
                 "nothing was refreshed or lent",
             )
         kind = str(frame.get("kind") or "")
-        if kind == "grant":
+        if kind in ("announce", "copy", "ack"):
+            # THE SYNC KINDS (S3). One import for the three branches; the module
+            # is stdlib-only at import, the package's stated rule.
+            from local_operator.network.credentials import sync as sync_mod
+
+            if kind == "announce":
+                detail = sync_mod.member_announce(self._server, link, frame)
+            elif kind == "copy":
+                detail = sync_mod.owner_copy(self, link, frame)
+            else:
+                detail = sync_mod.owner_ack(self, link, frame)
+        elif kind == "grant":
             detail = self.grant(link, frame)
         elif kind == "report":
             detail = self.report(link, frame)
@@ -1036,6 +1067,10 @@ class MeshCredentialBroker:
             refreshed=True,
             scope=GrantScope(kind="device", session_id=""),
             identity={},
+            # THE DELIVERY (§3.4): the allow-list this mint was narrowed to
+            # travels WITH the bearer, so the borrower materialises the same
+            # bound the token carries (github.remember_delivered_repositories).
+            narrowing=github_app.grant_narrowing(repositories),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
         lender.register(
@@ -1083,6 +1118,10 @@ class MeshCredentialBroker:
             refreshed=False,
             scope=GrantScope(kind="device", session_id=""),
             identity={},
+            # §3.4's bound for the token arms is the helper's allow-list ALONE,
+            # so it must reach the helper's device too (see _serve_github_app's
+            # note on the delivery; read fresh per serve, like the token).
+            narrowing=github_app.grant_narrowing(github_app.repositories_for(self.root)),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
 
@@ -1124,7 +1163,12 @@ class MeshCredentialBroker:
             return {"kind": "error", "code": "not_a_holder", "key": key}
         if failure == "quota":
             return self._remote_quota_block(key, entry, by, frame, reported_id=reported_id)
-        if failure in ("invalid", "unauthorized"):
+        if failure in ("invalid", "unauthorized", "copy_stale"):
+            # ``copy_stale`` (S4) rides the same arm as the ordinary 401: a copy
+            # upstream rejects is a value the owner may be able to refresh at
+            # its source, and the announce pass carries whatever the refresh
+            # produced to the holder on its next contact. Its own name in the
+            # audit keeps the two failure stories distinguishable.
             return self._one_owner_refresh(key, entry, by, reason=failure, reported_id=reported_id)
         # Anything else — ``unavailable`` (a provider 5xx/529 overload), ``failed`` —
         # is audited above and changes nothing: a provider-side fault is not evidence

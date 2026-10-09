@@ -31,7 +31,7 @@ import time
 import uuid
 from asyncio import InvalidStateError
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -5007,7 +5007,13 @@ class ServingSessionHandle(SessionHandle):
         return "answered"
 
     @_on_session_loop
-    async def ask_respond(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
+    async def ask_respond(
+        self,
+        ask_id: str,
+        answers: dict[str, list[str]],
+        by: str = "",
+        attachments: Mapping[str, Sequence["ImageContent"]] | None = None,
+    ) -> str:
         """Answer a QUEUED ask (design §2.4). Additive op: an old registrant
         answers ``unknown op``, and a runtime without the queue refuses in words.
 
@@ -5019,7 +5025,14 @@ class ServingSessionHandle(SessionHandle):
         revision window stays open until it does (design §10, the consumption
         bound).
         """
-        outcome = self._session.respond_ask(ask_id, answers, by=by or "remote")
+        # ``attachments`` is passed ONLY when present, so a text-only answer calls
+        # the session exactly as it always did (a reduced session double keeps
+        # working). The keyword's presence on THIS signature is also what the
+        # runtime advertises ``ask-attachments-v1`` from (``_takes_ask_attachments``):
+        # a handle that takes it keeps the pictures, one that does not is
+        # refused-not-stripped by every sender.
+        kwargs: dict[str, Any] = {"attachments": attachments} if attachments else {}
+        outcome = self._session.respond_ask(ask_id, answers, by=by or "remote", **kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         await self._session.reconcile_asks()
@@ -5211,6 +5224,15 @@ class ServingSessionHandle(SessionHandle):
         flaps with window focus, which is the one thing a block inside the
         persisted system prefix must never do.
         """
+        # The greeting's FIRE-TIME gate (review round 1, R-3) rides the same
+        # install, because it needs the same thing — the connection table this
+        # runtime owns — and the same lifetime. A separate probe rather than the
+        # interactivity one: that answer counts relayed and phone surfaces,
+        # which the operator named as places the greeting must NOT land.
+        try:
+            self._session._aida_attended_probe = lambda: bool(self._attended_surfaces())
+        except Exception:  # noqa: BLE001 — a session without the slot keeps its default
+            logger.debug("could not install the attended probe", exc_info=True)
         holder = getattr(self._session, "_goal_state", None)
         if holder is None or not hasattr(holder, "interactive_probe"):
             return
@@ -5218,6 +5240,34 @@ class ServingSessionHandle(SessionHandle):
             holder.interactive_probe = lambda: bool(self._attached_surfaces())
         except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
             logger.debug("could not install the interactivity probe", exc_info=True)
+
+    def _attended_surfaces(self) -> frozenset[str]:
+        """Local human front ends on this runtime (``RuntimeServer.attended_surfaces``).
+
+        Empty for a registrant that predates the reader: an older server cannot
+        say, and the gate this feeds must WITHHOLD when it cannot tell (the
+        withheld greeting is re-armed by the next attended moment, while a wrong
+        "attended" spends it where nobody can read it).
+        """
+        reader = getattr(self._registrant, "attended_surfaces", None)
+        if not callable(reader):
+            return frozenset()
+        try:
+            return frozenset(cast("frozenset[str]", reader()))
+        except Exception:  # noqa: BLE001 — unreadable means "cannot tell"
+            logger.debug("could not read the attended surfaces", exc_info=True)
+            return frozenset()
+
+    def aida_attended(self) -> None:
+        """A local human surface arrived: let a withheld greeting re-arm now.
+
+        Called by ``RuntimeServer._note_attended`` on the session's loop. The
+        session decides whether it is hers and whether anything is owed; this is
+        only the doorbell.
+        """
+        hook = getattr(self._session, "aida_attended", None)
+        if callable(hook):
+            hook()
 
     def _desktop_notification_available(self) -> bool:
         reader = getattr(self._registrant, "notification_surfaces", None)
@@ -7272,8 +7322,11 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.session import naming
 
         setter = getattr(session, "set_conversation_name", None)
-        complete_once = getattr(session, "complete_once", None)
-        if not callable(setter) or not callable(complete_once):
+        # Two jobs: `complete_once` is the readiness seam every session shape
+        # has, and requiring it keeps `refresh_completer`'s fallback from
+        # raising. The probe that follows is the callable the refresh will use.
+        complete = naming.refresh_completer(session) if hasattr(session, "complete_once") else None
+        if not callable(setter) or not callable(complete):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         current = getattr(session, "conversation_name", "") or ""
         # One budget over the history read AND the naming call, and one failure
@@ -7466,14 +7519,20 @@ class ServingSessionHandle(SessionHandle):
         did the user actually send" stays in one place.
         """
         registry = getattr(session, "team_registry", None)
+        if arg:
+            # Routed BEFORE the availability guard below (agent review round 1,
+            # NIT-3): the DETACH verb needs the SESSION (``attach_team(None)``)
+            # and not the registry, so a session whose registry read is
+            # unavailable must still be able to free the slot it is holding.
+            # The attach path applies the same guard itself, for the lookup it
+            # actually needs.
+            return self._team_attach_slash(session, arg, SlashResult)
         if registry is None or not hasattr(registry, "list_teams"):
             return SlashResult(
                 kind="notice",
                 text="teams are unavailable in this session. Ask the agent to create one.",
                 style="warning",
             )
-        if arg:
-            return self._team_attach_slash(session, arg, SlashResult)
         try:
             teams = list(registry.list_teams())
         except Exception as exc:  # noqa: BLE001 — a listing is never worth an error
@@ -7541,8 +7600,68 @@ class ServingSessionHandle(SessionHandle):
         if name.startswith("="):
             name = name[1:]
         request = request.strip()
+        # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_team`` and
+        # ``/agent``'s own pair: a team owns this session's agent slot (issue
+        # #2014), so detaching it is the ONE way to free that slot again, and a
+        # request after the verb is a mistyped attach that falls through to the
+        # ordinary name lookup below (which reports the unknown name).
+        if name.lower() in ("clear", "none") and not request:
+            detach = getattr(session, "attach_team", None)
+            if not callable(detach):
+                # Same shape as the attach guard below: state what this session
+                # can do rather than promising a detach it cannot perform.
+                return SlashResult(
+                    kind="notice",
+                    text="this session cannot run a team, so there is no team to detach",
+                    style="warning",
+                )
+            # Read BEFORE the call, and off the OBJECT rather than its name
+            # (agent review round 2, MINOR-1): `attach_team`'s gate is
+            # ``active_team is not None``, so a nameless team in force is a team
+            # that was detached, not one that was never there.
+            attached_before = getattr(session, "active_team", None) is not None
+            try:
+                detach(None)
+            except Exception as exc:  # noqa: BLE001 — a failed detach is a notice
+                return SlashResult(
+                    kind="notice", text=f"could not detach the team: {exc}", style="warning"
+                )
+            self._notify()
+            if not attached_before:
+                profile = str(getattr(session, "active_agent", "") or "")
+                return SlashResult(
+                    kind="notice",
+                    text=(
+                        f"no team is attached; {profile} is still this session's speaker, "
+                        "so nothing was detached. Run /agent clear to drop it."
+                        if profile
+                        else "no team is attached, so nothing was detached."
+                    ),
+                    style="info",
+                    # Same data the follower seam returns (MINOR-1/NIT-1): the
+                    # two are documented mirrors, and the TUI's receipt
+                    # consumer keys band sync on ``data["type"]``.
+                    data={"type": "team_attached", "team": "", "manager": "", "request": ""},
+                )
+            # Both segments move: the team NAME and the manager NAME the team
+            # claimed (see ``Session._release_team_agent_slot``).
+            return SlashResult(
+                kind="notice",
+                text="no team active; this session uses its base instructions.",
+                style="info",
+                data={"type": "team_attached", "team": "", "manager": "", "request": ""},
+            )
+        registry = getattr(session, "team_registry", None)
+        if registry is None or not hasattr(registry, "get_team_by_name"):
+            # The ATTACH half does need the registry, and refusing here keeps
+            # the "unavailable" answer to the form that requires it (NIT-3).
+            return SlashResult(
+                kind="notice",
+                text="teams are unavailable in this session. Ask the agent to create one.",
+                style="warning",
+            )
         try:
-            team = registry_team = session.team_registry.get_team_by_name(name)
+            team = registry_team = registry.get_team_by_name(name)
         except Exception as exc:  # noqa: BLE001 — a bad registry read is a notice
             return SlashResult(
                 kind="notice", text=f"could not load team {name!r}: {exc}", style="warning"
@@ -7568,18 +7687,34 @@ class ServingSessionHandle(SessionHandle):
                 text="this session cannot run a team. /team chart <name> shows a roster",
                 style="warning",
             )
+        # Read BEFORE the attach: it is the team a TEAM SWITCH displaces, and
+        # after the claim this session's name is the new one (D5).
+        prior_team = str(getattr(session, "active_team_name", "") or "")
         try:
-            attach(team)
+            replaced = attach(team)
         except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
             return SlashResult(
                 kind="notice", text=f"could not attach team {team.name!r}: {exc}", style="warning"
             )
         # The band and the discovery record both name the attached team, so the
         # projection has to refresh before the viewer paints its receipt.
-        from local_operator.teams import display_form
+        from local_operator.teams import display_form, replaced_profile_clause
 
         self._notify()
         shown = display_form(team.name, team.label)
+        # Issue #2014: attaching a team REPLACES the speaker in the agent slot,
+        # and a silent replacement is a state change nobody can account for. The
+        # attach reports what it dropped (its return value), so the receipt can
+        # — the ONE clause builder the TUI-local and follower seams share, so
+        # those three surfaces cannot word it differently. ``prior_team`` names
+        # the team that was displaced when this was a TEAM SWITCH, where calling
+        # the dropped speaker a "profile" would name something that never
+        # existed (design round 1, D5).
+        dropped = (
+            replaced_profile_clause(str(replaced), team.manager, prior_team=prior_team)
+            if replaced
+            else ""
+        )
         return SlashResult(
             kind="notice",
             text=(
@@ -7589,7 +7724,8 @@ class ServingSessionHandle(SessionHandle):
                 f"Send a request with /team {team.name} <message>."
                 if not request
                 else f"sending to {shown}. {team.manager} is coordinating."
-            ),
+            )
+            + dropped,
             style="info",
             data={
                 "type": "team_attached",
@@ -7639,6 +7775,12 @@ class ServingSessionHandle(SessionHandle):
         grammar (review/UX round 1, U1: the switch was unreachable live because
         only the local half existed).
         """
+        # Imported here rather than at module scope, matching every other
+        # ``session.errors`` reader on this path (see ``_team_slash``'s
+        # neighbours): the error module pulls the runtime types module, and the
+        # serving module is imported by that tree's own boot closure.
+        from local_operator.session.errors import AgentSlotOwnedByTeam
+
         if not arg:
             from local_operator.agent_profiles import agent_listing_rows
 
@@ -7685,11 +7827,17 @@ class ServingSessionHandle(SessionHandle):
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 return SlashResult(kind="notice", text="nothing to detach", style="info")
-            detach()
+            try:
+                detach()
+            except AgentSlotOwnedByTeam as refusal:
+                # A team owns the slot (issue #2014): the profile in force comes
+                # from the team, so this is the team's refusal and its remedy
+                # (``/team clear``), not "nothing to detach".
+                return SlashResult(kind="notice", text=str(refusal), style="warning")
             self._notify()
             return SlashResult(
                 kind="notice",
-                text="this session uses its base instructions",
+                text="no agent active; this session uses its base instructions",
                 style="info",
                 data={"type": "agent_attached", "agent": "", "request": ""},
             )
@@ -7700,6 +7848,13 @@ class ServingSessionHandle(SessionHandle):
             )
         try:
             resolved = attach(name)
+        except AgentSlotOwnedByTeam as refusal:
+            # Issue #2014: a team attached to this session owns the agent slot,
+            # so the refusal names the team and the way out rather than
+            # reporting a name nobody mistyped. Same sentence as the TUI's
+            # local path and as the ``lop exec`` preflight — it is raised from
+            # the ONE place the slot moves.
+            return SlashResult(kind="notice", text=str(refusal), style="warning")
         except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
             return SlashResult(
                 kind="notice", text=f"could not attach agent {name!r}: {exc}", style="warning"

@@ -196,11 +196,14 @@ def _modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Targe
     sentinel.touch()
     monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: sentinel)
     monkeypatch.setattr(launchd, "is_own_plist", lambda path, label: True)
-    # The isolated test HOME is not the passwd home, so a real containment check
-    # would (correctly) refuse the two daemons that record a config dir. Their
-    # own guard is pinned in `test_launchd.py`; here it is the repair under test.
+    # The isolated test HOME is not the passwd home, and its config root is not
+    # the one the shared unit serves, so the real ownership guards would
+    # (correctly) refuse the daemons that record a config dir. Their own guards
+    # are pinned in `test_launchd.py` and `tests/unit/wakes/test_install.py`;
+    # here it is the repair under test, so both seams are opened explicitly.
     monkeypatch.setattr(launchd, "config_lives_in_real_home", lambda config: True)
-    monkeypatch.setattr(wakes_install, "_config_lives_in_real_home", lambda config: True)
+    monkeypatch.setattr(launchd, "shared_label_refusal", lambda config: None)
+    monkeypatch.setattr(wakes_install, "_shared_label_refusal", lambda config: None)
     # The supervisor IDENTITY is what the five repairs branch on now (a repair is
     # launchd's, and the other two platforms' units are handled elsewhere), so
     # the seam is `supervisors.supervisor` — one patch covering mobile, wakes, the

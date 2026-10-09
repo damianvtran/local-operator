@@ -408,6 +408,10 @@ def test_the_token_arm_serves_the_stored_token_without_minting(
         assert detail["credential_ref"]["kind"] == github_mod.GITHUB_KIND
         assert detail["credential_ref"]["provider"] == github_mod.GITHUB_KEY
         assert detail["scope"] == {"kind": "device", "session_id": ""}
+        # §3.4: for the token arms the helper's allow-list is the ONLY bound, so
+        # the owner's designation must travel with the bearer (an App-only
+        # delivery would leave these arms unbounded on the borrower).
+        assert detail["narrowing"] == {"repositories": [SCRATCH]}
         now_ms = time.time() * 1000
         assert detail["grant_expires_at_ms"] <= now_ms + 900_000 + 5_000
         # No mint was attempted against the forge, and the lender tracks nothing.
@@ -434,6 +438,8 @@ def test_the_gh_arm_serves_the_login_the_cli_already_holds(
         assert detail["access_token"] == GHO
         assert detail["refreshed"] is False
         assert detail["token_expires_at_ms"] == 0
+        # The narrowing rides this arm too (see the token-arm cell's note).
+        assert detail["narrowing"] == {"repositories": [SCRATCH]}
         assert github_api.mint_requests == []
         assert rig.broker._lender().outstanding() == 0  # noqa: SLF001
     assert log.read_text(encoding="utf-8").splitlines() == ["fired"]

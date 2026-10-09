@@ -822,3 +822,154 @@ def test_a_settled_row_survives_its_runtime_and_still_names_its_conversation() -
     rows = _client().get("/api/asks").json()["asks"]
     assert [row["ask_id"] for row in rows] == ["ask-open-1"]
     assert rows[0]["cwd"] == "/tmp/gone"
+
+
+# ---------------------------------------------------------------------------
+# Image answers through the relay (ask-attachments-v1): forward or refuse, never strip
+# ---------------------------------------------------------------------------
+
+
+class _KeepingAskHandle(_AskHandle):
+    """An owner whose ``ask_respond`` takes ``attachments`` -- it advertises the token."""
+
+    async def ask_respond(  # type: ignore[override]
+        self, ask_id, answers, by="", attachments=None
+    ) -> str:  # noqa: ANN001
+        self.ask_calls.append(
+            (
+                "ask_respond",
+                {
+                    "ask_id": ask_id,
+                    "answers": answers,
+                    "by": by,
+                    "kinds": {
+                        q: [b.type for b in blocks] for q, blocks in (attachments or {}).items()
+                    },
+                },
+            )
+        )
+        return "answered"
+
+
+async def _post_ask_command(handle: _AskHandle, body: dict[str, object]) -> httpx.Response:
+    """Dial ``handle`` through a real relay and POST one command frame at it."""
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    try:
+        deadline = asyncio.get_running_loop().time() + 5
+        record = None
+        while asyncio.get_running_loop().time() < deadline:
+            found = [pair for pair in registry.scan() if pair[1] == "live"]
+            if found:
+                record = found[0][0]
+                break
+            await asyncio.sleep(0.05)
+        assert record is not None
+        daemon = MobileDaemon(port=0, password="pw123")
+        entry = SessionEntry(record)
+        daemon.table.entries[record.pid] = entry
+        dial = asyncio.ensure_future(_dial(daemon, entry))
+        try:
+            for _ in range(100):
+                if entry.projection is not None:
+                    break
+                await asyncio.sleep(0.05)
+            assert entry.projection is not None
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=build_app(daemon)),
+                base_url="http://fixture",
+                cookies={COOKIE_NAME: sign_cookie("pw123")},
+            ) as client:
+                return await client.post(f"/api/sessions/{record.session_id}/command", json=body)
+        finally:
+            dial.cancel()
+    finally:
+        registrant.close()
+
+
+def _png_b64_small() -> str:
+    import base64
+    import io
+
+    from PIL import Image as PILImage
+
+    buffer = io.BytesIO()
+    PILImage.new("RGB", (8, 8), (10, 120, 200)).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_the_relay_forwards_an_image_answer_to_a_capable_owner() -> None:
+    handle = _KeepingAskHandle()
+    reply = await _post_ask_command(
+        handle,
+        {
+            "op": "ask_respond",
+            "ask_id": "ask-1",
+            "answers": {"q1": ["see this"]},
+            "images": [
+                {"question_id": "q1", "data_b64": _png_b64_small(), "mime_type": "image/png"}
+            ],
+        },
+    )
+    assert reply.status_code == 200, reply.text
+    (call,) = handle.ask_calls
+    assert call[1]["kinds"] == {"q1": ["image"]}
+
+
+@pytest.mark.asyncio
+async def test_the_relay_refuses_rather_than_strips_for_an_owner_without_the_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.session.runtime import server as runtime_server
+    from local_operator.session.runtime.types import ASK_ATTACHMENTS_UNSUPPORTED
+
+    # PIN THE RELAY'S OWN GATE, not the owner's backstop. The owner refuses an
+    # image answer with the SAME sentence (``_answer_attachment_kwargs``), and a
+    # handle that never saw the call records nothing either way -- so with the
+    # relay gate removed this cell still passed (mutant: ``daemon.py`` gate
+    # condition -> ``False``). What differs is whether the frame REACHED the
+    # owner at all: a real pre-feature owner has no dispatch backstop and would
+    # record the text and ignore the pictures. The spy stands in for "the frame
+    # arrived": it must never be called.
+    reached_owner: list[str] = []
+    real = runtime_server._answer_attachment_kwargs  # noqa: SLF001
+
+    async def spy(op, method, wire_images, answers):  # noqa: ANN001
+        reached_owner.append(op)
+        return await real(op, method, wire_images, answers)
+
+    monkeypatch.setattr(runtime_server, "_answer_attachment_kwargs", spy)
+
+    handle = _AskHandle()  # ``ask_respond(ask_id, answers, by)``: no ``attachments``
+    reply = await _post_ask_command(
+        handle,
+        {
+            "op": "ask_respond",
+            "ask_id": "ask-1",
+            "answers": {"q1": ["see this"]},
+            "images": [
+                {"question_id": "q1", "data_b64": _png_b64_small(), "mime_type": "image/png"}
+            ],
+        },
+    )
+    assert reply.status_code == 422, reply.text
+    assert reply.json()["error"] == ASK_ATTACHMENTS_UNSUPPORTED
+    assert handle.ask_calls == [], "the text half of the answer must NOT have been recorded"
+    assert reached_owner == [], "the relay must refuse BEFORE a frame is written to the owner"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_images_list_is_a_422_at_the_relay_door() -> None:
+    handle = _KeepingAskHandle()
+    reply = await _post_ask_command(
+        handle,
+        {
+            "op": "ask_respond",
+            "ask_id": "ask-1",
+            "answers": {"q1": ["x"]},
+            "images": [{"data_b64": "QUJD", "mime_type": "image/png"}],
+        },
+    )
+    assert reply.status_code == 422, reply.text
+    assert handle.ask_calls == []
