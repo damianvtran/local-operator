@@ -75,6 +75,9 @@ def _registries(root: Path) -> tuple[AgentRegistry, TeamRegistry]:
     return agents, teams
 
 
+# Known limit (Q-NIT-2): a ``session_cls`` subclass that strips ``attach_team``
+# cannot restore a STORED team — the constructor attaches the resolved team
+# through that seam and raises TypeError; build stripped shapes on fresh transcripts.
 def _session(root: Path, agents: Any, teams: Any, session_cls: type[Session] = Session) -> Session:
     return session_cls(
         model=MODEL,
@@ -442,6 +445,41 @@ async def test_the_follower_detach_verb_repaints_in_the_same_turn(tmp_path) -> N
         assert result.text == "no team active; this session uses its base instructions."
         assert result.data["type"] == "team_attached"
         assert resumed.active_team_name == ""
+
+
+@pytest.mark.asyncio
+async def test_the_follower_no_op_receipt_is_the_bare_sentence_with_its_keys(tmp_path) -> None:
+    """The follower host's half of the bare no-op — sentence AND its 4-key data.
+
+    The routed twin is pinned in ``test_team_agent_precedence.py``; with nothing
+    in force the verb moved nothing, and this half must word it identically and
+    carry the same ``team_attached`` payload — including ``request`` — or a
+    follower's band keys drift from the owner's. Two producers, one sentence:
+    pinned on both, so a drift in either reddens (agent review round 1, R1).
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    agents, teams = _registries(tmp_path)
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+
+        result = app._team_attach_slash_result("clear", resumed.team_registry, SlashResult)
+
+        assert result.kind == "notice"
+        assert result.style == "info"
+        assert result.text == "no team is attached, so nothing was detached."
+        assert result.data == {
+            "type": "team_attached",
+            "team": "",
+            "manager": "",
+            "request": "",
+        }
 
 
 @pytest.mark.asyncio
