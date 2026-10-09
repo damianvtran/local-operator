@@ -86,9 +86,11 @@ class CodeRequestRow(BaseModel):
     last_at: float | None = None
     #: Filled by the adapter slice: ``{state, draft, title, head_sha, ci, updated_at}``.
     summary: dict[str, Any] | None = None
-    #: Filled by the round parser once comments are fetched.
+    #: The parsed review lanes, once comments have been fetched.
     lanes: list[dict[str, Any]] | None = None
+    #: When the forge last answered with NEW content (a 304 does not move it).
     fetched_at: float | None = None
+    #: True when the last refresh failed and this row keeps older data.
     stale: bool = False
     refresh_error: str | None = None
 
@@ -114,8 +116,10 @@ class CodeRequestListing(BaseModel):
     #: ``git push`` "create a pull request" links: a fact about a BRANCH, kept out of the
     #: rows on purpose (the link names no code request).
     hints: list[dict[str, Any]] = Field(default_factory=list)
-    #: Hosts whose refresh is cooling down, mapped to the instant it lifts. Always empty
-    #: in this slice (nothing fetches yet) and present so 1b does not change the shape.
+    #: Hosts whose refresh is cooling down, mapped to the instant it lifts
+    #: (epoch seconds). ``{}`` when no host is cooling. A cooling host's rows
+    #: keep their last known data and say ``stale``; force-refresh never
+    #: bypasses this (a force must not defeat the host's own rate limit).
     cooling: dict[str, float] = Field(default_factory=dict)
     #: The scan's own state: ``ready`` when the index is current for the journal,
     #: ``refreshing`` when a scan is running for a journal that has moved, ``error`` when
@@ -125,7 +129,13 @@ class CodeRequestListing(BaseModel):
 
 
 class CodeRequestRefreshReceipt(BaseModel):
-    """``POST …/code-requests/refresh`` — a 202 receipt for work that has not happened."""
+    """``POST …/code-requests/refresh`` — a 202 receipt for queued work.
+
+    The scan half ran; the FETCH half is scheduled (reads never block on the
+    network, so the fetch completes behind this receipt and its result arrives
+    through the feed frame + the next GET). ``note`` is the honest sentence
+    about both halves and about rows that cannot be fetched at all.
+    """
 
     model_config = ConfigDict(extra="allow")
 
@@ -133,7 +143,7 @@ class CodeRequestRefreshReceipt(BaseModel):
     accepted: bool
     keys: list[str] = Field(default_factory=list)
     force: bool = False
-    #: What the caller should do instead, in one sentence. This route exists so the UI's
-    #: refresh affordance has a stable address; until the adapter slice lands it does no
-    #: work, and this field is the honest statement of that rather than a silent no-op.
+    #: One sentence about what was done and queued. Written here rather than
+    #: composed by the client so the copy lives beside the behaviour it
+    #: describes.
     note: str = ""

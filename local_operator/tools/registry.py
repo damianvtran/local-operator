@@ -16,6 +16,7 @@ from typing import Any, NamedTuple
 
 from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
+from local_operator.code_requests.tool import build_code_requests_tool
 from local_operator.network.tool import build_network_tool
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
@@ -114,6 +115,15 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # purpose: appending never shifts a provider-visible array prefix, which
     # is what the prompt cache keys on.
     "generate_image": lambda context: build_generate_image_tool(context),
+    # createIf: rung 3 — present only where the session has a store root
+    # (its own directory plus a resolvable config root), so a reduced host
+    # pays no schema for a tool whose every call could only say "no store".
+    # Read-only (`list`/`show`) and deferred by default (its schema is the
+    # biggest part of its cost; the recommendation hook and the tracked note
+    # are what keep it discoverable). Appended at the END of both tables on
+    # purpose: appending never shifts a provider-visible array prefix, which
+    # is what the prompt cache keys on.
+    "code_requests": lambda context: build_code_requests_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -156,6 +166,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "sessions",
     "ask_withdraw",
     "generate_image",
+    "code_requests",
 ]
 
 

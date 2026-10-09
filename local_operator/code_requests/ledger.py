@@ -52,6 +52,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -274,6 +275,27 @@ def read_index(config_dir: str | Path, session_id: str) -> dict[str, Any] | None
     return data
 
 
+#: In-process write locks, one per ``(config_dir, session_id)``. The index has
+#: TWO writers in this process: the scanner (:func:`write_index`) and the fetch
+#: service's completion bump (:func:`touch_index`). Both are read-modify-write
+#: shapes over one file, so serialising them here is what keeps a touch from
+#: reverting rows a concurrent scan just wrote (and vice versa). Cross-process
+#: duplicates (daemon + runtime) remain accepted, exactly as the fetch cache's
+#: docstring states: both writers are cheap and self-healing on the next pass.
+_INDEX_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_INDEX_LOCKS_GUARD = threading.Lock()
+
+
+def _index_lock(config_dir: str | Path, session_id: str) -> threading.Lock:
+    key = (str(config_dir), session_id)
+    with _INDEX_LOCKS_GUARD:
+        lock = _INDEX_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _INDEX_LOCKS[key] = lock
+    return lock
+
+
 def write_index(config_dir: str | Path, session_id: str, result: ScanResult) -> bool:
     """Persist one scan's rows. An empty result REMOVES the file.
 
@@ -285,31 +307,54 @@ def write_index(config_dir: str | Path, session_id: str, result: ScanResult) -> 
         path = index_path(config_dir, session_id)
     except ValueError:
         return False
-    if not result.rows and not result.tool_output_only and not result.hints:
-        try:
-            path.unlink()
-            return True
-        except FileNotFoundError:
-            return True
-        except OSError:
+    with _index_lock(config_dir, session_id):
+        if not result.rows and not result.tool_output_only and not result.hints:
+            try:
+                path.unlink()
+                return True
+            except FileNotFoundError:
+                return True
+            except OSError:
+                return False
+        rows = [row.to_payload() for row in result.rows]
+        payload: dict[str, Any] = {
+            "schema": INDEX_SCHEMA,
+            "session_id": session_id,
+            "updated_at": round(time.time(), 3),
+            "rows": rows,
+            # The COLLAPSED refs are deliberately absent. They are the expansion a reader
+            # asks for by name ("show the tool-output mentions"), and this file exists to be
+            # read cold and cheap for every session on the machine; the count rides along so
+            # a list renders "67 more seen in tool output" without opening the cache.
+            "tool_output_only": result.tool_output_only,
+            "hints": list(result.hints),
+            "events": result.events,
+        }
+        if result.tool_only_truncated:
+            payload["tool_only_truncated"] = True
+        return _write_json(path, payload)
+
+
+def touch_index(config_dir: str | Path, session_id: str) -> bool:
+    """Bump the index's ``updated_at`` so the feed announces a fetch completion.
+
+    The design's completion signal (§D.6): the ``code_requests`` feed frame and
+    the route both report the index's ``updated_at`` (in ms) as ``revision``, so
+    moving it IS the announcement — the client refetches and the route merges
+    the freshly written cache entries. Content is preserved verbatim; only the
+    timestamp moves, and a missing/empty index is a no-op (a fetch for a
+    session whose rows have since been removed must not resurrect the file).
+    """
+    try:
+        path = index_path(config_dir, session_id)
+    except ValueError:
+        return False
+    with _index_lock(config_dir, session_id):
+        entry = _read_json(path)
+        if entry is None:
             return False
-    rows = [row.to_payload() for row in result.rows]
-    payload: dict[str, Any] = {
-        "schema": INDEX_SCHEMA,
-        "session_id": session_id,
-        "updated_at": round(time.time(), 3),
-        "rows": rows,
-        # The COLLAPSED refs are deliberately absent. They are the expansion a reader
-        # asks for by name ("show the tool-output mentions"), and this file exists to be
-        # read cold and cheap for every session on the machine; the count rides along so
-        # a list renders "67 more seen in tool output" without opening the cache.
-        "tool_output_only": result.tool_output_only,
-        "hints": list(result.hints),
-        "events": result.events,
-    }
-    if result.tool_only_truncated:
-        payload["tool_only_truncated"] = True
-    return _write_json(path, payload)
+        entry["updated_at"] = round(time.time(), 3)
+        return _write_json(path, entry)
 
 
 def read_cache(config_dir: str | Path, session_id: str) -> dict[str, Any] | None:

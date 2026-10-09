@@ -133,14 +133,21 @@ def _force_browser_available(monkeypatch):
     reads the machine's image credentials (``imagegen.availability``), so an
     unforced answer would depend on the developer's stored keys. Patched on the
     module object the builder resolves through.
+
+    ``code_requests`` joined them with the code-request workstream: its gate
+    reads the session's store root (``context.session_dir``), which this
+    factory's context does not carry, so the whole-table assertions force the
+    predicate the same way.
     """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    from local_operator.code_requests import tool as code_requests_tool
     from local_operator.tools import image_tool
 
     monkeypatch.setattr(
         image_tool.image_availability, "image_provider_reachable", lambda *a, **k: True
     )
+    monkeypatch.setattr(code_requests_tool, "code_requests_available", lambda context: True)
 
 
 def test_default_set_builds_all_builtin_tools() -> None:
