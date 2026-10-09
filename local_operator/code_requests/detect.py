@@ -95,7 +95,10 @@ class Detection:
     exit: int | None = None
     act: str | None = None
     reason: str | None = None
-    hint: Mapping[str, str] | None = None
+    #: A rule's own payload: the ``git push`` hint's url/project, or the candidate refs an
+    #: unattributable create printed (``{"candidates": [payload, …]}``). ``Any`` because it
+    #: is a bag a reader inspects, never a value any rule branches on.
+    hint: Mapping[str, Any] | None = None
     unverified: bool = False
 
 
@@ -239,6 +242,20 @@ def _scan(command: str, start: int, *, nested: bool) -> tuple[list[str], int]:
                 i = match.end()
                 word_start = False
                 continue
+        if (
+            ch == ">"
+            or (ch == "<" and not command.startswith("<<", i))
+            or (ch == "&" and i + 1 < length and command[i + 1] == ">")
+        ):
+            # A REDIRECTION is where output goes, never an argument and never a stage
+            # boundary. Reading the ``&`` of ``2>&1`` as a separator split
+            # ``gh pr create -f 2>&1 | tail -1`` into a phantom stage ``1`` — a stage that
+            # could "print anything", which made every URL in the command unattributable
+            # and turned a real create into ``unknown``.
+            _strip_trailing_fd(current)
+            i = _skip_redirect(command, i)
+            word_start = False
+            continue
         if nested and ch == ")" and depth == 0:
             stages.append("".join(current))
             return stages, i + 1
@@ -260,6 +277,52 @@ def _scan(command: str, start: int, *, nested: bool) -> tuple[list[str], int]:
         i += 1
     stages.append("".join(current))
     return stages, length
+
+
+def _strip_trailing_fd(current: list[str]) -> None:
+    """Drop a file-descriptor number that the redirect operator belongs to (``2`` in ``2>&1``)."""
+    text = "".join(current)
+    if re.search(r"(?:^|\s)\d+$", text):
+        current[:] = [re.sub(r"\d+$", "", text)]
+
+
+def _redirect_operator_length(command: str, i: int) -> int:
+    """How many characters the redirect operator at ``i`` spans (``>``, ``>>``, ``>&``, ``&>>``)."""
+    if command.startswith("&>>", i):
+        return 3
+    if command.startswith("&>", i):
+        return 2
+    if command.startswith(">>", i):
+        return 2
+    if command.startswith((">&", "<&", "<>"), i):
+        return 2
+    return 1
+
+
+def _skip_redirect(command: str, i: int) -> int:
+    """Index just past a redirection and its target, so neither becomes an argument.
+
+    ``&1``/``&2`` are part of the operator; ``/dev/null`` or a filename after it is the
+    target. Quotes are respected: ``> "my file"`` consumes the quoted name as one target.
+    """
+    length = len(command)
+    i += _redirect_operator_length(command, i)
+    if i < length and command[i] == "&":
+        i += 1
+    # ``> file`` puts the target on the far side of a space: skip the gap before deciding
+    # whether anything is left to consume, or the target stays behind as an argument.
+    while i < length and command[i] in " \t":
+        i += 1
+    if i >= length or command[i] in _SEPARATORS:
+        return i
+    while i < length and not command[i].isspace() and command[i] not in _SEPARATORS:
+        if command[i] in ("'", '"'):
+            quote = command[i]
+            i += 1
+            while i < length and command[i] != quote:
+                i += 1
+        i += 1
+    return i
 
 
 def _skip_heredoc_bodies(command: str, i: int, heredocs: list[tuple[str, bool]]) -> int:
@@ -909,10 +972,72 @@ def _rule_stem(verb: str) -> str:
 # ---------------------------------------------------------------------------
 
 _FORGE_CLIS = frozenset({"gh", "glab", "tea", "az"})
+
+#: Forge verbs whose output url ALWAYS carries a fragment (``#issuecomment-…``,
+#: ``#note_…``), so the stage can never own a bare url line.
+_FRAGMENT_ONLY_VERBS = frozenset(
+    {("pr", "comment"), ("issue", "comment"), ("mr", "note"), ("issue", "note")}
+)
+
+#: Stages that cannot print a code-request url of their own: shell builtins, file
+#: housekeeping, and ``git`` (whose url-shaped output is a push hint, on stderr, prefixed).
+_BLIND_COMMANDS = frozenset(
+    {
+        "cd",
+        "pushd",
+        "popd",
+        "export",
+        "unset",
+        "set",
+        "source",
+        ".",
+        "wait",
+        "sleep",
+        "true",
+        "false",
+        ":",
+        "mkdir",
+        "rmdir",
+        "rm",
+        "mv",
+        "cp",
+        "touch",
+        "chmod",
+        "chown",
+        "ln",
+        "test",
+        "[",
+        "[[",
+        "declare",
+        "local",
+        "shift",
+        "trap",
+        "umask",
+        "git",
+        "kill",
+        "wait",
+    }
+)
+
+#: Filters that print only their stdin, and therefore add no line of their own — but
+#: only while they have no file operand (``cat summary.txt`` prints a file: see
+#: ``_has_file_operand``; ``tee report.txt`` never reads one).
+_PASS_THROUGH_COMMANDS = frozenset({"cat", "tail", "head", "sort", "uniq", "cut", "tr", "nl"})
+_PASS_THROUGH_ALWAYS = frozenset({"tee", "wc"})
 _INTERPRETERS = frozenset(
     {"bash", "sh", "zsh", "python", "python3", "node", "ruby", "perl", "deno", "bun"}
 )
 _SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".ts", ".rb", ".pl")
+
+#: Shell constructs whose text IS executed but which ``split_stages`` cannot see through
+#: as a stage of its own: a command substitution and a loop body. A create inside one of
+#: these is a MISS if it is not recognised (QA round 2, row 3f: ``URL=$(gh pr create -f)``
+#: and ``for b in …; do gh pr create …; done`` recorded nothing at all).
+_SUBSTITUTION = re.compile(r"\$\((?P<sub>[^()]*(?:\([^()]*\)[^()]*)*)\)|`(?P<tick>[^`]*)`")
+_LOOP_BODY = re.compile(r"\b(?:for|while)\b(?P<loop>.*?)\bdone\b", re.DOTALL)
+_CREATE_INVOCATION = re.compile(
+    r"\b(?:gh\s+pr\s+create|glab\s+mr\s+create|tea\s+pulls\s+create|az\s+repos\s+pr\s+create)\b"
+)
 
 
 def _is_script_stage(words: list[str]) -> bool:
@@ -1017,6 +1142,32 @@ def detect_bash(command: str, result_text: str, context: HostContext) -> list[De
             detections.extend(_git_push_hints(result))
     if detections:
         return _dedupe(detections)
+    shape = _unreachable_create_shape(command)
+    if shape is not None and not any(_is_create_stage(words) for words in stages):
+        # A create ran where the tokeniser cannot see it. Any bare URL on stdout may be
+        # its own, and which one it is cannot be established — so the answer is the
+        # design's "possibly opened", with every candidate carried as evidence.
+        candidates = [
+            ref
+            for line in result.stdout.splitlines()
+            for ref in [_line_ref(line, context, ("github", "gitlab", "gitea", "azure"))]
+            if ref is not None and not _has_fragment_or_query(line)
+        ]
+        if candidates:
+            return [
+                Detection(
+                    KIND_UNKNOWN,
+                    candidates[0],
+                    "create-unreachable",
+                    "gh pr create",
+                    0,
+                    reason=(
+                        f"a create ran inside {shape}, so this call's output cannot be "
+                        "attributed to it: possibly opened by this call"
+                    ),
+                    hint={"candidates": [ref.to_payload() for ref in candidates]},
+                )
+            ]
     # The script rule needs an ABSENCE: no forge CLI ran at all. ``gh pr view
     # --json url`` and its friends print PR URLs as a READ.
     if not any(name in _FORGE_CLIS for name in names) and any(
@@ -1051,45 +1202,35 @@ def _create_by_cli(
 ) -> list[Detection]:
     """The URL a create CLI's own stage printed, or the honest `unknown` instead.
 
-    WHERE THE URL COMES FROM, and why it is not simply "the last line of stdout". The
-    bash tool reports ONE stdout for the whole command, so a compound stage
-    (``gh pr create -f && gh pr comment 5 --body hi``) puts two CLIs' output in the same
-    buffer — and reading its last line recorded the COMMENT's URL as the PR this call
-    created (review round 1, F1: PR #5 was recorded `opened` while the PR the call
-    actually created, #4, was not a row at all). Attribution now has three rules:
+    WHY NOT "THE LAST LINE OF STDOUT", twice over. The bash tool reports ONE stdout for
+    the whole command, so every stage's output lands in the same buffer. Review round 1
+    (F1) caught the last line being read as the creation when a LATER stage printed a
+    different URL; round 2 (Q5) caught the same class from the other side — a later
+    script, a file read, or an EARLIER forge act whose line was taken instead. The rule
+    is now fail-closed and positional:
 
     1. **A create prints a BARE url**: no fragment and no query. ``#issuecomment-…``,
-       ``#note_…``, ``#diff-…`` and ``/files`` are other commands' shapes, so a line
-       carrying one is never read as a creation.
-    2. **A later stage naming a same-forge URL in its own ARGUMENTS** (``… ; echo <url>``,
-       ``… && curl <url>``) makes this stdout unattributable — the create cannot be
-       separated from the echo — and the answer is `unknown` ("possibly opened"),
-       never `opened`.
-    3. **A later forge-CLI stage** (gh/glab/tea/az) may print a URL of its own
-       (``gh pr view 5 --json url``), so the FIRST bare URL line is taken rather than the
-       last: the create runs before it. With a single stage — or stages that are not
-       forge CLIs — the last bare URL line is the create's, which is the shape gh and
-       glab both print.
+       ``#note_…`` and ``#diff-…`` are other commands' shapes.
+    2. **Only stages that can print a bare url of their own are candidates for the
+       blame.** Filters with no file operand (``| tail -1``, ``| tee x``), shell
+       builtins and ``git`` cannot print one; a script, an interpreter with a script, a
+       file reader (``cat summary.txt``), a stage whose ARGUMENTS name a url, and every
+       forge-CLI stage that is not a comment/note verb can. A ``gh pr comment`` /
+       ``glab mr note`` stage prints its url WITH a fragment, so it is not a bare-url
+       printer at all — which is what keeps ``gh pr create -f && gh pr comment 5``
+       attributable to the create (QA round 2, row 3a).
+    3. **A stage whose own arguments name the ref it printed is eliminated**, and the
+       candidate line carrying that ref is explained by it. ``gh pr create -f && gh pr
+       view 5 --json url`` therefore attributes the FIRST line to the create, because
+       the second line is named by the view's arguments.
+    4. If exactly one printer is left and exactly one candidate is unexplained, that
+       candidate is the create's → ``opened``. If every remaining printer is a CREATE
+       and the candidates number the same, they map in stage order (three creates in
+       one command, QA round 2 Q6 — dropping the middle rows silently was the finding).
+       Anything else is `unknown` ("possibly opened"), with the candidate lines carried
+       as evidence, never a chosen first or last line.
     """
     stem = _rule_stem(verb)
-    ambiguous = _later_stage_names_a_url(stages, index, context, forge)
-    if ambiguous:
-        loose = _last_url_ref(result.stdout, context, (forge,))
-        if loose is None:
-            return []
-        return [
-            Detection(
-                KIND_UNKNOWN,
-                loose,
-                f"{stem}-unattributed",
-                verb,
-                0,
-                reason=(
-                    f"{verb} ran, but a later stage of the same command names a URL of "
-                    "its own, so this call's output cannot be attributed to the create"
-                ),
-            )
-        ]
     candidates = [
         ref
         for line in result.stdout.splitlines()
@@ -1097,6 +1238,8 @@ def _create_by_cli(
         if ref is not None and not _has_fragment_or_query(line)
     ]
     if not candidates:
+        # The CLI ran and printed a url of its own, but not in the shape a create prints
+        # (a fragment, a comment link, a table). Same answer as before: unshaped.
         loose = _last_url_ref(result.stdout, context, (forge,))
         if loose is None:
             return []
@@ -1110,12 +1253,184 @@ def _create_by_cli(
                 reason=f"{verb} ran, but its URL is not in the CLI's own stdout shape",
             )
         ]
-    # glab prints its "Creating merge request for …" herald on stdout before the URL, so
-    # the LAST candidate is its own either way; with a later forge CLI in the command the
-    # FIRST is the create's, because the create ran first.
-    later_forge = any(command_word(words) in _FORGE_CLIS for words in stages[index + 1 :])
-    ref = candidates[0] if later_forge else candidates[-1]
-    return [Detection(KIND_OPENED, ref, f"{stem}-stdout", verb, 0)]
+    printers = [
+        item
+        for item, words in enumerate(stages)
+        if _url_printer_reason(words, context, forge) is not None
+    ]
+    explained: set[str] = set()
+    unexplained: list[int] = []
+    for item in printers:
+        named = _named_keys(stages[item], context)
+        keys = {ref.key for ref in candidates}
+        if item != index and named and named <= keys:
+            # Its own arguments name the refs it printed, so this stage accounts for those
+            # lines and cannot be the source of the others.
+            explained |= named
+            continue
+        unexplained.append(item)
+    remaining = [ref for ref in candidates if ref.key not in explained]
+    if unexplained == [index] and len(remaining) == 1:
+        return [Detection(KIND_OPENED, remaining[0], f"{stem}-stdout", verb, 0)]
+    if unexplained and all(_is_create_stage(stages[item]) for item in unexplained):
+        if len(remaining) == len(unexplained):
+            return [Detection(KIND_OPENED, ref, f"{stem}-stdout", verb, 0) for ref in remaining]
+    reason = _unattributed_reason(stages, unexplained, index, verb)
+    # ``remaining`` can be empty when every candidate line is named by another stage's
+    # arguments. The row is still recorded — the call did run a create — so it reports the
+    # first candidate it saw rather than dropping the fact.
+    subject = remaining[0] if remaining else candidates[0]
+    return [
+        Detection(
+            KIND_UNKNOWN,
+            subject,
+            f"{stem}-unattributed",
+            verb,
+            0,
+            reason=reason,
+            hint={"candidates": [ref.to_payload() for ref in candidates]},
+        )
+    ]
+
+
+def _unreachable_create_shape(command: str) -> str | None:
+    """A create the tokeniser cannot see: inside ``$( )``/backticks or a loop body.
+
+    Both are EXECUTED shell text, unlike a heredoc body fed to python — which is why the
+    heredoc false positive this module already tests stays refused. The answer for one of
+    these is never ``opened`` (nobody can tell which iteration's URL landed on stdout), and
+    the design's rule for a create whose evidence is out of reach is ``unknown``,
+    "possibly opened", rather than silence.
+    """
+    for match in _SUBSTITUTION.finditer(command):
+        body = match.group("sub") or match.group("tick") or ""
+        if _CREATE_INVOCATION.search(body):
+            return "a command substitution"
+    for match in _LOOP_BODY.finditer(command):
+        if _CREATE_INVOCATION.search(match.group("loop") or ""):
+            return "a loop body"
+    return None
+
+
+def _unattributed_reason(
+    stages: list[list[str]], unexplained: list[int], index: int, verb: str
+) -> str:
+    """Why this call's output could not be attributed, naming the stage that could fake it."""
+    others = [item for item in unexplained if item != index]
+    if others:
+        names = ", ".join(_stage_label(stages[item]) for item in others[:3])
+        return (
+            f"{verb} ran, but other stages of the same command could print a URL of "
+            f"their own ({names}), so this call's output cannot be attributed to the create"
+        )
+    return f"{verb} ran, and its stdout carries more than one URL that could be its own"
+
+
+def _stage_label(words: list[str]) -> str:
+    """A short human label for a stage: ``gh pr view``, ``cat summary.txt``."""
+    return " ".join(words[:3]) if words else "?"
+
+
+def _is_create_stage(words: list[str]) -> bool:
+    name = command_word(words)
+    rest = words[1:]
+    if name == "gh":
+        return len(rest) >= 2 and rest[0] == "pr" and rest[1] in _GH_CREATE
+    if name == "glab":
+        return len(rest) >= 2 and rest[0] == "mr" and rest[1] in _GLAB_CREATE
+    if name == "tea":
+        return len(rest) >= 2 and rest[0] in _TEA_PULLS and rest[1] in _TEA_CREATE
+    if name == "az":
+        return rest[:3] == ["repos", "pr", "create"]
+    return False
+
+
+#: Commands that print their arguments, and the metacharacters that make an argument
+#: something other than literal text.
+_ECHO_COMMANDS = frozenset({"echo", "printf"})
+_EXPANSION = re.compile(r"[$`*?\[]")
+
+
+def _is_literal_echo(words: list[str]) -> bool:
+    """``echo done`` prints ``done``; ``echo $URL`` prints whatever the variable holds."""
+    if command_word(words) not in _ECHO_COMMANDS:
+        return False
+    return not any(_EXPANSION.search(word) for word in words[1:])
+
+
+def _named_keys(words: list[str], context: HostContext) -> set[str]:
+    """The refs a forge stage's own ARGUMENTS name, through the same resolvers its
+    detection uses — so "the ref this stage is about" has one definition in the module."""
+    name = command_word(words)
+    rest = words[1:]
+    ref: Ref | None = None
+    if name == "gh" and len(rest) >= 2 and rest[0] == "pr":
+        ref = _github_target(rest[2:], context)
+    elif name == "glab" and len(rest) >= 2 and rest[0] == "mr":
+        ref = _gitlab_target(rest[2:], context)
+    return {ref.key} if ref is not None else set()
+
+
+def _url_printer_reason(words: list[str], context: HostContext, forge: str) -> str | None:
+    """Why this stage could print a BARE url of its own, or ``None`` when it cannot.
+
+    The ``None`` answers are the load-bearing ones, because they are what keeps a real
+    create attributable: a shell builtin, a filter with no file operand, and ``git``
+    cannot conjure a url line out of nothing. Everything else — a script, an
+    interpreter, a file reader, an unrecognised command, a forge CLI, a stage whose
+    arguments name a url — can, and therefore makes the command ambiguous.
+    """
+    name = command_word(words)
+    if not name:
+        return None
+    if name in _FORGE_CLIS:
+        rest = words[1:]
+        if name in ("gh", "glab") and len(rest) >= 2:
+            verb = tuple(rest[:2])
+            if verb in _FRAGMENT_ONLY_VERBS:
+                # A comment/note prints its own url WITH a fragment, so it can never be
+                # mistaken for the create's bare line.
+                return None
+        return f"the forge CLI '{name}'"
+    if _is_script_stage(words):
+        return f"the script '{os.path.basename(words[0])}'"
+    for word in words[1:]:
+        if any(ref.forge == forge for ref in iter_urls(word, context)):
+            return f"'{name}' names a URL in its arguments"
+    if _is_literal_echo(words):
+        # An echo of LITERAL text prints exactly that text, so it can only add a url line
+        # if one of its own arguments is one — which the rule above already caught. This
+        # is what keeps the everyday ``gh pr create -f && echo done`` attributable.
+        return None
+    if name in _PASS_THROUGH_ALWAYS:
+        return None
+    if name in _PASS_THROUGH_COMMANDS and not _has_file_operand(words):
+        # A filter with no file operand prints only what it received on stdin, which is
+        # this same stdout — it cannot add a line the create did not produce.
+        return None
+    if name in _BLIND_COMMANDS:
+        return None
+    return f"the command '{name}'"
+
+
+#: A shell redirection as a token: ``2>&1``, ``>/dev/null``, ``&>log``. It names where
+#: output goes, never an input file, so it must not read as a filter's operand.
+_REDIRECT = re.compile(r"^(?:\d*[<>]|&>)")
+
+
+def _has_file_operand(words: list[str]) -> bool:
+    """Does a filter stage read a FILE (as opposed to its stdin)?
+
+    ``2>&1`` is a redirection, not an operand: ``gh pr create -f 2>&1 | tail -1`` is the
+    create's own stdout through a filter, and reading the redirect as a filename made the
+    tail look like a reader of arbitrary files (and so made the whole command ambiguous).
+    """
+    for word in words[1:]:
+        if word.startswith("-") or _REDIRECT.match(word) or word.isdigit():
+            # ``tail -n 1`` / ``tail 1``: the number is the COUNT, not a file.
+            continue
+        return True
+    return False
 
 
 def _has_fragment_or_query(line: str) -> bool:

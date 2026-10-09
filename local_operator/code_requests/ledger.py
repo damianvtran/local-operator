@@ -120,10 +120,12 @@ def index_dir(config_dir: str | Path) -> Path:
     return Path(config_dir) / INDEX_DIRNAME
 
 
-#: What a session id may look like when it becomes a FILENAME. Session ids are
-#: 12 lowercase hex characters; the bound is generous on purpose (a fork keeps its
-#: parent's id shape, and an id is bookkeeping, never a secret).
-_DERIVED_STEM = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+#: What a session id may look like when it becomes a FILENAME: 1 to 128 characters of
+#: ``[A-Za-z0-9_-]``, matched with ``fullmatch`` so a trailing newline is refused like any
+#: other stray character. Session ids are 12 lowercase hex characters; the bound is
+#: generous on purpose — a fork keeps its parent's id shape, and an id is bookkeeping,
+#: never a secret.
+_DERIVED_STEM = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 def _derived_stem(session_id: str) -> str:
@@ -139,7 +141,7 @@ def _derived_stem(session_id: str) -> str:
     ``<dir>/<stem>.json``. Refusing that shape outright is what makes the allow-list row
     for those calls a statement a reviewer can check rather than a promise about callers.
     """
-    if not _DERIVED_STEM.match(session_id or ""):
+    if not _DERIVED_STEM.fullmatch(session_id or ""):
         raise ValueError(f"not a session id: {session_id!r}")
     return session_id
 
@@ -897,10 +899,17 @@ def session_cwd(config_dir: str | Path, session_id: str) -> str:
 
 
 def _cwd_from_runtime_record(config_dir: Path, session_id: str) -> str:
-    """The live session's own ``cwd``, when a runtime is running it."""
+    """The live session's own ``cwd``, when a runtime is running it.
+
+    ``reap=False`` is ``registry.scan``'s READER MODE, and this is a reader: it is called
+    from a GET route the desktop app hits on every open. With the default ``reap=True`` a
+    scan moves dead records into the sidecar and deletes the unparseable ones — a reader
+    sweeping at a UI's cadence moves another process's evidence behind its back (review
+    round 2, M1).
+    """
     from local_operator.session.runtime import registry
 
-    for record, _state in registry.scan(config_dir):
+    for record, _state in registry.scan(config_dir, reap=False):
         if getattr(record, "session_id", "") == session_id and getattr(record, "cwd", ""):
             return str(record.cwd)
     return ""
