@@ -54,12 +54,13 @@ def _app() -> OperatorApp:
     return OperatorApp(lambda: _factory(FakeSession()))
 
 
-def _frame_samples(app: OperatorApp) -> list[dict[str, float]]:
+def _frame_samples(app: OperatorApp, session=None) -> list[dict[str, float]]:
     """Install a per-display sampler: the state of every painted frame.
 
     ``scroll``/``extent`` are read from the view at paint time, which is the
     only moment at which "was the reader at the tail in THIS frame" is a fact
-    rather than an inference.
+    rather than an inference. Pass ``session`` to also record whether that
+    conversation was in front of the reader and whether its view was revealed.
     """
     samples: list[dict[str, float]] = []
     real_hook = app.post_display_hook
@@ -73,6 +74,13 @@ def _frame_samples(app: OperatorApp) -> list[dict[str, float]]:
                     "extent": float(view.max_scroll_y),
                     "blocks": float(len(view.blocks())),
                     "height": float(view.outer_size.height),
+                    # "target": painted with THAT conversation in front of
+                    # the reader (a switch's samples begin on the outgoing one,
+                    # whose reader is wherever they were); "parked": the incoming
+                    # view is still offscreen, so this is a composition frame
+                    # rather than the reader's own.
+                    "target": float(session is not None and app._session is session),
+                    "parked": float(bool(view.disabled)),
                 }
             )
         except Exception:  # noqa: BLE001 — a frame before the transcript exists is not a state
@@ -268,7 +276,9 @@ async def _viewer(tmp_path, name: str):
         await handle.dispose()
 
 
-async def _switch_to(app, pilot, remote, *, saved_anchor: bool) -> list[object]:
+async def _switch_to(
+    app, pilot, remote, *, saved_anchor: bool, anchor_index: int = 0, anchor_id: str = ""
+) -> list[object]:
     """Prepare and commit ``remote`` as a saved view; return the hold calls."""
     source = SessionInteraction(remote)
     app._sidebar_sources[remote.session_id] = source
@@ -281,17 +291,21 @@ async def _switch_to(app, pilot, remote, *, saved_anchor: bool) -> list[object]:
     app._lease_sidebar_source = lease  # type: ignore[method-assign]
     source.display_only = True
     source.draft.following_tail = not saved_anchor
-    source.draft.scroll_anchor_id = ""
+    # A PRODUCTION DRAFT IS ALREADY SAVED WHEN THE LEASE IS PREPARED: the sidebar
+    # captures it on the way out and the interaction carries it back in. A caller
+    # that knows the anchor id up front passes it here, because whether the
+    # PREPARE knows the reader's position decides whether it arms a position or
+    # calls `follow_tail()` — and only the armed path reaches the arrival test's
+    # subject.
+    source.draft.scroll_anchor_id = anchor_id
     source.draft.scroll_anchor_part = 0
     source.draft.scroll_offset = 0
 
     prepared = await app._prepare_sidebar_session(remote.session_id)
     view = prepared[1].replay.view
-    if saved_anchor:
-        anchor = next(
-            (block for block in view.blocks() if block.navigation_anchor_id),
-            None,
-        )
+    if saved_anchor and not anchor_id:
+        anchors = [block for block in view.blocks() if block.navigation_anchor_id]
+        anchor = anchors[anchor_index] if len(anchors) > anchor_index else None
         assert anchor is not None, "the prepared view has no anchor to save a position on"
         source.draft.scroll_anchor_id = anchor.navigation_anchor_id
 
@@ -406,17 +420,178 @@ async def test_a_short_resume_holds_the_tail_for_its_first_frame(tmp_path) -> No
             assert calls, "the resume's first frame was not held to the tail"
 
 
-def test_the_tail_history_notice_takes_the_width_it_is_given() -> None:
-    """F5: the twins are built the same way.
+def test_the_tail_history_notice_takes_the_width_the_prepare_named() -> None:
+    """F5, pinned on what ``prepare`` BUILDS rather than on the class (R2-F2).
 
-    ``OlderHistoryNotice`` (head) has taken a ``fold_width`` since the prepared
-    replay learned to name one; its twin at the other end hardcoded its own
-    construction, so the pair disagreed about how a block learns its width. No
-    height consequence at today's widths — the copy is 30 cells, one row at 80
-    and at 142 — but the seam is the point: a block that folds at a width its
-    caller did not name is exactly the defect the argument exists to close.
+    The twins disagreeing about how a block learns its width is the seam this
+    exists to close, and the first version of this pin could not see it: it
+    constructed ``HistoryPageNotice`` itself, so it passed with
+    ``session_presentation.py``'s OWN construction reverted — a pin that survives
+    the revert of the line it names is not a pin. This one seeds the pending tail
+    the projection is handed and measures the notice THAT call built.
+
+    No height consequence at today's widths (the copy is 30 cells: one row at 80
+    and at 142) — the point is the seam, exactly as F5 was answered in round 1.
     """
-    from local_operator.tui.session_presentation import HistoryPageNotice
+    from local_operator.tui.session_presentation import (
+        HistoryPageNotice,
+        PreparedReplay,
+    )
 
-    assert HistoryPageNotice(fold_width=142).fold_width(0) == 142
-    assert HistoryPageNotice().fold_width(80) == 80
+    prose = " ".join(f"ZEBRA word{index:02} alpha beta gamma delta epsilon" for index in range(40))
+    replay = PreparedReplay()
+    replay._resume_pending_tail = [_assistant_message(prose)]
+    replay.prepare([_assistant_message(prose)], bound=1, fold_width=126)
+    notices = [block for block in replay.blocks if isinstance(block, HistoryPageNotice)]
+    assert notices, "the prepare built no tail notice to measure"
+    named = notices[0].fold_width(0)
+    assert named == 126, (
+        "the tail notice was built at its own default, not at the width the caller named",
+        named,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_preview_reveal_lands_on_its_saved_anchor_in_one_state(tmp_path) -> None:
+    """Q8/R2-F1: a saved mid-conversation position, taken in ONE painted state.
+
+    The shape is a ``display_only`` source — what a first visit, or a return
+    after the idle sweep released the lease, commits as. ``_prepare_sidebar_session``
+    skips the layout wait for it, so at commit time every block's region is still
+    zero: the commit-time restore has no geometry to place the anchor with, and
+    the two writers that ran instead both aimed at the END of the conversation
+    (the prepare's unconditional ``follow_tail()`` and the mount batch's
+    ``_land_on_tail``, which reads an unmeasured view as "at the tail"). QA round
+    2 measured the result on the real path: state-104ms at the TOP, state-146ms
+    at the tail, settled at the saved position, and the anchor reached in 5 of 7
+    runs.
+
+    So the assertions are the accept criterion, over SEVEN fresh targets in one
+    pilot (a fresh saved-preview facade each time, so every one of them commits
+    through the unmeasured path):
+
+    * the first painted frame that carries content is already the settled one;
+    * no frame sits anywhere but the saved position — not the top, not the tail;
+    * all seven land, which is the 7/7 that the single-run version could not say.
+
+    Fails on 9c4d6b96c5 with `[41, 0, 39, 41, 41, 41]` (the top frame) and on the
+    pre-Q8-fix tree with the tail frame instead.
+    """
+    async with _viewer(tmp_path, "preview-home") as home:
+
+        async def factory():
+            return home
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=FRAME) as pilot:
+            for _ in range(100):
+                await pilot.pause()
+                if app._session is home:
+                    break
+            landed = 0
+            for index in range(7):
+                async with _saved_preview(tmp_path, f"preview-target-{index}") as saved:
+                    samples = _frame_samples(app, session=saved)
+                    before = len(samples)
+                    # The fixture's own message ids are the anchor ids
+                    # (`navigation_anchor_id` is the projected message's), and
+                    # the draft has to carry the position BEFORE the prepare.
+                    await _switch_to(
+                        app,
+                        pilot,
+                        saved,
+                        saved_anchor=True,
+                        anchor_index=3,
+                        anchor_id=f"saved-row-{3:04}",
+                    )
+
+                    content = [
+                        sample
+                        for sample in samples[before:]
+                        if sample["target"] == 1.0
+                        and sample["parked"] == 0.0
+                        and sample["blocks"] > 0
+                        and sample["extent"] > 0
+                    ]
+                    assert content, f"open {index}: no painted frame carried content"
+                    settled = content[-1]["scroll"]
+                    assert settled > 0, (
+                        f"open {index}: the fixture is too short to need a scroll",
+                        settled,
+                        content[-1]["extent"],
+                    )
+                    assert min(sample["scroll"] for sample in content) > 0, (
+                        f"open {index}: a painted frame sat at the TOP of a conversation whose "
+                        "saved anchor is rows further down",
+                        [round(sample["scroll"]) for sample in content[:6]],
+                    )
+                    assert content[0]["scroll"] == settled, (
+                        f"open {index}: the first content frame was not the settled position — "
+                        "the viewport was walked onto the anchor (or off it) over extra frames",
+                        [round(sample["scroll"]) for sample in content[:6]],
+                        round(settled),
+                    )
+                    view = app._transcript_view()
+                    assert settled < view.max_scroll_y - 0.5, (
+                        f"open {index}: the landed frame is the TAIL, not the saved position",
+                        settled,
+                        view.max_scroll_y,
+                    )
+                    source = app._sidebar_sources[saved.session_id]
+                    anchor = next(
+                        (
+                            block
+                            for block in view.blocks()
+                            if block.navigation_anchor_id == source.draft.scroll_anchor_id
+                        ),
+                        None,
+                    )
+                    assert anchor is not None, f"open {index}: the saved anchor is not in the view"
+                    # "Landed on the anchor" is the anchor's OWN top row at the top
+                    # of the visible content: `region.y` is a container coordinate,
+                    # so the comparison is against `content_region.y` and not
+                    # against `scroll_y` (the same measurement QA's own matrix
+                    # reports as `anchor_top`).
+                    off_by = abs(anchor.region.y - view.content_region.y)
+                    assert off_by <= 1.5, (
+                        f"open {index}: the view did not land on its saved anchor",
+                        round(off_by, 1),
+                        settled,
+                        view.max_scroll_y,
+                    )
+                    landed += 1
+            assert landed == 7, f"the saved position was reached in {landed} of 7 opens"
+
+
+@asynccontextmanager
+async def _saved_preview(tmp_path, name: str, *, rows: int = 6):
+    """A viewer over a session with NO runtime: the ``display_only`` shape.
+
+    ``saved_preview`` is the facade ``_lease_sidebar_source``'s saved branch
+    builds, so this is what a first visit — or a return after the idle sweep
+    released the lease — commits, and the one whose prepare path skips the
+    layout wait.
+    """
+    config = tmp_path / "config"
+    config.mkdir(exist_ok=True)
+    (config / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
+    )
+    directory = config / "sessions" / f"synthetic-{name}"
+    seed = [
+        Message(
+            id=f"saved-row-{index:04}", role="assistant", content=[TextContent(text=LONG_PROSE)]
+        )
+        for index in range(rows)
+    ]
+    await seed_transcript(directory, seed)
+    remote = await AttachedSession.saved_preview(
+        directory.name,
+        config_dir=config,
+        cwd=str(tmp_path),
+        takeover_factory=_never_take_over,
+    )
+    try:
+        yield remote
+    finally:
+        await remote.dispose()
