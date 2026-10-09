@@ -537,9 +537,10 @@ interaction state: no wire change, §4 is untouched by this section.**
   sheet, phone/app sheet). **Entered by the user** (the f4 toggle, click the minimized bar,
   Enter on a focused row, or the explicit `/asks` / header action), **or ONCE by the
   open-by-default policy** when a conversation is opened with asks already pending (the shared
-  six-clause contract `tui/ask_open_policy.py` states, in review with the TUI/relay change
-  (#2067); the desktop drawer and app sheet arrive with their own PRs). **Never automatic on
-  ask arrival** — §5.1's no-arrival-mount, no-focus-steal rule
+  six-clause contract `tui/ask_open_policy.py` states — landed with the TUI/relay change
+  (#2067, released in v0.68.9); the desktop drawer's open-by-default arrives with UI #897
+  and the app sheet with its own PR). **Never automatic on ask arrival** — §5.1's
+  no-arrival-mount, no-focus-steal rule
   is unchanged for an ask that lands while the conversation is already on screen. Left by Esc,
   the collapse control, or a click on the bar/chevron.
 - **MINIMIZED** — a compact, persistent single-line affordance; the answer surface is *not*
@@ -559,9 +560,10 @@ its own input. The wire half of image attachments on that input has landed
 its own repo, so the door is text-only until then. A
 free-text-only question has no `Other` row to open: its input is the question's only
 control and is shown open (on the TUI that is the picker's single free-text row, which is
-itself the input). **Status 2026-10-08:** the TUI picker has its `Other` row today; the
-desktop, relay web and app gain the explicit `Other` field with their own `Other` PRs, and
-this section states the target those PRs build to. An ask surface never
+itself the input). **Status 2026-10-08:** the TUI picker has its `Other` row today and the
+desktop's landed with UI #892; the relay web and the app gain the explicit `Other` field
+with their own `Other` PRs, and this section states the target those PRs build to. An ask
+surface never
 moves, sends or discards composer text: the composer's draft stays in its own buffer
 through expand, collapse, settle and a conversation switch, and the ask surface's draft is
 never sent into the composer's channel. (A *user* expand — f4, the bar, a list row — DOES take
@@ -593,7 +595,7 @@ ancestor).
 > typing in the composer was how a free-text answer was given; the `Other` row gives free
 > text a labelled home instead. §12.0's "answered in chat" path (the model records the attribution
 > with `ask_withdraw(answered_in_chat)`) is now the only way a chat reply settles an ask, and
-> §12.0 is unchanged and stronger for it.
+> §12.0 is stronger for it.
 
 **Minimized affordance — the minimal design, per surface.** One line, directly above the
 composer, built from each app's existing composer-chip vocabulary — it must read as a chip,
@@ -624,7 +626,8 @@ for an ask: each app's existing placeholder is shown in every ask state. The ask
 own input carries its own copy, and the strings are **per surface**, not one string
 everywhere: today the desktop's free-text-only input reads `Type your answer`, the TUI's
 free-text row `Other (type your own)`, the relay web's `your answer` and the native app's
-`Your answer`; the `Other` field's own copy lands in each surface's `Other` PR.
+`Your answer`; the desktop's `Other` field copy has landed (UI #892, `Type your answer`);
+the relay web's and the app's land with their `Other` PRs.
 
 **Multiple asks.** The minimized bar always shows the **head** ask plus the count; expansion
 opens the list/picker (TUI) or the sheet (others). Answering one advances to the **next
@@ -639,12 +642,13 @@ collapses — there was no list to return to.)
 - **Entry/badge:** a count chip in the working line/status band (`◆ 2 asks`), sidebar/`/resume`
   catalog badge (`tui/session_catalog.py` `pending` ranking, scout `188/287`), OS notification via
   the existing `tui/notify.py` map (scout `177/237`). **No auto-mount on ask ARRIVAL and no focus
-  steal** — the open-by-default mount (in review with #2067; `tui/ask_open_policy.py`, §5.0
-  amended 2026-10-08) happens ONCE when a conversation is opened with asks already pending, is
-  not an arrival mount, and takes no caret. A new ask must not displace a card the user is
-  mid-answer on or their composer draft (`docs/design/composer-focus-default.md`; #1315
-  machinery `app.py:7715/7810`). The **§5.0 minimized bar is what names the first question** —
-  it replaces the ad-hoc one-line notice, so there is one affordance, not two.
+  steal** — the open-by-default mount (landed with #2067, released in v0.68.9;
+  `tui/ask_open_policy.py`, §5.0 amended 2026-10-08) happens ONCE when a conversation is
+  opened with asks already pending, is not an arrival mount, and takes no caret. A new ask
+  must not displace a card the user is mid-answer on or their composer draft
+  (`docs/design/composer-focus-default.md`; #1315 machinery `app.py:7715/7810`). The
+  **§5.0 minimized bar is what names the first question** — it replaces the ad-hoc one-line
+  notice, so there is one affordance, not two.
 - **List:** `/asks` (+ keybinding) opens a list in `#prompt-host`; per row: status glyph,
   first question, age/expiry. Enter mounts that ask in the **existing** `AskPickerScreen`
   (`ask_picker.py:537`); the single-mounted-card widget model stays — the *queue* is a store,
@@ -697,9 +701,9 @@ collapses — there was no list to return to.)
   (`working-line-model.ts:455-461`); sidebar must not classify a working session as
   `answer`→RUNNING purely for open asks; `answerState` keyed per ask.
 - **Minimized state (§5.0, R7):** the chip/bar under the chat is the default; the composer
-  never routes to the ask (§5.0 amended) — an answer is typed in the dock/sheet, whose
-  `Other` row carries the free-text input. This **replaces** the current unconditional
-  composer swallow (which stays for the flag-off path only). Chat-list status gains the
+  never routes to the ask (§5.0 amended; landed with UI #892) — an answer is typed in the
+  dock/sheet, whose `Other` row carries the free-text input. The unconditional composer
+  swallow is retired (it stays for the flag-off path only). Chat-list status gains the
   outstanding-asks state, distinct from approval.
 - **Answer path:** addressed by `ask_id` + whole-ask `answers`; new refusal-copy families for
   timed-out/late beside `SETTLED_ELSEWHERE`/`QUESTION_MOVED_ON` (`ask-answer.ts:428-469`);
@@ -914,15 +918,19 @@ A dedicated case, because the composer rule is a *behavioural* claim that stills
   is not asserted here); (3) with the surface expanded, the answer is given only in the ask
   surface: the `Other` input (or a free-text-only question's input) writes the draft, and
   nothing typed or pressed there reaches the composer. Each surface states its own submit
-  gesture: the TUI advances/accepts on Enter; the desktop, relay web and native surfaces
-  submit through their own explicit control over the whole draft (one atomic form), not on
-  Enter; (4) collapsing preserves the composer's draft and the ask surface's draft, and
+  gesture: the TUI advances/accepts on Enter; the desktop commits on Enter inside its
+  `Other`/free-text field — Enter does what `Send answer` does when the whole ask is
+  complete, otherwise it moves to the next question that still needs an answer (Shift+Enter
+  is a newline); the relay web and native surfaces submit through their own explicit control
+  over the whole draft (one atomic form), not on Enter; (4) collapsing preserves the
+  composer's draft and the ask surface's draft, and
   re-expanding restores the ask surface's draft on surfaces that keep one (not the native app, which persists
   nothing, ADR 0005 §2); (5) an ask settling while expanded leaves the composer exactly as
   the user left it (placeholder never swapped, draft kept in the buffer, text never moved); (6) the minimized bar is absent
   at zero asks and shows head + count at 3.
 - **Frames:** minimized bar (1 and 3 asks), expanded with the `Other` row closed and open
-  (once that surface's `Other` PR lands), and the list/sidebar outstanding-asks state — **light and dark** where the surface has
+  (landed for the desktop with UI #892; other surfaces once their `Other` PR lands), and the
+  list/sidebar outstanding-asks state — **light and dark** where the surface has
   both, at phone size for web/app. Before/after against `origin/main`.
 - **No wire assertions:** R7 is client-local interaction state and changes nothing in §4 —
   any PR that touches the wire for R7 is out of scope.
@@ -1310,11 +1318,12 @@ through it:
   nobody will answer is how the operator learns to ignore the set. `dismiss` cannot carry this: it is
   refused unless `timed_out` (queue.py), it is the USER's view action, and its copy is the user's
   voice.
-* **Answered in chat.** §5.0 guarantees the composer never converts a chat draft into an answer. So
-  when the operator simply replies in the transcript — the most natural way to answer a question they
-  can see — the ask keeps reading "waiting" although the agent HAS the answer, and the surfaced count
-  is now a lie with a clock on it. The only safe detector of "that message WAS the answer" is the
-  model itself; what it lacks is a way to RECORD the attribution.
+* **Answered in chat.** With the composer no longer an answer door (§5.0 amended),
+  `answered_in_chat` withdrawal is the only way a chat reply settles an ask. So when the
+  operator simply replies in the transcript — the most natural way to answer a question they
+  can see — the ask keeps reading "waiting" although the agent HAS the answer, and the
+  surfaced count is now a lie with a clock on it. The only safe detector of "that message WAS
+  the answer" is the model itself; what it lacks is a way to RECORD the attribution.
 
 ### 12.1 Proposal: one agent-facing op, two reasons
 
