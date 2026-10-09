@@ -113,6 +113,42 @@ def count_changes(old: str, new: str) -> tuple[int, int]:
     return added, removed
 
 
+#: A ``read`` line-number gutter (``12| ``) — presentation the tool adds, not
+#: content, so it must not make a lone timestamp line look like a record.
+_GUTTER_RE = re.compile(r"^\s*\d+\|\s?")
+
+
+def is_pure_addition(old: str, new: str) -> bool:
+    """Whether ``new`` only ADDS content to ``old``: no line removed or changed.
+
+    The shape of an append-only log (a build-progress file, an audit trail) and
+    of a listing that gained a row. It is the one delta shape the classifier
+    gate must not judge: the gate's suppress classes are about bookkeeping that
+    CHANGED without meaning (timestamps, ordering, volatile ids), and a model
+    asked about ``+ 4| === c2 done rc=0 <ts> ===`` answered
+    ``non-material-metadata`` in the 2026-10-09 regression. An added line is a
+    new record, which is what the gate's own rubric calls MATERIAL.
+
+    Guard: at least one added line must carry content beyond the line-number
+    gutter and the ``<ts>`` scrub marker, so a delta that adds only blank or
+    timestamp-only lines still goes to the gate. ``old`` empty is not an
+    addition (that is baseline establishment, handled before any delta).
+    """
+    old_lines = old.split("\n")
+    matcher = difflib.SequenceMatcher(None, old_lines, new.split("\n"), autojunk=False)
+    new_lines = new.split("\n")
+    carries_content = False
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "delete"):
+            return False
+        if tag == "insert":
+            for line in new_lines[j1:j2]:
+                body = _GUTTER_RE.sub("", line).replace(_TS_MARKER, "")
+                if any(ch.isalnum() for ch in body):
+                    carries_content = True
+    return carries_content
+
+
 def render_delta(
     old: str,
     new: str,

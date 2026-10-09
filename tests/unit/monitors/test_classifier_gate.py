@@ -23,7 +23,9 @@ from local_operator.monitors.classify import (
     IGNORABLE,
     MATERIAL,
     NON_MATERIAL_METADATA,
+    PURPOSE_MAX_CHARS,
     bounded_state,
+    gate_state,
     materiality_question,
     monitor_classify,
     suppressed_counter,
@@ -44,6 +46,7 @@ def spec(
     arguments: Mapping[str, Any] | None = None,
     every_ms: int = 60_000,
     created_at: int = NOW,
+    description: str = "",
 ) -> MonitorSpec:
     return MonitorSpec(
         id=monitor_id,
@@ -52,6 +55,7 @@ def spec(
         arguments=dict(arguments or {"n": "a"}),
         every_ms=every_ms,
         created_at=created_at,
+        description=description,
     )
 
 
@@ -310,6 +314,89 @@ async def test_the_state_is_the_bounded_delta(tmp_path: Any) -> None:
         assert state.endswith("[truncated]"), state
     finally:
         harness.scheduler.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The gate judges the delta AGAINST the monitor's purpose (2026-10-09 regression)
+# ---------------------------------------------------------------------------
+
+#: What a build-progress monitor armed on a ``read`` of an append-only log says
+#: it wants, trimmed from the report that surfaced the bug.
+LOG_PURPOSE = "Build progress: the script appends one line per build start and completion."
+
+
+def _purpose_aware_gate(state: str) -> str:
+    """A stand-in for the vendor model that reproduces the measured failure.
+
+    Measured against the live cascade: an appended ``read`` line with NO purpose
+    in the state came back ``non-material-metadata`` (3/3), and the same delta
+    with the purpose attached came back ``material`` (3/3). This double encodes
+    that dependency — it only says "material" when the state names a purpose —
+    so the test fails if the scheduler stops sending one.
+    """
+    return MATERIAL if "Purpose:" in state else NON_MATERIAL_METADATA
+
+
+@pytest.mark.asyncio
+async def test_an_appended_log_line_read_through_read_is_delivered(harness: Harness) -> None:
+    """The reported shape: ``read`` of an append-only log, a new line each time.
+
+    ``read`` numbers its lines (``N| …``), so an append is a pure ``+1/-0``
+    insert at the tail; the diff pipeline sees it (pinned below), and the only
+    thing that can lose it is the gate.
+    """
+    harness.classify_fn = _purpose_aware_gate
+    harness.scheduler.load(
+        [
+            spec(
+                name="sweep-serial-builds",
+                tool="read",
+                arguments={"path": "b.log"},
+                description=LOG_PURPOSE,
+            )
+        ]
+    )
+    first = "1| === c1 start 2026-10-09T15:00:00Z ==="
+    second = first + "\n2| === c1 done rc=0 2026-10-09T15:23:11Z ==="
+    third = second + "\n3| === c2 start 2026-10-09T15:23:12Z ==="
+    harness.results.extend([{"text": first}, {"text": second}, {"text": third}])
+    await harness.ripe()  # baseline
+    await harness.ripe()
+    await harness.ripe()
+    assert len(harness.deliveries) == 2
+    assert harness.deliveries[0].delta_text == "+1/-0 changed lines\n+ 2| === c1 done rc=0 <ts> ==="
+    assert harness.deliveries[1].delta_text == "+1/-0 changed lines\n+ 3| === c2 start <ts> ==="
+    counters = harness.counters()
+    assert counters["checks"] == 3
+    assert counters["deliveries"] == 2
+    assert counters["suppressed"]["non_material_metadata"] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_gate_state_names_the_monitor_and_its_purpose(harness: Harness) -> None:
+    harness.scheduler.load([spec(name="loom-pr", description="flip of review state")])
+    harness.results.extend([{"text": "a"}, {"text": "b"}])
+    await harness.ripe()
+    await harness.ripe()
+    assert harness.states == [
+        "Monitor: loom-pr\nPurpose: flip of review state\nChange:\n+1/-1 changed lines\n- a\n+ b"
+    ]
+
+
+def test_gate_state_without_a_purpose_is_the_bare_delta() -> None:
+    assert gate_state("m", "", "+1/-0 changed lines\n+ x", 1200) == "+1/-0 changed lines\n+ x"
+    assert gate_state("m", "   \n ", "d", 1200) == "d"
+
+
+def test_gate_state_collapses_and_clips_the_purpose_and_still_bounds_the_delta() -> None:
+    long_purpose = "word " * 400
+    state = gate_state("n", long_purpose, "x" * 500, 100)
+    head, _, delta = state.partition("Change:\n")
+    assert head.startswith("Monitor: n\nPurpose: word word")
+    purpose_line = head.splitlines()[1]
+    assert len(purpose_line) <= len("Purpose: ") + PURPOSE_MAX_CHARS + 1
+    assert purpose_line.endswith("…")
+    assert len(delta) <= 100 and delta.endswith("[truncated]")
 
 
 # ---------------------------------------------------------------------------

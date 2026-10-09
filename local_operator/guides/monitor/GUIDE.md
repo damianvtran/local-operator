@@ -109,6 +109,21 @@ default keep "difference" honest:
   default because order can *be* the change (a newest-first listing); turn it
   on for set-like outputs that reorder under you.
 
+- **The materiality gate sees your `description`.** When the classifier is on, a
+  changed (not merely appended) delta is judged against the monitor's name and
+  `description` — so write the description as *what you want to be told*
+  ("one line per build completion — every new line is progress"). A bare
+  `description` leaves the gate guessing, and it will call a counter tick or a
+  status line "bookkeeping" and suppress it. **Appended content is never
+  gated**: a delta that only adds lines (a log tail, a new row) is delivered
+  as-is. Suppressions are counted (`suppressed.*` in the monitor's state file)
+  and logged at INFO, but the `N checks, 0 deliveries — nothing has changed`
+  hint does not say so — it can mean "suppressed", not only "unchanged".
+- A `read` of a file numbers its lines (`12| …`), truncates at ~8 KB and prints a
+  `[truncated … N more lines]` footer. A log that grows past that window only
+  shows its head, so the monitor cannot see appended lines: watch the tail with
+  `bash` (`tail -n 20 <file>`) or `grep -c`, not `read`.
+
 Deltas are bounded and honest: counts, up to ~12 short previews, and a
 `… and N more changed lines` marker; the full output is never injected. The
 delta is **data** — content from the watched source, wrapped in the monitor

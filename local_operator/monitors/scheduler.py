@@ -50,7 +50,7 @@ from typing import Any, TypedDict
 from local_operator.monitors import state as monitor_state
 from local_operator.monitors.classify import (
     MonitorClassify,
-    bounded_state,
+    gate_state,
     suppressed_counter,
 )
 from local_operator.monitors.delivery import MonitorDelivery, MonitorNotice
@@ -58,6 +58,7 @@ from local_operator.monitors.diff import (
     beyond_window_text,
     content_hash,
     has_line_difference,
+    is_pure_addition,
     normalize,
     render_delta,
 )
@@ -161,6 +162,10 @@ class _Change:
     skipped: int
     checks: int
     at_ms: int
+    #: The delta only ADDED content (an appended log line, a new row). Such a
+    #: change is delivered without asking the gate — see
+    #: :func:`~local_operator.monitors.diff.is_pure_addition` for why.
+    pure_addition: bool = False
 
 
 @dataclass
@@ -741,6 +746,7 @@ class MonitorScheduler:
         )
         new_hash = content_hash(normalized)
         old_hash = str(counters.get("content_hash") or "")
+        pure_addition = False
 
         counters["checks"] = int(counters.get("checks") or 0) + 1
         counters["last_check_at"] = now
@@ -799,6 +805,7 @@ class MonitorScheduler:
                     return None
                 delta_text, changes = beyond_window_text(new_hash)
             else:
+                pure_addition = is_pure_addition(blob_text, normalized)
                 delta_text, changes = render_delta(
                     blob_text,
                     normalized,
@@ -826,6 +833,7 @@ class MonitorScheduler:
             # of THIS check even if a later settle lands after edits.
             checks=int(counters["checks"]),
             at_ms=now,
+            pure_addition=pure_addition,
         )
 
     async def _classify_change(self, change: _Change) -> str | None:
@@ -833,8 +841,10 @@ class MonitorScheduler:
 
         Serialised across the session's monitors (``_classify_lock``), bounded
         by ``classifyMaxChars`` through
-        :func:`~local_operator.monitors.classify.bounded_state` (whose marker
-        floor is the one place the bound is not literal), and fail-OPEN on
+        :func:`~local_operator.monitors.classify.gate_state` (whose marker
+        floor is the one place the bound is not literal; it also carries the
+        monitor's name and purpose so the verdict has something to judge the
+        delta AGAINST), and fail-OPEN on
         every fault — including a gate callback that raises. The deadline is NOT
         duplicated here: the call's own bound is
         ``values.classification.timeoutMs`` inside
@@ -843,7 +853,19 @@ class MonitorScheduler:
         """
         if self._classify is None:
             return None
-        state = bounded_state(change.delta_text, self._settings.classify_max_chars)
+        if change.pure_addition:
+            # Appended content is new information, never "bookkeeping that
+            # changed": deliver without a model call (and without a model's
+            # chance to swallow it). Measured 2026-10-09: even with the
+            # monitor's purpose in the state, the live gate swallowed one of
+            # three appended build-log lines.
+            return None
+        state = gate_state(
+            change.spec.name,
+            change.spec.description,
+            change.delta_text,
+            self._settings.classify_max_chars,
+        )
         async with self._classify_lock:
             try:
                 return await self._classify(state)
@@ -877,7 +899,10 @@ class MonitorScheduler:
             counted = counters["suppressed"]
             counted[suppressed] = int(counted.get(suppressed) or 0) + 1
             self._write_counters(entry)
-            logger.debug("monitor %s change suppressed (%s)", change.spec.id, suppressed)
+            # INFO, not debug: a suppression is a change nobody was told about,
+            # and at debug level the 2026-10-09 gate regression left no trace
+            # outside the counters file.
+            logger.info("monitor %s change suppressed (%s)", change.spec.id, suppressed)
             return None
         if not self._rate_allows(counters, change.at_ms):
             counters["suppressed"]["rate_cap"] = (
