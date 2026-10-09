@@ -61,7 +61,7 @@ def test_normalise(tag: str | None, want: str | None) -> None:
         ({}, None),
     ],
 )
-def test_linux_environment(environ: dict, want: str | None) -> None:
+def test_linux_environment(environ: dict[str, str], want: str | None) -> None:
     assert resolve.os_language(system="Linux", environ=environ) == want
 
 
@@ -193,6 +193,27 @@ def test_missing_config_resolves_auto(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.delenv("LOP_LANG", raising=False)
     assert resolve.resolve_language() == "en"
+
+
+def test_kill_switch_forces_en_over_config_and_env() -> None:
+    # RFC §9: `LOP_I18N=0` is the operational control and outranks every other
+    # source, config included.
+    import local_operator.i18n.resolve as mod
+
+    original = mod.shipped_locales
+    mod.shipped_locales = lambda: ("en", "fr")  # type: ignore[assignment]
+    try:
+        got = resolve.resolve_language(
+            "fr", environ={"LOP_I18N": "0", "LOP_LANG": "fr"}, system="Linux"
+        )
+        assert got == "en"
+        # Any other value (including `1`) leaves the chain alone.
+        got = resolve.resolve_language(
+            "fr", environ={"LOP_I18N": "1", "LOP_LANG": "fr"}, system="Linux"
+        )
+        assert got == "fr"
+    finally:
+        mod.shipped_locales = original  # type: ignore[assignment]
 
 
 def test_shipped_locales_reads_generated_set() -> None:

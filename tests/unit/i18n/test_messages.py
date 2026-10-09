@@ -18,6 +18,7 @@ def fixture_catalogues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         json.dumps(
             {
                 "wire.errors.model_unavailable": "Model {model} is unavailable.",
+                "wire.errors.files": "{n, plural, one {# file} other {# files}}",
                 "wire.errors.broken": "{unclosed",
             }
         ),
@@ -67,6 +68,19 @@ def test_malformed_message_degrades_instead_of_raising(fixture_catalogues: None)
     # still yields an envelope (the parity check is where this goes red).
     got = messages.envelope("wire.errors.broken", {})
     assert got["text"] == "wire.errors.broken"
+
+
+def test_non_numeric_plural_binding_degrades_instead_of_raising(
+    fixture_catalogues: None,
+) -> None:
+    # round-1 M1: the envelope's never-raise contract must hold for the first
+    # non-numeric binding a wire slice passes, not just for missing codes.
+    for bad in ("abc", True):
+        got = messages.envelope("wire.errors.files", {"n": bad})
+        assert got["code"] == "wire.errors.files"
+        assert got["params"] == {"n": bad}
+        assert got["text"] == "wire.errors.files"
+    assert messages.envelope("wire.errors.files", {"n": 3})["text"] == "3 files"
 
 
 def test_msg_carries_code_and_params(fixture_catalogues: None) -> None:

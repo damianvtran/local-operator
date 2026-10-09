@@ -7,12 +7,14 @@ the subset" being a parse error, not a quietly different rendering.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.i18n import runtime
 
 
-def render(source: str, params: dict | None = None, locale: str = "en") -> str:
+def render(source: str, params: dict[str, Any] | None = None, locale: str = "en") -> str:
     return runtime.render_message(source, params or {}, locale)
 
 
@@ -105,6 +107,27 @@ class TestSyntaxErrors:
         with pytest.raises(runtime.MessageSyntaxError) as err:
             runtime.parse_message("a } b")
         assert "offset" in str(err.value)
+
+
+class TestValueNormalisation:
+    def test_non_numeric_plural_value_is_a_format_error(self) -> None:
+        # round-1 M1: `decimal.InvalidOperation` (an ArithmeticError, not a
+        # MessageError) used to escape; the category boundary now normalises it
+        # so `render_message`'s documented outcome holds.
+        for bad in ("abc", True, [1]):
+            with pytest.raises(runtime.MessageFormatError):
+                render("{n, plural, one {# f} other {# fs}}", {"n": bad})
+
+    def test_select_matches_integral_floats_like_the_ts_surfaces(self) -> None:
+        # round-1 m1: JS cannot express 3.0 as distinct from 3, so the TS
+        # surfaces select `3`; Python's str(3.0) would miss it.
+        from decimal import Decimal
+
+        src = "{v, select, 3 {three} other {x}}"
+        assert render(src, {"v": 3}) == "three"
+        assert render(src, {"v": 3.0}) == "three"
+        assert render(src, {"v": Decimal("3.0")}) == "three"
+        assert render(src, {"v": 3.5}) == "x"
 
 
 class TestIntrospection:

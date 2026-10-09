@@ -30,6 +30,9 @@ def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate):
     monkeypatch.setattr(i18n_generate, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(i18n_generate, "KEYS_DIR", tmp_path / "keys")
     monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "ledger.json")
+    # `_check` relativises planned paths against REPO for its messages (and
+    # only for that); point it at the temp root so the fixture paths resolve.
+    monkeypatch.setattr(i18n_generate, "REPO", tmp_path)
     return root, emitted
 
 
@@ -43,6 +46,10 @@ def test_per_key_functions_are_emitted_with_typed_kwargs(generated, i18n_generat
                 "demo.words.updated": "Updated {when, date, short}",
                 "demo.words.plain": "plain text, no params",
                 "demo.words.import": "keyword collision",
+                # round-1 m2: shapes that emit SYNTAX ERRORS without
+                # sanitisation — a digit-leading suffix and a keyword ARGUMENT.
+                "demo.words.2fa": "two-factor prompts",
+                "demo.words.klass": "{class, select, login {Sign in} other {Continue}}",
             }
         ),
         encoding="utf-8",
@@ -50,6 +57,10 @@ def test_per_key_functions_are_emitted_with_typed_kwargs(generated, i18n_generat
     planned = i18n_generate._planned_files(emitted)
     module = planned[Path(i18n_generate.KEYS_DIR) / "demo_words.py"]
     expected_body = """\
+
+
+def _2fa() -> Msg:
+    return Msg("demo.words.2fa", {})
 
 
 def files(*, count: int | float) -> Msg:
@@ -64,6 +75,10 @@ def import_() -> Msg:
     return Msg("demo.words.import", {})
 
 
+def klass(*, class_: str) -> Msg:
+    return Msg("demo.words.klass", {"class": class_})
+
+
 def plain() -> Msg:
     return Msg("demo.words.plain", {})
 
@@ -74,6 +89,9 @@ def updated(*, when: datetime) -> Msg:
     assert module == i18n_generate.GENERATED_HEADER + (
         "from datetime import datetime\n\nfrom ..messages import Msg\n\n\n"
     ) + expected_body.lstrip("\n")
+    # The sanitised shapes COMPILE — the regression m2 recorded was a
+    # SyntaxError the text-comparing drift check could not see.
+    compile(module, "demo_words.py", "exec")
     # The generated module is what black/isort would leave alone.
     check = subprocess.run(
         [sys.executable, "-m", "black", "--check", "-"],
@@ -94,6 +112,26 @@ def test_empty_namespace_module_has_no_dangling_import(generated, i18n_generate)
     assert module == i18n_generate.GENERATED_HEADER.rstrip() + "\n"
     assert "from ..messages import Msg" not in module
     assert "from datetime" not in module
+
+
+def test_check_flags_orphaned_generated_files(generated, i18n_generate, capsys) -> None:
+    # round-1 n4: a namespace rename/removal leaves keys/<old>.py behind; the
+    # plan-vs-plan diff never saw it, so --check now flags files in the
+    # generated dirs that are not part of the plan.
+    root, emitted = generated
+    (root / "en" / "demo.json").write_text('{"demo.x": "x"}', encoding="utf-8")
+    planned = i18n_generate._planned_files(emitted)
+    for path, content in planned.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    assert i18n_generate._check(planned) == 0
+    orphan = Path(i18n_generate.KEYS_DIR) / "orphan.py"
+    orphan.write_text("", encoding="utf-8")
+    assert i18n_generate._check(planned) == 1
+    out = capsys.readouterr().out
+    assert "orphaned" in out and "orphan.py" in out
+    orphan.unlink()
+    assert i18n_generate._check(planned) == 0
 
 
 def test_shipped_set_requires_fresh_passed_entries(generated, i18n_generate) -> None:
