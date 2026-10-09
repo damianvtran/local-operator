@@ -2528,6 +2528,29 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
         logger.exception("image fetch: history fold failed for %s", record.session_id)
         return None
     message = next((m for m in history if isinstance(m, Message) and m.id == entry_id), None)
+    if message is None:
+        # ROW ids, not message ids (QA round 1, Q-1).  A tool row's
+        # client-visible id is ``{assistant_message_id}:{call_id}`` on the
+        # history fold or ``tc-{call_id}`` on the live fold — the message
+        # carrying the RESULT is keyed by ``tool_call_id``, and the result's
+        # own message id never reaches a client.  Resolving only the exact id
+        # served every unit test (which passed the result id directly) while
+        # every real phone fetch 404'd; both row shapes are recovered here so
+        # the refs the projection emits are the refs this endpoint answers.
+        call_id = ""
+        if entry_id.startswith("tc-"):
+            call_id = entry_id[3:]
+        elif ":" in entry_id:
+            call_id = entry_id.rsplit(":", 1)[-1]
+        if call_id:
+            message = next(
+                (
+                    m
+                    for m in history
+                    if isinstance(m, Message) and m.role == "tool" and m.tool_call_id == call_id
+                ),
+                None,
+            )
     if message is None or not isinstance(message.content, list):
         return None
     # ``index`` is the position among IMAGE blocks (what _image_refs emits),
