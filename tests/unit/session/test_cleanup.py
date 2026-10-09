@@ -795,6 +795,68 @@ def test_remover_clears_a_read_only_leftover_inside_a_scratchpad(tmp_path: Path)
     assert not target.exists()
 
 
+def test_remover_clears_a_no_permission_leftover_inside_a_scratchpad(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The measured second husk (2026-10-09, live store ``30776a2dc9b8``): a
+    pytest tmpdir chain whose deepest directory is mode 0000. The fd walk dies
+    opening that directory — no per-entry ``onexc`` retry can fix a walk that
+    never re-issues its open — and a second 0000 level inside it can only be
+    reached by the pre-widen walk: without it the retry dies again there. A
+    symlink pointing back out of the session is skipped, never chmod-ed
+    through."""
+    mark_store(tmp_path / "sessions")
+    target = tmp_path / "sessions" / "abc"
+    guard = (
+        target
+        / "scratchpad"
+        / "iso-seg-a"
+        / "tmp"
+        / "pytest-of-damian"
+        / "pytest-0"
+        / "popen-gw3"
+        / "test_the_ladder_reclaims_a_gue0"
+        / "guard"
+    )
+    guard.mkdir(parents=True)
+    inner = guard / "inner"
+    inner.mkdir()
+    deep = inner / "deep.txt"
+    deep.write_text("probe\n", encoding="utf-8")
+    canary = tmp_path / "canary.txt"
+    canary.write_text("safe\n", encoding="utf-8")
+    os.chmod(canary, 0o444)
+    (guard / "link-to-outside.txt").symlink_to(canary)
+    os.chmod(deep, 0o444)
+    os.chmod(inner, 0o000)
+    os.chmod(guard, 0o000)
+    try:
+        with caplog.at_level(logging.WARNING, logger="local_operator.session.cleanup"):
+            removed = remove_session_dir(
+                target, config_dir=tmp_path, policy="p", reason="r", actor="test"
+            )
+    finally:
+        # Without the fix the removal raises and leaves the no-permission
+        # chain behind; restore it outer-first (each mode gates the next) so
+        # tmp_path teardown can reap it.
+        for leftover in (guard, inner, deep):
+            try:
+                os.chmod(leftover, 0o755)
+            except OSError:
+                pass
+    assert removed is True
+    assert not target.exists()
+    # The walk must not chmod through the symlink: the canary outside the
+    # session keeps its mode and content.
+    assert canary.exists() and (os.stat(canary).st_mode & 0o777) == 0o444
+    # One WARNING line carries the count — never per entry. Two paths are the
+    # walk's own (``inner`` and the file inside it); ``guard`` itself was
+    # already widened by the ``onexc`` hook during the first attempt, which is
+    # why it is not part of the count.
+    widened = [r.getMessage() for r in caplog.records if "widened" in r.getMessage()]
+    assert len(widened) == 1 and "widened 2 path(s)" in widened[0]
+
+
 def test_remover_fails_closed_when_the_widening_cannot_help(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
