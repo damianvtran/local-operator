@@ -355,7 +355,18 @@ html :focus-visible {
 }
 @media (prefers-reduced-motion: reduce) {
 	.lo-loadbar-fill {
+		/*
+		 * Full-width and dimmed (design D2). The sweep IS the motion, so with
+		 * the animation gone a half-width rest would sit as a static 50%
+		 * fill — a fraction this bar never carried, on a bar whose entire job
+		 * is not stating one. A full-width muted fill says only "live,
+		 * unquantified", the same reduction the card's state word makes, and
+		 * the colour stays the element's own `bg-accent` role. Shared with
+		 * the transcript's lazy-load bar, which gets the same honest rest.
+		 */
 		animation: none;
+		width: 100%;
+		opacity: 0.4;
 	}
 }
 
