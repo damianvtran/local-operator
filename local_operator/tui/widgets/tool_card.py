@@ -101,6 +101,7 @@ from textual.timer import Timer
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.types import INTERRUPTED_FAULTS
 from local_operator.tui import bindings
+from local_operator.tui import imagegen as imagegen_mod
 from local_operator.tui.glyphs import display_name, tool_icon
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
@@ -181,6 +182,17 @@ _RESET_LABEL = "session reset"
 #: click target; only the label flips so the row always says what a click does.
 EXPAND_HINT = "⟨expand⟩"
 COLLAPSE_HINT = "⟨collapse⟩"
+
+#: The cancel affordance for a LIVE image-generation row, painted in the
+#: trailing slot for as long as the call can still be stopped (queued or
+#: running). Ctrl+C is the app's ONE interrupt — there is deliberately no
+#: tool-scoped cancel in v1 — so the card's whole job here is to SAY so: a
+#: user watching an image render for a minute should not have to guess which
+#: key stops it. Shed whole at the widths that cannot hold it, like every
+#: other occupant of the slot. Always spelled out, never shortened to a bare
+#: ``ctrl+c``: copy-mode owns that chord too often for the short form to read
+#: as "interrupt" rather than "copy".
+IMAGE_INTERRUPT_HINT = "⟨ctrl+c to interrupt⟩"
 
 #: Answers given in the hint slot when the affordance has nothing to open.
 #: An expander that silently ignores half its activations is indistinguishable
@@ -512,6 +524,14 @@ LIVE_ADVISORY_GLYPH = "!"
 #: at exactly this rate before it was folded into this one) and it is a
 #: CEILING: bash's own 500 ms emit floor cannot push the card past it.
 CLOCK_INTERVAL_S = 1.0
+#: The imagegen band's repaint cadence, in milliseconds — the app's animated
+#: rate (the working line's own `_FRAME_MS`). A SECOND, scoped timer beside
+#: `CLOCK_INTERVAL_S` on purpose: the clock is the 1 Hz "not hung" repaint
+#: every live row pays, while this one exists only to move a shimmer band on a
+#: live imagegen card that is EXPANDED — the graphic is in the body, so a
+#: collapsed row must not pay 30 frames a second to repaint a row with no
+#: animation in it (the idle-output cost `animation.py` exists to avoid).
+_IMAGE_FRAME_MS = 33
 #: Search details are persisted separately from the token-bounded model text.
 #: The expansion gets enough of each provider snippet to identify the page,
 #: while the source URL remains the path to the complete document.
@@ -1537,6 +1557,28 @@ class ToolCard(ExpandableActionBlock):
         self._compose_facts: str = ""
         self._compose_started: float | None = None
         self._clock_timer: Timer | None = None
+        #: The imagegen variant's structured live fields (last snapshot), or
+        #: ``None``. Written only by :meth:`set_live_details`, read only by the
+        #: variant's body — the one adapter mapping lives in
+        #: ``local_operator.tui.imagegen`` and this is its single hold on a card.
+        self._imagegen_live: imagegen_mod.ImagegenLive | None = None
+        #: The provider's error text, retained PAST the settle that clears
+        #: `_imagegen_live`: a failure either arrives in the live updates or in
+        #: the result details, and the failure body must find it whichever way
+        #: it came (see `_settle_live` / `_absorb_result`). The TYPE rides
+        #: beside it for the same reason: it is what tells the already-finished
+        #: cancel conflict apart from a real failure, in one reader
+        #: (`imagegen.provider_error_note`).
+        self._imagegen_error: str | None = None
+        self._imagegen_error_type: str | None = None
+        #: The shimmer phase and its scoped timer (see `_IMAGE_FRAME_MS` and
+        #: `_sync_frame_timer`). The phase is NOT reset when the timer stops
+        #: and restarts — a collapsed-then-expanded card resumes the band where
+        #: it was rather than jumping it, the same rule `WorkingBlock._sync_rate`
+        #: documents for a refocused terminal.
+        self._frame_ms: float = 0.0
+        self._frame_timer: Timer | None = None
+        self._frame_timer_ms: float = 0.0
         self._duration: float | None = None
         self._error: str = ""
         #: The word this card's ``interrupted`` state prints. Set by
@@ -2265,6 +2307,10 @@ class ToolCard(ExpandableActionBlock):
         if not visible:
             if self._clock_timer is not None:
                 self._clock_timer.pause()
+            # The band is a repaint of a body nobody can see while the row is
+            # off the navigation lane; `_tick_clock` below re-syncs it on the
+            # way back in.
+            self._stop_frame_timer()
         elif self._state in ("running", "composing"):
             self._start_clock()
             if self._clock_timer is not None:
@@ -2310,6 +2356,12 @@ class ToolCard(ExpandableActionBlock):
             # `_settle_live`, so this should be unreachable.
             self._stop_clock()
             return
+        # The imagegen band's rate follows focus and the expansion state, both
+        # of which can move without an event this card receives — this tick is
+        # the cheapest place to notice (within the second) without wiring every
+        # card into the app's focus fan-out. Idempotent and cheap when the
+        # answer has not changed (see `_sync_frame_timer`).
+        self._sync_frame_timer()
         # The duration is on the row whether or not output moved, so the tick
         # always REPAINTS a running card — the clock IS the "not hung" signal
         # and skipping the paint would freeze it.
@@ -2364,13 +2416,133 @@ class ToolCard(ExpandableActionBlock):
         it has, keeping the tail would leave the card holding two accounts of
         the same output — and the streamed one is the truncated, out-of-date
         one.
+
+        The imagegen error text is the ONE thing that survives the clear: a
+        provider that reported a failure on its last streaming update (and
+        then said nothing else) must still have its words on the failure body,
+        and the update that carried them is gone by now. The view itself goes —
+        its numbers describe an execution that has ended.
         """
         self._stop_clock()
+        self._stop_frame_timer()
+        if self._imagegen_live is not None:
+            # Retained semi-independently: the type can arrive WITHOUT a
+            # sentence (the already-finished conflict is the reason the frozen
+            # contract allows it), and losing it here would drop the note the
+            # failure body owes.
+            if self._imagegen_live.error:
+                self._imagegen_error = self._imagegen_live.error
+            if self._imagegen_live.error_type:
+                self._imagegen_error_type = self._imagegen_live.error_type
+        self._imagegen_live = None
         self._live = []
         self._live_advisory = None
         self._live_dropped = 0
         self._live_elided = False
         self._live_dirty = False
+
+    # -- the imagegen variant's timers and fields ---------------------------
+
+    def _is_imagegen(self) -> bool:
+        """Whether this card wears the image-generation live variant.
+
+        Keyed off the CURRENT name, re-read on every call: :meth:`begin_running`
+        can replace a dictation fragment with the real call, and the variant
+        must follow the name it ends up with. One predicate and one detection
+        set (`imagegen.IMAGE_GEN_TOOLS`) — a rename or a second call shape is a
+        one-line edit there and every renderer follows.
+        """
+        return imagegen_mod.is_image_gen_tool(self.tool_name)
+
+    def set_live_details(self, details: object) -> None:
+        """Adopt the structured live fields of a streaming update (imagegen).
+
+        The snapshot REPLACES the last one, matching ``set_partial_detail``'s
+        documented contract: a producer re-sends current state per update and
+        stops sending a field when it stops applying (a queue position stops
+        appearing once the request is running). Absence is thus an answer, not
+        a gap to backfill — and the card renders the reduced state rather than
+        a stale field.
+
+        Non-imagegen cards return before parsing: the adapter is this surface's
+        one reader for these keys, and no other tool's updates should cost a
+        dict walk for a variant they do not have.
+
+        Marking only; no repaint. The card's own timers own the cadence — the
+        1 Hz clock for the row and the elapsed reading, the frame timer for the
+        band — exactly as `set_live_advisory` documents for its line.
+        """
+        if not self._is_imagegen():
+            return
+        previous = self._imagegen_live
+        view = None if details is None else imagegen_mod.live_from_details(details)
+        self._imagegen_live = view
+        # An error carried by one update is retained past that update: the
+        # failure body reads it after `_settle_live` clears the view, and a
+        # producer that reported the fault on a single frame then went quiet
+        # must not lose it. Absent fields keep the retained pair — the LIVE
+        # display reads the snapshot (so a withdrawn error leaves the live
+        # line), while retention only ever feeds the settle.
+        if view is not None:
+            if view.error:
+                self._imagegen_error = view.error
+            if view.error_type:
+                self._imagegen_error_type = view.error_type
+        if view != previous:
+            self._live_dirty = True
+
+    def _imagegen_motion_wanted(self) -> bool:
+        """Whether the graphic should be animating right now.
+
+        Four conditions, and each one is a saving: the variant exists only on
+        an imagegen card, the graphic only in the EXPANDED body (a collapsed
+        row shows no canvas — it pays the interrupt hint, not 30 fps), the row
+        must be on screen at all (`_navigation_visible`), and motion is the
+        app-wide gate (`animation.motion_enabled`: the shimmer setting / env
+        kill switch AND terminal focus — `animation.py`'s one answer to
+        "should this surface be animating"). Anything else keeps the still
+        canvas, which is the honest read.
+        """
+        from local_operator.tui.animation import motion_enabled
+
+        return (
+            self._is_imagegen()
+            and self._state == "running"
+            and self._expanded
+            and self._navigation_visible
+            and motion_enabled()
+        )
+
+    def _sync_frame_timer(self) -> None:
+        """Arm / disarm the frame timer for the CURRENT state (idempotent).
+
+        Textual timers cannot be re-rated in place, so a change replaces one —
+        the same shape ``WorkingBlock._sync_rate`` uses, including NOT resetting
+        the phase (`_frame_ms`): a collapsed-then-expanded card resumes the
+        band where it was rather than jumping it. Cheap when the answer has not
+        changed, which is what lets the 1 Hz clock call it on every tick.
+        """
+        if not self._imagegen_motion_wanted():
+            self._stop_frame_timer()
+            return
+        if self._frame_timer is not None and self._frame_timer_ms == _IMAGE_FRAME_MS:
+            return
+        self._stop_frame_timer()
+        if self.is_running:
+            self._frame_timer_ms = _IMAGE_FRAME_MS
+            self._frame_timer = self.set_interval(_IMAGE_FRAME_MS / 1000.0, self._tick_frame)
+
+    def _stop_frame_timer(self) -> None:
+        """Retire the band's timer; the phase survives for a later start."""
+        if self._frame_timer is not None:
+            self._frame_timer.stop()
+            self._frame_timer = None
+        self._frame_timer_ms = 0.0
+
+    def _tick_frame(self) -> None:
+        """Advance the band and repaint: the imagegen card's own 30 fps path."""
+        self._frame_ms += _IMAGE_FRAME_MS
+        self._refresh_row()
 
     def begin_running(
         self,
@@ -2534,6 +2706,10 @@ class ToolCard(ExpandableActionBlock):
             if isinstance(parent, TranscriptView):
                 parent.invalidate_name_col()
         self._refresh_row()
+        # A row that was QUEUED and expanded before it started is already
+        # showing a body, so the band's timer is due the moment the call runs;
+        # the check is idempotent for every other transition.
+        self._sync_frame_timer()
 
     def set_live_advisory(self, advisory: str | None) -> None:
         """Paint (or clear) the live memory advisory as a persistent state line.
@@ -2616,6 +2792,18 @@ class ToolCard(ExpandableActionBlock):
         Write/edit tools prefer their rendered diff; all other tools expand to
         cleaned result text.
         """
+        # The imagegen variant's SETTLED read of the adapter: the result's
+        # details may carry the provider's error payload where the live updates
+        # never did (and vice versa — `_settle_live` retained the live one, and
+        # this line runs after it, so a details-carried error wins as the
+        # fresher account). Parsed at the settlement's own entry point so both
+        # carriers reach the failure body through one field.
+        if self._is_imagegen():
+            settled = imagegen_mod.live_from_details(details)
+            if settled.error:
+                self._imagegen_error = settled.error
+            if settled.error_type:
+                self._imagegen_error_type = settled.error_type
         self._added, self._removed = _diff_counts(details)
         # Reset per result, like the flags below and for the same reason: a card
         # written once is still rebuilt from a payload, and neither of these may
@@ -2782,12 +2970,28 @@ class ToolCard(ExpandableActionBlock):
         (``⟨no output⟩``), which is a separate affordance decision. A finished
         call that printed nothing still cannot be opened to see what it ran;
         that gap is known.
+
+        The imagegen variant's QUEUED state is the one live exception that is
+        not ``running``: its body (the state line, and the call's arguments) is
+        strictly more than the row can hold, and it is exactly the stretch a
+        user watching a slow batch wants to open onto. Gated on the detection
+        set, so every other tool's queued row keeps the inert-row answer
+        (``⟨waiting…⟩``) unchanged.
         """
-        return bool(self._output) or bool(self._diff) or self._state == "running"
+        return (
+            bool(self._output)
+            or bool(self._diff)
+            or self._state == "running"
+            or (self._state == "queued" and self._is_imagegen())
+        )
 
     def _after_toggle(self) -> None:
         """An expand/collapse supersedes any earlier inert-row answer."""
         self._clear_notice(repaint=False)
+        # The imagegen graphic exists only in the EXPANDED body, so this
+        # transition is exactly when the band's timer earns its keep (and when
+        # collapsing must stop paying for it) — see `_sync_frame_timer`.
+        self._sync_frame_timer()
 
     def _on_inert_activation(self) -> None:
         self._flash_notice()
@@ -3019,9 +3223,18 @@ class ToolCard(ExpandableActionBlock):
         # came back empty. Its own block states the state and carries whatever
         # has streamed, and it takes precedence over the settled blocks, which
         # are empty at this point anyway.
-        if self._state == "running":
+        if self._state == "running" and self._is_imagegen():
+            self._append_input_body(row, width)
+            self._append_imagegen_live_body(row, width)
+        elif self._state == "running":
             self._append_input_body(row, width)
             self._append_live_body(row, width)
+        elif self._state == "queued" and self._is_imagegen():
+            # The vocabulary's first state on the variant's own terms: the
+            # call is announced and waiting for a slot, so there is a state
+            # line (and nothing else — the blank body IS the wait).
+            self._append_input_body(row, width)
+            self._append_imagegen_live_body(row, width)
         elif self._state == "success" and self._diff:
             # A settled write/edit expands to its DIFF ALONE. The arguments are
             # the same change stated twice — `old_text`/`new_text` (or the
@@ -3040,6 +3253,18 @@ class ToolCard(ExpandableActionBlock):
         elif self._is_fetch_card and self._output:
             self._append_input_body(row, width)
             self._append_fetch_body(row, width)
+        elif (
+            self._state in ("error", "interrupted")
+            and self._is_imagegen()
+            and imagegen_mod.provider_error_note(
+                self._imagegen_error, self._imagegen_error_type, "\n".join(self._output)
+            )
+        ):
+            # The imagegen failure WITH a provider payload the generic body
+            # cannot already carry (see the helper). Same block order as the
+            # generic failure body, one insertion.
+            self._append_input_body(row, width)
+            self._append_imagegen_failure_body(row, width)
         elif self._output:
             self._append_input_body(row, width)
             self._append_output_body(row, width)
@@ -3127,6 +3352,124 @@ class ToolCard(ExpandableActionBlock):
         for line in self._live:
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(line, line_width), style=dim)
+
+    def _append_imagegen_live_body(self, row: Text, width: int) -> None:
+        """The imagegen live block: state, progress graphic, queue, log tail.
+
+        Replaces the generic live body for the detection set, rendering only
+        what the producer actually sent: the state line carries the frozen
+        vocabulary's word (with the card's own elapsed reading where the card
+        has one), the graphic is determinate when the adapter has a fraction
+        and the shimmering canvas otherwise, and the queue position, provider
+        error and log tail appear only when a producer carried them. Absence
+        renders the reduced state — no fraction means no bar, never a
+        filled-in guess.
+
+        The log tail is ONE source: the adapter's structured rows when the
+        producer sent them, else the streamed text the generic body reads.
+        Painting both would double-print the same lines the day both carriers
+        are live, which is the defect class this repo keeps re-finding.
+        """
+        dim = bindings.style("tool.live.dim")
+        accent = bindings.style("tool.live.header")
+        advisory_style = bindings.style("tool.live.advisory")
+        danger = bindings.style("tool.output.error")
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        view = self._imagegen_live or imagegen_mod.ImagegenLive()
+        word = imagegen_mod.imagegen_state_word(self._state, view.state)
+        if word is not None:
+            header = f"⋯ {word}"
+            # Elapsed only for a RUNNING card: a queued call has not started,
+            # and a duration counted from the announcement would date a wait
+            # the row was never asked to report — the same rule the status
+            # column's `queued` word follows.
+            elapsed = self._elapsed() if self._state == "running" else None
+            if elapsed is not None:
+                header = f"{header} · {format_duration(max(0, int(elapsed)))}"
+            row.append("\n" + indent, style=dim)
+            # `accent` for `tool.live.header`'s own reason: this line is the
+            # card's answer to "is it alive" and must survive a still frame.
+            row.append(truncate_cells(header, line_width), style=accent)
+        if self._state == "running":
+            # The graphic: frozen and precise once a fraction exists, moving
+            # (the band crossing the empty canvas) while the work is
+            # indeterminate. The phase is the card's own; a card whose band
+            # timer is not running renders the phase still, which is the
+            # honest reduced frame (`progress_graphic`).
+            row.append("\n" + indent, style=dim)
+            row.append_text(imagegen_mod.progress_graphic(view.fraction, self._frame_ms))
+        if view.queue_position is not None:
+            row.append("\n" + indent, style=dim)
+            row.append(
+                truncate_cells(f"queue position {view.queue_position}", line_width), style=dim
+            )
+        if view.error or view.error_type:
+            # The provider's note for this snapshot: the platform sentence
+            # verbatim, or the already-finished cancel conflict's own words —
+            # and its KIND decides the ink, so the conflict can never wear the
+            # error's glyph or colour (`provider_error_note`). The first line
+            # only: the live block is one row per line by contract; the FULL
+            # text is kept for the failure body (`_imagegen_error`), which is
+            # where "verbatim" is owed.
+            note = imagegen_mod.provider_error_note(view.error, view.error_type)
+            if note:
+                text, kind = note
+                first = text.splitlines()[0] if text.splitlines() else text
+                row.append("\n" + indent, style=dim)
+                if kind == imagegen_mod.ERROR_KIND_FINISHED:
+                    row.append(truncate_cells(first, line_width), style=dim)
+                else:
+                    row.append(truncate_cells(f"{ICON_ERROR} {first}", line_width), style=danger)
+        if self._live_advisory:
+            row.append("\n" + indent, style=dim)
+            row.append(
+                truncate_cells(f"{LIVE_ADVISORY_GLYPH} {self._live_advisory}", line_width),
+                style=advisory_style,
+            )
+        logs = view.log_lines if view.log_lines else tuple(self._live)
+        dropped = view.log_dropped if view.log_lines else self._live_dropped
+        elided = False if view.log_lines else self._live_elided
+        if elided or dropped > 0:
+            plural = "s" if dropped != 1 else ""
+            marker = "… earlier output not shown" if elided else f"… {dropped} earlier line{plural}"
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(marker, line_width), style=dim)
+        for line in logs:
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(line, line_width), style=dim)
+
+    def _append_imagegen_failure_body(self, row: Text, width: int) -> None:
+        """The imagegen failure expansion: reason, provider payload, output.
+
+        The same block order as the generic failure body with ONE insertion:
+        the provider's own error text between the promoted reason and the
+        captured output. That position is the point of the block — the result
+        text may carry only a paraphrase (``image generation failed``), and the
+        provider's sentence is what the operator acts on. Entered only when
+        the generic body could not already carry the payload
+        (`imagegen.provider_error_note`, re-derived here rather than threaded so
+        the deciding predicate and the painted text cannot disagree).
+        """
+        dim = bindings.style("tool.output.dim")
+        ink = bindings.style("tool.output.error")
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        glyph, lead_ink = self._promoted_paint(ink)
+        self._append_reason_body(row, line_width, indent, dim, lead_ink, glyph=glyph)
+        note = imagegen_mod.provider_error_note(
+            self._imagegen_error, self._imagegen_error_type, "\n".join(self._output)
+        )
+        if note:
+            text, kind = note
+            if kind == imagegen_mod.ERROR_KIND_FINISHED:
+                # One fixed, short sentence in the neutral ink: the conflict
+                # has no wrap budget to spend and no error glyph to wear.
+                row.append("\n" + indent, style=dim)
+                row.append(truncate_cells(text, line_width), style=dim)
+            else:
+                self._append_wrapped_rows(row, text, line_width, indent, dim, ink, glyph=ICON_ERROR)
+        self._append_captured_rows(row, line_width, indent, dim, ink)
 
     def _append_input_body(self, row: Text, width: int) -> None:
         """The arguments the call was made with, one labelled block per key.
@@ -3434,6 +3777,29 @@ class ToolCard(ExpandableActionBlock):
         reason = self._promoted_lead()
         if not reason:
             return
+        self._append_wrapped_rows(row, reason, line_width, indent, dim, ink, glyph=glyph)
+
+    def _append_wrapped_rows(
+        self,
+        row: Text,
+        text: str,
+        line_width: int,
+        indent: str,
+        dim: Style,
+        ink: Style,
+        *,
+        glyph: str = ICON_ERROR,
+    ) -> None:
+        """The bounded, lead-marked wrapped block: the reason rules, extracted.
+
+        Split out of :meth:`_append_reason_body` so the imagegen failure
+        body's provider-error rows paint with the SAME rules — one wrap, one
+        lead idiom, one pair of budgets — rather than a second painter beside
+        the first. The WHY of every choice below is written out in
+        :meth:`_append_reason_body`'s docstring (the crop exemption, the
+        indent, the glyph lead, the two budgets); this method is that
+        description made mechanical, callable with any text.
+        """
         lead = glyph + " "
         blanks = " " * cell_len(lead)
         # The lead's ink follows its glyph, so the state's mark and its colour
@@ -3446,7 +3812,7 @@ class ToolCard(ExpandableActionBlock):
             if glyph in (ICON_PARTIAL, ICON_SUCCESS)
             else "tool.status.error_glyph"
         )
-        wrapped = wrap_cells(reason, line_width)
+        wrapped = wrap_cells(text, line_width)
         # Greedy fit inside both budgets: the cell budget bounds the CONTENT at
         # every width and the row budget bounds the SHAPE on narrow frames, where
         # a cell budget alone would turn 432 cells into 54 rows at 16 columns.
@@ -3503,6 +3869,18 @@ class ToolCard(ExpandableActionBlock):
         indent = " " * OUTPUT_INDENT
         glyph, lead_ink = self._promoted_paint(ink)
         self._append_reason_body(row, line_width, indent, dim, lead_ink, glyph=glyph)
+        self._append_captured_rows(row, line_width, indent, dim, ink)
+
+    def _append_captured_rows(
+        self, row: Text, line_width: int, indent: str, dim: Style, ink: Style
+    ) -> None:
+        """The captured output crop: one row per line, capped, with the marker.
+
+        Shared by the plain-result body and the imagegen failure body so the
+        crop — lines, its cap, and the hidden-count marker that promises the
+        expanded height — has one implementation and cannot drift between the
+        two painters.
+        """
         captured = self._captured_output()
         shown = captured[:EXPAND_MAX_LINES]
         for line in shown:
@@ -3922,7 +4300,19 @@ class ToolCard(ExpandableActionBlock):
         slot = ""
         slot_element = "tool.row.slot_offer"
         remaining = max(0, width - prefix_cells - status_cells - 2)
-        if self.can_expand():
+        # The imagegen variant's cancel affordance (see `IMAGE_INTERRUPT_HINT`).
+        # It takes the slot ahead of the expand offer while the call can still
+        # be stopped — "how do I stop this" is the load-bearing question on a
+        # live row, and the row still expands on click; only its LABEL yields.
+        # When the hint cannot fit, the generic arms below run unchanged, so a
+        # narrow row keeps whatever affordance it already had.
+        interrupt_hint = ""
+        if self._state in ("queued", "running") and self._is_imagegen():
+            if remaining - (cell_len(IMAGE_INTERRUPT_HINT) + 1) >= _SUMMARY_FLOOR:
+                interrupt_hint = IMAGE_INTERRUPT_HINT
+        if interrupt_hint:
+            slot = interrupt_hint
+        elif self.can_expand():
             # See `bindings.BY_ELEMENT["tool.row.slot_offer"].note`.
             if (
                 self.tool_name.lower() == "web_search"
