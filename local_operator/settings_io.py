@@ -464,9 +464,15 @@ SECTIONS: tuple[Section, ...] = (
     ),
     Section(
         "session_delegated",
-        "Delegated work: subagents and background sessions",
+        # NOT "Delegated work: subagents and background sessions": at 49 cells
+        # the title overran the page's 34-cell value column and the header
+        # silently lost its "takes effect: new launch" tag (found in the
+        # rendered frame). The longer phrase lives in the description (desktop)
+        # and in the rows' help (TUI paints no section description).
+        "Delegated work",
         Scope.NEW_LAUNCH,
-        "Subagent and background-session transcripts and their scratch folders. "
+        "Delegated work: subagent and background-session transcripts and their "
+        "scratch folders. "
         "On by default: they are removed after the age below. Your conversations, "
         "sidebar workstreams, anything running, waiting on a wake or monitor, "
         "linked to an open project, still in use by an active parent, or holding "
@@ -2537,8 +2543,8 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=(
-            "Remove subagent and background-session transcripts after the age below; "
-            "never your conversations or anything in use."
+            "Remove subagent and background-session transcripts after the age "
+            "below; never your conversations or anything in use."
         ),
         choices=_bool_choices(
             "remove delegated work after the age below",

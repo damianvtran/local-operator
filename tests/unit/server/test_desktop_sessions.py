@@ -9573,3 +9573,35 @@ async def test_the_ask_attachments_feature_is_published(draft_api) -> None:
     client, _root = draft_api
     features = (await client.get("/v1/capabilities")).json()["result"]["features"]
     assert features["ask_attachments"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_list_route_serves_the_delegated_cleanup_notice_exactly_once(draft_api) -> None:
+    """The ONE-TIME "delegated sessions were cleaned up" notice rides the list.
+
+    Consumed on read: the first answer carries it and flips the on-disk
+    acknowledgement, the second does not — so steady-state hourly sweeps (which
+    never re-arm it) stay silent, and so does a client that polls every 2 s.
+    """
+    import json
+
+    client, root = draft_api
+    sessions = root / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / ".delegated-retention.json").write_text(
+        json.dumps({"removed_total": 3, "max_age_hours": 48, "notice_acknowledged": False})
+    )
+    first = (await client.get("/v1/desktop/sessions")).json()["result"]
+    notice = first["delegated_cleanup_notice"]
+    assert notice["removed"] == 3 and notice["in_progress"] is False
+    assert "Cleaned up 3 delegated sessions" in notice["message"]
+    assert "Your own conversations were not touched." in notice["message"]
+    second = (await client.get("/v1/desktop/sessions")).json()["result"]
+    assert second["delegated_cleanup_notice"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_list_route_carries_no_notice_when_nothing_was_ever_removed(draft_api) -> None:
+    client, _root = draft_api
+    answer = (await client.get("/v1/desktop/sessions")).json()["result"]
+    assert "delegated_cleanup_notice" in answer and answer["delegated_cleanup_notice"] is None

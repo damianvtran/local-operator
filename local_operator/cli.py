@@ -1090,7 +1090,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Run the session cleanup policy now (use --dry-run to preview)",
         description=(
             "Apply session.cleanup.* from config (each limit overridable below) to the "
-            "session store. Requires session.cleanup.enabled: true unless --force. "
+            "session store, in two classes: your conversations (needs "
+            "session.cleanup.enabled: true unless --force) and delegated subagent/"
+            "background sessions (session.cleanup.delegated.*, on by default). "
             "Every removal is recorded in <config>/sessions/.cleanup-log.jsonl."
         ),
         parents=[parent_parser],
@@ -1133,6 +1135,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         help="remove directories that never got a transcript (overrides config)",
+    )
+    cleanup_parser.add_argument(
+        "--delegated-max-age-hours",
+        type=_delegated_hours,
+        default=None,
+        metavar="N",
+        help="remove subagent/background sessions idle over N hours, 2-720 (overrides config)",
     )
     cleanup_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
@@ -4598,17 +4607,69 @@ def _cleanup_row(candidate: Any, verb: str) -> str:
     )
 
 
+#: Text rows printed per section before the listing is summarised. A first dry
+#: run on a long-lived store can name 17,000 delegated sessions; ``--json`` has
+#: them all, and the real run's record is ``.cleanup-log.jsonl``.
+_CLEANUP_TEXT_ROWS = 200
+
+
+def _delegated_hours(text: str) -> int:
+    """Argparse type for ``--delegated-max-age-hours``: the registry's own range."""
+    from local_operator.session.cleanup import (
+        MAX_DELEGATED_MAX_AGE_HOURS,
+        MIN_DELEGATED_MAX_AGE_HOURS,
+    )
+
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number of hours") from None
+    if not MIN_DELEGATED_MAX_AGE_HOURS <= value <= MAX_DELEGATED_MAX_AGE_HOURS:
+        raise argparse.ArgumentTypeError(
+            f"max_age_hours must be between {MIN_DELEGATED_MAX_AGE_HOURS} and "
+            f"{MAX_DELEGATED_MAX_AGE_HOURS} (30 days); got {value}"
+        )
+    return value
+
+
+def _print_cleanup_rows(rows: list[Any], verb: str) -> None:
+    for candidate in rows[:_CLEANUP_TEXT_ROWS]:
+        print(_cleanup_row(candidate, verb))
+    if len(rows) > _CLEANUP_TEXT_ROWS:
+        print(f"  ... and {len(rows) - _CLEANUP_TEXT_ROWS} more (--json lists every row)")
+
+
+def _print_kept(protected: list[tuple[str, str]]) -> None:
+    for name, guard in protected[:_CLEANUP_TEXT_ROWS]:
+        print(f"  kept         {name}  ({guard})")
+    if len(protected) > _CLEANUP_TEXT_ROWS:
+        print(f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept (--json lists every row)")
+
+
 def sessions_cleanup_command(args: argparse.Namespace) -> int:
     """``lop sessions cleanup [--dry-run] [--force [--yes]]``.
 
+    TWO CLASSES, one command (``session/delegated_retention.py`` has the why):
+    "Your conversations" (what the sidebar lists; the five ``session.cleanup.*``
+    limits, OFF by default) and "Delegated work" (subagent and background
+    sessions; ``session.cleanup.delegated.*``, ON by default). Each prints its own
+    section with its policy line, rows, kept list and totals.
+
     Order of operations for a real run is LIST, CONFIRM, REMOVE — never the
     reverse (UX U2). The listing is the dry run over the same policy, so what
-    the user confirms is exactly what goes.
+    the user confirms is exactly what goes: the parent class applies its previewed
+    plan, and the delegated class re-runs with ``only=<previewed names>`` at the
+    preview's own clock.
 
-    Exit codes: 0 ran (or dry run); 1 nothing to apply (no limits); 2 refused
-    (switch off without ``--force``, or confirmation declined); 3 ran with
-    errors. ``--json`` always emits a JSON object on stdout, whatever the
-    outcome, and carries ``enabled`` so a script can see the switch state.
+    A class runs when its switch is on (or ``--force``); the parent class also
+    needs a limit. A dry run lists both whatever the switches say and notes it.
+
+    Exit codes: 0 ran (or dry run); 1 nothing to apply (no parent limits and
+    delegated cleanup off); 2 refused (parent switch off without ``--force`` and
+    nothing else to run, or confirmation declined); 3 ran with errors. ``--json``
+    always emits a JSON object on stdout, whatever the outcome; its pre-existing
+    keys now cover BOTH classes (rows carry ``origin``) and ``parent`` /
+    ``delegated`` hold the per-class detail.
     """
     import dataclasses
     import json as _json
@@ -4620,6 +4681,11 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         policy_from_config,
         run_cleanup,
     )
+    from local_operator.session.delegated_retention import (
+        UNBOUNDED,
+        DelegatedResult,
+        run_delegated_pass,
+    )
 
     root = config_dir()
     policy = policy_from_config(ConfigManager(root))
@@ -4630,6 +4696,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             ("max_inactive_days", args.max_inactive_days),
             ("max_total_bytes", args.max_total_bytes),
             ("remove_empty", args.remove_empty),
+            ("delegated_max_age_hours", getattr(args, "delegated_max_age_hours", None)),
         )
         if value is not None
     }
@@ -4639,95 +4706,173 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         "session.cleanup.enabled is off: turn it on in /settings > Session cleanup, "
         "or pass --force to run once"
     )
+    force = bool(args.force)
+    parent_runs = policy.has_any_limit and (policy.enabled or force)
+    delegated_runs = policy.delegated_enabled or force
 
-    def emit_json(result: CleanupResult, *, outcome: str, confirmed: bool | None = None) -> None:
-        print(
-            _json.dumps(
-                {
-                    "outcome": outcome,
-                    "enabled": policy.enabled,
-                    "forced": bool(args.force),
-                    "dry_run": result.dry_run,
-                    "scanned": result.scanned,
-                    "removed": [dataclasses.asdict(c) for c in result.removed],
-                    "protected": [
-                        {"session": name, "guard": guard} for name, guard in result.protected
-                    ],
-                    "errors": result.errors,
-                    "skipped": result.skipped,
-                    "confirmed": confirmed,
-                    "record": str(record_path),
-                },
-                indent=2,
+    def emit_json(
+        parent: CleanupResult,
+        delegated: CleanupResult | None,
+        *,
+        outcome: str,
+        confirmed: bool | None = None,
+    ) -> None:
+        both = [parent] + ([delegated] if delegated is not None else [])
+
+        def klass(result: CleanupResult) -> dict[str, Any]:
+            return {
+                "scanned": result.scanned,
+                "removed": [dataclasses.asdict(c) for c in result.removed],
+                "protected": [{"session": n, "guard": g} for n, g in result.protected],
+                "errors": result.errors,
+                "skipped": result.skipped,
+            }
+
+        payload: dict[str, Any] = {
+            "outcome": outcome,
+            "enabled": policy.enabled,
+            "forced": force,
+            "dry_run": parent.dry_run,
+            "scanned": sum(r.scanned for r in both),
+            "removed": [dataclasses.asdict(c) for r in both for c in r.removed],
+            "protected": [{"session": n, "guard": g} for r in both for n, g in r.protected],
+            "errors": sum(r.errors for r in both),
+            "skipped": parent.skipped,
+            "confirmed": confirmed,
+            "record": str(record_path),
+            "parent": klass(parent),
+            "delegated": None,
+        }
+        if delegated is not None:
+            detail = klass(delegated)
+            detail.update(
+                enabled=policy.delegated_enabled,
+                max_age_hours=getattr(delegated, "hours", policy.delegated_max_age_hours),
+                within_window=getattr(delegated, "within_window", 0),
+                remaining=getattr(delegated, "remaining", 0),
             )
-        )
+            payload["delegated"] = detail
+        print(_json.dumps(payload, indent=2))
 
-    if not policy.has_any_limit:
-        message = (
-            "no cleanup limits configured: set session.cleanup.* in /settings or pass "
-            "--max-sessions/--max-inactive-days/--max-total-bytes/--remove-empty"
-        )
-        if not policy.enabled:
-            message += f"\n{switch_hint}"
-        if args.json:
-            emit_json(CleanupResult(skipped="no limits configured"), outcome="nothing-to-do")
-        else:
-            print(message, file=sys.stderr)
-        return 1
-
-    if not policy.enabled and not args.force and not args.dry_run:
-        if args.json:
-            emit_json(CleanupResult(skipped="disabled"), outcome="refused")
-        else:
-            print(f"refusing to remove sessions: {switch_hint}", file=sys.stderr)
-            print("preview what the limits would remove with --dry-run", file=sys.stderr)
-        return 2
+    if not parent_runs and not delegated_runs:
+        if not policy.has_any_limit:
+            message = (
+                "no cleanup limits configured and delegated cleanup is off: set "
+                "session.cleanup.* in /settings or pass "
+                "--max-sessions/--max-inactive-days/--max-total-bytes/--remove-empty"
+            )
+            if not policy.enabled:
+                message += f"\n{switch_hint}"
+            if args.json:
+                emit_json(
+                    CleanupResult(skipped="no limits configured"), None, outcome="nothing-to-do"
+                )
+            else:
+                print(message, file=sys.stderr)
+            if not args.dry_run:
+                return 1
+        elif not args.dry_run:
+            if args.json:
+                emit_json(CleanupResult(skipped="disabled"), None, outcome="refused")
+            else:
+                print(f"refusing to remove sessions: {switch_hint}", file=sys.stderr)
+                print("preview what the limits would remove with --dry-run", file=sys.stderr)
+            return 2
 
     # The LISTING is always a dry run first, so a real run shows the user the
-    # same rows before anything is removed.
-    preview = run_cleanup(root, policy, dry_run=True, force=bool(args.force), actor="cli")
-    policy_line = (
+    # same rows before anything is removed. Both previews share ONE clock.
+    moment = time.time()
+    # ``file_logging`` for the preview too: every scratchpad-git keep is a
+    # WARNING by design (one line per kept session, for the log), and on a first
+    # dry run those would interleave with the listing that already names each
+    # one under "kept".
+    with file_logging():
+        if policy.has_any_limit:
+            parent_preview = run_cleanup(
+                root, policy, dry_run=True, force=force, actor="cli", now=moment
+            )
+        else:
+            parent_preview = CleanupResult(dry_run=True, skipped="no limits configured")
+        delegated_preview = run_delegated_pass(
+            root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment
+        )
+    parent_policy_line = (
         f"policy: enabled={'on' if policy.enabled else 'OFF'} max_sessions={policy.max_sessions} "
         f"max_inactive_days={policy.max_inactive_days} max_total_bytes={policy.max_total_bytes} "
         f"remove_empty={policy.remove_empty}"
+        if policy.has_any_limit
+        else "policy: off (no limits configured)"
     )
+    delegated_policy_line = (
+        f"policy: {'on' if policy.delegated_enabled else 'OFF'}, remove delegated sessions idle "
+        f"over {delegated_preview.hours}h (parent still active, open project, running, armed "
+        "wake/monitor or unpushed git work keeps them)"
+    )
+
+    def sections(verb: str, parent: CleanupResult, delegated: DelegatedResult) -> None:
+        print("== Your conversations (parent sessions) ==")
+        print(parent_policy_line)
+        if parent.skipped == "no limits configured":
+            print("parent class: off")
+        else:
+            if not policy.enabled and verb == "would remove":
+                print(f"note: {switch_hint}; this is a preview only")
+            print(f"scanned {parent.scanned} sessions; {verb} {len(parent.removed)}")
+            _print_cleanup_rows(parent.removed, verb)
+            _print_kept(parent.protected)
+        print()
+        print("== Delegated work (subagents and background sessions) ==")
+        print(delegated_policy_line)
+        if delegated.skipped and delegated.skipped.startswith("skipped:"):
+            print(f"{delegated.skipped} (nothing removed; fail-closed)")
+        else:
+            if not policy.delegated_enabled and verb == "would remove":
+                print("note: delegated cleanup is off in config; this is a preview only")
+            print(
+                f"{delegated.delegated_total} delegated sessions; {delegated.within_window} "
+                f"newer than {delegated.hours}h (kept); {verb} {len(delegated.removed)}"
+            )
+            _print_cleanup_rows(delegated.removed, verb)
+            _print_kept(delegated.protected)
 
     if args.dry_run:
         if args.json:
-            emit_json(preview, outcome="dry-run")
+            emit_json(parent_preview, delegated_preview, outcome="dry-run")
             return 0
-        print(policy_line)
-        if not policy.enabled:
-            print(f"note: {switch_hint}; this is a preview only")
-        print(f"scanned {preview.scanned} sessions; would remove {len(preview.removed)}")
-        for candidate in preview.removed:
-            print(_cleanup_row(candidate, "would remove"))
-        for name, guard in preview.protected:
-            print(f"  kept         {name}  ({guard})")
+        sections("would remove", parent_preview, delegated_preview)
         print(f"nothing was removed (dry run); the record of real removals is {record_path}")
         return 0
 
     if not args.json:
-        print(policy_line)
-        if not policy.enabled:
-            print(f"WARNING: {switch_hint}; running because --force was given")
-        print(f"scanned {preview.scanned} sessions; about to remove {len(preview.removed)}")
-        for candidate in preview.removed:
-            print(_cleanup_row(candidate, "will remove"))
-        for name, guard in preview.protected:
-            print(f"  kept         {name}  ({guard})")
-    if not preview.removed:
+        if parent_runs is False and policy.has_any_limit:
+            print(f"parent class not run: {switch_hint}")
+        sections("will remove", parent_preview, delegated_preview)
+    parent_rows = len(parent_preview.removed) if parent_runs else 0
+    delegated_rows = len(delegated_preview.removed) if delegated_runs else 0
+    if policy.has_any_limit and not parent_runs and not delegated_rows:
+        # The limits are configured but their switch is off, and the other class
+        # has nothing to do: that is a REFUSAL, not "nothing to remove" — the
+        # reading that made a user who saw "limits set, nothing happens" run
+        # with --force on a store they had meant to protect (QA Q1 of #645).
         if args.json:
-            emit_json(preview, outcome="nothing-to-do")
+            emit_json(parent_preview, delegated_preview, outcome="refused")
+        else:
+            print(f"refusing to remove sessions: {switch_hint}", file=sys.stderr)
+            print("preview what the limits would remove with --dry-run", file=sys.stderr)
+        return 2
+    if not parent_rows and not delegated_rows:
+        if args.json:
+            emit_json(parent_preview, delegated_preview, outcome="nothing-to-do")
         else:
             print("nothing to remove")
         return 0
 
     confirmed: bool | None = None
+    total = parent_rows + delegated_rows
     if not args.yes:
         if not sys.stdin.isatty():
             if args.json:
-                emit_json(preview, outcome="refused", confirmed=False)
+                emit_json(parent_preview, delegated_preview, outcome="refused", confirmed=False)
             else:
                 print(
                     "refusing: not a terminal and --yes was not given, so nothing was removed",
@@ -4735,13 +4880,13 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 )
             return 2
         try:
-            answer = input(f"remove {len(preview.removed)} session(s)? type 'yes' to confirm: ")
+            answer = input(f"remove {total} session(s)? type 'yes' to confirm: ")
         except (EOFError, KeyboardInterrupt):
             answer = ""
         confirmed = answer.strip().lower() == "yes"
         if not confirmed:
             if args.json:
-                emit_json(preview, outcome="refused", confirmed=False)
+                emit_json(parent_preview, delegated_preview, outcome="refused", confirmed=False)
             else:
                 print("not confirmed; nothing was removed")
             return 2
@@ -4752,19 +4897,38 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     # ``file_logging`` detaches the console handlers for the block and puts
     # them back afterwards. ``apply_cleanup(preview)`` removes EXACTLY the
     # rows the user just confirmed — a second scan could rank a session
-    # created meanwhile and take one shown as kept (review round 2, R2-2).
+    # created meanwhile and take one shown as kept (review round 2, R2-2). The
+    # delegated class gets the same guarantee from ``only=`` + the preview clock.
     with file_logging():
-        result = apply_cleanup(root, preview, actor="cli")
+        parent_result = (
+            apply_cleanup(root, parent_preview, actor="cli")
+            if parent_rows
+            else CleanupResult(skipped=parent_preview.skipped)
+        )
+        delegated_result = (
+            run_delegated_pass(
+                root,
+                lambda: policy,
+                force=force,
+                actor="cli",
+                now=moment,
+                budget_s=UNBOUNDED,
+                only=[c.session for c in delegated_preview.removed],
+            )
+            if delegated_rows
+            else DelegatedResult()
+        )
+    errors = parent_result.errors + delegated_result.errors
     if args.json:
-        emit_json(result, outcome="removed", confirmed=confirmed)
-        return 3 if result.errors else 0
-    print(f"removed {len(result.removed)} session(s)")
-    for candidate in result.removed:
-        print(_cleanup_row(candidate, "removed"))
-    if result.errors:
-        print(f"  {result.errors} error(s); see the log", file=sys.stderr)
+        emit_json(parent_result, delegated_result, outcome="removed", confirmed=confirmed)
+        return 3 if errors else 0
+    removed = parent_result.removed + delegated_result.removed
+    print(f"removed {len(removed)} session(s)")
+    _print_cleanup_rows(removed, "removed")
+    if errors:
+        print(f"  {errors} error(s); see the log", file=sys.stderr)
     print(f"record: {record_path}")
-    return 3 if result.errors else 0
+    return 3 if errors else 0
 
 
 def sessions_reclaim_command(args: argparse.Namespace) -> int:

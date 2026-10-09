@@ -21573,6 +21573,27 @@ class OperatorApp(App[None]):
         if body is not None:
             self._system_notice(body, "warning")
             return
+        # The DELEGATED-work class announces itself ONCE per store, from its own
+        # record (`session.delegated_retention`), never from `last-cleanup.json`:
+        # that file is re-armed by every removing pass of the parent class and
+        # would make each hourly delegated sweep announce again.
+        try:
+            from local_operator.session.delegated_retention import (
+                format_delegated_notice,
+                take_unannounced_delegated_notice,
+            )
+
+            delegated = take_unannounced_delegated_notice(
+                config_dir() / SESSIONS_DIRNAME,
+                runtime_pid=runtime_pid if isinstance(runtime_pid, int) else None,
+            )
+            delegated_body = None if delegated is None else format_delegated_notice(delegated)
+        except Exception:  # noqa: BLE001 — a notice must never take the app down
+            logger.debug("delegated cleanup notice could not be built", exc_info=True)
+            delegated_body = None
+        if delegated_body is not None:
+            self._system_notice(delegated_body, "info")
+            return
         if rechecks_left > 0:
             remaining = rechecks_left - STARTUP_CLEANUP_RECHECK_S
             self._startup_cleanup_timer = self.set_timer(

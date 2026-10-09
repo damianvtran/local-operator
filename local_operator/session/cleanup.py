@@ -59,6 +59,14 @@ says so), and ``lop sessions cleanup`` runs it — only with ``enabled:
 true``, or with ``--force`` after listing and a typed confirmation. Both
 honour every hard guard.
 
+TWO CLASSES (this module is the PARENT class; ``delegated_retention`` is the
+other). Everything below — the five limits, the recent-N guard, ``_dir_bytes`` —
+sees ONLY directories the sidebar lists. Hidden-origin directories (subagents,
+agent-shell runs, any future non-user origin) belong to
+``session.cleanup.delegated.*``, which is on by default with a bounded age; the
+split is ``_is_delegated_dir``, i.e. ``resume.is_user_session_origin``. The hard
+guards, ``remove_session_dir`` and the log below are shared by both classes.
+
 The store marker is a guard against foreign and unmarked targets and the
 CLI on a store nothing has booted; it is NOT a second gate on the harness's
 own startup pass, which marks its store in ``_prepare`` before maintenance
@@ -1281,6 +1289,21 @@ def _guard_refusal(reason: str, session_id: str) -> str:
     )
 
 
+def _is_delegated_dir(directory: Path) -> bool:
+    """Whether ``directory`` is in the DELEGATED class (hidden origin).
+
+    THE one predicate is ``resume.is_user_session_origin`` applied to the recorded
+    origin, so a value minted tomorrow is delegated until someone registers it as a
+    user origin. Reads CLOSED toward the user: a missing, truncated or non-object
+    ``origin.json`` reads as ``""`` (the user's own), which puts the directory in the
+    PARENT class — the one class the delegated pass never touches. Lazy import:
+    ``resume`` is heavy and this module must stay light for the runtime child.
+    """
+    from local_operator.resume import is_user_session_origin, session_origin
+
+    return not is_user_session_origin(session_origin(directory))
+
+
 def _has_transcript(directory: Path) -> bool:
     try:
         return (directory / TRANSCRIPT_FILENAME).stat().st_size > 0
@@ -1492,8 +1515,26 @@ def run_cleanup(
         result.errors += 1
         return result
     for child in children:
-        result.scanned += 1
         try:
+            # PARENT CLASS ONLY. Delegated sessions are another class with their
+            # own policy (``delegated_retention``); counting them here made
+            # ``max_total_bytes`` trim a user's conversations to make room for
+            # subagent transcripts, and ``_dir_bytes`` walk 64 GB of them. A
+            # directory that cannot be classified is the user's (see
+            # :func:`_is_delegated_dir`), so it stays in this class. ``scanned``
+            # is therefore the PARENT population, so the dry run's "scanned N"
+            # is the number of conversations the limits could have seen.
+            try:
+                delegated = _is_delegated_dir(child)
+            except (
+                Exception
+            ):  # noqa: BLE001 — cannot classify: it is the user's, kept in this class
+                # (an ImportError of ``resume`` lands here too; the picker guard
+                # below then refuses the whole run, exactly as it always did).
+                delegated = False
+            if delegated:
+                continue
+            result.scanned += 1
             if live_resolved is not None and child.resolve() == live_resolved:
                 result.protected.append((child.name, "the current session"))
                 continue
