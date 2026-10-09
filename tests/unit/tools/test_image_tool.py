@@ -298,8 +298,9 @@ async def test_the_no_cancellation_race_returns_a_clean_receipt(
     _patch_cascade(monkeypatch, fake_cascade)
     monkeypatch.setattr(image_rungs, "best_effort_cancel", fake_cancel)
 
+    updates: list[object] = []
     result = await image_tool.execute_generate_image(
-        "call-1", {"prompt": "a cat"}, None, None, None
+        "call-1", {"prompt": "a cat"}, None, updates.append, None
     )
 
     assert result.is_error is True
@@ -314,6 +315,16 @@ async def test_the_no_cancellation_race_returns_a_clean_receipt(
         "request_id": "r1",
         "model": "flux/dev",
     }
+    assert (result.details or {})["stage"] == "cancelled"
+    assert "error_type" not in (result.details or {}), "a plain cancel is not a failure"
+    # The cancel-phase updates bracket the best-effort cancel; the second
+    # mirrors the receipt exactly (one wording, no drift).
+    assert [update.details["stage"] for update in updates] == [  # type: ignore[union-attr]
+        "cancelling",
+        "cancelled",
+    ]
+    assert updates[1].content[0].text == text  # type: ignore[union-attr]
+    assert updates[1].details["provider"] == "radient"  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -321,6 +332,7 @@ async def test_task_cancellation_cancels_provider_side_and_reraises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[object] = []
+    updates: list[object] = []
 
     async def fake_cascade(**kwargs):
         raise asyncio.CancelledError()
@@ -333,13 +345,92 @@ async def test_task_cancellation_cancels_provider_side_and_reraises(
     monkeypatch.setattr(image_rungs, "best_effort_cancel", fake_cancel)
 
     with pytest.raises(asyncio.CancelledError):
-        await image_tool.execute_generate_image("call-1", {"prompt": "a cat"}, None, None, None)
+        await image_tool.execute_generate_image(
+            "call-1", {"prompt": "a cat"}, None, updates.append, None
+        )
     assert calls, "an abort must attempt the provider-side cancel"
+    # The cancel-phase updates emit from inside the CancelledError handler —
+    # through the guarded emitter, so nothing can replace the cancellation.
+    assert [update.details["stage"] for update in updates] == [  # type: ignore[union-attr]
+        "cancelling",
+        "cancelled",
+    ]
+    assert updates[0].details["provider"] is None  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------
 # Execution: local validation and img2img wiring
 # ---------------------------------------------------------------------------
+
+
+def test_the_emitter_swallows_a_raising_on_update() -> None:
+    """The tool-level guard (reviewer round-1 pin): progress never rides control flow.
+
+    Same contract as the rungs' own wrapper — a raising ``on_update`` is
+    swallowed, because the terminal cancel-phase lines emit from inside
+    cancellation handlers and must never replace the ``CancelledError``.
+    """
+
+    def raiser(update: object) -> None:
+        raise RuntimeError("on_update exploded")
+
+    emit = image_tool._progress_emitter(raiser)
+    assert emit is not None
+    emit("line", {"stage": "queued"})  # must not raise
+    assert image_tool._progress_emitter(None) is None
+
+
+@pytest.mark.asyncio
+async def test_the_abort_receipt_survives_a_raising_emitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising on_update cannot break the abort-path cancellation (pin)."""
+
+    async def fake_cascade(**kwargs):
+        kwargs["handle"].provider = ImageRoute.RADIENT
+        kwargs["handle"].request_id = "r1"
+        raise image_cascade.ImageGenerationCancelled()
+
+    async def fake_cancel(handle):
+        return "none"
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    monkeypatch.setattr(image_rungs, "best_effort_cancel", fake_cancel)
+
+    def raiser(update: object) -> None:
+        raise RuntimeError("on_update exploded")
+
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, raiser, None
+    )
+    assert result.is_error is True
+    assert (result.details or {})["stage"] == "cancelled"
+    assert "error_type" not in (result.details or {})
+
+
+@pytest.mark.asyncio
+async def test_task_cancellation_survives_a_raising_emitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising on_update cannot replace the Esc-path CancelledError (pin)."""
+    calls: list[object] = []
+
+    async def fake_cascade(**kwargs):
+        raise asyncio.CancelledError()
+
+    async def fake_cancel(handle):
+        calls.append(handle)
+        return "none"
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    monkeypatch.setattr(image_rungs, "best_effort_cancel", fake_cancel)
+
+    def raiser(update: object) -> None:
+        raise RuntimeError("on_update exploded")
+
+    with pytest.raises(asyncio.CancelledError):
+        await image_tool.execute_generate_image("call-1", {"prompt": "a cat"}, None, raiser, None)
+    assert calls, "the cancel flow continued past the raising emitter"
 
 
 @pytest.mark.asyncio
@@ -417,11 +508,20 @@ async def test_progress_updates_map_onto_agent_tool_updates(
         "call-1", {"prompt": "a cat"}, None, updates.append, None
     )
 
-    assert len(updates) == 1
-    update = updates[0]
+    assert len(updates) == 2, "the synthetic update, then the tool's own completed"
+    update, completed = updates
     text_part = update.content[0]  # type: ignore[union-attr]
     assert text_part.text == "Generating via Radient (flux/dev): queued, #2 — 14s"
     assert update.details["stage"] == "queued"  # type: ignore[union-attr]
+    # The tool's terminal update closes the canonical lifecycle (Q7 wire scope)
+    # and carries the canonical key set like every other update.
+    assert completed.details["stage"] == "completed"  # type: ignore[union-attr]
+    assert completed.content[0].text == (  # type: ignore[union-attr]
+        "Generation complete — 1 image(s) via Radient (flux/dev)."
+    )
+    canonical = {"stage", "queue_position", "progress_fraction", "log_lines", "error", "error_type"}
+    assert canonical <= set(completed.details)  # type: ignore[union-attr]
+    assert completed.details["progress_fraction"] is None  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -443,4 +543,12 @@ async def test_the_cancel_receipt_states_not_cancelled_reasons(
         "call-1", {"prompt": "a cat"}, None, None, None
     )
     text = result.content[0].text  # type: ignore[union-attr]
+    details = result.details or {}
+    # The cancel conflict is NOT a failure: the surfaces' frozen branch keys
+    # on this pair (Q7), and the receipt sentence rides beside it verbatim.
+    assert details["error_type"] == "media_already_completed"
+    assert details["stage"] == "cancelled"
+    assert details["error"] == (
+        "The generation had already completed when the cancel arrived; " "its result was discarded."
+    )
     assert "not cancelled — it had already completed" in text
