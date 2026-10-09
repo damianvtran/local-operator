@@ -157,6 +157,12 @@ def test_reachable_is_the_any_of_matrix(
     monkeypatch.delenv("OPENAI_API_KEY")
 
     store.upsert_credential(
+        "openai",
+        {"type": "oauth", "refresh": "r", "access": "a", "expires": 4_000_000_000_000},
+    )
+    assert availability.image_provider_reachable(config_root) is True
+
+    store.upsert_credential(
         "radient", {"type": "oauth", "refresh": "r", "access": "a", "expires": 4_000_000_000_000}
     )
     assert availability.image_provider_reachable(config_root) is True
@@ -173,6 +179,7 @@ def test_probes_never_raise(config_root: Path, monkeypatch: pytest.MonkeyPatch) 
     assert availability.radient_available(config_root) is False
     assert availability.fal_key(config_root) is None
     assert availability.openai_images_key(config_root) is None
+    assert availability.openai_subscription_grant(config_root) is False
     assert availability.image_provider_reachable(config_root) is False
 
 
@@ -194,3 +201,59 @@ async def test_the_async_twin_agrees_with_the_sync_probe(
     store.upsert_credential("openai-key", {"type": "api_key", "source": "login", "key": "sk-x"})
     assert availability.openai_images_key(config_root) == "sk-x"
     assert await availability.openai_call_key(store) == "sk-x"
+
+
+# ---------------------------------------------------------------------------
+# The subscription grant: OAuth rows only, the inverse of the images rule
+# ---------------------------------------------------------------------------
+
+
+def test_openai_subscription_probe_reads_oauth_rows_only(
+    store: AuthStore, config_root: Path
+) -> None:
+    # A platform api_key is NOT a subscription grant (that row belongs to
+    # openai-key); the OAuth grant the images API rejects is exactly what the
+    # Codex-backend rung spends. The two probes must never blur into one.
+    store.upsert_credential("openai-key", {"type": "api_key", "source": "login", "key": "sk-x"})
+    assert availability.openai_subscription_grant(config_root) is False
+
+    store.upsert_credential(
+        "openai",
+        {
+            "type": "oauth",
+            "refresh": "r1",
+            "access": "chatgpt-token",
+            "expires": 4_000_000_000_000,
+        },
+    )
+    assert availability.openai_subscription_grant(config_root) is True
+
+
+def test_openai_subscription_env_never_lights_the_gate(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A grant is stored by a sign-in, never exported; an ambient platform key
+    # must not advertise this rung.
+    monkeypatch.setenv("OPENAI_API_KEY", "exported-key")
+    assert availability.openai_subscription_grant(config_root) is False
+
+
+@pytest.mark.asyncio
+async def test_the_subscription_access_twin_serves_the_stored_grant(store: AuthStore) -> None:
+    assert await availability.openai_sub_access(store) is None
+
+    store.upsert_credential(
+        "openai",
+        {
+            "type": "oauth",
+            "refresh": "r1",
+            "access": "chatgpt-token",
+            "expires": 4_000_000_000_000,
+            "account_id": "acc-1",
+        },
+    )
+    access = await availability.openai_sub_access(store)
+    assert access is not None
+    assert access.kind == "oauth"
+    assert access.access_token == "chatgpt-token"
+    assert access.account_id == "acc-1"

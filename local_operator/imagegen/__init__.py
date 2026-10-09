@@ -71,6 +71,9 @@ class ImageRoute(StrEnum):
     RADIENT = "radient"
     FAL = "fal"
     OPENAI = "openai"
+    #: The ChatGPT subscription's Codex-backend image tool (media wave-2,
+    #: append-only). Wire spelling is hyphenated, unlike the rest.
+    OPENAI_SUB = "openai-sub"
     #: No usable route. Appears in availability/refusal payloads only.
     NONE = "none"
 

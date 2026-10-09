@@ -67,6 +67,7 @@ __all__ = [
     "best_effort_cancel",
     "emit_progress",
     "progress_details",
+    "run_openai_sub",
 ]
 
 logger = logging.getLogger(__name__)
@@ -1149,3 +1150,16 @@ async def best_effort_cancel(handle: CancelHandle | None) -> str:
         return "abandoned"
     except BaseException:  # noqa: BLE001 - incl. GeneratorExit; never raise from cleanup
         return "failed"
+
+
+# ---------------------------------------------------------------------------
+# Re-exported executors (media wave-2 breadth rungs)
+# ---------------------------------------------------------------------------
+#
+# The add-a-rung checklist puts each new executor in ``rungs_<provider>.py``
+# and re-exports it HERE so ``imagegen.rungs`` names every executor the wave
+# ships. The imports stay at the bottom on purpose: each provider module
+# reaches this module's shared plumbing at CALL time (one lazy import per
+# function), which keeps every import order working — this module importing
+# the provider module first, or the provider module imported first.
+from local_operator.imagegen.rungs_openai_sub import run_openai_sub  # noqa: E402

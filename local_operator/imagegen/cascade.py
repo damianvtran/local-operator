@@ -79,6 +79,7 @@ RUNG_LABELS: dict[str, str] = {
     ImageRoute.RADIENT: "Radient",
     ImageRoute.FAL: "FAL",
     ImageRoute.OPENAI: "OpenAI",
+    ImageRoute.OPENAI_SUB: "ChatGPT plan",
 }
 
 #: The resolver's fixed order, first match wins. APPEND-ONLY: the three routes
@@ -91,6 +92,7 @@ IMAGE_RUNG_ORDER: tuple[ImageRoute, ...] = (
     ImageRoute.RADIENT,
     ImageRoute.FAL,
     ImageRoute.OPENAI,
+    ImageRoute.OPENAI_SUB,
 )
 
 #: Every rung's declaration — identity, capability, cancel support and cost
@@ -128,6 +130,16 @@ RUNG_SPECS: dict[str, RungSpec] = {
         capabilities=frozenset({"t2i"}),
         cancel_support=CancelSupport.NONE,
         cost="rate_table",
+    ),
+    ImageRoute.OPENAI_SUB: RungSpec(
+        route=ImageRoute.OPENAI_SUB,
+        label="ChatGPT plan",
+        kinds=frozenset({"image"}),
+        capabilities=frozenset({"t2i"}),
+        cancel_support=CancelSupport.NONE,
+        # Quota-funded: no cash figure exists, and none is ever synthesized
+        # (design D8); the guide states the 3-5x quota burn.
+        cost="subscription",
     ),
 }
 
@@ -208,6 +220,8 @@ async def _probe_route(
         return bool(image_availability.fal_key(config_dir))
     if route == ImageRoute.OPENAI:
         return bool(image_availability.openai_images_key(config_dir))
+    if route == ImageRoute.OPENAI_SUB:
+        return image_availability.openai_subscription_grant(config_dir)
     logger.warning("no availability probe for image route %s; reporting unavailable", route)
     return False
 
@@ -220,6 +234,10 @@ _ROUTE_REASONS: dict[ImageRoute, tuple[str, str]] = {
     ImageRoute.RADIENT: ("Signed in to Radient.", "Not signed in to Radient."),
     ImageRoute.FAL: ("A FAL key is stored.", "No FAL key is stored."),
     ImageRoute.OPENAI: ("An OpenAI API key is stored.", "No OpenAI API key is stored."),
+    ImageRoute.OPENAI_SUB: (
+        "A ChatGPT subscription sign-in is stored.",
+        "No ChatGPT subscription sign-in is stored.",
+    ),
 }
 
 
@@ -255,8 +273,9 @@ async def resolve_image_route(
         )
     reason = (
         "No image provider is available: sign in to Radient (`/login radient`), "
-        "store a FAL key (`lop login fal`) or export FAL_API_KEY, or store an "
-        "OpenAI API key (`lop login openai-key`) or export OPENAI_API_KEY."
+        "store a FAL key (`lop login fal`) or export FAL_API_KEY, store an "
+        "OpenAI API key (`lop login openai-key`) or export OPENAI_API_KEY, or "
+        "sign in to a ChatGPT plan (`lop login openai`)."
     )
     return ImageRouteResolution(route=ImageRoute.NONE, reason=reason, rungs=tuple(rungs))
 
@@ -325,6 +344,33 @@ async def _run_route(
     client: httpx.AsyncClient | None,
 ) -> image_rungs.RungResult:
     """Dispatch one rung, resolving its credential at call time."""
+    if route == ImageRoute.OPENAI_SUB:
+        # This rung's credential carries identity beyond the bearer (the
+        # ``chatgpt-account-id`` the Codex backend wants), so it resolves its
+        # own access record instead of going through ``_call_time_key``
+        # (which returns a bare string). Same rule as every other rung: the
+        # resolution happens HERE, at call time, and a missing or dead grant
+        # surfaces as a rung failure that fails forward.
+        access = await image_availability.openai_sub_access(store)
+        if access is None or not access.access_token:
+            raise APIError(
+                "No ChatGPT subscription sign-in is available.",
+                status_code=None,
+                code="unauthorized",
+            )
+        return await image_rungs.run_openai_sub(
+            prompt=prompt,
+            access_token=access.access_token,
+            account_id=access.org_id or access.account_id,
+            num_images=num_images,
+            image_size=image_size,
+            source_url=source_url,
+            seed=seed,
+            model=model,
+            emit=emit,
+            pause=pause,
+            client=client,
+        )
     key = await _call_time_key(route, config_dir=config_dir, radient_base=radient_base, store=store)
     if route == ImageRoute.RADIENT:
         return await image_rungs.run_radient(

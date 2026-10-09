@@ -188,6 +188,8 @@ def _preferred_route_label() -> str:
             return "FAL"
         if image_availability.openai_images_key(cfg):
             return "OpenAI"
+        if image_availability.openai_subscription_grant(cfg):
+            return "ChatGPT plan"
     except Exception:  # noqa: BLE001 - a describer must never fail a call
         logger.debug("image availability read failed for approval text", exc_info=True)
     return "the configured provider"
