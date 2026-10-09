@@ -1,14 +1,19 @@
-"""Image generation cascade: the shared tokens and result types.
+"""Image generation cascade: the lane's tokens, resolver types and route enum.
 
 The package is deliberately **import-light** (stdlib only, like ``stt/``'s
 ``__init__``): the tool builder, the session factory's classification roster
 and the tests all import these names on paths that must not drag in the HTTP
-client or the credential stores.
+client or the credential stores. Under media wave-2 the generic bodies of the
+kind-neutral tokens live in :mod:`local_operator.artifacts` (also stdlib-only)
+and are re-exported or aliased here, so THIS module's pinned surface keeps
+resolving for the lane's tests and consumers.
 
 **The cascade order is FROZEN** (architect design, 2026-10-08, decisions
 D4–D9): Radient → FAL → OpenAI → honest error, first match wins, and the
 executor fails FORWARD on every rung failure except (a) user cancellation
 (stop; no failover) and (b) local validation errors (raised before dispatch).
+Media wave-2 appends provider rungs to the order (imagegen.cascade owns the
+constant); the relative order of the first three does not change.
 
 - :mod:`local_operator.imagegen.availability` — the sync credential probes
   (the ``createIf`` gate's substrate; no sockets on any session-build path).
@@ -31,9 +36,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal
+
+# Re-exported under their generic names (session-build paths import this
+# module; the generic types are stdlib-only, so no heavy import rides in).
+from local_operator.artifacts import (
+    ArtifactKind,
+    AttemptOutcome,
+    JobAttempt,
+    JobOutcome,
+    MediaAsset,
+    RungAvailability,
+)
 
 __all__ = [
+    "ArtifactKind",
     "AttemptOutcome",
     "ImageAttempt",
     "ImageOutcome",
@@ -59,24 +75,14 @@ class ImageRoute(StrEnum):
     NONE = "none"
 
 
-#: One rung's outcome in an executor attempt. ``skipped`` is not "not
-#: available" — unavailable rungs are never attempted at all — it is a rung the
-#: walk reached but did not spend: the overall budget was gone, or (Radient)
-#: the affordability probe said the account cannot fund this request.
-AttemptOutcome = Literal["ok", "failed", "skipped"]
-
-
-@dataclass(frozen=True)
-class RungAvailability:
-    """One rung's availability, with the reason a user would be shown.
-
-    Availability answers "is there a credential for this rung", NOT "will the
-    call succeed" — see :func:`local_operator.imagegen.cascade.resolve_image_route`.
-    """
-
-    route: ImageRoute
-    available: bool
-    reason: str
+#: ``ImageAttempt`` / ``ImageOutcome`` are ALIASES of the generic records — one
+#: shape, no isinstance traps (design D2), so a monkeypatched producer cannot
+#: hand a consumer a type its ``isinstance`` check misses. ``ImageOutcome``
+#: therefore carries ``kind`` (defaulting to ``image`` so legacy keyword
+#: constructions keep working; every walk-produced outcome sets it explicitly)
+#: and ``cost_source`` beside the fields it always had.
+ImageAttempt = JobAttempt
+ImageOutcome = JobOutcome
 
 
 @dataclass(frozen=True)
@@ -87,54 +93,3 @@ class ImageRouteResolution:
     reason: str
     #: Fixed cascade order, every route present.
     rungs: tuple[RungAvailability, ...]
-
-
-@dataclass(frozen=True)
-class ImageAttempt:
-    """One rung's attempt inside :func:`local_operator.imagegen.cascade.run_image_cascade`.
-
-    ``reason_class`` is a small closed token (``insufficient_balance``,
-    ``insufficient_credits``, ``unauthorized``, ``rate_limited``, ``timeout``,
-    ``network``, ``upstream``, ``refused``, ``cancelled``,
-    ``invalid_response``, ``unknown``) so consumers can group failures without
-    parsing prose; ``message`` is the human-facing sentence.
-    """
-
-    route: ImageRoute
-    outcome: AttemptOutcome
-    reason_class: str = ""
-    message: str = ""
-    status_code: int | None = None
-
-
-@dataclass(frozen=True)
-class MediaAsset:
-    """One downloaded asset: bytes plus the facts surfaces need to render it."""
-
-    data: bytes
-    content_type: str
-    source_url: str
-    width: int | None = None
-    height: int | None = None
-    duration_s: float | None = None
-
-
-@dataclass(frozen=True)
-class ImageOutcome:
-    """A successful cascade run: the assets, the rung that produced them, and the walk."""
-
-    assets: tuple[MediaAsset, ...]
-    route: ImageRoute
-    attempts: tuple[ImageAttempt, ...]
-    #: The model id the provider actually ran (the route's default when the
-    #: caller pinned none).
-    model: str = ""
-    #: Echoed for the caption/receipt so a cancelled or failed re-issue can
-    #: repeat or edit the prompt without the model having to remember it.
-    prompt: str = ""
-    seed: int | None = None
-    #: The provider's own job id, for the receipt and for support queries.
-    generation_id: str | None = None
-    #: Radient reports per-generation cost; FAL/OpenAI bill their own key with
-    #: no returned figure, so this stays ``None`` there.
-    cost_usd: float | None = None

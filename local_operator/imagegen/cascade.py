@@ -33,14 +33,15 @@ attempt list; the tool renders it as the error note.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
+from collections.abc import Awaitable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 
+from local_operator.artifacts import ArtifactKind, JobCancelled, JobSpec, JobUnavailable
+from local_operator.artifacts import walk as artifacts_walk
 from local_operator.clients._http import APIError
 from local_operator.env import resolve_radient_api_base_url
 from local_operator.imagegen import (
@@ -52,7 +53,6 @@ from local_operator.imagegen import (
 )
 from local_operator.imagegen import availability as image_availability
 from local_operator.imagegen import rungs as image_rungs
-from local_operator.imagegen.errors import failure_reason_class
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.radient_credentials import (
     has_persisted_radient_credential,
@@ -72,29 +72,35 @@ IMAGE_RUNG_TIMEOUT_S = 240.0
 IMAGE_GENERATION_TIMEOUT_S = 300.0
 
 #: Human labels for attempt lines (the tokens themselves travel in details).
-RUNG_LABELS = {
+#: ``str``-keyed on purpose: the members ARE their wire spellings, so string
+#: routes (the generic walk's vocabulary) look up here without a conversion.
+RUNG_LABELS: dict[str, str] = {
     ImageRoute.RADIENT: "Radient",
     ImageRoute.FAL: "FAL",
     ImageRoute.OPENAI: "OpenAI",
 }
 
 
-class ImageGenerationCancelled(Exception):
+class ImageGenerationCancelled(JobCancelled):
     """The abort signal fired between polls; no task cancellation involved.
 
     The rare-race path (design §4.3): the tool converts it to a clean
     ``is_error=True`` receipt and performs the best-effort provider cancel.
     Deliberately NOT ``asyncio.CancelledError`` — that class is the loop's own
-    cancellation machinery and must propagate untouched.
+    cancellation machinery and must propagate untouched. A subclass of the
+    generic :class:`~local_operator.artifacts.JobCancelled`: the walk treats
+    every subclass as a STOP (no failover).
     """
 
 
-class ImageGenerationUnavailable(RuntimeError):
+class ImageGenerationUnavailable(JobUnavailable):
     """The cascade could not produce an image; carries the walk's record.
 
     Mirrors ``SttUnavailable``'s contract: ``attempts`` may be empty (no rung
     was available at all — the tool then names the setup remedies);
-    ``resolution`` is the full rung report either way.
+    ``resolution`` is the full rung report either way. Subclasses the generic
+    :class:`~local_operator.artifacts.JobUnavailable` so a consumer can catch
+    either layer.
     """
 
     def __init__(
@@ -164,7 +170,9 @@ async def resolve_image_route(
     )
     available = next((rung for rung in rungs if rung.available), None)
     if available is not None:
-        return ImageRouteResolution(route=available.route, reason=available.reason, rungs=rungs)
+        return ImageRouteResolution(
+            route=ImageRoute(available.route), reason=available.reason, rungs=rungs
+        )
     reason = (
         "No image provider is available: sign in to Radient (`/login radient`), "
         "store a FAL key (`lop login fal`) or export FAL_API_KEY, or store an "
@@ -174,29 +182,14 @@ async def resolve_image_route(
 
 
 def _make_pause(signal: "AbortSignal | None") -> image_rungs.PauseFn | None:
-    """The abort-aware wait every rung's poll loop uses.
+    """The abort-aware wait every rung's poll loop uses (this lane's binding).
 
-    ``None`` without a signal (library use, tests). With one: a zero-length
-    wait is a plain abort check, and a real wait races ``signal.wait()``
-    against the timeout — the signal winning raises
-    :class:`ImageGenerationCancelled`, our own task's cancellation propagates
-    untouched (that is the loop's path, not ours).
+    The generic helper lives in :mod:`local_operator.artifacts.walk`; this
+    wrapper binds :class:`ImageGenerationCancelled` so the lane's pinned call
+    sites (``test_cascade``) keep their exact spelling. ``None`` without a
+    signal (library use, tests).
     """
-    if signal is None:
-        return None
-
-    async def pause(seconds: float) -> None:
-        if signal.aborted:
-            raise ImageGenerationCancelled()
-        try:
-            await asyncio.wait_for(signal.wait(), timeout=max(0.0, seconds))
-        except TimeoutError:
-            return
-        # The wait returned because the signal fired (not because the timeout
-        # elapsed) — the user asked the walk to stop.
-        raise ImageGenerationCancelled()
-
-    return pause
+    return artifacts_walk.make_pause(signal, ImageGenerationCancelled)
 
 
 async def _call_time_key(
@@ -297,55 +290,12 @@ async def _run_route(
     )
 
 
-def _attempt_message(exc: BaseException) -> str:
-    text = str(exc).strip()
-    return text or exc.__class__.__name__
-
-
-def _status_code_of(exc: BaseException) -> int | None:
-    return exc.status_code if isinstance(exc, APIError) else None
-
-
-def _all_failed_message(attempts: list[ImageAttempt]) -> str:
-    lines = ["Image generation failed on every available provider:"]
-    for attempt in attempts:
-        label = RUNG_LABELS.get(attempt.route, str(attempt.route))
-        if attempt.outcome == "skipped":
-            lines.append(f"- {label}: skipped — {attempt.message}")
-        else:
-            lines.append(f"- {label}: {attempt.message}")
-    return "\n".join(lines)
-
-
-def _emit_rung_failure(
-    emit: image_rungs.ProgressFn | None,
-    route: ImageRoute,
-    *,
-    message: str,
-    error_type: str,
-    num_images: int,
-) -> None:
-    """The mid-walk failure update: the pair the surfaces branch on.
-
-    ``error_type`` is the SAME classification the attempt record beside it
-    carries as ``reason_class`` — one classifier, so the update and the
-    attempt cannot disagree (the Q7 wire scope: "map sensibly alongside
-    ``attempts[].reason_class``; don't duplicate/contradict"). ``stage`` is
-    ``None``: no canonical stage names a mid-walk failure — the pair is the
-    semantics, and the next update (the next rung's ``queued``) replaces it.
-    """
-    label = RUNG_LABELS.get(route, str(route))
-    image_rungs.emit_progress(
-        emit,
-        f"Generating via {label}: failed — {message}",
-        **image_rungs.progress_details(
-            stage=None,
-            provider=str(route),
-            num_images=num_images,
-            error=message,
-            error_type=error_type,
-        ),
-    )
+# ``_attempt_message`` / ``_status_code_of`` / ``_all_failed_message`` /
+# ``_emit_rung_failure`` moved to :mod:`local_operator.artifacts.walk` in media
+# wave-2 (generic over kind and labels). This lane's byte-identical sentences
+# and label lookups ride the walk's parameters: ``RUNG_LABELS`` below is the
+# ``labels`` mapping it is given, and the all-failed header ("Image generation
+# failed on every available provider:") is derived from the artifact kind.
 
 
 async def run_image_cascade(
@@ -365,7 +315,14 @@ async def run_image_cascade(
     emit: image_rungs.ProgressFn | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> ImageOutcome:
-    """Run the image cascade. See module docstring for the failure contract."""
+    """Run the image cascade. See module docstring for the failure contract.
+
+    The walk itself is generic
+    (:func:`local_operator.artifacts.walk.run_job_walk`); this function is the
+    image lane's binding of it: the kind, the available candidates, the
+    labels, the budgets, and a dispatch closure wired to THIS module's
+    ``_run_route`` so the pinned monkeypatch seam keeps intercepting.
+    """
     resolution = await resolve_image_route(config_dir, base_url=base_url, store=store)
     candidates = [rung.route for rung in resolution.rungs if rung.available]
     if not candidates:
@@ -375,113 +332,59 @@ async def run_image_cascade(
     store, owned = _ensure_store(config_dir, store)
     handle = handle if handle is not None else image_rungs.CancelHandle()
     pause = _make_pause(signal)
-    attempts: list[ImageAttempt] = []
-    deadline = time.monotonic() + IMAGE_GENERATION_TIMEOUT_S
+
+    def _dispatch(route_str: str) -> Awaitable[image_rungs.RungResult]:
+        """One rung, through the module-global ``_run_route`` AT CALL TIME.
+
+        The module-global read is load-bearing: ``test_cascade`` monkeypatches
+        ``cascade._run_route`` and every dispatch must be intercepted. The walk
+        hands route STRINGS (its generic layer carries no enum); convert back
+        to the ``ImageRoute`` member before calling the seam, because the
+        lane's fakes and executors compare against the members.
+        """
+        return _run_route(
+            ImageRoute(route_str),
+            prompt=prompt,
+            config_dir=config_dir,
+            radient_base=radient_base,
+            store=store,
+            source_url=source_url,
+            strength=strength,
+            image_size=image_size,
+            num_images=num_images,
+            seed=seed,
+            model=model,
+            handle=handle,
+            emit=emit,
+            pause=pause,
+            client=client,
+        )
+
+    def _on_exhausted(
+        message: str, attempts: tuple[ImageAttempt, ...]
+    ) -> ImageGenerationUnavailable:
+        return ImageGenerationUnavailable(message, resolution=resolution, attempts=attempts)
+
     try:
-        for route in candidates:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                attempts.append(
-                    ImageAttempt(
-                        route=route,
-                        outcome="skipped",
-                        reason_class="timeout",
-                        message=(
-                            "The overall generation budget was spent before this "
-                            "provider was reached."
-                        ),
-                    )
-                )
-                continue
-            budget = min(IMAGE_RUNG_TIMEOUT_S, remaining)
-            try:
-                result = await asyncio.wait_for(
-                    _run_route(
-                        route,
-                        prompt=prompt,
-                        config_dir=config_dir,
-                        radient_base=radient_base,
-                        store=store,
-                        source_url=source_url,
-                        strength=strength,
-                        image_size=image_size,
-                        num_images=num_images,
-                        seed=seed,
-                        model=model,
-                        handle=handle,
-                        emit=emit,
-                        pause=pause,
-                        client=client,
-                    ),
-                    timeout=budget,
-                )
-            except (ImageGenerationCancelled, asyncio.CancelledError):
-                # User cancellation is a STOP, not a failure: no failover.
-                raise
-            except TimeoutError:
-                timeout_message = (
-                    f"{RUNG_LABELS.get(route, route)} exceeded its "
-                    f"{int(budget)}s generation budget."
-                )
-                attempts.append(
-                    ImageAttempt(
-                        route=route,
-                        outcome="failed",
-                        reason_class="timeout",
-                        message=timeout_message,
-                    )
-                )
-                _emit_rung_failure(
-                    emit,
-                    route,
-                    message=timeout_message,
-                    error_type="timeout",
-                    num_images=num_images,
-                )
-                continue
-            except image_rungs.RungSkipped as exc:
-                attempts.append(
-                    ImageAttempt(
-                        route=route,
-                        outcome="skipped",
-                        reason_class=exc.reason_class,
-                        message=str(exc),
-                    )
-                )
-                continue
-            except Exception as exc:  # noqa: BLE001 - every rung failure fails forward
-                reason_class = failure_reason_class(exc)
-                attempt_message = _attempt_message(exc)
-                attempts.append(
-                    ImageAttempt(
-                        route=route,
-                        outcome="failed",
-                        reason_class=reason_class,
-                        message=attempt_message,
-                        status_code=_status_code_of(exc),
-                    )
-                )
-                _emit_rung_failure(
-                    emit,
-                    route,
-                    message=attempt_message,
-                    error_type=reason_class,
-                    num_images=num_images,
-                )
-                continue
-            attempts.append(ImageAttempt(route=route, outcome="ok"))
-            return ImageOutcome(
-                assets=tuple(result.assets),
-                route=route,
-                attempts=tuple(attempts),
-                model=result.model,
+        return await artifacts_walk.run_job_walk(
+            kind=ArtifactKind.IMAGE,
+            spec=JobSpec(
+                kind=ArtifactKind.IMAGE,
                 prompt=prompt,
+                count=num_images,
                 seed=seed,
-                generation_id=result.generation_id,
-                cost_usd=result.cost_usd,
-            )
-        raise ImageGenerationUnavailable(
-            _all_failed_message(attempts), resolution=resolution, attempts=tuple(attempts)
+                model=model,
+            ),
+            candidates=candidates,
+            labels=RUNG_LABELS,
+            call=_dispatch,
+            handle=handle,
+            emit=emit,
+            pause=pause,
+            tool="generate_image",
+            rung_timeout_s=IMAGE_RUNG_TIMEOUT_S,
+            overall_timeout_s=IMAGE_GENERATION_TIMEOUT_S,
+            on_exhausted=_on_exhausted,
         )
     finally:
         if owned:
