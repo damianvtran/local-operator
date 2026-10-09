@@ -750,6 +750,46 @@ def test_remover_refuses_a_symlink_into_a_store(tmp_path: Path) -> None:
     assert victim.exists()
 
 
+def test_remover_refuses_a_symlink_target_before_any_widening(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review F1 / QA Q1, reproduced on the previous head: a symlink sitting in
+    ``sessions/`` as the target passed every guard (resolution had already
+    followed the link), ``rmtree`` refused the link itself, and the pre-widen
+    walk then widened modes inside the LINKED-TO tree — a session this call was
+    never asked to touch. The refusal must fire before any resolve and before
+    the walk: no record, no removal, and the pointed-at tree stays
+    byte-identical."""
+    mark_store(tmp_path / "sessions")
+    victim = tmp_path / "sessions" / "foo"
+    ro = victim / "scratchpad" / "ro"
+    ro.mkdir(parents=True)
+    wal = ro / "wal.db"
+    wal.write_text("probe\n", encoding="utf-8")
+    os.chmod(wal, 0o444)
+    os.chmod(ro, 0o555)
+    link = tmp_path / "sessions" / "linked"
+    link.symlink_to(victim)
+    before = (os.lstat(ro).st_mode, os.lstat(wal).st_mode)
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.cleanup"):
+        removed = remove_session_dir(
+            link, config_dir=tmp_path, policy="p", reason="r", actor="test"
+        )
+    assert removed is False
+    assert link.is_symlink()
+    assert victim.exists()
+    assert (os.lstat(ro).st_mode, os.lstat(wal).st_mode) == before
+    assert not any("widened" in r.getMessage() for r in caplog.records)
+    assert not (tmp_path / "sessions" / CLEANUP_LOG_NAME).exists()
+    # The refusal leaves the read-only victim in place (that is the point);
+    # restore its write bits so tmp_path teardown can reap it.
+    for leftover in (ro, wal):
+        try:
+            os.chmod(leftover, 0o755)
+        except OSError:
+            pass
+
+
 def test_remover_removes_a_marked_store_entry(tmp_path: Path) -> None:
     mark_store(tmp_path / "sessions")
     target = tmp_path / "sessions" / "abc"
@@ -855,6 +895,68 @@ def test_remover_clears_a_no_permission_leftover_inside_a_scratchpad(
     # why it is not part of the count.
     widened = [r.getMessage() for r in caplog.records if "widened" in r.getMessage()]
     assert len(widened) == 1 and "widened 2 path(s)" in widened[0]
+
+
+def test_the_widen_walk_stops_at_its_caps_and_the_removal_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review F3: the caps are load-bearing for the "bounded" claim, so pin
+    them. A direct call shows the walk widens up to a patched cap and no
+    further — the blocker one level past it keeps mode 0000 — and the removal
+    then fails closed: the error reaches the caller and the directory stays.
+    Caps are patched small to keep this cheap (QA verified the shipped
+    constants by hand: a 0000 at depth 16/17, and a 20,001-entry scan)."""
+    mark_store(tmp_path / "sessions")
+
+    # Depth: cap 3, blocker at depth 4 (target=0 .. b=3, guard=4), with one
+    # widenable file inside the cap so the direct call also shows the walk ran.
+    monkeypatch.setattr(cleanup, "WIDEN_MAX_DEPTH", 3)
+    deep = tmp_path / "sessions" / "deep"
+    guard = deep / "scratchpad" / "a" / "b" / "guard"
+    inner = guard / "inner"
+    inner.mkdir(parents=True)
+    (inner / "file.txt").write_text("x", encoding="utf-8")
+    loose = deep / "scratchpad" / "loose.txt"
+    loose.write_text("x", encoding="utf-8")
+    os.chmod(loose, 0o444)
+    os.chmod(inner, 0o000)
+    os.chmod(guard, 0o000)
+
+    assert cleanup._widen_for_removal(deep) == 1
+    assert (os.lstat(loose).st_mode & 0o777) == 0o744
+    assert (os.lstat(guard).st_mode & 0o777) == 0o000  # one level past the cap
+    with pytest.raises(OSError):
+        remove_session_dir(deep, config_dir=tmp_path, policy="p", reason="r", actor="test")
+    assert deep.exists()
+    for leftover in (guard, inner):
+        try:
+            os.chmod(leftover, 0o755)
+        except OSError:
+            pass
+
+    # Entries: cap 2: the examined-entry count passes it while scanning the
+    # scratchpad, long before the blocker's own directory is reached.
+    monkeypatch.setattr(cleanup, "WIDEN_MAX_DEPTH", 16)
+    monkeypatch.setattr(cleanup, "WIDEN_MAX_ENTRIES", 2)
+    many = tmp_path / "sessions" / "many"
+    e_guard = many / "scratchpad" / "p1" / "guard"
+    e_inner = e_guard / "inner"
+    e_inner.mkdir(parents=True)
+    for name in ("p2", "p3"):
+        (many / "scratchpad" / name).mkdir()
+    os.chmod(e_inner, 0o000)
+    os.chmod(e_guard, 0o000)
+
+    assert cleanup._widen_for_removal(many) == 0
+    assert (os.lstat(e_guard).st_mode & 0o777) == 0o000  # past the entry cap
+    with pytest.raises(OSError):
+        remove_session_dir(many, config_dir=tmp_path, policy="p", reason="r", actor="test")
+    assert many.exists()
+    for leftover in (e_guard, e_inner):
+        try:
+            os.chmod(leftover, 0o755)
+        except OSError:
+            pass
 
 
 def test_remover_fails_closed_when_the_widening_cannot_help(

@@ -429,12 +429,24 @@ def mark_store(sessions_dir: Path) -> None:
 def _refusal(target: Path, config_dir: Path | None) -> str | None:
     """Why :func:`remove_session_dir` must not touch ``target``; ``None`` if it may.
 
-    Three independent checks, each sufficient to refuse: the target must be
-    directly under a ``sessions/`` directory; that directory must carry the
+    Four independent checks, each sufficient to refuse: the target itself must
+    not be a symlink — refused BEFORE any resolve, because a resolve would
+    follow it and everything downstream (the record, the widen phases) would
+    treat the pointed-at tree as the directory selected for deletion; it must
+    be directly under a ``sessions/`` directory; that directory must carry the
     store marker; and, when a ``config_dir`` is given, it must be THAT config
     dir's store. Paths are resolved so a symlink into the real store cannot
-    launder itself through a marked scratch store.
+    launder itself through a marked scratch store. (The pre-resolve check is
+    the one that can fire: once resolved, a link has already been followed, so
+    no post-resolve ``is_symlink`` test could ever be true — review F1, QA Q1.)
     """
+    try:
+        if target.is_symlink():
+            return "target is a symlink"
+    except OSError:
+        # An unreadable target lands here; ``resolve`` below refuses it with
+        # its own reason, exactly as it did before this check existed.
+        pass
     try:
         resolved = target.resolve(strict=True)
     except OSError:
@@ -451,7 +463,7 @@ def _refusal(target: Path, config_dir: Path | None) -> str | None:
             return "config dir cannot be resolved"
         if parent != expected:
             return f"store {parent} is not this process's store {expected}"
-    if resolved.is_symlink() or not resolved.is_dir():
+    if not resolved.is_dir():
         return "not a directory"
     return None
 
