@@ -26,7 +26,11 @@ from pydantic import (
 from starlette.background import BackgroundTask
 
 from local_operator.harness.types import ModelSpec
-from local_operator.media import SUPPORTED_AUDIO_MIME_TYPES, SUPPORTED_IMAGE_MIME_TYPES
+from local_operator.media import (
+    SUPPORTED_AUDIO_MIME_TYPES,
+    SUPPORTED_IMAGE_MIME_TYPES,
+    SUPPORTED_VIDEO_MIME_TYPES,
+)
 from local_operator.network.projection import ProjectionRefusal
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_mesh import MESH_ID_PATTERN
@@ -624,12 +628,17 @@ AttachmentDigest = Annotated[str, Path(pattern=r"^[a-f0-9]{32}$")]
 ATTACHMENT_FALLBACK_MIME = "application/octet-stream"
 
 #: Mimes the two attachment-fetch routes may serve as themselves: the image
-#: set above plus the audio sniffer's output set. Same principle the comment
-#: above states (an allowlist of exactly what the media ingress can produce),
-#: extended to recordings now that durable user rows can carry them: a stored
-#: audio block is served as the container its bytes verified as, and anything
-#: else — including every non-audio mime — still falls back to octet-stream.
-ATTACHMENT_SERVABLE_MIME_TYPES = SUPPORTED_IMAGE_MIME_TYPES | SUPPORTED_AUDIO_MIME_TYPES
+#: set above, the audio sniffer's output set, and the output-attachment
+#: contract's video containers. Same principle the comment above states (an
+#: allowlist, not the store's word) extended twice: recordings arrived with
+#: durable user rows, and video arrives with artifacts produced by tools.
+#: Video is the one member with no sniffer behind it — the container is what
+#: the producing tool registered — so for it the set is the contract's closed
+#: vocabulary; anything outside it, for every kind, still falls back to
+#: octet-stream.
+ATTACHMENT_SERVABLE_MIME_TYPES = (
+    SUPPORTED_IMAGE_MIME_TYPES | SUPPORTED_AUDIO_MIME_TYPES | SUPPORTED_VIDEO_MIME_TYPES
+)
 
 
 class Input(BaseModel):
