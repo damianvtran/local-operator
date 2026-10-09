@@ -347,16 +347,19 @@ Create the session ON the peer when the work is new:
 ```bash
 lop network sessions --peer <id> --create --name <n> --prompt <p> --json
 # → `{ok, session_id, admitted, agent, model, team, duplicate, detail, record}`
-#   (plus `unattended_notice` on an implied `--yolo` that fell back): the DEVICE
-#   is the `--peer` you passed, NOT a `peer` key; the human receipt says
-#   "created on <peer>"
+#   (the PROMPTED shape: a promptless create carries `warming` and no
+#   `agent`/`team`, a create naming a definition adds `definitions`, and
+#   `unattended_notice` appears on an implied `--yolo` that fell back): the
+#   DEVICE is the `--peer` you passed, NOT a `peer` key; the human receipt
+#   says "created on <peer>"
 ```
 
 The create mints the id on that device, reconciles the definitions it names
 (`--profile`, `--team`, `--agent`) onto it first, and says in the receipt what
-the session runs as. The flag set is the table in "Which device should run this
-session"; the precedence rule, and the by-name refusal for a profile, team or
-agent that does not resolve there, are in "Who the session on the peer runs as".
+the session runs as. The flag set is the table and the flag paragraph under it in
+"Which device should run this session"; the precedence rule, and the by-name
+refusal for a profile, team or agent that does not resolve there, are in "Who the
+session on the peer runs as".
 
 Then drive the conversation where it lives. Each act takes an id OR a name and
 returns the owner's receipt, which names the device that actually acted:
@@ -366,10 +369,12 @@ returns the owner's receipt, which names the device that actually acted:
   device.
 - `--peek` is the family's READ and drives nothing — a stored session refuses
   it and names the warm-up rather than starting a runtime nobody is watching.
-- `--engage` warms a stored conversation; `--stop` ends the session — on one
-  whose turn is in flight it SKIPS (`outcome: skipped`, rc 1, the target left
-  UNTOUCHED) unless you add `--force`; `--archive`/`--unarchive` hide or
-  restore it there, and `--delete` is a dry run until `--yes`.
+- `--engage` warms a stored conversation; `--stop` stops the session where it
+  lives — a healthy target is ENDED by the plain form even mid-turn, and only a
+  target already leaving after a signal, or one mid-turn whose socket will not
+  answer, is SKIPPED (`outcome: skipped`, rc 1, target left UNTOUCHED), with
+  `--force` the way past either; `--archive`/`--unarchive` hide or restore it
+  there, and `--delete` is a dry run until `--yes`.
 
 The exact flags, the text-positional rule and the `--stop`/`--force` contract
 are the table and the paragraphs in "Which device should run this session".
@@ -631,10 +636,14 @@ mistaken for a complete one.
 
 A STOP THAT DID NOT ACT EXITS NON-ZERO. `--stop` answers `{"ok": true}` with rc 0
 only for an outcome that ENDED the target: `stopped`, `killed`, `already-gone`, or
-`not_running` (which is itself the answer to "did it stop"). A target whose turn is
-in flight is `{"ok": false, "outcome": "skipped", "rung": "busy"}` with rc 1, a
-sentence naming both ways forward, and the target LEFT UNTOUCHED — stop it again
-once the turn ends, or add `--force`. The same rule covers `refused`, where the
+`not_running` (which is itself the answer to "did it stop"). A HEALTHY target is
+ended by the plain form even mid-turn — the ladder asks its socket FIRST, and a
+stop the user asked for is one they want. The skip covers the two states that rung
+cannot reach: a target already leaving after a signal, and one mid-turn whose own
+socket will not answer. That second one is `{"ok": false, "outcome": "skipped",
+"rung": "busy"}` with rc 1, a sentence naming both ways forward, and the target
+LEFT UNTOUCHED — stop it again once the turn ends, or add `--force`. The same rule
+covers `refused`, where the
 owner could not prove the process it would signal was the one it recorded. The
 `outcome` word is what says which happened; rc alone does not.
 
