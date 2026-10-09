@@ -12,7 +12,7 @@ committed bytes drift from `build.py`.
 | dir | what | consumers assert |
 |---|---|---|
 | `rows/*.json` | full journal lines (`{id,ts,type:"custom",payload:{custom_type:"supplement_v1",details}}`) | parse + re-serialise byte-stable; `queued_stale.json` is THE stale-row fixture (`state=queued`, no live job) |
-| `rows/dispositions.json` | what every surface must paint per row, live job vs cold reader | the stale-row rule and display copy of §2.8 |
+| `rows/dispositions.json` | what every surface must paint per row, live job vs cold reader; `files_*` = the row's file callouts above the line (§2.4: files do not wait for the generator) | the stale-row rule and display copy of §2.8 |
 | `rows/journal_versions.json` | two versions of one anchor in journal order | newest-version-wins |
 | `events/*.json` | `supplement_progress` events, one per state | `SupplementProgressEvent` round trip; `running`/`cancelling` are live-only |
 | `messages/messages.json` | host->frame theme/ping; accepted and REJECTED frame->host shapes | the nonce echo and the four accepted shapes `ready|resize|error|pong` |

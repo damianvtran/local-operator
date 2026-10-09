@@ -125,6 +125,47 @@ def test_split_component_merges_blocks_and_rejects_conflicts() -> None:
         split_component("<data>[1]</data>")
 
 
+def test_a_non_finite_number_is_refused_at_both_boundaries() -> None:
+    """Agent review R5: ``NaN``/``Infinity`` would reach ``lo-data`` as bare tokens that
+    ``JSON.parse`` refuses, killing the whole prelude (no ``LO``, no ``ready``)."""
+    for token in ("NaN", "Infinity", "-Infinity"):
+        with pytest.raises(ValueError, match="non-finite"):
+            split_component(f'<data>{{"a":[[1,{token}]]}}</data><p></p>')
+    for value in (float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            data_json({"a": {"rows": [[value]]}})
+        with pytest.raises(ValueError):
+            assemble_document("<p></p>", {"a": value})
+
+
+def test_a_dataset_string_containing_the_close_tag_stays_whole() -> None:
+    """Agent review R6(a): the JSON is parsed in place, so ``</data>`` inside a value does
+    not end the block."""
+    body, data = split_component('<data>{"a":{"title":"x</data>y"}}</data>\n<p>b</p>')
+    assert data == {"a": {"title": "x</data>y"}} and body == "<p>b</p>"
+
+
+def test_attributes_on_the_data_tag_are_tolerated() -> None:
+    """Agent review R6(b): ``<data value="…">`` is still a data block, not body text."""
+    body, data = split_component('<data value="7">{"a":1}</data ><DATA>{"b":2}</DATA><p>b</p>')
+    assert data == {"a": 1, "b": 2} and body == "<p>b</p>"
+    # ...and <datalist> is not a <data> tag
+    assert split_component("<datalist></datalist>") == ("<datalist></datalist>", {})
+
+
+def test_only_the_leading_blocks_are_data_and_the_body_is_kept_verbatim() -> None:
+    """Agent review R6(c): a ``<data>`` the body's own script mentions is the body's."""
+    body_in = '<div id="c"></div><script>var s="<data>{\\"z\\":1}</data>"</script>'
+    body, data = split_component('<data>{"a":1}</data>\n' + body_in)
+    assert data == {"a": 1} and body == body_in
+    assert split_component(body_in) == (body_in, {})
+
+
+def test_a_block_with_trailing_text_after_its_json_is_refused() -> None:
+    with pytest.raises(ValueError, match="exactly one JSON object"):
+        split_component('<data>{"a":1} trailing</data>')
+
+
 def test_the_prelude_files_are_package_data() -> None:
     """The wheel must carry what the assembler reads at runtime."""
     import tomllib

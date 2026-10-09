@@ -11,7 +11,8 @@ to it is a change to every surface at once. Three things are therefore pinned:
   version fails;
 * the BEHAVIOUR the contract promises of the frame -- the nonce echo (memo §4.1 S-R4) and
   the label geometry at the 220 px floor -- by executing the real ``prelude.js`` under node
-  against a stub DOM (``prelude_harness.mjs``; skipped where node is absent).
+  against a stub DOM (``prelude_harness.mjs``). Without node these FAIL on CI (``CI`` set)
+  and skip with a reason locally -- never a silent pass.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -26,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.supplements import document
+from local_operator.supplements import contract, document
 from tests.unit.supplements.conftest import FIXTURES, load
 
 PRELUDE_DIR = Path(document.__file__).resolve().parent / "prelude"
@@ -39,12 +41,26 @@ GZIP_CAP = 4608
 #: The pinned pair. Change these ONLY with a rebuilt pair, a bumped PRELUDE_VERSION and the
 #: size table in prelude/BUILD.md. The sizes are the numbers the PR reports.
 PINNED_CSS_BYTES = 2044
-PINNED_JS_BYTES = 8259
-PINNED_GZIP_BYTES = 4577
-PINNED_DIGEST = "0d00f76d478ce84e0d2546ebc882f61d5505d357db48cbaa49c5533e55220ad2"
+PINNED_JS_BYTES = 8202
+PINNED_GZIP_BYTES = 4607
+PINNED_DIGEST = "84545fe0244dc3ee4cb2b285bb55435d0f32926902769e448e3c4a6c3924aa36"
 PINNED_VERSION = 1
 
-needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+
+@pytest.fixture
+def node_available() -> None:
+    """The behaviour tests below are the ONLY execution of the prelude's JS in the suite, so
+    a missing ``node`` must never read as green: on CI it is a failure (the runner image
+    ships node; losing it would silently drop the nonce and geometry coverage), locally a
+    skip whose reason says what did not run."""
+    if shutil.which("node") is not None:
+        return
+    if os.environ.get("CI"):
+        pytest.fail("node is not on PATH: the prelude behaviour tests cannot run on CI")
+    pytest.skip("node is not installed: the prelude's JS behaviour was NOT exercised")
+
+
+needs_node = pytest.mark.usefixtures("node_available")
 
 
 def _pair() -> tuple[bytes, bytes]:
@@ -184,14 +200,83 @@ def test_messages_not_from_the_parent_are_ignored(tmp_path: Path) -> None:
 
 
 @needs_node
-def test_the_nonce_is_not_reachable_from_a_component_script(tmp_path: Path) -> None:
-    scenario = {"steps": [theme("secret-nonce")]}
-    out = _run(scenario, tmp_path)
-    assert "secret-nonce" not in json.dumps(out["texts"])
-    # LO's documented surface carries no nonce member (checked on the source: the value
-    # lives in a closure variable, never on `window.LO`).
-    js = (PRELUDE_DIR / "prelude.js").read_text(encoding="utf-8")
-    assert "LO.nonce" not in js and "nonce:" not in js
+def test_content_inside_the_frame_can_read_the_nonce_by_design(tmp_path: Path) -> None:
+    """Pins the TRUE property (agent review R1 / QA Q-1), so no later edit re-states the
+    false one. The nonce authenticates the browsing context the host mounted -- a navigated
+    successor never received the push -- and is NOT a secret from scripts in that context:
+    ``LO.theme`` is the push as sent, and any script could add its own listener anyway.
+    Keeping it from a successor is the host's navigation rule (memo §4.1)."""
+    # h=7 marks the component's own post: the prelude's resize (posted on the same flush)
+    # carries the nonce too, so picking "the last post" would pass without the forge.
+    forge = "parent.postMessage({lo:'supplement',v:1,t:'resize',h:7,n:LO.theme.nonce},'*')"
+    out = _run({"steps": [theme("bound"), {"draw": forge}]}, tmp_path)
+    forged = [post for post in out["posts"] if post.get("h") == 7]
+    assert len(forged) == 1, out["posts"]
+    forged = forged[0]
+    assert forged["n"] == "bound"
+    # ...which is why a host clamps every accepted value: passing the nonce check says
+    # where a post came from, not that it is benign.
+    assert contract.accept_frame_message(forged, "bound") == forged
+
+
+@needs_node
+def test_an_error_thrown_before_the_theme_push_is_posted_with_the_nonce_once_bound(
+    tmp_path: Path,
+) -> None:
+    """QA round 1, Q-2, on the real fixture: ``documents/error.html``'s inline script throws
+    during parse, BEFORE the host's theme push at ``load``. The prelude must hold that error
+    and post it -- with the nonce -- the moment the push binds it; before the fix it went
+    out unmarked, every host dropped it, and the frame stayed blank forever."""
+    import re
+
+    html = (FIXTURES / "documents" / "error.html").read_text(encoding="utf-8")
+    data_block = re.search(
+        r'<script type="application/json" id="lo-data">(.*?)</script>', html, re.S
+    )
+    assert data_block is not None
+    data = json.loads(data_block[1])
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    prelude, component = scripts[0], scripts[-1]
+    assert prelude == (PRELUDE_DIR / "prelude.js").read_text(encoding="utf-8")
+    assert "missing" in component
+    out = _run({"data": data, "steps": [{"script": component}, theme("X"), PING]}, tmp_path)
+    kinds = [post["t"] for post in out["posts"]]
+    assert kinds[0] == "ready" and "n" not in out["posts"][0]
+    errors = [post for post in out["posts"] if post["t"] == "error"]
+    assert len(errors) == 1, out["posts"]  # held, not posted unmarked AND again
+    assert errors[0]["n"] == "X" and "unknown dataset missing" in errors[0]["msg"]
+    assert contract.accept_frame_message(errors[0], "X") == errors[0]
+    # it is flushed at binding, ahead of everything else the push triggers
+    assert kinds.index("error") < kinds.index("pong")
+
+
+@needs_node
+def test_only_the_first_pre_nonce_error_is_held(tmp_path: Path) -> None:
+    """The first error is the cause; later ones are its fallout, and a host shows one line
+    either way. One slot keeps the queue bounded whatever a component throws."""
+    out = _run({"steps": [{"error": "first"}, {"error": "second"}, theme("X")]}, tmp_path)
+    errors = [post for post in out["posts"] if post["t"] == "error"]
+    assert [(e["msg"], e["n"]) for e in errors] == [("first", "X")]
+
+
+@needs_node
+@pytest.mark.parametrize(
+    ("length", "echoed"),
+    [(contract.NONCE_MAX_CHARS, True), (contract.NONCE_MAX_CHARS + 1, False)],
+)
+def test_the_frame_binds_a_nonce_up_to_the_contract_limit_and_refuses_a_longer_one(
+    tmp_path: Path, length: int, echoed: bool
+) -> None:
+    """Agent review R4: the limit is the contract's ``NONCE_MAX_CHARS`` on both sides. A
+    longer nonce is refused (bound as ""), never truncated: a truncated echo would fail
+    every host comparison while looking almost right."""
+    nonce = "a" * length
+    out = _run({"steps": [theme(nonce), PING]}, tmp_path)
+    pong = next(post for post in out["posts"] if post["t"] == "pong")
+    assert (pong.get("n") == nonce) is echoed
+    if not echoed:
+        assert "n" not in pong
+    assert (contract.accept_frame_message(pong, nonce) is not None) is echoed
 
 
 def _overlap(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, float]:

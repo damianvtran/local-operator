@@ -25,6 +25,8 @@ from typing import Any
 
 from local_operator.harness.types import SupplementProgressEvent
 from local_operator.supplements.contract import (
+    ERROR_MSG_MAX_CHARS,
+    NONCE_MAX_CHARS,
     SUPPLEMENT_CUSTOM_TYPE,
     reader_disposition,
 )
@@ -55,7 +57,9 @@ COMPONENTS: dict[str, str] = {
     "empty": "",
     # The frame-level failure case: the inline script asks the prelude for a dataset that
     # does not exist, so it throws, the window `error` handler posts {t:"error"} and the
-    # host replaces the frame with its one quiet "Couldn't render this graphic" line.
+    # host replaces the frame with its one quiet "Couldn't render this graphic" line. It
+    # throws DURING PARSE, before the host's theme push at `load`, so the prelude holds that
+    # error and posts it with the nonce once the push binds it (QA round 1, Q-2).
     "error": (
         '<data>{"lat":{"title":"Latency (ms)","columns":["region","ms"],"rows":[["us-east",120]]}}'
         "</data>\n"
@@ -145,6 +149,11 @@ ROWS: dict[str, dict[str, Any]] = {
     "decided": _row(state="decided", files=FILES, decision=DECISION),
     # THE STALE-ROW FIXTURE every lane asserts against (memo §2.4): non-terminal, no live job
     "queued_stale": _row(state="queued", files=FILES, decision=DECISION),
+    # graphics only, no files decided: the plain `preparing` / `cancelled_retry` pair (the
+    # `files_*` dispositions above are what a row WITH files paints; memo §2.4)
+    "queued_no_files": _row(
+        anchor=ANCHOR_B, job=JOB_B, state="queued", decision=DECISION, at=AT + 60
+    ),
     "done_populated": _row(
         version=2,
         state="done",
@@ -227,6 +236,11 @@ EVENTS: dict[str, dict[str, Any]] = {
     "skipped": _event(state="skipped"),
 }
 
+
+def _pong(nonce: str) -> dict[str, Any]:
+    return {"lo": "supplement", "v": 1, "t": "pong", "n": nonce}
+
+
 TOKEN = "n-4f2a9c1e07b3"  # a per-frame nonce, as the host would mint it
 MESSAGES = {
     "host": {
@@ -262,6 +276,30 @@ MESSAGES = {
         "unknown_type": {"lo": "supplement", "v": 1, "t": "navigate", "n": TOKEN},
         "wrong_version": {"lo": "supplement", "v": 2, "t": "pong", "n": TOKEN},
         "wrong_tag": {"lo": "supplement-host", "v": 1, "t": "pong", "n": TOKEN},
+        "error_message_not_a_string": {
+            "lo": "supplement",
+            "v": 1,
+            "t": "error",
+            "msg": 3,
+            "n": TOKEN,
+        },
+        "error_message_too_long": {
+            "lo": "supplement",
+            "v": 1,
+            "t": "error",
+            "msg": "x" * (ERROR_MSG_MAX_CHARS + 1),
+            "n": TOKEN,
+        },
+    },
+    # NONCE_MAX_CHARS, at the boundary: a host that mints one character more than the limit
+    # gets a frame that binds "" (refused, never truncated), so nothing it posts can match.
+    "nonce_boundary": {
+        "max_chars": NONCE_MAX_CHARS,
+        "accepted": {"nonce": "a" * NONCE_MAX_CHARS, "message": _pong("a" * NONCE_MAX_CHARS)},
+        "rejected": {
+            "nonce": "a" * (NONCE_MAX_CHARS + 1),
+            "message": _pong("a" * (NONCE_MAX_CHARS + 1)),
+        },
     },
 }
 

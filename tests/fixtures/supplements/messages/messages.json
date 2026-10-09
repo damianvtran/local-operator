@@ -99,6 +99,41 @@
       "v": 1,
       "t": "pong",
       "n": "n-4f2a9c1e07b3"
+    },
+    "error_message_not_a_string": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "error",
+      "msg": 3,
+      "n": "n-4f2a9c1e07b3"
+    },
+    "error_message_too_long": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "error",
+      "msg": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "n": "n-4f2a9c1e07b3"
+    }
+  },
+  "nonce_boundary": {
+    "max_chars": 64,
+    "accepted": {
+      "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message": {
+        "lo": "supplement",
+        "v": 1,
+        "t": "pong",
+        "n": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "rejected": {
+      "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message": {
+        "lo": "supplement",
+        "v": 1,
+        "t": "pong",
+        "n": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
     }
   }
 }

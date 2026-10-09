@@ -161,12 +161,38 @@ class SupplementDetails(TypedDict):
 
 #: What a surface paints for the NEWEST row of an anchor. One of:
 #:
-#: * ``preparing``       -- ``◌ Preparing highlights… · Adjust… · Cancel``
-#: * ``block``           -- the settled block (files and/or components)
-#: * ``cancelled_retry`` -- ``Highlights cancelled · Retry`` (neutral ink)
-#: * ``failed_retry``    -- ``Couldn't prepare highlights · Retry``
-#: * ``nothing``         -- no line at all
-ReaderDisposition = Literal["preparing", "block", "cancelled_retry", "failed_retry", "nothing"]
+#: * ``preparing``             -- ``◌ Preparing highlights… · Adjust… · Cancel``
+#: * ``files_preparing``       -- the row's file callouts, then the ``preparing`` line
+#: * ``block``                 -- the settled block (files and/or components)
+#: * ``cancelled_retry``       -- ``Highlights cancelled · Retry`` (neutral ink)
+#: * ``files_cancelled_retry`` -- the row's file callouts, then ``cancelled_retry``
+#: * ``failed_retry``          -- ``Couldn't prepare highlights · Retry``
+#: * ``files_failed_retry``    -- the row's file callouts, then ``failed_retry``
+#: * ``nothing``               -- no line at all
+#:
+#: The ``files_*`` values exist because memo §2.4 writes ``files`` on the FIRST row
+#: (``decided``) precisely so "file callouts appear without waiting for the generator": a
+#: one-value disposition that only said ``preparing`` would have every surface hide them
+#: until ``done``, and a cold reader would drop on reload files the user already saw. Once
+#: shown, files stay shown whatever the generator then does; only supersede/dismiss/skip
+#: hide them (they hide the whole row).
+ReaderDisposition = Literal[
+    "preparing",
+    "files_preparing",
+    "block",
+    "cancelled_retry",
+    "files_cancelled_retry",
+    "failed_retry",
+    "files_failed_retry",
+    "nothing",
+]
+
+
+_WITH_FILES: Final[dict[ReaderDisposition, ReaderDisposition]] = {
+    "preparing": "files_preparing",
+    "cancelled_retry": "files_cancelled_retry",
+    "failed_retry": "files_failed_retry",
+}
 
 
 def reader_disposition(row: Mapping[str, Any], *, job_live: bool) -> ReaderDisposition:
@@ -181,7 +207,8 @@ def reader_disposition(row: Mapping[str, Any], *, job_live: bool) -> ReaderDispo
     Precedence is the memo's: a superseded or dismissed row renders nothing whatever its
     state; then the committed ``state`` decides (a job-level ``failed`` is never replaced
     by the frame-level fallback line, which is a surface concern and never rewrites a
-    row).
+    row). A non-``done`` row that carries ``files`` paints them above its line (the
+    ``files_*`` values): the decision wrote them first so they need not wait (§2.4).
     """
     state = row.get("state")
     if row.get("error") == SUPERSEDED_ERROR or row.get("dismissed") or state == "skipped":
@@ -194,24 +221,31 @@ def reader_disposition(row: Mapping[str, Any], *, job_live: bool) -> ReaderDispo
             else "nothing"
         )
     if state == "failed":
-        return "failed_retry"
-    if state == "cancelled":
-        return "cancelled_retry"
-    if state in ("decided", "queued", "running", "cancelling"):
-        return "preparing" if job_live else "cancelled_retry"
-    return "nothing"
+        line: ReaderDisposition = "failed_retry"
+    elif state == "cancelled":
+        line = "cancelled_retry"
+    elif state in ("decided", "queued", "running", "cancelling"):
+        line = "preparing" if job_live else "cancelled_retry"
+    else:
+        return "nothing"
+    return _WITH_FILES[line] if row.get("files") else line
 
 
 def newest_per_anchor(rows: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
     """Newest-version-wins per anchor. Ties (a re-read of the same version) keep the later
-    row in journal order, which is the one the writer appended last."""
+    row in journal order, which is the one the writer appended last.
+
+    A row whose ``anchor`` is not a string or whose ``version`` is not an integer (``bool``
+    excluded) is SKIPPED, never coerced: readers must tolerate rows from other builds
+    (:class:`SupplementDetails`), and one malformed line must not stop a history page from
+    rendering every other anchor."""
     newest: dict[str, Mapping[str, Any]] = {}
     for row in rows:
-        anchor = row.get("anchor")
-        if not isinstance(anchor, str):
+        anchor, version = row.get("anchor"), row.get("version")
+        if not isinstance(anchor, str) or not isinstance(version, int) or isinstance(version, bool):
             continue
         held = newest.get(anchor)
-        if held is None or int(row.get("version", 0)) >= int(held.get("version", 0)):
+        if held is None or version >= held["version"]:
             newest[anchor] = row
     return newest
 
@@ -227,13 +261,18 @@ def is_digest(value: object) -> bool:
 #: A viewer that renders supplements. The ATTACH gate has two halves, ANDed: the runtime's
 #: owner-record capability list (assembled beside ``display-history-audit-v1``) and the
 #: viewer's own boolean on its auth frame (``auth["supplements"] = True``). The desktop
-#: live path negotiates by the events route's query param ``supplements=1`` instead (the
-#: ``frontend_replace``/``entry_ts`` shape); relay and attach clients read the owner's
-#: list. See :func:`negotiated`.
+#: live path negotiates by :data:`SUPPLEMENTS_QUERY_PARAM` instead; relay and attach
+#: clients read the owner's list. See :func:`negotiated`.
 SUPPLEMENTS_CAPABILITY: Final = "supplements-v1"
 #: The auth-frame key a viewer declares. A name on ``network.dial.AUTH_FIELDS`` so a
 #: relayed dial forwards it (the entry-times declaration once shipped inert for want of it).
 SUPPLEMENTS_AUTH_FIELD: Final = "supplements"
+#: The desktop live path's declaration: the events route's query parameter, sent as
+#: ``?supplements=1`` (the ``frontend_replace``/``entry_ts`` shape), because that route has no
+#: auth frame to carry :data:`SUPPLEMENTS_AUTH_FIELD`. Named here so lanes C1 (route) and
+#: U-b (client) cannot spell it differently; C0 adds no route behaviour.
+SUPPLEMENTS_QUERY_PARAM: Final = "supplements"
+SUPPLEMENTS_QUERY_VALUE: Final = "1"
 #: ``GET /v1/capabilities`` ``features`` key and version. The STATIC HTTP flag; it is not
 #: the attach gate (memo round-1 R5).
 SUPPLEMENTS_FEATURE_KEY: Final = "supplements"
@@ -278,6 +317,13 @@ FRAME_MESSAGE_TYPES: Final = ("ready", "resize", "error", "pong")
 #: Those that can move host state and so MUST echo the per-frame nonce. ``ready`` precedes
 #: the first theme push (which is what delivers the nonce) and moves nothing.
 NONCE_REQUIRED_TYPES: Final = ("resize", "error", "pong")
+#: The longest nonce a host may mint, in characters. The prelude BINDS a longer one as ""
+#: (refused, never truncated -- a truncated echo would silently fail every comparison), so a
+#: host that minted one would have every state-moving post dropped and its watchdog unmount
+#: the frame. 64 holds 48 random bytes in base64 or 32 in hex; mint within it.
+NONCE_MAX_CHARS: Final = 64
+#: The longest ``msg`` an ``error`` may carry (the prelude slices to this).
+ERROR_MSG_MAX_CHARS: Final = 300
 #: The watchdog bound: a frame that never posts ``ready`` or fails to answer a ping in this
 #: long is unmounted into the FRAME-level fallback line (never a rewrite of the row).
 WATCHDOG_S: Final = 5.0
@@ -285,8 +331,18 @@ WATCHDOG_S: Final = 5.0
 
 class ThemeMessage(TypedDict):
     """Host -> frame. ``vars`` holds RESOLVED values (never a palette id) for names
-    matching ``--lo-*``/``--font-*``; the nonce is minted per frame by the host and sent
-    in its FIRST theme push. The frame binds the first nonce and ignores later ones."""
+    matching ``--lo-*``/``--font-*``; the nonce is minted per frame by the host (at most
+    :data:`NONCE_MAX_CHARS` characters) and sent in its FIRST theme push. The frame binds
+    the first nonce and ignores later ones.
+
+    WHAT THE NONCE IS (memo §4.1 S-R4): proof that a post comes from the browsing context
+    the host mounted, because only that document received the push. It is NOT a secret
+    from code inside the frame: a component script can read it (``LO.theme`` carries the
+    push as sent, and any script can add its own ``message`` listener). So it never
+    authenticates component code against the host -- every value is still clamped -- and
+    keeping a navigated successor from being handed it is the host's job: the one-shot
+    navigation guard (Electron/native), the parent page's ``frame-src data:`` and the
+    second-``load`` teardown (relay)."""
 
     lo: Literal["supplement-host"]
     t: Literal["theme"]
@@ -302,7 +358,9 @@ class PingMessage(TypedDict):
 
 class FrameMessage(TypedDict):
     """Frame -> host. ``n`` is the nonce echo: required on resize/error/pong, absent on
-    ready. ``h`` (px) only on resize, ``msg`` (<= 300 chars) only on error."""
+    ready. ``h`` (px) only on resize, ``msg`` (<= :data:`ERROR_MSG_MAX_CHARS`) only on
+    error. An ``error`` raised before the first theme push is held by the frame and
+    posted, with ``n``, the moment that push binds the nonce."""
 
     lo: Literal["supplement"]
     v: Literal[1]
@@ -318,7 +376,13 @@ def accept_frame_message(message: object, nonce: str | None) -> FrameMessage | N
     Returns the message when it is one of the four accepted shapes and, for a
     state-moving type, carries ``nonce`` (``nonce`` is None before the host has minted one:
     then only ``ready`` can pass). Everything else -- wrong tag or version, an unknown
-    ``t``, a missing or stale nonce, a non-finite or negative ``h`` -- is ``None``.
+    ``t``, a missing or stale nonce, a host nonce longer than :data:`NONCE_MAX_CHARS` (the
+    frame would have refused it), a non-finite or negative ``h``, an ``error`` whose
+    ``msg`` is not a string of at most :data:`ERROR_MSG_MAX_CHARS` -- is ``None``.
+
+    The nonce check binds the browsing context, not the code in it (see
+    :class:`ThemeMessage`): a message that passes is from the document the host mounted,
+    which may still be hostile, so a host clamps ``h`` to its own range regardless.
 
     NOT the whole check. ``event.source === frame.contentWindow``, ``event.origin ===
     "null"``, the navigation counter and the one-message-per-animation-frame coalescing
@@ -331,8 +395,14 @@ def accept_frame_message(message: object, nonce: str | None) -> FrameMessage | N
     kind = message.get("t")
     if kind not in FRAME_MESSAGE_TYPES:
         return None
-    if kind in NONCE_REQUIRED_TYPES and (not nonce or message.get("n") != nonce):
+    if kind in NONCE_REQUIRED_TYPES and (
+        not nonce or len(nonce) > NONCE_MAX_CHARS or message.get("n") != nonce
+    ):
         return None
+    if kind == "error":
+        text = message.get("msg")
+        if not isinstance(text, str) or len(text) > ERROR_MSG_MAX_CHARS:
+            return None
     if kind == "resize":
         height = message.get("h")
         if (

@@ -1,9 +1,13 @@
 {
   "decided": {
-    "live": "preparing",
-    "cold": "cancelled_retry"
+    "live": "files_preparing",
+    "cold": "files_cancelled_retry"
   },
   "queued_stale": {
+    "live": "files_preparing",
+    "cold": "files_cancelled_retry"
+  },
+  "queued_no_files": {
     "live": "preparing",
     "cold": "cancelled_retry"
   },

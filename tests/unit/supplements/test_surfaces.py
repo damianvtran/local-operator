@@ -90,10 +90,19 @@ async def _attach(server: RuntimeServer, **declare: Any) -> dict[str, Any]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("owner_has_op", "viewer_declares", "expected"),
-    [(True, True, True), (True, False, False), (False, True, False), (False, False, False)],
+    [
+        (True, True, True),
+        (True, False, False),
+        (False, True, False),
+        (False, False, False),
+        # agent review R9: only the JSON boolean declares; truthy strings fail CLOSED
+        (True, "false", False),
+        (True, "1", False),
+        (True, 1, False),
+    ],
 )
 async def test_the_attach_gate_is_both_halves(
-    tmp_path, owner_has_op: bool, viewer_declares: bool, expected: bool
+    tmp_path, owner_has_op: bool, viewer_declares: object, expected: bool
 ) -> None:
     server = await _server(tmp_path, with_read_op=owner_has_op)
     try:
@@ -106,8 +115,8 @@ async def test_the_attach_gate_is_both_halves(
             "frontend_state": True,
             "display_window": True,
         }
-        if viewer_declares:
-            auth["supplements"] = True
+        if viewer_declares is not False:
+            auth["supplements"] = viewer_declares
         writer.write(json.dumps(auth).encode() + b"\n")
         await writer.drain()
         try:

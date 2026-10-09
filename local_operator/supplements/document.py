@@ -69,9 +69,25 @@ DATA_ELEMENT_ID: Final = "lo-data"
 
 _PRELUDE_PACKAGE: Final = "local_operator.supplements"
 
-#: ``<data>`` elements of a stored component. ``<data>`` is a real (inline) HTML element, so
-#: the extractor must remove it from the body or it would paint its JSON as text.
-_DATA_BLOCK_RE: Final = re.compile(r"<data>(.*?)</data>", re.DOTALL | re.IGNORECASE)
+#: The opening and closing tags of a stored component's LEADING ``<data>`` blocks.
+#: ``<data>`` is a real (inline) HTML element, so the extractor must remove it from the body
+#: or it would paint its JSON as text. Attributes on the opening tag (``<data value="…">``)
+#: are tolerated and ignored -- the JSON is the element's content -- and ``<datalist>`` does
+#: not match. The CONTENT is never found by searching for ``</data>``: a dataset string may
+#: legitimately contain that text, so the JSON value is parsed in place and the close tag is
+#: required right after it (see :func:`split_component`).
+_DATA_OPEN_RE: Final = re.compile(r"\s*<data(?:\s[^>]*)?>\s*", re.IGNORECASE)
+_DATA_CLOSE_RE: Final = re.compile(r"\s*</data\s*>", re.IGNORECASE)
+
+
+def _reject_constant(name: str) -> Any:
+    # ``json`` accepts NaN/Infinity by default, but the browser's ``JSON.parse`` does not:
+    # one such value in ``lo-data`` throws inside the prelude's ``LO`` initialiser, so the
+    # whole prelude dies (no ``LO``, no listener, no ``ready``). Refuse it at the boundary.
+    raise ValueError(f"<data> holds a non-finite number ({name}), which JSON.parse refuses")
+
+
+_DATA_DECODER: Final = json.JSONDecoder(parse_constant=_reject_constant)
 
 
 @cache
@@ -99,8 +115,11 @@ def data_json(data: Mapping[str, Any] | None) -> str:
     into markup. ``JSON.parse`` reads the escape back as the same character, so the data
     the prelude sees is unchanged. Key order is preserved and the separators are compact,
     so equal data gives equal bytes.
+
+    Raises ``ValueError`` for a non-finite float (NaN/Infinity): Python would write it as a
+    bare ``NaN`` token that ``JSON.parse`` rejects, killing the prelude in the frame.
     """
-    text = json.dumps(dict(data or {}), ensure_ascii=False, separators=(",", ":"))
+    text = json.dumps(dict(data or {}), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     return text.replace("<", "\\u003c")
 
 
@@ -116,22 +135,34 @@ def split_component(blob: str) -> tuple[str, dict[str, Any]]:
 
     Each ``<data>`` JSON must be an object of datasets; several blocks merge in order, and
     a dataset id that appears twice with different content is an error (silently letting
-    one win would change what the chart plots). Raises ``ValueError`` for either problem;
+    one win would change what the chart plots). Raises ``ValueError`` for either problem,
+    for a non-finite number, and for a block whose JSON is not followed by ``</data>``;
     the caller (the route, the validator) decides what that means for its surface.
+
+    ONLY THE LEADING RUN of blocks is data. Extraction stops at the first thing that is not
+    a ``<data>`` block and everything from there on is the body, kept VERBATIM -- so a
+    ``<data>`` the body itself contains (inside its own ``<script>`` text, say) is the
+    body's business and never lifted out of it. Each block's JSON is parsed in place, so a
+    dataset string containing ``</data>`` does not end the block early.
     """
     merged: dict[str, Any] = {}
-    for match in _DATA_BLOCK_RE.finditer(blob):
+    position = 0
+    while (opening := _DATA_OPEN_RE.match(blob, position)) is not None:
         try:
-            block = json.loads(match.group(1))
+            block, end = _DATA_DECODER.raw_decode(blob, opening.end())
         except json.JSONDecodeError as error:
             raise ValueError(f"<data> is not valid JSON: {error.msg}") from None
+        closing = _DATA_CLOSE_RE.match(blob, end)
+        if closing is None:
+            raise ValueError("<data> must hold exactly one JSON object, then </data>")
         if not isinstance(block, dict):
             raise ValueError("<data> must be a JSON object of datasets")
         for key, value in block.items():
             if key in merged and merged[key] != value:
                 raise ValueError(f"dataset {key!r} is declared twice with different content")
             merged[key] = value
-    return _DATA_BLOCK_RE.sub("", blob).strip("\n"), merged
+        position = closing.end()
+    return blob[position:].strip("\n"), merged
 
 
 def assemble_stored_component(blob: str) -> str:
