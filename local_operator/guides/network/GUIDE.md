@@ -193,6 +193,227 @@ rendering is not a contract.
    keypair other networks will address it by, and a member list they can inspect.
    The next section says what the session plane can and cannot do across the mesh.
 
+## Connect a device, make it capable, then offload
+
+The end-to-end path is three phases, and exactly one step in it is not yours:
+join the device, make it fully capable, then run work on it. This section is
+the ORDER; each phase names the sibling section that carries its detail, so
+read that one before you act and come back here for the sequence. Drive every
+command with `--json`, because the agent path parses it.
+
+**ONE STEP IN THE WHOLE FLOW IS A PERSON'S, AND IT IS THE PAIRING'S SECOND
+PHASE.** Plan around it instead of routing around it: a pairing that
+"succeeded" without a human is the exact failure this family is built to
+prevent.
+
+### Phase 1 — Join the device
+
+Pair by the sequence in "When the user asks to set it up"; that section is the
+ceremony's playbook and it carries the invite file, the code, the window and
+the refusal for a mistyped digit. The walkthrough only needs the shape and
+where the ordering matters:
+
+1. `lop network status --json` on both devices. Nothing is changed by it, and
+   it answers whether a relay and an identity exist at all.
+2. `lop network init <name> --json` on the device that should OWN the network.
+3. `lop network invite --role drive --json` there, then carry the token
+   **file** to the other machine out of band — AirDrop, a shared directory, or
+   the user's own terminal. Never into a transcript and never printed here.
+   `drive` is right for a device you will only drive; a device you will offload
+   WORK to wants `--role admin`, or a narrower grant below.
+4. The human runs `lop network join @<token-file>` at the other device's own
+   terminal. When you park the ceremony instead
+   (`lop network join @<token-file> --park --json`), print the code YOU derive
+   and the `sentence` and hand the second command over.
+5. The human runs `lop network join --confirm <code> --json` with the code they
+   read off the OTHER screen. You cannot do this step, there is no flag that
+   does it for them, and a code you did not see on the other device is never
+   the one to pass.
+6. Verify from both sides: `lop network peers --json` must show the new member
+   with `reachable: true`, and `lop network ls --json` must agree on the epoch
+   and the member count.
+
+Then widen the member for the work it will do. An invite mints a `drive`
+member: list, view, prompt, steer, stop and slash, and nothing wider. The
+role-to-capability mapping is in "Reference", and the three acts `drive` may
+not perform are named in "Moving a session between devices". Grant on the
+device that OWNS the work — the device that will hold a conversation, or run an
+unattended session:
+
+```bash
+lop network member grant <network> <device-id> move        # may take sessions here
+lop network member grant <network> <device-id> delete      # may delete sessions here
+lop network member grant <network> <device-id> unattended  # may start unattended sessions here
+```
+
+The device id is the one a refusal prints or `lop network show <network>
+--json` lists — a name does not resolve for this verb. `unattended` is the
+grant `--yolo` needs, and the device that would RUN the session is the one that
+decides it; the rule and the refusal are in
+"Which device should run this session". Pairing with `--role admin` carries
+the whole capability vocabulary at once, and the member row — not the role
+name — is what says which grant a device actually holds.
+
+**A MEMBER IS NOT NECESSARILY A SESSION PATH.** A device can show in `ls` and
+still be unable to hold work, and a device that is unreachable is a `doctor`
+question rather than a reason to re-run the listing; both readings are
+explained in "When something looks wrong".
+
+### Phase 2 — Make the node capable
+
+Joining makes a device a MEMBER. It does not make it able to COMPLETE offloaded
+work, and that gap is the whole of this phase. The verdict is one command:
+
+```bash
+lop network ready --peer <device> --json     # every member, when --peer is omitted
+```
+
+Its top-level `ok` is true only when every ADMISSION row and every still-gating
+EQUIPMENT row passes. When it is false the payload carries `code: "unhealthy"`
+and a `message` naming the failures, and every row carries its own `state`
+cell — `ok`, `warn`, `FAIL` or `n/a`. `warn` is equipment that is named and
+does NOT hold the verdict, so a `--json` consumer branches on `state` and not
+on the bare `ok`, which stays as reported. **DO NOT OFFLOAD ON A `FAIL`, AND DO
+NOT READ A `warn` AS ONE.** A row that could not be asked reads as an
+unanswered row, never as a pass.
+
+Every failing row carries its exact remedy and the side that runs it, and the
+four that hold the verdict are these:
+
+- **operator_authority** — whether anything on that device can allow an
+  approval. On THIS machine it is self-installable: `lop operator setup
+  --json`, then `lop operator status` for the level reached. On a PEER it is
+  the onboarding card: file `lop network approvals request --host <host>
+  --user <user> --network <name> --json`, show it
+  (`lop network approvals show <id> --json`), let THEM answer
+  (`lop network approvals approve <id>`), then run
+  `lop network approvals run <id> --json`. Never approve on their behalf —
+  and "When something looks wrong" carries the whole flow, including
+  `deny`, `withdraw` and the receipts it writes.
+- **build** — a node runs ITS build, so update the side named as behind with
+  `lop update` on that device and re-check. The row is ADMISSION-class, which
+  is why a node behind this one is not "ready, with caveats": the machinery
+  and the remedy are in "The build gates the machinery".
+- **git_identity** — offloaded work that commits needs an author. The row's
+  remedy suggests this device's own `user.name`/`user.email`; set them on the
+  peer when the work should commit as someone else.
+- **model_credential** — the provider login the node serves or borrows
+  (`lop network credentials`), so a session there can reach a model at all.
+
+The MCP rows (`mcp_servers`, `mcp_credential`) and `tooling` are the other way
+round: they read `warn`, they are named, and they do NOT hold the verdict,
+because the thing that needs a server or a tool refuses at its OWN point of use
+rather than failing the device.
+
+Bring the node's DEFINITIONS and MCP SERVERS across deliberately when a create
+will not: `lop network definitions push --peer <id>` (or `--all-peers`) and
+`lop network mcp push --peer <id>`. Both reconcile by name and carry no values,
+and a create that names a profile or a team pushes what it mentions anyway.
+Read what a device holds, and what a mirror still needs, with
+`lop network definitions state --json` and `lop network mcp state --json`; the
+create-time half and the by-name refusal for a definition that does not resolve
+there are in "Who the session on the peer runs as".
+
+Credentials are the fourth leg, and the node may need none of its own:
+`lop network credential share <NAME> --with <device>` lends a login short term,
+`lop network credential mark <NAME> sync` preselects a stored secret for
+devices approved from now on, and `lop secret set <KEY>` puts a key on the
+device that must hold it. What is COPIED, what is BROKERED and what never
+travels at all is "Credentials on a peer" — read it before promising a login to
+anyone.
+
+Anything the node must have on its own disk — a toolchain, a checkout — is NOT
+something this phase can deliver; "Toolchains do not travel" names which lanes
+that blocks, and why its `tooling` row reads `warn` rather than `FAIL`.
+
+**RE-CHECK AFTER EVERY FIX.** `ready` is a snapshot of what the node holds
+now, not a promise about it: a row you repaired a moment ago is only known
+repaired when it reads `ok` again.
+
+### Phase 3 — Offload the work
+
+With `ok: true`, the session plane is open. Decide where the work belongs
+first, because a session lives on exactly one device.
+"Moving a session between devices" names the work that should stay where it
+is.
+
+```bash
+lop network sessions --all-peers --json     # every peer's sessions, merged
+lop network sessions --peer <id> --json     # one device's own catalogue
+```
+
+Create the session ON the peer when the work is new:
+
+```bash
+lop network sessions --peer <id> --create --name <n> --prompt <p> --json
+# → the receipt names `session_id` and the `peer` that holds it, plus `admitted`
+```
+
+The create mints the id on that device, reconciles the definitions it names
+(`--profile`, `--team`, `--agent`) onto it first, and says in the receipt what
+the session runs as. The full flag set, the precedence rules and the refusals
+for an unnameable name are in "Which device should run this session".
+
+Then drive the conversation where it lives. Each act takes an id OR a name and
+returns the owner's receipt, which names the device that actually acted:
+
+- `--send` delivers a turn and waits for the owner's outcome; `--steer` injects
+  into the turn it is already running; `--slash` runs a slash command on that
+  device.
+- `--peek` is the family's READ and drives nothing — a stored session refuses
+  it and names the warm-up rather than starting a runtime nobody is watching.
+- `--engage` warms a stored conversation; `--stop` ends the turn it is running;
+  `--archive`/`--unarchive` hide or restore it there, and `--delete` is a dry
+  run until `--yes`.
+
+The exact flags, the text-positional rule and the `--stop`/`--force` contract
+are the table and the paragraphs in "Which device should run this session".
+Inside a session the same acts are one `network` tool call.
+
+To hand an EXISTING conversation over instead of creating one, move it — the
+device that will HOLD the conversation issues the move, and there is no push
+verb:
+
+```bash
+lop sessions move <id> --to <peer> --json         # hand it over; the copy here is retired
+lop sessions move <id> --to local --json          # bring it home
+lop sessions move <id> --to <peer> --keep --json  # copy it, leave the original running
+```
+
+"Moving a session between devices" carries the `move` capability rule, `--wait`
+and `--queue` for a conversation whose turn is in flight, and the scheduled
+state that does and does not travel with it.
+
+**WHAT A FAILURE LOOKS LIKE.** Branch on `code` and on the receipt's `outcome`,
+never on an empty listing or a zero exit alone; the family's vocabulary is in
+"Which device should run this session":
+
+- `relay_unavailable` — THIS device's relay could not be asked, so the answer
+  says nothing about the peer. Fix it (`lop network start`, or
+  `lop network restart` for a wedged relay) before reading anything into it.
+- `peer_unreachable` — the relay answered and the NAMED device did not. That is
+  a `lop network doctor --json` question, not a retry.
+- `session_unknown` — the device answered and holds no such conversation.
+- `session_unreachable` — the device accepted the act and its runtime then
+  stopped answering inside the time this verb allows; nothing here changed.
+- `turn_not_running` — a `--steer` reached a session with no turn there to
+  correct.
+- `stop_unreported` / `engage_unreported` / `create_unreported` /
+  `slash_unreported` — a receipt arrived without the field it is a receipt for,
+  so whether the peer acted is UNKNOWN: restart the relay and ask again rather
+  than reading it as a failed act.
+
+**A STOP THAT DID NOT ACT EXITS NON-ZERO**, and a `--send` exits `0` only for a
+turn that REACHED its end: read `outcome`, never the code alone. A `skipped`
+stop left the target UNTOUCHED — stop it again once the turn ends, or add
+`--force` — and `outcome: running` or `queued` is a delivery, not a completion.
+"Which device should run this session" carries the full contract.
+
+And the one non-zero exit that is about a person rather than a fault: a parked
+pairing whose window closed with nobody answering exits `3` as
+`pairing_unanswered`, having joined nothing. Park a fresh ceremony rather than
+reusing the invite — the scope of every exit code is in "Reference".
+
 ## Who the session on the peer runs as
 
 A create on a peer can name the agent PROFILE it runs as or the TEAM it manages,
