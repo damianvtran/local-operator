@@ -185,7 +185,9 @@
     },
     "cancel": null,
     "restart": null,
-    "stateLines": [],
+    "stateLines": [
+      "cancelling\u2026"
+    ],
     "imageCount": 0,
     "scroller": {
       "top": 53,
@@ -611,7 +613,9 @@
     },
     "cancel": null,
     "restart": null,
-    "stateLines": [],
+    "stateLines": [
+      "cancelling\u2026"
+    ],
     "imageCount": 0,
     "scroller": {
       "top": 53,
