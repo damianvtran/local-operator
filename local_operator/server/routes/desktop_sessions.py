@@ -2347,7 +2347,8 @@ async def ack_delegated_cleanup_notice(request: Request):
     from local_operator.session.retention import SESSIONS_DIRNAME
 
     root = pathlib.Path(request.app.state.config_manager.config_dir)
-    await asyncio.to_thread(acknowledge_delegated_notice, root / SESSIONS_DIRNAME)
+    async with errors(request):
+        await asyncio.to_thread(acknowledge_delegated_notice, root / SESSIONS_DIRNAME)
     return reply({"acknowledged": True})
 
 
