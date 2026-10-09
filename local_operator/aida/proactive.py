@@ -1274,9 +1274,10 @@ async def ensure_armed(
     (nothing armed; for the first three any existing Aida rows were best-effort
     cancelled, and ``"held"`` leaves a stopped session dormant), ``"owner"`` (a
     live runtime holds the session — it will reconcile on its own watcher tick),
-    ``"no-session"`` (nothing on disk to arm against) or ``"failed"`` (a
-    refusal/logged error). Never raises: the callers are boot paths whose
-    failures must not fail them.
+    ``"busy"`` (a peer held the STORE lock for the whole wait; benign and
+    retried on the next tick or boot — see that handler), ``"no-session"``
+    (nothing on disk to arm against) or ``"failed"`` (a refusal/logged error).
+    Never raises: the callers are boot paths whose failures must not fail them.
     """
     from local_operator.wakes import store as wake_store
     from local_operator.wakes.arm import (
@@ -1285,6 +1286,7 @@ async def ensure_armed(
         arm_wake,
         repair_index,
     )
+    from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
     root = Path(config_dir)
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
@@ -1367,6 +1369,36 @@ async def ensure_armed(
                 result = "present"
         await _drain_tray_external(root, session_id, pol, now)
         return result
+    except WakeLockBusy:
+        # A PEER HOLDS THE STORE LOCK, and that is a normal answer here rather
+        # than a failure — the reason it needs saying is that this function has
+        # two attended callers at boot and they run CONCURRENTLY: the launch
+        # hook (`tui/__init__.py`'s ``_aida_boot_ensure``, an asyncio task) and
+        # the app's first-run route (``App._route_first_run_boot`` →
+        # ``_open_aida_first_run`` → ``ensure_session`` → here). Both arm the
+        # same row, both take ``state.locked`` for the row write and again for
+        # the escalation tray, and the loser waits :data:`state.LOCK_WAIT_S`
+        # (5 s, one large conversation's worth of writing) before the lock
+        # module answers as it is designed to: "a peer's temporary hold and
+        # re-running is the fix". Whoever loses arms nothing, the row it would
+        # have written is the row the winner is writing, and the next tick or
+        # boot arms it anyway. Reported as ``logger.warning(..., exc_info=True)``
+        # this printed a full traceback into the operator's log for a first-run
+        # boot that was working correctly (CI `tui-e2e (ubuntu-latest, 1)`, run
+        # 37886200214: the clean-log contract caught `aida: ensure_armed failed`
+        # over `WakeLockBusy`, 2 runs in 10) — so the refusal keeps its own word
+        # and no stack, and the catch-all below stays for genuine defects.
+        logger.info("aida: the store lock is held by a peer; the cadence arms on a later tick")
+        return "busy"
+    except WakeLockUnavailable as exc:
+        # Not retryable, unlike the busy lock: the lock FILE could not be
+        # created at all, so the next attempt is refused too (the lock module's
+        # own distinction). The exception's sentence is the whole diagnosis and
+        # names the remedy, so it is logged as one line WITHOUT a stack — the
+        # failure is the store's permissions, not this code path — and the word
+        # stays ``"failed"`` so callers keep treating it as one.
+        logger.warning("aida: the store lock could not be created: %s", exc)
+        return "failed"
     except Exception:  # noqa: BLE001 — boot paths must not fail on her account
         logger.warning("aida: ensure_armed failed", exc_info=True)
         return "failed"

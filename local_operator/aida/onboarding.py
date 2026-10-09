@@ -791,6 +791,11 @@ def nudge_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | N
     root = Path(config_dir)
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
     window_ms = _nudge_days(root) * 86_400_000
+    # Lazy, matching :mod:`local_operator.aida.state`'s own reach for the lock
+    # module: the two refusals are the only names this function needs, and a
+    # contended lock is the documented ``None`` (the handler below).
+    from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
+
     try:
         with state.locked(root):
             path = state.onboarding_path(root)
@@ -804,6 +809,26 @@ def nudge_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | N
             data["nudge_offered_at"] = now
             data["nudge_offers"] = int(data.get("nudge_offers") or 0) + 1
             state.write_json(path, data)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        # A LOCK REFUSAL, which this handler's own broad arm already called
+        # expected ("a lock refusal must not cost the cadence") while still
+        # printing a full traceback for it: the boot writers hold this store
+        # lock concurrently by design (the launch hook's task and the app's
+        # first-run route, the runtime's reconcile, the supervisor), so a peer
+        # holding it is a normal miss — the window it writes means the next
+        # attempt offers the nudge, and a first-run boot must not log a stack
+        # as the operator's first experience of the feature. Quiet, with the
+        # exception's own sentence so the cause is still readable; the broad
+        # arm below stays for genuine defects. Same split, and the same
+        # reasoning, as ``proactive.ensure_armed``'s handler.
+        logger.info("aida: the nudge window was not recorded (%s); the next tick retries", exc)
+        # A REFUSED LOCK PUBLISHES NOTHING. The clause is only ever handed back
+        # WITH its stamp written in the same locked write (the two-effects rule
+        # above), and this return is what keeps that true when the lock was
+        # never entered at all: falling through to ``return NUDGE_CLAUSE``
+        # nudges without spending the window, which is the nagging bug the
+        # window exists to prevent.
+        return None
     except Exception:  # noqa: BLE001 — a lock refusal must not cost the cadence
         logger.warning("aida: could not record the nudge window", exc_info=True)
         return None
@@ -920,6 +945,8 @@ def tip_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | Non
     """
     root = Path(config_dir)
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
+
     try:
         if greeting_state(root) not in (GREETING_DELIVERED, GREETING_SKIPPED):
             return None
@@ -943,6 +970,15 @@ def tip_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | Non
             data["tips_given"] = given + [t for t in spent if t not in given]
             data["tip_offered_at"] = now
             state.write_json(path, data)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        # Same refusal, same reasoning as the nudge window's handler above: a
+        # peer's hold is a miss for this tick, not a defect — an unseen tip is
+        # offered again on a later cadence — and it is logged as one quiet line
+        # rather than a traceback into the operator's log.
+        logger.info("aida: the tip was not recorded (%s); the next tick retries", exc)
+        # No stamp, no clause — and no fall-through to the indexed return below,
+        # which needs ``choice`` from inside the lock that was never entered.
+        return None
     except Exception:  # noqa: BLE001 — a ledger miss must not cost the cadence
         logger.warning("aida: could not record the tip", exc_info=True)
         return None
