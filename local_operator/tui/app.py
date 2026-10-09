@@ -5625,6 +5625,11 @@ class OperatorApp(App[None]):
         # stopped (a queued asker wakes when the front prompt settles, and
         # without the latch it would mount a fresh question for a dead turn).
         self._approval: ApprovalPrompt | None = None
+        #: A card the reveal pre-mounted for a gate the app already held
+        #: (``_prearm_known_gate``), waiting for the session's own ladder to
+        #: adopt it. Never a second live card: the ladder takes this reference
+        #: back out of ``self._approval`` and re-registers the SAME object.
+        self._prearmed_approval: ApprovalPrompt | None = None
         #: The composer's text as of the last Changed event, so a buffer that
         #: went empty can be told apart from one the app emptied. See
         #: `on_text_area_changed`.
@@ -9612,6 +9617,28 @@ class OperatorApp(App[None]):
             # straight back to.
             self._reset_band_for_swap(retire=False)
             self._adopt_session(session, replay_history=False, reuse_controller=True)
+            # ARM THE GATE BRIDGE HERE, IN THE REVEAL'S OWN SYNCHRONOUS SECTION,
+            # not at the end of the commit. A pending gate is a DOCK child, so
+            # its card takes its rows out of the transcript's own height: the
+            # card mounting a turn after the reveal moves every visible row up
+            # by its height (measured on S4 at 160x45: the transcript goes 38 ->
+            # 23 rows) and that is the "the transcript jumps when the card
+            # arrives" the first-paint audit reports. The ladder's card can only
+            # be in the frame the reveal paints if the bridge is armed BEFORE
+            # the refresh the reveal queues -- `self._interaction` has just
+            # moved to the incoming source, so the ladder's own "the card
+            # belongs to the source in front of the user" rule is satisfied
+            # here exactly as it was at the end of the commit.
+            #
+            # A source with no gate of its own is untouched: `_maybe_start_gate`
+            # reads the gate off the session (and returns without a card for a
+            # cold lease, whose snapshot has not arrived yet).
+            session.resume_viewer_gates()
+            # ...and the card the ladder is about to build for a gate this
+            # source already carries is mounted HERE, in the same synchronous
+            # section, so the reveal's own frame already excludes its rows
+            # (`_prearm_known_gate`; the ladder adopts the card when it runs).
+            self._prearm_known_gate(source)
             # IMMEDIATELY AFTER the adopt, and never before it. `_adopt_session`
             # is the single place a source becomes current: it has just moved
             # `self._interaction` to the incoming source and lifted ITS mute, so
@@ -9743,7 +9770,6 @@ class OperatorApp(App[None]):
                 # clears the stash (``_submit_aida_prompt``), so the first
                 # landing takes it and later ones see None.
                 self._submit_aida_prompt(session)
-            session.resume_viewer_gates()
             self._session_sidebar.set_current(session_id)
             self._session_sidebar.refresh()
             if refreshing and focused_before_refresh is not None:
@@ -25815,6 +25841,24 @@ class OperatorApp(App[None]):
             return False
         if bool(source.draft.approve_all):
             return True
+        # ADOPT THE CARD THE REVEAL ALREADY MOUNTED FOR THIS GATE, if there is
+        # one. It is not a competing prompt — it IS this gate's card, built by
+        # the same constructor with the same binding and the same question
+        # (`_prearm_known_gate`) — so it is taken out of the live slot BEFORE the
+        # serialization loop below can wait on it as though another asker owned
+        # it, and the construction section re-registers this same object as the
+        # one live card. Adopting rather than rebuilding is what keeps the
+        # answer path single: the card the reader saw is the card that answers.
+        prearmed = self._prearmed_approval
+        if (
+            prearmed is not None
+            and prearmed.source_binding == (source.token, gate_key, view_generation)
+            and getattr(prearmed, "gate_question", None) == (tool_name, description)
+        ):
+            self._prearmed_approval = None
+            self._approval = None
+        else:
+            prearmed = None
         while self._approval is not None and not self._approval.answered:
             await self._approval.wait()
             if not self._is_current(source):
@@ -25846,32 +25890,42 @@ class OperatorApp(App[None]):
         # while still taking focus off the composer the card is pointed at —
         # a turn parked on an answer the user can neither see nor reach.
         self._close_aside()
-        prompt = ApprovalPrompt(
-            tool_name,
-            description,
-            on_answer=partial(
-                self._latch_source_approval_answer, source, gate_key, view_generation
-            ),
-        )
-        # A gate on a PEER's session carries the hint that says where an allow
-        # happens: an allow from THIS origin would be refused by the owner's
-        # runtime by design (design note §3), and the reader must learn that
-        # from the card rather than from a refusal notice after the fact.
-        self._mark_remote_gate(prompt)
-        prompt.source_binding = (source.token, gate_key, view_generation)
-        self._restore_gate_draft(source, prompt)
-        self._approval = prompt
-        # The QUESTION goes in the dock, where it cannot scroll away from the
-        # turn it is blocking and where it reliably owns its own answer keys.
-        # The transcript gets a RECEIPT instead, and only once the answer is in
-        # (below): a receipt written up front would have to be rewritten, and a
-        # transcript block that changes after later blocks were appended is the
-        # one thing the transcript's finalize discipline forbids.
-        self._mount_prompt(prompt)
+        if prearmed is not None:
+            # Mounted by the reveal, so its rows are already out of the
+            # transcript's height and it is already in front of the reader.
+            # Everything below still runs for it, so this is the ladder's own
+            # path rather than a second one; a card the reader answered in the
+            # reveal window simply has its answer in hand (``wait()`` returns it
+            # at once) and is not advertised to the phone as newly pending.
+            prompt = prearmed
+            # Re-registered as the ONE live card, which the adoption arm
+            # deliberately vacated before the serialization loop: from here this
+            # is indistinguishable from a card this method built itself, and
+            # `_live_prompt`/`route_key_to_live_prompt` route its answer keys as
+            # they always did.
+            self._approval = prompt
+        else:
+            prompt = self._build_approval_prompt(
+                source,
+                gate_key=gate_key,
+                view_generation=view_generation,
+                tool_name=tool_name,
+                description=description,
+            )
+            self._approval = prompt
+            # The QUESTION goes in the dock, where it cannot scroll away from
+            # the turn it is blocking and where it reliably owns its own answer
+            # keys. The transcript gets a RECEIPT instead, and only once the
+            # answer is in (below): a receipt written up front would have to be
+            # rewritten, and a transcript block that changes after later blocks
+            # were appended is the one thing the transcript's finalize
+            # discipline forbids.
+            self._mount_prompt(prompt)
         # Same rewrite as the ask card's mount: the band must not offer a retry
         # while the question it is about is answerable above it (D1).
         self._show_sidebar_connection(source)
-        self._notify_mobile_approval_pending(prompt)
+        if not prompt.answered:
+            self._notify_mobile_approval_pending(prompt)
         # The turn is now parked on the user, and the working line says so —
         # this is the one wait in a turn that the agent is not responsible for.
         self._refresh_working_activity()
@@ -27790,6 +27844,114 @@ class OperatorApp(App[None]):
             # what makes the unmount below unable to double-answer.
             card.settle(None)
             self._unmount_prompt(card)
+
+    def _build_approval_prompt(
+        self,
+        source: SessionInteraction,
+        *,
+        gate_key: Any,
+        view_generation: int,
+        tool_name: str,
+        description: str,
+    ) -> ApprovalPrompt:
+        """Construct an approval card, wired to the latch the bridge answers through.
+
+        ONE construction with two callers — the session's own gate ladder
+        (``request_tool_approval``) and the reveal's pre-arm below. A second
+        construction beside it would be a card whose answer takes a different
+        path from the one the bridge owns, which is the defect class that leaves
+        a question on screen nobody can honour (UX round 1, U1). The question it
+        was built for rides on the card (``gate_question``) so an adoption can
+        prove it is adopting THIS gate's card and not a neighbour's.
+        """
+        prompt = ApprovalPrompt(
+            tool_name,
+            description,
+            on_answer=partial(
+                self._latch_source_approval_answer, source, gate_key, view_generation
+            ),
+        )
+        # A gate on a PEER's session carries the hint that says where an allow
+        # happens: an allow from THIS origin would be refused by the owner's
+        # runtime by design (design note §3), and the reader must learn that
+        # from the card rather than from a refusal notice after the fact.
+        self._mark_remote_gate(prompt)
+        prompt.source_binding = (source.token, gate_key, view_generation)
+        prompt.gate_question = (tool_name, description)
+        self._restore_gate_draft(source, prompt)
+        return prompt
+
+    def _prearm_known_gate(self, source: SessionInteraction) -> None:
+        """Mount a gate the app ALREADY has in hand IN the frame that reveals its conversation.
+
+        WHY. The card is a dock child, so its rows come out of the transcript's
+        own height: mounting it a turn after the reveal takes those rows away and
+        moves every visible row up by them — measured on S4 at 160x45, the
+        transcript goes 38 -> 23 rows and the card's own frame is a distinct
+        painted state. For a source whose snapshot the app already holds — a
+        bound viewer, which is what a switch back to a live conversation has,
+        and what the paint-first resume's attach-behind produces — the gate is
+        known in the same synchronous section that builds the reveal, so the
+        card can be part of that frame. Measured at both orders: with the bridge
+        armed early but the card still built by the ladder, the card lands on the
+        NEXT compositor display after the reveal (reveal 480.9 ms, card 532.0 ms
+        on S4) — the ladder's task cannot run inside a synchronous commit, so
+        the card has to be mounted here to be in the frame.
+
+        WHAT IT DOES NOT DO. It does not answer, deliver or decide anything: the
+        session's own ladder still decides whether a card is owed, and
+        ``request_tool_approval`` ADOPTS this card when it runs (see the
+        adoption arm there), so the answer path and the receipt stay the
+        bridge's. The guards below mirror the ladder's own early returns —
+        a latch denial and ``approve_all`` never reach a card, and a viewer that
+        can never bind is refused one level down (G6) — so a pre-armed card is
+        only ever mounted for a gate the ladder will take. A card that outlives
+        its gate is taken down by the ordinary writers: the next commit's swap
+        clears the live cards, and ``_suspend_sidebar_gates`` disables and
+        snapshots one on the way out of the conversation.
+
+        A COLD lease is left alone by construction: its snapshot has not
+        arrived, so ``pending_gate`` is ``None`` and there is nothing to read
+        (measured at the reveal of a first sidebar open: ``cold=True``,
+        ``pending_gate=None``, no ask rows). That is the residual this cannot
+        close from the app side.
+        """
+        if self._approval is not None or self._ask_screen is not None:
+            return
+        if source is not self._interaction or source.session is None:
+            return
+        if not _is_viewer(source.session):
+            return
+        # A ``display_only`` reveal is a SAVED PREVIEW, not the conversation's
+        # final state — the sticky flag the gate suite's display-only test names
+        # (a resync in flight at preparation time sets it, and only the
+        # connect/bind path clears it). The card inside such a frame would be a
+        # question asked over rows the app has already declared provisional, and
+        # the ladder refuses exactly that state one level down (G1,
+        # ``not _ready_for_events``): measured, pre-arming through it mounted a
+        # card the bridge would not answer. The reconcile re-arms the ladder the
+        # moment the display heals, so the card arrives with the real rows.
+        if source.display_only:
+            return
+        if bool(getattr(source, "can_never_bind", False)):
+            return
+        pending = getattr(source.session, "pending_gate", None)
+        if pending is None or getattr(pending, "kind", None) != "approval":
+            return
+        if bool(source.draft.approve_all):
+            return
+        if self._source_approvals_are_denied(source, source.turn.epoch):
+            return
+        prompt = self._build_approval_prompt(
+            source,
+            gate_key=self._sidebar_gate_identity(source),
+            view_generation=source.gate_view_generation,
+            tool_name=str(getattr(pending, "title", "") or ""),
+            description=str(getattr(pending, "detail", "") or ""),
+        )
+        self._prearmed_approval = prompt
+        self._approval = prompt
+        self._mount_prompt(prompt)
 
     def _mount_prompt(self, card: Widget) -> None:
         """Put a prompt into the dock's prompt host, above the status band.

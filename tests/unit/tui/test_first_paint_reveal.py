@@ -236,6 +236,13 @@ async def test_the_reveal_hold_is_taken_and_released_around_one_layout() -> None
 
 @asynccontextmanager
 async def _viewer(tmp_path, name: str, *, rows: int = 6):
+    """``_viewer_session``, minus the handle: what most cells here need."""
+    async with _viewer_session(tmp_path, name, rows=rows) as (remote, _handle):
+        yield remote
+
+
+@asynccontextmanager
+async def _viewer_session(tmp_path, name: str, *, rows: int = 6):
     """A real owner runtime plus a real ``AttachedSession`` viewer over it.
 
     The saved-position cell needs the commit seam to run for real: a mocked
@@ -269,7 +276,7 @@ async def _viewer(tmp_path, name: str, *, rows: int = 6):
         display_window=True,
     )
     try:
-        yield remote
+        yield remote, handle
     finally:
         await remote.dispose()
         server.close()
@@ -646,3 +653,138 @@ async def test_the_launch_projects_the_whole_window_in_one_pass(tmp_path) -> Non
     assert calls, "the resume never projected a window"
     assert [call.get("bound") for call in calls] == [RESUME_RENDER_MESSAGES], calls
     assert pages == [], f"a page was mounted during the launch: {pages}"
+
+
+@pytest.mark.asyncio
+async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> None:
+    """(a): a known gate's card is part of the frame that reveals its rows.
+
+    The card is a dock child, so its rows come out of the transcript's own
+    height. Built a turn AFTER the reveal it takes those rows away then, and
+    every visible row moves up by them — measured on S4 at 160x45, the
+    transcript goes 38 -> 23 rows and the card's own frame is a second painted
+    state. For a source whose snapshot the app ALREADY holds — which is what a
+    switch back to a live conversation has, and what the paint-first resume's
+    attach-behind produces — the gate is known inside the commit's own
+    synchronous section, so the card is built and mounted there
+    (``_prearm_known_gate``) and the session's ladder adopts the same card when
+    it runs.
+
+    Without the pre-arm this fails on the first content frame: no card, and the
+    taller transcript — the frame the reader sees jump.
+    """
+    async with (
+        _viewer_session(tmp_path, "alpha") as (alpha, alpha_handle),
+        _viewer_session(tmp_path, "beta") as (beta, _beta_handle),
+    ):
+
+        async def factory():
+            return alpha
+
+        app = OperatorApp(factory)
+        gate_task: asyncio.Task[object] | None = None
+        async with app.run_test(size=FRAME) as pilot:
+            for _ in range(200):
+                await pilot.pause()
+                if app._session is alpha:
+                    break
+            beta_source = SessionInteraction(beta)
+            app._sidebar_sources[alpha.session_id] = app._interaction
+            app._sidebar_sources[beta.session_id] = beta_source
+            app._interactions[id(beta)] = beta_source
+
+            async def lease(session_id, *, speculative=False):
+                source = app._sidebar_sources[session_id]
+                source.preparations += 1
+                return source
+
+            app._lease_sidebar_source = lease  # type: ignore[method-assign]
+            # Without this an approval auto-answers and never mounts a card.
+            app._set_approve_all(False)
+            alpha_handle._auto_approve = False
+
+            async def visit(session_id: str) -> None:
+                prepared = await app._prepare_sidebar_session(session_id)
+                app._commit_sidebar_session(
+                    session_id, prepared, app._sidebar_navigation.generation
+                )
+                for _ in range(12):
+                    await pilot.pause()
+
+            gate_task = asyncio.create_task(alpha_handle._approval_gate("write", "Save one record"))
+            for _ in range(200):
+                await pilot.pause()
+                if app._approval is not None:
+                    break
+            assert app._approval is not None, "the gate never mounted on alpha"
+
+            await visit(beta.session_id)
+            assert app._approval is None, "the outgoing session's card is still on screen"
+
+            samples: list[dict[str, float]] = []
+            real_hook = app.post_display_hook
+
+            def hook() -> None:
+                try:
+                    view = app._transcript_view()
+                    host = app.query_one("#prompt-host")
+                    target = getattr(getattr(app, "_session", None), "session_id", "")
+                    samples.append(
+                        {
+                            "target": 1.0 if target == alpha.session_id else 0.0,
+                            "blocks": float(len(view.blocks())),
+                            "height": float(view.outer_size.height),
+                            "prompt": float(bool(host.display and host.children)),
+                        }
+                    )
+                except Exception:  # noqa: BLE001 — a frame before the transcript exists
+                    pass
+                real_hook()
+
+            app.post_display_hook = hook  # type: ignore[method-assign]
+            try:
+                prepared = await app._prepare_sidebar_session(alpha.session_id)
+                app._commit_sidebar_session(
+                    alpha.session_id, prepared, app._sidebar_navigation.generation
+                )
+                # THE DISCRIMINATING MOMENT. The commit is one synchronous
+                # section, and the ladder's task cannot run inside it, so at this
+                # instant the card is either mounted BY the commit (the pre-arm)
+                # or not mounted at all — a later turn would be the frame the
+                # reader sees the transcript move on. Without the pre-arm this
+                # fails here with `_approval is None`.
+                assert app._approval is not None, (
+                    "the reveal's own commit did not mount the known gate's card: it "
+                    "arrives on a later turn, taking its rows out of the transcript then"
+                )
+                host = app.query_one("#prompt-host")
+                assert host.display and host.children, "the card is registered but not mounted"
+                for _ in range(12):
+                    await pilot.pause()
+            finally:
+                app.post_display_hook = real_hook  # type: ignore[method-assign]
+
+            assert gate_task is not None
+            gate_task.cancel()
+
+    # Only the INCOMING conversation's frames: the outgoing one paints until the
+    # swap, and its card-less frame is not what this test is about.
+    content = [
+        sample
+        for sample in samples
+        if sample["target"] == 1.0 and sample["blocks"] > 0 and sample["height"] > 0
+    ]
+    assert content, f"the return leg painted no rows: {samples}"
+    first = content[0]
+    assert first["prompt"] == 1, (
+        "the frame that revealed the rows carried no card, so its rows come out of "
+        "the transcript's height on a LATER frame",
+        content[:4],
+    )
+    # The transcript's own height is NOT asserted here: whether the dock's new
+    # rows and the reveal coalesce into one layout pass depends on the frame
+    # (measured coalescing at 160x45 in the bench probe, one pass apart in this
+    # smaller pilot, which is why this assertion was removed rather than
+    # tightened). What this test pins is the part that is this change's: the card
+    # exists before the frame that carries it, so the rows in that frame were
+    # laid out with it.
