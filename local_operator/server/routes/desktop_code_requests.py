@@ -170,6 +170,8 @@ def _row_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         "unknown_reason",
         "evidence",
         "reason",
+        "link_only_hint",
+        "cooling_until",
         "summary",
         "lanes",
         "fetched_at",

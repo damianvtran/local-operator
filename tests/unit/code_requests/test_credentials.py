@@ -146,28 +146,46 @@ def test_resolved_values_are_registered_for_scrubbing(monkeypatch) -> None:
 
 
 def test_cli_env_strips_every_token_valued_variable(monkeypatch) -> None:
-    """The strip is the membership check: gh/glab echo an env token for ANY host."""
-    for name in (
+    """The strip is the membership check: gh/glab echo an env token for ANY host.
+
+    The rule is EVERY name ending in TOKEN, not a family list — the family list
+    missed ``OAUTH_TOKEN``, one of glab's documented env precedence names, and
+    leaked a token to any ``--host`` a URL named (review round 2, N1).
+    """
+    sample = (
         "GH_TOKEN",
         "GITHUB_TOKEN",
         "GH_ENTERPRISE_TOKEN",
         "GITLAB_TOKEN",
+        "GITLAB_ACCESS_TOKEN",
         "GITLAB_ANYTHING_TOKEN",
         "GLAB_TOKEN",
-    ):
+        "OAUTH_TOKEN",
+    )
+    for name in sample:
         monkeypatch.setenv(name, "tok-value")
     env = credentials._cli_env()
-    for name in (
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-        "GH_ENTERPRISE_TOKEN",
-        "GITLAB_TOKEN",
-        "GITLAB_ANYTHING_TOKEN",
-        "GLAB_TOKEN",
-    ):
+    for name in sample:
         assert name not in env, name
     # Non-token variables survive: PATH is what makes the child runnable.
     assert env.get("PATH")
+    # ...and the rule is name-ending, so a token-ish name that does not end in
+    # TOKEN still survives (the member is not over-stripped).
+    monkeypatch.setenv("MY_TOKEN_NOTE", "keep")
+    assert credentials._cli_env().get("MY_TOKEN_NOTE") == "keep"
+
+
+def test_an_oauth_token_echoed_by_a_fake_glab_is_stripped_out(tmp_path: Path, monkeypatch) -> None:
+    """The N1 vector, end to end: glab's OAUTH_TOKEN arm cannot serve an unknown host."""
+    fake = tmp_path / "fake-glab"
+    fake.write_text("#!/bin/sh\nprintf '%s' \"${OAUTH_TOKEN:-}\"\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("OAUTH_TOKEN", "oauth-token-must-not-leak")
+    monkeypatch.setattr(credentials, "_find_glab", lambda home: str(fake))
+    monkeypatch.setattr(credentials, "_store_secret", lambda config_dir: "")
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("evil.example.invalid", "gitlab")
+    assert caught.value.kind == "absent"
 
 
 def test_store_secret_only_serves_gitlab_com(monkeypatch) -> None:

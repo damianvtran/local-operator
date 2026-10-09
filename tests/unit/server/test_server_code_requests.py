@@ -449,3 +449,66 @@ async def test_the_scan_uses_the_sessions_recorded_cwd(desktop):
     assert confirmed["number"] == 9
     assert confirmed["reason"] is None
     assert confirmed["host"] == "ghe.internal.acme.io"
+
+
+def _seed_urls_session(root: Path, urls: list[str], *, session_id: str = SESSION) -> None:
+    """A user message naming URLs: the scanner derives the rows, no tools run."""
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    row = {
+        "id": "a1",
+        "ts": time.time() - 60,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "user",
+            "content": [{"text": "please look at " + " and ".join(urls)}],
+        },
+    }
+    with (directory / "transcript.jsonl").open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+async def _settled_rows(client, root):
+    """GET once to kick the lazy scan, wait for the index, then read the rows."""
+    await client.get(f"/v1/desktop/sessions/{SESSION}/code-requests")
+    for _ in range(50):
+        if ledger.read_index(root, SESSION) is not None:
+            break
+        await _tick()
+    response = await client.get(f"/v1/desktop/sessions/{SESSION}/code-requests")
+    return response.json()["result"]
+
+
+@pytest.mark.asyncio
+async def test_a_link_only_row_carries_its_per_forge_hint(desktop):
+    """Q11: ``link_only_hint`` must reach the WIRE — the UI renders this field."""
+    client, root = desktop
+    _seed_urls_session(
+        root,
+        ["https://codeberg.org/o/r/pulls/3", "https://ghe.example.com/o/r/pull/4"],
+    )
+    body = await _settled_rows(client, root)
+    rows = {row["host"]: row for row in body["rows"]}
+    assert "codeberg.org" in rows, body
+    assert rows["codeberg.org"]["link_only"] is True
+    assert rows["codeberg.org"]["link_only_hint"] == "Link only — this host isn't tracked yet."
+    assert "gh CLI" in rows["ghe.example.com"]["link_only_hint"]
+    assert "glab" not in rows["ghe.example.com"]["link_only_hint"]
+
+
+@pytest.mark.asyncio
+async def test_a_cooling_hosts_unfetched_row_states_the_wait(desktop):
+    """Q13: the row itself must say a rate-limit wait, not an ordinary link-only."""
+    client, root = desktop
+    _seed_session(root)
+    code_requests_cache._reset_for_tests()
+    code_requests_cache.note_rate_limited("github.com", retry_after=120.0)
+    try:
+        body = await _settled_rows(client, root)
+        row = body["rows"][0]
+        assert row["link_only"] is True
+        assert isinstance(row["cooling_until"], float)
+        assert "cooling" in (row["reason"] or "")
+    finally:
+        code_requests_cache._reset_for_tests()

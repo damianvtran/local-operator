@@ -47,7 +47,12 @@ from typing import Any, Mapping, Sequence
 
 from local_operator.code_requests import cache as fetch_cache
 from local_operator.code_requests import ledger, rounds
-from local_operator.code_requests.adapters import FULL_FORGES, adapter_for, state_of
+from local_operator.code_requests.adapters import (
+    FULL_FORGES,
+    adapter_for,
+    forge_adapter,
+    state_of,
+)
 from local_operator.code_requests.adapters.base import (
     FetchOutcome,
     ForgeHTTPError,
@@ -173,6 +178,11 @@ def link_only_hint(ref: Mapping[str, Any] | None) -> str:
     return "Link only — this host isn't tracked yet."
 
 
+def _cooling_stamp(until: float) -> str:
+    """A cooling window's end as UTC ISO-8601, for row-level copy and tests."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until))
+
+
 def view_row(
     raw: Mapping[str, Any],
     entry: Mapping[str, Any] | None,
@@ -216,6 +226,20 @@ def view_row(
         row["link_only_hint"] = link_only_hint(ref_map)
         reason = skip_reason or str((entry or {}).get("refresh_error") or "")
         reason = reason or str(raw.get("unknown_reason") or "")
+        # A never-fetched row on a COOLING host is not an ordinary link-only:
+        # it has a credential and an adapter, will be fetched the moment the
+        # window resets, and a reader must not be told "sign in" for a
+        # rate-limit wait (QA round 2, Q13). The window is read from the live
+        # cooling state — no network, same source the top-level map uses.
+        host = str(ref_map.get("host") or "")
+        cool_until = fetch_cache.cooling_until(host) if host else None
+        if cool_until is not None:
+            row["cooling_until"] = cool_until
+            if not reason:
+                reason = (
+                    "cooling — this host is rate-limited until "
+                    f"{_cooling_stamp(cool_until)}; nothing was fetched yet"
+                )
         if reason:
             row["reason"] = reason
         if entry and entry.get("refresh_error"):
@@ -333,9 +357,19 @@ def view_for_ref(config_dir: Any, ref: Ref) -> dict[str, Any] | None:
         view["lanes"] = entry.get("lanes") if isinstance(entry.get("lanes"), list) else None
         view["comments"] = convention_comments(entry)
     else:
-        view["link_only_reason"] = ref.reason or str(
-            entry.get("refresh_error") or "no state has been fetched yet"
-        )
+        # The tool's own never-fetched view carries the same cooling signal
+        # the route's rows do (QA round 2, Q13).
+        cool_until = fetch_cache.cooling_until(ref.host)
+        if cool_until is not None:
+            view["cooling_until"] = cool_until
+            view["link_only_reason"] = ref.reason or (
+                "cooling — this host is rate-limited until "
+                f"{_cooling_stamp(cool_until)}; nothing was fetched yet"
+            )
+        else:
+            view["link_only_reason"] = ref.reason or str(
+                entry.get("refresh_error") or "no state has been fetched yet"
+            )
     return view
 
 
@@ -405,7 +439,12 @@ async def show(
         dirty = fetch_cache.read_dirty(config_dir, session_id)
         at = dirty.get("at")
         dirty_at = at if isinstance(at, (int, float)) else None
-        marked = bool(dirty.get("all")) or ref.key in {str(k) for k in dirty.get("keys") or ()}
+        # ONLY the key's own mark is a trigger here. A turn-end ``all`` mark
+        # says "the session's rows may have moved", not "this ref moved":
+        # honouring it made every ``show`` refetch while the mark sat
+        # unconsumed by a client pass (review round 2, N3 — three shows, three
+        # fetches). The pass that services the session consumes ``all``.
+        marked = ref.key in {str(k) for k in dirty.get("keys") or ()}
         needs = marked
     if needs and adapter_for(ref) is not None:
         cooling = fetch_cache.cooling_until(ref.host)
@@ -492,8 +531,13 @@ async def probe_shorthand(
     ``"unknown"`` and the caller keeps the link-only row it already had. The
     probe never writes the ledger, and the credential gate inside
     :func:`resolve` means an unauthenticated host makes ZERO requests.
+
+    The adapter comes from :func:`adapters.forge_adapter`, NOT
+    :func:`adapter_for`: the latter refuses every not-yet-confirmed ref by
+    design, and routing the probe through it made this whole path unreachable
+    (QA round 2, Q10). The F1 gate still runs FIRST: no credential, no probe.
     """
-    adapter = adapter_for(ref)
+    adapter = forge_adapter(ref.forge)
     probe = getattr(adapter, "probe_pull", None) if adapter is not None else None
     if probe is None:
         return "unknown", None
@@ -600,7 +644,17 @@ async def refresh_session(
         # does not pass the flag on), so the mark has been serviced — leaving it
         # would refetch the session on every GET (QA round 1, Q2). Guarded by
         # the same ``since`` snapshot as the keys.
-        consume_all = bool(dirty.get("all")) and len(planned.refs) < MAX_REFS_PER_PASS
+        #
+        # A row the plan SKIPPED for cooling or per-key backoff was NOT
+        # serviced, and clearing the mark then loses the revalidation those
+        # rows were owed (review round 2, N4): a cooling host and an ``all``
+        # mark used to clear it while fetching nothing.
+        consume_all = (
+            bool(dirty.get("all"))
+            and len(planned.refs) < MAX_REFS_PER_PASS
+            and not planned.cooling
+            and not planned.backing_off
+        )
         fetch_cache.clear_dirty(
             config_dir,
             session_id,
@@ -818,14 +872,16 @@ def _build_entry(
     ``lanes`` are what every reader renders, and keeping a second copy of
     every body would double the entry for the same bytes.
 
-    THE PARSE IS A FETCH-TIME ARTEFACT (cross-round finding X1). It runs on
-    the FULL bodies whenever this pass fetched a comment-bearing piece, and its
-    result is STORED (``convention``); a rebuild that did not refetch the
-    comments replays that stored parse instead of re-parsing bodies the size
-    bound has since truncated. Before this, a verdict past the 4 KiB cap —
-    #2106's round-2 review keeps its verdict at char 6708 of 6979 — parsed as
-    ``terminal`` on the fetch that saw the full text and as ``unstated`` on the
-    next 304 that re-read the capped copy.
+    THE PARSE IS A FETCH-TIME ARTEFACT, kept PER COMMENT PIECE (cross-round
+    finding X1, completed by review round 2 N2). It runs on the FULL bodies of
+    every piece fetched on this pass, and each piece's result is STORED
+    (``convention.pieces``); a rebuild replays the stored passes for pieces
+    that did not refetch instead of re-parsing bodies the size bound has
+    truncated. Before the fix, a verdict past the 4 KiB cap — #2106's round-2
+    review keeps its verdict at char 6708 of 6979 — parsed as ``terminal`` on
+    the fetch that saw the full text and as ``unstated`` on the next pass that
+    re-read the capped copy, including the MIXED case where one piece
+    refetched and the other answered 304.
     """
     moment = round(time.time(), 3)
     pieces, validators = fetch_cache.merge_pieces(prior, outcome)
@@ -842,16 +898,44 @@ def _build_entry(
     # how every lane silently reads "freshness unknown".
     summary = dict(summary_piece) if isinstance(summary_piece, Mapping) else {}
     summary["state"] = state
-    fresh_comments = bool(_COMMENT_PIECES & set(outcome.pieces))
-    report: Any = None
-    if not fresh_comments and isinstance(prior, Mapping):
-        stored = prior.get("convention")
-        if isinstance(stored, Mapping):
-            report = rounds.RoundReport.from_payload(stored)
-    if report is None:
-        report = rounds.parse(
-            all_comments, head_sha=head_sha or None, is_open=state in _OPEN_STATES
-        )
+    # THE PARSE IS A FETCH-TIME ARTEFACT, kept PER COMMENT PIECE (review round
+    # 2, N2). A piece fetched on THIS pass is parsed from its full bodies; a
+    # piece that answered 304 replays the passes stored for it, never the
+    # capped copy the size bound left in ``pieces``. Combining the groups
+    # reproduces the one-shot parse exactly (created_at order + renumbering),
+    # so the mixed case — a new review landing beside an unchanged long issue
+    # comment — cannot degrade a clean verdict to ``unstated``.
+    stored_convention = (prior or {}).get("convention") if isinstance(prior, Mapping) else None
+    stored_pieces = (
+        stored_convention.get("pieces")
+        if isinstance(stored_convention, Mapping)
+        and isinstance(stored_convention.get("pieces"), Mapping)
+        else None
+    )
+    piece_groups: dict[str, list[Any]] = {}
+    ignored: list[str] = []
+    for name in sorted(_COMMENT_PIECES):
+        if name in outcome.pieces:
+            piece_report = rounds.parse(adapter.comments({name: pieces.get(name)}))
+            piece_groups[name] = piece_report.passes
+            ignored.extend(piece_report.ignored)
+            continue
+        payload = stored_pieces.get(name) if isinstance(stored_pieces, Mapping) else None
+        if isinstance(payload, list):
+            piece_groups[name] = [
+                item
+                for item in (rounds.ReviewPass.from_payload(entry_) for entry_ in payload)
+                if item is not None
+            ]
+            continue
+        # No stored parse for this piece: a pre-upgrade entry, or a piece this
+        # host never returned. Best effort from the stored (possibly capped)
+        # copy — one pass, then the piece has its own stored parse.
+        piece_report = rounds.parse(adapter.comments({name: pieces.get(name)}))
+        piece_groups[name] = piece_report.passes
+        ignored.extend(piece_report.ignored)
+    report = rounds.RoundReport.combine(list(piece_groups.values()))
+    report.ignored[:] = ignored
     states = report.states(head_sha or None, is_open=state in _OPEN_STATES)
     lanes = [item.to_payload() for item in states]
     entry: dict[str, Any] = {
@@ -869,10 +953,13 @@ def _build_entry(
         "state": state,
         "ci": adapter.ci(pieces) if state else None,
         "lanes": lanes,
-        # The fetch-time parse, replayed across non-refetching rebuilds; see
-        # the docstring. Small: passes carry verdict text, not bodies.
+        # The fetch-time parse, per piece, replayed across non-refetching
+        # rebuilds; see the docstring and the block above. Small: passes carry
+        # verdict text, not bodies.
         "convention": {
-            "passes": [item.to_payload() for item in report.passes],
+            "pieces": {
+                name: [item.to_payload() for item in group] for name, group in piece_groups.items()
+            },
             "ignored": list(report.ignored),
         },
         "comments_total": len(all_comments),

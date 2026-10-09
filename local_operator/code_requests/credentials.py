@@ -36,10 +36,13 @@ THE RULES THIS MODULE KEEPS, because it is the one place a token exists as a val
 4. **Only an AUTHENTICATED host gets a token.** A URL can name any host; a
    token may only travel to one this device is actually signed in to. The
    per-host CLI probes ARE the membership test — each runs with every
-   ``*_TOKEN`` environment variable stripped (:data:`_ENV_TOKEN_NAME`), so a
-   ``gh``/``glab`` answer can only come from its own stored login, never from
-   an env var echoing itself back for an arbitrary ``--host`` (the vectors
-   review round 1, F1, measured). The one env exception is by construction:
+   environment variable whose name ends in ``TOKEN`` stripped
+   (:data:`_ENV_TOKEN_NAME`), so a ``gh``/``glab`` answer can only come from
+   its own stored login, never from an env var echoing itself back for an
+   arbitrary ``--host`` (the vectors review round 1, F1, measured; the family
+   deny-list that missed ``OAUTH_TOKEN`` is review round 2, N1 — the rule is
+   name-ending, not family-name, because the next variable is the one a
+   deny-list misses). The one env exception is by construction:
    ``GH_TOKEN``/``GITHUB_TOKEN`` are github.com's own token and ``GITLAB_TOKEN``
    is gitlab.com's (QA round 1, Q5 — a headless device authenticated by env);
    neither vouches for any other host. The ``GITLAB_TOKEN`` STORE secret is
@@ -80,14 +83,21 @@ _CLI_TIMEOUT_S = 10.0
 #: process gets a minimal PATH where a Homebrew glab is invisible.
 _GLAB_FALLBACK_BIN_DIRS: tuple[str, ...] = ("/opt/homebrew/bin", "/usr/local/bin")
 
-#: Token-valued environment variables, per family, stripped from every CLI
-#: child this module spawns. WHY: ``gh auth token --hostname H`` and ``glab
-#: config get token --host H`` echo the corresponding env variable for ANY H,
-#: so an unstripped child would make an unknown host look signed-in (measured:
-#: ``GITLAB_TOKEN=[redacted] glab config get token --host evil.example`` prints
-#: the token). With the strip in place, only the CLI's own stored, per-host
-#: login can answer — which is exactly the membership check the fetch needs.
-_ENV_TOKEN_NAME = re.compile(r"^(GH|GITHUB|GITLAB|GLAB)_?.*TOKEN$", re.IGNORECASE)
+#: Environment variables stripped from a CLI probe child: EVERY name ending
+#: in ``TOKEN`` (case-insensitive). WHY: ``gh auth token --hostname H`` and
+#: ``glab config get token --host H`` echo the corresponding env variable for
+#: ANY H, so an unstripped child would make an unknown host look signed-in
+#: (measured: ``GITLAB_TOKEN=[redacted] glab config get token --host
+#: evil.example`` prints the token). A deny-list of known family names is how
+#: the round-1 list missed ``OAUTH_TOKEN`` — one of glab's documented env
+#: precedence names — and leaked a token to any ``--host`` a URL named (review
+#: round 2, N1). The membership rule is the suffix, not the family. With the
+#: strip in place, only the CLI's own stored, per-host login can answer —
+#: which is exactly the membership check the fetch needs.
+#: ``.*`` is required: the single call site matches with ``.match()`` (an
+#: anchored match), so the pattern must span from the START to the suffix —
+#: bare ``TOKEN$`` matched nothing at all under ``.match()``.
+_ENV_TOKEN_NAME = re.compile(r".*TOKEN$", re.IGNORECASE)
 
 #: Which host each family's canonical env token may speak for. ``GH_TOKEN`` is
 #: github.com's own token; it must never vouch for a GHES host, and

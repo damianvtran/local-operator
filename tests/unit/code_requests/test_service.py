@@ -796,3 +796,250 @@ def test_the_wire_row_carries_the_hint() -> None:
     row = service.view_row(raw, None)
     assert row["link_only"] is True
     assert row["link_only_hint"] == "Link only — this host isn't tracked yet."
+
+
+# ---------------------------------------------------------------------------
+# review round 2: N2 (mixed refetch keeps full-body parses), N3 (show vs the
+# all-mark), N4 (all-mark survives unserviced rows), Q10 (the probe is
+# reachable), Q13 (cooling state per row)
+# ---------------------------------------------------------------------------
+
+
+def _mixed_handler(calls: list[str], body: str, *, changing: str):
+    """Phase 1 primes both pieces; phase 2 refetches ONLY ``changing``.
+
+    The long convention comment (verdict near the end, past the 4 KiB cap)
+    lives on the OTHER piece, which answers 304 in phase 2; the changing piece
+    gains a body the parser ignores. The lane must stay decided by the long
+    comment — the exact N2 shape, in both directions (reviews change while
+    comments 304, and the reverse).
+    """
+    import httpx
+
+    new_comment = {
+        "id": 43,
+        "body": "LGTM!",
+        "created_at": "2026-10-03T00:00:00Z",
+        "html_url": "u",
+    }
+    long_comment = {
+        "id": 42,
+        "body": body,
+        "created_at": "2026-10-02T01:00:00Z",
+        "html_url": "u",
+    }
+    piece_paths = {
+        "comments": "/issues/7/comments",
+        "reviews": "/pulls/7/reviews",
+    }
+
+    def piece_response(request: httpx.Request, piece: str, etag_in: str, etag_out: str):
+        inm = request.headers.get("if-none-match")
+        if piece == changing:
+            if inm == etag_in:
+                return httpx.Response(200, json=[new_comment], headers={"ETag": etag_out})
+            if inm == etag_out:
+                return httpx.Response(304)
+            return httpx.Response(200, json=[], headers={"ETag": etag_in})
+        if inm == etag_in:
+            return httpx.Response(304)
+        return httpx.Response(200, json=[long_comment], headers={"ETag": etag_in})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        calls.append(path)
+        if "/commits/" in path:
+            return httpx.Response(200, json={"check_runs": [], "total_count": 0})
+        for piece, suffix in piece_paths.items():
+            if path.endswith(suffix):
+                return piece_response(request, piece, f'W/"{piece[0]}-1"', f'W/"{piece[0]}-2"')
+        return httpx.Response(
+            200,
+            json={
+                "number": 7,
+                "state": "open",
+                "title": "t",
+                "head": {"sha": "9d29452abc123", "ref": "x"},
+                "base": {"ref": "main"},
+                "user": {"login": "u"},
+            },
+            headers={"ETag": 'W/"s-1"'},
+        )
+
+    return handler
+
+
+def _install_proxy(monkeypatch: pytest.MonkeyPatch, handler_factory) -> None:
+    """Serve the REAL adapter through a MockTransport, nothing else faked."""
+    import httpx
+
+    from local_operator.code_requests.adapters import github as gh_module
+
+    real = gh_module.ADAPTER
+
+    class Proxy:
+        kind = real.kind
+        full = real.full
+        pieces = real.pieces
+        state = staticmethod(real.state)
+        comments = staticmethod(real.comments)
+        ci = staticmethod(real.ci)
+
+        async def fetch(self, ref, validators, tok, *, stored=None, client=None):
+            transport = httpx.MockTransport(handler_factory())
+            async with httpx.AsyncClient(transport=transport, timeout=5) as http:
+                return await real.fetch(ref, validators, tok, stored=stored, client=http)
+
+    monkeypatch.setattr(service, "adapter_for", lambda ref: Proxy())
+
+
+async def _mixed_lane(tmp_path: Path, monkeypatch, *, changing: str) -> dict[str, Any]:
+    body = _long_convention_body()
+    calls: list[str] = []
+    _install_proxy(monkeypatch, lambda: _mixed_handler(calls, body, changing=changing))
+    await service.refresh_keys(tmp_path, [REF])
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None
+    lane = next(item for item in entry["lanes"] if item["lane"] == "agent")
+    assert lane["state"] == "clean", lane
+    # Phase 2: only the ``changing`` piece refetches (the other answers 304).
+    cache._reset_for_tests()
+    cache.clear_key_backoff(REF.key)
+    await service.refresh_keys(tmp_path, [REF], force=True)
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None
+    return next(item for item in entry["lanes"] if item["lane"] == "agent")
+
+
+@pytest.mark.asyncio
+async def test_a_review_mixed_refresh_keeps_the_long_comments_verdict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lane = await _mixed_lane(tmp_path, monkeypatch, changing="reviews")
+    assert lane["state"] == "clean", "reviews changed while comments 304'd: " + str(lane)
+
+
+@pytest.mark.asyncio
+async def test_a_comments_mixed_refresh_keeps_the_long_reviews_verdict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lane = await _mixed_lane(tmp_path, monkeypatch, changing="comments")
+    assert lane["state"] == "clean", "comments changed while reviews 304'd: " + str(lane)
+
+
+@pytest.mark.asyncio
+async def test_show_ignores_the_sessions_all_mark(tmp_path: Path, monkeypatch) -> None:
+    """N3: an unconsumed turn-end mark must not make every ``show`` refetch."""
+    calls: list[str] = []
+
+    async def fetch(ref, validators, token, *, stored=None, client=None):
+        calls.append(ref.key)
+        return _outcome(pieces={"summary": {"title": "new", "head_sha": "b" * 12}})
+
+    _patch_fetch(monkeypatch, fetch)
+    cache.write_entry(tmp_path, _entry(), ref=REF)  # fresh within its TTL
+    _seed_index(tmp_path)
+    cache.mark_dirty(tmp_path, "s1", all_rows=True)
+    for _ in range(3):
+        await service.show(tmp_path, REF, session_id="s1")
+    assert calls == [], "the all mark is not the ref's own mark"
+    assert cache.read_dirty(tmp_path, "s1")["all"] is True
+    # The key's own mark still revalidates (F6, unchanged) and consumes itself.
+    cache.mark_dirty(tmp_path, "s1", keys=[REF.key])
+    await service.show(tmp_path, REF, session_id="s1")
+    assert calls == [REF.key]
+    assert cache.read_dirty(tmp_path, "s1")["all"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_all_mark_survives_a_pass_that_skipped_a_cooling_host(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """N4: clearing ``all`` for rows the pass never serviced loses their revalidation."""
+    calls: list[str] = []
+
+    async def fetch(ref, validators, token, *, stored=None, client=None):
+        calls.append(ref.key)
+        return _outcome(pieces={"summary": {"title": "t", "head_sha": "a" * 12}})
+
+    _patch_fetch(monkeypatch, fetch)
+    _seed_index(tmp_path)
+    cache.mark_dirty(tmp_path, "s1", all_rows=True)
+    cache.note_rate_limited("github.com", retry_after=120.0)
+    await service.refresh_session(tmp_path, "s1", [ROW])
+    assert calls == [], "the cooling host is not called"
+    assert cache.read_dirty(tmp_path, "s1")["all"] is True, "the mark was NOT serviced"
+    # Once the window ends, the next pass services the row and consumes the mark.
+    cache._reset_for_tests()
+    await service.refresh_session(tmp_path, "s1", [ROW])
+    assert calls == [REF.key]
+    assert cache.read_dirty(tmp_path, "s1")["all"] is False
+
+
+@pytest.mark.asyncio
+async def test_probe_shorthand_reaches_the_adapter_without_a_full_ref(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Q10: the advertised resolve works through the REAL lookup chain.
+
+    No ``adapter_for`` patch anywhere: the probe takes its adapter from the
+    forge registry (``forge_adapter``), because ``adapter_for`` refuses every
+    unconfirmed ref by design and used to make this path unreachable.
+    """
+    import httpx
+
+    from local_operator.code_requests.adapters import adapter_for
+    from local_operator.code_requests.adapters import github as gh_module
+
+    ref = parse_any("o/r#7")
+    assert ref is not None and not ref.full
+    assert adapter_for(ref) is None, "the fetch gate still refuses an unconfirmed ref"
+
+    original = gh_module.GitHubAdapter.probe_pull
+    seen: list[str] = []
+    status = {"code": 200}
+
+    async def probe(self, probe_ref, token, *, client=None):
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(f"{request.method} {request.url.path}")
+            return httpx.Response(status["code"], json={})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5) as http:
+            return await original(gh_module.ADAPTER, probe_ref, token, client=http)
+
+    monkeypatch.setattr(gh_module.GitHubAdapter, "probe_pull", probe)
+    try:
+        verdict, promoted = await service.probe_shorthand(tmp_path, ref)
+        assert verdict == "pull" and promoted is not None and promoted.full is True
+        assert seen == ["GET /repos/o/r/pulls/7"]
+        cache._reset_for_tests()
+        credentials_reset()
+        status["code"] = 404
+        verdict, promoted = await service.probe_shorthand(tmp_path, ref)
+        assert verdict == "issue" and promoted is None
+        assert seen[-1] == "GET /repos/o/r/pulls/7"
+    finally:
+        monkeypatch.undo()
+
+
+def credentials_reset() -> None:
+    from local_operator.code_requests import credentials as creds
+
+    creds._reset_for_tests()
+
+
+def test_a_never_fetched_row_states_cooling_not_plain_link_only() -> None:
+    """Q13: a tracked row on a cooling host must show the WAIT, not link-only."""
+    raw = dict(ROW)
+    cache.note_rate_limited("github.com", retry_after=120.0)
+    try:
+        row = service.view_row(raw, None)
+        assert row["link_only"] is True
+        assert isinstance(row.get("cooling_until"), float)
+        assert "cooling" in str(row.get("reason") or "")
+        assert "sign in" not in str(row.get("reason") or "")
+    finally:
+        cache._reset_for_tests()
+    row = service.view_row(raw, None)
+    assert "cooling_until" not in row
+    assert "reason" not in row
