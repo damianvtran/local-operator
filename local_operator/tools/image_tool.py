@@ -191,13 +191,35 @@ def _preferred_route_label() -> str:
     return "the configured provider"
 
 
+#: The consent copy's humanized size tokens (design round 1, D2): the wire enum
+#: is FAL-shaped ("square_hd"), which reads as jargon in the ONE prompt a
+#: person answers under time pressure. Unmapped values fall back to the raw
+#: token — a describer must never fail, or blank, a value it cannot prettify.
+_SIZE_DISPLAY = {
+    "square_hd": "square HD",
+    "square": "square",
+    "portrait_4_3": "portrait 4:3",
+    "portrait_16_9": "portrait 16:9",
+    "landscape_4_3": "landscape 4:3",
+    "landscape_16_9": "landscape 16:9",
+}
+
+
+def _display_size(token: str) -> str:
+    """The prompt-facing spelling of a size token; raw fallback (see above)."""
+    return _SIZE_DISPLAY.get(token, token)
+
+
 def _describe_generate_image_approval(args: dict[str, Any], cwd: str) -> str:
     """What the approval prompt says: provider, quantity, size, and the spend.
 
     Written for the person answering the prompt under time pressure: the
     decision-relevant facts are the QUANTITY (each image bills), the SIZE and
     that money leaves their account — not the prompt text (already on the
-    card) nor the raw JSON the fallback would dump.
+    card) nor the raw JSON the fallback would dump. Quantity is part of BOTH
+    shapes (design round 1, D1): the edit path spends per image exactly as the
+    generate path does, and a consent that omits the count hides the
+    multiplier the person is approving.
     """
     del cwd  # the spend is account-level; no path decides it
     prompt = args.get("prompt")
@@ -210,11 +232,13 @@ def _describe_generate_image_approval(args: dict[str, Any], cwd: str) -> str:
     source = args.get("source_image_path")
     provider = _preferred_route_label()
     what = (
-        f"Edit an image ({source})"
+        f"Edit {num} image{'s' if num != 1 else ''} ({source})"
         if isinstance(source, str) and source
         else f"Generate {num} image{'s' if num != 1 else ''}"
     )
-    return f"{what} at {size} via {provider} — a paid provider call on your account."
+    return (
+        f"{what} at {_display_size(size)} via {provider} — " "a paid provider call on your account."
+    )
 
 
 # ---------------------------------------------------------------------------
