@@ -658,3 +658,93 @@ def test_a_create_the_tokeniser_reaches_is_never_double_counted():
     assert len(detections) == 1
     assert detections[0].kind == "unknown"
     assert detections[0].rule == "gh-pr-create-unattributed"
+
+
+# -- review round 3: a refusal, an input redirect, and a later act -----------
+
+
+#: gh's own refusal, verbatim from the installed binary's format string
+#: (``a pull request for branch %q into branch %q already exists:``) followed by the URL of
+#: the EXISTING pull request.
+_REFUSAL = (
+    'a pull request for branch "feat-x" into branch "main" already exists:\n'
+    "https://github.com/damianvtran/local-operator/pull/5"
+)
+
+
+def test_a_masked_refusal_is_never_an_open():
+    """F1: ``2>&1`` merges gh's refusal into stdout, and a masking stage restores exit 0.
+
+    The URL after ``already exists:`` belongs to the EXISTING request: this call created
+    nothing. Every masking spelling must land on ``unknown`` with the candidates carried,
+    never ``opened``.
+    """
+    for command in (
+        "gh pr create -f 2>&1 | tail -1",
+        "gh pr create -f 2>&1 | tee x",
+        "gh pr create -f 2>&1 || true",
+        "gh pr create -f 2>&1; echo done",
+        "gh pr create -f 2>&1",
+    ):
+        detections = _bash(command, _REFUSAL)
+        assert [item.kind for item in detections] == ["unknown"], command
+        assert detections[0].rule == "gh-pr-create-refused"
+        assert detections[0].candidate_keys() == ["github.com/damianvtran/local-operator#5"]
+        assert "refused" in (detections[0].reason or "")
+    # And a success through the same masking stages is still an open.
+    assert _kinds(_bash("gh pr create -f 2>&1 | tail -1", _created(4))) == [
+        ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#4", None)
+    ]
+
+
+def test_a_refusal_mid_chain_never_assigns_the_existing_url_to_a_create():
+    """F1: the first create collided, the second succeeded — positional must not fire.
+
+    ``opened #5`` for a create that only collided is exactly the false row this rule
+    exists for, so the command is unattributable and BOTH candidates ride as evidence.
+    """
+    stdout = f"{_REFUSAL}\n{_created(2)}"
+    detections = _bash("gh pr create -a 2>&1 || true; gh pr create -b 2>&1", stdout)
+    assert [item.kind for item in detections] == ["unknown"]
+    assert detections[0].rule == "gh-pr-create-refused"
+    # The row hangs on the line the refusal did NOT print: #5 is the request that already
+    # existed, #2 is the create's plausible own output. Both ride as evidence.
+    ref = detections[0].ref
+    assert ref is not None and ref.key == "github.com/damianvtran/local-operator#2"
+    assert detections[0].candidate_keys() == [
+        "github.com/damianvtran/local-operator#5",
+        "github.com/damianvtran/local-operator#2",
+    ]
+
+
+def test_an_input_redirect_keeps_reading_a_file():
+    """F2: ``cat < other.txt`` reads a file, and a redirect must not hide that.
+
+    With the create's own stdout sent to ``/dev/null`` the only bare URL on stdout is the
+    file's, so attributing it to the create is a false ``opened`` — the stage has to stay
+    recognisable as a file reader.
+    """
+    for command in (
+        "gh pr create -f > /dev/null && cat < other.txt",
+        "gh pr create -f > /dev/null && head -1 < other.txt",
+        "gh pr create -f > /dev/null && cat other.txt",
+    ):
+        detections = _bash(command, _created(2))
+        assert [item.kind for item in detections] == ["unknown"], command
+        assert detections[0].rule == "gh-pr-create-unattributed"
+    # The create's own stdout redirected away with no reader at all: nothing to report.
+    assert _bash("gh pr create -f > /dev/null", "") == []
+
+
+def test_a_later_act_does_not_make_the_create_ambiguous():
+    """F3: ``gh pr create -f && gh pr merge 1 --auto`` — the merge names no url line.
+
+    An act prints a status sentence about the request it acted on, so it cannot be the
+    source of the create's bare url; the create stays attributable, and the merge still
+    records its own act.
+    """
+    detections = _bash("gh pr create -f && gh pr merge 1 --auto", _created(1))
+    assert _kinds(detections) == [
+        ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#1", None),
+        ("acted", "gh-pr-act", "github.com/damianvtran/local-operator#1", "merge"),
+    ]

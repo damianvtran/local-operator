@@ -505,15 +505,11 @@ def _apply_detection(
         evidence["exit"] = detection.exit
     if detection.act:
         evidence["act"] = detection.act
-    candidates = (detection.hint or {}).get("candidates")
-    if isinstance(candidates, list) and candidates:
+    candidates = detection.candidate_keys()
+    if candidates:
         # An ``unknown ("possibly opened")`` row says which urls the call printed, because
         # the rule refused to choose between them — a reader, not the scanner, decides.
-        evidence["candidates"] = [
-            str(item.get("key") or item.get("url") or "")
-            for item in candidates
-            if isinstance(item, Mapping)
-        ]
+        evidence["candidates"] = candidates
     if detection.unverified:
         # The GitHub MCP tool names were never exercised on a live server here, so the
         # claim travels with its own caveat rather than reading like the measured rules.
