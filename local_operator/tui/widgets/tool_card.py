@@ -91,6 +91,7 @@ import re
 import textwrap
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from rich.cells import cell_len
@@ -1562,6 +1563,13 @@ class ToolCard(ExpandableActionBlock):
         #: variant's body — the one adapter mapping lives in
         #: ``local_operator.tui.imagegen`` and this is its single hold on a card.
         self._imagegen_live: imagegen_mod.ImagegenLive | None = None
+        #: The `cancelling` interim, latched the moment a live update maps to
+        #: it and held until the settle clears the live view (design round 1,
+        #: D1): a later terminal-stage update (`cancelled` — the window
+        #: between the cancel acknowledgement and the result) must not un-say
+        #: the word, re-arm the interrupt hint, or un-fill the graphic. See
+        #: :meth:`set_live_details`.
+        self._imagegen_cancel_hold: imagegen_mod.ImagegenLive | None = None
         #: The provider's error text, retained PAST the settle that clears
         #: `_imagegen_live`: a failure either arrives in the live updates or in
         #: the result details, and the failure body must find it whichever way
@@ -2447,6 +2455,9 @@ class ToolCard(ExpandableActionBlock):
             if self._imagegen_live.error_type:
                 self._imagegen_error_type = self._imagegen_live.error_type
         self._imagegen_live = None
+        # The latched cancel interim describes an execution that has ended:
+        # the settle's own account is the word now (design round 1, D1).
+        self._imagegen_cancel_hold = None
         self._live = []
         self._live_advisory = None
         self._live_dropped = 0
@@ -2510,6 +2521,25 @@ class ToolCard(ExpandableActionBlock):
             return
         previous = self._imagegen_live
         view = None if details is None else imagegen_mod.live_from_details(details)
+        if view is not None and view.state == imagegen_mod.STATE_CANCELLING:
+            # First sight of the interim (and every refresh while the producer
+            # still says it): latch it. From here a later update must not
+            # un-say the acknowledged stop — the cancel flow's terminal-stage
+            # emit (`cancelled`) arrives one turn before the result and
+            # previously reverted the word, re-armed the hint and un-filled
+            # the bar (design round 1, D1).
+            self._imagegen_cancel_hold = view
+        elif view is not None and self._imagegen_cancel_hold is not None:
+            # Latched: the held word and the graphic state it carried are
+            # pinned over this update's, which still contributes every other
+            # field — new facts are spoken, the interim is not unspoken. The
+            # pin ends where the live view itself does, at the settle
+            # (`_settle_live`), which repaints from the result alone.
+            view = replace(
+                view,
+                state=self._imagegen_cancel_hold.state,
+                fraction=self._imagegen_cancel_hold.fraction,
+            )
         self._imagegen_live = view
         # An error carried by one update is retained past that update: the
         # failure body reads it after `_settle_live` clears the view, and a
