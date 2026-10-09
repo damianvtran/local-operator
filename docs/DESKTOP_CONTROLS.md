@@ -525,9 +525,16 @@ read that tells a page mid-run "a run is live" without attempting a create (the
 ## Provider and reporting endpoints
 
 
-- GET `/v1/desktop/models?live=false|true`: ProviderController initial/cached or live
-  model catalogue, selectors, connectivity and listing errors. Connectivity means
-  credential availability, not proof of a successful external inference request.
+- GET `/v1/desktop/models?live=false|true&scope=all|usable&current=<provider>/<id>`:
+  ProviderController initial/cached or live model catalogue, selectors, connectivity
+  and listing errors. Connectivity means credential availability, not proof of a
+  successful external inference request. `scope` defaults to `all` (the whole
+  registry); `scope=usable` withholds the rows whose provider has no credential on
+  this host while always keeping `current` (the session's own model). The response
+  echoes `scope` and adds `hidden` — how many rows that filter withheld — beside
+  the existing `credentials_known`, which is `false` when the credential store
+  could not be read (the filter then withholds nothing, because "cannot tell"
+  must not present as "you own no models").
 - GET `/v1/desktop/usage?provider=...&live=false|true&refresh=false|true`: same shared
   ProviderController cache/account semantics as terminal usage. Reports carry age,
   quota data, unavailable/invalid-credential/partial states. Refresh requires live.
