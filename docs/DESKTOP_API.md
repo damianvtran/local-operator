@@ -1456,19 +1456,34 @@ and two shapes for one page is the defect the capability exists to prevent.
    A page that ends mid-run is what makes a client condense a partial run and
    then re-condense it as pages land: the run's head is the row that says the
    run started, and its absence is the whole reason the desktop's align walk
-   exists. After the extension the oldest run on the page has its own opening
-   user row, so a client's condensation of that run is complete rather than
-   provisionally end-loaded.
-3. **Hard caps, and an honest flag when they bind.** The extension stops at
-   `OPEN_FRAME_MAX_ROWS` (400) paintable rows or `OPEN_FRAME_MAX_BYTES`
-   (1,572,864) of served entries, whichever comes first — a 600-row run must not
-   turn a 300 ms open into a mega-payload. `head_cut: true` is how the page says
-   the extension was refused: the page is then the plain `limit`-row tail, the
-   oldest run on it has no opening user row, and the run facts below (not the
-   page) are what carry that run's true size. It is `false` on every page the
-   extension satisfied, which is the ordinary case. A client must not read
-   `head_cut: false` as "the page holds whole runs" — only as "the extension was
-   not refused by a cap".
+   exists. The cut therefore counts `limit` paintable rows from the newest end
+   and then continues back to the next USER row above them — a user row is the
+   client's own run opener (`walkTurns`), so a page starting there begins a run
+   rather than cutting one. The rows that hunt added are bounded by
+   `OPEN_FRAME_MAX_EXTRA_ROWS` (100), so a page is at least `limit` paintable
+   rows and at most `limit + 100`, whatever the shape.
+3. **A head the hunt cannot reach is not paid for, and the page says so.**
+   When no user row is within that budget — the operator's own case is a settled
+   run of 600 rows whose head sits hundreds of rows above the window — the page
+   is EXACTLY the `limit` paintable rows the client asked for and
+   `head_cut: true` states that its oldest run is a fragment. Serving the
+   overshoot instead was measured on the S3 fixture at 231 rows and 264 KB
+   against 100 rows and 114 KB, with a partial run at the top either way: the
+   extra rows cannot complete that run, and `runs` (below) states its true size
+   exactly. Two consequences a renderer depends on:
+
+   - `head_cut: true` is NOT a reason to fetch older pages. When `runs` covers
+     the run — matched by `run_key`, `opening_user_id` or `closing_answer_id` —
+     the page and the facts together ARE the final layout: draw the bar from
+     `action_count` / `worked_seconds` and do not walk.
+   - `head_cut: false` does not mean "every run on the page is whole" either: a
+     STEERED run's head is its first user row, and a page can begin at the steer.
+     The facts carry the whole run's span, which is what the bar is drawn from.
+
+   The hard caps still bound the read itself: `OPEN_FRAME_MAX_ROWS` (400)
+   paintable rows or `OPEN_FRAME_MAX_BYTES` (1,572,864) of served entries,
+   whichever comes first, so a 600-row run cannot turn a 300 ms open into a
+   mega-payload.
 4. **Non-painted bytes are stripped.** The strip is built from what each client
    actually reads, checked in all three repositories before anything was
    deleted (the file each read was found in is named below, and the whole list
