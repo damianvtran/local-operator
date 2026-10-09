@@ -8223,7 +8223,11 @@ async def test_a_request_without_the_paging_parameters_is_answered_as_before(dra
         "cursor_missing",
         "scope",
         "counts",
+        # Additive and one-shot: None unless a delegated-retention sweep has
+        # removed something this store has not yet announced.
+        "delegated_cleanup_notice",
     }
+    assert result["delegated_cleanup_notice"] is None
     assert result["next_cursor"] is None
     assert result["cursor_missing"] is False
     assert result["scope"] is None
