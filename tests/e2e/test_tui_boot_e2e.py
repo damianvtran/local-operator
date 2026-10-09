@@ -612,6 +612,36 @@ def _stop_other(pid: int | None, *, grace_s: float = 5.0) -> None:
             os.kill(pid, signal.SIGKILL)
 
 
+def _marker_context(
+    config_dir: Path, marker: bytes, *, before: int = 300, after: int = 2000
+) -> str:
+    """The block around a crash marker, NAMING the file it is in.
+
+    The message used to print the tail of the concatenated logs, and that hid
+    exactly the case it exists for: measured on CI (`tui-e2e (ubuntu-latest,
+    1)`, run 37886200214), the log carried `Traceback` somewhere before the
+    last 3000 bytes — ``_logs()`` joins every file in ``logs/`` (the app's own
+    log, the stall watchdog's dump, the runtime's), and pytest then elides the
+    middle of the compared operand — so the reader could tell the marker was
+    there and nothing about what wrote it. This walks the files one at a time
+    and prints the window around the FIRST match, which is the difference
+    between a red cell and a diagnosis.
+    """
+    directory = config_dir / "logs"
+    if not directory.is_dir():
+        return "no logs directory"
+    for path in sorted(directory.glob("*.log")):
+        with contextlib.suppress(OSError):
+            data = path.read_bytes()
+            index = data.find(marker)
+            if index >= 0:
+                start = max(0, index - before)
+                end = min(len(data), index + after)
+                window = data[start:end].decode("utf-8", errors="replace")
+                return f"{path.name} at byte {index}:\n{window}"
+    return "the marker is in neither the terminal nor logs/*.log"
+
+
 def test_the_assembled_tui_boots_loads_its_resources_and_survives_legacy_terminal_input(
     headless_tui_env: Path,
     tmp_path: Path,
@@ -709,8 +739,7 @@ def test_the_assembled_tui_boots_loads_its_resources_and_survives_legacy_termina
                         f"tail:\n{text[-3000:].decode('utf-8', errors='replace')}"
                     )
                 assert b"Traceback" not in text, (
-                    f"{where} carries a traceback; "
-                    f"tail:\n{text[-3000:].decode('utf-8', errors='replace')}"
+                    f"{where} carries a traceback; " f"{_marker_context(config_dir, b'Traceback')}"
                 )
     finally:
         if terminal is not None:
