@@ -3519,13 +3519,36 @@ class DesktopSessionBridge:
                 has_more=page.has_more,
                 cursor_missing=page.reconciled,
                 has_newer=page.has_newer,
+                # THE ANCHOR IS THE PAGE'S REASON TO EXIST (review round 1, F1).
+                # Without it the cap cut the jump target away — a client asked for
+                # a position and got a window that no longer contained it — and
+                # ``capped`` was not folded into the flags either, so ``has_more``
+                # said the conversation began at the cut and the older rows became
+                # unreachable.
+                anchor_id=around_id,
                 bounds=(
                     page_seq_bounds(anchored_index, anchored, reaches_eof=False)
                     if anchored_index is not None
                     else None
                 ),
             )
-            return self._frame_answer(result)
+            answer = self._frame_answer(result)
+            # ONLY the older side (review round 3, F15): a cut on the newer side
+            # leaves older rows untouched, so folding it here made ``has_more``
+            # true on a page whose oldest row is the journal's first.
+            answer["has_more"] = page.has_more or result.capped_older
+            # AND THE NEWER SIDE (review round 2, F10): a cap that refuses rows on
+            # the newer side leaves them beyond the page, so the flag has to say
+            # so — ``page.has_newer`` is the reader's pre-cap answer and cannot
+            # know about the cap. Measured before this: ``around_id=u0050`` with
+            # 450 rows after it served 400 and answered ``has_newer: false`` while
+            # 50 newer rows sat inside the request.
+            answer["has_newer"] = bool(page.has_newer) or result.capped_newer
+            # AN ANCHORED PAGE NEVER CLAIMS ITS OLDEST RUN IS WHOLE: it is a jump
+            # window, not a tail cut, so the only honest reading of ``head_cut``
+            # here is "a cap dropped rows from this window".
+            answer["head_cut"] = result.capped
+            return answer
 
         collected: list[dict[str, Any]] = []
         has_more = False
@@ -3542,7 +3565,16 @@ class DesktopSessionBridge:
                     # the bound would be a second cut over rows the caller's own
                     # bound never described.
                     through_id=through_id if not collected else None,
-                    limit=limit,
+                    # THE PAGE PLUS ITS CONTINUATION, IN ONE READ (QA round 1,
+                    # Q3): the reader's own window is sized to the request and a
+                    # SMALL request is the case that suffers — at ``limit <= 20``
+                    # the raw read is a few dozen rows, so the user-row hunt ran
+                    # out of rows it had never asked for and the cut stopped
+                    # short. Reading ``limit + OPEN_FRAME_MAX_EXTRA_ROWS`` on every
+                    # page costs nothing when the hunt is unnecessary (the page
+                    # still serves ``limit`` rows) and makes the bound the same
+                    # number the hunt is allowed to spend.
+                    limit=limit + OPEN_FRAME_MAX_EXTRA_ROWS,
                 )
             except FileNotFoundError:
                 if collected:
@@ -3577,10 +3609,33 @@ class DesktopSessionBridge:
             # hand the reachability test is one subtraction (see
             # ``open_frame.tail_head_reachable``) and a run too long to reach is
             # left to ``runs`` rather than paid for in bytes.
-            if index is None and attempt == 0:
+            # F3: THE SHORTCUT STOPS THE EXTRA HUNT ONLY, AND ONLY ON A TAIL
+            # READ. Two ways this was wrong: it ended the read while the page
+            # still held FEWER than ``limit`` paintable rows (the ordinary shape
+            # of a long live run is a ``tool`` row followed by a
+            # ``session_spend.v1`` row per provider round, so one read of ``limit``
+            # raw rows can hold half that many painted ones), and it asked about
+            # the JOURNAL's last run even when the cursor was a ``before_id`` in
+            # the middle of the conversation. A page is owed its ``limit`` rows;
+            # the shortcut only decides whether to spend MORE on a head that
+            # ``runs`` already describes exactly.
+            if (
+                attempt == 0
+                and index is None
+                and before_id is None
+                and through_id is None
+                and around_id is None
+            ):
                 index = await self._frame_index(deadline)
-                if index is not None and not tail_head_reachable(index, limit=limit):
-                    break
+            if (
+                index is not None
+                and len(paintable_rows) >= limit
+                and before_id is None
+                and through_id is None
+                and around_id is None
+                and not tail_head_reachable(index, limit=limit)
+            ):
+                break
             if len(paintable_rows) >= limit + OPEN_FRAME_MAX_EXTRA_ROWS:
                 # The head hunt's own budget, in ROWS and not pages: past it the
                 # page is not aligned and the rows above the limit are ones the
@@ -3630,12 +3685,18 @@ class DesktopSessionBridge:
         answer = self._frame_answer(result)
         # A cut that DROPPED rows the read had already fetched still owes the
         # client a "there is more above this page": ``has_more`` describes the
-        # page served, never the reads behind it, and the reader that trimmed
-        # rows above the cut would otherwise be told the conversation starts
-        # there.
+        # page served, never the reads behind it, and a reader that trimmed rows
+        # above the cut would otherwise be told the conversation starts there.
         trimmed = len(kept) < len(collected)
         answer["has_more"] = has_more or result.capped or trimmed
-        answer["head_cut"] = (not reached) and (answer["has_more"] or result.capped)
+        # F2: ``head_cut`` IS COMPUTED FROM WHAT WAS SERVED, AFTER THE CAPS.
+        # ``reached`` describes ``collected``, and ``build_frame`` may then have
+        # dropped the oldest rows — the page's user row first — so a page could
+        # report ``head_cut: false`` while its oldest run WAS cut by the cap. That
+        # is the one reading a client acts on (it stops walking and condenses the
+        # page's oldest run from the rows it holds), which makes the false answer
+        # worse than no answer.
+        answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
         return answer
 
     @staticmethod

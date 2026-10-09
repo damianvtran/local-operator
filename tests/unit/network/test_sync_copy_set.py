@@ -418,8 +418,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/session/archived.py": (1, "the archived-ids list, a store-level record"),
     "local_operator/session/search_index.py": (1, "the search index, a store-level record"),
     "local_operator/session/transcript_index.py": (
-        1,
-        "the transcript index cache directory under the cache root, a store-level record",
+        2,
+        "the transcript index cache directory under the cache root, a store-level record; "
+        "and the tool name whose rows the desktop hides when display.hide_cross_session is "
+        "on, a comparison word rather than a path",
     ),
     "local_operator/session/retention.py": (
         1,

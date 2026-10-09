@@ -88,6 +88,9 @@ def run(
         settled=settled,
         outcome=outcome,
         complete=complete,
+        # A record that states a worked figure is one a row reported (Q4); a run
+        # that reported none states ``None`` on the wire.
+        worked_any=worked > 0.0,
     )
 
 
@@ -328,6 +331,13 @@ def test_publish_runs_states_counts_for_a_settled_run_only() -> None:
     assert settled["worked_seconds"] == 12.5 and settled["settled"] is True
     assert live["settled"] is False and live["outcome"] == "open"
     assert live["action_count"] is None and live["worked_seconds"] is None
+    # Q4: a settled run whose rows reported no duration states None, not 0.0.
+    silent = of.publish_runs(
+        index_with([run(opening="u3", closing="a3", first_seq=9, last_seq=12, worked=0.0)]),
+        first_seq=9,
+        last_seq=None,
+    )
+    assert silent[0]["worked_seconds"] is None
     # The identity a client can match on is still stated for the live run: the
     # run's LAST row id, which is the client's own fallback key when a run has no
     # elected answer yet.
@@ -391,3 +401,89 @@ def test_the_frame_result_serialises_compactly_enough_to_be_measured() -> None:
     """``served_bytes`` measures the wire's own encoding, not a pretty one."""
     entries = [message("m1", "user")]
     assert of.served_bytes(entries) == len(json.dumps(entries[0], separators=(",", ":")))
+
+
+def test_an_anchored_page_keeps_its_anchor_under_a_cap() -> None:
+    """F1: the cap may never cut a jump target away from its own page.
+
+    An anchored read exists because a client asked for a POSITION. Growing the
+    window outward from the anchor (rather than truncating from the newest end)
+    is what keeps the target inside the answer, and it keeps the two halves of the
+    window equally long — the shape a jump paints around its row.
+    """
+    rows = [message("u0", "user")] + [message(f"t{i}", "tool") for i in range(450)]
+    frame = of.build_frame(rows, index=None, runs_state="building", anchor_id="t200")
+    ids = [row["id"] for row in frame.entries]
+    assert "t200" in ids
+    assert len(ids) == of.OPEN_FRAME_MAX_ROWS
+    # Centred: the anchor sits in the middle of the kept window, not at an edge.
+    assert ids[len(ids) // 2] == "t200"
+    assert frame.capped is True
+    # F10: 250 rows on the NEWER side of the anchor were refused by the cap, so
+    # the page must not claim there are none beyond it.
+    assert frame.capped_newer is True
+    # F15: BOTH sides were refused here (the anchor has 250 newer and 200 older
+    # rows against a 400-row cap), and the two flags must say so separately so
+    # that ``has_more`` can fold only the older one.
+    assert frame.capped_older is True
+
+    # An anchor at the very start of the region still survives: growth stops on
+    # the side that has no rows and continues on the other.
+    edge = of.build_frame(rows, index=None, runs_state="building", anchor_id="u0")
+    assert edge.entries[0]["id"] == "u0"
+    assert edge.capped is True
+    # F15's own shape: nothing lies older of the first row, so only the newer
+    # side is cut and ``has_more`` must not be inflated by it.
+    assert edge.capped_older is False and edge.capped_newer is True
+
+
+def test_the_custom_allow_list_serves_only_the_painted_envelope() -> None:
+    """F6: one ``type:"custom"`` type paints, so one is served.
+
+    The unlisted types are the ones the deny-list missed — ``wake_schedules``
+    (plural), ``stt_transcript_v1``, ``todo_snapshot`` (written by
+    ``append_custom``, so it cannot paint) — and each of them was spending a slot
+    of the client's ``limit`` while nothing could draw it.
+    """
+    for custom_type in (
+        "wake_schedules",
+        "monitor_schedules",
+        "subagent_roster",
+        "todo_snapshot",
+        "active_model_route",
+        "conversation_name",
+        "aida_turn",
+        "stt_transcript_v1",
+        "mesh_credential_binding.v1",
+        "attention_started",
+        "session_spend.v1",
+        "system_prefix",
+    ):
+        assert of.strip_entry(custom("c1", custom_type)) is None, custom_type
+    kept = of.strip_entry(custom("k1", "completion_attention", {"anchor": "a"}))
+    assert kept is not None
+    # An unknown TOP-LEVEL type is still served verbatim: the envelope gate is
+    # about ``custom``, and a type this build has never seen is not its to judge.
+    unknown = row("x1", "future_thing", {"anything": 1})
+    assert of.strip_entry(unknown) is not None
+
+
+def test_a_harness_chrome_user_row_is_neither_paintable_nor_a_run_head() -> None:
+    """F8: a row the client discards may not count toward ``limit`` or head a run.
+
+    Two spellings, both the client's: the ``harness_injected`` stamp and the
+    chrome recognisers. A page that began at one would have its oldest run
+    head-cut on screen while ``head_cut`` claimed otherwise.
+    """
+    from local_operator.harness.rows import harness_chrome_prompts
+
+    injected = message("u1", "user", provider_payload={"harness_injected": True})
+    chrome = message("u2", "user", content=[{"text": harness_chrome_prompts()[0]}])
+    for row_ in (injected, chrome):
+        assert of.strip_entry(row_) is None
+        assert of.is_user_row(row_) is False
+    assert of.paintable([injected, message("t1", "tool"), chrome]) == [
+        strip for strip in [of.strip_entry(message("t1", "tool"))] if strip is not None
+    ]
+    # A plain user row is still the run head.
+    assert of.is_user_row(message("u3", "user")) is True

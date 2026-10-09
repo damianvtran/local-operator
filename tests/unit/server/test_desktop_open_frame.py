@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
+from local_operator.server.models.desktop_sessions import HistoryPage
 from local_operator.server.routes import desktop_sessions
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session import transcript_index as ti
@@ -488,3 +489,252 @@ async def test_a_snapshot_carries_the_same_page_as_history(tmp_path: Path) -> No
         assert snapshot["runs"] == page["runs"]
         assert snapshot["runs_state"] == page["runs_state"]
         assert snapshot["head_cut"] == page["head_cut"]
+
+
+def _long_turn(turn: int, calls: int, *, spend_rows: bool = True) -> list[Any]:
+    """One turn with ``calls`` tool rows, each followed by a spend receipt.
+
+    THE ORDINARY SHAPE OF A LIVE RUN: ``session.py`` writes a
+    ``session_spend.v1`` row per provider round, so a run of N calls holds 2N
+    journal rows and one read of ``limit`` rows holds about half that many
+    painted ones.
+    """
+    rows = [
+        _entry(
+            f"u{turn:04d}",
+            float(turn),
+            "message",
+            {"kind": "message", "role": "user", "content": [{"text": f"turn {turn}"}]},
+        )
+    ]
+    for call in range(calls):
+        rows.append(
+            _entry(
+                f"t{turn:04d}{call:04d}",
+                float(turn) + call / 1000,
+                "message",
+                {
+                    "kind": "message",
+                    "role": "tool",
+                    "content": [{"text": "output"}],
+                    "provider_payload": {"details": {}, "duration_s": 1.0},
+                },
+            )
+        )
+        if spend_rows:
+            rows.append(
+                _entry(
+                    f"s{turn:04d}{call:04d}",
+                    float(turn) + call / 1000 + 0.0005,
+                    "custom",
+                    {"custom_type": "session_spend.v1", "details": {"micro": 1}},
+                )
+            )
+    rows.append(
+        _entry(
+            f"a{turn:04d}",
+            float(turn) + 1,
+            "message",
+            {"kind": "message", "role": "assistant", "content": [{"text": "done"}]},
+        )
+    )
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_a_long_live_run_still_serves_the_limit_it_was_asked_for(
+    tmp_path: Path,
+) -> None:
+    """F3(a): the shortcut may not end the read below ``limit`` paintable rows.
+
+    The reachability shortcut exists to stop the EXTRA hunt, not the page: with a
+    long live tail (a ``tool`` row and a spend receipt per call) one read of
+    ``limit`` raw rows holds about half that many painted ones, and the old rule
+    broke out of the loop immediately — S3-class journals answered 50 rows for a
+    100-row request.
+    """
+    async with _Harness(tmp_path) as harness:
+        _write(
+            harness.root / "sessions" / harness.session_id,
+            _long_turn(1, 200),
+        )
+        assert harness.client is not None
+        page = (
+            await harness.client.get(
+                f"/v1/desktop/sessions/{harness.session_id}/history",
+                params={"limit": 100, "open_frame": 1},
+            )
+        ).json()["result"]
+        assert len(page["entries"]) >= 100, len(page["entries"])
+        assert page["head_cut"] is True  # the run's head is 400 rows above
+
+
+@pytest.mark.asyncio
+async def test_a_before_id_page_keeps_its_limit_when_the_tail_run_is_long(
+    tmp_path: Path,
+) -> None:
+    """F3(b): an older page is not shortened because the JOURNAL's tail is long.
+
+    The shortcut asked ``tail_head_reachable`` about the journal's last run
+    whatever cursor the read carried, so a mid-journal page answered fewer rows
+    than asked for whenever the newest turn happened to be a long one.
+    """
+    async with _Harness(tmp_path) as harness:
+        rows: list[Any] = []
+        for turn in range(1, 21):
+            rows.extend(_long_turn(turn, 3))
+        rows.extend(_long_turn(99, 400))
+        _write(harness.root / "sessions" / harness.session_id, rows)
+        assert harness.client is not None
+        page = (
+            await harness.client.get(
+                f"/v1/desktop/sessions/{harness.session_id}/history",
+                params={"before_id": "u0010", "limit": 40, "open_frame": 1},
+            )
+        ).json()["result"]
+        assert len(page["entries"]) >= 40, len(page["entries"])
+        # The page ends immediately above the cursor: the newest row before
+        # ``u0010`` is the previous turn's answer.
+        assert page["entries"][-1]["id"] == "a0009"
+
+
+@pytest.mark.asyncio
+async def test_head_cut_is_true_when_the_cap_drops_the_pages_user_row(
+    tmp_path: Path,
+) -> None:
+    """F2: ``head_cut`` describes what was SERVED, never what was collected.
+
+    A journal the reader could align (its head is a user row) whose page the byte
+    or row cap then cut must not claim alignment: the client acts on that flag by
+    condensing the page's oldest run from loaded rows.
+    """
+    async with _Harness(tmp_path) as harness:
+        rows = [
+            _entry(
+                "u0001",
+                1.0,
+                "message",
+                {"kind": "message", "role": "user", "content": [{"text": "go"}]},
+            )
+        ]
+        for call in range(450):
+            rows.append(
+                _entry(
+                    f"t{call:04d}",
+                    1.0 + call / 1000,
+                    "message",
+                    {
+                        "kind": "message",
+                        "role": "tool",
+                        "content": [{"text": "x" * 3000}],
+                        "provider_payload": {"details": {}, "duration_s": 1.0},
+                    },
+                )
+            )
+        _write(harness.root / "sessions" / harness.session_id, rows)
+        assert harness.client is not None
+        page = (
+            await harness.client.get(
+                f"/v1/desktop/sessions/{harness.session_id}/history",
+                params={"limit": 500, "open_frame": 1},
+            )
+        ).json()["result"]
+        assert page["head_cut"] is True
+        assert page["has_more"] is True
+        assert len(page["entries"]) <= 400
+        assert all(entry["payload"].get("role") != "user" for entry in page["entries"])
+
+
+@pytest.mark.asyncio
+async def test_a_capped_anchored_page_keeps_the_anchor_and_says_has_more(
+    tmp_path: Path,
+) -> None:
+    """F1: the jump target survives its own page, and the flags stay honest.
+
+    Reproduced against the head before this fix: an anchored page that hit the cap
+    dropped the anchor, answered ``has_more: false`` and made the older rows
+    unreachable.
+    """
+    async with _Harness(tmp_path) as harness:
+        rows = [
+            _entry(
+                "u0001",
+                1.0,
+                "message",
+                {"kind": "message", "role": "user", "content": [{"text": "go"}]},
+            )
+        ]
+        for call in range(500):
+            rows.append(
+                _entry(
+                    f"t{call:04d}",
+                    1.0 + call / 1000,
+                    "message",
+                    {
+                        "kind": "message",
+                        "role": "tool",
+                        "content": [{"text": "x" * 3000}],
+                        "provider_payload": {"details": {}, "duration_s": 1.0},
+                    },
+                )
+            )
+        _write(harness.root / "sessions" / harness.session_id, rows)
+        assert harness.client is not None
+        page = (
+            await harness.client.get(
+                f"/v1/desktop/sessions/{harness.session_id}/history",
+                params={"around_id": "t0250", "before": 200, "after": 200, "open_frame": 1},
+            )
+        ).json()["result"]
+        ids = [entry["id"] for entry in page["entries"]]
+        assert "t0250" in ids, "the anchor vanished from its own page"
+        assert page["has_more"] is True
+        assert page["head_cut"] is True  # a cap dropped rows from the window
+        assert len(ids) <= 400
+
+
+def test_the_history_page_schema_keeps_its_properties() -> None:
+    """F7: the open frame's keys are conditional on the wire AND documented.
+
+    ``exclude_if`` omits a key when it is unset without hiding the model's shape
+    from the generated schema, which a ``model_serializer`` returning ``dict``
+    does (``additionalProperties: true`` and every property gone).
+    """
+    schema = HistoryPage.model_json_schema()
+    assert set(schema.get("properties", {})) >= {
+        "entries",
+        "has_more",
+        "cursor_missing",
+        "has_newer",
+        "runs",
+        "runs_state",
+        "head_cut",
+    }
+    assert schema.get("title") == "HistoryPage"
+
+
+@pytest.mark.asyncio
+async def test_a_small_limit_still_reaches_the_openings_user_row(tmp_path: Path) -> None:
+    """Q3: at ``limit`` <= 20 the hunt ran out of rows it never asked for.
+
+    The reader sizes its window to the REQUEST (it multiplies by a small factor to
+    cover rows its own filter drops), so a 5-row page bought a few dozen raw rows
+    and the cut stopped short of the run's opening user row — the bar then opened
+    on a partial run. The read now buys ``limit + OPEN_FRAME_MAX_EXTRA_ROWS``
+    rows, which is the same number the hunt is allowed to spend.
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=8)
+        assert harness.client is not None
+        base = f"/v1/desktop/sessions/{harness.session_id}/history"
+        frame = (await harness.client.get(base, params={"limit": 5, "open_frame": 1})).json()[
+            "result"
+        ]
+        assert len(frame["entries"]) >= 5
+        # Either the page reaches a run head, or it says honestly that a cap
+        # stopped it — never a headless page reported as complete.
+        assert frame["entries"][0]["payload"].get("role") == "user" or frame["head_cut"] is True
+        # Facts are NOT asserted here: a page whose bounds hold no run a client
+        # could match by answers ``ready`` with an empty list (see ``publish_runs``
+        # and the note in ``build_frame``), which is legitimate — this test is
+        # about the read's bound, not about the facts.

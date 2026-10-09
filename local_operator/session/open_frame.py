@@ -40,6 +40,7 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
+from local_operator.harness.rows import is_harness_chrome, is_harness_injection
 from local_operator.session.transcript_index import RunRecord, TranscriptIndex
 
 logger = logging.getLogger(__name__)
@@ -127,25 +128,36 @@ _DROPPED_PROVIDER_KEYS = ("native_replay", "system_fingerprint", "id")
 #: ``session_mcp_unavailable`` are all PAINTED, and the reducer's
 #: ``SILENT_CUSTOM_TYPES`` names the ones that are not. Both spellings are here
 #: because both appear in real journals for the same logical row.
-_DROPPED_CUSTOM_TYPES = frozenset(
-    {
-        # type: "custom" rows (the harness's own bookkeeping envelopes)
-        "frontend_state_checkpoint_v1",
-        "session_spend.v1",
-        "session_state",
-        "system_prefix",
-        "selected_model",
-        "attention_started",
-        # message-row customs the reducer lists as silent
-        "hub_communication",
-        "wake_schedule",
-        "prune",
-    }
-)
+#: ``type: "custom"`` rows are handled by the allow-list (``_KEPT_CUSTOM_TYPE``);
+#: the message-row customs the reducer's ``SILENT_CUSTOM_TYPES`` names are the
+#: only custom types it can paint on the other envelope, and they are read from
+#: that set rather than re-listed here.
 
-#: ``type: "custom"`` rows that MUST be served whatever else is dropped: the one
-#: custom the desktop paints from this shape. Named as an allow-list so the list
-#: above can never take it out by accident.
+#: ``type: "custom"`` rows that PAINT, as an ALLOW-LIST.
+#:
+#: The desktop projects a durable row in ONE function
+#: (``transcript-reducer.ts::durableRecord``), and that function ends every
+#: non-message row it does not recognise: among ``type: "custom"`` rows only
+#: ``completion_attention`` survives (the notice branch at ``:2543``, ahead of the
+#: ``if (entry.type !== "message") return null`` gate at ``:2592``). The constant
+#: below IS that gate, stated the way the gate works rather than as a list of
+#: types someone remembered to drop.
+#:
+#: A DENY-LIST WAS THE WRONG SHAPE HERE, and this module shipped one first. It
+#: missed ``wake_schedules`` (plural — the reducer's silent set has the
+#: singular), ``monitor_schedules``, ``subagent_roster``, ``todo_snapshot``
+#: (written by ``append_custom`` at ``session.py:20564``, so ``type: "custom"``
+#: and therefore unpaintable, contrary to what this module claimed),
+#: ``active_model_route``, ``conversation_name``, ``aida_*``,
+#: ``stt_transcript_v1`` and ``mesh_credential_binding.v1`` — every one of them
+#: served AND counted toward ``limit`` while nothing could paint them.
+#:
+#: A NEW type is therefore DROPPED until it is named here, which is the fail-safe
+#: direction for this contract: a row a client cannot paint must not spend the
+#: client's row budget, and adding a painted type is a one-line change with a
+#: test. Unknown TOP-LEVEL entry types are still served verbatim — the gate is
+#: about the ``custom`` envelope, and a type this build has never seen is not
+#: this module's to judge.
 _KEPT_CUSTOM_TYPE = "completion_attention"
 
 #: A compaction's one-line preview cap. The marker's summary is a full model
@@ -173,7 +185,20 @@ class FrameResult:
     #: (and are still on disk) are not in ``entries``. The caller MUST fold this
     #: into ``has_more`` — otherwise a reader is told the conversation begins
     #: where the cap cut and never pages back to rows it was not given.
+    #: Either end (see ``capped_older``/``capped_newer`` for which). The anchored
+    #: arm uses it as ``head_cut``; ``has_more`` folds ``capped_older`` alone, so a
+    #: cut on the newer side cannot inflate it (review round 3, F15).
     capped: bool = False
+    #: WHICH SIDE THE CAP CUT (review round 2, F10). An anchored window grows
+    #: outward from its anchor, so a cap can refuse rows on either side — and the
+    #: newer side is the one a client cannot infer from ``has_newer`` alone: the
+    #: reader's own ``has_newer`` describes what the request window held BEFORE the
+    #: caps ran, so folding the cut into the flag is the only way the field stays
+    #: honest about rows that exist beyond the page.
+    capped_newer: bool = False
+    #: The OLDER side, the mirror of ``capped_newer`` — the anchored window can be
+    #: refused rows on either end, and ``has_more`` must fold only this one (F15).
+    capped_older: bool = False
     #: Diagnostics for the evidence table and for tests: how many journal rows
     #: were decoded to produce this page, and how many were dropped by the strip.
     raw_rows: int = 0
@@ -193,8 +218,10 @@ def strip_entry(entry: Mapping[str, Any]) -> dict[str, Any] | None:
     payload = entry.get("payload")
     payload = dict(payload) if isinstance(payload, Mapping) else {}
     if etype == "custom":
-        custom_type = str(payload.get("custom_type") or "")
-        if custom_type in _DROPPED_CUSTOM_TYPES and custom_type != _KEPT_CUSTOM_TYPE:
+        # THE ALLOW-LIST (see ``_KEPT_CUSTOM_TYPE``): one type paints, and every
+        # other custom envelope is a row no surface can draw — so it may not be
+        # served and may not spend the client's row budget either.
+        if str(payload.get("custom_type") or "") != _KEPT_CUSTOM_TYPE:
             return None
         return {**entry, "payload": payload}
     if etype == "compaction":
@@ -217,6 +244,16 @@ def strip_entry(entry: Mapping[str, Any]) -> dict[str, Any] | None:
         # served verbatim: an unknown row is not this module's to judge, and a
         # client already ignores what it does not recognise.
         return {**entry, "payload": payload}
+    if etype == "message" and str(payload.get("role") or "") == "user":
+        # A HARNESS-CHROME USER ROW IS NOT A USER ROW: the desktop drops it at
+        # ``isHarnessInjected`` and the chrome recognisers, and the index skips it
+        # entirely. A page that began at one would have its oldest run head-cut on
+        # screen while ``head_cut`` said otherwise, and it would take a slot from
+        # the ``limit`` the client asked for. The predicates are the harness's own
+        # (``harness.rows``), reused rather than restated, so the callers of
+        # "is this row chrome?" cannot drift apart.
+        if is_harness_injection(payload) or _is_chrome_text(payload):
+            return None
     provider = payload.get("provider_payload")
     if isinstance(provider, Mapping):
         trimmed = {k: v for k, v in provider.items() if k not in _DROPPED_PROVIDER_KEYS}
@@ -288,14 +325,42 @@ def tail_head_reachable(
     return rows_above_head <= limit + extra_rows + 1
 
 
+def _is_chrome_text(payload: Mapping[str, Any]) -> bool:
+    """Whether a user row's TEXT is harness chrome the client never shows.
+
+    The reducer's recognisers are the authority (``transcript-reducer.ts:2725``,
+    ``:2735``) and ``harness.rows`` restates them for this side of the wire; this
+    helper is only the ``content`` walk, so a row's stamp and its text are checked
+    by one caller instead of two spellings. The stamp is read through
+    ``is_harness_injection`` for the same reason — and it takes the PAYLOAD, not
+    the envelope (its duck-typing accepts "a message-like object or a raw payload
+    mapping", and an envelope is neither).
+    """
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if isinstance(block, Mapping) and isinstance(block.get("text"), str):
+            if is_harness_chrome(block["text"]):
+                return True
+    return False
+
+
 def is_user_row(entry: Mapping[str, Any]) -> bool:
-    """Whether a SERVED row is a user message row — the client's own run opener."""
+    """Whether a SERVED row is a user message row — the client's own run opener.
+
+    A harness-chrome user row answers ``False``: the client drops it at its own
+    projection, so a page that began at one would look aligned to this module and
+    head-cut on screen. ``strip_entry`` removes them before they reach a page for
+    the same reason, and this second check is what keeps the predicate true if a
+    caller hands it rows the strip did not see.
+    """
     payload = entry.get("payload")
-    return (
-        str(entry.get("type") or "") == "message"
-        and isinstance(payload, Mapping)
-        and str(payload.get("role") or "") == "user"
-    )
+    if str(entry.get("type") or "") != "message" or not isinstance(payload, Mapping):
+        return False
+    if str(payload.get("role") or "") != "user":
+        return False
+    return not is_harness_injection(payload) and not _is_chrome_text(payload)
 
 
 def align_page(
@@ -416,7 +481,10 @@ def run_payload(run: RunRecord) -> dict[str, Any]:
         # The client's own run identity: the closing answer's id when the run has
         # one, else its last row's id (``transcript-rows.ts::runsOf``). It is the
         # key a bar is remembered by and the first thing a client matches on.
-        "run_key": run.closing_answer_id or run.last_id,
+        # THE CLIENT'S OWN KEY (see ``RunRecord.key_id``): a client matches a
+        # fact to the run it already holds by this string, so an entry id here is
+        # a mismatch on every marker- and tool-terminated run.
+        "run_key": run.key_id or run.closing_answer_id or run.last_id,
         "opening_user_id": run.opening_user_id or None,
         "closing_answer_id": run.closing_answer_id or None,
         "settled": run.settled,
@@ -433,11 +501,32 @@ def run_payload(run: RunRecord) -> dict[str, Any]:
             {
                 "action_count": run.action_count,
                 "failed_count": run.failed_count,
-                "worked_seconds": round(run.worked_seconds, 3),
+                # NULL, NOT 0.0, when no row of the run reported a duration: the
+                # client's own ``workedSeconds`` states ``null`` for that case
+                # (``trace-fold-model.ts``), and a bar that prints "0s" where the
+                # fold prints nothing is the disagreement this contract removes.
+                "worked_seconds": round(run.worked_seconds, 3) if run.worked_any else None,
+                # ADDITIVE, for the setting's own reader: the subset of the counts
+                # the desktop HIDES when ``display.hide_cross_session`` is on
+                # (``cross-session-visibility.ts``). A client with the setting off
+                # ignores both fields; one with it on subtracts them instead of
+                # re-deriving them from rows it cannot see.
+                "cross_session_action_count": run.cross_actions,
+                "cross_session_worked_seconds": (
+                    round(run.cross_worked, 3) if run.cross_actions else None
+                ),
             }
         )
     else:
-        payload.update({"action_count": None, "failed_count": None, "worked_seconds": None})
+        payload.update(
+            {
+                "action_count": None,
+                "failed_count": None,
+                "worked_seconds": None,
+                "cross_session_action_count": None,
+                "cross_session_worked_seconds": None,
+            }
+        )
     return payload
 
 
@@ -451,6 +540,7 @@ def build_frame(
     has_more: bool = True,
     cursor_missing: bool = False,
     has_newer: bool | None = None,
+    anchor_id: str | None = None,
 ) -> FrameResult:
     """Strip, cap and publish one page from rows already read, newest last.
 
@@ -458,6 +548,14 @@ def build_frame(
     ``head_cut`` is set by the caller when it asked for the extension and could
     not reach the head. Rows are dropped, never truncated: a half-row would be a
     shape no client's reader has ever seen.
+
+    ``anchor_id`` IS THE JUMP TARGET, and when it is given the cap keeps it. An
+    anchored read exists for one reason — a client asked for a POSITION — so a
+    cap that cut the anchor away would answer a request that no longer contains
+    its own answer, and the client would either paint a page without the row it
+    asked for or re-request the same window forever. The window is then grown
+    OUTWARD from the anchor instead of truncated from the newest end, which is
+    also what keeps the two halves of an anchored page equally long.
     """
     ordered = list(raw_entries)
     raw_rows = len(ordered)
@@ -469,22 +567,37 @@ def build_frame(
     # exceeds the cap by itself is still served, because a page with no rows is
     # not a smaller page, it is a blank transcript, and today's reader serves
     # that row too.
+    painted = [
+        stripped for stripped in (strip_entry(raw) for raw in ordered) if stripped is not None
+    ]
+    sizes = [len(json.dumps(entry, separators=(",", ":"))) for entry in painted]
+    anchor_index = None
+    if anchor_id is not None:
+        anchor_index = next(
+            (pos for pos, entry in enumerate(painted) if str(entry.get("id") or "") == anchor_id),
+            None,
+        )
     entries: list[dict[str, Any]] = []
     total_bytes = 0
-    capped = False
-    for raw in reversed(ordered):
-        stripped = strip_entry(raw)
-        if stripped is None:
-            continue
-        size = len(json.dumps(stripped, separators=(",", ":")))
-        if entries and (
-            len(entries) >= OPEN_FRAME_MAX_ROWS or total_bytes + size > OPEN_FRAME_MAX_BYTES
-        ):
-            capped = True
-            break
-        entries.append(stripped)
-        total_bytes += size
-    entries.reverse()
+    capped_older = False
+    capped_newer = False
+    if anchor_index is not None:
+        entries, total_bytes, capped_older, capped_newer = _window_around(
+            painted, sizes, anchor_index
+        )
+    else:
+        for pos in range(len(painted) - 1, -1, -1):
+            size = sizes[pos]
+            if entries and (
+                len(entries) >= OPEN_FRAME_MAX_ROWS or total_bytes + size > OPEN_FRAME_MAX_BYTES
+            ):
+                # A TAIL read walks newest-first, so the rows a cap refuses here
+                # are always the OLDER ones; the newer side is untouched.
+                capped_older = True
+                break
+            entries.append(painted[pos])
+            total_bytes += size
+        entries.reverse()
     runs: list[dict[str, Any]] = []
     state = runs_state or "unavailable"
     if index is not None:
@@ -508,10 +621,55 @@ def build_frame(
         runs=runs,
         runs_state=state,
         head_cut=head_cut,
-        capped=capped,
+        capped=capped_older or capped_newer,
+        capped_older=capped_older,
+        capped_newer=capped_newer,
         raw_rows=raw_rows,
         dropped_rows=dropped,
     )
+
+
+def _window_around(
+    painted: Sequence[dict[str, Any]],
+    sizes: Sequence[int],
+    anchor_index: int,
+) -> tuple[list[dict[str, Any]], int, bool, bool]:
+    """The largest contiguous window of ``painted`` that holds ``anchor_index``.
+
+    Grown outward one row at a time, oldest first then newest, so the page stays
+    centred on its anchor and the two directions are treated alike; a row that
+    would breach either cap ends the growth on that side and the walk continues
+    on the other. Returns ``(entries, bytes, capped_older, capped_newer)``: one
+    flag per SIDE, because the two feed different fields and a single ``capped``
+    made ``has_newer`` a lie the moment the newer side was the one refused
+    (review round 2, F10 — 50 newer rows existed and the page said there were
+    none).
+    """
+    lo = hi = anchor_index
+    total = sizes[anchor_index]
+    capped_older = False
+    capped_newer = False
+    while True:
+        grew = False
+        if lo > 0:
+            size = sizes[lo - 1]
+            if (hi - lo + 1) < OPEN_FRAME_MAX_ROWS and total + size <= OPEN_FRAME_MAX_BYTES:
+                lo -= 1
+                total += size
+                grew = True
+            else:
+                capped_older = True
+        if hi + 1 < len(painted):
+            size = sizes[hi + 1]
+            if (hi - lo + 1) < OPEN_FRAME_MAX_ROWS and total + size <= OPEN_FRAME_MAX_BYTES:
+                hi += 1
+                total += size
+                grew = True
+            else:
+                capped_newer = True
+        if not grew:
+            break
+    return list(painted[lo : hi + 1]), total, capped_older, capped_newer
 
 
 def page_seq_bounds(

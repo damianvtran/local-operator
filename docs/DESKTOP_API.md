@@ -1460,8 +1460,13 @@ and two shapes for one page is the defect the capability exists to prevent.
    and then continues back to the next USER row above them — a user row is the
    client's own run opener (`walkTurns`), so a page starting there begins a run
    rather than cutting one. The rows that hunt added are bounded by
-   `OPEN_FRAME_MAX_EXTRA_ROWS` (100), so a page is at least `limit` paintable
-   rows and at most `limit + 100`, whatever the shape.
+   `OPEN_FRAME_MAX_EXTRA_ROWS` (100), so a page holds `limit` paintable rows plus
+   at most 100 more — AND THE CAPS WIN OVER `limit` WHEN THEY CONFLICT: `limit`
+   goes up to 500 while `OPEN_FRAME_MAX_ROWS` is 400, so a request for 500 rows
+   of a 3 KB-per-row journal is answered with 400 rows and `head_cut: true`, not
+   with fewer than `limit` rows silently or with more than the page can carry. A
+   page is therefore `min(limit, what the caps allow)` paintable rows, and the
+   flags say which of the two decided it.
 3. **A head the hunt cannot reach is not paid for, and the page says so.**
    When no user row is within that budget — the operator's own case is a settled
    run of 600 rows whose head sits hundreds of rows above the window — the page
@@ -1488,28 +1493,35 @@ and two shapes for one page is the defect the capability exists to prevent.
    actually reads, checked in all three repositories before anything was
    deleted (the file each read was found in is named below, and the whole list
    is in the PR):
-   - **Dropped whole.** The rows the desktop's own projection refuses. It
-     projects a durable row in ONE function (`transcript-reducer.ts::durableRecord`),
-     which ends every non-message row it does not recognise — so among
-     `type: "custom"` rows only `completion_attention` can paint, whatever the
-     row holds. The rows that exist in that shape in real journals are dropped:
-     `frontend_state_checkpoint_v1` (39.1% of the tail bytes on this machine's 40
-     largest journals, in rows of about 349 KB), `session_spend.v1`,
-     `session_state`, `system_prefix` (3.2%), `selected_model` and
-     `attention_started`. The message-row customs the reducer's
-     `SILENT_CUSTOM_TYPES` names go with them — `hub_communication`,
-     `wake_schedule`, `prune` — while the message-row customs it PAINTS
-     (`session_mcp_unavailable`, `todo_snapshot`, `job_result`, the wake and peer
-     receipts, the ask rows) are untouched.
-     `system_prefix` is on this list DESPITE a module comment in
+   - **`custom` rows: an ALLOW-LIST.** The desktop projects a durable row in ONE
+     function (`transcript-reducer.ts::durableRecord`), and that function ends
+     every non-message row it does not recognise: among `type: "custom"` rows
+     only `completion_attention` survives (the notice branch at `:2543`, ahead of
+     the `if (entry.type !== "message") return null` gate at `:2592`). So exactly
+     that one is served and every other `custom` envelope is dropped, whatever it
+     holds. The types that appear in real journals and are dropped this way
+     include `frontend_state_checkpoint_v1` (39.1% of the tail bytes on this
+     machine's 40 largest journals, in rows of about 349 KB), `session_spend.v1`,
+     `session_state`, `system_prefix` (3.2%), `selected_model`,
+     `attention_started`, `wake_schedules`, `monitor_schedules`,
+     `subagent_roster`, `todo_snapshot`, `active_model_route`,
+     `conversation_name`, `aida_*`, `stt_transcript_v1` and
+     `mesh_credential_binding.v1`.
+     `system_prefix` is on that list DESPITE a module comment in
      `transcript-rows.ts` claiming the prefix rows paint — the audit's strip list
-     repeated that claim. The reducer's own gate refuses them, and the comment
-     describes a shape this build does not write. The reducer is the authority,
-     and the check that caught the difference is the reason the enumeration is
-     done from each client's code rather than from a byte-share table. A row type
-     this build does not know is SERVED: an unknown row is not this contract's to
-     judge, and the fail-safe direction is the one that keeps a future surface
-     working.
+     repeated the claim. The reducer's gate refuses them, and the comment
+     describes a shape this build does not write; the reducer is the authority.
+     **A `custom` type added later is dropped until it is named**, which is the
+     fail-safe direction: a row no surface can paint may not spend the client's
+     row budget. Message-ROW customs are a different envelope with different
+     rules — the receipts, `job_result`, the ask rows and
+     `session_mcp_unavailable` are PAINTED, and the reducer's
+     `SILENT_CUSTOM_TYPES` names the ones that are not (`hub_communication`,
+     `wake_schedule`, `prune`), so both shapes are handled by the same reader
+     with one predicate each.
+   - **Unknown TOP-LEVEL types are served verbatim.** The allow-list is about the
+     `custom` envelope; an entry type this build has never seen is not this
+     contract's to judge, and a client already ignores what it does not recognise.
    - **Compaction rows** keep their envelope and three payload keys:
      `{id, ts, type, payload: {tokens_before, preview_text}}`. `tokens_before`
      is the pairing fingerprint the reducer matches a live pass against
@@ -1533,14 +1545,15 @@ and two shapes for one page is the defect the capability exists to prevent.
 
    | field | meaning |
    | --- | --- |
-   | `run_key` | the run's closing answer id, or its last row's id while it has no answer — the client's own `TurnRun.key` |
+   | `run_key` | the key the client's own record for the closing row carries, in `walkTurns`' vocabulary: a tool result is `tool:<call_id>`, a completion-marker notice is the **producer's** `completion-<token>` (the row's `details.anchor`; `prov-<token>` only for a row that carries no anchor — a legacy-journal path, since both producer paths set the anchor and a client derives nothing from the fallback (QA round 2, Q9)), anything else is its entry id. It is a convenience, not the only way in — a client matches a fact to a run it holds by scanning that run's rows for `run_key`, `opening_user_id` or `closing_answer_id` (review round 2, F11) — but a value the client never derives matches nothing on a head-cut run, and the bar falls back to the span it loaded (measured: 99 of 400 actions on a head-cut interrupted run, and "50+" for a 150-action run) |
    | `opening_user_id` | the run's opening user row; `null` for a run that opens off a non-user row |
    | `closing_answer_id` | the run's elected answer row, or `null` |
    | `settled` | the run's outcome was recorded — a marker resolves it, or a newer settled run followed it |
    | `outcome` | `complete` / `error` / `interrupted` / `open` / `null`, the rail's own vocabulary |
    | `action_count` | tool rows in the run |
    | `failed_count` | tool rows whose outcome is a genuine error, by the client's own predicate (a partial `send` delivery, a never-sent call, a stopped call and an interrupted fault are excluded) |
-   | `worked_seconds` | the sum of the run's `duration_s` values — the same quantity the bar and the turn's foot already state |
+   | `worked_seconds` | the sum of the run's `duration_s` values — the same quantity the bar and the turn's foot already state — and **`null`, never `0`, when no row reported one** (`workedSeconds` in `trace-fold-model.ts` states null for that case) |
+   | `cross_session_action_count` | how many of `action_count`'s calls are the ones the desktop HIDES when `display.hide_cross_session` is on: tool rows whose `tool_name` is `send`, the same arm as `cross-session-visibility.ts::visibleRecords`, counted whether or not the row's body survived the strip (the client hides the ROW). A client with the setting ON subtracts it — and `cross_session_worked_seconds`, the same split of `worked_seconds` — so its bar matches its own fold; a client with it off ignores both. **Failures are not split**: a hidden `send` row's failure stays inside `failed_count`, because the client's own filter does not split them (review round 2, F12) |
    | `started_ts` / `ended_ts` | the run's opening row and its closing row, on the journal's clock |
    | `complete` | `true` unless the index had to drop a row body inside this run (a row over the scanner's 2 MiB keep limit), in which case a count below is a lower bound. Measured 0 of 65,755 tool rows across the twelve largest journals here exceed that limit — the flag exists so a pathological row can never be reported as an exact count |
 
@@ -1556,6 +1569,30 @@ and two shapes for one page is the defect the capability exists to prevent.
    scan was started and this answer carries none), `"unavailable"` (no index
    could be built), `"unsupported"` (this page's source cannot carry facts —
    see the remote scope below).
+
+   **A FLAGGED OPEN ON A COLD INDEX COSTS MORE THAN THE SAME READ UNFLAGGED, AND
+   THE DEADLINE DOES NOT BOUND THE EXTRA WORK.** The fact wait is bounded
+   (120 ms); the read in front of it is not, because a cold index makes it do work
+   the plain read never does. Measured on 41.5 MB journals with the arms
+   alternated, cold index on both sides: **at least the deadline, and measured
+   +82 ms to +720 ms over the same read unflagged**, the upper end at host load
+   39-55 — the spread is the host state, not the protocol, so the mechanism is the
+   figure to carry and the band is a lower bound. Three of four pairs exceeded the
+   deadline in both arm orders; the 118 MB pairs are inconclusive because
+   page-cache order dominates. That is a stated exception, not a defect to discover: a client that
+   needs the plain read's timing on a cold index should not negotiate the
+   capability for the FIRST open and let the next one (warm, with the facts) pay
+   nothing extra (QA round 2, Q6).
+
+   **`building` CAN REPEAT ACROSS THE OPENS OF ONE COLD READ.** The facts wait is
+   a deadline spent out of the read's own budget (`OPEN_FRAME_SNAPSHOT_BUDGET_S`,
+   120 ms), so a cold scan that does not land inside the snapshot does not land
+   inside the `/history` that follows it either: measured at 118 MB with a
+   checkpoint, the `/history` right after a `building` snapshot answers
+   `building` too (the scan is 559 ms). That is the contract, not a defect — the
+   next frame, or the next open, has the facts, and the client keeps its own
+   condensation meanwhile — and it is stated here so a client does not retry in a
+   loop waiting for a state the same open cannot produce.
 
    **Why `building` rather than a scan on the hot path.** The index is the only
    whole-journal source for a run's counts, and its cost was measured on this
