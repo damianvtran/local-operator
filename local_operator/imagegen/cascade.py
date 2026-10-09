@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
+
 from local_operator.clients._http import APIError
 from local_operator.env import resolve_radient_api_base_url
 from local_operator.imagegen import (
@@ -49,8 +50,8 @@ from local_operator.imagegen import (
     ImageRouteResolution,
     RungAvailability,
 )
-from local_operator.imagegen import rungs as image_rungs
 from local_operator.imagegen import availability as image_availability
+from local_operator.imagegen import rungs as image_rungs
 from local_operator.imagegen.errors import failure_reason_class
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.radient_credentials import (
@@ -251,9 +252,7 @@ async def _run_route(
     client: httpx.AsyncClient | None,
 ) -> image_rungs.RungResult:
     """Dispatch one rung, resolving its credential at call time."""
-    key = await _call_time_key(
-        route, config_dir=config_dir, radient_base=radient_base, store=store
-    )
+    key = await _call_time_key(route, config_dir=config_dir, radient_base=radient_base, store=store)
     if route == ImageRoute.RADIENT:
         return await image_rungs.run_radient(
             prompt=prompt,
