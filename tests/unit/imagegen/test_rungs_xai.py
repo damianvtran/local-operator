@@ -198,6 +198,27 @@ async def test_a_response_without_image_data_is_invalid_response() -> None:
     assert caught.value.code == "invalid_response"
 
 
+@pytest.mark.asyncio
+async def test_a_pre_aborted_signal_stops_before_the_request() -> None:
+    # Reviewer round 1 Q6: a single-request rung has no poll loop, so the
+    # zero-length pause is the abort check that must run before the spend.
+    from local_operator.imagegen import cascade as image_cascade
+
+    calls: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        calls.append(seconds)
+        raise image_cascade.ImageGenerationCancelled()
+
+    recorder = _Recorder()
+    http = _client(recorder.handler(_ok_response()))
+    with pytest.raises(image_cascade.ImageGenerationCancelled):
+        await _run(recorder, pause=pause, client=http)
+
+    assert calls == [0.0]
+    assert recorder.requests == []
+
+
 def test_the_spec_declares_reported_cost_and_no_cancel() -> None:
     from local_operator.artifacts.rung import CancelSupport
     from local_operator.imagegen import ImageRoute, cascade

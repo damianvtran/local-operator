@@ -85,6 +85,16 @@ OPENAI_SUB_EMIT_INTERVAL_S = 2.0
 #: table does carry one (pinned by its own tests); this keeps the call total.
 OPENAI_SUB_FALLBACK_MODEL = "gpt-6-astra"
 
+#: The top-level ``instructions`` the request carries. The chat client on this
+#: same backend always sends ``instructions`` (its request's system blocks
+#: joined with blank lines, ``clients.py`` ``_build_responses_body``), so the
+#: harness sends the field here too rather than relying on the backend's
+#: default; an image request has no system prompt, so it is a fixed one-liner.
+#: TIER: open risk — no published document covers this field for the Codex
+#: image tool (reviewer round 1, F2; see docs/design/image-providers.md
+#: § Evidence tiers); the live probe settles it.
+OPENAI_SUB_INSTRUCTIONS = "Generate the image the user asks for."
+
 
 def _default_host_model() -> str:
     """The current Codex model for the account — a suggestion, never a pin.
@@ -222,6 +232,7 @@ async def run_openai_sub(
         headers["chatgpt-account-id"] = account_id
     body = {
         "model": model_id,
+        "instructions": OPENAI_SUB_INSTRUCTIONS,
         "input": [
             {
                 "type": "message",
@@ -241,6 +252,22 @@ async def run_openai_sub(
     # monkeypatch seam (``image_rungs._client_scope``) is preserved because
     # this reads the module attribute at call time.
     from local_operator.imagegen import rungs as image_rungs
+
+    # One initial frame before the stream opens so a surface shows the rung
+    # running from the first moment (the walk emits nothing itself between
+    # rungs; reviewer round 1 nit — this rung is the slowest at 1-4 min, so
+    # silence until the first SSE event was the longest gap in the lane).
+    image_rungs.emit_progress(
+        emit,
+        f"Generating via ChatGPT plan ({model_id}): running — 0s",
+        **image_rungs.progress_details(
+            stage="in_progress",
+            provider=str(ImageRoute.OPENAI_SUB),
+            model=model_id,
+            elapsed_s=0,
+            num_images=1,
+        ),
+    )
 
     async with image_rungs._client_scope(client) as http:
         started = time.monotonic()

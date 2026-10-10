@@ -17,16 +17,17 @@ probe ran this wave by operator decision):
   documented ratios, and passes ``n`` straight through (the tool's cap of 4
   is inside the schema's 1..10; the schema has NO seed parameter, so a pinned
   seed is dropped silently — the OpenAI rule).
-- **Cost is REPORTED, not a rate table.** The spec's response
-  (``GeneratedImageResponse``) REQUIRES ``usage.cost_in_usd_ticks``
-  ("the cost of this request"; one USD cent = 100,000,000 ticks, one USD =
-  10,000,000,000), so this rung emits ``cost_usd`` from it with
-  ``cost_source="reported"`` — the design's D8 permits only reported figures
-  on ``cost_usd``, and this is one. (The wave's sign-off had pencilled xAI as
-  ``rate_table`` on the research note that "nothing per request" is returned;
-  the first-party schema read at implement time says otherwise, so the
-  reported figure wins. The pricing page's $0.04/image flat rate stays the
-  guide's cross-check.)
+- **Cost is REPORTED, not a rate table.** The spec's response schema carries
+  ``usage`` as ``oneOf [null, MediaUsage]``, and WHEN PRESENT
+  ``cost_in_usd_ticks`` is required on it ("the cost of this request"; one
+  USD cent = 100,000,000 ticks, one USD = 10,000,000,000), so this rung emits
+  ``cost_usd`` from it with ``cost_source="reported"`` — the design's D8
+  permits only reported figures on ``cost_usd``, and this is one. (The
+  wave's sign-off had pencilled xAI as ``rate_table`` on the research note
+  that "nothing per request" is returned; the first-party schema read at
+  implement time says otherwise — reworded at reviewer round 1, F5, for the
+  nullable ``usage`` — so the reported figure wins, when it arrives. The
+  pricing page's $0.04/image flat rate stays the guide's cross-check.)
 - ``GeneratedImage.b64_json`` is documented as the b64 form WITHOUT a
   data-URI prefix; ``mime_type`` rides each item and is carried through when
   present. If a ``url`` item appears anyway (a proxy deployment ignoring
@@ -92,6 +93,12 @@ async def run_xai(
     client: httpx.AsyncClient | None = None,
 ) -> RungResult:
     """Run one xAI image generation. See the module docstring."""
+    # Observe a pre-aborted signal before anything else happens (reviewer
+    # round 1 Q6): a single-request rung has no poll loop for the abort to
+    # land in, so this zero-length wait is the only place the user's stop can
+    # take effect before the spend. A no-op without a signal.
+    if pause is not None:
+        await pause(0.0)
     if source_url is not None:
         raise RungSkipped(
             "xAI has no wired image-to-image route in this rung.", reason_class="unsupported"
