@@ -236,3 +236,40 @@ def test_an_unresolvable_path_is_judged_on_its_written_form(tmp_path) -> None:
     os.symlink(loop, loop)  # a symlink loop: realpath must not raise
     assert is_sensitive(loop, cwd=str(tmp_path)) == ""
     assert is_sensitive(tmp_path / "a" / ".env", cwd=str(tmp_path)) == denylist.RULE_NAME
+
+
+#: (path as written, expected rule) for the R6-1 class: a FOLD-PRODUCED separator. ``／``
+#: (U+FF0F) is the one codepoint NFKC maps onto ``/``, so a path spelled with it is a single
+#: component to ``PurePosixPath`` and becomes two only after the fold -- which is exactly why
+#: the fold has to run before the split (`denylist._rule_for`).
+FOLDED_SEPARATOR_TABLE = [
+    ("．ｓｓｈ／config", denylist.RULE_COMPONENT),
+    ("ｒｅｐｏ／．ｅｎｖ", denylist.RULE_NAME),
+    (".config／gh／hosts.yml", denylist.RULE_GH_HOSTS),
+    ("deploy／secrets／x.json", denylist.RULE_COMPONENT),
+]
+
+#: Must survive: the same spelling, a benign path. Without these a rule that denied every
+#: path containing a full-width solidus would pass the table above.
+FOLDED_SEPARATOR_ALLOWED = [
+    "ｒｅｐｏｒｔ／ｄｒａｆｔ．ｍｄ",
+    "notes／2026／summary.csv",
+    "．ｓｓｈ-notes／report.md",
+]
+
+
+@pytest.mark.parametrize(("path", "rule"), FOLDED_SEPARATOR_TABLE)
+def test_a_fold_produced_separator_splits_like_a_real_one(path: str, rule: str, tmp_path) -> None:
+    """Agent review round 6 (R6-1): NFKC folds ``／`` onto ``/``, so a multi-component path
+    spelled with full-width separators must reach the same structural rule as its plain
+    spelling. Spelled ASCII-first (no literal U+FF0F in the source) so a future edit of this
+    table cannot be defeated by an editor's own normalisation."""
+    folded = unicodedata.normalize("NFKC", path)
+    assert "／" not in folded and "/" in folded, "the fixture no longer tests R6-1"
+    assert is_sensitive(path, cwd=str(tmp_path)) == rule
+
+
+@pytest.mark.parametrize("path", FOLDED_SEPARATOR_ALLOWED)
+def test_a_fold_produced_separator_does_not_deny_benign_paths(path: str, tmp_path) -> None:
+    """The must-survive controls for the class above."""
+    assert is_sensitive(path, cwd=str(tmp_path)) == ""

@@ -27,7 +27,7 @@ denylist because only candidates that survived the pre-filter can reach this mod
 
 import time
 import uuid
-from typing import Any, Final
+from typing import Any, Final, Mapping
 
 from local_operator.supplements.candidates import Candidate
 from local_operator.supplements.contract import (
@@ -105,7 +105,7 @@ def build_details(
     return details  # type: ignore[return-value]
 
 
-def next_version(details: SupplementDetails, *, state: str, error: str = "") -> SupplementDetails:
+def next_version(details: Mapping[str, Any], *, state: str, error: str = "") -> SupplementDetails:
     """The follow-on row for the same ``anchor`` and ``job``: ``version + 1``, new state.
 
     Everything else is carried verbatim -- older versions stay in the journal as an audit trail
@@ -120,11 +120,11 @@ def next_version(details: SupplementDetails, *, state: str, error: str = "") -> 
     return nxt  # type: ignore[return-value]
 
 
-def superseded(details: SupplementDetails) -> SupplementDetails:
+def superseded(details: Mapping[str, Any]) -> SupplementDetails:
     """The row that cuts a non-terminal job a newer user turn replaced (renders nothing)."""
     return next_version(details, state="cancelled", error=SUPERSEDED_ERROR)
 
 
-async def append_row(transcript: Any, details: SupplementDetails) -> None:
+async def append_row(transcript: Any, details: Mapping[str, Any]) -> None:
     """Journal one row. ``preserve_mtime=True``: see the module docstring."""
     await transcript.append_custom(SUPPLEMENT_CUSTOM_TYPE, dict(details), preserve_mtime=True)
