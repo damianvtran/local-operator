@@ -565,6 +565,13 @@ RAW_CASES: tuple[tuple[str, str, dict[str, Any]], ...] = (
         "bash",
         {"command": f"echo caf\u00e9\n{REAL_KEY}\n\tBearer {_BEARER_TOKEN}\n{_GH_TOKEN}\nok"},
     ),
+    # QA round 2, Q-1: an assignment line directly before the Bearer line. The text pass
+    # alone mangles the assignment's value AND consumes the escape before the Bearer line,
+    # so the word-boundary rule cannot anchor the token at all -- these two are red under
+    # the text-pass-first order and green only for the order ``_scrub_raw_arguments``
+    # documents (value pass first, text pass last).
+    ("assignment-then-bearer", "bash", {"command": f"TOKEN=abc123\nBearer {_BEARER_TOKEN}"}),
+    ("api-key-then-bearer", "bash", {"command": f"API_KEY=abc123\nBearer {_BEARER_TOKEN}"}),
 )
 
 
@@ -723,17 +730,26 @@ class TestRawArgumentsEscapedBoundaries:
         assert original.tool_calls[0].arguments == arguments
         assert original.tool_calls[0].raw_arguments == json.dumps(arguments)
 
+    @pytest.mark.parametrize("hook", ("shape", "session"))
     @pytest.mark.parametrize("case", RAW_CASES, ids=[c[0] for c in RAW_CASES])
     @pytest.mark.asyncio
     async def test_stored_history_next_request_wire_and_transcript_are_clean(
-        self, case: tuple[str, str, dict[str, Any]], tmp_path: Path
+        self, case: tuple[str, str, dict[str, Any]], hook: str, tmp_path: Path
     ) -> None:
-        """The loop end to end: every place the call is stored, replayed or persisted."""
+        """The loop end to end: every place the call is stored, replayed or persisted.
+
+        Both hooks, because they fail differently: the shape function is the stateless
+        surface every embedder gets, and the session store is the one a real ``Session``
+        installs (whose containment registration can mask some rows by a side door -- the
+        escaped-boundary defect must be closed for both, not only where a hit happened to
+        be registered earlier).
+        """
         from local_operator.session.transcript import Transcript
 
         _, name, arguments = case
         raw = json.dumps(arguments)
-        model, executor_args, end = await _drive_raw(name, raw, _session_redact(tmp_path))
+        redact = scrub_secrets if hook == "shape" else _session_redact(tmp_path)
+        model, executor_args, end = await _drive_raw(name, raw, redact)
 
         # The executor was handed the ORIGINAL arguments (the credential intact).
         assert executor_args == [arguments]
@@ -791,6 +807,43 @@ class TestRawArgumentsEscapedBoundaries:
             '{"path": "/w/a", "content": "x\\n'
         )
         assert (kept.tool_calls[0].raw_arguments or "").endswith('\\ny", "mode"')
+
+    @pytest.mark.parametrize("hook", ("shape", "session"))
+    @pytest.mark.asyncio
+    async def test_a_stream_cut_after_an_assignment_line_is_clean_everywhere(
+        self, hook: str, tmp_path: Path
+    ) -> None:
+        """QA round 2, Q-1: the assignment+Bearer form under a stream cut mid-call.
+
+        This is the shape QA reproduced the leak through on a real ``Session.prompt``: the
+        cut leaves ``arguments`` empty, so no earlier pass ever sees the value and the raw
+        fragment is the ONLY carrier -- it must be judged (and masked) on the characters it
+        denotes. The 20-character prefix is asserted too: a truncated credential is still a
+        credential, and the cut is deliberately inside the token.
+        """
+        from local_operator.session.transcript import Transcript
+
+        redact = scrub_secrets if hook == "shape" else _session_redact(tmp_path)
+        whole = json.dumps({"command": f"TOKEN=abc123\nBearer {_BEARER_TOKEN}\nEOF"})
+        raw = whole[: whole.index(_BEARER_TOKEN) + 22]  # cut INSIDE the bearer value
+        with pytest.raises(ValueError):
+            json.loads(raw)
+        model, executor_args, end = await _drive_raw("bash", raw, redact)
+        assert executor_args == [], "an unparseable call is never executed"
+        stored = _calls_named(end.messages, "bash")
+        assert stored, "the call is stored"
+        for call in stored:
+            assert not _leaks(call.raw_arguments or "")
+            assert _BEARER_TOKEN[:20] not in (call.raw_arguments or ""), "a prefix is a credential"
+        replayed = _calls_named(list(model.requests[1].messages), "bash")
+        assert replayed and all(not _leaks(c.raw_arguments or "") for c in replayed)
+        assert all(not _leaks(body) for body in _wire_bodies(list(model.requests[1].messages)))
+        transcript = Transcript(tmp_path / "session")
+        for message in end.messages:
+            await transcript.append_message(message)
+        row = (tmp_path / "session" / "transcript.jsonl").read_text()
+        assert not _leaks(row)
+        assert _BEARER_TOKEN[:20] not in row
 
     @pytest.mark.asyncio
     async def test_a_truncated_call_through_the_loop_is_clean_everywhere(
