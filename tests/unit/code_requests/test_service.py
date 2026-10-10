@@ -281,6 +281,7 @@ async def test_failure_keeps_the_last_known_row(tmp_path: Path, monkeypatch) -> 
     entry = cache.read_entry(tmp_path, REF)
     assert entry is not None
     assert entry["stale"] is True and "503" in entry["refresh_error"]
+    assert entry["failure_kind"] == "server"  # the failure site records WHY (design §2)
     assert entry["pieces"]  # last known data survives
     assert isinstance(entry.get("checked_at"), (int, float))  # the TTL can pace it
     assert cache.key_backoff_until(REF.key) is not None
@@ -310,6 +311,7 @@ async def test_401_re_resolves_once_then_degrades_to_link_only(tmp_path: Path, m
     view = service.view_for_ref(tmp_path, REF)
     assert view is not None and view["link_only"] is True
     assert "credential rejected" in view["link_only_reason"]
+    assert view["fetch_state"] == "unauthenticated"
 
 
 # ---------------------------------------------------------------------------
@@ -324,10 +326,12 @@ def test_view_row_merges_and_reports_staleness(tmp_path: Path) -> None:
     assert merged["url"] == REF.url and merged["forge"] == "github"
     assert merged["summary"]["state"] == "open"
     assert merged["stale"] is True and merged["refresh_error"] == "refresh failed (503)"
+    assert merged["fetch_state"] == "stale"
     # A link-only row keeps its reason and never draws a summary.
     other = service.view_rows(tmp_path, [LINK_ONLY_ROW])[0]
     assert other["link_only"] is True and other["summary"] is None
     assert "detect-and-link" in other["reason"]
+    assert other["fetch_state"] == "untracked"
 
 
 def test_lane_freshness_note_reads_the_parsed_state() -> None:
@@ -413,12 +417,18 @@ async def test_a_404_is_throttled_and_the_revision_does_not_move(
     tmp_path: Path, monkeypatch
 ) -> None:
     calls: list[str] = []
+    touches: list[str] = []
+
+    def spy(config_dir, session_id):
+        touches.append(session_id)
+        return True
 
     async def not_found(ref, validators, token, *, stored=None, client=None):
         calls.append(ref.key)
         raise base.ForgeHTTPError("not_found", "summary", 404)
 
     _patch_fetch(monkeypatch, not_found)
+    monkeypatch.setattr(ledger, "touch_index", spy)
     changed: list[bool] = []
     for _ in range(5):
         report = await service.refresh_session(tmp_path, "s1", [ROW])
@@ -428,8 +438,12 @@ async def test_a_404_is_throttled_and_the_revision_does_not_move(
         "the first failure is user-visible; identical repeats must not report changed "
         "(the feed revision is what a client's refetch loop keys on)"
     )
+    # The index moved EXACTLY for the one changed pass (the per-ref fill plus
+    # the settle, design §3) — identical repeats must not re-announce.
+    assert touches == ["s1", "s1"]
     entry = cache.read_entry(tmp_path, REF)
     assert entry is not None and entry["refresh_error"] == "not found at the forge"
+    assert entry["failure_kind"] == "not_found"  # recorded at the failure site
     assert isinstance(entry.get("checked_at"), (int, float))
 
 
@@ -796,6 +810,7 @@ def test_the_wire_row_carries_the_hint() -> None:
     row = service.view_row(raw, None)
     assert row["link_only"] is True
     assert row["link_only_hint"] == "Link only — this host isn't tracked yet."
+    assert row["fetch_state"] == "untracked"
 
 
 # ---------------------------------------------------------------------------
@@ -1042,6 +1057,7 @@ def test_a_never_fetched_row_states_cooling_not_plain_link_only() -> None:
     try:
         row = service.view_row(raw, None)
         assert row["link_only"] is True
+        assert row["fetch_state"] == "cooling"
         assert isinstance(row.get("cooling_until"), float)
         assert "cooling" in str(row.get("reason") or "")
         assert "sign in" not in str(row.get("reason") or "")
@@ -1050,6 +1066,9 @@ def test_a_never_fetched_row_states_cooling_not_plain_link_only() -> None:
     row = service.view_row(raw, None)
     assert "cooling_until" not in row
     assert "reason" not in row
+    # ... and a pending row carries no remedy at all (design §2).
+    assert row["fetch_state"] == "pending"
+    assert "link_only_hint" not in row
 
 
 # ---------------------------------------------------------------------------
@@ -1070,6 +1089,7 @@ async def test_show_never_fetched_carries_cooling_and_hint(tmp_path: Path) -> No
     assert isinstance(view["cooling_until"], float)
     assert view["link_only_reason"] == f"cooling — {service.cooling_copy(view['cooling_until'])}"
     assert view["link_only_hint"] == "Link only — sign in with the gh CLI to track this one."
+    assert view["fetch_state"] == "cooling"
 
     gitea = parse_any("https://codeberg.org/o/r/pulls/3")
     assert gitea is not None
@@ -1078,6 +1098,7 @@ async def test_show_never_fetched_carries_cooling_and_hint(tmp_path: Path) -> No
     assert "cooling_until" not in plain
     assert plain["link_only_hint"] == "Link only — this host isn't tracked yet."
     assert "detect-and-link" in str(plain["link_only_reason"])
+    assert plain["fetch_state"] == "untracked"
 
 
 @pytest.mark.asyncio
@@ -1343,3 +1364,253 @@ async def test_a_piece_with_no_stored_parse_refetches_instead_of_reading_the_cap
         later = await forced_pass()
         assert sorted(later) == [(_COMMENTS_PATH, True), (_REVIEWS_PATH, True)], later
         assert _agent_lane(tmp_path)["state"] == "terminal"
+
+
+# ---------------------------------------------------------------------------
+# per-item fetch state: pending (still loading) is NOT unauthenticated
+# (operator defect; frozen design §2/§3/§8)
+# ---------------------------------------------------------------------------
+
+
+def test_a_never_fetched_row_is_pending_and_carries_no_remedy(tmp_path: Path) -> None:
+    """THE defect pin: a fetchable row whose first read has not RESOLVED is
+    ``pending`` and must carry no sign-in anywhere — not the per-forge hint,
+    not a reason. This is the row that used to render the link-only remedy.
+    """
+    row = service.view_row(ROW, None)
+    assert row["fetch_state"] == "pending"
+    assert row["link_only"] is True
+    assert row.get("link_only_hint") is None
+    assert "reason" not in row
+    dumped = json.dumps(row)
+    assert "sign in" not in dumped and "Link only" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_a_credential_absent_read_resolves_unauthenticated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: when a read RESOLVES without a usable login, the row is
+    ``unauthenticated`` and its reason IS the credential sentence — the one
+    no-data state (with cooling) whose remedy is a sign-in."""
+
+    def raising_resolve(host, forge, *, home=None, config_dir=None, fresh=False):
+        raise code_credentials.CredentialError(
+            "absent", "no credential for github.com — sign in with the gh CLI"
+        )
+
+    monkeypatch.setattr(service, "resolve", raising_resolve)
+    report = await service.refresh_keys(tmp_path, [REF])
+    assert report.changed == [REF.key]
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None and entry["failure_kind"] == "credential"
+    row = service.view_rows(tmp_path, [ROW])[0]
+    assert row["fetch_state"] == "unauthenticated"
+    assert row["link_only"] is True
+    assert "sign in" in row["reason"]
+    assert row["link_only_hint"] == "Link only — sign in with the gh CLI to track this one."
+
+
+def test_a_resolved_failure_classifies_by_its_recorded_kind(tmp_path: Path) -> None:
+    """Rules 6/7: the KIND decides, never the copy. Only a credential failure
+    may show a sign-in; every other no-data failure is ``failed``."""
+    for kind, expected in (
+        ("credential", service.FETCH_UNAUTH),
+        ("network", service.FETCH_FAILED),
+        ("server", service.FETCH_FAILED),
+        ("not_found", service.FETCH_FAILED),
+        ("http", service.FETCH_FAILED),
+    ):
+        entry = _entry(pieces={}, stale=True, refresh_error=f"{kind} message", failure_kind=kind)
+        assert service.view_row(ROW, entry)["fetch_state"] == expected, kind
+    # The 503 shape the service writes: failed, never unauthenticated.
+    row = service.view_row(
+        ROW,
+        _entry(
+            pieces={},
+            stale=True,
+            refresh_error="refresh failed (server 503); keeping the last known data",
+            failure_kind="server",
+        ),
+    )
+    assert row["fetch_state"] == "failed"
+    assert row["fetch_state"] != "unauthenticated"
+    assert "sign in" not in str(row.get("reason") or "")
+
+
+#: Every message shape the credential resolver can store (``credentials.py``:
+#: the two gh refusals, the glab refusal, the gh/glab spawn failure, the
+#: per-host remedy form, the unreachable detect-and-link refusal) plus the 401
+#: path's ``_REJECTED``. The spawn failure does NOT say "sign in" — the gap
+#: agent review round 1 (F1) closed in the marker set.
+_LEGACY_CREDENTIAL_MESSAGES = (
+    "Can't refresh — sign in with the gh CLI (`gh auth login`), then refresh.",
+    "Can't refresh — the gh CLI login could not be read on this device; "
+    "sign in again with `gh auth login`, then refresh.",
+    "Can't refresh — sign in with the glab CLI (`glab auth login`), then refresh.",
+    "Can't refresh — the gitlab CLI could not be asked (TimeoutExpired).",
+    "Can't refresh — sign in with the glab CLI (`glab auth login --hostname "
+    "gitlab.example`), then refresh.",
+    "credential rejected — sign in again with gh/glab, then refresh",
+    "no credential path exists for gitea (detect-and-link host)",
+)
+
+#: The non-credential shapes ``_handle_fetch_error`` can store: none may match
+#: a legacy credential marker.
+_LEGACY_OTHER_MESSAGES = (
+    "refresh failed (server 503); keeping the last known data",
+    "refresh failed (network); keeping the last known data",
+    "not found at the forge",
+    "refresh failed (HTTP 500)",
+)
+
+
+def test_a_legacy_entry_falls_back_to_its_message_for_the_kind(tmp_path: Path) -> None:
+    """Entries written before ``failure_kind``: the message is the only signal.
+    EVERY credential message the resolver can store (plus the 401 path's
+    ``_REJECTED``) classifies as credential — including the gh/glab spawn
+    failure, which does not say "sign in" (agent review round 1, F1) — and no
+    non-credential failure message may. The fallback is bounded to those
+    entries and disappears as they revalidate."""
+    for message in _LEGACY_CREDENTIAL_MESSAGES:
+        legacy = _entry(pieces={}, stale=True, refresh_error=message)
+        assert "failure_kind" not in legacy
+        assert service.view_row(ROW, legacy)["fetch_state"] == "unauthenticated", message
+    for message in _LEGACY_OTHER_MESSAGES:
+        legacy = _entry(pieces={}, stale=True, refresh_error=message)
+        assert "failure_kind" not in legacy
+        assert service.view_row(ROW, legacy)["fetch_state"] == "failed", message
+    # F1's repro, both ways: a pre-upgrade entry (no kind) and a post-upgrade
+    # write of the SAME spawn failure (kind recorded) must agree on the state.
+    spawned = "Can't refresh — the gitlab CLI could not be asked (TimeoutExpired)."
+    with_kind = _entry(pieces={}, stale=True, refresh_error=spawned, failure_kind="credential")
+    assert service.view_row(ROW, with_kind)["fetch_state"] == "unauthenticated"
+
+
+def test_a_successful_fetch_clears_the_failure_kind(tmp_path: Path) -> None:
+    """A success writes ``failure_kind: None`` beside the cleared error, so a
+    stale kind never outlives its message."""
+    prior = _entry(
+        pieces={}, stale=True, refresh_error="refresh failed (server 503)", failure_kind="server"
+    )
+    outcome = _outcome(
+        pieces={"summary": {"raw_state": "open", "title": "t", "head_sha": "a" * 12}}
+    )
+    entry = service._build_entry(REF, prior, outcome, github.ADAPTER)
+    assert entry["failure_kind"] is None
+    assert entry["refresh_error"] is None and entry["stale"] is False
+
+
+def test_cooling_does_not_override_data_or_a_resolved_failure(tmp_path: Path) -> None:
+    """Rules 3/8 precedence: cooling is about the HOST, never about flipping a
+    resolved row. Data wins; a recorded failure outranks the wait copy."""
+    cache.write_entry(tmp_path, _entry(), ref=REF)
+    cache.note_rate_limited("github.com", retry_after=120.0)
+    try:
+        ready_row = service.view_rows(tmp_path, [ROW])[0]
+        assert ready_row["fetch_state"] == "ready"
+
+        failed = _entry(
+            pieces={}, stale=True, refresh_error="refresh failed (network)", failure_kind="network"
+        )
+        assert service.view_row(ROW, failed)["fetch_state"] == "failed"
+
+        unauth = _entry(
+            pieces={},
+            stale=True,
+            refresh_error="credential rejected — sign in again",
+            failure_kind="credential",
+        )
+        assert service.view_row(ROW, unauth)["fetch_state"] == "unauthenticated"
+    finally:
+        cache._reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_refresh_keys_calls_on_changed_once_per_changed_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design §3: one callback per CHANGED ref; a 304 changes nothing and a
+    pass whose refs are all throttled calls nothing."""
+    ref2 = _ref("https://github.com/o/r/pull/8")
+    calls: list[str] = []
+
+    async def fetch(ref, validators, token, *, stored=None, client=None):
+        if ref.key == REF.key:
+            return _outcome(pieces={"summary": {"title": "t", "head_sha": "a" * 12}})
+        return _outcome(not_modified={"summary"})
+
+    async def on_changed(key: str) -> None:
+        calls.append(key)
+
+    _patch_fetch(monkeypatch, fetch)
+    report = await service.refresh_keys(tmp_path, [REF, ref2], on_changed=on_changed)
+    assert report.changed == [REF.key]
+    assert calls == [REF.key]
+
+    # A pass where every ref is under per-key backoff makes no call at all.
+    calls.clear()
+    cache.note_key_failure(REF.key)
+    cache.note_key_failure(ref2.key)
+    again = await service.refresh_keys(tmp_path, [REF, ref2], on_changed=on_changed)
+    assert again.changed == [] and calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_session_pass_touches_the_index_per_changed_ref_and_settles_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design §3: each changed ref announces itself WHILE the pass runs (the
+    feed's progressive fill), and the end-of-pass touch still settles it. A
+    pass that selects nothing touches nothing."""
+    ref2 = _ref("https://github.com/o/r/pull/8")
+    row2 = {
+        "key": ref2.key,
+        "ref": ref2.to_payload(),
+        "relation": "mentioned",
+        "relations": ["mentioned"],
+    }
+    touches: list[str] = []
+
+    def spy(config_dir, session_id):
+        touches.append(session_id)
+        return True
+
+    async def fetch(ref, validators, token, *, stored=None, client=None):
+        return _outcome(pieces={"summary": {"title": "t", "head_sha": "a" * 12}})
+
+    _patch_fetch(monkeypatch, fetch)
+    monkeypatch.setattr(ledger, "touch_index", spy)
+    report = await service.refresh_session(tmp_path, "s1", [ROW, row2])
+    assert report.changed == [REF.key, ref2.key]
+    assert touches == ["s1", "s1", "s1"], "per changed ref, then the settle"
+
+    # A second pass has nothing eligible (both entries fresh, no marks left).
+    touches.clear()
+    again = await service.refresh_session(tmp_path, "s1", [ROW, row2])
+    assert again.changed == []
+    assert touches == [], "a no-op pass touches nothing"
+
+
+def test_touch_index_is_strictly_monotone_inside_one_millisecond(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design §3: two touches inside one millisecond (a fast multi-ref pass)
+    must produce two DISTINCT revisions — the client dedupes frames by
+    ``(sessionId, revision)`` and an equal revision swallows the fill frame.
+    Frozen clock: the collision branch is the worst case, not an accident."""
+    _seed_index(tmp_path)
+    frozen = time.time()
+    monkeypatch.setattr(ledger.time, "time", lambda: frozen)
+    assert ledger.touch_index(tmp_path, "s1") is True
+    index = ledger.read_index(tmp_path, "s1")
+    assert index is not None
+    first = index["updated_at"]
+    assert ledger.touch_index(tmp_path, "s1") is True
+    index = ledger.read_index(tmp_path, "s1")
+    assert index is not None
+    second = index["updated_at"]
+    assert second > first, "two touches inside one millisecond must not share a revision"
+    # The client's currency is the revision in ms (route ``_revision``): it
+    # must move too, or the frame dedupe swallows the second touch.
+    assert int(second * 1000) > int(first * 1000)

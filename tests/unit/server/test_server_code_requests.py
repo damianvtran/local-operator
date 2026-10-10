@@ -23,7 +23,7 @@ from httpx import ASGITransport, AsyncClient
 
 from local_operator.code_requests import cache as code_requests_cache
 from local_operator.code_requests import ledger
-from local_operator.code_requests.refs import HostContext, Remote
+from local_operator.code_requests.refs import HostContext, Remote, parse_any
 from local_operator.config import ConfigManager
 from local_operator.server.routes import desktop_code_requests
 
@@ -146,6 +146,11 @@ async def test_a_scanned_session_answers_its_rows(desktop):
     row = body["rows"][0]
     assert row["relation"] == "opened" and row["link_only"] is True
     assert row["summary"] is None and row["lanes"] is None
+    # The never-fetched fetchable row is PENDING, and pending rows carry no
+    # remedy: no hint, no reason, no sign-in anywhere (the operator defect).
+    assert row["fetch_state"] == "pending"
+    assert row["link_only_hint"] is None
+    assert row["reason"] is None
     assert row["evidence"][-1]["rule"] == "gh-pr-create-stdout"
     assert body["revision"] > 0
 
@@ -493,8 +498,10 @@ async def test_a_link_only_row_carries_its_per_forge_hint(desktop):
     assert "codeberg.org" in rows, body
     assert rows["codeberg.org"]["link_only"] is True
     assert rows["codeberg.org"]["link_only_hint"] == "Link only — this host isn't tracked yet."
+    assert rows["codeberg.org"]["fetch_state"] == "untracked"
     assert "gh CLI" in rows["ghe.example.com"]["link_only_hint"]
     assert "glab" not in rows["ghe.example.com"]["link_only_hint"]
+    assert rows["ghe.example.com"]["fetch_state"] == "untracked"
 
 
 @pytest.mark.asyncio
@@ -510,5 +517,52 @@ async def test_a_cooling_hosts_unfetched_row_states_the_wait(desktop):
         assert row["link_only"] is True
         assert isinstance(row["cooling_until"], float)
         assert "cooling" in (row["reason"] or "")
+        # Cooling is a fetch state of its own: still no data, but it must not
+        # read as pending or as a resolved no-login outcome.
+        assert row["fetch_state"] == "cooling"
     finally:
         code_requests_cache._reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_failed_and_stale_rows_state_themselves_not_a_sign_in(desktop):
+    """Rules 2/7 through the real route: a resolved NON-credential failure
+    says ``failed`` (its copy is the failure sentence, never a sign-in), and a
+    failed conditional revalidation of retained data says ``stale``."""
+    client, root = desktop
+    _seed_urls_session(root, ["https://github.com/o/r/pull/7", "https://github.com/o/r/pull/8"])
+    await _settled_rows(client, root)
+    failed_ref = parse_any("https://github.com/o/r/pull/7")
+    stale_ref = parse_any("https://github.com/o/r/pull/8")
+    assert failed_ref is not None and stale_ref is not None
+    assert code_requests_cache.write_entry(
+        root,
+        {
+            "pieces": {},
+            "summary": None,
+            "refresh_error": "refresh failed (server 503); keeping the last known data",
+            "failure_kind": "server",
+            "stale": True,
+            "checked_at": time.time(),
+        },
+        ref=failed_ref,
+    )
+    assert code_requests_cache.write_entry(
+        root,
+        {
+            "pieces": {"summary": {"raw_state": "open", "title": "t", "head_sha": "a" * 12}},
+            "summary": {"state": "open", "title": "t", "head_sha": "a" * 12},
+            "refresh_error": "refresh failed (network); keeping the last known data",
+            "failure_kind": "network",
+            "stale": True,
+            "checked_at": time.time(),
+        },
+        ref=stale_ref,
+    )
+    response = await client.get(f"/v1/desktop/sessions/{SESSION}/code-requests")
+    rows = {row["number"]: row for row in response.json()["result"]["rows"]}
+    assert rows[7]["fetch_state"] == "failed"
+    assert rows[7]["link_only"] is True
+    assert "sign in" not in (rows[7]["reason"] or "")
+    assert rows[8]["fetch_state"] == "stale"
+    assert rows[8]["link_only"] is False and rows[8]["summary"] is not None
