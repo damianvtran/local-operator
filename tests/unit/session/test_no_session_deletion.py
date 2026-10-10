@@ -965,6 +965,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # paths come from `keys.key_path()`, which is `config_dir()/secrets/` plus
     # a fixed basename — no caller input and no session id reaches either, so
     # neither can name a path under sessions/.
+    # The tail-anchor sidecar: an atomic write of a session's OWN file. Both paths
+    # are that directory's own children (``tail-anchor.v1.json`` and its
+    # ``.<name>.<pid>.tmp``), and the target is a regular file inside the session —
+    # never the directory the store walks, and never another session's.
+    (
+        "local_operator/session/tail_anchor.py::write_anchor",
+        "os.replace",
+        "Atomic write of <session>/tail-anchor.v1.json; both paths are its own children",
+    ),
+    (
+        "local_operator/session/tail_anchor.py::write_anchor",
+        "<path>.unlink",
+        "Clears this pid's own .tmp sidecar in the same directory after a failed write",
+    ),
     (
         "local_operator/secrets/keys.py::replace_master_key",
         "os.replace",
@@ -2782,6 +2796,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
+        "local_operator/session/tail_anchor.py::write_anchor",
         # tmp -> update-window.json (the update window's handover marker)
         "local_operator/session/runtime/inbox.py::write_update_window",
         # stop-sweeps.jsonl -> stop-sweeps.jsonl.1 (a FILE under config_dir()/logs)

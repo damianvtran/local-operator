@@ -306,6 +306,15 @@ ATTACHMENT_SIDECAR_SUFFIX = ".json"
 #: ``tests/unit/network/test_sync_copy_set.py``, which also proves that every
 #: entry the retention module calls bookkeeping is on one list or the other.
 EXCLUDED_ENTRIES: dict[str, str] = {
+    # The tail anchor (``session.tail_anchor``): a hint about the SOURCE's own
+    # journal bytes — an inode number and the offset of the end of its last
+    # complete row. In a copy both are wrong by construction (a replica is a
+    # different file), and the reader validates them before use, so the honest
+    # answer is that it is written by the destination's own pre-warm job or not at
+    # all. Copying it would only make every cold read on the peer fall back.
+    "tail-anchor.v1.json": (
+        "a hint about this device's own journal bytes; rewritten by the destination"
+    ),
     # The liveness marker: copied, the destination would report the SOURCE's pid
     # as the owner of its copy, which is how a viewer refuses to open a session
     # that is not running there.

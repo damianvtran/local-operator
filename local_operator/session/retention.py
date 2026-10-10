@@ -93,6 +93,11 @@ _SIDECAR_NAMES = frozenset(
         "origin-scan.json",
         "title-scan.json",
         "subagent-roster.v1.json",
+        # The tail anchor: a record about THIS journal's own bytes (inode and the
+        # end of its last complete row), written by the pre-warm job so a
+        # checkpointless journal can be read without scanning to BOF. Bookkeeping,
+        # not user content, and meaningless in a replica — see ``network.sync``.
+        "tail-anchor.v1.json",
         "origin-verdicts.json",
         # Birth metadata is bookkeeping, not user content: stamping a legacy
         # conversation must not push it across the cleanup size budget.
