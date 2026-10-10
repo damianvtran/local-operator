@@ -21,6 +21,8 @@ RTL & bidi section before translating a single string.
 - Keep Latin as-is, untransliterated: `lop`, commands, `--flags`, paths,
   config keys, product names, tool names (glossary §1). Never wrap them in
   Urdu punctuation or reorder them.
+- Kept-Latin acronyms stay half-width and undeclined: API, CLI, TUI, JSON,
+  YAML, HTTP, URL.
 - Settled loanwords take Urdu script: سیشن، ٹوکن، فائل، ریموٹ، ورک اسپیس.
 - Prefer the settled Urdu term where one exists: ترتیبات (settings), محفوظ
   کریں (save), استعمال (usage).

@@ -48,7 +48,7 @@ translators and the auditor.
 - Latin digits in v1 (§2.8) — Devanagari digits (०१२…) are deferred and
   recorded here as revisitable without code.
 - Never hand-written — the formatter renders "12,34,567.5" (Indian grouping)
-  and dates "10 अक्तू॰ 2026"; am/pm suffix per the formatter.
+  and dates "10 अक्टू॰ 2026"; am/pm suffix per the formatter.
 
 ## Width rules
 

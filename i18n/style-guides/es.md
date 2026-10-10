@@ -8,9 +8,9 @@ translators and the auditor. Wave 1 locale.
 - Address: **tú** — recorded decision: modern dev/consumer convention (Apple
   es, Google es both address as tú): "tu sesión", "puedes". "usted" reads
   enterprise/customer-service and is avoided; "vosotros" is never used.
-- Neutral Spanish: avoid region-marked words — use "archivo" (not "fichero"),
-  "celular" over "móvil" for phones — prefer wording that reads the same in
-  Madrid and Mexico City.
+- Neutral Spanish: avoid region-marked words — use "archivo" (not "fichero");
+  for a phone, "teléfono" reads everywhere ("celular" and "móvil" each mark a
+  region) — prefer wording that reads the same in Madrid and Mexico City.
 - Action labels: infinitive — "Guardar", "Reanudar", "Cancelar" (standard es
   UI convention).
 - Terse: "Guardado", not "La sesión se ha guardado correctamente". No "!".
@@ -39,7 +39,8 @@ translators and the auditor. Wave 1 locale.
 
 ## Plurals
 
-- Categories: `one` (1 only — 0 is `other`: "0 sesiones"), `many` (≥ 10⁶),
+- Categories: `one` (1 only — 0 is `other`: "0 sesiones"), `many` (exact
+  multiples of 10⁶ only — "1.000.000 de sesiones"; 1.500.000 → `other`),
   `other`. `few` is not a Spanish category — never use it.
 - Example: `{count, plural, one {# sesión} many {# de sesiones} other {# sesiones}}`
 - `#` renders the formatted number; never pre-format inside the branch.
