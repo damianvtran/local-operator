@@ -90,6 +90,10 @@ def help() -> Msg:
     return Msg("wire.slash.help", {})
 
 
+def highlights() -> Msg:
+    return Msg("wire.slash.highlights", {})
+
+
 def info() -> Msg:
     return Msg("wire.slash.info", {})
 
