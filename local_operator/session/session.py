@@ -8450,12 +8450,24 @@ class Session:
           consumer racing the first.
         * The spawned run's ``guard`` re-checks the queue under ``_turn_lock``,
           so a wake that loses the race to a turn which drained the row first
-          retires silently: no turn, no events, no provider call.
+          retires silently: no turn, no events, no provider call. The same
+          silent retirement covers the narrower window INSIDE the wake: its
+          opening drain (``drain_steering_on_open``) can also find the queue
+          already emptied (an in-flight drain that suspended mid-append took
+          the row), and a run with nothing to deliver returns before its first
+          event instead of spending a paid empty call (see ``harness/loop.py``'s
+          opening-drain comment).
 
-        The leaving arms are skipped exactly as the flush skips them (a turn
+        The leaving arms are skipped exactly as the flush skips them: a turn
         opened under ``_leaving_deliveries``/``_one_shot_exit`` could only ever
-        be aborted by the disposal that follows; the queue keeps its item and
-        dispose's own drain owns it).
+        be aborted by the disposal that follows, so no wake opens and the row
+        stays where it is. THE SKIP IS NOT PRESERVATION — a plain typed steer
+        left queue-resident is destroyed when the session ends: ``dispose()``
+        consumes the steering queue and rejects what it finds without
+        persisting (the destruction ``_drop_pre_aborted_turn`` documents), so
+        it reaches neither the transcript nor a later turn. That is the known
+        price of the skip (agent review round 1, NIT-2), not a claim the row
+        is safe.
 
         WHY A SPAWNED RUN AND NOT A DIRECT HAND-OFF: ``_drain_steering`` is
         the queue's ONLY consumer — it persists what it takes, emits the
@@ -8465,7 +8477,8 @@ class Session:
         ``initial``) would double-inject against whichever boundary drain also
         saw them. So the wake keeps the queue intact and lets the spawned
         run's OPENING drain (``drain_steering_on_open``) be the only taker,
-        before its first provider request.
+        before its first provider request — retiring before its first event
+        when that taker finds nothing.
         """
         if self._leaving_deliveries or self._one_shot_exit:
             return
@@ -8475,14 +8488,16 @@ class Session:
             self._prompt_messages(
                 [],
                 guard=lambda: not self._steering_queue.empty(),
+                guard_note="the queue was already drained",
                 drain_steering_on_open=True,
             )
         )
         if task is None:
             # Disposed before the spawn (``_spawn_background`` closes the
-            # coroutine and answers None): nothing was taken from the queue
-            # and dispose's own drain owns what is left. Kept so a future
-            # await introduced above this spawn cannot silently drop the wake.
+            # coroutine and answers None): nothing was taken from the queue,
+            # and the disposed session's own drain destroys what is left (see
+            # the leaving-arm note above). Kept so a future await introduced
+            # above this spawn cannot silently drop the wake.
             return
 
     async def fork_snapshot(
@@ -13312,6 +13327,7 @@ class Session:
         *,
         carried_prompt: bool = False,
         guard: Callable[[], bool] | None = None,
+        guard_note: str = "",
         drain_steering_on_open: bool = False,
     ) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
@@ -13329,18 +13345,26 @@ class Session:
         queue holds a message with no live turn to take it: the loop drains
         the queue once before this run's first request, so that call carries
         the steer instead of an empty warm-up whose only output was the
-        model's reaction to history it had already answered. Set only by
+        model's reaction to history it had already answered — and a run whose
+        opening drain finds the queue already emptied (the in-flight drain
+        took the row first) retires before its first event and spends no call
+        at all (see ``harness/loop.py``'s opening-drain comment). Set only by
         :meth:`_ensure_steering_wake`; every other caller keeps the
         historical shape (a steer can never appear in a turn's first request).
 
-        ``guard`` is the patience delivery's under-lock re-check: it runs once
-        the turn lock is held, and a False return retires the delivery
-        silently — no turn, no events. It exists because the watermark that
-        dispatched the fire can change while the delivery waits for the lock
-        (a reply claiming it first); repeating the check under the lock is
-        what makes the reply's effect visible even when its own cancel landed
-        after the fire was already in flight. See ``wakes/patience`` for the
-        race table. Other callers pass nothing and are unchanged.
+        ``guard`` is the under-lock re-check for deliveries whose dispatch
+        condition can change while they wait for the lock; a False return
+        retires the delivery silently — no turn, no events. Its first caller
+        is the patience delivery: the watermark that dispatched the fire can
+        change while it waits (a reply claiming it first), and repeating the
+        check under the lock is what makes the reply's effect visible even
+        when its own cancel landed after the fire was already in flight (see
+        ``wakes/patience`` for the race table). :meth:`_ensure_steering_wake`
+        is the other: its guard retires the wake when the queue is empty.
+        ``guard_note`` is the caller's short account of what its guard found,
+        appended to the retirement log so the line stops naming one caller's
+        cause for every caller (agent review round 1, NIT-1); empty leaves
+        the line bare. Other callers pass nothing and are unchanged.
         """
         if self._disposed:
             raise RuntimeError("session is disposed")
@@ -13366,7 +13390,10 @@ class Session:
                 await self._hold_deliveries_at_admission(initial)
                 return
             if guard is not None and not guard():
-                logger.info("patience: delivery retired under the turn lock (a reply landed)")
+                logger.info(
+                    "delivery retired under the turn lock%s",
+                    f" ({guard_note})" if guard_note else "",
+                )
                 return
             # A newly ARRIVING unit of work is a fresh intent, exactly like a
             # typed prompt, so it clears the sticky abort the same way
@@ -22958,7 +22985,11 @@ class Session:
             self._peer_arrival.mark(WAKE_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(
-            self._prompt_messages([wake_message], guard=self._patience_guard(due.schedule, pol))
+            self._prompt_messages(
+                [wake_message],
+                guard=self._patience_guard(due.schedule, pol),
+                guard_note="a reply landed",
+            )
         )
 
     def _patience_guard(self, row: WakeSchedule, pol: Any) -> Callable[[], bool]:
