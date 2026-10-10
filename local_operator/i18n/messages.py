@@ -16,6 +16,7 @@ goes red.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -23,13 +24,37 @@ from . import catalogues
 from . import runtime as _runtime
 
 
-#: The namespace is the code's dotted prefix: `wire.errors.model_unavailable`
-#: lives in `catalogues/<locale>/wire.errors.json` (namespace = file boundary,
-#: §2.2). Codes with no dot cannot address a namespace and therefore always
-#: fall back to their own literal.
-def _namespace_of(code: str) -> str | None:
-    namespace, dot, _ = code.rpartition(".")
-    return namespace if dot and namespace else None
+#: Resolution is FILE-derived, not string-derived: §2.2 keys are
+#: `<namespace>.<area>.<element>[.<state>]`, so a code may carry several segments
+#: after its namespace and "everything before the last dot" resolves the wrong
+#: file for any key deeper than one segment. One message is DEFINED by exactly
+#: one catalogue file (the collision rule), so the namespace is the longest
+#: dot-prefix whose file CONTAINS the code: a nested namespace
+#: (`wire.errors.auth`) addresses its own file, while a key living in the
+#: shallower file is not shadowed by a deeper file that does not define it.
+@functools.lru_cache(maxsize=4096)
+def _namespace_for(root: str, code: str) -> str | None:
+    """The namespace whose catalogue defines ``code``, or ``None``.
+
+    ``root`` (the catalogue root, as a string) is part of the cache key so
+    fixture trees resolve independently of the shipped corpus, and this sits
+    on every render — the probe stats candidate files and parses the first
+    that carries the key. A root's corpus is package data and immutable at
+    runtime; a test that mutates a tree in place can call
+    ``_namespace_for.cache_clear()``. The probe reads `en`, the authored
+    source every other locale mirrors (parity is enforced), so discovery does
+    not depend on which locale is being rendered.
+    """
+    segments = code.split(".")
+    for cut in range(len(segments) - 1, 0, -1):
+        namespace = ".".join(segments[:cut])
+        try:
+            messages = catalogues.load_catalogue("en", namespace)
+        except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
+            continue
+        if code in messages:
+            return namespace
+    return None
 
 
 @dataclass(frozen=True)
@@ -70,7 +95,7 @@ def envelope(
 
 def render(code: str, params: Mapping[str, Any], *, locale: str | None = None) -> str:
     """The rendered sentence for ``code``, or the code itself when unknown."""
-    namespace = _namespace_of(code)
+    namespace = _namespace_for(str(catalogues.catalogue_root()), code)
     if namespace is None:
         return code
     requested = locale or "en"
