@@ -473,3 +473,134 @@ def test_a_relative_path_with_directories_survives_byte_identical() -> None:
     passes through whole -- a stated non-scrub, not an inference."""
     relative = "which clients/acme-corp/q3.pdf file?"
     assert relative in dec.files_state("u", relative)
+
+
+# -- round-4 remediation (the literal pass; carried runs) ----------------------------------
+
+
+def test_a_tab_or_nbsp_separated_component_reduces_the_whole_path() -> None:
+    """R4-1: the carried run's whitespace class is every separator except the line break, so
+    a tab- or NBSP-separated component (a path pasted from a web page or PDF) crosses like a
+    space run -- the tail no longer rides behind a truncated match."""
+    state = dec.files_state("u", "save ~/clients/Acme\tCorp/q3-summary.pdf")
+    assert "save q3-summary.pdf" in state
+    assert "Acme" not in state and "Corp/" not in state
+    state = dec.files_state("u", "save ~/clients/Acme\u00a0Corp/q3-summary.pdf")
+    assert "save q3-summary.pdf" in state
+    assert "Acme" not in state and "Corp/" not in state
+
+
+def test_a_three_word_run_reduces_the_whole_path() -> None:
+    """R4-2: the scan reaches past plain words to the run's slash-attached component, so a
+    component whose penultimate word is not itself slash-attached still crosses -- and a run
+    of doubled spaces crosses on the same rule."""
+    state = dec.files_state("u", "save /Users/damian/Acme Corp Ltd/q3-summary.pdf")
+    assert "save q3-summary.pdf" in state
+    assert "Acme" not in state and "Ltd" not in state
+    state = dec.files_state("u", "save /Users/damian/Acme  Corp  Ltd/q3-summary.pdf")
+    assert "save q3-summary.pdf" in state
+    assert "Acme" not in state and "Ltd" not in state
+
+
+def test_a_segment_that_starts_with_a_space_reduces_the_whole_path() -> None:
+    """R4-3: a separator left before a segment -- ``/Users/damian/ Client Work/reports`` --
+    crosses with the segment, and the final base name alone remains."""
+    state = dec.files_state("u", "save /Users/damian/ Client Work/reports")
+    assert "save reports" in state
+    assert "damian" not in state and "Client" not in state
+
+
+def test_a_multi_run_spaced_path_reduces_to_its_final_base_name() -> None:
+    """The carried run loops: a path whose components carry whitespace in more than one
+    place (``Ltd/Sub Dir/q3.pdf``) crosses once per run and drops to the final base name --
+    the close the round-3 shape could not reach."""
+    state = dec.files_state("u", "save /Users/damian/Acme Corp Ltd/Sub Dir/q3.pdf")
+    assert "save q3.pdf" in state
+    assert "Acme" not in state and "Dir" not in state
+
+
+def test_the_continuation_readings_are_pinned_exactly() -> None:
+    """R4-4 plus the reach-ahead boundary: connectives between two rooted paths are never
+    crossed, a plain-word run with no slash-attached component stops the scan, and the one
+    continuation reading -- a ``word/word`` token inside the run -- is pinned as its exact
+    result (``see or y``), so the boundary is visible rather than inferred. The reach-ahead
+    itself is pinned on prose too: a three-word run that reaches a slash-attached component
+    crosses (the R4-2 close), where the round-3 shape leaked the tail."""
+    assert "see x and y" in dec.files_state("u", "see /x and /y")
+    assert "see x and then y" in dec.files_state("u", "see /x and then /y")
+    assert "see or y" in dec.files_state("u", "see /x and/or y")
+    assert "see q3.pdf" in dec.files_state("u", "see /x Acme Corp Ltd/q3.pdf")
+
+
+def test_the_recorded_may_leak_pair_is_pinned() -> None:
+    """The one accepted may-leak, as its must-survive/may-leak pair: a spaced component
+    whose run never reaches a slash-attached continuation cannot be told from prose without
+    eating arbitrary words, so the confident match reduces to its own base name (``Acme``)
+    and the component tail rides (may-leak: ``Corp``) while the prose after it must survive
+    (``and more``)."""
+    state = dec.files_state("u", "save ~/clients/Acme Corp and more")
+    assert "save Acme Corp and more" in state, "the recorded may-leak, pinned as it is"
+    assert "~/clients" not in state, "the confident prefix still reduces"
+
+
+def test_the_turns_own_path_spellings_are_replaced_literally() -> None:
+    """The literal pass: a spelling the turn's own evidence holds is replaced exactly,
+    before any shape rule runs. The discriminating case is a spelling no shape rule can
+    reach -- cwd-relative (the reduction takes only rooted paths) with a space inside the
+    final component -- where the exact replacement is the only thing between the payload
+    and the directory name."""
+    text = "save secret-client-dir/q3 summary.pdf"
+    assert "secret-client-dir" in dec.files_state("u", text), "the shape pass cannot reach it"
+    literals = (("secret-client-dir/q3 summary.pdf", "q3 summary.pdf"),)
+    state = dec.files_state("u", text, literals=literals)
+    assert "save q3 summary.pdf" in state and "secret-client-dir" not in state
+
+
+def test_the_literal_pass_replaces_the_longest_spelling_first() -> None:
+    """Ordering: with an outer and an inner spelling of the same turn in the literal set,
+    the longer needle goes first -- the inner one cannot eat a prefix and strand the rest
+    as a relative path."""
+    literals = (("/Users/op/a", "a"), ("/Users/op/a/b/q3.pdf", "q3.pdf"))
+    state = dec.files_state("u", "save /Users/op/a/b/q3.pdf", literals=literals)
+    assert "save q3.pdf" in state and "op" not in state
+
+
+def test_a_tab_inside_the_turn_own_absolute_spelling_is_replaced_exactly() -> None:
+    """The same exactness on a rooted spelling: the tab-carrying path as written is gone
+    before the shape pass forms any opinion about its pieces."""
+    literals = (("/Users/op/secret\tclient/q3.pdf", "q3.pdf"),)
+    state = dec.files_state("u", "save /Users/op/secret\tclient/q3.pdf", literals=literals)
+    assert "save q3.pdf" in state and "secret" not in state
+
+
+def test_option_text_replaces_the_turns_own_spelling_in_its_intent_line() -> None:
+    """The literal pass on the option builder too: an intent line naming the turn's own
+    (relative, space-carrying) path reduces through the exact replacement."""
+    canned = _cand("q3 summary.pdf", intent="Writing it to secret-client-dir/q3 summary.pdf")
+    literals = (("secret-client-dir/q3 summary.pdf", "q3 summary.pdf"),)
+    text = dec.option_text(canned, literals=literals)
+    assert "secret-client-dir" not in text
+    assert text.endswith("Writing it to q3 summary.pdf")
+
+
+@pytest.mark.asyncio
+async def test_the_turn_own_paths_never_reach_the_vendor_payload() -> None:
+    """The literal pass end to end: a candidate whose own path carries whitespace, spelled
+    in the answer as the turn wrote it (both the relative and the absolute form), is gone
+    from everything the vendor receives before any shape rule runs -- and the base name the
+    decision judges still arrives."""
+    files = [_cand("q3 summary.pdf", intent="Writing it to secret-client-dir/q3 summary.pdf")]
+    service = FakeService({"supplement_files": _files_answer("f1", {"f1": 1.0})})
+    out = await _decide(
+        service,
+        files,
+        user_text="make me a report",
+        answer_text=(
+            "Saved secret-client-dir/q3 summary.pdf and "
+            "/Users/op/secret-client-dir/q3 summary.pdf for you."
+        ),
+    )
+    assert [c.name for c in out.featured] == ["q3 summary.pdf"]
+    payload = _vendor_payload(service.asked)
+    assert "secret-client-dir" not in payload
+    assert "q3 summary.pdf" in payload

@@ -158,12 +158,16 @@ async def test_the_attention_marker_and_the_answer_precede_the_row(tmp_path: Pat
     )
     handle.subscribe(lambda: None)
     sequence: list[str] = []
-    from local_operator.harness.types import AgentEndEvent, MessageEndEvent
+    from local_operator.harness.types import AgentEndEvent, Message, MessageEndEvent
 
     def handler(event: Any) -> None:
         if isinstance(event, AgentEndEvent):
             sequence.append("agent_end")
-        elif isinstance(event, MessageEndEvent) and event.message.role == "assistant":
+        elif (
+            isinstance(event, MessageEndEvent)
+            and isinstance(event.message, Message)
+            and event.message.role == "assistant"
+        ):
             sequence.append("answer")
 
     session.subscribe(handler)
