@@ -52,7 +52,7 @@ import logging
 import threading
 from contextlib import suppress
 
-from local_operator.redaction_shapes import DETECTED_COMPONENT_FLOOR
+from local_operator.redaction_shapes import DETECTED_COMPONENT_FLOOR, scrub_values
 from local_operator.variables import VariableStore
 
 #: Redaction-only store: values to scrub, never to inject or advertise.
@@ -162,9 +162,12 @@ class StderrRedactor:
             if cut == previous:
                 break
         ready, self._pending = text[:cut], text[cut:]
-        for secret in self._secrets:
-            ready = ready.replace(secret, "[redacted]")
-        return ready
+        # The shared value pass, not a substring loop repeated here: a word-like
+        # value masks on letter-run boundaries (agent review round 1, R1 — a
+        # child's stderr turned ``un<word>ally`` into ``un[redacted]ally`` while
+        # every other surface had moved), and every spelling the pass generates is
+        # masked from this sink too.
+        return scrub_values(ready, self._secrets)
 
 
 class _Filter(logging.Filter):
