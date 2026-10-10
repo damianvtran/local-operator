@@ -258,3 +258,35 @@ def test_verdict_classification_by_leading_token(verdict, expected):
 )
 def test_freshness_needs_a_real_prefix(reviewed, head, expected):
     assert freshness(reviewed, head) == expected
+
+
+def test_a_labelled_verdict_past_the_field_window_is_still_read():
+    """#2112's round-4 review: ``Reviewer:``/``Scope:`` on top, the verdict on line 44.
+
+    The 40-line field window protects ``Reviewer``/``Scope``/``Head`` (a review quotes
+    its own prompt further down), but a ``Verdict:`` label with no other spelling in
+    the window is the closing summary, and bounding it turned a clean TERMINAL round
+    into ``unstated``.
+    """
+    body = (
+        "### Agent review — round 4\n\nReviewer: reviewer on a-model\n"
+        "Scope: `46b12d2ff9..039476dff3`\n\n"
+        + "".join(f"- note {index}\n" for index in range(50))
+        + "\n**Verdict: `clean` — no BLOCKER, no MAJOR — round 4 is TERMINAL on `039476dff3`.**\n"
+    )
+    assert len(body.splitlines()) > 40
+    report = parse([Comment(id="1", created_at="2026-10-08T00:00:00Z", body=body)])
+    (item,) = report.passes
+    assert item.verdict_class == STATE_TERMINAL
+    assert item.reviewed_head == "039476dff3"
+
+
+def test_a_scope_line_past_the_field_window_is_still_ignored():
+    """The window still guards the quoted-prompt case for every field but the verdict."""
+    body = (
+        "### Agent review — round 1\n\nReviewer: r\nScope: `aaaaaaa..bbbbbbb`\n"
+        + "".join(f"- note {index}\n" for index in range(50))
+        + "Scope: `ccccccc..ddddddd`\nHead: eeeeeee\n"
+    )
+    (item,) = parse([Comment(id="1", created_at="2026-10-08T00:00:00Z", body=body)]).passes
+    assert item.reviewed_head == "bbbbbbb"

@@ -893,15 +893,22 @@ def _install_proxy(monkeypatch: pytest.MonkeyPatch, handler_factory) -> None:
     monkeypatch.setattr(service, "adapter_for", lambda ref: Proxy())
 
 
-async def _mixed_lane(tmp_path: Path, monkeypatch, *, changing: str) -> dict[str, Any]:
-    body = _long_convention_body()
+async def _mixed_lane(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    changing: str,
+    body: str | None = None,
+    expected: str = "clean",
+) -> dict[str, Any]:
+    body = body if body is not None else _long_convention_body()
     calls: list[str] = []
     _install_proxy(monkeypatch, lambda: _mixed_handler(calls, body, changing=changing))
     await service.refresh_keys(tmp_path, [REF])
     entry = cache.read_entry(tmp_path, REF)
     assert entry is not None
     lane = next(item for item in entry["lanes"] if item["lane"] == "agent")
-    assert lane["state"] == "clean", lane
+    assert lane["state"] == expected, lane
     # Phase 2: only the ``changing`` piece refetches (the other answers 304).
     cache._reset_for_tests()
     cache.clear_key_backoff(REF.key)
@@ -1191,3 +1198,118 @@ async def test_the_ignored_list_survives_a_replay_only_rebuild(tmp_path: Path, m
     entry = cache.read_entry(tmp_path, REF)
     assert entry is not None
     assert entry["convention"]["ignored"]["reviews"] == ["review:43"]
+
+
+# ---------------------------------------------------------------------------
+# a verdict the parser must see WHOLE: past the 4 KiB display cap AND past the
+# parser's top-of-body field window — the shape of #2112's round-4 review
+# ---------------------------------------------------------------------------
+
+
+def _deep_verdict_body() -> str:
+    """#2112's round-4 agent review, reshaped: 45 lines, verdict at char ~4450.
+
+    Two independent bounds used to hide this verdict: the 4 KiB body cap on the
+    stored copy (a replay that re-parsed the stored body lost it) and the
+    parser's 40-line field window (the FULL body lost it too, so no amount of
+    parsing-before-trimming alone made the lane read ``clean``). The helper
+    asserts both preconditions so the tests below cannot silently weaken.
+    """
+    header = (
+        "### Agent review — round 4\n\n"
+        "Reviewer: reviewer on a-model\n"
+        "Scope: `46b12d2ff9..039476dff3` (one commit)\n\n"
+    )
+    filler = "".join(
+        f"- Finding {index}: a verification note that is long enough to matter. " + "x" * 40 + "\n"
+        for index in range(42)
+    )
+    tail = "\n**Verdict: `clean` — no BLOCKER, no MAJOR — round 4 is TERMINAL on `039476dff3`.**\n"
+    body = header + filler + tail
+    verdict_at = body.index("**Verdict")
+    assert verdict_at > cache.COMMENT_BODY_MAX, verdict_at
+    verdict_line = len(body[:verdict_at].splitlines())
+    assert verdict_line > 40, verdict_line  # rounds.FIELD_SCAN_LINES
+    return body
+
+
+async def _prime_deep_verdict(tmp_path: Path, monkeypatch) -> dict[str, Any]:
+    """One FIRST fetch through the real GitHub adapter; returns the agent lane."""
+    body = _deep_verdict_body()
+    _install_proxy(monkeypatch, lambda: _mixed_handler([], body, changing="reviews"))
+    await service.refresh_keys(tmp_path, [REF])
+    return _agent_lane(tmp_path)
+
+
+def _agent_lane(tmp_path: Path) -> dict[str, Any]:
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None
+    return next(item for item in entry["lanes"] if item["lane"] == "agent")
+
+
+@pytest.mark.asyncio
+async def test_a_deep_verdict_is_read_on_the_first_fetch(tmp_path: Path, monkeypatch) -> None:
+    lane = await _prime_deep_verdict(tmp_path, monkeypatch)
+    assert lane["state"] == "terminal", lane
+    assert "TERMINAL" in lane["verdict"]
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None
+    stored = str(entry["pieces"]["comments"][0]["body"])
+    assert "[truncated]" in stored, "the stored copy IS capped; the parse must not depend on it"
+
+
+@pytest.mark.asyncio
+async def test_a_deep_verdict_survives_a_restart_disk_replay(tmp_path: Path, monkeypatch) -> None:
+    """Process restart = empty memory tier, entry read back from disk."""
+    await _prime_deep_verdict(tmp_path, monkeypatch)
+    cache._reset_for_tests()
+    assert _agent_lane(tmp_path)["state"] == "terminal"
+    # ... and the row the UI draws is built from that same stored parse.
+    entry = cache.read_entry(tmp_path, REF)
+    row = service.view_row(ROW, entry)
+    agent = next(item for item in row["lanes"] if item["lane"] == "agent")
+    assert agent["state"] == "terminal", agent
+
+
+@pytest.mark.asyncio
+async def test_a_deep_verdict_survives_an_all_304_refresh(tmp_path: Path, monkeypatch) -> None:
+    await _prime_deep_verdict(tmp_path, monkeypatch)
+    cache._reset_for_tests()
+    cache.clear_key_backoff(REF.key)
+    await service.refresh_keys(tmp_path, [REF], force=True)
+    assert _agent_lane(tmp_path)["state"] == "terminal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changing", ["reviews", "comments"])
+async def test_a_deep_verdict_survives_a_mixed_200_304_refresh(
+    tmp_path: Path, monkeypatch, changing: str
+) -> None:
+    lane = await _mixed_lane(
+        tmp_path, monkeypatch, changing=changing, body=_deep_verdict_body(), expected="terminal"
+    )
+    assert lane["state"] == "terminal", lane
+
+
+@pytest.mark.asyncio
+async def test_a_piece_with_no_stored_parse_refetches_instead_of_reading_the_capped_copy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The one rebuild path that DID parse a trimmed body.
+
+    An entry with stored pieces but no ``convention`` (written before the
+    fetch-time parse existed, or edited) used to answer 304 for a comment piece
+    and then parse the capped copy it kept. The validators of such a piece must
+    be dropped so the pass refetches it whole.
+    """
+    await _prime_deep_verdict(tmp_path, monkeypatch)
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None
+    legacy = {k: v for k, v in entry.items() if k != "convention"}
+    legacy["lanes"] = []
+    cache.write_entry(tmp_path, legacy, ref=REF)
+    cache._reset_for_tests()
+    cache.clear_key_backoff(REF.key)
+    # A bound-trimmed copy is what is on disk now, and its validators say 304.
+    await service.refresh_keys(tmp_path, [REF], force=True)
+    assert _agent_lane(tmp_path)["state"] == "terminal"
