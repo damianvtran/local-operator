@@ -22,6 +22,10 @@ data and cannot drift:
 ``coexist``            the quota row and the credential warning, together.
 ``narrow``             ``depleted`` at a width the row cannot hold the URL in
                        (default 60x24): the URL is dropped whole, never clipped.
+``radient-unverified-wide``
+                       ``radient-unverified`` at 200x30: the content width band
+                       where the in-sentence URL used to be cut mid-address —
+                       now the tail drops whole too (design round 1, D2).
 
 Isolates HOME and the config dir before importing the app
 (``isolate_capture``) so a capture never reads the operator's providers, caches
@@ -75,9 +79,11 @@ async def main() -> None:
     out = Path(sys.argv[1]).resolve()
     size = sys.argv[2] if len(sys.argv) > 2 else ""
     state = sys.argv[3] if len(sys.argv) > 3 else "depleted"
-    fixture = "depleted" if state == "narrow" else state
+    fixture = {"narrow": "depleted", "radient-unverified-wide": "radient-unverified"}.get(
+        state, state
+    )
     if not size:
-        size = "60x24" if state == "narrow" else "100x30"
+        size = {"narrow": "60x24", "radient-unverified-wide": "200x30"}.get(state, "100x30")
     width, height = (int(part) for part in size.split("x"))
 
     # A neutral cwd before painting: the splash's cwd row and the composer
@@ -98,10 +104,27 @@ async def main() -> None:
         # (its height IS the rows it draws), and the screen has not gone
         # scrollable under the extra row (virtual == actual, no scrollbar).
         screen = pilot.app.screen
+
+        def _pad(needle: str) -> str:
+            """Leading cells of the first row containing ``needle``, or ``-``."""
+            for line in lines:
+                if needle in line.plain:
+                    return str(len(line.plain) - len(line.plain.lstrip(" ")))
+            return "-"
+
+        # `stack_pad` is the shared pad the status+hint stack holds — the
+        # "stack x" of design round 1's D1 acceptance — and `quota_pad` the
+        # notice row's own centre; both in cells, so the pair's numbers can be
+        # compared off the same run as its pixels.
+        quota_pad = "-"
+        if info.quota_notice is not None:
+            head = " ".join(info.quota_notice.text.split())[:24]
+            quota_pad = _pad(head)
         print(
             f"state={state} size={width}x{height} rows={len(lines)}"
             f" welcome_h={welcome.size.height} virtual_h={screen.virtual_size.height}"
             f" scrollbar={bool(screen.show_vertical_scrollbar)}"
+            f" stack_pad={_pad('/help')} quota_pad={quota_pad}"
             f" quota={'yes' if info.quota_notice is not None else 'no'} -> {out}"
         )
         assert len(lines) == welcome.size.height, "the block is content-sized"
