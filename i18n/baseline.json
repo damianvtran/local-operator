@@ -3,7 +3,8 @@
   "note": "enforced = blocking scope (path prefixes or exact paths); findings elsewhere are advisory (report-only) until the area's extraction slice adds its prefix. files = per-file literal ceilings (shrink-only; new files start at 0). See scripts/i18n/check.py.",
   "enforced": [
     "local_operator/i18n/",
-    "scripts/i18n/"
+    "scripts/i18n/",
+    "local_operator/slash_commands.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
@@ -135,7 +136,7 @@
     "local_operator/skills/discovery.py": 1,
     "local_operator/skills/index.py": 4,
     "local_operator/skills/protocol.py": 2,
-    "local_operator/slash_commands.py": 78,
+    "local_operator/slash_commands.py": 29,
     "local_operator/supervisors.py": 5,
     "local_operator/teams.py": 4,
     "local_operator/tools/agent_tool.py": 3,
