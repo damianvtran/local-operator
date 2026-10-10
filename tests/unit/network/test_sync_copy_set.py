@@ -765,7 +765,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``send-notice-`` prefixes an entry id inside the transcript's own custom rows",
     ),
-    "local_operator/terminals.py": (1, "``xterm-kitty`` is a TERM value, not a path"),
+    "local_operator/terminals.py": (
+        2,
+        "``xterm-kitty`` and ``foot`` are TERM values — terminal capability "
+        "string prefixes the OSC 8 hyperlink probe matches — never session entries",
+    ),
     "local_operator/tui/glyphs.py": (1, "``mcp__`` prefixes a tool name in the glyph table"),
     "local_operator/tui/widgets/editor.py": (
         1,

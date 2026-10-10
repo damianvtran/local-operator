@@ -50893,6 +50893,17 @@ class OperatorApp(App[None]):
             return self._archive_slash_result(False, SlashResult)
         if command == "delete":
             return await self._delete_slash_result(args, SlashResult)
+        # ``/highlights`` is deliberately NOT among the producers above, and
+        # that is host scope rather than an omission: turn supplements are a
+        # ``ServingSessionHandle`` surface — the runner, the lazy read and the
+        # three control ops all live on that handle (memo §2.2, "host scope
+        # follows from the seam") — and a session THIS app hosts has no runner
+        # for a branch to act on, so the refusal below is the honest answer.
+        # The runtime host implements the command
+        # (``ServingSessionHandle._highlights_slash``), which is the only host
+        # where the actions can exist; a no-op branch here would fabricate the
+        # "nothing is being prepared" stub — indistinguishable from a session
+        # that really is idle — for one that cannot run supplements at all.
         # Every authoritative capability must land on a producer ABOVE: a
         # success-shaped receipt for an operation that never ran is the round-2
         # MAJOR-1 defect, so an unhandled command answers with an honest
@@ -56760,7 +56771,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 142
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 146
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

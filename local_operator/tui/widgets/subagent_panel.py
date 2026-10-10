@@ -3011,19 +3011,34 @@ class SubagentPanel(Container):
         key at the moment it moves the counts.
         """
         jobs = list(self._jobs_by_id.values())
-        key = tuple(
-            (
+        key = tuple(self._job_key(job) for job in jobs)
+        if self._summary_counts_key != key:
+            self._summary_counts_key = key
+            self._summary_counts_value = summary_counts(jobs, paused_ids=self._paused_ids)
+        return self._summary_counts_value
+
+    def _job_key(self, job: Any) -> tuple[Any, ...]:
+        """One ledger job's contribution to the summary cache key. NEVER raises.
+
+        Guarded whole, like :func:`row_facts` and for the same reason: a
+        ``getattr`` default only covers a MISSING attribute, and the hosts this
+        widget has to survive — embedders and replayed ledgers whose job
+        objects are not ``AsyncJob`` — hand it properties that RAISE. This key
+        is read from every ``sync`` AND every 1 Hz tick, so an escape from here
+        is an unhandled Textual message-handler exception: the whole app, for a
+        status row. The fallback values are the ones :func:`row_facts` returns
+        for the same job (running, not queued, not paused), so the key still
+        names the fields the counts were derived from.
+        """
+        try:
+            return (
                 id(job),
                 getattr(job, "status", ""),
                 bool(getattr(job, "queued", False)),
                 str(getattr(job, "id", "") or "") in self._paused_ids,
             )
-            for job in jobs
-        )
-        if self._summary_counts_key != key:
-            self._summary_counts_key = key
-            self._summary_counts_value = summary_counts(jobs, paused_ids=self._paused_ids)
-        return self._summary_counts_value
+        except Exception:  # noqa: BLE001 — a job the panel cannot read may not take the app down
+            return (id(job), "running", False, False)
 
     def _ledger_has_running(self) -> bool:
         """Whether any child is live, read from the LEDGER not the rows.
