@@ -1947,7 +1947,8 @@ generator lane ships) a small generated graphic. It is decided after the turn's
 advertises `supplements-v1` only when it can honour the lazy read op
 (`supplements_for(anchors[]) → {anchor: newest row}`), and the viewer declares
 `supplements` on its auth frame (`auth["supplements"] = true`; the desktop live path
-declares `?supplements=1` on its events route instead — the `entry_ts` shape). Only then
+declares `?supplements=1` on its events route instead — the `entry_ts` shape; that
+parameter is a frozen name today, read by no route until the routes lane lands). Only then
 may the runtime send `supplement_progress` events or project supplement rows; a viewer
 that does not declare receives neither, so it never paints an unknown kind. Rows are
 journaled either way, reach a desktop as ordinary history entries (raw `custom` rows)
@@ -2005,7 +2006,8 @@ It arrives only AFTER the turn's `agent_end`, and it carries the `anchor`, so a 
 event (the next turn already started) still lands on the right answer. `lop exec` never
 produces one (its turns are outside the trigger), and SDK event streams are unchanged.
 Under backpressure, supplement frames fold keep-newest — the family is
-self-replacing by construction.
+self-replacing by construction — but no fold key exists for them yet; `session/delta_merge.py`
+gains the `supplement` fold with the emitter lane.
 
 **Not in this release.** No image components (v1 documents carry HTML only); no mesh
 transfer (a file or component a peer device holds reads as "on <peer>" with previews
@@ -2014,7 +2016,9 @@ native (phone) WebView frame is pending its own lane; and the static preview rou
 (`/v1/static/*`) are not yet token-authenticated — short-lived signed URLs are a
 recorded follow-up that needs a client change. No renderer consumes any of this yet:
 the TUI, UI, relay and native renderers are separate lanes, and the desktop document
-route is a registered 404 stub until the routes lane fills it.
+route is a registered 404 stub until the routes lane fills it; the `?supplements=1`
+events-route reader and the keep-newest fold are contract-frozen names still to be
+implemented, by the routes and emitter lanes respectively.
 
 ### Verification
 
