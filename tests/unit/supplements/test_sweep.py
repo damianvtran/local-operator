@@ -127,8 +127,37 @@ async def test_media_blobs_and_sidecarless_content_are_never_candidates(tmp_path
     assert lonely.exists()
 
 
-async def test_the_reference_scan_narrows_by_transcript_mtime(tmp_path: Path) -> None:
-    """A transcript last written before the candidate's mtime cannot reference it."""
+async def test_a_transcript_with_a_pinned_mtime_still_protects_its_blob(tmp_path: Path) -> None:
+    """R1 regression: the order production actually writes.
+
+    ``persistence.append_row`` appends with ``preserve_mtime=True``, and the restore
+    pins the transcript's mtime back to before the append -- which necessarily
+    precedes the blob the row names, because the runner stores the blob first
+    (``runtime/supplements._store``) and commits the row after. So no mtime
+    relationship in this file proves it holds no reference: a scan that narrows by
+    transcript mtime skips this transcript and deletes a REFERENCED blob (silent
+    data loss -- the row's digest then dangles and the frame can never render).
+    """
+    digest = _blob(tmp_path, b"<p>pinned</p>", age_s=OLD_AGE_S)
+    _journal(tmp_path, "s1", [_row("a" * 32, digest)])
+    transcript = tmp_path / "sessions" / "s1" / "transcript.jsonl"
+    blob_mtime = os.stat(tmp_path / "attachments" / f"{digest}.bin").st_mtime
+    pinned = blob_mtime - 120.0
+    os.utime(transcript, (pinned, pinned))
+    report = sweep.store_sweep(tmp_path)
+    assert report.scanned_sessions == 1, "the referencing transcript must be scanned"
+    assert report.deleted == 0 and digest in report.kept
+    assert (tmp_path / "attachments" / f"{digest}.bin").exists()
+
+
+async def test_the_reference_scan_is_never_narrowed_by_transcript_mtime(tmp_path: Path) -> None:
+    """EVERY transcript is scanned: a file's age proves nothing about its references.
+
+    The "old" transcript here names no candidate, and it is still scanned -- the
+    mtime is pinned back by every ``preserve_mtime`` append, so an arbitrarily old
+    file may name an arbitrarily new blob (R1). The pass stays bounded by the scan
+    budget instead, which fails closed (the budget test below).
+    """
     digest = _blob(tmp_path, b"<p>narrow</p>", age_s=OLD_AGE_S)
     _journal(tmp_path, "old", [_row("b" * 32, "1" * 32)])
     old_transcript = tmp_path / "sessions" / "old" / "transcript.jsonl"
@@ -136,7 +165,7 @@ async def test_the_reference_scan_narrows_by_transcript_mtime(tmp_path: Path) ->
     os.utime(old_transcript, (long_ago, long_ago))
     _journal(tmp_path, "new", [_row("c" * 32, digest)])
     report = sweep.store_sweep(tmp_path)
-    assert report.scanned_sessions == 1  # only "new" could reference the candidate
+    assert report.scanned_sessions == 2  # both transcripts; nothing is skipped by age
     assert report.deleted == 0 and digest in report.kept
 
 

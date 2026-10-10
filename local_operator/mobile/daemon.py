@@ -4286,6 +4286,15 @@ _SUPPLEMENT_FILE_TYPES: dict[str, str] = {
     ".avif": "image/avif",
 }
 
+#: The read family's response policy (file-serving RFC D5; memo §2.7): the pair rides
+#: EVERY response of both routes, errors included -- #2134 R4's lesson is that a policy
+#: attached only to the success path is silently absent where it matters. Stamped by
+#: ``_supplement_response`` at each return site below (the gate's refusals included).
+_SUPPLEMENT_POLICY: dict[str, str] = {
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store",
+}
+
 
 def build_app(daemon: MobileDaemon):
     """The Starlette app. Imported inside the function so ``lop`` without the
@@ -5377,6 +5386,57 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
+    # -- the supplement read family (memo §2.7; RFC D5) ----------------------------------
+    #
+    # The response policy and the journal-reference check are shared by the two routes
+    # below, so they live beside them rather than inside each handler.
+
+    def _supplement_response(response: Response) -> Response:
+        """Stamp the family policy (``_SUPPLEMENT_POLICY``) on ``response``.
+
+        EVERY return of the two routes below goes through this, errors included
+        (#2134 R4: a policy attached only to the success path is silently absent
+        where it matters). Plain assignment, not ``setdefault``: the 200s set the
+        same pair, and one spelling keeps the family uniform.
+        """
+        for name, value in _SUPPLEMENT_POLICY.items():
+            response.headers[name] = value
+        return response
+
+    def _journal_references_digest(payload: bytes, digest: str) -> bool:
+        """Whether a ``supplement_v1`` row of this journal references ``digest``.
+
+        §2.7's letter for the document route: the reference is read per
+        ``supplement_v1`` row. Deliberately narrower than a raw session-wide scan
+        with sync's byte grammar -- the grammar also matches ``"attachment"``
+        references on other row types (message media carries the same key today),
+        and a future text-mime producer must not become servable through this door
+        without the authorisation being reconsidered (round-1 review R4). The cheap
+        pre-filter keeps JSON parsing to the lines that can be supplement rows.
+        """
+        from local_operator.network.sync import _ATTACHMENT_REF
+        from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+        marker = SUPPLEMENT_CUSTOM_TYPE.encode("ascii")
+        needle = digest.encode("ascii")
+        for line in payload.splitlines():
+            if marker not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            row_payload = row.get("payload")
+            if not isinstance(row_payload, dict):
+                continue
+            if row_payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
+                continue
+            if any(match == needle for match in _ATTACHMENT_REF.findall(line)):
+                return True
+        return False
+
     async def api_session_supplement_document(request: Request) -> Response:
         """One stored supplement component, assembled to a document, as ``{html}``.
 
@@ -5392,24 +5452,35 @@ def build_app(daemon: MobileDaemon):
 
         AUTHORISATION IS THREE FACTS, the memo's §2.7 (a)-(c): the cookie (``gate``),
         the session existing on disk as a local USER conversation, and the digest
-        being REFERENCED by that session's journal. The third is what makes the route
-        safe to key on a digest alone: a blob no row references is not servable here
-        even when the caller holds a digest from somewhere else, and the scan is
-        sync's own reference grammar (a digest sync would not ship is a digest this
-        route does not authorise). It deliberately does NOT use ``_entry_for_session``
-        -- that serves only live generations, and an ended conversation's history must
-        still show its components.
+        The digest is the whole address; there is no caller-supplied path anywhere in
+        the request. Headers carry ``X-Content-Type-Options: nosniff`` and
+        ``Cache-Control: no-store`` -- on EVERY response of the route, refusals
+        included (``_supplement_response``) -- and the document's own CSP rides
+        inside it as a <meta>, because the tunnel forwards a fixed response-header
+        set (memo §2.7).
+
+        AUTHORISATION IS THREE FACTS, the memo's §2.7 (a)-(c): the cookie (``gate``),
+        the session existing on disk as a local USER conversation, and the digest
+        being REFERENCED by a ``supplement_v1`` row of that session's journal
+        (``_journal_references_digest``). The third is what makes the route safe to
+        key on a digest alone: a blob no row references is not servable here even
+        when the caller holds a digest from somewhere else. It is deliberately
+        scoped to supplement rows rather than sync's whole-journal byte grammar --
+        the grammar also matches media references on other row types, and those
+        must not become servable through this door without the authorisation being
+        reconsidered (round-1 review R4). It deliberately does NOT use
+        ``_entry_for_session`` -- that serves only live generations, and an ended
+        conversation's history must still show its components.
         """
         denied = gate(request)
         if denied is not None:
-            return denied
+            return _supplement_response(denied)
         session_id = str(request.path_params["session_id"])
         digest = str(request.path_params["digest"])
 
         def load() -> str | None:
             import base64
 
-            from local_operator.network.sync import _ATTACHMENT_REF
             from local_operator.session.attachments import AttachmentStore
             from local_operator.supplements.contract import is_digest
             from local_operator.supplements.document import assemble_stored_component
@@ -5423,11 +5494,7 @@ def build_app(daemon: MobileDaemon):
                 payload = (directory / "transcript.jsonl").read_bytes()
             except OSError:
                 return None
-            if _ATTACHMENT_REF.search(payload) is None:
-                return None
-            if not any(
-                match.decode("ascii") == digest for match in _ATTACHMENT_REF.findall(payload)
-            ):
+            if not _journal_references_digest(payload, digest):
                 return None
             resolved = AttachmentStore().get(digest)
             if resolved is None:
@@ -5440,11 +5507,10 @@ def build_app(daemon: MobileDaemon):
 
         html = await asyncio.to_thread(load)
         if html is None:
-            return JSONResponse({"error": "no such supplement"}, status_code=404)
-        return JSONResponse(
-            {"html": html},
-            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
-        )
+            return _supplement_response(
+                JSONResponse({"error": "no such supplement"}, status_code=404)
+            )
+        return JSONResponse({"html": html}, headers=dict(_SUPPLEMENT_POLICY))
 
     async def api_session_supplement_file(request: Request) -> Response:
         """One file callout's bytes, addressed by the row's own index (memo §2.7).
@@ -5474,14 +5540,14 @@ def build_app(daemon: MobileDaemon):
         """
         denied = gate(request)
         if denied is not None:
-            return denied
+            return _supplement_response(denied)
         session_id = str(request.path_params["session_id"])
         job = str(request.path_params["job"])
         raw_index = request.query_params.get("i", "")
         try:
             index = int(raw_index)
         except ValueError:
-            return JSONResponse({"error": "bad file index"}, status_code=400)
+            return _supplement_response(JSONResponse({"error": "bad file index"}, status_code=400))
 
         def load() -> tuple[bytes, str] | str:
             """``(bytes, mime)``, or a refusal token the route maps to a status."""
@@ -5559,19 +5625,20 @@ def build_app(daemon: MobileDaemon):
 
         outcome = await asyncio.to_thread(load)
         if outcome == "missing":
-            return JSONResponse({"error": "no such file"}, status_code=404)
+            return _supplement_response(JSONResponse({"error": "no such file"}, status_code=404))
         if outcome == "no-cwd":
-            return JSONResponse(
-                {"error": "file previews for an ended session need the session running"},
-                status_code=409,
+            return _supplement_response(
+                JSONResponse(
+                    {"error": "file previews for an ended session need the session running"},
+                    status_code=409,
+                )
             )
         if outcome == "too-large":
-            return JSONResponse({"error": "file is larger than the preview limit"}, status_code=413)
+            return _supplement_response(
+                JSONResponse({"error": "file is larger than the preview limit"}, status_code=413)
+            )
         data, mime = outcome
-        headers = {
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "no-store",
-        }
+        headers = dict(_SUPPLEMENT_POLICY)
         if not mime.startswith("image/"):
             headers["Content-Disposition"] = "attachment"
         return Response(content=data, media_type=mime, headers=headers)
