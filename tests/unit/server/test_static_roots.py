@@ -69,6 +69,28 @@ def _denied(raw: str, roots: ServedRoots) -> StaticPathDenied:
     return caught.value
 
 
+def _other_spellings_of(directory: Path) -> list[Path]:
+    """``directory`` plus every spelling that names it without being that string.
+
+    Only the ones the volume actually supports are returned: a case flip needs a
+    case-insensitive filesystem, the ``/System/Volumes/Data`` twin needs the macOS
+    firmlink. Reviews R2-1 and security S-1 reproduced the ``$HOME``-as-root
+    exposure through exactly these two, so the guards are tested through them
+    rather than by mocking ``samefile``.
+    """
+    spellings = [directory]
+    flipped = Path(str(directory).swapcase())
+    if flipped.exists() and flipped.samefile(directory):
+        spellings.append(flipped)
+    try:
+        twin = Path("/System/Volumes/Data") / directory.relative_to("/")
+    except ValueError:  # pragma: no cover -- every test path is absolute
+        return spellings
+    if twin.exists() and twin.samefile(directory):
+        spellings.append(twin)
+    return spellings
+
+
 # --------------------------------------------------------------------------- policy
 
 
@@ -255,7 +277,13 @@ def test_a_live_session_working_directory_is_a_root_and_a_stale_one_is_not(tmp_p
 
 
 def test_a_session_started_in_home_does_not_make_home_a_root(tmp_path, monkeypatch):
-    """R1: 34 live sessions on the reference host run in ``~``; ``~/Pictures`` stays 403."""
+    """R1: 34 live sessions on the reference host run in ``~``; ``~/Pictures`` stays 403.
+
+    R2-1/S-1: the rule is about the DIRECTORY, not its spelling. ``/users/me`` and
+    ``/System/Volumes/Data/Users/me`` are ``$HOME`` on this filesystem and
+    ``resolve()`` canonicalises neither, so a string comparison let a cwd written
+    that way become a root and served ``~/Pictures``.
+    """
     from local_operator.session.runtime import registry
 
     home = tmp_path / "home"
@@ -263,10 +291,12 @@ def test_a_session_started_in_home_does_not_make_home_a_root(tmp_path, monkeypat
     (home / "Pictures" / "a.png").write_bytes(PNG)
     monkeypatch.setenv("HOME", str(home))
     config_dir = tmp_path / "config"
-    registry.publish(_live_record(os.getpid(), home), config_dir)
-    roots = build_roots(config_dir, {})
-    assert home.resolve() not in roots.roots
-    assert _denied(str(home / "Pictures" / "a.png"), roots).status == 403
+    for spelling in _other_spellings_of(home):
+        registry.publish(_live_record(os.getpid(), spelling), config_dir)
+        static_roots.clear_live_cache()
+        roots = build_roots(config_dir, {})
+        assert home.resolve() not in roots.roots, spelling
+        assert _denied(str(home / "Pictures" / "a.png"), roots).status == 403, spelling
 
 
 def test_a_session_started_above_home_does_not_make_an_ancestor_a_root(tmp_path, monkeypatch):
@@ -295,13 +325,19 @@ def test_a_session_inside_home_is_still_a_root(tmp_path, monkeypatch):
 
 
 def test_home_itself_is_served_when_the_operator_configures_it(tmp_path, monkeypatch):
-    """Widening past the built-ins is the operator's explicit opt-in (``static.roots``)."""
+    """Widening past the built-ins is the operator's explicit opt-in (``static.roots``).
+
+    Including one typed in another spelling (security S-1): the identity test that
+    closes the implicit arm must not turn an operator's ``/users/me`` opt-in into a
+    root that silently does nothing.
+    """
     home = tmp_path / "home"
     home.mkdir()
     (home / "a.png").write_bytes(PNG)
     monkeypatch.setenv("HOME", str(home))
-    roots = build_roots(tmp_path / "config", {"static": {"roots": [str(home)]}})
-    assert resolve_servable(str(home / "a.png"), roots)
+    for spelling in _other_spellings_of(home):
+        roots = build_roots(tmp_path / "config", {"static": {"roots": [str(spelling)]}})
+        assert resolve_servable(str(home / "a.png"), roots), spelling
 
 
 @pytest.mark.parametrize("spelling", ["parent", "dotdot", "env"])
@@ -346,6 +382,18 @@ def test_a_symlink_loop_outside_the_roots_is_the_same_403(tmp_path, workspace):
     looped = _denied(str(loop), roots)
     plain = _denied(str(elsewhere / "nope.png"), roots)
     assert (looped.status, looped.detail) == (plain.status, plain.detail)
+
+
+def test_an_over_long_component_inside_a_root_is_the_same_403_not_a_500(tmp_path, workspace):
+    """S-4: ``ENAMETOOLONG`` escaped as the handler's 500 -- the one non-4xx answer.
+
+    The classification is by errno, because ``Path.exists()`` swallows
+    ``ENAMETOOLONG`` on Python 3.13+ and re-raises it on 3.12, which made the same
+    request a 500 on CI's interpreter and a 404 here.
+    """
+    over_long = str(workspace / ("a" * 300) / "b.png")
+    denied = _denied(over_long, _roots(tmp_path, workspace))
+    assert (denied.status, denied.detail) == (403, static_roots.OUTSIDE_ROOTS_DETAIL)
 
 
 def test_the_403_body_names_the_remedy(tmp_path, workspace):
@@ -440,6 +488,14 @@ def test_the_macos_data_volume_firmlink_counts_as_an_ancestor_of_home():
         ("rebind.attacker.test:8080", "127.0.0.1", False),
         ("rebind.attacker.test", None, False),
         ("localhost.attacker.test", "127.0.0.1", False),
+        # S-3: userinfo is not an authority, and neither is an empty Host. A browser
+        # sends neither, so they need not pass -- and the ``:`` split would read the
+        # attacker's name out of the first two.
+        ("localhost:80@attacker.test", "127.0.0.1", False),
+        ("[::1]@attacker.test", None, False),
+        ("attacker@localhost", "127.0.0.1", False),
+        ("", "127.0.0.1", False),
+        ("   ", None, False),
         ("mac.lan:1111", "mac.lan", True),
         ("mac.lan:1111", "127.0.0.1", False),
         ("anything.example", "0.0.0.0", True),  # explicit wildcard exposure: check is off
@@ -820,6 +876,16 @@ async def test_unknown_tilde_user_through_the_route_is_403_not_500(test_app_clie
     """R5 end to end: the reproduced 500 was ``Could not determine home directory.``"""
     response = await test_app_client.get(
         "/v1/static/images", params={"path": "~no-such-user-zzz/a.png"}
+    )
+    assert response.status_code == 403
+    assert "static.roots" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_an_over_long_component_through_the_route_is_403_not_500(test_app_client, configured):
+    """S-4 end to end: the 500 the security round reproduced on a 3.12 interpreter."""
+    response = await test_app_client.get(
+        "/v1/static/images", params={"path": str(configured / ("a" * 300) / "b.png")}
     )
     assert response.status_code == 403
     assert "static.roots" in response.json()["detail"]

@@ -25,19 +25,30 @@ remain unauthenticated. The UI loads them through ``<img>``/``<video>``/
 cannot simply be required. The follow-up is a short-lived signed query token
 minted by an authenticated endpoint and verified here, which needs the UI lane
 to request it. Until then a hostile local caller can still *trigger* a read of
-anything inside the roots below -- but no longer anything outside them, and a
-web page can no longer *read the response* cross-origin. Also open, all of them
+anything inside the roots below -- and, since an ``<img>`` reports ``load`` /
+``error`` and ``naturalWidth``/``naturalHeight`` back to the page, still
+*observe* whether an image inside them exists, decodes and how many pixels it
+has; what no longer happens is reading a response cross-origin, or reaching
+anything outside the roots below. Also open, all of them
 needing write access INSIDE a root or a same-user local process (who could read
 the file directly anyway), so none is closed here:
 
 * TOCTOU: :func:`resolve_servable` validates a realpath and the handlers then
   open BY PATH, so a symlink swapped inside a writable root between the check and
-  the open is followed. The case that matters is a root shared with another OS
-  user (``static.roots`` pointing at a shared directory);
+  the open is followed -- and it is not a narrow window: a 30k-request swap run
+  (security round 1, 2026-10-10) won ~1 request in 4 (7,343 served the outside
+  file), while swapping an intermediate symlink never won (0 of 15,872, the
+  handler opening the already-resolved path). The case that matters is a root
+  shared with another OS user (``static.roots`` pointing at a shared directory);
+  the fix is an ``O_NOFOLLOW``/``fstat`` open streamed from the fd, which needs a
+  custom response and is recorded as follow-up rather than done here;
 * hardlinks: a hardlink inside a root to a file outside it is indistinguishable
   from a file that lives there, and no realpath test can tell;
 * Host validation covers DNS NAMES only (:func:`host_is_acceptable`): an IP
-  literal Host is admitted, since a rebinding page cannot present one.
+  literal Host is admitted, since a rebinding page cannot present one. It is also
+  scoped to this module's routes -- :func:`is_static_path` is what the middleware
+  gates on, so the rest of the legacy surface (``/v1/agents``, ``/health``) still
+  answers under a rebinding Host (security round 1 measured it; out of scope).
 
 THE ROOTS, and why each is there (all compared as realpaths):
 
@@ -99,9 +110,11 @@ settings registry and its tests.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import logging
 import os
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -182,6 +195,13 @@ OUTSIDE_ROOTS_DETAIL = (
     f"{ROOTS_ENV}."
 )
 
+#: The stat errnos that mean "this path is not there", answered 404 inside a root:
+#: missing, a component that is not a directory, and a symlink loop. Everything
+#: else an ``os.stat`` can raise (``ENAMETOOLONG`` on an over-long component,
+#: ``EACCES`` on a directory the daemon may not traverse) is the uniform 403: the
+#: caller learns nothing about the disk, and no such path can be a clean answer.
+_MISSING_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
 
 class StaticPathDenied(Exception):
     """A path the static routes will not serve; ``status`` is the HTTP code."""
@@ -228,6 +248,23 @@ def _contains(root: Path, home: Path) -> bool:
     return False
 
 
+def _same_directory(left: Path, right: Path) -> bool:
+    """Whether two paths are the same directory: by identity, falling back to the name.
+
+    ``samefile`` is the identity test the rest of this module uses
+    (:func:`_contains`) -- a string comparison is not the same question: macOS
+    ``resolve()`` canonicalises neither case nor the ``/System/Volumes/Data``
+    firmlink, so ``/Users/me``, ``/users/me`` and
+    ``/System/Volumes/Data/Users/me`` are one directory spelled three ways (review
+    R2-1, security S-1). The name fallback keeps a path that does not exist
+    answerable -- a missing entry is nobody's home directory.
+    """
+    try:
+        return left.samefile(right)
+    except OSError:
+        return left == right
+
+
 def root_refusal(real: Path, *, implicit: bool = False) -> str | None:
     """Why ``real`` (an absolute realpath) may not be a served root, else ``None``.
 
@@ -238,22 +275,29 @@ def root_refusal(real: Path, *, implicit: bool = False) -> str | None:
     * A root that CONTAINS ``$HOME`` is refused outright -- ``/``, ``/Users``,
       ``~/..``, and ``/System/Volumes/Data`` on macOS, which is ``/`` by another
       name. Matching on the filesystem root's NAME alone missed all but one.
+    * ``$HOME`` ITSELF is decided by identity, not by the spelling (review R2-1,
+      security S-1): ``/users/me`` and ``/System/Volumes/Data/Users/me`` are the
+      same directory as ``$HOME`` and compare unequal to it, so a live-session
+      record whose cwd was written that way used to pass this predicate -- as
+      neither equal to nor an ancestor of ``home`` -- and serve ``~/Pictures``.
     * ``implicit=True`` is the stricter rule for a root nobody typed (a live
-      session's cwd): it must not EQUAL ``$HOME`` either. Sessions started in
+      session's cwd): it must not BE ``$HOME`` either. Sessions started in
       ``~`` are the normal case, and honouring them would serve ``~/Pictures``,
       ``~/Downloads`` and ``~/Desktop``. Serving ``~`` is the operator's explicit
-      opt-in through ``static.roots``.
+      opt-in through ``static.roots``, whatever spelling they typed it in.
     """
     if real == Path(real.anchor):
         return "the filesystem root cannot be a served root"
     home = _home()
-    if home is None or not _contains(real, home):
+    if home is None:
         return None
-    if real != home:
-        return f"{real} contains your home directory, so it would serve nearly everything"
-    if implicit:
-        return "your home directory is only served when configured explicitly"
-    return None
+    if _same_directory(real, home):
+        if implicit:
+            return "your home directory is only served when configured explicitly"
+        return None
+    if not _contains(real, home):
+        return None
+    return f"{real} contains your home directory, so it would serve nearly everything"
 
 
 def _realpath(value: str | os.PathLike[str], *, implicit: bool = False) -> Path | None:
@@ -414,11 +458,21 @@ def resolve_servable(raw: str, roots: ServedRoots) -> Path:
     if any(part.startswith(".") for part in real.relative_to(root).parts):
         raise StaticPathDenied(403, "Hidden paths may not be served.")
 
-    if not real.exists():
-        raise StaticPathDenied(404, f"File not found: {raw}")
+    # ONE ``os.stat``, not ``exists()``/``is_file()``: those SWALLOW some OS
+    # errors and re-raise others, and which ones changed between Python 3.12 and
+    # 3.14 (``ENAMETOOLONG`` is ignored from 3.13 on only). Uncaught, a refusal
+    # here escaped as the handler's generic 500 -- the one answer inside a root
+    # that was not a clean 4xx and so a signal in its own right (security S-4).
+    # Classifying the errno answers the same way on every interpreter.
+    try:
+        info = os.stat(real)
+    except OSError as exc:
+        if exc.errno in _MISSING_ERRNOS:
+            raise StaticPathDenied(404, f"File not found: {raw}") from None
+        raise StaticPathDenied(403, OUTSIDE_ROOTS_DETAIL) from None
     # ``real`` is already the resolved target, so this refuses a directory and
     # any FIFO, socket or device node (which would hang a read).
-    if not real.is_file():
+    if not stat.S_ISREG(info.st_mode):
         raise StaticPathDenied(400, f"Not a file: {raw}")
     if not os.access(real, os.R_OK):
         raise StaticPathDenied(403, f"File not accessible: {raw}")
@@ -463,6 +517,11 @@ def host_is_acceptable(host_header: str | None, bound_host: str | None) -> bool:
     * the host the daemon was told to bind, when that is a specific name (an
       operator who bound ``--host mac.lan`` and reaches it as such).
 
+    Refused before any of that is even parsed: a ``Host`` carrying userinfo
+    (``localhost:80@attacker.test``, ``[::1]@attacker.test``) or present but empty
+    (security S-3). Neither is an authority a browser can send, and the split on
+    ``:`` would otherwise read the attacker's name out of such a value.
+
     No header at all is accepted: rebinding always carries a name. A WILDCARD bind
     (``--host 0.0.0.0``) turns the check off, because the daemon is then meant to
     be reached under names this process cannot list; that is an explicit operator
@@ -471,9 +530,12 @@ def host_is_acceptable(host_header: str | None, bound_host: str | None) -> bool:
     """
     if bound_host is not None and bound_host.strip().lower() in _WILDCARD_BINDS:
         return True
-    if not host_header:
+    if host_header is None:
         return True
-    name = _host_name(host_header)
+    authority = host_header.strip()
+    if not authority or "@" in authority:
+        return False
+    name = _host_name(authority)
     try:
         ipaddress.ip_address(name)
         return True

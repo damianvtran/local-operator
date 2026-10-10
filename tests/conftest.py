@@ -57,6 +57,12 @@ _AMBIENT_VARS = (
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
+    # The static-route root allowlist (``server/utils/static_roots.ROOTS_ENV``),
+    # a directory list that WIDENS what the server will serve. An inherited value
+    # would make every server test's root set depend on the developer's shell --
+    # and on an operator's machine it names real directories, so a test could be
+    # made to serve files out of one.
+    "LOCAL_OPERATOR_STATIC_ROOTS",
     # The unbounded-search guard's escape hatch (``tools/search_guard.ALLOW_ENV``).
     # An inherited value would waive the refusal every cell in
     # ``test_bash_search_interception.py`` asserts — the same ESCAPE-HATCH class
