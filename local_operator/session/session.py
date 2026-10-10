@@ -127,6 +127,7 @@ from local_operator.harness.render import (
     _is_todo_reminder,
 )
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
     is_inherit_tier_sentinel,
@@ -284,6 +285,16 @@ from local_operator.session.transcript import (
 )
 from local_operator.session.usage_seed import seed_reported_usage
 from local_operator.stt import AudioPath
+from local_operator.supplements.trigger import (
+    TRIGGER_INJECTED,
+    TRIGGER_TYPED,
+    TURN_TEXT_BUDGET,
+    USER_TEXT_MAX_CHARS,
+    RunProvenance,
+    TurnItem,
+    items_text_size,
+    snapshot_messages,
+)
 from local_operator.tools.builtin import (
     open_todos,
     restore_todos,
@@ -2714,6 +2725,13 @@ class Session:
         #: the naming owners; a captured answer would pin a seam hosts and tests
         #: swap after construction.
         title_fit_check: TitleFitCheck | None = None,
+        #: Turn supplements' view of the SAME shared ``ClassificationService`` the two
+        #: callables above ride: a per-call resolver returning the service (or ``None``
+        #: when the layer is off). A resolver and not the object because the seam is an
+        #: injectable attribute on the factory's hooks, swapped by tests after construction
+        #: and rebuilt when the layer is toggled. ``None`` (a session built without one)
+        #: means the decision has no vendor and the files half degrades to its heuristic.
+        supplement_seam: Callable[[], Any] | None = None,
         # Called each turn with the session's live ``model_label`` so the env
         # block names the running model; accepts it positionally (``...``) and
         # may return sync or async. A provider that ignores the argument is
@@ -2838,6 +2856,36 @@ class Session:
         #: consumed exactly once by ``_finalize_attention_notify``.
         self._run_triggers: set[str] = set()
         self._run_notify_requested: bool = False
+        #: TURN SUPPLEMENTS' provenance (docs/design/turn-supplements.md §2.1/§2.2). The
+        #: trigger set above is insufficient for "a person asked": goal-loop continuations
+        #: and spooled owner chrome call ``prompt(harness_injected=True)`` and classify as
+        #: "user" there. ``_run_typed_user`` is True once a typed (non-injected) user row
+        #: joined the run; ``_run_last_trigger`` is the class of the LAST non-internal
+        #: input (``supplements.trigger.TRIGGER_TYPED``, ``"injected"`` or a wake/monitor
+        #: custom type) so a courtesy wake folded in AFTER the user's message makes the run
+        #: ineligible. Reset at the pipeline head beside ``_run_triggers``, written by
+        #: ``_note_run_input``, frozen onto ``_last_run_provenance`` by ``_emit``.
+        self._run_typed_user: bool = False
+        self._run_last_trigger: str | None = None
+        self._run_user_text: str = ""
+        #: The LOGICAL turn's messages across EVERY loop run of the pipeline (first run plus
+        #: each ``_drain_continuation`` run), snapshotted as they end. The held end is
+        #: replaced per run, so the emitted end alone would carry only the LAST run's
+        #: messages and a turn that compacted and auto-continued would lose its
+        #: pre-compaction file writes (memo round-1 R2). Reset at the pipeline head and
+        #: NEVER in ``_flush_held_end`` -- that method clears ``_logical_generation``
+        #: BEFORE the ``_emit`` that freezes this record, and mirroring that neighbouring
+        #: clear would freeze an empty accumulator (memo round-2 R2-5).
+        self._turn_items: list[TurnItem] = []
+        self._turn_text_budget: int = TURN_TEXT_BUDGET
+        self._last_run_provenance: RunProvenance | None = None
+        #: Bumped in the pipeline ``finally`` AFTER ``on_turn_settled``; the supplement job
+        #: waits for it to pass the mark frozen on its provenance, so the answer, the
+        #: attention marker and the banner always precede any supplement work. A counter
+        #: and not a bare Event because a next turn that cleared the event first must not
+        #: strand a waiter that was woken late.
+        self._turns_settled: int = 0
+        self._turn_settled_event = asyncio.Event()
         #: §14.3's wake-id record, beside the trigger record and consumed the
         #: same way: EVERY ``details["wake_id"]`` (and every id a resume
         #: catch-up folds, from ``details["wake_ids"]``) seen in this run's
@@ -3967,6 +4015,9 @@ class Session:
         #: cascade hedges rather than asking. See
         #: ``tests/unit/session/test_viewer_protocol.py``'s owner-only probe set.
         self.title_fit_check = title_fit_check
+        #: Read by ``ServingSessionHandle`` (the supplement runner's seam). Public like
+        #: ``title_fit_check`` because the runtime handle holds the session, not the hooks.
+        self.supplement_seam = supplement_seam
         #: Whether this session is AIDA's (``local_operator.aida``), resolved
         #: once per open by :meth:`_aida_is_hers` — one stat of
         #: ``<config>/aida/state.json`` on every session that is not hers, and
@@ -11836,6 +11887,7 @@ class Session:
         custom_type = getattr(message, "custom_type", None)
         if custom_type in (WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE):
             self._run_triggers.add(str(custom_type))
+            self._run_last_trigger = str(custom_type)
             details = getattr(message, "details", None)
             if isinstance(details, Mapping):
                 if details.get("notify"):
@@ -11863,6 +11915,15 @@ class Session:
             self._run_triggers.add("internal")
         else:
             self._run_triggers.add("user")
+            # Turn supplements (§2.2 rules 1-2): a user-role row is "typed" only if the
+            # harness did not mint it. ``is_harness_injection`` reads the stamp every
+            # injection site writes (goal/judge continuations, spooled owner chrome).
+            if is_harness_injection(message):
+                self._run_last_trigger = TRIGGER_INJECTED
+            else:
+                self._run_typed_user = True
+                self._run_last_trigger = TRIGGER_TYPED
+                self._run_user_text = str(getattr(message, "text", "") or "")[:USER_TEXT_MAX_CHARS]
 
     def _has_awaiting_user(self) -> bool:
         """§14.2's ``awaiting_user``: a plain user message queued, unconsumed.
@@ -12949,6 +13010,20 @@ class Session:
             # re-deriving it. One value, four readers, decided by nobody else.
             event = event.model_copy(update={"notify": self._finalize_attention_notify(event)})
             self._attention_outcome = event
+            # Turn supplements (§2.1): freeze the facts the runtime subscriber needs, while
+            # they still exist -- ``_run_triggers`` and the accumulator are reset at the
+            # NEXT pipeline head. Beside ``_attention_outcome`` on purpose; the subscriber
+            # reads this through ``last_run_provenance`` after the end event is delivered.
+            self._last_run_provenance = RunProvenance(
+                typed_user=self._run_typed_user,
+                last_trigger=self._run_last_trigger,
+                user_text=self._run_user_text,
+                items=tuple(self._turn_items),
+                job_id=self._job_id,
+                one_shot=self._one_shot_exit,
+                settled_mark=self._turns_settled,
+                triggers=frozenset(self._run_triggers),
+            )
             # The emitted end is the logical turn's outcome (held ends flush
             # here from the pipeline finally; abort/error skip the hold and
             # emit immediately). The canonical snapshot copies this field so a
@@ -13392,6 +13467,11 @@ class Session:
         self._run_wake_ids = set()
         self._run_catchup_unidentified = False
         self._run_aida_checkin = False
+        self._run_typed_user = False
+        self._run_last_trigger = None
+        self._run_user_text = ""
+        self._turn_items = []
+        self._turn_text_budget = TURN_TEXT_BUDGET
         for message in initial:
             self._note_run_input(message)
         # Cleared at the head of EVERY turn, alongside the outcome, so a cause
@@ -13475,6 +13555,33 @@ class Session:
                     settled()
                 except Exception:  # noqa: BLE001 — a publish failure is not a turn failure
                     logger.debug("on_turn_settled hook failed", exc_info=True)
+            # AFTER the hook, the last statement of the pipeline: turn supplements' "settled"
+            # signal (memo §2.1). Nothing the user sees about this turn follows it.
+            self._turns_settled += 1
+            self._turn_settled_event.set()
+
+    @property
+    def turns_settled(self) -> int:
+        """How many turn pipelines have fully finished (see ``_turns_settled``)."""
+        return self._turns_settled
+
+    @property
+    def last_run_provenance(self) -> RunProvenance | None:
+        """The facts of the run whose end event was emitted last (turn supplements)."""
+        return self._last_run_provenance
+
+    async def wait_turn_settled(self, mark: int) -> None:
+        """Return once more than ``mark`` turn pipelines have finished.
+
+        The loop re-checks the counter after every wake, so a settle that already happened
+        returns at once and a wake that raced the next turn's clear still terminates.
+        """
+        while self._turns_settled <= mark:
+            # Clear-then-wait with no await between the check and the clear (one thread), so
+            # a stale "set" from an earlier turn cannot make this spin and a settle that
+            # lands after the clear still wakes it.
+            self._turn_settled_event.clear()
+            await self._turn_settled_event.wait()
 
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
@@ -13848,6 +13955,17 @@ class Session:
                     continue
                 if isinstance(event, AgentEndEvent):
                     new_messages = list(event.messages)
+                    # Turn supplements: accumulate EVERY run's messages (see
+                    # ``_turn_items``). Snapshotted now because compaction prunes tool
+                    # results in place.
+                    try:
+                        snapped = snapshot_messages(
+                            new_messages, text_budget=self._turn_text_budget
+                        )
+                        self._turn_text_budget -= items_text_size(snapped)
+                        self._turn_items.extend(snapped)
+                    except Exception:  # noqa: BLE001 — an instrument never fails a turn
+                        logger.debug("supplement snapshot failed", exc_info=True)
                     if event.aborted or event.error:
                         # A failed or interrupted run is a real boundary: never
                         # hold it behind a compaction that may not happen. The

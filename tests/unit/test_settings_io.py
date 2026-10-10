@@ -345,6 +345,7 @@ def _consumer_defaults() -> dict[str, object]:
         consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
     consumers.update(_classification_consumer_defaults())
     consumers.update(_monitor_consumer_defaults())
+    consumers.update(_supplements_consumer_defaults())
     # The Aida keys, asked of the package that reads them. The registry rows
     # above carry literals on purpose (``settings_io`` must stay off the aida
     # package's import path — it is loaded on every CLI start), and this block
@@ -459,6 +460,25 @@ def _classification_consumer_defaults() -> dict[str, object]:
         "classification.maxStateChars": DEFAULT_MAX_STATE_CHARS,
         "classification.maxCandidates": DEFAULT_MAX_CANDIDATES,
         "classification.maxRecommendations": DEFAULT_MAX_RECOMMENDATIONS,
+    }
+
+
+def _supplements_consumer_defaults() -> dict[str, object]:
+    """``values.supplements.*`` defaults, asked of the module that reads them
+    (``local_operator.supplements.policy``), not restated beside the registry rows."""
+    from local_operator.supplements import policy
+
+    return {
+        "supplements.enabled": policy.DEFAULT_ENABLED,
+        "supplements.files": policy.DEFAULT_FILES,
+        "supplements.graphics": policy.DEFAULT_GRAPHICS,
+        "supplements.model": policy.DEFAULT_MODEL,
+        "supplements.maxTurns": policy.DEFAULT_MAX_TURNS,
+        "supplements.maxOutputTokens": policy.DEFAULT_MAX_OUTPUT_TOKENS,
+        "supplements.timeoutS": policy.DEFAULT_TIMEOUT_S,
+        "supplements.maxCostUsd": policy.DEFAULT_MAX_COST_USD,
+        "supplements.maxFeatured": policy.DEFAULT_MAX_FEATURED,
+        "supplements.denyPrefixes": list(policy.DEFAULT_DENY_PREFIXES),
     }
 
 

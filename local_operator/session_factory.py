@@ -4693,6 +4693,9 @@ async def _prepare(
         # one. ``hooks.classifier`` is ``None`` whenever the layer is off, which
         # the adapter reports as "no classifier" rather than raising.
         title_fit_check=title_fit_check(lambda: hooks.classifier),
+        # Turn supplements decide on the SAME service (one cascade, one breaker, one
+        # credential memo), resolved per call for the reason the lines above give.
+        supplement_seam=lambda: hooks.classifier,
         # Provenance distinguishes deliberate resume flags from persisted
         # identity; no provenance subscribes a session to mutable defaults.
         model_source=model_source,
