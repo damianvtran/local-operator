@@ -276,7 +276,7 @@ class SupplementBlock(TranscriptBlock):
                 self._painted_links[uri] = raw_path
             if path and path != text:
                 row.append("  ")
-                row.append(path, style=link_style or self._dim_style())
+                row.append(path, style=self._path_style(link_style))
             if size:
                 row.append(f"  {size}", style=self._dim_style())
             rows.append(self._fit(row, body))
@@ -309,7 +309,7 @@ class SupplementBlock(TranscriptBlock):
                 self._painted_links[uri] = raw
             if shown and shown != label:
                 row.append("  ")
-                row.append(shown, style=link_style or self._dim_style())
+                row.append(shown, style=self._path_style(link_style))
             rows.append(self._fit(row, body))
         return rows
 
@@ -323,6 +323,15 @@ class SupplementBlock(TranscriptBlock):
     def _fit(self, row: Text, body: int) -> Text:
         """Truncate a row to the block's lane (indent included), styles aligned.
 
+        Walks ``row.plain`` from character 0 with a span→style lookup rather
+        than iterating ``row.spans``: an unstyled head (the indent, and the
+        file NAME whenever the row carries no link) has no span at all, so a
+        spans-only walk emitted just the styled tail — an overflowing row
+        lost exactly the characters that identify the file (design round 1,
+        D1). Spans supply style, never content: every character of ``plain``
+        is emitted in order, unstyled gaps as base-styled pieces, and the
+        truncation eats the row's tail.
+
         Row-by-row truncation rather than wrapping is deliberate: the click hit
         test maps widget ``y`` to an authored line, and one authored line must
         stay one terminal row for that mapping to hold.
@@ -334,15 +343,32 @@ class SupplementBlock(TranscriptBlock):
         if cell_len(plain) <= width:
             return row
         out = Text(no_wrap=True, overflow="ellipsis")
+        length = len(plain)
+        spans = row.spans
         used = 0
-        for span in row.spans:
-            if used >= width:
-                break
-            chunk = plain[span.start : span.end]
+        cursor = 0
+        span_index = 0
+        while cursor < length and used < width:
+            span = spans[span_index] if span_index < len(spans) else None
+            if span is not None and span.end <= cursor:
+                # Unreachable for rows built by ordered appends; the guard
+                # keeps a malformed span list from rewinding the cursor.
+                span_index += 1
+                continue
+            if span is not None and span.start <= cursor:
+                end, style = min(span.end, length), span.style
+                span_index += 1
+            elif span is not None:
+                end, style = min(span.start, length), None
+            else:
+                end, style = length, None
+            chunk = plain[cursor:end]
             room = width - used
-            piece = truncate_cells(chunk, room) if cell_len(chunk) > room else chunk
-            out.append(piece, style=span.style)
-            used += cell_len(piece)
+            if cell_len(chunk) > room:
+                chunk = truncate_cells(chunk, room)
+            out.append(chunk, style=style)
+            used += cell_len(chunk)
+            cursor = end
         return out
 
     # -- styles (tokens only, never a hex: the design-qa gate's token rule) --
@@ -356,8 +382,29 @@ class SupplementBlock(TranscriptBlock):
         return Style(color=theme_mod.semantic_color("muted"))
 
     @staticmethod
+    def _path_style(link: Style | None) -> Style:
+        """The session-relative path's ink: the link's own, else ``muted``.
+
+        ``muted`` rather than ``dim``: the path is read, not scanned, and the
+        light ramp's ``dim`` path ink measured 3.77:1 — below the 4.5 AA floor
+        (design round 1, D2). ``muted`` reads 7.18:1 light / 8.62:1 dark; the
+        size column keeps ``dim``, inside that token's 3.4 floor for
+        micro-labels.
+        """
+        if link is not None:
+            return link
+        return Style(color=theme_mod.semantic_color("muted"))
+
+    @staticmethod
     def _link_style(uri: str) -> Style:
-        return Style(color=theme_mod.semantic_color("accent"), underline=True, link=uri)
+        """The link ink: ``signal``, the ramp's link/file-path token.
+
+        ``accent`` is the ramp's one green, reserved for the live indicator
+        and focus; every other transcript link paints ``signal`` + underline
+        (design round 1, D3). Both ramps clear AA — signal 7.40:1 dark /
+        4.91:1 light; accent was 8.73 / 4.84 — so the token rule decides.
+        """
+        return Style(color=theme_mod.semantic_color("signal"), underline=True, link=uri)
 
     @staticmethod
     def _more_style() -> Style:

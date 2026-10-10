@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
@@ -147,6 +148,30 @@ def test_block_more_row_expands_in_place() -> None:
     narrow._expanded = True
     narrow._rebuild(width=40)
     assert all(len(line) <= 40 for line in _painted(narrow).plain.splitlines())
+
+
+def test_an_overflowing_row_keeps_its_unstyled_head() -> None:
+    """Design round 1, D1: an overflow must eat the tail, never the name.
+
+    With no OSC 8 link the indent and the file NAME are unstyled — they carry
+    no span — and the spans-only fit emitted just the styled path/size, so an
+    overflowing row lost exactly the characters that identify the file and
+    started flush at the block's left edge. The fit now walks ``row.plain``
+    from char 0: the head survives whole and the path is what ellipsizes.
+    """
+    block = _block(
+        _rows(
+            [_file("reports/experiments/2026-10-09/summary-of-results.md")],
+            more=["reports/q3.md"],
+            files_more=1,
+            components=[{"attachment": "d" * 32, "mime": "text/html"}],
+        )
+    )
+    block._rebuild(width=40)
+    first, second = _painted(block).plain.splitlines()
+    assert first == "  summary-of-results.md  reports/experi…"
+    assert cell_len(first) == 40
+    assert second == "  1 more file"
 
 
 def test_block_skips_html_components_with_no_placeholder() -> None:
