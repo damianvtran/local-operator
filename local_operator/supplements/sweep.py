@@ -40,9 +40,9 @@ BOUNDED, IN THREE LAYERS.
   most :data:`MAX_DELETES` deletions, at most :data:`MAX_DELETE_BYTES` bytes
   freed, and a reference-scan budget of :data:`MAX_SCAN_BYTES` transcript bytes
   -- exceeding the budget SKIPS the deletion phase rather than guessing.
-- Fail-closed: any transcript that exists but cannot be read aborts the
-  deletion phase for that pass (a reference we cannot see is a reference we
-  must assume).
+- Fail-closed: any session entry that cannot be listed or stat'ed, and any
+  transcript that exists but cannot be read, aborts the deletion phase for
+  that pass (a reference we cannot see is a reference we must assume).
 - Interval: the runner gates passes with a stamp file (``SWEEP_INTERVAL_S``),
   so a machine runs at most one pass per interval no matter how many sessions
   start.
@@ -202,22 +202,49 @@ def blob_candidates(
     return candidates[:limit]
 
 
-def _session_transcripts(sessions_dir: Path) -> Iterable[Path]:
+def _session_transcripts(sessions_dir: Path) -> tuple[list[Path], list[str]]:
+    """Every session transcript under ``sessions_dir``, plus discovery problems.
+
+    Discovery is the first half of the fail-closed contract -- an entry this
+    scan cannot enumerate or stat may hold a transcript that references a
+    candidate -- so "cannot look" must reach the caller as loudly as "cannot
+    read": both land in the ``problems`` channel ``referenced_digests`` folds
+    into the ``problem`` its callers gate on. Round-2 review R2-1: an
+    unlistable ``sessions/`` returned ``[]`` and a stat failure on an entry was
+    skipped, both with no problem recorded, so ``store_sweep``'s gate never
+    fired and a session dir without ``+x`` (transcript intact and referencing)
+    let the pass delete the blob its transcript still named.
+
+    The one absence that is NOT a problem: ``sessions_dir`` itself missing --
+    there is no sessions dir, so there is no transcript and no reference to
+    miss, the same rule ``referenced_digests`` applies to a transcript deleted
+    mid-scan. Returns ``(transcripts, problems)``.
+    """
     try:
         children = list(sessions_dir.iterdir())
+    except FileNotFoundError:
+        return [], []
     except OSError:
-        return []
-    found = []
+        return [], [f"list:{sessions_dir}"]
+    found: list[Path] = []
+    problems: list[str] = []
     for child in children:
-        if not child.is_dir():
+        try:
+            child_is_dir = child.is_dir()
+        except OSError:
+            problems.append(f"stat:{child}")
+            continue
+        if not child_is_dir:
             continue
         transcript = child / _TRANSCRIPT_NAME
         try:
-            if transcript.is_file():
-                found.append(transcript)
+            transcript_is_file = transcript.is_file()
         except OSError:
+            problems.append(f"stat:{transcript}")
             continue
-    return found
+        if transcript_is_file:
+            found.append(transcript)
+    return found, problems
 
 
 def referenced_digests(
@@ -240,8 +267,9 @@ def referenced_digests(
     write-safety contract; the pass stays bounded by the scan budget below, which
     fails closed.
 
-    ``problem`` is non-empty when the scan could NOT be trusted: a transcript
-    that is not readable, or a budget overrun. Callers must treat a non-empty
+    ``problem`` is non-empty when the scan could NOT be trusted: a session
+    entry that could not be listed or stat'ed, a transcript that is not
+    readable, or a budget overrun. Callers must treat a non-empty
     ``problem`` as "assume the missing references exist" and delete nothing --
     fail-closed, because an unread reference is exactly the case that must not
     become a deletion. ``FileNotFoundError`` (a session dir deleted mid-scan)
@@ -251,8 +279,8 @@ def referenced_digests(
     digests: set[str] = set()
     sessions = 0
     scanned_bytes = 0
-    problems: list[str] = []
-    for transcript in _session_transcripts(sessions_dir):
+    transcripts, problems = _session_transcripts(sessions_dir)
+    for transcript in transcripts:
         try:
             stat = transcript.stat()
         except FileNotFoundError:
@@ -312,7 +340,8 @@ def store_sweep(
         # delete. The scan is deliberately NOT narrowed by transcript mtime --
         # ``referenced_digests``' docstring records why that ordering cannot be
         # relied on (preserve_mtime appends; round-1 review R1). The scan budget
-        # is what bounds the pass instead, and it fails closed.
+        # bounds the pass instead and fails closed -- as does a discovery
+        # failure, which reaches this same ``problem`` gate (round-2 review R2-1).
         referenced, sessions, scanned, problem = referenced_digests(
             root / _SESSIONS_DIRNAME, budget_bytes=max_scan_bytes
         )
