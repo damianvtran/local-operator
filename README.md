@@ -1482,16 +1482,52 @@ their authors and contributors for building in the open.
   width-constrained conversation whose resize handles reveal themselves on
   hover. We studied the design and built our own implementation; DeepSeek AI has
   not reviewed, endorsed, or contributed to this project.
+- **[pstack](https://github.com/cursor/plugins/tree/main/pstack)** (in
+  [Cursor's plugins repository](https://github.com/cursor/plugins)): created by
+  [Lauren Tan (`poteto`)](https://github.com/poteto). Its rigorous-engineering
+  playbooks (verification, test-first development, smallest-change principles)
+  informed several of our builtin skills.
+- **[superpowers](https://github.com/obra/superpowers)**: created by
+  [Jesse Vincent (`obra`)](https://github.com/obra). Its verification,
+  test-driven development, systematic debugging and code-review skills informed
+  our corresponding builtins.
+- **[anthropics/skills](https://github.com/anthropics/skills)**: created by
+  [Anthropic](https://github.com/anthropics). Its `frontend-design` and
+  `webapp-testing` skills (Apache-2.0) informed our frontend-design and
+  browser-qa builtins.
+- **[ux-ui-agent-skills](https://github.com/plugin87/ux-ui-agent-skills)**:
+  created by [plugin87](https://github.com/plugin87). Its design-review skills
+  and objective quality gates informed our design-qa builtin.
+- **[claude-skills](https://github.com/jezweb/claude-skills)**: created by
+  [Jeremy Dawes (`jezweb`)](https://github.com/jezweb). Its design-review skill
+  informed our design-qa builtin.
+- **[agent-config](https://github.com/event4u-app/agent-config)**: created by
+  the [event4u-app](https://github.com/event4u-app) team. Its governed-skill and
+  design-review material informed our design-qa builtin.
+- **[ehmo/platform-design-skills](https://github.com/ehmo/platform-design-skills)**:
+  created by [ehmo](https://github.com/ehmo). Its condensed Apple HIG, Material 3
+  and WCAG 2.2 rule sets informed our design-qa checks.
+- **[microsoft/skills](https://github.com/microsoft/skills)**: created by
+  [Microsoft](https://github.com/microsoft). Its frontend-design-review skill
+  informed our frontend-design and design-qa builtins.
+- **[mattpocock/skills](https://github.com/mattpocock/skills)**: created by
+  [Matt Pocock](https://github.com/mattpocock). Its small, composable
+  engineering skills (TDD, code review, debugging, writing for agents) informed
+  the scope and tone of our catalog.
+- **[awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)**:
+  a community index maintained by [VoltAgent](https://github.com/VoltAgent). Its
+  skill-quality standards informed our skill-authoring builtin.
 
 Inspiration drawn from these projects informed our own independent
 implementation; any mistakes here are our own.
 
 ### A note on reuse and credit
 
-All of the projects above are MIT licensed, as is Local Operator itself. Under
-the MIT license you are free to draw inspiration from or reuse code from Local
-Operator in your own work. Verbatim reuse of the code requires retaining the
-copyright notice and license text, as the license states. Beyond that legal
+All of the projects above are open source under permissive licenses (MIT; the
+Anthropic skills cited above are Apache-2.0), and Local Operator itself is
+MIT. Under that license, you are free to draw inspiration from or reuse code
+from Local Operator in your own work. Verbatim reuse of the code requires
+retaining the copyright notice and license text, as the license states. Beyond that legal
 minimum, we appreciate credit where credit is due: an acknowledgement
 of the projects and people whose work you build on, in the same spirit as the
 credits above. It costs little and it keeps open source healthy.

@@ -5,17 +5,23 @@ session relies on (a missing/broken skills module must degrade to
 no-skills, not crash startup). Re-exports the discovery model, the semantic
 index, the embedding backends, the ``skill://`` resolver, the
 ``SkillResolver`` adapter factory, and the default root computation.
-Root precedence: project-local beats global, native beats ecosystem.
+Root precedence: project-local beats global, native beats ecosystem, and the
+packaged builtin catalog is weakest of all.
 ``default_skill_roots`` walks up from cwd to the filesystem root collecting
 ``.local-operator/skills`` directories (regardless of ``$HOME``), appends
 ``~/.local-operator/skills``, then the wider ecosystem roots
 (``~/.omp/agent/skills``, ``~/.claude/skills``, ``~/.codex/skills``,
-``~/.agents/skills``) last — only the ones that exist, so a clean machine
-scans nothing extra. Each root is scanned to a bounded depth
-(``LOCAL_OPERATOR_SKILL_MAX_DEPTH``, default 3) so grouped skill libraries
-are found; a directory holding a ``SKILL.md`` is never descended into.
+``~/.agents/skills``) — only the ones that exist, so a clean machine scans
+nothing extra — and finally the packaged builtin catalog
+(:data:`PACKAGED_SKILL_ROOT`) as the LAST root: it is the only root nobody
+authored locally, so a same-named copy in any earlier root shadows it.
+Each root is scanned to a bounded depth (``LOCAL_OPERATOR_SKILL_MAX_DEPTH``,
+default 3) so grouped skill libraries are found; a directory holding a
+``SKILL.md`` is never descended into. The builtin catalog stays flat, so it
+is discovered under every legal value of that cap.
 ``LOCAL_OPERATOR_SKILL_EXTRA_ROOTS`` replaces that ecosystem set
-(colon-separated absolute paths; an empty value disables it).
+(colon-separated absolute paths; an empty value disables it); it does NOT
+affect the packaged root, which is not part of the set it replaces.
 Earlier roots win name collisions in :func:`discover_skills`, which is what
 makes native roots authoritative over imported ones.
 """
@@ -50,6 +56,7 @@ __all__ = [
     "EmbeddingBackend",
     "EmbeddingError",
     "LocalEmbedder",
+    "PACKAGED_SKILL_ROOT",
     "Skill",
     "SkillIndex",
     "default_backend_from_env",
@@ -86,6 +93,17 @@ _EXTRA_ROOTS_ENV = "LOCAL_OPERATOR_SKILL_EXTRA_ROOTS"
 # are discovered. ``1`` restores the flat one-level layout. It is an env var
 # rather than a /settings key for the same reason as the roots override above.
 
+#: The packaged builtin skill catalog (``skills/builtin/`` beside this module):
+#: release content, refreshed by every install, discovered LAST so it is the
+#: weakest root in :func:`default_skill_roots`. The flat ``<name>/SKILL.md``
+#: layout means every legal ``LOCAL_OPERATOR_SKILL_MAX_DEPTH`` value discovers
+#: it. A user overrides (or silences) one by copying it into any earlier root:
+#: the same name there wins, and :func:`discover_skills` warns once about the
+#: shadowed builtin. Not affected by ``LOCAL_OPERATOR_SKILL_EXTRA_ROOTS``,
+#: which replaces only the ecosystem set. Shipped in the wheel via the
+#: ``skills/builtin`` package-data lines in pyproject.toml.
+PACKAGED_SKILL_ROOT: Path = Path(__file__).resolve().parent / "builtin"
+
 
 def _ecosystem_roots(home: Path) -> list[Path]:
     """Existing ecosystem roots, or the env override, native-root-free.
@@ -110,7 +128,10 @@ def default_skill_roots(cwd: Path | None = None) -> list[Path]:
     ``<dir>/.local-operator/skills`` — regardless of ``$HOME``, so a repo at
     ``/opt``, ``/srv`` or ``/Volumes`` still picks up its project-local
     roots — then appends ``~/.local-operator/skills``, then the ecosystem
-    roots (see :data:`_ECOSYSTEM_SKILL_SUBDIRS` / :data:`_EXTRA_ROOTS_ENV`).
+    roots (see :data:`_ECOSYSTEM_SKILL_SUBDIRS` / :data:`_EXTRA_ROOTS_ENV`),
+    then the packaged builtin catalog (:data:`PACKAGED_SKILL_ROOT`) LAST:
+    weakest, because it is release content rather than user content, so a
+    same-named copy in any earlier root shadows it.
     Roots are deduped by realpath, first occurrence wins — the walk-up order
     gives project-local roots priority over global ones, and native roots
     priority over ecosystem ones, matching the collision rule in
@@ -132,6 +153,9 @@ def default_skill_roots(cwd: Path | None = None) -> list[Path]:
     # wins collisions, and native beats imported.
     candidates.append(home / _SKILLS_SUBDIR)
     candidates.extend(_ecosystem_roots(home))
+    # Appended LAST = weakest: it is the only root the user did not author,
+    # so a same-named copy in any earlier root wins (and is warned about).
+    candidates.append(PACKAGED_SKILL_ROOT)
 
     seen: set[str] = set()
     roots: list[Path] = []
