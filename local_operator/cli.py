@@ -4646,6 +4646,73 @@ def _print_kept(protected: list[tuple[str, str]]) -> None:
         print(f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept (--json lists every row)")
 
 
+def _content_class_counts(rows: list[Any]) -> dict[str, int]:
+    """Pads per content class, for the summary line and --json.
+
+    A pad counts once per class it contributed (a pad can carry both a merged
+    tree and stale logs); the order is the rows' fixed class order.
+    """
+    counts: dict[str, int] = {}
+    for row in rows:
+        for name in getattr(row, "classes", ()):
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _content_row_text(row: Any, verb: str) -> str:
+    """One content reclaim row: pad, size, classes and their evidence."""
+    title = row.title or "(no title)"
+    if len(title) > 16:
+        title = title[:15] + "…"
+    entries = f"{row.entries} entr{'y' if row.entries == 1 else 'ies'}"
+    tail = f"{row.reason}; {entries}"
+    if row.rescue_bundle:
+        tail += f"; rescue bundle {os.path.basename(row.rescue_bundle)}"
+    elif row.method == "worktree-remove":
+        tail += "; worktree remove"
+    return f"  {verb:<14} {row.session:<12} {title:<16} {_format_bytes(row.bytes):>8} ({tail})"
+
+
+def _print_content(delegated: Any, verb: str) -> None:
+    """The scratchpad-content block under the delegated section.
+
+    The summary names the pads, the bytes and the per-class counts; the rows
+    name each pad's classes and entry count; the ``content kept`` rows carry
+    the reasons the pass DECLINED (unmerged/dirty trees, unreadable subtrees,
+    failed rescue bundles), so the dry run audits both directions. Capped like
+    the other listings; ``--json`` carries every row.
+    """
+    skipped = getattr(delegated, "content_skipped", None)
+    if skipped == "disabled":
+        print(
+            "  scratchpad content: off (session.cleanup.delegated.scratchpad.enabled "
+            "is off; --force runs it once)"
+        )
+        return
+    if skipped == "disabled during the pass":
+        print("  scratchpad content: switch turned off during the pass (batched stop)")
+    rows = list(getattr(delegated, "content", []))
+    kept = list(getattr(delegated, "content_kept", []))
+    classes = _content_class_counts(rows)
+    parts = ", ".join(f"{count} {name}" for name, count in classes.items())
+    low = getattr(delegated, "content_remaining", 0)
+    low_note = f"; {low} pad(s) not reached this pass" if low else ""
+    size = _format_bytes(sum(row.bytes for row in rows))
+    paren = f" ({parts})" if parts else ""
+    print(f"  scratchpad content: {verb} {len(rows)} pad(s), ~{size}{paren}{low_note}")
+    for row in rows[:_CLEANUP_TEXT_ROWS]:
+        print(_content_row_text(row, verb))
+    if len(rows) > _CLEANUP_TEXT_ROWS:
+        print(f"  ... and {len(rows) - _CLEANUP_TEXT_ROWS} more (--json lists every row)")
+    for name, reason in kept[:_CLEANUP_TEXT_ROWS]:
+        print(f"  content kept {name}  ({reason})")
+    if len(kept) > _CLEANUP_TEXT_ROWS:
+        print(
+            f"  ... and {len(kept) - _CLEANUP_TEXT_ROWS} more content keeps "
+            "(--json lists every row)"
+        )
+
+
 def sessions_cleanup_command(args: argparse.Namespace) -> int:
     """``lop sessions cleanup [--dry-run] [--force [--yes]]``.
 
@@ -4660,6 +4727,15 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     the user confirms is exactly what goes: the parent class applies its previewed
     plan, and the delegated class re-runs with ``only=<previewed names>`` at the
     preview's own clock.
+
+    The delegated section also carries the scratchpad-CONTENT block (the
+    carve-out in ``session/delegated_retention.py``): the pads it would reclaim
+    (stale output, build shapes, merged-clean git trees) and the ``content
+    kept`` reasons for what it declines, so the operator can audit both
+    directions. That phase is gated by ``session.cleanup.delegated.scratchpad.
+    enabled`` (default on; ``--force`` runs it once when off), and content
+    reclaims are the only reason a run with no session rows still proceeds to
+    confirmation — with its own confirmation sentence.
 
     A class runs when its switch is on (or ``--force``); the parent class also
     needs a limit. A dry run lists both whatever the switches say and notes it.
@@ -4764,6 +4840,21 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 max_age_hours=getattr(delegated, "hours", policy.delegated_max_age_hours),
                 within_window=getattr(delegated, "within_window", 0),
                 remaining=getattr(delegated, "remaining", 0),
+                scratchpad_enabled=policy.delegated_scratchpad_enabled,
+                scratchpad={
+                    "enabled": policy.delegated_scratchpad_enabled,
+                    "reclaimed": [
+                        dataclasses.asdict(row) for row in getattr(delegated, "content", [])
+                    ],
+                    "kept": [
+                        {"session": name, "reason": reason}
+                        for name, reason in getattr(delegated, "content_kept", [])
+                    ],
+                    "classes": _content_class_counts(getattr(delegated, "content", [])),
+                    "bytes": sum(row.bytes for row in getattr(delegated, "content", [])),
+                    "remaining": getattr(delegated, "content_remaining", 0),
+                    "skipped": getattr(delegated, "content_skipped", None),
+                },
             )
             payload["delegated"] = detail
         print(_json.dumps(payload, indent=2))
@@ -4861,6 +4952,11 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             )
             _print_cleanup_rows(delegated.removed, delegated_verb)
             _print_kept(delegated.protected)
+            if delegated_runs:
+                content_verb = (
+                    "would reclaim" if delegated_verb == "would remove" else "will reclaim"
+                )
+                _print_content(delegated, content_verb)
 
     if args.dry_run:
         if args.json:
@@ -4876,7 +4972,14 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         sections("will remove", parent_preview, delegated_preview, parent_runs, delegated_runs)
     parent_rows = len(parent_preview.removed) if parent_runs else 0
     delegated_rows = len(delegated_preview.removed) if delegated_runs else 0
-    if policy.has_any_limit and not parent_runs and not delegated_rows:
+    # Content reclaims the run would perform: only when the class and the
+    # content switch both run (or --force), mirroring the pass's own gate.
+    content_rows = (
+        len(delegated_preview.content)
+        if delegated_runs and (policy.delegated_scratchpad_enabled or force)
+        else 0
+    )
+    if policy.has_any_limit and not parent_runs and not delegated_rows and not content_rows:
         # The limits are configured but their switch is off, and the other class
         # has nothing to do: that is a REFUSAL, not "nothing to remove" — the
         # reading that made a user who saw "limits set, nothing happens" run
@@ -4887,7 +4990,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             print(f"refusing to remove sessions: {switch_hint}", file=sys.stderr)
             print("preview what the limits would remove with --dry-run", file=sys.stderr)
         return 2
-    if not parent_rows and not delegated_rows:
+    if not parent_rows and not delegated_rows and not content_rows:
         if args.json:
             emit_json(parent_preview, delegated_preview, outcome="nothing-to-do")
         else:
@@ -4896,6 +4999,17 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
 
     confirmed: bool | None = None
     total = parent_rows + delegated_rows
+    if total and content_rows:
+        prompt = (
+            f"remove {total} session(s) and reclaim scratchpad content from "
+            f"{content_rows} session(s)? type 'yes' to confirm: "
+        )
+    elif total:
+        prompt = f"remove {total} session(s)? type 'yes' to confirm: "
+    else:
+        prompt = (
+            f"reclaim scratchpad content from {content_rows} session(s)? " "type 'yes' to confirm: "
+        )
     if not args.yes:
         if not sys.stdin.isatty():
             if args.json:
@@ -4907,7 +5021,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 )
             return 2
         try:
-            answer = input(f"remove {total} session(s)? type 'yes' to confirm: ")
+            answer = input(prompt)
         except (EOFError, KeyboardInterrupt):
             answer = ""
         confirmed = answer.strip().lower() == "yes"
@@ -4942,7 +5056,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 budget_s=UNBOUNDED,
                 only=[c.session for c in delegated_preview.removed],
             )
-            if delegated_rows
+            if delegated_rows or content_rows
             else DelegatedResult()
         )
     errors = parent_result.errors + delegated_result.errors
@@ -4952,6 +5066,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     removed = parent_result.removed + delegated_result.removed
     print(f"removed {len(removed)} session(s)")
     _print_cleanup_rows(removed, "removed")
+    if delegated_result.content:
+        print(f"reclaimed scratchpad content from {len(delegated_result.content)} session(s)")
     if errors:
         print(f"  {errors} error(s); see the log", file=sys.stderr)
     print(f"record: {record_path}")
