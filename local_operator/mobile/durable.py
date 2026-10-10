@@ -590,23 +590,6 @@ _ARCHIVE_READ_LIMIT = 200
 #: performs for an anchored page.
 _ARCHIVE_PAIRING_MARGIN = 64
 
-#: Entries read NEWER than the CALLER'S own window head, on its own read only, to
-#: find the newest compaction whose marker the render dropped (see the splice's
-#: comment in :func:`journal_rows_older_than`). Wider than the pairing margin
-#: because the compaction ENTRY sits INSIDE the client's own window — as far
-#: forward as the render's rows reach — and a page that cannot see the entry can
-#: never serve its marker. Bound by the reader's page ceiling, so this stays one
-#: page-sized read rather than a scan of the file.
-#:
-#: ITS LIMIT, STATED RATHER THAN IMPLIED: this counts ENTRIES while the cap that
-#: dropped the marker counts ROWS, and the two do not run at the same rate — S6
-#: folds ~1.8 entries per painted row (summaries, results and prunes paint
-#: nothing). A session whose window spans more than this many entries between the
-#: cursor and its newest compaction therefore still strands the marker, exactly as
-#: review round 4 found it. Raising the bound buys reach at a linear cost in the
-#: first page; removing the limit needs a cursor-keyed fact rather than a window.
-_ARCHIVE_SEED_MARGIN = 200
-
 
 def _row_group(row_id: str, known: Container[str]) -> str:
     """The message a rendered row belongs to, resolved against the page at hand.
@@ -806,20 +789,6 @@ def _pairing_messages(
     ]
 
 
-def _newest_compaction_marker(newer: Sequence[TranscriptEntry]) -> AgentMessage | None:
-    """The marker of the NEWEST compaction entry in the slice, or ``None``.
-
-    The LAST compaction entry in the slice is the newest one: a journal is
-    append-only, and it is the newest compaction whose marker the fold hoists
-    into its prefix — the row :func:`journal_rows_older_than`'s caller may have
-    lost to the render's cap.
-    """
-    for entry in reversed(list(newer)):
-        if entry.type == ENTRY_COMPACTION:
-            return _compaction_marker(entry)
-    return None
-
-
 def journal_rows_older_than(
     directory: Path,
     prunes: Mapping[str, str],
@@ -827,7 +796,6 @@ def journal_rows_older_than(
     before_id: str,
     limit: int,
     prunes_complete: bool = True,
-    window_head: str | None = None,
 ) -> tuple[list[Any], bool] | None:
     """Phone rows for the journal entries OLDER than ``before_id``.
 
@@ -872,17 +840,6 @@ def journal_rows_older_than(
     ``call_00_x7:06c08d4847`` call id — is located by whichever attempt names a
     real row, and a miss is a miss only once every attempt has failed.
 
-    ``window_head`` IS THE ONE PIECE OF PER-WALK STATE THIS FUNCTION CANNOT
-    DERIVE. A walk is many pages, and this function is entered once per page, so
-    everything it can see per call ("the first read of this call") is true on
-    every page — which is how review round 5 caught the newest compaction's
-    marker being re-served on pages 1-4 of the walk that was supposed to serve it
-    once. The daemon therefore hands down the id the client's OWN seed pages from
-    on its first call (see ``daemon._window_head``): the marker splice fires only
-    for that id, and since pages serve only entries strictly older than their
-    anchor, no page of the walk can carry it. ``None`` — a caller with no seed to
-    speak of — means no splice, which is the safe direction.
-
     Returns ``None`` when ``before_id`` names no journal row — the cursor a
     client holds can outlive the file it came from (a compaction that landed
     mid-scroll, a replaced transcript) — so the caller keeps its own
@@ -904,33 +861,19 @@ def journal_rows_older_than(
     # splice on a multi-read page (every later cursor is a page row, and a page
     # never starts mid-group, so the first splice is the only one it can undo).
     recovered = False
-    # WHICH CALL THIS IS, not which read of it: ``_journal_page`` runs once per
-    # HTTP page, so a fact the reader can only derive per call ("the first read of
-    # this call") is true on EVERY page of a walk — that is round 5's blocker,
-    # where the marker below came back on pages 1-4. ``window_head`` is the id the
-    # client's OWN window pages from on its first call, handed down by the daemon
-    # that holds the render; pages serve only entries strictly older than their
-    # anchor, so no page of the walk can carry it, and the splice happens once.
-    splice_marker = window_head is not None and before_id == window_head
-    # The caller's own call also looks further forward than a page's pairing needs
-    # — see the marker splice below — while every later read is a page row's,
-    # which wants only its answers.
-    after = _ARCHIVE_SEED_MARGIN
-    first_read = True
     while len(rows) < limit:
         try:
             # AN ANCHORED read rather than a plain ``before_id`` one: the page
             # needs the newer rows that answer its newest calls, and the anchor
             # is where both halves meet. ``before`` is the reader's own ceiling
-            # for a page; ``after`` is the pairing margin (one message's fan-out,
-            # so a call and its result are inside it on any real journal), widened
-            # on the caller's own read for the reason the splice below gives.
+            # for a page, ``after`` the pairing margin — one message's fan-out,
+            # so a call and its result are inside it on any real journal.
             page = read_transcript_page(
                 directory,
                 around_id=candidate,
                 before=_ARCHIVE_READ_LIMIT,
-                after=after,
-                limit=_ARCHIVE_READ_LIMIT + after + 1,
+                after=_ARCHIVE_PAIRING_MARGIN,
+                limit=_ARCHIVE_READ_LIMIT + _ARCHIVE_PAIRING_MARGIN + 1,
             )
         except FileNotFoundError:
             return None
@@ -952,40 +895,7 @@ def journal_rows_older_than(
         older = list(page.entries[:anchor])
         newer = list(page.entries[anchor:])
         entry_ids.update(entry.id for entry in page.entries)
-        caller_read = first_read
-        first_read = False
-        after = _ARCHIVE_PAIRING_MARGIN
         messages = _page_messages(older, prunes)
-        if splice_marker and caller_read:
-            # THE NEWEST COMPACTION'S MARKER CAN BE NEWER THAN EVERY ANCHOR, and
-            # then no page in the walk can serve it.
-            #
-            # WHY. The fold hoists that marker into its prefix, so the render
-            # paints it as its FIRST row — and ``ProjectionFold._cap_tail`` drops
-            # that row on any render past its cap, because it pins a USER row for
-            # a marker that is a ``notice``. The compaction ENTRY, meanwhile, sits
-            # where it was written: an auto-compaction is appended after the start
-            # of its own kept window, so the rows between ``first_kept_entry_id``
-            # and the compaction entry are NEWER than the cursor this call was
-            # handed. Pages serve only entries strictly OLDER than their anchor,
-            # so the entry can only ever appear in a page's ``newer`` half — which
-            # :func:`_pairing_messages` filters to tool results — and the row that
-            # says history continues behind the boundary is stranded. Measured by
-            # review round 4 on two of eleven large real journals, one row each,
-            # and it is the row that TELLS the reader there is older history.
-            #
-            # Served on the caller's own call only — see ``splice_marker`` above,
-            # which is what makes that per-WALK — and at the NEWEST end of its
-            # rows: the compaction entry is newer than everything in ``older``,
-            # and the desktop paints a marker where its entry sits.
-            #
-            # ``newer[1:]`` — the anchor is excluded on purpose. When the cursor
-            # IS the compaction entry (an uncapped render, whose first row is the
-            # marker the client is holding as its own cursor), serving it back
-            # would re-serve the client's cursor row and never advance the walk.
-            marker = _newest_compaction_marker(newer[1:])
-            if marker is not None:
-                messages.append(marker)
         if messages:
             messages += _pairing_messages(newer, messages, prunes)
             rows = _fold(messages) + rows

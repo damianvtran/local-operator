@@ -77,7 +77,6 @@ from local_operator.mobile.transfer_receipts import (
     Unclaimed,
 )
 from local_operator.mobile.types import (
-    PROJECTION_TRANSCRIPT_LIMIT,
     PROTOCOL_VERSION,
     SessionProjection,
     SessionRecord,
@@ -2485,48 +2484,6 @@ async def _engage_and_publish(
     return detail
 
 
-def _window_head(state: Any) -> str | None:
-    """The row id the web client pages from on its FIRST call, for this seed.
-
-    A mirror of ``transcript.tsx``'s ``oldestId`` (its opening branch), and it
-    has to live HERE because only the daemon holds the seed: the bridge pages the
-    JOURNAL, and nothing in a journal page can say whether the cursor it was
-    handed is the client's own window head or a row this walk already served.
-
-    The rows are the SEED's own, which is what ``_durable_projection`` hands the
-    client: ``DurableFoldState.render`` is the same fold BEFORE the cap
-    (``fold_messages_to_entries`` over the same history, without the pin), so the
-    cap is applied here rather than assumed — the head of the uncapped list is a
-    different row on any session past the cap, and gating on it would make the
-    splice below dead code in exactly the sessions it exists for.
-
-    WHY THAT DISTINCTION IS LOAD-BEARING. A walk is many HTTP pages, each of
-    which is one call into the reader — so a fact the reader can only see per
-    call ("the first read of this call") is true on EVERY page, and a row served
-    under it is re-served page after page: on the reviewer's S10 shape the newest
-    compaction's marker came back on pages 1-4, and the client keeps every copy
-    inside ``older`` (its de-dup filters the live window only), so the boundary
-    notice would paint once per page fetched. This id cannot: pages serve only
-    entries strictly OLDER than their anchor, and the head is the anchor of the
-    first page, so no page of the walk can carry it. (An uncapped render's head
-    is the compaction's own marker row; the reader's ``newer[1:]`` guard is what
-    keeps that one from being served back to a client already holding it.)
-    """
-    from local_operator.mobile.projection import ProjectionFold
-
-    rows = ProjectionFold._cap_tail(list(getattr(state, "render", None) or []))
-    if not rows:
-        return None
-    head = rows[0]
-    if len(rows) >= PROJECTION_TRANSCRIPT_LIMIT and getattr(head, "kind", None) == "user":
-        # The pinned opener is not the tail's chronological neighbour: the client
-        # starts one row past it, and so must this mirror.
-        second = rows[1] if len(rows) > 1 else None
-        if second is not None:
-            return str(second.id)
-    return str(head.id)
-
-
 def _journal_page(
     directory: Path,
     state: Any,
@@ -2556,7 +2513,6 @@ def _journal_page(
         before_id=before,
         limit=limit,
         prunes_complete=bool(getattr(state, "scan_from_bof", True)),
-        window_head=_window_head(state),
     )
     return rows if rows is not None else ([], False)
 
