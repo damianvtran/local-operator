@@ -36,11 +36,15 @@ async def test_boot_video_jobs_ensures_check_wake_idempotently(tmp_path) -> None
         await session.journal_video_job(_record("vid1"))
 
         await session._boot_video_jobs()
-        arming = [row for row in session._wake.schedules if getattr(row, "id", "") == "video-check-vid1"]
+        arming = [
+            row for row in session._wake.schedules if getattr(row, "id", "") == "video-check-vid1"
+        ]
         assert len(arming) == 1, "a pending record must get its check-wake"
 
         await session._boot_video_jobs()
-        arming = [row for row in session._wake.schedules if getattr(row, "id", "") == "video-check-vid1"]
+        arming = [
+            row for row in session._wake.schedules if getattr(row, "id", "") == "video-check-vid1"
+        ]
         assert len(arming) == 1, "boot runs on every open; a second pass must not double-arm"
     finally:
         await session.dispose()

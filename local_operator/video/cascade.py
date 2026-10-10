@@ -36,12 +36,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from local_operator.artifacts import (
-    ArtifactKind,
-    JobAttempt,
-    JobOutcome,
-    JobSpec,
-)
+from local_operator.artifacts import ArtifactKind, JobAttempt, JobOutcome, JobSpec
 from local_operator.artifacts import walk as artifacts_walk
 from local_operator.artifacts.rung import CancelSupport, RungSpec, SourceSupport
 from local_operator.clients._http import APIError

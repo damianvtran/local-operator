@@ -679,6 +679,58 @@ async def test_the_tool_roster_follows_the_sessions_final_inventory(
 
 
 @pytest.mark.asyncio
+async def test_the_video_pair_reaches_a_real_factory_session(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-1 QA blocker Q1: both video builders are createIf-gated on a
+    credential AND on a session-owned field (``jobs``), so the factory's warm
+    pass refuses them and only the constructor's capability merge can mount
+    them on the real surface. Without the merge-set entry every live session
+    answered ``Tool not found: generate_video`` while the guide and the
+    context budget advertised the pair.
+
+    Both legs of the gate run on the REAL boot: no credential → no tools;
+    an exported ``FAL_API_KEY`` → both tools in the inventory.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    monkeypatch.delenv("FAL_API_KEY", raising=False)
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
+    )
+    try:
+        names = {tool.name for tool in session._tools}
+        assert "generate_video" not in names, "the credential gate must hold without a key"
+        assert "video_status" not in names
+    finally:
+        await session.dispose()
+
+    monkeypatch.setenv("FAL_API_KEY", "test-key")
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
+    )
+    try:
+        names = {tool.name for tool in session._tools}
+        assert {
+            "generate_video",
+            "video_status",
+        } <= names, "the constructor merge must mount the pair once the gate opens"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_factory_refuses_a_session_whose_move_is_in_flight(
     tmp_config_dir: Path,
 ) -> None:

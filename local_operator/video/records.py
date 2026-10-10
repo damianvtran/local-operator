@@ -24,7 +24,9 @@ Shape (frozen, video-contract §1.4; ``None`` fields are omitted on disk):
       "result": {"digest": …, "duration_s": 8.0, "content_type": "video/mp4",
                  "model": …, "cost_usd": 1.6, "cost_source": "reported",
                  "billing_basis": "billed"},
-      "outcome_note": "…"
+      "outcome_note": "…",
+      "watcher": "<observation async job id, while one is armed>",
+      "error": "…", "error_type": "media_already_completed"
     }
 
 Two rules this module carries, both from the contract:
@@ -105,6 +107,9 @@ def build_record(
     provider_ref: Mapping[str, Any] | None = None,
     result: Mapping[str, Any] | None = None,
     outcome_note: str | None = None,
+    watcher: str | None = None,
+    error: str | None = None,
+    error_type: str | None = None,
     at: str | None = None,
 ) -> dict[str, Any]:
     """One record revision. ``None`` fields are omitted, never written as null.
@@ -127,6 +132,17 @@ def build_record(
         ("route_label", route_label),
         ("model", model),
         ("mode", mode),
+        # ``watcher`` journals the id of the observation job watching this
+        # record; it is what stops a second ``video_status`` from registering
+        # a duplicate watcher for the same generation (each watcher settles
+        # through delivery, so N registrations = N completion rows).
+        ("watcher", watcher),
+        # The frozen cancel-conflict pair (contract §1.6/§4.1): set with
+        # ``error_type="media_already_completed"`` when a cancel found the
+        # generation already finished, so surfaces render the "already
+        # finished" branch instead of inventing an error for it.
+        ("error", error),
+        ("error_type", error_type),
     ):
         if value is not None:
             record[key] = value
@@ -150,24 +166,28 @@ def record_is_terminal(record: Mapping[str, Any]) -> bool:
 def newest_records_by_job(records: list[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
     """Group record rows by job id, newest wins per id.
 
-    Input order is not trusted wholesale, but it IS the append order the
-    scanner produced (newest first) and the tiebreak when two rows share an
-    ``at`` stamp (the writer's clock has second resolution): the LATER row in
-    list order wins. ``at`` strings are ISO-8601 with a fixed shape, so
-    lexicographic order is chronological order. Malformed rows are skipped
-    individually — one bad row costs one row, never the map.
+    Rows arrive NEWEST-FIRST (`read_custom_entries` walks backwards from the
+    end of the transcript), so on an identical ``at`` stamp — the writer's
+    clock has second resolution — the row FIRST seen is the later write and
+    wins. Getting this backwards silently drops fields a later row added
+    (the Q2 drill: a same-second ``registered`` row shadowed the ``running``
+    row that carried ``provider_ref``, and the cold follow could never
+    poll). ``at`` strings are ISO-8601 with a fixed shape, so lexicographic
+    order is chronological order and a strictly greater stamp always wins
+    regardless of position. Malformed rows are skipped individually — one
+    bad row costs one row, never the map.
     """
-    grouped: dict[str, tuple[tuple[str, int], dict[str, Any]]] = {}
-    for index, row in enumerate(records):
+    grouped: dict[str, tuple[str, dict[str, Any]]] = {}
+    for row in records:
         if not isinstance(row, Mapping):
             continue
         job_id = str(row.get("job") or "")
         if not job_id:
             continue
-        key = (str(row.get("at") or ""), index)
+        at = str(row.get("at") or "")
         current = grouped.get(job_id)
-        if current is None or key >= current[0]:
-            grouped[job_id] = (key, dict(row))
+        if current is None or at > current[0]:
+            grouped[job_id] = (at, dict(row))
     return {job_id: row for job_id, (_, row) in grouped.items()}
 
 
@@ -220,8 +240,7 @@ def check_wake_message(job_id: str) -> str:
     return (
         f"A video generation job ({job_id}) may have settled. "
         f"Check it with the video_status tool (job_id='{job_id}') — the result "
-        "is registered as a session attachment if complete; cancel this wake if "
-        "the job is settled or gone."
+        "is registered as a session attachment if complete."
     )
 
 

@@ -63,16 +63,44 @@ def test_build_record_rejects_unknown_state() -> None:
 
 
 def test_newest_records_by_job_at_then_order() -> None:
+    # Rows arrive NEWEST-FIRST (read_custom_entries walks backwards from the
+    # end of the transcript), so on an identical `at` stamp the FIRST row is
+    # the later write (round-1 QA blocker Q2: the registered/running pair
+    # shares one second, and picking the older row dropped the provider_ref
+    # the post-restart cold follow needs).
     rows = [
-        {"job": "a", "at": "2026-10-10T10:00:00+00:00", "state": "registered"},
-        {"job": "b", "at": "2026-10-10T10:01:00+00:00", "state": "running"},
-        # Same-second pair: the LATER list position wins (append order).
-        {"job": "a", "at": "2026-10-10T10:05:00+00:00", "state": "completed"},
         {"job": "a", "at": "2026-10-10T10:05:00+00:00", "state": "failed"},
+        {"job": "a", "at": "2026-10-10T10:05:00+00:00", "state": "completed"},
+        {"job": "b", "at": "2026-10-10T10:01:00+00:00", "state": "running"},
+        {"job": "a", "at": "2026-10-10T10:00:00+00:00", "state": "registered"},
     ]
     grouped = video_records.newest_records_by_job(rows)  # type: ignore[arg-type]
-    assert grouped["a"]["state"] == "failed"
+    assert grouped["a"]["state"] == "failed", "the first-seen same-second row is the newest"
     assert grouped["b"]["state"] == "running"
+    # QA's deterministic repro, now going the right way: the newest row of the
+    # tie carries the ref and must survive.
+    tie = [
+        {
+            "job": "j",
+            "at": "2026-10-10T20:14:30+00:00",
+            "state": "running",
+            "provider_ref": {"request_id": "01a12773-ebab-78a3-ad53-d50710b3e351"},
+        },
+        {"job": "j", "at": "2026-10-10T20:14:30+00:00", "state": "registered"},
+    ]
+    newest = video_records.newest_records_by_job(tie)  # type: ignore[arg-type]
+    assert newest["j"]["state"] == "running"
+    assert newest["j"].get("provider_ref"), "the same-second tie must not drop the ref"
+    # A strictly newer stamp wins regardless of position in the list.
+    assert (
+        video_records.newest_records_by_job(
+            [  # type: ignore[arg-type]
+                {"job": "c", "at": "2026-10-10T10:00:00+00:00", "state": "registered"},
+                {"job": "c", "at": "2026-10-10T10:01:00+00:00", "state": "completed"},
+            ]
+        )["c"]["state"]
+        == "completed"
+    )
     # Malformed rows are skipped individually, never fatal.
     grouped = video_records.newest_records_by_job(
         [{"nope": 1}, {"job": "", "at": "x"}]  # type: ignore[list-item]

@@ -701,6 +701,14 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # the derived prune finds nothing to undo. Appended last for the same
     # prefix reason as `sessions` above.
     "no_reply",
+    # The video pair rides the same shape: `jobs` (and the credential probe)
+    # exists only on a live session's own context, so the factory's warm pass
+    # refuses BOTH builders and this merge is what mounts them on a real
+    # session — without these two names the tools are advertised to nobody
+    # (round-1 QA blocker Q1; the same failure `no_reply` records above).
+    # Appended last for the same prefix reason as `sessions`.
+    "generate_video",
+    "video_status",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -16485,7 +16493,10 @@ class Session:
             return
         try:
             from local_operator.video.jobs import VideoWakeHandle
-            from local_operator.video.records import read_video_records, record_is_terminal
+            from local_operator.video.records import (
+                read_video_records,
+                record_is_terminal,
+            )
 
             records = await asyncio.to_thread(read_video_records, directory)
             for job_id, record in records.items():

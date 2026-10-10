@@ -71,6 +71,12 @@ async def test_success_path_records_cancel_wake_and_text(
         emit = kwargs["emit"]
         if emit is not None:
             emit("Generating video via FAL: queued — 5s", {"stage": "queued"})
+        # The rung CLEARS the handle the instant the job is terminal (the
+        # cancel semantics: nothing left to cancel) — so the completed row
+        # must still carry the refs captured at ACCEPT time (V2: the QA drill
+        # lost them on the cleared handle and the §1.5 refetch could then
+        # never poll the provider).
+        handle.clear()
         return _outcome()
 
     monkeypatch.setattr(video_jobs, "run_video_cascade", fake_cascade)
@@ -108,6 +114,9 @@ async def test_success_path_records_cancel_wake_and_text(
     completed = journal[1]
     assert completed["result"]["digest"] == "d" * 32
     assert completed["route_label"] == "FAL"
+    assert (
+        completed["provider_ref"]["request_id"] == "req-1"
+    ), "the completed row must keep the refs the cleared handle no longer holds"
 
     # The wake row was cancelled on settle (exactly one update removing it).
     assert scheduler.updates == [[]]
@@ -141,7 +150,7 @@ async def test_signal_cancel_settles_cancelled_and_raises_carrier(
 
     async def fake_cancel(handle: Any) -> str:
         cancelled.append(handle.request_id)
-        return "ok"
+        return "cancelled"
 
     monkeypatch.setattr(video_jobs, "run_video_cascade", fake_cascade)
     monkeypatch.setattr(video_jobs, "best_effort_cancel", fake_cancel)
@@ -163,7 +172,8 @@ async def test_signal_cancel_settles_cancelled_and_raises_carrier(
     assert cancelled == ["req-2"], "the bounded provider cancel must run"
     states = [record["state"] for record in journal]
     assert states == ["cancelled"]
-    assert "cancelled — provider cancel: ok" in journal[0]["outcome_note"]
+    assert journal[0]["outcome_note"] == "Provider job cancelled."
+    assert journal[0].get("error_type") is None, "a plain cancel is not a conflict"
     assert scheduler.updates == [[]]
 
 
@@ -197,16 +207,177 @@ async def test_failure_settles_failed_and_reraises(
     assert "no provider could run it" in journal[0]["outcome_note"]
 
 
-@pytest.mark.asyncio
-async def test_cancel_note_honesty_clause_for_queued_only() -> None:
+def test_cancel_note_uses_the_frozen_wording_map() -> None:
+    # Contract §1.6: the cancel-token phrases are NOT changed by video — the
+    # note composes from the image lane's map, byte-for-byte (equality pinned
+    # below), and never leaks a raw token.
     note = video_jobs._cancel_outcome_note("radient", "none")
-    assert "cannot be stopped" in note
-    assert "may complete upstream and bill" in note
-    assert "result is not retrievable" in note
-    # The frozen sentence, verbatim second half (contract §4.3).
     assert note == (
-        "cancelled — provider cancel: none. Provider cannot be stopped; the "
-        "generation may complete upstream and bill; the result is not retrievable."
+        "Provider job not cancelled — nothing was left to cancel. "
+        "Provider cannot be stopped; the generation may complete upstream and "
+        "bill; the result is not retrievable."
     )
-    plain = video_jobs._cancel_outcome_note("fal", "ok")
-    assert plain == "cancelled — provider cancel: ok."
+    # A queued-only provider's ACKNOWLEDGED cancel still cannot stop a running
+    # generation — the §4.3 clause rides the `cancelled` token too (round-1
+    # design D1: FAL enforces aborts, Radient only queues).
+    acked = video_jobs._cancel_outcome_note("radient", "cancelled")
+    assert acked.startswith("Provider job cancelled.")
+    assert "may complete upstream and bill" in acked
+    # An abort-capable provider's acknowledged cancel is the plain phrase.
+    assert video_jobs._cancel_outcome_note("fal", "cancelled") == "Provider job cancelled."
+    # The conflict and gone branches carry the frozen phrases, never tokens.
+    assert video_jobs._cancel_outcome_note("fal", "already_completed") == (
+        "Provider job not cancelled — it had already completed; its result was discarded."
+    )
+    assert video_jobs._cancel_outcome_note("fal", "not_found") == (
+        "Provider job not cancelled — the provider no longer knows the job."
+    )
+    assert video_jobs._cancel_outcome_note("fal", "timeout") == (
+        "Provider job not cancelled — the cancel request timed out. "
+        "The cancel request got no terminal answer; the generation may complete "
+        "upstream and bill; the result is not retrievable."
+    )
+    # A token the map does not know is surfaced verbatim — never invented.
+    assert video_jobs._cancel_outcome_note("fal", "weird") == "Provider job weird."
+
+
+def test_cancel_copy_constants_match_the_image_lane() -> None:
+    """The frozen map is byte-identical in both lanes (contract §1.6: the
+    cancel-token phrases are NOT changed by video); the duplication is pinned
+    here so the copies cannot drift."""
+    from local_operator.tools import image_tool
+
+    assert video_jobs._CANCEL_PHRASES == image_tool._CANCEL_PHRASES
+    assert video_jobs._CANCEL_CONFLICT_SENTENCE == image_tool._CANCEL_CONFLICT_SENTENCE
+
+
+@pytest.mark.asyncio
+async def test_cancel_conflict_settles_the_frozen_already_finished_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel that finds the generation already completed settles the frozen
+    ``media_already_completed`` pair (round-1 design D1; contract §1.6/§4.1)."""
+    journal: list[dict[str, Any]] = []
+
+    async def fake_cascade(**kwargs: Any) -> Any:
+        handle = kwargs["handle"]
+        handle.provider = "fal"
+        handle.request_id = "req-9"
+        from local_operator.video import VideoGenerationCancelled
+
+        raise VideoGenerationCancelled("stop")
+
+    async def fake_cancel(handle: Any) -> str:
+        return "already_completed"
+
+    monkeypatch.setattr(video_jobs, "run_video_cascade", fake_cascade)
+    monkeypatch.setattr(video_jobs, "best_effort_cancel", fake_cancel)
+
+    async def fake_journal(record: dict[str, Any]) -> None:
+        journal.append(record)
+
+    runner = video_jobs.make_video_job_runner(
+        mode="t2v",
+        prompt="p",
+        config_dir=None,
+        journal=fake_journal,
+        wake_scheduler=_FakeScheduler(rows=[SimpleNamespace(id="video-check-j9")]),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await runner("j9", SimpleNamespace(), lambda d: None)
+
+    record = journal[0]
+    assert record["state"] == "cancelled"
+    assert record["error_type"] == "media_already_completed"
+    assert record["error"] == video_jobs._CANCEL_CONFLICT_SENTENCE
+    assert record["outcome_note"] == (
+        "Provider job not cancelled — it had already completed; its result was discarded."
+    )
+
+
+def _fake_wake(job_id: str) -> Any:
+    return video_jobs.VideoWakeHandle(
+        _FakeScheduler(rows=[SimpleNamespace(id=f"video-check-{job_id}")]), job_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_watcher_settles_provider_cancelled_as_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V5: a provider CANCELLED observation settles ``cancelled`` from the
+    watcher exactly as the one-shot ``video_status`` path does — one
+    observation, one word, wherever it was seen."""
+    journal: list[dict[str, Any]] = []
+
+    async def fake_resume(**_kwargs: Any) -> Any:
+        from local_operator.clients._http import APIError
+
+        raise APIError("provider says CANCELLED", status_code=200, code="cancelled")
+
+    monkeypatch.setattr(video_jobs, "resume_video_observation", fake_resume)
+
+    async def fake_journal(record: dict[str, Any]) -> None:
+        journal.append(record)
+
+    runner = video_jobs.make_video_watcher_runner(
+        record={
+            "job": "w1",
+            "state": "running",
+            "provider": "radient",
+            "model": "m",
+            "mode": "t2v",
+            "provider_ref": {"request_id": "r1"},
+        },
+        config_dir=None,
+        journal=fake_journal,
+        wake=_fake_wake("w1"),
+    )
+    from local_operator.clients._http import APIError
+
+    with pytest.raises(APIError):
+        await runner("w1", SimpleNamespace(), lambda d: None)
+
+    assert [record["state"] for record in journal] == ["cancelled"]
+    assert journal[0]["outcome_note"] == "the provider reported the generation as CANCELLED"
+    assert journal[0]["provider_ref"] == {"request_id": "r1"}
+
+
+@pytest.mark.asyncio
+async def test_watcher_settles_provider_gone_with_the_one_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D4: the provider-gone sentence has ONE home; the watcher's settle and
+    every other 404 site render the identical bytes."""
+    journal: list[dict[str, Any]] = []
+
+    async def fake_resume(**_kwargs: Any) -> Any:
+        from local_operator.clients._http import APIError
+
+        raise APIError("gone", status_code=404, code="not_found")
+
+    monkeypatch.setattr(video_jobs, "resume_video_observation", fake_resume)
+
+    async def fake_journal(record: dict[str, Any]) -> None:
+        journal.append(record)
+
+    runner = video_jobs.make_video_watcher_runner(
+        record={
+            "job": "w2",
+            "state": "running",
+            "provider": "fal",
+            "model": "m",
+            "mode": "t2v",
+        },
+        config_dir=None,
+        journal=fake_journal,
+        wake=_fake_wake("w2"),
+    )
+    from local_operator.clients._http import APIError
+
+    with pytest.raises(APIError):
+        await runner("w2", SimpleNamespace(), lambda d: None)
+
+    assert [record["state"] for record in journal] == ["failed"]
+    assert journal[0]["outcome_note"] == video_jobs.PROVIDER_GONE_NOTE
+    assert "(HTTP 404)" in journal[0]["outcome_note"]

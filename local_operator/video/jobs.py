@@ -58,12 +58,8 @@ from local_operator.video.cascade import (
     VIDEO_RUNG_SPECS,
     run_video_cascade,
 )
-from local_operator.video.records import (
-    build_record,
-    check_wake_id,
-    check_wake_request,
-)
-from local_operator.video.rungs import resume_video_observation
+from local_operator.video.records import build_record, check_wake_id, check_wake_request
+from local_operator.video.rungs import PROVIDER_GONE_NOTE, resume_video_observation
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +73,43 @@ __all__ = [
 #: Bound on the ``outcome_note`` written to the durable record — a record is
 #: a status line, not a log; the job's own error_text carries the full text.
 _OUTCOME_NOTE_MAX_CHARS = 2000
+
+#: The frozen cancel-token wording map (contract §1.6: "the cancel-token
+#: phrases are NOT changed by video"). Byte-identical to the image lane's
+#: ``image_tool._CANCEL_PHRASES`` — a test pins the equality — and duplicated
+#: rather than imported because ``video/`` must not depend on the tools layer.
+#: A token this map does not know is surfaced verbatim: a record must never
+#: invent an outcome.
+_CANCEL_PHRASES = {
+    "cancelled": "cancelled",
+    "already_completed": "not cancelled — it had already completed; its result was discarded",
+    "not_found": "not cancelled — the provider no longer knows the job",
+    "none": "not cancelled — nothing was left to cancel",
+    "timeout": "not cancelled — the cancel request timed out",
+    "failed": "not cancelled — the cancel request failed",
+    "abandoned": "not cancelled — a second stop abandoned the cancel attempt",
+}
+
+#: The frozen cancel-conflict sentence (contract §1.6/§4.1); byte-identical to
+#: ``image_tool._CANCEL_CONFLICT_SENTENCE`` (same duplication rule as above).
+#: Written beside ``error_type: media_already_completed`` so the surfaces
+#: render the "already finished" branch instead of inventing an error.
+_CANCEL_CONFLICT_SENTENCE = (
+    "The generation had already completed when the cancel arrived; its result was discarded."
+)
+
+#: The §4.3 honesty tails. ``CANNOT_STOP`` is for when no stop exists to take
+#: (a queued-only provider, or nothing was ever cancellable); ``NO_ANSWER``
+#: for an attempt that got no terminal answer from an abort-capable provider.
+#: The operative half of both is verbatim contract §4.3.
+_CANNOT_STOP_CLAUSE = (
+    "Provider cannot be stopped; the generation may complete upstream and bill; "
+    "the result is not retrievable."
+)
+_NO_ANSWER_CLAUSE = (
+    "The cancel request got no terminal answer; the generation may complete "
+    "upstream and bill; the result is not retrievable."
+)
 
 
 def video_job_label(*, mode: str, duration_s: int | None, route_label: str) -> str:
@@ -292,30 +325,48 @@ def _provider_ref_from_handle(handle: CancelHandle) -> dict[str, Any]:
 
 
 def _cancel_outcome_note(provider: str | None, receipt_token: str) -> str:
-    """The honest cancel note; the frozen clauses for the cases that need them.
+    """The honest cancel note, composed from the frozen wording map.
 
-    A ``none``/timed-out/failed cancel NEVER reads as a stop we made: the
-    contract's honesty clause (video-contract §4.3) is used verbatim where it
-    applies, so a provider that cannot be stopped says so in the record.
+    Two rules carry the copy (contract §1.6/§4.3): the phrase for every token
+    comes from ``_CANCEL_PHRASES`` byte-for-byte — a raw token never renders —
+    and the §4.3 honesty tail is appended wherever the provider's copy of the
+    job may still be running and billing. The queued-only case includes the
+    acknowledged ``cancelled`` token: a queue cancel cannot stop a generation
+    already running on such a provider, and the guide promises the record
+    says so.
     """
+    phrase = _CANCEL_PHRASES.get(receipt_token, receipt_token)
+    note = f"Provider job {phrase}."
     support = None
     if provider:
         spec = VIDEO_RUNG_SPECS.get(provider)
         support = spec.cancel_support if spec is not None else None
-    if receipt_token == "none" or support is CancelSupport.QUEUED_ONLY:
-        if receipt_token in ("none", "failed", "timeout", "abandoned"):
-            return (
-                f"cancelled — provider cancel: {receipt_token}. Provider cannot be "
-                "stopped; the generation may complete upstream and bill; the "
-                "result is not retrievable."
-            )
-    if receipt_token in ("failed", "timeout", "abandoned"):
-        return (
-            f"cancelled — provider cancel: {receipt_token}. The cancel request "
-            "got no terminal answer; the generation may complete upstream and "
-            "bill; the result is not retrievable."
-        )
-    return f"cancelled — provider cancel: {receipt_token}."
+    if receipt_token in ("none", "failed", "timeout", "abandoned"):
+        if support is CancelSupport.QUEUED_ONLY or receipt_token == "none":
+            note += " " + _CANNOT_STOP_CLAUSE
+        else:
+            note += " " + _NO_ANSWER_CLAUSE
+    elif receipt_token == "cancelled" and support is CancelSupport.QUEUED_ONLY:
+        note += " " + _CANNOT_STOP_CLAUSE
+    return note
+
+
+def _record_ref(handle: CancelHandle, fallback: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The provider ref for a durable record row.
+
+    The rungs CLEAR the handle the instant the provider job is terminal (the
+    cancel semantics: nothing left to cancel), so a row written after settle
+    cannot read the refs from it — the Q2 refetch path ("terminal but
+    unregistered, fetch once") then can never reach the provider. Prefer the
+    handle's live content; else the ref captured at accept time / carried on
+    the record being followed.
+    """
+    ref = _provider_ref_from_handle(handle)
+    if ref:
+        return ref
+    if isinstance(fallback, Mapping) and fallback:
+        return dict(fallback)
+    return None
 
 
 async def _journal_best_effort(
@@ -409,8 +460,14 @@ def make_video_job_runner(
         )
         wake = VideoWakeHandle(wake_scheduler, job_id)
         handle = CancelHandle()
+        # The refs captured the moment the rung accepts: the handle is CLEARED
+        # at terminal, so these are what the completed/cancelled rows record
+        # (and what the §1.5 refetch later polls).
+        accepted_ref: dict[str, Any] = {}
 
         async def on_accept(accepted: CancelHandle) -> None:
+            if not accepted_ref:
+                accepted_ref.update(_provider_ref_from_handle(accepted))
             await _journal_best_effort(
                 journal,
                 build_record(
@@ -449,13 +506,17 @@ def make_video_job_runner(
             # provider cancel, the honest record, and then the manager's own
             # cancelled carrier — the row settles ``cancelled`` with no
             # completion delivery, exactly like a cancelled task/bash job.
-            await _settle_cancelled(handle, journal, wake, job_id, mode, params, source_rows)
+            await _settle_cancelled(
+                handle, journal, wake, job_id, mode, params, source_rows, accepted_ref
+            )
             raise asyncio.CancelledError from None
         except asyncio.CancelledError:
             # The task-cancellation spelling (Esc/steer/dispose). The cleanup
             # is bounded and shielded; the original cancellation is re-raised
             # untouched so the manager's accounting sees it.
-            await _settle_cancelled(handle, journal, wake, job_id, mode, params, source_rows)
+            await _settle_cancelled(
+                handle, journal, wake, job_id, mode, params, source_rows, accepted_ref
+            )
             raise
         except Exception as exc:  # noqa: BLE001 — every failure settles the record
             await _journal_best_effort(
@@ -468,7 +529,7 @@ def make_video_job_runner(
                     mode=mode,
                     params=params,
                     sources=source_rows or None,
-                    provider_ref=_provider_ref_from_handle(handle) or None,
+                    provider_ref=_record_ref(handle, accepted_ref),
                     outcome_note=str(exc)[:_OUTCOME_NOTE_MAX_CHARS] or None,
                 ),
             )
@@ -496,7 +557,7 @@ def make_video_job_runner(
                 mode=mode,
                 params=params,
                 sources=source_rows or None,
-                provider_ref=_provider_ref_from_handle(handle) or None,
+                provider_ref=_record_ref(handle, accepted_ref),
                 result=receipt,
             ),
         )
@@ -514,9 +575,18 @@ async def _settle_cancelled(
     mode: str,
     params: Mapping[str, Any],
     source_rows: Sequence[Mapping[str, Any]],
+    fallback_ref: Mapping[str, Any] | None = None,
 ) -> None:
     """The cancel settle shared by both cancellation spellings (never raises)."""
     receipt_token = await best_effort_cancel(handle)
+    error: str | None = None
+    error_type: str | None = None
+    if receipt_token == "already_completed":
+        # The frozen conflict branch (contract §1.6/§4.1): the cancel arrived
+        # too late, and the surfaces render it as "already finished" off this
+        # pair — never as an error's ink.
+        error = _CANCEL_CONFLICT_SENTENCE
+        error_type = "media_already_completed"
     await _journal_best_effort(
         journal,
         build_record(
@@ -527,8 +597,10 @@ async def _settle_cancelled(
             mode=mode,
             params=params,
             sources=list(source_rows) or None,
-            provider_ref=_provider_ref_from_handle(handle) or None,
+            provider_ref=_record_ref(handle, fallback_ref),
             outcome_note=_cancel_outcome_note(handle.provider, receipt_token),
+            error=error,
+            error_type=error_type,
         ),
     )
     await wake.cancel()
@@ -554,6 +626,12 @@ def make_video_watcher_runner(
     mode = str(record.get("mode") or "")
     params = record.get("params") if isinstance(record.get("params"), Mapping) else {}
     source_rows = record.get("sources") if isinstance(record.get("sources"), list) else []
+    # The ref the followed record carries: the rows this runner writes must
+    # keep it (the handle may already be cleared by the terminal poll), or a
+    # later refetch of an unregistered completion has nothing to poll.
+    record_ref = (
+        record.get("provider_ref") if isinstance(record.get("provider_ref"), Mapping) else None
+    )
 
     async def run(
         job_id: str,
@@ -575,29 +653,38 @@ def make_video_watcher_runner(
                 emit=emit,
             )
         except VideoGenerationCancelled:
-            await _settle_cancelled(handle, journal, wake, record_job_id, mode, params, source_rows)
+            await _settle_cancelled(
+                handle, journal, wake, record_job_id, mode, params, source_rows, record_ref
+            )
             raise asyncio.CancelledError from None
         except asyncio.CancelledError:
-            await _settle_cancelled(handle, journal, wake, record_job_id, mode, params, source_rows)
+            await _settle_cancelled(
+                handle, journal, wake, record_job_id, mode, params, source_rows, record_ref
+            )
             raise
         except APIError as exc:
             note = str(exc)[:_OUTCOME_NOTE_MAX_CHARS]
+            state = "failed"
             if exc.code == "not_found":
-                note = (
-                    "the provider no longer knows this job (HTTP 404) — it was "
-                    "cancelled or reaped upstream; the result is not retrievable"
-                )
+                note = PROVIDER_GONE_NOTE
+            elif exc.code == "cancelled":
+                # The provider's own CANCELLED settles as ``cancelled`` — the
+                # SAME word the one-shot ``video_status`` path uses for the
+                # identical observation (V5: one observation, one word,
+                # wherever it was seen).
+                state = "cancelled"
+                note = "the provider reported the generation as CANCELLED"
             await _journal_best_effort(
                 journal,
                 build_record(
                     job_id=record_job_id,
-                    state="failed",
+                    state=state,
                     provider=handle.provider or str(record.get("provider") or "") or None,
                     model=handle.model or str(record.get("model") or "") or None,
                     mode=mode,
                     params=params,
                     sources=list(source_rows) or None,
-                    provider_ref=_provider_ref_from_handle(handle) or None,
+                    provider_ref=_record_ref(handle, record_ref),
                     outcome_note=note or None,
                 ),
             )
@@ -614,6 +701,7 @@ def make_video_watcher_runner(
                     mode=mode,
                     params=params,
                     sources=list(source_rows) or None,
+                    provider_ref=_record_ref(handle, record_ref),
                     outcome_note=str(exc)[:_OUTCOME_NOTE_MAX_CHARS] or None,
                 ),
             )
@@ -641,7 +729,7 @@ def make_video_watcher_runner(
                 mode=mode,
                 params=params,
                 sources=list(source_rows) or None,
-                provider_ref=_provider_ref_from_handle(handle) or None,
+                provider_ref=_record_ref(handle, record_ref),
                 result=receipt,
             ),
         )

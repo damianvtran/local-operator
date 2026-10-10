@@ -267,12 +267,17 @@ def test_default_set_drops_no_reply_without_the_quiet_end_door() -> None:
     assert without == [name for name in withdoor if name != "no_reply"]
 
 
-def test_no_reply_is_appended_last_in_both_tables() -> None:
+def test_the_newest_appends_stay_last_in_both_tables() -> None:
     """Appending never shifts a provider-visible array prefix — the prompt
-    cache keys on that array — so both tables must END with the tool, not
-    merely contain it (docs §8)."""
-    assert DEFAULT_TOOL_NAMES[-1] == "no_reply"
-    assert list(TOOL_BUILDERS)[-1] == "no_reply"
+    cache keys on that array — so both tables must END with the newest
+    entries, not merely contain them (docs §8). Round-1 review V7: the video
+    pair first sat BEFORE ``code_requests``/``no_reply`` while its comment
+    claimed the end, which shifted those two; it now truly ends both
+    tables."""
+    assert DEFAULT_TOOL_NAMES[-2:] == ["generate_video", "video_status"]
+    assert list(TOOL_BUILDERS)[-2:] == ["generate_video", "video_status"]
+    assert DEFAULT_TOOL_NAMES[-3] == "no_reply"
+    assert list(TOOL_BUILDERS)[-3] == "no_reply"
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:

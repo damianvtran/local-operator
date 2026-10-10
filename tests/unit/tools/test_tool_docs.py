@@ -247,7 +247,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # mode/source rules and the family quirks. The wire description carries
     # one sentence; this holds the rest. Re-measured deliberately via this
     # test's own print; the ONLY other count that moved is ``jobs`` below.
-    "generate_video": 796,
+    # 796 -> 794 (round-1 design D3): the wire description's first sentence is
+    # now the contract §2.3 string verbatim (the shipped wording stated the
+    # same fact twice); re-measured deliberately, and it is the ONLY entry
+    # this remediation moved.
+    "generate_video": 794,
     "glob": 91,
     "grep": 337,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
