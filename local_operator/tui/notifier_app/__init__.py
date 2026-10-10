@@ -229,7 +229,7 @@ def ensure_bundle(config_dir: Path, *, block: bool = False) -> Path | None:
     way and the NEXT one carries the identity. ``block=True`` is for callers
     that are OFF the event loop and for whom the first toast being clickable is
     the point: the attended-moment pre-warm (:func:`prewarm`) and a long-lived
-    banner's own worker thread (`notify.detached_notify(durable=True)`).
+    banner's own worker thread (`notify.detached_notify(durable_click_s=...)`).
     (An earlier version of this docstring named a `lop notify --prepare`
     command; no such command was ever added to the CLI.)
 

@@ -210,12 +210,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 return
             await ensure_session(config_dir)
             # Same attended moment, same reason as the TUI's boot hook: make her
-            # first banner clickable. Off the loop (the macOS build blocks); the
+            # first banner clickable. Off the loop on a daemon thread (the macOS build
+            # blocks, and a default-executor thread would delay shutdown); the
             # remembered-terminal half finds no emulator markers in a daemon the
             # desktop spawned and is a no-op there, which is fine.
-            from local_operator.tui.resume_click import prepare_for_clicks
+            from local_operator.tui.resume_click import prepare_for_clicks_detached
 
-            await asyncio.to_thread(prepare_for_clicks)
+            await prepare_for_clicks_detached()
         except Exception:  # noqa: BLE001 — a bootstrap must never fail the daemon
             logger.warning("aida: boot ensure failed", exc_info=True)
 

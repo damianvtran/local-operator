@@ -1097,9 +1097,27 @@ def osascript_command(title: str, body: str) -> list[str]:
 
 #: How long a DURABLE banner's click stays live (seconds). See
 #: ``detached_notify(durable_click_s=...)``. Equal to the helper's own ceiling
-#: (``notifier_app.MAX_ACTIVATION_WINDOW_S``) on purpose: the only caller is
-#: Aida's check-in, which is capped at a few per rolling 24 h, so the resident
-#: helpers this buys are bounded by that cap and nothing else needs tuning.
+#: (``notifier_app.MAX_ACTIVATION_WINDOW_S``) on purpose.
+#:
+#: WHAT BOUNDS THE RESIDENT HELPERS, stated exactly because an earlier comment
+#: here said "the cap of three a day" and that was not true: the window is keyed
+#: on her SESSION (``_aida_duty`` in ``serving._raise_completion_banner``), so it
+#: covers every completion of her conversation that reaches the runtime's own
+#: banner rung, not only a cadence check-in. ``MAX_BANNERS_PER_DAY`` gates the
+#: cadence publishes alone (an errored turn is exempt from it, and a turn the
+#: user drives never consults it). The real bound is therefore: at most one idle
+#: few-MB helper per such banner, each gone after this window, at the rate her
+#: session completes with nothing watching it — low in practice, but a rate, not
+#: a cap. If that ever shows up as a pile of helpers, the lever is to key the
+#: window on the cadence kind rather than on the session.
+#:
+#: AT EXPIRY THE BANNER STAYS IN NOTIFICATION CENTRE AND DOES NOTHING when
+#: clicked — deliberately. The helper is the only thing that can run the click,
+#: so past this window the click is gone, and the alternative (deleting the
+#: delivered notification as the helper exits) would make an unanswered
+#: check-in vanish from the one place the user can still find it. The 24 h value
+#: is a ceiling, not a promise either: a logout, reboot or crash ends the helper
+#: sooner, and the banner is then equally inert.
 DURABLE_CLICK_WINDOW_S = 24.0 * 60.0 * 60.0
 
 
@@ -1291,21 +1309,37 @@ def _action_probe_file() -> Path | None:
         return None
 
 
-def _read_persisted_action_support(notifier: str) -> bool | None:
-    """The persisted answer for THIS binary, or None when absent or stale."""
+#: How many binaries the persisted probe file remembers. Two ``notify-send``
+#: on PATH (a distro one and a Homebrew/Nix one) used to overwrite each other's
+#: single record and re-probe forever; a handful of entries removes that, and the
+#: cap keeps a machine that churns binaries from growing the file without bound.
+_ACTION_PROBE_MAX_ENTRIES = 8
+
+
+def _load_action_probe_entries(path: Path) -> dict[str, dict[str, object]]:
+    """The persisted ``{binary path: record}`` map, or ``{}`` (absent, torn, wrong shape)."""
     import json
 
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+    return {k: v for k, v in entries.items() if isinstance(k, str) and isinstance(v, dict)}
+
+
+def _read_persisted_action_support(notifier: str) -> bool | None:
+    """The persisted answer for THIS binary, or None when absent or stale."""
     identity = _action_probe_identity(notifier)
     path = _action_probe_file()
     if identity is None or path is None:
         return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    record = _load_action_probe_entries(path).get(notifier)
+    if record is None or any(record.get(k) != v for k, v in identity.items()):
         return None
-    if not isinstance(data, dict) or any(data.get(k) != v for k, v in identity.items()):
-        return None
-    supports = data.get("supports")
+    supports = record.get("supports")
     return supports if isinstance(supports, bool) else None
 
 
@@ -1319,19 +1353,37 @@ def _write_persisted_action_support(notifier: str, supports: bool) -> None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        entries = _load_action_probe_entries(path)
+        entries.pop(notifier, None)  # re-insert last, so eviction below is oldest-first
+        entries[notifier] = {**identity, "supports": supports}
+        while len(entries) > _ACTION_PROBE_MAX_ENTRIES:
+            entries.pop(next(iter(entries)))
         # Unique temp name + replace: two runtimes probing at once must never
         # leave a half-written file for a third to misread (a torn read is
         # already treated as "absent", but a clean write is cheaper than relying
-        # on that).
+        # on that). Two writers can still lose each other's entry (read-modify-
+        # write, no lock); the cost is one extra probe, never a wrong answer.
         tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-        tmp.write_text(json.dumps({**identity, "supports": supports}), encoding="utf-8")
+        tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         logger.debug("could not persist the notify-send probe", exc_info=True)
 
 
 def _run_action_probe(notifier: str) -> bool:
-    """Ask the binary, record the answer in memory AND on disk."""
+    """Ask the binary; remember the answer in memory, and on disk ONLY if conclusive.
+
+    **A TIMEOUT OR AN EXCEPTION IS NOT AN ANSWER.** The key of the persisted
+    record is the binary's identity, which does not change when the host merely
+    had a slow moment, so persisting a failed probe as "no --action" made one
+    2 s stall on a loaded machine a permanent plain-toast verdict (found in
+    review; the in-memory-only version of the same False died with the process).
+    Conclusive means the child RAN TO COMPLETION, exited 0 and printed a help
+    text we could read; anything else answers False for THIS process (so a long-
+    lived TUI does not re-fork a flaky binary per banner) and leaves the disk
+    untouched, so the next process asks again.
+    """
+    conclusive = False
     try:
         result = subprocess.run(  # noqa: S603 — fixed argv, no shell
             [notifier, "--help"],
@@ -1340,11 +1392,14 @@ def _run_action_probe(notifier: str) -> bool:
             timeout=_ACTION_PROBE_TIMEOUT_S,
             check=False,
         )
-        supports = "--action" in (result.stdout + result.stderr)
-    except Exception:  # noqa: BLE001 — an unprobeable notifier is an old one
+        text = (result.stdout or "") + (result.stderr or "")
+        supports = "--action" in text
+        conclusive = result.returncode == 0 and bool(text.strip())
+    except Exception:  # noqa: BLE001 — an unprobeable notifier is answered False, not persisted
         supports = False
     _ACTION_SUPPORT[notifier] = supports
-    _write_persisted_action_support(notifier, supports)
+    if conclusive:
+        _write_persisted_action_support(notifier, supports)
     return supports
 
 

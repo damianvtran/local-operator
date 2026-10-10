@@ -34,6 +34,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +47,80 @@ def _path(config_dir: Path) -> Path:
     return config_dir / "notifier" / _FILE
 
 
-def remember(config_dir: Path, backend_name: str) -> bool:
-    """Record ``backend_name`` as the terminal last attended. True if written.
+#: Backends whose "window" is not something a click can SHOW the user.
+#: ``CmuxBackend.spawn`` passes ``--focus false`` on every call (its module
+#: docstring: a fork must not steal the window being typed in), which is right
+#: for ``/fork`` and wrong for a click: the user would get an unfocused sidebar
+#: row in a cmux window that may be on another Space, i.e. a click that appears
+#: to do nothing. Not remembered, so a cmux user's click keeps the existing
+#: Terminal.app landing, which at least raises a window. Enforced on the READ as
+#: well as the write (:func:`recall`), so a hand-edited or older file naming one
+#: is not honoured.
+_NOT_REMEMBERED = frozenset({"cmux"})
 
-    Skips the write when the file already says the same thing, so a TUI that
-    boots many times a day in one terminal costs a read, not a rewrite.
+#: How long a memory is believed. THE MEMORY HAS TO BE ABLE TO BE WRONG-AND-GONE,
+#: because the thing it stands for ("the terminal the user is at") changes
+#: without this file being told: someone who tried Ghostty once and now lives in
+#: an emulator we cannot name (VS Code's terminal, Alacritty, Warp) would
+#: otherwise get a Ghostty window on every click, forever (found in review, D2).
+#: Two mechanisms, because each covers a hole in the other:
+#:
+#: - **Clear on an attended boot that cannot name its terminal**
+#:   (:func:`remember_current` with ``forget_if_undetected``) — immediate and
+#:   exact for the user who moved, but silent about the user who simply stopped
+#:   booting a TUI at all.
+#: - **Age out** — the backstop for that second user. The TUI refreshes
+#:   ``recorded_at`` once it is older than :data:`_REFRESH_AFTER_S`, so a daily
+#:   Ghostty user never reaches the limit and a user who has not booted a TUI in
+#:   a month is not sent to a terminal they may have uninstalled.
+MAX_AGE_S = 30 * 24 * 3600
+
+#: A write is skipped while the file already says the same thing and is younger
+#: than this, so a TUI booting many times a day in one terminal costs a read.
+_REFRESH_AFTER_S = 12 * 3600
+
+
+def _read(config_dir: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(_path(config_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def recall(config_dir: Path, *, now: float | None = None) -> str | None:
+    """The backend name last remembered, or None.
+
+    None for: no file, a torn file, a wrong shape, a name in
+    :data:`_NOT_REMEMBERED`, or a record older than :data:`MAX_AGE_S` (or with
+    no usable ``recorded_at`` — an undated memory cannot be shown to be fresh).
     """
-    if not backend_name:
+    data = _read(config_dir)
+    if data is None:
+        return None
+    name = data.get("backend")
+    if not isinstance(name, str) or not name or name in _NOT_REMEMBERED:
+        return None
+    recorded = data.get("recorded_at")
+    if not isinstance(recorded, (int, float)) or isinstance(recorded, bool):
+        return None
+    if (time.time() if now is None else now) - recorded > MAX_AGE_S:
+        return None
+    return name
+
+
+def remember(config_dir: Path, backend_name: str, *, now: float | None = None) -> bool:
+    """Record ``backend_name`` as the terminal last attended. True if written."""
+    if not backend_name or backend_name in _NOT_REMEMBERED:
         return False
-    if recall(config_dir) == backend_name:
+    stamp = time.time() if now is None else now
+    data = _read(config_dir)
+    if (
+        data is not None
+        and recall(config_dir, now=stamp) == backend_name
+        and isinstance(data.get("recorded_at"), (int, float))
+        and stamp - data["recorded_at"] < _REFRESH_AFTER_S
+    ):
         return False
     path = _path(config_dir)
     try:
@@ -63,7 +129,7 @@ def remember(config_dir: Path, backend_name: str) -> bool:
         # half-written file for a click to misread.
         tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(
-            json.dumps({"backend": backend_name, "recorded_at": int(time.time())}),
+            json.dumps({"backend": backend_name, "recorded_at": int(stamp)}),
             encoding="utf-8",
         )
         os.replace(tmp, path)
@@ -73,31 +139,36 @@ def remember(config_dir: Path, backend_name: str) -> bool:
         return False
 
 
-def recall(config_dir: Path) -> str | None:
-    """The backend name last remembered, or None (absent, torn, wrong shape)."""
+def forget(config_dir: Path) -> bool:
+    """Drop the memory. True if a file was removed."""
     try:
-        data = json.loads(_path(config_dir).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    name = data.get("backend") if isinstance(data, dict) else None
-    return name if isinstance(name, str) and name else None
+        _path(config_dir).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.debug("could not forget the attended terminal", exc_info=True)
+        return False
 
 
-#: Backends whose "window" is not something a click can SHOW the user.
-#: ``CmuxBackend.spawn`` passes ``--focus false`` on every call (its module
-#: docstring: a fork must not steal the window being typed in), which is right
-#: for ``/fork`` and wrong for a click: the user would get an unfocused sidebar
-#: row in a cmux window that may be on another Space, i.e. a click that appears
-#: to do nothing. Not remembered, so a cmux user's click keeps the existing
-#: Terminal.app landing, which at least raises a window.
-_NOT_REMEMBERED = frozenset({"cmux"})
-
-
-def remember_current(config_dir: Path, env: Mapping[str, str] | None = None) -> bool:
+def remember_current(
+    config_dir: Path,
+    env: Mapping[str, str] | None = None,
+    *,
+    forget_if_undetected: bool = False,
+) -> bool:
     """Record the terminal THIS process is running in, if one is detectable.
 
     Call from an ATTENDED moment (the TUI booting), where emulator markers are
     present. Never raises; returns True only when the file changed.
+
+    ``forget_if_undetected`` is for a caller that IS a person's terminal (the
+    TUI): if it cannot name the emulator it is in (or it is cmux, which is never
+    remembered), then the user is demonstrably no longer in the terminal the file
+    names, and keeping it would send their next click there. A caller that is
+    NOT a terminal — the desktop daemon, which has no emulator markers because it
+    has no emulator — must leave this False, or every daemon boot would wipe a
+    perfectly good memory.
     """
     try:
         from local_operator.spawn.registry import active_backend
@@ -107,5 +178,5 @@ def remember_current(config_dir: Path, env: Mapping[str, str] | None = None) -> 
         logger.debug("could not detect the attended terminal", exc_info=True)
         return False
     if backend is None or backend.name in _NOT_REMEMBERED:
-        return False
+        return forget(config_dir) if forget_if_undetected else False
     return remember(config_dir, backend.name)

@@ -282,7 +282,7 @@ def _probe_returns(monkeypatch: pytest.MonkeyPatch, text: str) -> list[list[str]
 
     def run(argv, **_kwargs):  # noqa: ANN001
         calls.append(list(argv))
-        return SimpleNamespace(stdout=text, stderr="")
+        return SimpleNamespace(stdout=text, stderr="", returncode=0)
 
     monkeypatch.setattr(subprocess, "run", run)
     return calls
@@ -330,7 +330,7 @@ def test_a_torn_persisted_file_is_treated_as_absent(
 
     assert notify._notify_send_supports_actions(fake_notify_send, block=True) is True
     assert len(calls) == 1
-    assert json.loads(path.read_text())["supports"] is True
+    assert json.loads(path.read_text())["entries"][fake_notify_send]["supports"] is True
 
 
 def test_the_default_path_still_never_blocks(
@@ -552,7 +552,7 @@ def test_preparing_for_clicks_remembers_the_terminal_and_prewarms_the_bundle(
     did: list[str] = []
     monkeypatch.setattr(
         "local_operator.spawn.remembered.remember_current",
-        lambda root, env=None: did.append("remember"),
+        lambda root, env=None, **_kw: did.append("remember"),
     )
     monkeypatch.setattr(notifier_app, "prewarm", lambda root: did.append("prewarm") or True)
 
@@ -603,7 +603,13 @@ async def test_the_tui_schedules_click_preparation_off_the_loop(
     from local_operator.tui import _schedule_click_preparation
 
     ran_on: list[threading.Thread] = []
-    monkeypatch.setattr(rc, "prepare_for_clicks", lambda: ran_on.append(threading.current_thread()))
+    kwargs_seen: list[dict[str, object]] = []
+
+    def record(**kwargs: object) -> None:
+        kwargs_seen.append(kwargs)
+        ran_on.append(threading.current_thread())
+
+    monkeypatch.setattr(rc, "prepare_for_clicks", record)
     app = SimpleNamespace(_click_prep_task=None)
 
     task = _schedule_click_preparation(app)
@@ -612,6 +618,8 @@ async def test_the_tui_schedules_click_preparation_off_the_loop(
 
     assert len(ran_on) == 1
     assert ran_on[0] is not threading.main_thread(), "the compile ran on the event loop"
+    # The TUI IS a person's terminal, so it alone may clear a stale memory.
+    assert kwargs_seen == [{"attended_terminal": True}]
     await asyncio.sleep(0)
 
 
@@ -635,4 +643,461 @@ def test_both_attended_boot_paths_call_the_preparation() -> None:
 
     assert "_schedule_click_preparation(app)" in inspect.getsource(tui.run_tui)
     # The call itself, off the loop — not merely the import beside it.
-    assert "await asyncio.to_thread(prepare_for_clicks)" in inspect.getsource(server_app.lifespan)
+    lifespan = inspect.getsource(server_app.lifespan)
+    assert "await prepare_for_clicks_detached()" in lifespan
+    # The daemon has no emulator markers because it has no emulator; letting it
+    # "forget an undetectable terminal" would wipe a good memory every boot.
+    assert "attended_terminal" not in lifespan
+
+
+# ---------------------------------------------------------------------------
+# Remediation round 1 (review R1-R6, QA Q1/Q2, design D1-D4)
+# ---------------------------------------------------------------------------
+
+
+def _slow_then_fast_probe(monkeypatch: pytest.MonkeyPatch, text: str):
+    """First call TIMES OUT; later calls answer ``text``. Returns the call log."""
+    calls: list[list[str]] = []
+
+    def run(argv, **kwargs):  # noqa: ANN001
+        calls.append(list(argv))
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 0))
+        return SimpleNamespace(stdout=text, stderr="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return calls
+
+
+def test_a_timed_out_probe_is_not_persisted_so_the_next_process_asks_again(
+    fake_notify_send: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F1 / R1 = Q1. One slow `notify-send --help` must not become a permanent 'no'.
+
+    The persisted record is keyed on the binary's identity, which a slow moment
+    does not change — so persisting the failure made a clickable `notify-send`
+    plain-toast until it was replaced. Driven as QA drove it: the stub supports
+    `--action`, its first answer times out, then the host recovers.
+    """
+    calls = _slow_then_fast_probe(monkeypatch, "  --action=KEY=LABEL\n")
+
+    assert notify._notify_send_supports_actions(fake_notify_send, block=True) is False
+    assert not (
+        tmp_path / "cfg" / "notifier" / notify._ACTION_PROBE_FILE
+    ).exists(), "a timeout was written to disk as if it were an answer"
+
+    notify._ACTION_SUPPORT.clear()  # the next process
+    assert notify._notify_send_supports_actions(fake_notify_send, block=True) is True
+    assert len(calls) == 2, "the recovered host was never asked again"
+
+
+def test_a_nonzero_or_empty_probe_is_not_persisted_either(
+    fake_notify_send: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "cfg" / "notifier" / notify._ACTION_PROBE_FILE
+    for result in (
+        SimpleNamespace(stdout="", stderr="", returncode=0),  # nothing readable
+        SimpleNamespace(stdout="  --action", stderr="", returncode=1),  # failed run
+    ):
+        notify._ACTION_SUPPORT.clear()
+        monkeypatch.setattr(subprocess, "run", lambda *a, _r=result, **k: _r)
+        notify._notify_send_supports_actions(fake_notify_send, block=True)
+        assert not path.exists(), result
+
+
+def test_a_conclusive_probe_is_persisted_in_both_directions(
+    fake_notify_send: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other half of F1: persisting only conclusive answers must still persist them."""
+    path = tmp_path / "cfg" / "notifier" / notify._ACTION_PROBE_FILE
+    for text, expected in (("  --action=KEY=LABEL\n", True), ("  --urgency\n", False)):
+        notify._ACTION_SUPPORT.clear()
+        path.unlink(missing_ok=True)  # the first answer would otherwise be read back
+        _probe_returns(monkeypatch, text)
+        assert notify._notify_send_supports_actions(fake_notify_send, block=True) is expected
+        record = json.loads(path.read_text())["entries"][fake_notify_send]
+        assert record["supports"] is expected
+
+
+def test_two_notify_send_binaries_do_not_evict_each_other(
+    fake_notify_send: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review nit: a single-record file made two alternating binaries re-probe forever."""
+    other = tmp_path / "other-notify-send"
+    other.write_text("#!/bin/sh\n# a second one on PATH\n")
+    other.chmod(0o755)
+    _probe_returns(monkeypatch, "  --action=KEY=LABEL\n")
+    assert notify._notify_send_supports_actions(fake_notify_send, block=True) is True
+    assert notify._notify_send_supports_actions(str(other), block=True) is True
+
+    notify._ACTION_SUPPORT.clear()
+    calls = _probe_returns(monkeypatch, "(must not be asked)")
+
+    assert notify._notify_send_supports_actions(fake_notify_send) is True
+    assert notify._notify_send_supports_actions(str(other)) is True
+    assert calls == []
+
+
+# --- remembered terminal: age, forget, and the read-side filter (F2 / D2 / Q2) ---
+
+
+def test_a_memory_older_than_the_limit_is_not_recalled(tmp_path: Path) -> None:
+    from local_operator.spawn import remembered
+
+    assert remembered.remember(tmp_path, "ghostty", now=1_000_000)
+    assert remembered.recall(tmp_path, now=1_000_000 + remembered.MAX_AGE_S - 1) == "ghostty"
+    assert remembered.recall(tmp_path, now=1_000_000 + remembered.MAX_AGE_S + 1) is None
+
+
+def test_a_memory_with_no_usable_date_is_not_recalled(tmp_path: Path) -> None:
+    """An undated memory cannot be shown to be fresh, so it is not believed."""
+    from local_operator.spawn import remembered
+
+    path = tmp_path / "notifier" / "last-terminal.json"
+    path.parent.mkdir(parents=True)
+    for payload in ({"backend": "ghostty"}, {"backend": "ghostty", "recorded_at": "yesterday"}):
+        path.write_text(json.dumps(payload))
+        assert remembered.recall(tmp_path) is None, payload
+
+
+def test_a_daily_user_refreshes_the_date_instead_of_aging_out(tmp_path: Path) -> None:
+    from local_operator.spawn import remembered
+
+    assert remembered.remember(tmp_path, "ghostty", now=0)
+    # Same terminal, inside the refresh interval: no rewrite.
+    assert remembered.remember(tmp_path, "ghostty", now=60) is False
+    # Same terminal, past it: rewritten with the new date.
+    later = remembered._REFRESH_AFTER_S + 1
+    assert remembered.remember(tmp_path, "ghostty", now=later) is True
+    assert remembered.recall(tmp_path, now=later + remembered.MAX_AGE_S - 1) == "ghostty"
+
+
+def test_an_attended_boot_that_cannot_name_its_terminal_forgets_the_old_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D2 / R2(a): booted in Ghostty once, now lives in VS Code's terminal."""
+    from local_operator.spawn import remembered
+
+    assert remembered.remember(tmp_path, "ghostty")
+    monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: None)
+
+    # A caller that is NOT a terminal (the desktop daemon) must leave it alone.
+    assert remembered.remember_current(tmp_path, {}) is False
+    assert remembered.recall(tmp_path) == "ghostty"
+    # The TUI is a terminal: not naming it means the user has left the old one.
+    assert remembered.remember_current(tmp_path, {}, forget_if_undetected=True) is True
+    assert remembered.recall(tmp_path) is None
+
+
+def test_a_cmux_boot_also_forgets_the_older_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.spawn import remembered
+    from local_operator.spawn.cmux import CmuxBackend
+
+    assert remembered.remember(tmp_path, "ghostty")
+    monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: CmuxBackend())
+
+    assert remembered.remember_current(tmp_path, {}, forget_if_undetected=True) is True
+    assert remembered.recall(tmp_path) is None
+
+
+def test_a_hand_written_cmux_memory_is_not_honoured_on_read(tmp_path: Path) -> None:
+    """Q2: the write-side filter alone trusts every file that ever reached the disk."""
+    from local_operator.spawn import remembered
+
+    path = tmp_path / "notifier" / "last-terminal.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"backend": "cmux", "recorded_at": int(__import__("time").time())}))
+
+    assert remembered.recall(tmp_path) is None
+
+
+def test_prepare_for_clicks_forgets_only_when_the_caller_is_a_terminal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv(notify.ENV_DISABLE, raising=False)
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: Path.home().resolve())
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(notifier_app, "prewarm", lambda root: True)
+    seen: list[object] = []
+    monkeypatch.setattr(
+        "local_operator.spawn.remembered.remember_current",
+        lambda root, env=None, *, forget_if_undetected=False: seen.append(forget_if_undetected),
+    )
+
+    rc.prepare_for_clicks()
+    rc.prepare_for_clicks(attended_terminal=True)
+
+    assert seen == [False, True]
+
+
+# --- F3: a terminal that is GONE must actually fall through ---
+
+
+class _OpenAndOsascript:
+    """Doubles ``subprocess.Popen`` the way macOS behaves for a missing Ghostty.
+
+    ``open -na Ghostty.app`` STARTS fine and then exits 1 for a bundle that is
+    not installed (measured: rc=1 in 0.3 s); ``osascript`` opens Terminal.app.
+    Neither backend is stubbed — the real ``GhosttyBackend`` and
+    ``TerminalAppBackend`` run, and only the OS process is faked — so the
+    outcome is decided by the code under test, not by the stub.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, open_rc: int | None) -> None:
+        self.argv: list[list[str]] = []
+        recorder = self
+
+        class _Stdin:
+            def write(self, data: bytes) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        class _Process:
+            stdin = _Stdin()
+
+            def __init__(self, argv: list[str]) -> None:
+                self._argv = argv
+
+            def wait(self, timeout=None) -> int:  # noqa: ANN001
+                if self._argv[0] == "open":
+                    if open_rc is None:
+                        raise subprocess.TimeoutExpired(self._argv, timeout or 0.0)
+                    return open_rc
+                return 0
+
+        def fake_popen(argv, **_kwargs):  # noqa: ANN001
+            recorder.argv.append(list(argv))
+            return _Process(list(argv))
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+
+def test_a_missing_ghostty_falls_through_to_terminal_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F3 / R2(b): the claim "a gone terminal costs one refused spawn" is now true."""
+    _rung4(monkeypatch, tmp_path, remembered="ghostty")
+    spawns = _OpenAndOsascript(monkeypatch, open_rc=1)
+
+    assert rc._spawn_terminal("a1b2c3d4e5f6") is True
+    assert [a[0] for a in spawns.argv] == ["open", "osascript"], spawns.argv
+
+
+def test_an_installed_ghostty_is_not_followed_by_terminal_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The control: a launch that succeeded (or is still running) opens ONE window."""
+    for open_rc in (0, None):  # None = still alive at the bound, which counts as success
+        run_dir = tmp_path / f"open-{open_rc}"  # a fresh memory: one write per run
+        run_dir.mkdir()
+        _rung4(monkeypatch, run_dir, remembered="ghostty")
+        spawns = _OpenAndOsascript(monkeypatch, open_rc=open_rc)
+
+        assert rc._spawn_terminal("a1b2c3d4e5f6") is True
+        assert [a[0] for a in spawns.argv] == ["open"], (open_rc, spawns.argv)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="needs macOS's real `open`")
+def test_the_real_open_reports_a_missing_bundle_as_a_refusal() -> None:
+    """The premise of F3, on the real binary: no mock decides this."""
+    from local_operator.spawn import ghostty
+
+    assert (
+        ghostty._open_reported(["open", "-na", "NoSuchTerminalBundle-click-durability.app"])
+        is False
+    )
+
+
+# --- F4: the click runs the command carried by the banner ---
+
+
+@pytest.fixture(scope="module")
+def dry_run_helper(tmp_path_factory: pytest.TempPathFactory) -> str:
+    if sys.platform != "darwin" or not __import__("shutil").which("clang"):
+        pytest.skip("needs macOS and a compiler to build the real helper")
+    binary = str(tmp_path_factory.mktemp("helper") / "notifier")
+    subprocess.run(
+        [
+            "clang",
+            "-framework",
+            "Foundation",
+            "-Wno-deprecated-declarations",
+            "-o",
+            binary,
+            str(Path(notifier_app.__file__).parent / "notifier.m"),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    return binary
+
+
+def _dry(binary: str, *argv: str) -> dict[str, str]:
+    out = subprocess.run(
+        [binary, *argv],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], "LOCAL_OPERATOR_NOTIFIER_DRY_RUN": "1"},
+        timeout=30,
+        check=True,
+    ).stdout.strip()
+    # "window=5400 command=echo MINE carried=echo MINE foreign=echo MINE"
+    import re
+
+    return dict(re.findall(r"(\w+)=(.*?)(?= \w+=|$)", out))
+
+
+def test_the_banner_carries_its_own_command_and_a_foreign_helper_runs_it(
+    dry_run_helper: str,
+) -> None:
+    """THE PREMISE, shown on the real binary rather than asserted.
+
+    Several helpers of one bundle id are alive at once (her 24 h helper outlives
+    every 30 s toast posted after it), and macOS routes a click by bundle id. The
+    dry-run builds the notification exactly as a post would, then asks
+    `commandToRun` what a DIFFERENT live helper — whose own command is
+    `OTHER-HELPER` — would run for this banner's click. It must run THIS banner's
+    command, which only works if the command rode the notification (`carried`).
+    What it cannot show is macOS actually mis-delivering a click; that needs a
+    real Notification Centre and was not probed.
+    """
+    got = _dry(dry_run_helper, "T", "B", "lop resume-click abc123", "", "5400")
+
+    assert got["carried"] == "lop resume-click abc123"
+    assert got["foreign"] == "lop resume-click abc123"
+    assert got["command"] == "lop resume-click abc123"
+
+
+def test_a_banner_with_no_click_falls_back_to_the_helpers_own_command(
+    dry_run_helper: str,
+) -> None:
+    """No carried command (a banner with no click action): the fallback is `ownCommand`."""
+    got = _dry(dry_run_helper, "T", "B")
+
+    assert got["carried"] == ""
+    assert got["foreign"] == "OTHER-HELPER"
+
+
+def test_the_helper_source_carries_and_reads_the_command() -> None:
+    """Runs on every platform: the two halves of the carry, by name.
+
+    Dropping the write OR the read leaves the other half compiling and the old
+    single-helper behaviour intact, which is exactly how review found the first
+    version unpinned (31 tests passed with both removed).
+    """
+    source = (Path(notifier_app.__file__).parent / "notifier.m").read_text(encoding="utf-8")
+
+    assert '@{@"command" : command}' in source  # the write
+    assert 'objectForKey:@"command"' in source  # the read
+    assert "commandToRun(notification, self.command)" in source  # the delegate uses it
+
+
+# --- F7: the dry-run seam fires only for exactly "1" ---
+
+
+def test_the_dry_run_seam_requires_exactly_one() -> None:
+    """An inherited `=0` or empty value must not silently drop every banner.
+
+    Source-level because the behavioural cell (`=0` -> a REAL post) is exactly
+    what must never be run from a test.
+    """
+    source = (Path(notifier_app.__file__).parent / "notifier.m").read_text(encoding="utf-8")
+
+    assert 'strcmp(value, "1") == 0' in source
+    assert 'getenv("LOCAL_OPERATOR_NOTIFIER_DRY_RUN") != NULL' not in source
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not __import__("shutil").which("clang"),
+    reason="needs macOS and a compiler",
+)
+def test_the_compiled_dry_run_predicate_accepts_only_one(tmp_path: Path) -> None:
+    """The REAL `dryRunRequested`, compiled and called directly — never via a post."""
+    harness = tmp_path / "harness.m"
+    harness.write_text(
+        "#define main notifier_main\n"
+        f'#include "{Path(notifier_app.__file__).parent / "notifier.m"}"\n'
+        "#undef main\n"
+        "int main(void) {\n"
+        '    const char *cases[] = {"1", "0", "", "11", "true", "01"};\n'
+        "    for (int i = 0; i < 6; i++) {\n"
+        '        setenv("LOCAL_OPERATOR_NOTIFIER_DRY_RUN", cases[i], 1);\n'
+        '        printf("[%s]=%d\\n", cases[i], dryRunRequested());\n'
+        "    }\n"
+        '    unsetenv("LOCAL_OPERATOR_NOTIFIER_DRY_RUN");\n'
+        '    printf("[unset]=%d\\n", dryRunRequested());\n'
+        "    return 0;\n"
+        "}\n"
+    )
+    binary = tmp_path / "harness"
+    subprocess.run(
+        [
+            "clang",
+            "-framework",
+            "Foundation",
+            "-Wno-deprecated-declarations",
+            "-o",
+            str(binary),
+            str(harness),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    out = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30).stdout
+
+    assert out.split() == [
+        "[1]=1",
+        "[0]=0",
+        "[]=0",
+        "[11]=0",
+        "[true]=0",
+        "[01]=0",
+        "[unset]=0",
+    ], out
+
+
+# --- F6: quitting during the first-run compile must not wait for it ---
+
+
+def test_the_click_preparation_does_not_delay_loop_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R5: `asyncio.run` joins the default executor, so `to_thread` made quitting wait.
+
+    Measured before the fix with a plain `to_thread` sleep: `asyncio.run` returned
+    only after the sleep. Here the preparation takes 3 s and the loop is asked to
+    shut down immediately; it must return well inside that.
+    """
+    import asyncio
+    import time
+
+    started = threading.Event()
+
+    def slow_prepare(**_kwargs: object) -> None:
+        started.set()
+        time.sleep(3.0)
+
+    monkeypatch.setattr(rc, "prepare_for_clicks", slow_prepare)
+
+    async def boot() -> None:
+        asyncio.get_running_loop().create_task(rc.prepare_for_clicks_detached())
+        for _ in range(200):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert started.is_set()
+
+    t0 = time.monotonic()
+    asyncio.run(boot())
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 1.5, f"shutdown waited {elapsed:.1f}s for the compile"
+    thread = next(t for t in threading.enumerate() if t.name == "click-preparation")
+    assert thread.daemon is True
+    thread.join(timeout=5)
