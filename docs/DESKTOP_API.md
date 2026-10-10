@@ -169,10 +169,46 @@ claim gates them: `/v1/chat`, `/v1/sse`, `/v1/static`, and the
 This predates the claim handshake and is unchanged by it; on a daemon whose
 allowlist admits an origin, a claim still removes their CORS grant from every
 other origin, so a page can no longer *read* them cross-origin, while an
-allowlist-less daemon keeps the echo (see the `null`-origin residual above) and
-an unauthenticated local caller can still reach them either way. Widening the
+allowlist-less daemon keeps the echo (see the `null`-origin residual above) --
+**except `/v1/static`, which drops it on every daemon, see below** -- and an
+unauthenticated local caller can still reach them either way. Widening the
 gate to cover them is a separate, larger decision and is recorded rather than
 made here.
+
+`/v1/static/*` is the one of those four that now carries its own hardening
+(`server/utils/static_roots.py`), because it is the one that reads arbitrary files:
+
+- **Served roots.** `path` must resolve (symlinks followed) to a regular file inside
+  the agent home, `<config>/sessions`, `<config>/uploads`, the working directory of a
+  running session, or a root added through `static.roots` (settings page /
+  `config.yml`) or `LOCAL_OPERATOR_STATIC_ROOTS`. A session whose working directory is
+  `$HOME` or contains it adds nothing (serving `~` is an explicit `static.roots`
+  opt-in), and a registered agent's working directory is not a source at all (it is
+  writable through the ungated `PATCH /v1/agents/<id>`). A configured root that
+  contains `$HOME` (`/`, `/Users`, `~/..`) is refused. Anything else is a `403` that
+  does not say whether the file exists and names the remedy (`static.roots`); `..` is
+  refused outright, and a dot-directory below a root (`~/.ssh` under a root at `~`) is
+  never served.
+- **Host check.** A `Host` that is a DNS name other than `localhost` (or the
+  daemon's own `--host`) is refused with `403`, so a DNS-rebinding page, which is
+  same-origin and needs no CORS grant, cannot use the route. IP literals pass (the
+  app dials `http://127.0.0.1:<port>`); a wildcard bind (`--host 0.0.0.0`) turns the
+  check off.
+- **Response policy.** Every response, errors included, carries `nosniff` and a
+  `Content-Security-Policy` ending in `frame-ancestors` (the app only), and no CORS
+  grant is made to an origin that is not on the admitted allowlist -- including, unlike
+  the rest of the legacy surface, on an allowlist-less daemon, because nothing reads
+  these routes with `fetch` (`<img>`/`<video>`/`<iframe src>` are not CORS-gated).
+- **Still open:** the routes are unauthenticated. The UI embeds them by `src`, which
+  cannot carry a bearer; the fix is a short-lived signed query token minted by an
+  authenticated endpoint and checked here, and it needs the UI to request it. Also
+  open: a symlink swapped inside a writable root between the check and the open
+  (TOCTOU), and a hardlink inside a root to a file outside it.
+- **Known regression until the UI follow-up lands.** Every UI consumer that passes a
+  user- or agent-named path (composer thumbnails, message attachments, video/HTML
+  previews, canvas file viewer) gets a `403` for a file outside the roots above.
+  local-operator-ui reading those bytes over IPC retires the dependency; until then the
+  remedy is `static.roots`.
 
 The deprecated `/v1/ws` socket surface was also in that ungated set and is now
 **gone** — route, mount and fan-out — so it is no longer listed. This is a
@@ -1935,6 +1971,91 @@ backend-minted `dedupe_key`), its focus gate, and notification-click behaviour.
 The backend still never DELIVERS an OS toast for a leased desktop surface; it
 composes for a frontend that does.
 
+### Turn supplements: the `supplement_v1` row and the `supplement_progress` event
+
+"Highlights" (contract: `local_operator/supplements/contract.py`; design authority
+`docs/design/turn-supplements.md` §2.4/§2.7) is the block an owner runtime may add
+under a final answer — file callouts for what the turn produced, and (once the
+generator lane ships) a small generated graphic. It is decided after the turn's
+`agent_end` is emitted, and it never reaches the model's context.
+
+**The gate is two halves, ANDed** (`supplements.contract.negotiated`): the owner
+advertises `supplements-v1` only when it can honour the lazy read op
+(`supplements_for(anchors[]) → {anchor: newest row}`), and the viewer declares
+`supplements` on its auth frame (`auth["supplements"] = true`; the desktop live path
+declares `?supplements=1` on its events route instead — the `entry_ts` shape; that
+parameter is a frozen name today, read by no route until the routes lane lands). Only then
+may the runtime send `supplement_progress` events or project supplement rows; a viewer
+that does not declare receives neither, so it never paints an unknown kind. Rows are
+journaled either way, reach a desktop as ordinary history entries (raw `custom` rows)
+and the other surfaces through the lazy read op.
+
+**The row** — a durable custom entry:
+
+```jsonc
+{"id": "22130e9a88661cd6d09c59fa0f765b2d", "ts": 1791000002.0, "type": "custom",
+ "payload": {"custom_type": "supplement_v1", "details": { /* below */ }}}
+```
+
+`payload.details` (`supplements.contract.SupplementDetails`); the required keys plus the
+staged optionals (`files_more`, `more`, `images`, `decision`, `instruction`, `model`,
+`turns`, `tokens_in`, `tokens_out`, `cost_usd`, `error`, `dismissed`):
+
+```jsonc
+{
+  "anchor": "a1b2c3d4e5f60718293a4b5c6d7e8f90",  // the final assistant message id
+  "job": "3f9c1a7e5b20",     // stable across versions of one anchor
+  "version": 1,              // +1 per regeneration; readers take the NEWEST per anchor
+  "state": "done",           // decided|queued|done|failed|cancelled|skipped
+  "files": [{"path": "reports/latency.md", "name": "latency.md", "kind": "markdown",
+             "size_bytes": 4120, "mtime": 1790999940.0, "why": "written by write"}],
+  "components": [{"attachment": "<32-hex digest>", "title": "Latency by region (ms)",
+                  "source": "bench.csv rows 1-4 (tool result of bash at 10:41)",
+                  "mime": "text/html", "height_hint": 320}],
+  "more": ["rel/path…"],     // ≤ 20; the "N more" paths; same denylist as files
+  "at": 1791000002.0
+}
+```
+
+Paths in `files`/`more` are session-relative (or `~/`-relative), never absolute. A row
+carrying `error: "superseded"` (a newer turn moved past it) or `dismissed: true` renders
+NOTHING on every surface, whatever its state.
+
+**The stale-row rule, for every reader.** Read the newest version per `anchor`; when a
+non-terminal row (`decided`/`queued`) has no live job in the answering runtime — a cold
+read, or a cut job — render it as `cancelled · Retry`, never a spinner that cannot
+finish. A terminal `done` row with nothing inside renders nothing either.
+
+**The event** — `supplement_progress`, a new `AgentEvent` family (additive on the
+tolerant frame; no `PROTOCOL_VERSION` bump), sent only to viewers that negotiated:
+
+```jsonc
+{"type": "supplement_progress", "anchor": "a1b2…", "job": "3f9c1a7e5b20", "version": 2,
+ "state": "running",     // + running|cancelling, which are LIVE-ONLY, never journaled
+ "stage": "generating",  // deciding|generating|validating|repairing; "" outside running
+ "elapsed_s": 41.5,
+ "files": [], "components": [],  // only on decided/done; done carries the components
+ "error": "", "error_type": ""}
+```
+
+It arrives only AFTER the turn's `agent_end`, and it carries the `anchor`, so a late
+event (the next turn already started) still lands on the right answer. `lop exec` never
+produces one (its turns are outside the trigger), and SDK event streams are unchanged.
+Under backpressure, supplement frames fold keep-newest — the family is
+self-replacing by construction — but no fold key exists for them yet; `session/delta_merge.py`
+gains the `supplement` fold with the emitter lane.
+
+**Not in this release.** No image components (v1 documents carry HTML only); no mesh
+transfer (a file or component a peer device holds reads as "on <peer>" with previews
+disabled — `GET …/attachments/{digest}` already answers 409 `attachment_on_peer`); the
+native (phone) WebView frame is pending its own lane; and the static preview routes
+(`/v1/static/*`) are not yet token-authenticated — short-lived signed URLs are a
+recorded follow-up that needs a client change. No renderer consumes any of this yet:
+the TUI, UI, relay and native renderers are separate lanes, and the desktop document
+route is a registered 404 stub until the routes lane fills it; the `?supplements=1`
+events-route reader and the keep-newest fold are contract-frozen names still to be
+implemented, by the routes and emitter lanes respectively.
+
 ### Verification
 
 `tests/e2e/test_desktop_sessions.py` drives real loopback HTTP and the production
@@ -2453,6 +2574,59 @@ the user forbade. With nothing else running, the click falls through to the
 terminal — the same place it lands when the launch is allowed and the app is
 absent.
 
+### Making the click survive until it is made
+
+A banner is often clicked long after it was posted. The case that shaped this
+section is the daily check-in from Aida, the built-in assistant session
+(`local_operator/aida/`): it is posted at 08:30 by a runtime that exits
+immediately afterwards, and the person clicks it from the notification list
+whenever they next sit down. For the click to land, each platform has to keep
+something alive or ready until then.
+
+- **macOS.** A click is delivered to the helper process that posted the banner,
+  so that process has to still be running. It waits for the number of seconds
+  given as its fifth argument after the program name (`argv[5]`), clamped to
+  1 s – 24 h and defaulting to 30 s. Aida's banner passes 24 h
+  (`notify.DURABLE_CLICK_WINDOW_S`); every other banner keeps 30 s. A 24 h wait
+  is a ceiling, not a promise: a logout, reboot or crash ends the helper sooner,
+  and a click after that does nothing (relaunching the program takes its
+  no-arguments usage branch and exits). That is also what happens at the end of
+  the window — the banner stays in the notification list and is inert, which is
+  deliberate: removing it would make an unanswered check-in disappear from the
+  one place the user can still find it. The click command is stored on the
+  notification itself, so when several helpers of the same app are alive the
+  click runs the command of the banner that was clicked. The sender app is
+  pre-warmed when a TUI or the desktop daemon starts
+  (`resume_click.prepare_for_clicks`) and built synchronously for a durable
+  banner, because the fallback used on a cold machine (`osascript`) cannot be
+  clicked at all. `BUILD_STAMP` is `"3"` so installs whose helper ignores the
+  wait argument rebuild. **Not verified on a real Notification Centre:** the
+  one real-banner click probe was skipped by the operator, so late-click
+  delivery is read from the code and not measured.
+- **Linux.** Whether `notify-send` understands `--action` is probed once and
+  kept in `<config>/notifier/notify-send-actions.json`, per binary (path, mtime
+  and size), so the first banner of a fresh runtime is already clickable. Only
+  an answer the probe actually returned is kept; a timeout or error is retried
+  by the next process. A banner that asks for a durable click probes
+  synchronously when nothing is known. The waiter is still
+  `notify-send --expire-time=5000 --action`: a click after the notification
+  daemon has dropped the popup is not delivered by every desktop. **Not
+  verified:** no Linux host or notification daemon was available.
+- **Windows.** A runtime banner does not exist there (`detached_notify` has no
+  Windows branch and `notify-send` is absent), so rungs 1–4 are never reached
+  from one. What a Windows user gets is the desktop app's own toast, only while
+  the app is running, and its click is handled inside the app. Raising a banner
+  from the runtime with a click that opens the conversation needs a registered
+  toast activator and a Windows host to test it on; neither exists here, so none
+  is claimed. This is a recorded limitation (see also `docs/XPLATFORM.md`).
+- **Rung 4's terminal.** A click's process sits in no terminal, so detection
+  finds none. The rung therefore tries the terminal the user last ran the TUI
+  in (`<config>/notifier/last-terminal.json`) before the macOS Terminal.app last
+  resort. The memory is refreshed on each TUI start, cleared when a TUI starts
+  somewhere that cannot be identified (or in cmux, which is never recorded
+  because it opens unfocused), and ignored after 30 days. A remembered terminal
+  that is no longer installed falls through to Terminal.app.
+
 ## Capability keys
 
 | Key | Version | Advertises | Absent means |
@@ -2469,6 +2643,7 @@ absent.
 | `ask_attachments` | 1 | the optional `images` list on `POST .../{id}/answers` (and the identical `images` key of the `ask_respond` socket frame), and the `attachments` refs on a `PendingAsk` row. The key is a BUILD fact; whether the owner behind a given session can keep the pictures is a separate, per-owner `ask-attachments-v1` runtime capability, and its absence is refused in words rather than stripped | the answer card offers no attach affordance and sends text only. A new UI that sends `images` to an old backend gets a `422` (`Answer` forbids unknown keys) — never a silent drop |
 | `entry_ts` | 1 | `entry_ts=1` on `GET .../{id}/history`, `GET .../{id}` and `GET .../{id}/events`, which turns on the per-row `ts_source` vocabulary for wire rows (`ts: null` + `"unstated"` where the owner shipped no true entry time) | the renderer sends no `entry_ts` and reads no `ts_source`, keeping today's serve-stamp ordering exactly. It must NOT gate any existing surface on this key: `ts_source` itself is additive and ignored by an older reader, so nothing breaks in either direction — the key only lets a NEW renderer tell whether asking is worthwhile |
 | `open_frame` | 1 | `open_frame=1` on `GET .../{id}`, `GET .../{id}/history` and `GET .../{id}/events`: a page counted in PAINTABLE rows, cut back to the oldest included run's opening user row under a hard cap (with `head_cut` when the cap binds), with non-painted bytes stripped and `runs[]` / `runs_state` carry the per-run facts the bar needs — see [the open frame](#the-open-frame-a-turn-aligned-paint-only-page-open_frame-1) | the renderer sends no `open_frame` and receives today's page byte-for-byte: counts in journal entries, unstripped rows, no `runs`. It must NOT send the flag unless it reads `runs`/`head_cut`, because the unit of `limit` changes with it |
+| `supplements` | 1 | `features.supplements: 1` — the turn-supplement ("Highlights") contract is in the build: the `supplement_progress` event family, the `supplement_v1` journal row, the `supplements-v1` attach capability and the document assembler. It is a BUILD fact, NOT the attach gate: live events and the history projection reach a viewer only under the two-half `supplements-v1` gate (the owner's own capability string ANDed with the viewer's declaration — `auth["supplements"] = true`, or `?supplements=1` on the desktop live path). See [Turn supplements](#turn-supplements-the-supplement_v1-row-and-the-supplement_progress-event) | the renderer draws nothing supplement-shaped and is never refused for it: a viewer that does not declare is not sent a `supplement_progress` event or a supplement projection, and rows are journaled either way. It must NOT gate any existing surface on this key |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already

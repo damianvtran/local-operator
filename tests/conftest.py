@@ -28,6 +28,7 @@ import logging
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -57,6 +58,12 @@ _AMBIENT_VARS = (
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
+    # The static-route root allowlist (``server/utils/static_roots.ROOTS_ENV``),
+    # a directory list that WIDENS what the server will serve. An inherited value
+    # would make every server test's root set depend on the developer's shell --
+    # and on an operator's machine it names real directories, so a test could be
+    # made to serve files out of one.
+    "LOCAL_OPERATOR_STATIC_ROOTS",
     # The unbounded-search guard's escape hatch (``tools/search_guard.ALLOW_ENV``).
     # An inherited value would waive the refusal every cell in
     # ``test_bash_search_interception.py`` asserts — the same ESCAPE-HATCH class
@@ -192,6 +199,16 @@ _AMBIENT_VARS = (
     # SAS-mismatch arm would never be exercised. Scrubbed here, and a test that
     # needs the seam sets it explicitly.
     "LOP_NETWORK_TEST_MODE",
+    # The spawn-lineage record (``macos_disclaim.ENV_SPAWN_CHAIN``): written into
+    # every long-lived child's environment by ``spawn_disclaimed`` and read back
+    # by the child's boot record and signal receipt. It names real processes (the
+    # spawner and its ancestors), so a value inherited from the developer's shell
+    # -- or from a lop session that launched pytest, which is the COMMON case,
+    # since every runtime is born with one -- would be prepended to by every test
+    # that spawns and asserted on by every test that reads a chain, making the
+    # recorded lineage depend on who ran the suite. Tests that need a chain set it
+    # explicitly.
+    "LOP_SPAWN_CHAIN",
     # The delegation allowance the guard reads beside them: set by the `bash`
     # tool on commands run by a session that HOLDS `task`, and the second route
     # by which an agent's shell may legitimately open a session. An inherited
@@ -582,6 +599,81 @@ def isolate_environment(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def refuse_real_notifier_spawn(monkeypatch):
+    """Refuse to START a real notification helper from a unit test, except in dry-run.
+
+    WHY A GUARD AT THE Popen BOUNDARY, ON TOP OF THE GATES ABOVE. The gates stop
+    the PRODUCT from announcing — a runtime reads them before it calls
+    ``detached_notify``. They mean nothing to a test that starts the
+    notification HELPER itself: the macOS helper is a compiled Objective-C
+    binary that talks to Notification Centre and reads none of them, and this
+    suite compiles and runs that real binary. Its one safety story is the
+    dry-run seam, ``LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1``, which makes the helper
+    report what it would do and exit before touching Notification Centre; the
+    F7 pin in ``test_click_durability.py`` holds the seam to exactly ``"1"``.
+    What this guard adds is the case a caller FORGETS: a spawn of a
+    ``notifier``/``notifier-*`` child that does not declare the seam is refused
+    here, for every test — instead of posting a banner to the developer's
+    screen that no assertion ever notices. That failure mode is real and was
+    seen on this feature: 2026-10-09 20:44:18, a compiled helper built from a
+    source that had no seam reached Notification Centre and presented a banner.
+
+    The ``osascript`` arm is the same rule for the fallback route: a test must
+    stub ``notify._spawn_detached_ok`` (or ``subprocess`` itself) rather than
+    spawn a real ``osascript -e 'display notification ...'``.
+
+    A test that deliberately runs the real helper opts in the visible way the
+    gates above document: pass ``LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1`` in the
+    child's environment. The pins are ``test_click_durability.py::
+    test_a_unit_run_cannot_start_a_real_notifier_without_the_seam`` and, for
+    the class contract, ``::test_the_spawn_guard_keeps_the_popen_class_contract``.
+    """
+
+    # The base is the REAL ``Popen``: this class body evaluates before the
+    # ``setattr`` below, so the name still holds the unpatched class.
+    class _GuardedPopen(subprocess.Popen[bytes]):
+        """The refusal, expressed as a Popen SUBCLASS — never a replacement.
+
+        WHY NOT A FUNCTION (round-3 regression). Whatever occupies
+        ``subprocess.Popen`` here IS Popen for every consumer in the process,
+        and consumers subscript it at runtime — the ``mcp`` package evaluates
+        ``subprocess.Popen[bytes]`` as its platform utility modules import,
+        and the repo's own annotations name ``Popen[...]`` widely. A plain
+        function answers the subscript — and ``isinstance()`` — with
+        ``TypeError: 'function' object is not subscriptable``: a measured 35
+        tests across the MCP auth and desktop catalog suites went red on the
+        broken head. Subclassing keeps ``Popen[str]``, ``isinstance`` and
+        ``issubclass`` working; the pin is
+        ``test_click_durability.py::test_the_spawn_guard_keeps_the_popen_class_contract``.
+        """
+
+        def __init__(self, args, *rest, **kwargs):
+            argv = [args] if isinstance(args, (str, bytes)) else list(args)
+            name = os.path.basename(str(argv[0])) if argv else ""
+            if name == "notifier" or name.startswith("notifier-"):
+                child_env = kwargs.get("env")
+                seam = (child_env if child_env is not None else os.environ).get(
+                    "LOCAL_OPERATOR_NOTIFIER_DRY_RUN"
+                )
+                if seam != "1":
+                    raise RuntimeError(
+                        f"refusing to start {argv[0]!r} without "
+                        "LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1: the dry-run seam is the "
+                        "only way a unit run reaches the notification helper (see "
+                        "tests/conftest.py::refuse_real_notifier_spawn)"
+                    )
+            if name == "osascript" and any("display notification" in str(arg) for arg in argv):
+                raise RuntimeError(
+                    "refusing to spawn a real 'osascript display notification' from a "
+                    "test; stub the spawn instead (see "
+                    "tests/conftest.py::refuse_real_notifier_spawn)"
+                )
+            super().__init__(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
+
+
+@pytest.fixture(autouse=True)
 def isolate_implicit_local_discovery(monkeypatch):
     """Keyless discovery must not read a developer's default-port runtimes.
 
@@ -626,6 +718,50 @@ def reset_store_maintenance() -> Iterator[None]:
         yield
     finally:
         reset_store_maintenance_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def reset_page_cache_between_tests() -> Iterator[None]:
+    """Give every test a worker that has served no transcript page yet.
+
+    ``local_operator.session.page_cache`` keys decoded pages on the journal's
+    file identity, ``(directory, st_ino, st_size)``, in one process-wide cache
+    (its module docstring argues why identity, not a generation counter, is the
+    invalidation). That identity is right for the product and cross-test state
+    for the suite: any later test that reads a journal can be answered from an
+    earlier one's page.
+
+    The collision is not hypothetical. CI run 38037554993 shard 3 (job
+    114171921826) failed
+    ``tests/unit/tui/test_subagent_view.py::test_the_no_fact_fallback_labels_an``
+    ``envelope_by_its_own_kind``, parameter ``[False-False-Parent]``, serving
+    an EARLIER parameter's page (``Parent · redirected`` where ``Parent`` was
+    expected). This repo deletes a PASSING test's ``tmp_path``
+    (``tmp_path_retention_policy = "failed"``) and ``_pytest.tmpdir`` numbers
+    the next directory from the suffixes that still EXIST, so a later parameter
+    gets the earlier one's path back; the kernel recycles the freed inode; and
+    the two journals are byte-length twins. Same ``(directory, st_ino,
+    st_size)``, different bytes, and the cached page answers — a hit the cache
+    cannot tell from a hit on the current file. The in-place rewrite at an
+    unchanged size, the other shape its docstring names, is the same defect one
+    test drives deterministically; see
+    ``tests/unit/session/test_page_cache_isolation.py``.
+
+    Reset BEFORE and AFTER each test, like ``reset_store_maintenance``: before,
+    so no test can be answered from another's cache; after, so nothing this
+    test left can be served inside a teardown that follows. This replaces the
+    file-local fixture ``tests/unit/session/test_page_cache.py`` carried — it
+    was right, it was just scoped to the one file that already knew. It does
+    not touch the product-side residual (a production fix changes the key and
+    its cache semantics), which stays the page-cache owners' call.
+    """
+    from local_operator.session.page_cache import reset_page_cache
+
+    reset_page_cache()
+    try:
+        yield
+    finally:
+        reset_page_cache()
 
 
 def _redaction_filter() -> logging.Filter | None:

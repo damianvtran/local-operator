@@ -10,7 +10,7 @@ lines the monitor was told to ignore (and in timestamps) must stay silent.
 
 from __future__ import annotations
 
-import asyncio
+import asyncio  # noqa: F401 — kept for a content-identical merge; main's tests use it
 import json
 import os
 import re

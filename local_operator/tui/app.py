@@ -4741,6 +4741,15 @@ class OperatorApp(App[None]):
         self._model_show_all = False
         self._model_activation_generation = 0
         self._model_activation_pending: int | None = None
+        #: A FIRST-LOGIN re-home whose session was not bound when the login
+        #: completed: the provider id to re-home for. Drained on the session-bind
+        #: edge and, as a backstop, at the next turn end (QA round 1, Q1 — the
+        #: repair used to evaporate silently in exactly this window).
+        self._rehome_await_bind: str | None = None
+        #: ``(old_label, login_provider, model_id)`` for a stranded conversation
+        #: that was BUSY when its first-login re-home ran. Retried at the next
+        #: turn end; the deferral sentence told the user so (UX review U1).
+        self._rehome_pending: tuple[str, str, str] | None = None
         #: The unknown provider id that put us in the setup state, when that is
         #: why we are here (``None`` for the nothing-configured case).
         #:
@@ -13431,6 +13440,18 @@ class OperatorApp(App[None]):
         #: Monotonic and never reset: a token from any earlier binding is simply
         #: unequal to the current one, which is all the comparison needs.
         self._binding_epoch += 1
+        # A first-login re-home that had no session to inspect (the login landed
+        # mid-swap) runs HERE, on the edge its decision was waiting for — the one
+        # writer of ``self._session``, so there is no second place the queue could
+        # be drained from a stale binding (QA round 1, Q1). Nothing runs on an
+        # UNBIND (``session is None``): the queue keeps its provider for the next
+        # bind or the turn-end backstop rather than firing against no session.
+        queued = self._rehome_await_bind
+        if queued is not None and session is not None:
+            self._rehome_await_bind = None
+            sentence = self._rehome_stranded_session(queued)
+            if sentence:
+                self._notice(sentence, "note")
 
     def _restore_search_spend(self, session: Any) -> None:
         """Seed a RESUMED conversation's search spend into the search ledger.
@@ -14734,6 +14755,7 @@ class OperatorApp(App[None]):
         hide_cross_session = cross_session_hidden()
         from local_operator.harness.rows import (
             is_hidden_tool_call,
+            is_quiet_turn_call,
             is_settle_only_ask,
             queued_ask_engine_live,
         )
@@ -14752,8 +14774,12 @@ class OperatorApp(App[None]):
             # HIDDEN tools never paint a row on any seam: this one restores the
             # row for a call already in flight, so skipping it here is what
             # keeps a resumed ``patience`` call from appearing where the live
-            # path refuses to mount it (UX round 1, U2).
-            if is_hidden_tool_call(call):
+            # path refuses to mount it (UX round 1, U2). THE QUIET PAIR is the
+            # second member of that class (design docs/design/quiet-turns.md
+            # §5, S1): both live seams and the replay skip its call, so this
+            # restore painter must too, or a resumed quiet call would mount a
+            # row the rest of the app refuses to paint.
+            if is_hidden_tool_call(call) or is_quiet_turn_call(call):
                 continue
             if is_settle_only_ask(getattr(call, "name", ""), queued_engine=gate_settle_only):
                 continue
@@ -15626,9 +15652,12 @@ class OperatorApp(App[None]):
         The gate's ONE drop path (design docs/design/ask-gate.md §3): a
         diverted ask's row must vanish wherever a surface had mounted one
         before the mode could be read — the mixed-build fallback the design
-        records (today's mount, drop on the settle marker). Registries are
-        cleaned by IDENTITY first (the card may sit under a placeholder key),
-        then the view's ``remove_block`` takes the row off its retained list.
+        records (today's mount, drop on the settle marker). THE QUIET PAIR's
+        end frame rides the same path (design docs/design/quiet-turns.md §5,
+        S1): a card some seam older than the name gates could have mounted is
+        retired rather than settled. Registries are cleaned by IDENTITY first
+        (the card may sit under a placeholder key), then the view's
+        ``remove_block`` takes the row off its retained list.
         """
         for registry in (self._tool_cards, self._composing_cards):
             for key in [key for key, candidate in registry.items() if candidate is card]:
@@ -38452,12 +38481,18 @@ class OperatorApp(App[None]):
         attachments: Mapping[int, Marked] | None = None,
         *,
         _inline_remote: bool = False,
+        _rehome: bool = False,
     ) -> Awaitable[None] | None:
         """Dispatch a typed slash command (with arguments) to its handler.
 
         Ordinary callers schedule remote work and return None. The cold-bind
         worker requests the SAME operation inline so queued commands reach the
         owner before a later prompt can overtake an extra scheduling hop.
+
+        ``_rehome`` is the sign-in repair's private spelling of ``/model
+        <p>/<id>``: it suppresses the dispatch's own receipt, because the repair
+        paints ONE sentence of its own and two receipts for one switch read as
+        two events (design round 1, D1). See ``_activate_resolved_model``.
 
         ``attachments`` is the composer's index→image map at submit time, passed
         through so the two prompt-sending commands (``/team``/``/agent``) can
@@ -38832,7 +38867,7 @@ class OperatorApp(App[None]):
         elif command == "/delete":
             self._cmd_delete(arg, notice)
         elif command == "/model":
-            self._cmd_model(arg, notice)
+            self._cmd_model(arg, notice, _rehome=_rehome)
         elif command == "/effort":
             self._cmd_effort(arg, notice)
         elif command == "/fast":
@@ -39908,7 +39943,7 @@ class OperatorApp(App[None]):
         )
 
     # -- model --------------------------------------------------------------
-    def _cmd_model(self, arg: str, notice: NoticeFn) -> None:
+    def _cmd_model(self, arg: str, notice: NoticeFn, *, _rehome: bool = False) -> None:
         """``/model`` — open the picker; ``/model provider/id`` — switch directly.
 
         A bare ``/model`` OPENS THE LIST rather than printing the current label.
@@ -40124,10 +40159,15 @@ class OperatorApp(App[None]):
             # This is a user-command receipt, not background infrastructure.
             # Retire the splash before the wait so completion cannot move the
             # composer underneath a draft typed while capacity is being checked.
-            notice(f"Checking active capacity for {provider}/{model_id}…", "info")
+            if not _rehome:
+                # A machine-initiated repair is not a user command waiting on a
+                # capacity answer, so the wait line goes with the receipt it
+                # belongs to (design round 1, D1): the re-home has its own single
+                # sentence.
+                notice(f"Checking active capacity for {provider}/{model_id}…", "info")
             self.run_worker(
                 self._resolve_local_model_activation(
-                    session, provider, model_id, persist_default, notice, generation
+                    session, provider, model_id, persist_default, notice, generation, _rehome
                 ),
                 group="local-model-resolution",
                 exclusive=True,
@@ -40138,7 +40178,9 @@ class OperatorApp(App[None]):
         except Exception as error:  # unresolvable hosting/model pair
             self._system_notice(f"cannot resolve {provider}: {error}", "error")
             return
-        self._activate_resolved_model(session, provider, model_id, spec, persist_default, notice)
+        self._activate_resolved_model(
+            session, provider, model_id, spec, persist_default, notice, _rehome=_rehome
+        )
 
     async def _resolve_local_model_activation(
         self,
@@ -40148,6 +40190,7 @@ class OperatorApp(App[None]):
         persist_default: bool,
         notice: NoticeFn,
         generation: int,
+        _rehome: bool = False,
     ) -> None:
         providers = self._providers
         if providers is None:
@@ -40159,7 +40202,7 @@ class OperatorApp(App[None]):
             # selection settles, so a fast next prompt cannot reach the old model.
             if self._session is session and generation == self._model_activation_generation:
                 self._activate_resolved_model(
-                    session, provider, model_id, spec, persist_default, notice
+                    session, provider, model_id, spec, persist_default, notice, _rehome=_rehome
                 )
         except Exception as error:
             self._system_notice(f"cannot resolve {provider}: {error}", "error")
@@ -40196,6 +40239,8 @@ class OperatorApp(App[None]):
         spec: Any,
         persist_default: bool,
         notice: NoticeFn,
+        *,
+        _rehome: bool = False,
     ) -> None:
         # Consume the ONE-SHOT effort override FIRST, before any early return.
         # `_cmd_model_saved` and the persist path leave it here so the NEXT
@@ -40516,6 +40561,16 @@ class OperatorApp(App[None]):
             # that can land on a provider this host has no credential for.
             self._publish_model_access(session)
         suffix, warning = ("", None) if write_only else self._model_access_note(provider)
+        if _rehome:
+            # ONE STATEMENT OF THE MOVE (design round 1, D1). Everything below is
+            # the dispatch's RECEIPT — the `model: X → Y (this session) · … —
+            # /model default saves this for new sessions` row (and the mid-turn
+            # and access rows that qualify it) — and the sign-in repair paints a
+            # sentence of its own, written for a move the user did not ask for.
+            # Two receipts for one switch read as two events, and the persist
+            # hint advised an action the config row above had already taken
+            # (D2). The switch itself, and the band, have already happened.
+            return
         if persist_result is not None:
             notice(persist_result, "warning")
         elif persist_default:
@@ -42386,10 +42441,14 @@ class OperatorApp(App[None]):
         predicate every picker already filters by), so it publishes the claim
         rather than letting each reader re-read a credential store.
 
-        A ``None`` claim is published rather than nothing when the store cannot
-        be read or the session has no model yet: ``signed_out`` would be an
-        accusation the app failed to establish, and a stale claim from before
-        the store became unreadable is worse than no claim at all.
+        The MAPPING is not spelled here: ``model_access_claim`` owns it, one
+        spelling shared by every publishing host, so this host and a serve-side
+        runtime cannot describe the same store with two answers (cross-PR
+        unify with the re-home branch's publication). ``None`` inputs — no
+        selector yet, an unreadable store — make the builder answer ``None``,
+        and the claim is published rather than nothing: ``signed_out`` would be
+        an accusation the app failed to establish, and a stale claim from
+        before the store became unreadable is worse than no claim at all.
         """
         store = getattr(session, "_frontend_state_store", None) if session is not None else None
         if store is None:
@@ -42401,26 +42460,10 @@ class OperatorApp(App[None]):
         # try/except around every call site, which is how the routed lane came
         # to be missed in the first place.
         try:
-            from local_operator.session.frontend_state import FrontendModelAccess
+            from local_operator.session.frontend_state import model_access_claim
 
-            selector = self._current_selector()
-            if not selector:
-                store.refresh_model_access(None)
-                return
-            provider = selector.partition("/")[0]
-            usable = self._usable_providers()
-            if usable is None:
-                store.refresh_model_access(None)
-                return
-            from local_operator.providers.registry import get_provider_definition
-
-            definition = get_provider_definition(provider)
             store.refresh_model_access(
-                FrontendModelAccess(
-                    state="ok" if provider in usable else "signed_out",
-                    provider=provider,
-                    label=definition.name if definition is not None else provider,
-                )
+                model_access_claim(self._current_selector(), self._usable_providers())
             )
         except Exception:
             logger.debug("model access publication failed", exc_info=True)
@@ -49454,10 +49497,33 @@ class OperatorApp(App[None]):
             # strictly narrower (it only knows about a value THIS boot
             # reported), so a config corrupted by another route was repaired by
             # the CLI and ignored here.
+            #
+            # ``accessible`` adds the OTHER half of the question the registry
+            # lookup cannot answer: a hosting the registry owns but this user
+            # has no credential for is STRANDED, and a sign-in to a working
+            # provider must replace it rather than bow to case 1 (see
+            # ``providers.model_access``; the read uses this app's own
+            # controller, so it sees the credential the login just stored).
+            # ``None`` on an unreadable store disables only that repair.
+            try:
+                from local_operator.providers.model_access import (
+                    credentialed_chat_providers,
+                )
+
+                accessible = (
+                    credentialed_chat_providers(
+                        self._providers, config_values=manager.get_config().values
+                    )
+                    if self._providers is not None
+                    else None
+                )
+            except Exception:  # noqa: BLE001 — the repair degrades, the login does not
+                accessible = None
             plan = plan_login_defaults(
                 provider,
                 manager.get_config_value("hosting"),
                 manager.get_config_value("model_name"),
+                accessible=accessible,
             )
             # A plan with nothing to write can still have something to SAY: a
             # decision-only provider (TypeSafe's Jev) leaves the routing exactly
@@ -49469,6 +49535,221 @@ class OperatorApp(App[None]):
             return plan.receipt
         except Exception as error:  # noqa: BLE001 — never fail a completed login
             return f"logged in, but could not save default hosting/model: {error}"
+
+    def _rehome_stranded_session(
+        self, login_provider: str, *, from_pending: bool = False
+    ) -> str | None:
+        """Move THIS session off a model the sign-in just proved unreachable.
+
+        The TUI's half of the re-home (the desktop's is ``server/utils/
+        desktop_rehome``; the policy, the predicate and the sentences all live in
+        ``providers/model_access``). A conversation's ``selected_model`` outranks
+        config — the owner is the only writer that may move it — so correcting
+        the default alone would leave the user staring at a chat pinned to a
+        provider whose credential is gone: the reported bug.
+
+        Runs AFTER the config write, so the target is the default the user now
+        has, and only for a session this process OWNS: a session reached over a
+        socket is governed by the config of the machine running it, whose own
+        sign-in path repairs it (the design's cross-process rule — lazy by
+        design, never pushed).
+
+        THE FIRST-LOGIN RULE (operator refinement, round 1) gates the move:
+        ``login_provider`` is the provider this login just added, and the repair
+        runs only when the credentialed chat providers other than it are empty
+        (``is_first_provider_login``; Radient counts). It exists for the state a
+        session can be in BEFORE any provider login — started by some earlier
+        build, pinned to ``radient/auto``, nothing behind it — and the first
+        OpenAI or Anthropic login is the one that moves it. Adding a second
+        provider later must never re-point open conversations. The gate runs on
+        EVERY attempt — the deferred retry included — because the authority can
+        lapse between the refusal and the turn end (a second login lands, or the
+        first provider is signed out again), and the queue is armed only once it
+        has passed (round-2 Q3: a non-first login must not even leave a string
+        waiting for the bind edge).
+
+        ``from_pending`` is the deferred retry of a first login that found the
+        conversation busy (see ``_settle_deferred_rehome``). It changes the
+        answer's SHAPE, not the checks: a still-busy conversation keeps the arm
+        silently (the sentence was said at the refusal), while every cannot-land
+        path closes the arm through :meth:`_deferred_close` — speaking the
+        close-out when the repair is still needed, silent when nothing is wrong
+        any more.
+
+        The switch goes through the ``/model`` dispatch rather than the raw
+        setter, for the reason ``_on_model_row_chosen`` gives: a picked or typed
+        selector and this repair must not be able to diverge, and the dispatch
+        carries ``_model_activation_generation`` with it. ``_rehome=True``
+        suppresses that dispatch's own receipt — the sentence returned here is
+        the ONE statement of the move (design round 1, D1). The check-then-
+        dispatch below is atomic by construction (both halves run in one
+        event-loop slot with no await between them), which is this front end's
+        equivalent of the owner-side compare-and-set the runtime uses.
+
+        Returns the sentence to paint — the move's notice, the deferral when the
+        conversation is busy, or the close-out ``_deferred_close`` writes — or
+        ``None`` when there is nothing to say. Never raises: the login it rides
+        on has already succeeded.
+        """
+        session = self._session
+        if self._providers is None:
+            # No controller to read a credential store with. The retry cannot be
+            # judged at all, so it closes rather than lapsing into silence; the
+            # conversation was stranded when the promise was made and nothing
+            # here shows that changed.
+            return self._deferred_close(from_pending, speak=True)
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+            from local_operator.providers.model_access import (
+                credentialed_chat_providers,
+                is_accessible,
+                is_first_provider_login,
+                is_stranded,
+                rehome_deferred_notice,
+                rehome_notice,
+            )
+
+            manager = ConfigManager(config_dir())
+            accessible = credentialed_chat_providers(
+                self._providers, config_values=manager.get_config().values
+            )
+            provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
+            model_id = str(manager.get_config_value("model_name", "") or "").strip()
+        except Exception:  # noqa: BLE001 — a repair must never fail a completed login
+            return self._deferred_close(from_pending, speak=True)
+        if not is_first_provider_login(accessible, login_provider):
+            return self._deferred_close(from_pending, speak=True)
+        if session is None:
+            # NO SESSION YET — the app is mid-swap, and there is no conversation
+            # to inspect (QA round 1, Q1: this window used to swallow the repair
+            # silently). The login authorised it, so it waits for the bind edge
+            # rather than evaporating. Not in the setup state, where no
+            # conversation exists to strand and the config write IS the repair.
+            if not from_pending and not self._setup_state:
+                self._rehome_await_bind = login_provider
+            return self._deferred_close(from_pending, speak=False)
+        if self._session_runs_elsewhere() or getattr(session, "is_cold", False):
+            # A follower is never ours to move (the design's cross-process
+            # rule), and a cold facade has no runtime to move — and in both
+            # states there is no local transcript for a sentence, so the arm is
+            # closed in silence rather than spoken into a conversation that is
+            # not here.
+            return self._deferred_close(from_pending, speak=False)
+        if not provider or not model_id or not is_accessible(provider, accessible):
+            # Nothing to move TO, or the target stopped being reachable: the
+            # repair is still needed (the conversation IS stranded) and cannot
+            # land, which is exactly what the close-out says.
+            return self._deferred_close(from_pending, speak=True)
+        old_label = str(getattr(session, "model_label", "") or "")
+        old_provider = old_label.partition("/")[0]
+        if not old_label or not is_stranded(old_provider, accessible):
+            # Either there is no model to move, or the old provider is
+            # credentialed again — nothing is wrong any more, and a "still on"
+            # sentence would invent a complaint.
+            return self._deferred_close(from_pending, speak=False)
+        if not self._idle_for_rehome(session):
+            # BUSY, and said so (UX review U1). The refusal is recorded here, so
+            # this is where the deferral sentence goes — and the repair is armed
+            # for the turn end instead of evaporating. A pending re-check keeps
+            # the arm rather than re-saying the sentence on every turn end.
+            self._rehome_pending = (old_label, login_provider, model_id)
+            if from_pending:
+                return None
+            return rehome_deferred_notice(old_label)
+        self._rehome_pending = None
+        self._run_slash_command(f"/model {provider}/{model_id}", _rehome=True)
+        return rehome_notice(old_label, f"{provider}/{model_id}")
+
+    def _deferred_close(self, from_pending: bool, *, speak: bool) -> str | None:
+        """Close the deferred arm; on a retry, return the sentence to paint.
+
+        ``speak`` is the caller's answer to "is the repair still NEEDED": a
+        conversation still stranded on a provider whose credential is gone gets
+        the close-out sentence, so the promise :func:`rehome_deferred_notice`
+        made ("until the turn ends") is either kept or visibly withdrawn
+        (round-2 U3/D5/Q1 — before this, every early return left the arm set and
+        the sentence unreachable, and a stale arm could move the session on a
+        much later, unrelated turn end). A state where nothing is wrong any
+        more — the old provider works again, or the user picked another model —
+        closes silently, because the sentence would invent a complaint.
+
+        A NON-pending call never owned an arm: it is a no-op returning ``None``.
+        """
+        if not from_pending:
+            return None
+        armed = self._rehome_pending
+        self._rehome_pending = None
+        if armed is None or not speak:
+            return None
+        from local_operator.providers.model_access import rehome_still_stranded_notice
+
+        return rehome_still_stranded_notice(armed[0])
+
+    def _settle_deferred_rehome(self) -> None:
+        """Complete — or close out — a re-home the login had to defer.
+
+        Runs at the ONE turn exit (see ``_finalize_turn``), where a busy
+        conversation becomes idle. Two queued repairs are honoured here, and both
+        were authorised at login time: the first-login move that had no session
+        yet (``_rehome_await_bind``, retried at this backstop if the bind edge
+        could not run it), and the deferred move itself (``_rehome_pending``).
+        The attempt returns the sentence to paint — the move, or the close-out
+        ``_deferred_close`` writes when the repair can no longer land — so
+        nothing stays armed across turn ends and nothing promised stays unsaid.
+        """
+        queued = self._rehome_await_bind
+        if queued is not None:
+            self._rehome_await_bind = None
+            sentence = self._rehome_stranded_session(queued)
+            if sentence:
+                self._notice(sentence, "note")
+            return
+        pending = self._rehome_pending
+        if pending is None:
+            return
+        old_label, login_provider, _model_id = pending
+        session = self._session
+        if session is None or self._session_runs_elsewhere() or getattr(session, "is_cold", False):
+            # No local conversation to paint into: the arm closes silently, for
+            # the same reason the same states do inside the attempt above.
+            self._rehome_pending = None
+            return
+        if str(getattr(session, "model_label", "") or "") != old_label:
+            # The user (or a reload) moved it themselves; whatever they chose
+            # wins, and there is nothing to explain.
+            self._rehome_pending = None
+            return
+        sentence = self._rehome_stranded_session(login_provider, from_pending=True)
+        if sentence:
+            self._notice(sentence, "note")
+
+    @staticmethod
+    def _idle_for_rehome(session: Any) -> bool:
+        """Whether a re-home would cut across nothing (the design's idle test).
+
+        Streaming is the live-turn signal, and a PARKED GATE is deliberately the
+        second term: the runbook already treats a parked approval as a running
+        turn (the tool slot is held mid-flight), so a model switch there would
+        land between the tool call and its result. Fails closed on an unreadable
+        probe — a skipped repair is recoverable, an interrupted turn is not.
+        """
+        try:
+            if bool(getattr(session, "is_streaming", False)):
+                return False
+            gate = getattr(session, "pending_gate", None)
+            if gate is None and not hasattr(session, "pending_gate"):
+                gate = getattr(getattr(session, "frontend_state", None), "pending_gate", None)
+            if gate is not None:
+                return False
+            count = getattr(session, "running_subagents", None)
+            if callable(count):
+                running = count()
+                if isinstance(running, int) and running > 0:
+                    return False
+            return True
+        except Exception:  # noqa: BLE001 — an unreadable state is assumed busy
+            return False
 
     async def _login_flow(self, provider: str) -> None:
         """Run the login on the event loop, reporting into the transcript.
@@ -49538,6 +49819,15 @@ class OperatorApp(App[None]):
                 # longest sentence in the block was also its least legible one while
                 # the two routine confirmations above it were bright.
                 await notice(set_msg, "note")
+            # Repair the conversation this sign-in stranded, if it is one this
+            # process owns and it is idle (see _rehome_stranded_session). AFTER
+            # the defaults write above, because the target is the default the
+            # user now has — and OUTSIDE the ``set_msg`` guard, because a login
+            # that wrote no config can still have stranded a session (its owner
+            # was pinned earlier, by a different sign-in or by /model).
+            rehome_msg = self._rehome_stranded_session(provider)
+            if rehome_msg:
+                await notice(rehome_msg, "note")
             # The credential set just changed, so the owner's offerable-model
             # publication is stale: a follower's picker must see the newly
             # usable provider without waiting for a session restart (D3).
@@ -53172,6 +53462,13 @@ class OperatorApp(App[None]):
         # path regardless, because "held when the turn ended" is a fact this
         # handler can check and "which boundary the loop reached" is not.
         self._settle_queued_steer_notices_unsent()
+        # A re-home the sign-in deferred (the conversation was busy) becomes
+        # possible exactly here, and a repair that never revisited it was the
+        # silent half of the bug (UX review U1). Books kept with the queued
+        # steer rows above, and for the same reason: it reconciles state this
+        # turn end is the first to see, and it is not part of the outcome
+        # announcement the latch below owns.
+        self._settle_deferred_rehome()
         # THE LATCH lands here — the notification ladder is the tail this turn
         # owes AT MOST ONCE, whichever route retired it. Everything above ran
         # unconditionally because a turn already closed can still have live
@@ -54317,10 +54614,19 @@ class OperatorApp(App[None]):
         # is where the row first exists, and suppressing it at the SOURCE —
         # before the supersede/rekey bookkeeping — is what keeps the later
         # start/end frames from finding a registry to adopt. The rows stay in
-        # the model's context; only the screen skips them.
-        from local_operator.harness.rows import is_hidden_tool_name, is_settle_only_ask
+        # the model's context; only the screen skips them. THE QUIET PAIR
+        # (design docs/design/quiet-turns.md §5, S1) is the same suppression
+        # class for the same reason: the announcement is the first frame that
+        # could mount its row.
+        from local_operator.harness.rows import (
+            is_hidden_tool_name,
+            is_quiet_turn_name,
+            is_settle_only_ask,
+        )
 
-        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+        if is_hidden_tool_name(getattr(event, "tool_name", None)) or is_quiet_turn_name(
+            getattr(event, "tool_name", None)
+        ):
             return
         # THE ASK GATE (design docs/design/ask-gate.md §3): while the queued
         # engine is live an `ask` call is SETTLE-ONLY — no row while it
@@ -54471,10 +54777,19 @@ class OperatorApp(App[None]):
         # composing gate above suppresses the announcement, and this one stops
         # a start frame from mounting a fresh card for a call with none — the
         # belt to that brace, because the two frames race and either can be a
-        # viewer's first sight of the call.
-        from local_operator.harness.rows import is_hidden_tool_name, is_settle_only_ask
+        # viewer's first sight of the call. THE QUIET PAIR (design
+        # docs/design/quiet-turns.md §5, S1) is gated here for exactly that
+        # race: suppressing only the composing seam would leave this one free
+        # to paint the ``no_reply`` card a moment later.
+        from local_operator.harness.rows import (
+            is_hidden_tool_name,
+            is_quiet_turn_name,
+            is_settle_only_ask,
+        )
 
-        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+        if is_hidden_tool_name(getattr(event, "tool_name", None)) or is_quiet_turn_name(
+            getattr(event, "tool_name", None)
+        ):
             return
         # THE ASK GATE's belt (design docs/design/ask-gate.md §3): the same
         # settle-only suppression the composing gate applies, because the two
@@ -54601,7 +54916,10 @@ class OperatorApp(App[None]):
         card.set_live_details(getattr(message.event.partial_result, "details", None))
 
     def on_tool_ended(self, message: ToolEnded) -> None:
-        from local_operator.harness.rows import is_ask_gate_divert_details
+        from local_operator.harness.rows import (
+            is_ask_gate_divert_details,
+            is_quiet_turn_result,
+        )
 
         event = message.event
         card = self._tool_cards.pop(event.tool_call_id, None)
@@ -54630,6 +54948,18 @@ class OperatorApp(App[None]):
             # The settle-mount's stash goes with it: a diverted ask never
             # reaches `_mount_settle_only_ask`, which is the other pop site.
             self._ask_gate_settled_calls.pop(event.tool_call_id, None)
+            if card is not None:
+                self._drop_tool_card(card)
+            self._refresh_working_activity()
+            return
+        # THE QUIET RESULT SETTLES NOTHING (design docs/design/quiet-turns.md
+        # §5, S1): the marker is the quiet end's own fact, read off the result
+        # at the same seam the divert check above reads its gate marker. The
+        # composing and started gates are the first doors for the pair's row;
+        # this drop half guarantees a card any seam older than the gates could
+        # have mounted is retired rather than settled — the pair's end can only
+        # ever paint nothing.
+        if is_quiet_turn_result(getattr(event, "result", None)):
             if card is not None:
                 self._drop_tool_card(card)
             self._refresh_working_activity()

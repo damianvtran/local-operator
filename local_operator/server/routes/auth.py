@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Any
 
@@ -32,6 +33,8 @@ from local_operator.server.utils.desktop_auth import (
 )
 
 router = APIRouter(tags=["Authentication"], dependencies=[Depends(require_desktop)])
+
+logger = logging.getLogger(__name__)
 
 
 class AccountRemoval(BaseModel):
@@ -76,6 +79,15 @@ async def get_desktop_auth(
         # The server's own manager, so a sign-in's defaults are written through
         # the same instance every other config route reads.
         host = DesktopAuth(AuthStore(root / "auth.db", config_dir=root), root, manager)
+        # The re-home hook: after the credential lands, repair the bound sessions
+        # it stranded (see utils/desktop_rehome). It reads app state lazily and
+        # holds the APP, never this request — the host object outlives it. The
+        # login provider arrives per call: the re-home is first-login-only and
+        # only the call site knows which provider this call added.
+        from local_operator.server.utils.desktop_rehome import rehome_after_login
+
+        app = request.app
+        host.rehome = lambda provider: rehome_after_login(app, provider)
         request.app.state.desktop_auth = host
     return host
 
@@ -400,7 +412,10 @@ async def cancel_operation(operation_id: str, host: DesktopAuth = Depends(get_de
 
 @router.put("/v1/auth/providers/{provider_id}/key", response_model=CRUDResponse)
 async def save_key(
-    provider_id: str, body: SecretInput, host: DesktopAuth = Depends(get_desktop_auth)
+    provider_id: str,
+    body: SecretInput,
+    request: Request,
+    host: DesktopAuth = Depends(get_desktop_auth),
 ):
     """Check the key with its provider, store it, and apply first-run defaults.
 
@@ -419,6 +434,11 @@ async def save_key(
 
     ``result`` is ``{"valid", "reason", "defaults_applied"}``. The key itself
     never appears in a reply or a log line.
+
+    ``defaults_applied`` gains two ADDITIVE fields when the sign-in moved or
+    deferred live sessions — ``rehomed_sessions`` and ``deferred_sessions``
+    (see ``utils/desktop_rehome``); both are absent when neither happened, so an
+    old renderer sees exactly the old shape.
     """
     storage_id = credential_provider_id(provider_id)
     definition = get_provider_definition(storage_id)
@@ -439,6 +459,27 @@ async def save_key(
     applied = await asyncio.to_thread(
         apply_desktop_login_defaults, host.config_manager, storage_id, oauth=False
     )
+    # A saved key strands and un-strands providers exactly as a sign-in does, so
+    # the same repair runs here (see utils/desktop_rehome): without it, the user
+    # who fixes their setup by pasting a key would keep every open session on the
+    # provider the key replaced — the reported bug's second half.
+    from local_operator.server.utils.desktop_rehome import (
+        rehome_after_login,
+        with_rehome_count,
+    )
+
+    moved: list[tuple[str, str]] = []
+    deferred: list[str] = []
+    try:
+        # ``storage_id``, not the route's ``provider_id``: the first-login rule
+        # compares credential STORAGE ids (``openai-device`` is ``openai``), the
+        # same translation the planner and the credential write already use.
+        moved, deferred = await rehome_after_login(request.app, storage_id)
+    except Exception:  # noqa: BLE001 — the key is stored; the repair is best effort
+        logger.warning(
+            "could not re-home sessions after saving a key for %s", storage_id, exc_info=True
+        )
+    applied = with_rehome_count(applied, moved, deferred)
     return _reply(
         {"valid": verdict.valid, "reason": verdict.reason, "defaults_applied": applied},
         "API key saved.",
