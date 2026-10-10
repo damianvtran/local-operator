@@ -52,8 +52,7 @@ read it as "last known", not as "current".
 
 While a row's first state read is still in flight the row shows a loading
 state and no remedy; the sign-in remedy appears only once a read has resolved
-without a usable login. A `stale` reading means the forge could not be
-refreshed this pass — last known, not current.
+without a usable login.
 
 ## Tracking and monitoring
 

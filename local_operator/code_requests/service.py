@@ -93,11 +93,18 @@ FETCH_FAILED = "failed"
 FETCH_UNTRACKED = "untracked"
 
 #: LEGACY fallback only: entries written before ``failure_kind`` existed are
-#: classified by whether their message names a sign-in. Every credential
-#: message contains "sign in"; no other failure message does (verified across
-#: the credential resolver and ``_handle_fetch_error``). New writes never rely
-#: on this, and it disappears as entries revalidate.
-_CREDENTIAL_HINTS = ("sign in",)
+#: classified by whether their message carries one of these markers. Most
+#: credential messages name a sign-in, but two do not: the gh/glab spawn
+#: failure (``credentials.py`` ``_cli_token``: "could not be asked") — which IS
+#: reachable as a stored ``refresh_error`` for a GHES/GitLab host — and the
+#: unreachable detect-and-link refusal ("no credential path exists"). Every
+#: message the resolver can raise contains one of the three; no NON-credential
+#: failure message (``_handle_fetch_error``'s four shapes) contains any
+#: (agent review round 1, F1: the original single "sign in" marker missed the
+#: spawn failure, so a pre-upgrade entry and a post-upgrade write of the same
+#: failure disagreed). New writes never rely on this, and it disappears as
+#: entries revalidate.
+_CREDENTIAL_HINTS = ("sign in", "could not be asked", "no credential path exists")
 
 
 @dataclass
