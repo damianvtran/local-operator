@@ -73,6 +73,11 @@ from local_operator.server.routes import (
     tts,
 )
 from local_operator.server.utils.event_broker import EventBroker
+from local_operator.server.utils.static_roots import (
+    host_is_acceptable,
+    is_static_path,
+    response_policy,
+)
 
 # Annotating the lifespan's record publisher (`None` on a boot that was not
 # announced) needs the shared publisher's type. Zero runtime cost where it
@@ -905,6 +910,62 @@ async def desktop_origin_cors(request: Request, call_next):
         # `del`, not `.pop()`: Starlette's MutableHeaders implements neither
         # `pop` nor dict's default-argument protocol, and deleting an absent
         # key is already a no-op there.
+        del response.headers["access-control-allow-origin"]
+        del response.headers["access-control-allow-credentials"]
+    return response
+
+
+@app.middleware("http")
+async def static_response_policy(request: Request, call_next):
+    """Harden every ``/v1/static/*`` response: CSP, ``nosniff``, no foreign CORS grant.
+
+    WHY A MIDDLEWARE AND NOT PER-HANDLER HEADERS. The policy has to ride the
+    error responses too (a JSON 403 wants ``nosniff``), and the CORS half can only
+    be done from here: ``CORSMiddleware`` writes its grant AFTER the handler, so a
+    handler cannot remove it. Registered after :func:`desktop_origin_cors`, i.e.
+    OUTERMOST, for the reason that function states: it is the only position that
+    observes the headers the CORS layer wrote. The preflight (``OPTIONS``) is
+    answered by ``CORSMiddleware`` itself without reaching a route, and this
+    wraps it too.
+
+    THE CORS DECISION. Unlike the rest of the legacy surface, which keeps its
+    historical wildcard echo because the shipped renderer reads ``/health``
+    cross-origin, nothing reads a static route with ``fetch``: the UI loads them
+    through ``<img>``, ``<video>``, ``<audio>`` and ``<iframe src>``, which are
+    not CORS-gated. So the grant is dropped for every origin that is not on the
+    admitted allowlist -- and with NO allowlist installed (the app-managed
+    default) for every origin, which is the case the echo was exploitable in. A
+    page can still *cause* a request (an ``<img>`` needs no grant); it can no
+    longer *read* the answer, and the root allowlist
+    (``utils/static_roots.py``) bounds what it could have caused.
+
+    THE HOST CHECK is the one thing here that is not about headers: a DNS-rebinding
+    page is same-origin with the daemon, so no CORS decision reaches it (review R8).
+    The ``Host`` it sends is its own name; see
+    :func:`~local_operator.server.utils.static_roots.host_is_acceptable` for what is
+    admitted and why the app's renderer is unaffected. It is answered HERE, before
+    the router, so the refusal cannot become a file-existence signal.
+
+    The policy is in ``utils/static_roots.py`` so it is testable without an app.
+    """
+    if not is_static_path(request.url.path):
+        return await call_next(request)
+    # Absent in a `--reload` child (the address arrives by environment and is
+    # consumed): the check then admits only IP literals and `localhost`, which is
+    # what a dev server is reached by.
+    announced = getattr(request.app.state, serve_registry.ANNOUNCED_STATE_ATTR, None)
+    if host_is_acceptable(request.headers.get("host"), announced[0] if announced else None):
+        response = await call_next(request)
+    else:
+        response = JSONResponse(
+            status_code=403, content={"detail": "This Host is not allowed to reach this server."}
+        )
+    allowed = desktop_posture().origins
+    for name, value in response_policy(request.url.path, allowed).items():
+        response.headers[name] = value
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in allowed:
+        # `del` on an absent key is a no-op in Starlette's MutableHeaders.
         del response.headers["access-control-allow-origin"]
         del response.headers["access-control-allow-credentials"]
     return response
