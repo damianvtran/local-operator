@@ -61,6 +61,7 @@ from local_operator.network.wire import (
     MAX_HANDSHAKE_LINE,
     MESH_NET_V1,
     ROLE_DIALER,
+    ZLIB_RECORDS_V1,
     FrameReader,
     LinkCrypto,
     Role,
@@ -70,6 +71,7 @@ from local_operator.network.wire import (
     deadline_in,
     encode_line,
     link_keys,
+    negotiate_capabilities,
     sas_code,
     sha256,
     unb64u,
@@ -843,7 +845,13 @@ class Handshake:
     def codec(self) -> LinkCrypto:
         """The record codec for this link, once the handshake has completed."""
         result = self.establish()
-        return LinkCrypto(result.keys, role=self.role)
+        # COMPRESSION IS THE INTERSECTION, never a local choice (wire.py "Record
+        # compression"): ``self.capabilities`` is what THIS end put in its hello or
+        # challenge, ``peer_capabilities`` what the other end did, and both sit in
+        # the MAC-covered transcript. An old peer advertises neither, so its link
+        # gets the codec it always had.
+        negotiated = negotiate_capabilities(self.capabilities, self.peer_capabilities)
+        return LinkCrypto(result.keys, role=self.role, compression=ZLIB_RECORDS_V1 in negotiated)
 
     def welcome_frame(
         self,

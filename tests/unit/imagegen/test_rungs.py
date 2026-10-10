@@ -127,6 +127,74 @@ def _radient_handler(
 
 
 @pytest.mark.asyncio
+async def test_radient_settled_status_figure_replaces_the_quote_and_is_billed() -> None:
+    # agent-server: submit answers the QUOTE (0.08 in the fake), the terminal
+    # status carries the SETTLED figure (``settled: true``) that equals the
+    # ledger - that one is a charge, so it wins and is labelled ``billed``.
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(
+            recorder,
+            statuses=[{"status": "COMPLETED", "settled": True, "cost_usd": 0.05, "units": 1}],
+        )
+    ) as client:
+        result = await _run_radient(client)
+
+    assert result.cost_usd == 0.05
+    assert result.cost_source == "reported"
+    assert result.billing_basis == "billed"
+    assert result.cost_provenance is not None and "settled" in result.cost_provenance
+
+
+@pytest.mark.asyncio
+async def test_radient_settled_zero_is_a_billed_zero_not_the_quote() -> None:
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(
+            recorder, statuses=[{"status": "COMPLETED", "settled": True, "cost_usd": 0.0}]
+        )
+    ) as client:
+        result = await _run_radient(client)
+
+    assert result.cost_usd == 0.0
+    assert result.billing_basis == "billed"
+
+
+@pytest.mark.asyncio
+async def test_radient_unsettled_status_cost_keeps_the_quote_as_estimated() -> None:
+    # A ``cost_usd`` on a status payload WITHOUT ``settled: true`` is not a
+    # charge: the quote and the ``estimated`` label stand.
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(
+            recorder, statuses=[{"status": "COMPLETED", "settled": False, "cost_usd": 9.99}]
+        )
+    ) as client:
+        result = await _run_radient(client)
+
+    assert result.cost_usd == 0.08
+    assert result.billing_basis == "estimated"
+
+
+async def _run_radient(client: httpx.AsyncClient):
+    return await image_rungs.run_radient(
+        prompt="a cat",
+        base_url="https://hub.test",
+        credential="cred",
+        num_images=1,
+        image_size="square_hd",
+        seed=None,
+        strength=None,
+        source_url=None,
+        model=None,
+        handle=image_rungs.CancelHandle(),
+        emit=None,
+        pause=_no_pause,
+        client=client,
+    )
+
+
+@pytest.mark.asyncio
 async def test_radient_happy_path_request_id_only_and_passthrough() -> None:
     recorder = _Recorder()
     handle = image_rungs.CancelHandle()
@@ -163,6 +231,11 @@ async def test_radient_happy_path_request_id_only_and_passthrough() -> None:
     assert result.model == "flux/dev", "the default is read off the live list"
     assert result.generation_id == "r1"
     assert result.cost_usd == 0.08
+    # The status never said ``settled``: the figure is still the submit-time
+    # QUOTE, so it is labelled ``estimated`` (the amount/source are unchanged).
+    assert result.cost_source == "reported"
+    assert result.billing_basis == "estimated"
+    assert result.cost_provenance is not None and "quote" in result.cost_provenance
     assert len(result.assets) == 1
     asset = result.assets[0]
     assert asset.data == PNG_1X1

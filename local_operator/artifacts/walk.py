@@ -267,5 +267,7 @@ async def run_job_walk(
             generation_id=result.generation_id,
             cost_usd=result.cost_usd,
             cost_source=result.cost_source,
+            billing_basis=result.billing_basis,
+            cost_provenance=result.cost_provenance,
         )
     raise on_exhausted(all_failed_message(kind, attempts, labels), tuple(attempts))
