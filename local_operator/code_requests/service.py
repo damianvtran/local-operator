@@ -43,7 +43,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from local_operator.code_requests import cache as fetch_cache
 from local_operator.code_requests import ledger, rounds
@@ -78,6 +78,33 @@ _COMMENT_PIECES = frozenset({"comments", "reviews", "notes"})
 #: The state words whose lane's "awaiting review" default applies (the parser's
 #: ``is_open`` argument): a merged/closed request is not awaiting anything.
 _OPEN_STATES = frozenset({"open", "draft"})
+
+#: How far a row's FORGE read has got — the wire contract's ``fetch_state``
+#: (design §1/§2), computed by :func:`fetch_state` and set by every merge entry
+#: point (``view_row`` for the route, ``view_for_ref``/``show`` for the tool).
+#: ``pending`` is the wire FACT a UI words as "loading": no read has RESOLVED
+#: yet — never ``unauthenticated``, which is a resolved outcome.
+FETCH_PENDING = "pending"
+FETCH_READY = "ready"
+FETCH_STALE = "stale"
+FETCH_UNAUTH = "unauthenticated"
+FETCH_COOLING = "cooling"
+FETCH_FAILED = "failed"
+FETCH_UNTRACKED = "untracked"
+
+#: LEGACY fallback only: entries written before ``failure_kind`` existed are
+#: classified by whether their message carries one of these markers. Most
+#: credential messages name a sign-in, but two do not: the gh/glab spawn
+#: failure (``credentials.py`` ``_cli_token``: "could not be asked") — which IS
+#: reachable as a stored ``refresh_error`` for a GHES/GitLab host — and the
+#: unreachable detect-and-link refusal ("no credential path exists"). Every
+#: message the resolver can raise contains one of the three; no NON-credential
+#: failure message (``_handle_fetch_error``'s four shapes) contains any
+#: (agent review round 1, F1: the original single "sign in" marker missed the
+#: spawn failure, so a pre-upgrade entry and a post-upgrade write of the same
+#: failure disagreed). New writes never rely on this, and it disappears as
+#: entries revalidate.
+_CREDENTIAL_HINTS = ("sign in", "could not be asked", "no credential path exists")
 
 
 @dataclass
@@ -178,6 +205,60 @@ def link_only_hint(ref: Mapping[str, Any] | None) -> str:
     return "Link only — this host isn't tracked yet."
 
 
+def fetch_state(
+    ref: Ref | Mapping[str, Any] | None,
+    entry: Mapping[str, Any] | None,
+    *,
+    cooling_until: float | None = None,
+) -> str:
+    """One row's FORGE-read state — the single place ``fetch_state`` is computed.
+
+    Pure read-time facts only (the ref, the stored entry, the in-process cooling
+    window): no network, no writes. Both merge entry points call it — ``view_row``
+    for the route, ``view_for_ref``/``show`` for the tool — so the surfaces cannot
+    drift about whether a row is still loading or has resolved without a login,
+    which is the operator defect this field exists to fix.
+
+    ``entry is None`` means NOT YET RESOLVED, never "failed": a resolved failure
+    always leaves an entry (``_record_failure`` writes one even for a
+    never-fetched ref), while a rate limit writes none and only cools the host.
+    A non-fetchable ref (a detect-and-link forge, an unconfirmed host, the
+    ambiguous shorthand — anything ``plan`` skips forever) is ``untracked``: its
+    link-only sentence is the genuine remedy and must never become pending.
+
+    Per-key backoff is deliberately NOT an input: it is only ever raised on paths
+    that also wrote a failure entry, so a backoff alone must not flip a resolved
+    failure back to ``pending``. Cooling is applied only where the table says so
+    (no entry, or an entry with no pieces and no recorded failure), never over a
+    failure whose copy names an action.
+    """
+    if isinstance(ref, Ref):
+        full = bool(ref.full)
+        forge = str(ref.forge or "")
+    elif isinstance(ref, Mapping):
+        full = bool(ref.get("full"))
+        forge = str(ref.get("forge") or "")
+    else:
+        full, forge = False, ""
+    if not (full and forge in FULL_FORGES):
+        return FETCH_UNTRACKED
+    if entry is not None and entry.get("pieces"):
+        return FETCH_STALE if (entry.get("stale") or entry.get("refresh_error")) else FETCH_READY
+    if entry is None:
+        return FETCH_COOLING if cooling_until is not None else FETCH_PENDING
+    error = str(entry.get("refresh_error") or "")
+    if error:
+        # ``failure_kind`` is recorded at the failure site; the message heuristic
+        # is only for entries written before that field existed.
+        kind = str(entry.get("failure_kind") or "")
+        if kind == "credential" or (
+            not kind and any(hint in error.lower() for hint in _CREDENTIAL_HINTS)
+        ):
+            return FETCH_UNAUTH
+        return FETCH_FAILED
+    return FETCH_COOLING if cooling_until is not None else FETCH_PENDING
+
+
 def _cooling_stamp(until: float) -> str:
     """A cooling window's end as UTC ISO-8601, for row-level copy and tests."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until))
@@ -227,22 +308,32 @@ def view_row(
             row[key] = ref_map.get(key)
     skip_reason = str(ref_map.get("reason") or "")
     has_pieces = bool(entry and entry.get("pieces"))
+    # The row's FORGE-read state (design §2), computed ONCE from read-time
+    # facts so the wire states whether the first fetch is still pending
+    # rather than leaving a renderer to infer it from copy. The cooling
+    # window is read here and reused below — no network, same source the
+    # top-level map uses.
+    host = str(ref_map.get("host") or "")
+    cool_until = fetch_cache.cooling_until(host) if host else None
+    state = fetch_state(ref_map, entry, cooling_until=cool_until)
+    row["fetch_state"] = state
     if entry is None or not has_pieces:
         row["link_only"] = True
         row["summary"] = None
         row["lanes"] = None
         # The remedy copy, per forge (finding X3) — a flat row field the UI
-        # renders instead of guessing a CLI from the forge id itself.
-        row["link_only_hint"] = link_only_hint(ref_map)
+        # renders instead of guessing a CLI from the forge id itself. It is
+        # SUPPRESSED while the row is pending (design §2): a first read that
+        # has not resolved must not carry a remedy its reader could act on,
+        # and an old UI then shows the bare link fallback instead.
+        if state != FETCH_PENDING:
+            row["link_only_hint"] = link_only_hint(ref_map)
         reason = skip_reason or str((entry or {}).get("refresh_error") or "")
         reason = reason or str(raw.get("unknown_reason") or "")
         # A never-fetched row on a COOLING host is not an ordinary link-only:
         # it has a credential and an adapter, will be fetched the moment the
         # window resets, and a reader must not be told "sign in" for a
-        # rate-limit wait (QA round 2, Q13). The window is read from the live
-        # cooling state — no network, same source the top-level map uses.
-        host = str(ref_map.get("host") or "")
-        cool_until = fetch_cache.cooling_until(host) if host else None
+        # rate-limit wait (QA round 2, Q13).
         if cool_until is not None:
             row["cooling_until"] = cool_until
             if not reason:
@@ -336,6 +427,12 @@ def view_for_ref(config_dir: Any, ref: Ref) -> dict[str, Any] | None:
     if entry is None:
         return None
     has_pieces = bool(entry.get("pieces"))
+    # The FORGE-read state, same single computation as ``view_row`` (design §2).
+    # The cooling window is read here and reused in the else branch below —
+    # the tool's own never-fetched view carries the same cooling signal the
+    # route's rows do (QA round 2, Q13; one spelling per QA round 3, Q15).
+    cool_until = fetch_cache.cooling_until(ref.host)
+    state = fetch_state(ref, entry, cooling_until=cool_until)
     summary = entry.get("summary")
     view: dict[str, Any] = {
         "key": ref.key,
@@ -346,8 +443,9 @@ def view_for_ref(config_dir: Any, ref: Ref) -> dict[str, Any] | None:
         "number": ref.number,
         "link_only": not has_pieces,
         "link_only_reason": ref.reason,
-        # Same per-forge remedy copy the route's row carries (finding X3).
-        "link_only_hint": link_only_hint({"forge": ref.forge, "host": ref.host}),
+        # The state word the tool renders from — the model must be able to
+        # tell a still-pending read from a resolved no-login outcome.
+        "fetch_state": state,
         "summary": None,
         "ci": None,
         "lanes": None,
@@ -358,16 +456,18 @@ def view_for_ref(config_dir: Any, ref: Ref) -> dict[str, Any] | None:
         "stale": bool(entry.get("stale")),
         "refresh_error": entry.get("refresh_error"),
     }
+    if state != FETCH_PENDING:
+        # Same per-forge remedy copy the route's row carries (finding X3),
+        # OMITTED rather than None while pending — the same rule as
+        # ``view_row`` (design §2): a read that has not resolved must not
+        # offer a sign-in its reader could act on.
+        view["link_only_hint"] = link_only_hint({"forge": ref.forge, "host": ref.host})
     if has_pieces:
         view["summary"] = dict(summary) if isinstance(summary, Mapping) else None
         view["ci"] = entry.get("ci")
         view["lanes"] = entry.get("lanes") if isinstance(entry.get("lanes"), list) else None
         view["comments"] = convention_comments(entry)
     else:
-        # The tool's own never-fetched view carries the same cooling signal
-        # the route's rows do (QA round 2, Q13; one spelling per QA round 3,
-        # Q15).
-        cool_until = fetch_cache.cooling_until(ref.host)
         if cool_until is not None:
             view["cooling_until"] = cool_until
             view["link_only_reason"] = ref.reason or f"cooling — {cooling_copy(cool_until)}"
@@ -471,6 +571,11 @@ async def show(
     # see the cooling wait and the per-forge remedy exactly as the UI does,
     # or a rate-limited host reads as "no state has been fetched yet" and a
     # detect-and-link host as a bare link.
+    cool_until = fetch_cache.cooling_until(ref.host)
+    # The FORGE-read state of a row with no entry: cooling when the host is
+    # cooling, untracked for a non-fetchable ref, else pending — the read is
+    # still owed (design §6).
+    state = fetch_state(ref, None, cooling_until=cool_until)
     fallback: dict[str, Any] = {
         "key": ref.key,
         "url": ref.url,
@@ -480,7 +585,7 @@ async def show(
         "number": ref.number,
         "link_only": True,
         "link_only_reason": ref.reason or "no state has been fetched yet",
-        "link_only_hint": link_only_hint({"forge": ref.forge, "host": ref.host}),
+        "fetch_state": state,
         "summary": None,
         "ci": None,
         "lanes": None,
@@ -490,7 +595,11 @@ async def show(
         "stale": False,
         "refresh_error": None,
     }
-    cool_until = fetch_cache.cooling_until(ref.host)
+    if state != FETCH_PENDING:
+        # Suppressed while pending — same rule as the other two entry points
+        # (design §2): this is the row whose first read is still owed, and a
+        # remedy it cannot act on must not reach its reader.
+        fallback["link_only_hint"] = link_only_hint({"forge": ref.forge, "host": ref.host})
     if cool_until is not None:
         fallback["cooling_until"] = cool_until
         if not ref.reason:
@@ -587,7 +696,11 @@ async def probe_shorthand(
 
 
 async def refresh_keys(
-    config_dir: Any, refs: Sequence[Ref], *, force: bool = False
+    config_dir: Any,
+    refs: Sequence[Ref],
+    *,
+    force: bool = False,
+    on_changed: Callable[[str], Awaitable[None]] | None = None,
 ) -> RefreshReport:
     """Fetch ``refs`` under the key locks, writing entries; never raises for a ref.
 
@@ -599,6 +712,12 @@ async def refresh_keys(
     network call when they overlap. A ``force`` pass never skips, and a stale
     entry never skips either (a failed pass must be retried under the key's
     backoff, not treated as fresh).
+
+    ``on_changed`` is awaited once per ref whose content CHANGED (design §3):
+    the session pass uses it to touch the index per ref, so a slow pass fills
+    the pane progressively instead of holding every row pending until the pass
+    ends. Best-effort by design — a callback must never fail a pass — and a
+    ref that did not change (a 304, a skipped/throttled ref) never calls it.
     """
     started = time.time()
     report = RefreshReport()
@@ -637,6 +756,19 @@ async def refresh_keys(
                 continue
             if changed:
                 report.changed.append(ref.key)
+                if on_changed is not None:
+                    # The fill announcement (design §3): fired while the key lock
+                    # is held, so two refs resolving at once (or two passes on
+                    # one key) cannot interleave their touches. A callback
+                    # exception is logged, never propagated — the pass's job is
+                    # fetching, and a missed touch is healed by the end-of-pass
+                    # touch ``refresh_session`` still performs.
+                    try:
+                        await on_changed(ref.key)
+                    except Exception:  # noqa: BLE001 - a callback must never fail a pass
+                        logger.debug(
+                            "code-request change callback failed for %s", ref.key, exc_info=True
+                        )
     return report
 
 
@@ -660,7 +792,21 @@ async def refresh_session(
     planned = plan(config_dir, session_id, rows, force=force, keys=keys, now=moment)
     report = RefreshReport(cooling=dict(planned.cooling), backing_off=dict(planned.backing_off))
     if planned.refs:
-        report = _merge_reports(report, await refresh_keys(config_dir, planned.refs, force=force))
+        # Per-ref index touches (design §3): the feed probes the index file
+        # (``desktop_feed``), so a bump as each ref resolves is what lets the
+        # pane fill progressively instead of waiting for the pass to end. The
+        # end-of-pass touch below still settles the pass. Best-effort: a
+        # missing index is a no-op inside ``touch_index`` itself.
+        async def _touch_index(_key: str) -> None:
+            try:
+                await asyncio.to_thread(ledger.touch_index, config_dir, session_id)
+            except Exception:  # noqa: BLE001 - a missing index is not a failure
+                logger.debug("could not touch the code-request index", exc_info=True)
+
+        report = _merge_reports(
+            report,
+            await refresh_keys(config_dir, planned.refs, force=force, on_changed=_touch_index),
+        )
     if session_id:
         attempted_keys = [ref.key for ref in planned.refs]
         # Consume the turn-end/wake ``all`` mark on THIS pass too: the plan above
@@ -797,7 +943,7 @@ async def _fetch_one(config_dir: Any, ref: Ref, *, force: bool = False) -> bool:
     try:
         token = await asyncio.to_thread(resolve, ref.host, ref.forge)
     except CredentialError as exc:
-        changed = _record_failure(config_dir, ref, prior, exc.message)
+        changed = _record_failure(config_dir, ref, prior, exc.message, kind="credential")
         # A gentle per-key backoff so a poll cannot re-spawn the login probe on
         # every GET; a sign-in is picked up on the next attempt after it.
         fetch_cache.note_key_failure(ref.key)
@@ -831,7 +977,7 @@ async def _handle_fetch_error(
         try:
             fresh = await asyncio.to_thread(resolve, ref.host, ref.forge, fresh=True)
         except CredentialError:
-            changed = _record_failure(config_dir, ref, prior, _REJECTED)
+            changed = _record_failure(config_dir, ref, prior, _REJECTED, kind="credential")
             fetch_cache.note_key_failure(ref.key)
             return changed
         adapter = adapter_for(ref)
@@ -845,7 +991,7 @@ async def _handle_fetch_error(
             )
         except ForgeHTTPError as second:
             if second.kind == "unauthorized":
-                changed = _record_failure(config_dir, ref, prior, _REJECTED)
+                changed = _record_failure(config_dir, ref, prior, _REJECTED, kind="credential")
                 fetch_cache.note_key_failure(ref.key)
                 return changed
             return await _handle_fetch_error(config_dir, ref, prior, second, fresh)
@@ -866,6 +1012,7 @@ async def _handle_fetch_error(
             ref,
             prior,
             f"refresh failed ({exc.kind}{suffix}); keeping the last known data",
+            kind=exc.kind,
         )
     if exc.kind == "not_found":
         # A 404 is a row-level condition and a THROTTLED one (review round 1,
@@ -874,9 +1021,11 @@ async def _handle_fetch_error(
         # 404 used to return "changed" every pass, which moved the feed
         # revision and drove a client refetch loop.
         fetch_cache.note_key_failure(ref.key)
-        return _record_failure(config_dir, ref, prior, "not found at the forge")
+        return _record_failure(config_dir, ref, prior, "not found at the forge", kind="not_found")
     fetch_cache.note_key_failure(ref.key)
-    return _record_failure(config_dir, ref, prior, f"refresh failed (HTTP {exc.status})")
+    return _record_failure(
+        config_dir, ref, prior, f"refresh failed (HTTP {exc.status})", kind="http"
+    )
 
 
 _REJECTED = "credential rejected — sign in again with gh/glab, then refresh"
@@ -911,7 +1060,12 @@ def _validators_of(prior: Mapping[str, Any] | None) -> dict[str, dict[str, str]]
 
 
 def _record_failure(
-    config_dir: Any, ref: Ref, prior: Mapping[str, Any] | None, message: str
+    config_dir: Any,
+    ref: Ref,
+    prior: Mapping[str, Any] | None,
+    message: str,
+    *,
+    kind: str | None = None,
 ) -> bool:
     """Keep the last known row, add ``stale`` + ``refresh_error``; True when the
     RENDERED row changed.
@@ -925,6 +1079,12 @@ def _record_failure(
     time). A failure on a never-fetched ref still records the entry: the route
     renders its ``refresh_error`` as the link-only reason, which is exactly the
     "sign in with gh/glab" copy the design asks for.
+
+    ``kind`` is WHY the attempt failed — ``credential``/``network``/``server``/
+    ``not_found``/``http`` — recorded at the failure site so ``fetch_state``
+    never has to string-match the message (design §2 failure provenance);
+    ``_build_entry`` clears it on the next success. Absent on entries written
+    before this field existed: readers then fall back to the message heuristic.
     """
     entry = dict(prior or {})
     entry.setdefault("key", ref.key)
@@ -936,6 +1096,8 @@ def _record_failure(
         not prior or not prior.get("stale") or str(prior.get("refresh_error") or "") != message
     )
     entry["refresh_error"] = message
+    if kind is not None:
+        entry["failure_kind"] = kind
     entry["stale"] = True
     entry["checked_at"] = round(time.time(), 3)
     fetch_cache.write_entry(config_dir, entry, ref=ref)
@@ -1062,16 +1224,28 @@ def _build_entry(
         "checked_at": moment,
         "fetched_at": moment if outcome.pieces else (prior or {}).get("fetched_at", moment),
         "refresh_error": None,
+        # A success clears the failure provenance with the message it explains
+        # (design §2): ``fetch_state`` reads ``failure_kind`` as "the LAST
+        # attempt's failure", so a stale kind must not outlive its error.
+        "failure_kind": None,
         "stale": False,
     }
     return entry
 
 
 __all__ = [
+    "FETCH_COOLING",
+    "FETCH_FAILED",
+    "FETCH_PENDING",
+    "FETCH_READY",
+    "FETCH_STALE",
+    "FETCH_UNAUTH",
+    "FETCH_UNTRACKED",
     "MAX_REFS_PER_PASS",
     "Plan",
     "RefreshReport",
     "convention_comments",
+    "fetch_state",
     "lane_freshness_note",
     "plan",
     "refresh_keys",

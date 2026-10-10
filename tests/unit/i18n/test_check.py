@@ -323,3 +323,23 @@ class TestCatalogueParity:
 
     def test_the_shipped_catalogues_pass(self, i18n_check) -> None:
         assert i18n_check.check_catalogues() == []
+
+    def test_cross_file_duplicate_key_is_refused(self, tmp_path, monkeypatch, i18n_check) -> None:
+        # NIT-1 (#2166): a key defined in both a namespace and its child
+        # namespace passes the per-file prefix checks; resolution is
+        # deepest-first, so without this check the duplicate would silently
+        # shadow instead of failing.
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "shallow", "demo.deep.y": "child"},
+                "en/demo.deep.json": {"demo.deep.y": "also here"},
+            },
+        )
+        problems = i18n_check.check_catalogues()
+        duplicates = [p for p in problems if "defined by both" in p]
+        assert duplicates, problems
+        assert any(
+            "'demo.deep.y'" in p and "'demo'" in p and "'demo.deep'" in p for p in duplicates
+        )

@@ -50,6 +50,10 @@ never an error wall. Data is cache-backed and revalidated conditionally, so a
 revealed `stale` marker means the forge could not be refreshed this pass —
 read it as "last known", not as "current".
 
+While a row's first state read is still in flight the row shows a loading
+state and no remedy; the sign-in remedy appears only once a read has resolved
+without a usable login.
+
 ## Tracking and monitoring
 
 Rows are derived from the session's own activity as it happens: opening,

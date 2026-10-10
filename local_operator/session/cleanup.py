@@ -124,6 +124,17 @@ DEFAULT_REMOVE_EMPTY = False
 #: not a default-off switch — are what keep a run that matters.
 DELEGATED_PATH: tuple[str, ...] = CLEANUP_PATH + ("delegated",)
 DEFAULT_DELEGATED_ENABLED = True
+#: The delegated class's SECOND switch, for the scratchpad-CONTENT layer
+#: (``delegated_retention``'s "THE CONTENT LAYER"): with it on, the pads of
+#: delegated sessions the record pass KEEPS still release stale output, build
+#: shapes and merged-clean git trees. ON by default, like the record pass: the
+#: content it releases is machine scratch (measured on this machine 2026-09-22:
+#: 34.6 GB of finished sessions' pads were build output nobody could reach),
+#: while the content rules — merged+clean+fully-pushed trees only, a 12-hour
+#: grace on stale output, ``.git`` never by shape — are what keep a pad that
+#: still matters. Gated BY the record switch, in addition to its own (the
+#: content phase is part of the same delegated class).
+DEFAULT_DELEGATED_SCRATCHPAD_ENABLED = True
 #: Hours since the session's last activity (``retention.session_activity``)
 #: before a delegated session is reapable. 48 h outlives a weekend-length pause
 #: of a parent that is still going to ask its children for a result.
@@ -191,6 +202,11 @@ class CleanupPolicy:
     #: "delegated cleanup is on" are independent facts.
     delegated_enabled: bool = DEFAULT_DELEGATED_ENABLED
     delegated_max_age_hours: int = DEFAULT_DELEGATED_MAX_AGE_HOURS
+    #: The delegated class's CONTENT layer's own switch (see
+    #: :data:`DEFAULT_DELEGATED_SCRATCHPAD_ENABLED`). Separate from
+    #: :attr:`delegated_enabled` so the record pass and the content phase can
+    #: be turned off independently.
+    delegated_scratchpad_enabled: bool = DEFAULT_DELEGATED_SCRATCHPAD_ENABLED
 
     @property
     def has_any_limit(self) -> bool:
@@ -345,6 +361,7 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
 
     return CleanupPolicy(
         delegated_enabled=_delegated_enabled(getter),
+        delegated_scratchpad_enabled=_delegated_scratchpad_enabled(getter),
         delegated_max_age_hours=clamp_delegated_hours(
             _delegated_leaf(getter, "max_age_hours", DEFAULT_DELEGATED_MAX_AGE_HOURS)
         ),
@@ -371,20 +388,31 @@ _ABSENT = object()
 
 
 def _delegated_enabled(getter: Callable[..., Any]) -> bool:
-    """The delegated switch, FAIL-CLOSED where the default is ON.
+    """The delegated class's RECORD switch (see :data:`DEFAULT_DELEGATED_ENABLED`)."""
+    return _delegated_switch(getter, DEFAULT_DELEGATED_ENABLED, "enabled")
 
-    Absent reads as the default (on). A value that is present but is not a
-    switch (``"banana"``) or a read that raises reads as OFF: the parent switch
-    can afford to read garbage as its default because its default is off, this
-    one cannot — the cost of a kept delegated session is bytes, the cost of a
+
+def _delegated_scratchpad_enabled(getter: Callable[..., Any]) -> bool:
+    """The delegated class's CONTENT switch (see the ``DEFAULT_..._SCRATCHPAD_...`` doc)."""
+    return _delegated_switch(getter, DEFAULT_DELEGATED_SCRATCHPAD_ENABLED, "scratchpad", "enabled")
+
+
+def _delegated_switch(getter: Callable[..., Any], default: bool, *names: str) -> bool:
+    """One delegated-class switch, FAIL-CLOSED where the default is ON.
+
+    Absent reads as ``default`` — both delegated switches default to ON. A
+    value that is present but is not a switch (``"banana"``) or a read that
+    raises reads as OFF: the parent switch can afford to read garbage as its
+    default because its default is off, these cannot — the cost of a kept
+    delegated session (record) or of kept pad content is bytes, the cost of a
     reaped one is the incident.
     """
     try:
-        raw = getter(DELEGATED_PATH + ("enabled",), _ABSENT)
+        raw = getter(DELEGATED_PATH + names, _ABSENT)
     except Exception:  # noqa: BLE001
         return False
     if raw is _ABSENT:
-        return DEFAULT_DELEGATED_ENABLED
+        return default
     from local_operator.settings_io import strict_bool
 
     # Parse twice with opposite fallbacks: the two agree only when the value
@@ -486,11 +514,12 @@ def remove_session_dir(
     it to the store's :data:`CLEANUP_LOG_NAME` BEFORE the ``rmtree``, so a
     crash mid-removal still leaves the record. Read-only or no-permission
     leftovers inside the session (rig-created 0555/0444 trees and 0000 dirs —
-    the measured husk causes) are handled by two bounded phases: the ``onexc``
-    hook below widens and retries each single removal once, and a still-failing
-    removal gets one pre-widen walk (``_widen_for_removal``) plus one further
-    attempt; anything neither phase can clear still raises to the caller,
-    exactly as the plain removal did. A dry run refuses and decides exactly as
+    the measured husk causes) are handled by :func:`_bounded_rmtree`'s two
+    bounded phases — the ONE ``rmtree`` call site, shared with the
+    scratchpad-content pass: the ``onexc`` hook widens and retries each single
+    removal once, and a still-failing removal gets one pre-widen walk plus one
+    further attempt; anything neither phase can clear still raises to the
+    caller, exactly as the plain removal did. A dry run refuses and decides exactly as
     a real run would but writes nothing and logs at DEBUG — the
     CLI prints the decisions itself, and a WARNING per rehearsal doubled
     every line in a terminal (UX round 1, U3). Returns whether the directory
@@ -533,87 +562,10 @@ def remove_session_dir(
         actor,
         target.parent / CLEANUP_LOG_NAME,
     )
-    try:
-        resolved_root = target.resolve()
-    except (OSError, RuntimeError):  # pragma: no cover — gone, or a loop
-        # The shapes ``resolve()`` refuses here fail the removal below anyway;
-        # this fallback only keeps the containment test meaningful while that
-        # failure surfaces.
-        resolved_root = target
-
-    def _widen_and_retry(function: Callable[..., Any], path: str, error: BaseException) -> None:
-        """``onexc`` hook for the removal below: widen, then retry ONCE.
-
-        WHY IT EXISTS. Session scratchpads can contain read-only trees left by
-        test rigs — measured on the live store, 2026-10-09: a 0555 directory
-        holding a 0444 file (husks ``ebf4ed0639c6`` and ``30776a2dc9b8``). A
-        plain removal deletes most of the session, then dies on the entry; the
-        record was already written, so the remainder (origin.json gone) can
-        never be classified again — a partial husk no later pass can see.
-
-        WHAT IT MAY TOUCH. Only paths inside ``resolved_root`` — the directory
-        this call already selected for deletion, with the guards passed — get
-        their owner bits widened: ``unlink`` inside an unwritable directory
-        needs the PARENT's write+execute bit, ``rmdir`` needs the parent's too,
-        so both the failing path and its parent are candidates. A symlink
-        candidate is skipped, never followed: ``chmod`` would reach its target,
-        a path this call was never asked to touch (``update.py``'s sibling
-        handler measured that).
-
-        FAIL CLOSED, BOUNDED. Only ``os.unlink``/``os.rmdir`` are re-issued;
-        the other shapes ``rmtree`` reports (``os.open``, ``os.scandir``,
-        ``os.lstat``, ``os.path.islink``, ``os.close``) cannot be re-issued
-        with just a path, and letting them return would silently skip a
-        subtree — a removal still failing after this hook takes the second
-        phase (``_widen_for_removal``, then one further attempt), and only a
-        failure of that reaches the caller exactly as the plain removal's
-        did: an error is counted and the directory stays on disk — nothing is
-        suppressed.
-        """
-        for candidate in (Path(path).parent, Path(path)):
-            try:
-                if candidate.is_symlink() or not candidate.resolve().is_relative_to(resolved_root):
-                    continue
-            except (OSError, RuntimeError):  # pragma: no cover — gone, or a loop
-                continue
-            try:
-                os.chmod(candidate, os.stat(candidate).st_mode | stat.S_IRWXU)
-            except OSError:
-                logger.debug(
-                    "session cleanup: could not widen %s for removal",
-                    candidate,
-                    exc_info=True,
-                )
-        if function is os.unlink or function is os.rmdir:
-            # The one retry: a second failure propagates, by design.
-            function(path)
-        else:
-            # Not re-issuable with just a path (see above): fail closed.
-            raise error
-
-    # ``onexc``, not ``onerror``: the non-deprecated spelling since 3.12 (the
-    # type stubs flag ``onerror``), and what ``update.py``'s chmod-and-retry
-    # handler already uses. The same guarded call is attempted at most twice —
-    # still the module's single removal call site — with the bounded widen
-    # walk in between for the shapes the hook cannot re-issue (``os.open``).
-    for attempt in (1, 2):
-        try:
-            shutil.rmtree(target, onexc=_widen_and_retry)
-            break
-        except OSError:
-            if attempt == 2:
-                raise
-            # One bounded second phase: a directory without its owner read bit
-            # cannot be opened or listed at all, so per-entry retries can never
-            # reach it — widen the modes in place first, then attempt the walk
-            # once more. Past the caps nothing further is widened, and the
-            # second failure propagates as the first would have.
-            widened = _widen_for_removal(resolved_root)
-            logger.warning(
-                "session cleanup: widened %d path(s) inside %s; retrying the removal once",
-                widened,
-                target.name,
-            )
+    # The bounded widen-and-retry removal — the ``onexc`` hook, the pre-widen
+    # fallback walk and the module's single ``rmtree`` call site — lives in
+    # ``_bounded_rmtree``, shared with the scratchpad-content pass.
+    _bounded_rmtree(target)
     if config_dir is not None:
         # The ask INDEX lives OUTSIDE the session directory (see
         # ``asks/store.py`` on why the cross-session view cannot be a scan of
@@ -722,6 +674,190 @@ def _widen_for_removal(root: Path) -> int:
                     exc_info=True,
                 )
     return widened
+
+
+def _bounded_rmtree(target: Path) -> None:
+    """Remove ``target`` with the bounded widen-and-retry discipline.
+
+    THE ONE ``shutil.rmtree`` OF A DIRECTORY UNDER ``sessions/`` — pinned by
+    ``tests/unit/session/test_no_session_deletion.py`` — and it has exactly
+    two callers: :func:`remove_session_dir` (a session the guards cleared) and
+    :func:`remove_scratchpad_entry` (a tree inside a pad, for the content
+    pass). Read-only or no-permission leftovers inside the target (rig-created
+    0555/0444 trees and 0000 dirs — the measured husk causes) are handled by
+    two bounded phases: the ``onexc`` hook below widens and retries each
+    single removal once, and a still-failing removal gets one pre-widen walk
+    (``_widen_for_removal``) plus one further attempt; anything neither phase
+    can clear still raises to the caller, exactly as a plain removal did.
+
+    WHAT IT MAY WIDEN: only paths inside ``target`` — resolved HERE, so no
+    caller can widen a containment root beyond what it asked to remove. A
+    symlink candidate is skipped, never followed: ``chmod`` would reach its
+    target, a path this call was never asked to touch (``update.py``'s
+    sibling handler measured that).
+    """
+    try:
+        resolved_root = target.resolve()
+    except (OSError, RuntimeError):  # pragma: no cover — gone, or a loop
+        # The shapes ``resolve()`` refuses here fail the removal below anyway;
+        # this fallback only keeps the containment test meaningful while that
+        # failure surfaces.
+        resolved_root = target
+
+    def _widen_and_retry(function: Callable[..., Any], path: str, error: BaseException) -> None:
+        """``onexc`` hook for the removal below: widen, then retry ONCE.
+
+        WHY IT EXISTS. Session scratchpads can contain read-only trees left by
+        test rigs — measured on the live store, 2026-10-09: a 0555 directory
+        holding a 0444 file (husks ``ebf4ed0639c6`` and ``30776a2dc9b8``). A
+        plain removal deletes most of the target, then dies on the entry; for
+        a session directory the record was already written, so the remainder
+        (origin.json gone) can never be classified again — a partial husk no
+        later pass can see.
+
+        WHAT IT MAY TOUCH. Only paths inside ``resolved_root`` — the tree this
+        call already selected for removal, with the guards passed — get their
+        owner bits widened: ``unlink`` inside an unwritable directory needs
+        the PARENT's write+execute bit, ``rmdir`` needs the parent's too, so
+        both the failing path and its parent are candidates. A symlink
+        candidate is skipped, never followed (``chmod`` would reach its
+        target, a path this call was never asked to touch).
+
+        FAIL CLOSED, BOUNDED. Only ``os.unlink``/``os.rmdir`` are re-issued;
+        the other shapes ``rmtree`` reports cannot be re-issued with just a
+        path, and letting them return would silently skip a subtree — a
+        removal still failing after this hook takes the second phase
+        (``_widen_for_removal``, then one further attempt), and only a failure
+        of that reaches the caller exactly as the plain removal's did: an
+        error is counted and the target stays on disk — nothing is suppressed.
+        """
+        for candidate in (Path(path).parent, Path(path)):
+            try:
+                if candidate.is_symlink() or not candidate.resolve().is_relative_to(resolved_root):
+                    continue
+            except (OSError, RuntimeError):  # pragma: no cover — gone, or a loop
+                continue
+            try:
+                os.chmod(candidate, os.stat(candidate).st_mode | stat.S_IRWXU)
+            except OSError:
+                logger.debug(
+                    "session cleanup: could not widen %s for removal",
+                    candidate,
+                    exc_info=True,
+                )
+        if function is os.unlink or function is os.rmdir:
+            # The one retry: a second failure propagates, by design.
+            function(path)
+        else:
+            # Not re-issuable with just a path (see above): fail closed.
+            raise error
+
+    # ``onexc``, not ``onerror``: the non-deprecated spelling since 3.12 (the
+    # type stubs flag ``onerror``), and what ``update.py``'s chmod-and-retry
+    # handler already uses. The same guarded call is attempted at most twice —
+    # still the module's single removal call site — with the bounded widen
+    # walk in between for the shapes the hook cannot re-issue (``os.open``).
+    for attempt in (1, 2):
+        try:
+            shutil.rmtree(target, onexc=_widen_and_retry)
+            break
+        except OSError:
+            if attempt == 2:
+                raise
+            # One bounded second phase: a directory without its owner read bit
+            # cannot be opened or listed at all, so per-entry retries can never
+            # reach it — widen the modes in place first, then attempt the walk
+            # once more. Past the caps nothing further is widened, and the
+            # second failure propagates as the first would have.
+            widened = _widen_for_removal(resolved_root)
+            logger.warning(
+                "session cleanup: widened %d path(s) inside %s; retrying the removal once",
+                widened,
+                target.name,
+            )
+
+
+def _scratchpad_refusal(target: Path, *, config_dir: Path | None, sessions_dir: Path) -> str | None:
+    """Why :func:`remove_scratchpad_entry` must not touch ``target``; ``None`` if it may.
+
+    Same discipline as :func:`_refusal`, scoped to pads: the target must not
+    be a symlink (checked BEFORE any resolve — the only moment the check can
+    fire, because ``resolve`` has erased the information by the time it
+    returns); it must resolve STRICTLY INSIDE
+    ``<sessions_dir>/<session>/scratchpad/`` — the session directory, the pad
+    root itself, and anything outside the store are never removable here;
+    ``sessions_dir`` must carry the store marker; and, when a ``config_dir``
+    is given, it must be THAT config dir's store.
+    """
+    try:
+        if target.is_symlink():
+            return "target is a symlink"
+    except OSError:
+        # An unreadable target lands here; ``resolve`` below refuses it with
+        # its own reason, exactly as it did before this check existed.
+        pass
+    try:
+        resolved = target.resolve(strict=True)
+        store = sessions_dir.resolve(strict=True)
+    except OSError:
+        return "target or store does not exist or cannot be resolved"
+    try:
+        relative = resolved.relative_to(store)
+    except ValueError:
+        return f"target {resolved} is not inside the store {store}"
+    parts = relative.parts
+    if len(parts) < 3 or parts[1] != "scratchpad":
+        return "not a path inside a session's scratchpad/ directory"
+    if not store_marker_path(store).is_file():
+        return f"store carries no {STORE_MARKER_NAME} marker"
+    if config_dir is not None:
+        try:
+            expected = (config_dir / SESSIONS_DIRNAME).resolve()
+        except OSError:
+            return "config dir cannot be resolved"
+        if store != expected:
+            return f"store {store} is not this process's store {expected}"
+    if not resolved.is_dir() and not resolved.is_file():
+        return "not a file or directory"
+    return None
+
+
+def remove_scratchpad_entry(
+    target: Path,
+    *,
+    config_dir: Path | None,
+    sessions_dir: Path,
+) -> bool:
+    """Remove ONE file or tree inside a session's scratchpad: the content phase's remover.
+
+    THE second — and last — removal shape in this module, reached only by the
+    delegated class's content phase (``delegated_retention``), never by a
+    user-facing command directly. Refuses unless :func:`_scratchpad_refusal`
+    clears the target and logs the refusal at WARNING, like
+    :func:`remove_session_dir`. The removal shape is decided by ``lstat``: a
+    directory goes through :func:`_bounded_rmtree` (the shared widen-and-retry
+    discipline — a 0555 rig-created tree inside a pad is a measured shape); a
+    file goes through a plain ``os.unlink``. Files get no widen phase on
+    purpose: the content pass removes a file only when shape+size+age passed,
+    nothing here is mid-record (the session record is untouched by this
+    pass), and a file that cannot be unlinked is left for a later pass to
+    retry — so the failure raises to the caller, exactly as
+    :func:`remove_session_dir`'s does, and is counted. Returns whether the
+    entry was (or, in a dry run, would have been) removed; ``False`` for a
+    refusal.
+    """
+    why_not = _scratchpad_refusal(target, config_dir=config_dir, sessions_dir=sessions_dir)
+    if why_not is not None:
+        logger.warning(
+            "session cleanup: REFUSED to remove scratchpad entry %s (%s)", target, why_not
+        )
+        return False
+    mode = os.lstat(target).st_mode
+    if stat.S_ISDIR(mode):
+        _bounded_rmtree(target)
+    else:
+        os.unlink(target)
+    return True
 
 
 #: The record ``policy`` string for a delete the USER asked for, as opposed to

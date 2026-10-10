@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TypedDict
@@ -156,6 +157,29 @@ class MonitorBuildFailed(TypedDict):
 
     error: str
     malformed: bool
+
+
+def _captured_cwd(raw: str) -> str:
+    """The cwd a spec STORES: absolute and expanded, so every later run —
+    after a session restart, an app restart, a machine restart — lands in the
+    directory the arm named.
+
+    The field's contract is "captured at arm; the check runs with it" (§10.1),
+    and a RELATIVE path silently breaks that contract across restarts: the
+    check's spawn resolves it against whatever process hosts the next runtime
+    (the child runtime is deliberately spawned without a ``cwd=``, so its
+    filesystem directory, not the arm's, decides), and a ``~`` form is not
+    expanded by the spawn at all — it would fail every tick. The arm site is
+    the one moment that knows what the caller meant, so the expansion happens
+    here once and the spec stores the answer. ``abspath``, not ``resolve``: a
+    symlinked path keeps the spelling the arm named. Blank stays blank (the
+    check then runs with the hosting session's cwd — the tool path's own
+    fallback).
+    """
+    stripped = raw.strip()
+    if not stripped:
+        return ""
+    return os.path.abspath(os.path.expanduser(stripped))
 
 
 def build_monitor_spec(
@@ -289,7 +313,7 @@ def build_monitor_spec(
         notify=as_bool("notify"),
         sort_lines=as_bool("sort_lines"),
         ignore=ignore,
-        cwd=cwd,
+        cwd=_captured_cwd(cwd),
         created_at=now_ms,
     )
     return {"spec": spec}

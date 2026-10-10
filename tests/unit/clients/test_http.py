@@ -26,6 +26,7 @@ from local_operator.clients._http import (
     REDACTION_MARKER,
     APIError,
     api_error_from_exception,
+    redact_secrets,
 )
 
 
@@ -135,3 +136,17 @@ def test_api_error_from_exception_scrubs_the_callers_credential_from_both_halves
     assert exc.body is not None
     assert key not in exc.body
     assert REDACTION_MARKER in str(exc)
+
+
+def test_a_word_like_secret_masks_on_word_boundaries_through_redact_secrets() -> None:
+    """The caller's own value takes the SHARED mask, not a local substring loop.
+
+    Provider values carry digits in practice, but the policy is one policy (agent review
+    round 1, R1): a letters-only value masks as a standalone token and leaves an ordinary
+    word that contains it readable, exactly as it does on every other surface.
+    """
+    word = "syn" + "thetic"
+    scrubbed = redact_secrets("un" + word + "ally and a " + word + " store", [word])
+    assert "un" + word + "ally" in scrubbed, "the embedded word must stay readable"
+    assert word + " store" not in scrubbed, "the standalone token must stay masked"
+    assert REDACTION_MARKER in scrubbed

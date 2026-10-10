@@ -139,7 +139,7 @@ def secret_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch)
         # cells drive the REAL broker (the copy path goes through it), so each side's
         # store starts a detached `brokerd` under its own root; the suite-wide sweep in
         # ``tests/conftest.py`` cannot see those roots — its candidates come from
-        # [redacted], and this module only ever reaches [redacted] through fixtures
+        # ``tmp_path``, and this module only ever reaches ``tmp_path`` through fixtures
         # (``secret_mesh`` and the network suite's ``root``), so ``item.funcargs``
         # never holds it and the sweep's list comes back as ``home/.local-operator``
         # alone. Measured on this fleet: a ``-n0`` run of this file left NINE live
@@ -147,7 +147,7 @@ def secret_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch)
         # ``candidates=1, with_socket=0``, and each two-device cell added two). The
         # socket lives INSIDE each root (pytest paths here are short enough that no
         # TMPDIR fallback is in play), and pytest reclaims the directories at
-        # [redacted]'s own teardown, after this finaliser — so this is the last
+        # ``tmp_path``'s own teardown, after this finaliser — so this is the last
         # moment `_stop_brokers_in` (the sweep's own stop, candidate by candidate,
         # refusing anything it cannot confirm dead) can reach them. Cell 5
         # (``needs_list``) leaked nothing and needs none of this; the bare-secret cell

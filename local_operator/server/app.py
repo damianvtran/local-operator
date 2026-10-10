@@ -73,6 +73,7 @@ from local_operator.server.routes import (
     transcription,
     tts,
 )
+from local_operator.server.utils import local_tokens
 from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.static_roots import (
     host_is_acceptable,
@@ -358,6 +359,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # started further down, once the scheduler is up and the record exists.
         reload_stop = asyncio.Event()
         reload_watch = serve_reload.install(app, stop=reload_stop)
+        # THE LOCAL SURFACE KEYS (file-serving RFC §4.1): minted before the
+        # record exists, for the same reason claim_key is -- a reader that finds
+        # the record a millisecond later must find the credential it needs. The
+        # generation counter lives beside the records and bumps once per
+        # announced boot, so a surface holding a pre-restart token is
+        # classifiable as stale (Phase A: treated as absent, logged once). The
+        # seed and the URL signing key never leave this process; see
+        # ``server/utils/local_tokens.py``.
+        serve_dir = session_registry.ensure_run_dir(config_dir, serve_registry.SERVE_RUN_DIRNAME)
+        surface_keys = local_tokens.mint_process_keys(
+            generation=local_tokens.bump_generation(serve_dir / local_tokens.GENERATION_FILENAME)
+        )
         serve_record = serve_registry.build_record(
             instance_id=app.state.instance_id,
             announced=announced,
@@ -368,6 +381,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # signal handlers all answer None, and all three would be lying if
             # this read `listener_fd is not None` instead.
             reloadable=reload_watch is not None,
+            access_token=surface_keys.access_token,
+            boot_generation=surface_keys.generation,
         )
         # The config root resolved above, passed explicitly: the publisher pins
         # the directory it publishes into for its whole life, so a heartbeat can

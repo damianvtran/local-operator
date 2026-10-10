@@ -31,8 +31,13 @@ from requests.exceptions import RequestException
 # The shared credential-shape scrubber. Imported under an alias because this
 # module defines the public `scrub_secrets` wrapper below, and re-exporting
 # the name directly would make the two indistinguishable at a call site.
-from local_operator.redaction_shapes import REDACTION_MARKER
+#
+# `REDACTION_MARKER` no longer has a user inside this module (the value pass below
+# is the shared one); it stays as a RE-EXPORT, which is how the tests for this
+# package have always read it from here.
+from local_operator.redaction_shapes import REDACTION_MARKER  # noqa: F401 — re-export
 from local_operator.redaction_shapes import scrub_secrets as scrubbed_secrets
+from local_operator.redaction_shapes import scrub_values
 
 NO_RESPONSE_BODY = "No response body"
 """Stand-in used in error messages when a failed request has no readable body."""
@@ -123,6 +128,11 @@ def redact_secrets(text: str, secrets: Iterable[Optional[str]]) -> str:
     because a client that knows its own key should still remove it byte-for-byte
     — the key is not always spelled the way a shape would recognise.
 
+    **The mask is the shared value pass** (:func:`~local_operator.redaction_shapes.scrub_values`),
+    not a local substring loop: a letters-only value masks on word boundaries and
+    every spelling the pass knows is masked, so this surface cannot drift from the
+    policy every other one reads (agent review round 1, R1).
+
     Args:
         text: The text about to be surfaced.
         secrets: The credential values to remove. Empty and ``None`` entries are
@@ -132,10 +142,7 @@ def redact_secrets(text: str, secrets: Iterable[Optional[str]]) -> str:
         The text with every non-empty secret replaced.
     """
 
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, REDACTION_MARKER)
-    return text
+    return scrub_values(text, secrets)
 
 
 #: The shape table used to live in this module, with this package's clients as
