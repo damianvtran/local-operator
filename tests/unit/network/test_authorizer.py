@@ -111,10 +111,11 @@ def test_a_local_op_in_the_peer_table_is_a_bug_not_a_gap(
 def test_the_vocabulary_is_the_one_agreed_set() -> None:
     """The agreed set, and the rejected draft names are absent.
 
-    ``approve`` and ``unattended`` joined in the remote-onboarding slice (a);
-    this pin is deliberately a full-set equality so a THIRTEENTH name cannot
-    appear without moving it, and so the two shipped additions are visible in
-    the diff rather than implied.
+    ``approve`` and ``unattended`` joined in the remote-onboarding slice (a),
+    and ``update`` joined in S1 of the mesh rolling updates (a per-member,
+    receiver-side grant — no role carries it); this pin is deliberately a
+    full-set equality so a FOURTEENTH name cannot appear without moving it, and
+    so the three shipped additions are visible in the diff rather than implied.
     """
     assert types.CAPABILITIES == frozenset(
         {
@@ -130,6 +131,7 @@ def test_the_vocabulary_is_the_one_agreed_set() -> None:
             "move",
             "approve",
             "unattended",
+            "update",
         }
     )
     for rejected in ("broker:request", "broker:grant", "member:admin", "trust"):
