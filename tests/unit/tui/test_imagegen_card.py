@@ -407,13 +407,27 @@ def test_a_queued_video_card_counts_the_queue_and_never_the_hint() -> None:
 
 
 def test_a_video_card_settles_with_no_live_furniture() -> None:
-    """R5/§3.1: the card's in-turn life ends at the settle — the receipt text
-    is the whole card, no ticking motif and no fabricated graphic. The
-    minutes-long presence is the band counter and the job rail, not here."""
+    """R5/§3.1/§2.4: the card's in-turn life ends at the settle — the receipt
+    text IS the whole card, no ticking motif and no fabricated graphic. The
+    text is the §2.4 SUBMIT receipt the lane's tool returns (the call is
+    detached; "Video generation started … cancel with ``jobs op='cancel'``"),
+    NOT the later completion sentence — "Video ready — …" is the `job_result`
+    delivery's own text (§5.1) and delivered rows are not repainted onto the
+    card (§3.1). The minutes-long presence is the band counter and the job
+    rail. (Remediation round 1, D1: this fixture used to carry the completion
+    text — the frame and this pin now carry the text the card settles with.)"""
     card = _video_running_card(stage="in_progress")
-    card.mark_done("Video ready — job abc123 · model wan-3.0-prime · 8.0s · $1.60 (reported)")
-    body = _content(card)
-    assert "Video ready" in body
+    card.mark_done(
+        "Video generation started — job `abc123` (mode i2v, 8 s, ~$1.60 est., Radient). "
+        "You'll get a completion notice when it settles; cancel with "
+        "`jobs op='cancel', job_id='abc123'`."
+    )
+    body = _content(card, 200)
+    assert "Video generation started" in body
+    # The remedy half survives at a width the card can hold it at — and the
+    # settled status must never read as the readiness claim (D1).
+    assert "cancel with" in body and "job_id='abc123'" in body
+    assert "Video ready" not in body
     assert "░" not in body and "█" not in body
     assert "⋯" not in body
 
