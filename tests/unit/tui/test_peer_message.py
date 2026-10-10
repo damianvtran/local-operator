@@ -160,6 +160,68 @@ async def test_resume_replays_peer_message_without_double_paint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_peer_turn_answered_with_no_reply_replays_as_the_card_alone() -> None:
+    """The persisted quiet pair paints no ledger row (design §5, S1).
+
+    The peer message the agent answered silently is the shape the pair exists
+    for: on resume the card is the whole receipt, and the ordinary call beside
+    the pair keeps its ledger row (the control — an over-broad skip would take
+    that row too).
+    """
+    from local_operator.harness.types import (
+        QUIET_TURN_KEY,
+        Message,
+        TextContent,
+        ToolCall,
+        ToolResult,
+    )
+
+    session = FakeSession()
+    session._history = [
+        SimpleNamespace(
+            role=None,
+            custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+            id="peer-1",
+            text="",
+            tool_calls=None,
+            content=[],
+            details={
+                "body": "status ping",
+                "sender": {"pid": 7, "conversation_name": "peer"},
+            },
+        ),
+        Message.assistant("", tool_calls=[ToolCall(id="q1", name="no_reply", arguments={})]),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id="q1",
+                tool_name="no_reply",
+                content=[TextContent(text="Quiet.")],
+                details={QUIET_TURN_KEY: True},
+            )
+        ),
+        Message.assistant("", tool_calls=[ToolCall(id="r1", name="read", arguments={"path": "f"})]),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id="r1",
+                tool_name="read",
+                content=[TextContent(text="file body")],
+            )
+        ),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        await _settle_for_peer_block(pilot, app)
+        await pilot.pause()
+        bodies = [b.text() for b in _peer_blocks(app)]
+        cards = [card for card in app.query(ToolCard)]
+
+    assert bodies == ["status ping"], "the peer card is the whole receipt"
+    assert [card.tool_call_id for card in cards] == ["r1"]
+    assert all(card.tool_name != "no_reply" for card in cards)
+
+
+@pytest.mark.asyncio
 async def test_busy_steer_paints_one_peer_block_and_no_user_block(tmp_path) -> None:
     """A `send now=True` landing mid-turn paints ONE PeerMessageBlock, and
     nothing else for the same message.

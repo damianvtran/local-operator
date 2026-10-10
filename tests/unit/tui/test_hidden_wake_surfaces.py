@@ -242,3 +242,143 @@ async def test_the_live_seams_mount_no_card_for_a_hidden_tool_call() -> None:
         )
         await pilot.pause()
         assert [card.tool_call_id for card in app.query(ToolCard)] == ["r1"]
+
+
+def quiet_pair(call_id: str = "q1"):
+    """The pair a quiet turn persists: the call row, then its marked result.
+
+    Product-shaped (``docs/design/quiet-turns.md`` §5, S1): a text-free
+    assistant row carrying the one ``no_reply`` call, and its tool result with
+    S0a's marker in ``details`` — the same two rows the e2e finds on disk.
+    """
+    from local_operator.harness.types import (
+        QUIET_TURN_KEY,
+        Message,
+        TextContent,
+        ToolCall,
+        ToolResult,
+    )
+
+    return [
+        Message.assistant("", tool_calls=[ToolCall(id=call_id, name="no_reply", arguments={})]),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id=call_id,
+                tool_name="no_reply",
+                content=[TextContent(text="Quiet.")],
+                details={QUIET_TURN_KEY: True},
+            )
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_replay_paints_no_ledger_row_for_the_quiet_call() -> None:
+    """The quiet call is the turn's door, not work (design §5, S1).
+
+    The replay is where a hidden row comes back on every reopen, and the
+    ``no_reply`` sentinel is the case the operator reported as filler — it
+    must never paint as a ledger row. The ordinary call beside it is the
+    control: an over-broad filter would take that row too.
+    """
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    session = FakeSession()
+    session._history = [simple_user("ask"), *quiet_pair("q1"), *tool_pair("r1", "read")]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._project_settled_rows(list(session._history))
+        await pilot.pause()
+        shown = _transcript_text(app)
+        cards = [card for card in app.query(ToolCard)]
+
+    assert "read" in shown, "the visible control must keep its ledger row"
+    assert "no_reply" not in shown
+    assert [card.tool_call_id for card in cards] == ["r1"]
+
+
+@pytest.mark.asyncio
+async def test_the_live_seams_mount_no_card_for_the_quiet_call() -> None:
+    """BOTH live frames are gated, not just one: they race, either first (S1).
+
+    ``tool_call_compose`` announces the row before the call exists and
+    ``tool_execution_start`` would mount one for a call with none — suppressing
+    only one seam leaves the other free to paint the ``no_reply`` row a moment
+    later, exactly as for a hidden tool.
+    """
+    from local_operator.harness.types import (
+        ToolCallComposeEvent,
+        ToolExecutionStartEvent,
+    )
+    from local_operator.tui.events import ToolComposing, ToolStarted
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.on_tool_composing(
+            ToolComposing(event=ToolCallComposeEvent(tool_call_id="q1", tool_name="no_reply"))
+        )
+        app.on_tool_started(
+            ToolStarted(event=ToolExecutionStartEvent(tool_call_id="q1", tool_name="no_reply"))
+        )
+        await pilot.pause()
+        assert list(app.query(ToolCard)) == []
+
+        # The control: an ordinary tool frames normally.
+        app.on_tool_composing(
+            ToolComposing(event=ToolCallComposeEvent(tool_call_id="r1", tool_name="read"))
+        )
+        await pilot.pause()
+        assert [card.tool_call_id for card in app.query(ToolCard)] == ["r1"]
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_result_settles_nothing_and_retires_a_stray_card() -> None:
+    """The marker-read half of the pair's contract (design §5, S1).
+
+    The composing and started gates are the first doors; the END frame reads
+    the marker itself, so a card a seam older than the gates could have
+    mounted is DROPPED rather than settled — the same settle-side shape the
+    ask gate's divert arm keeps beside it. The frame is consumed with nothing
+    painted either way.
+    """
+    from local_operator.harness.types import (
+        QUIET_TURN_KEY,
+        TextContent,
+        ToolExecutionEndEvent,
+        ToolResult,
+    )
+    from local_operator.tui.events import ToolEnded
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Simulate the mixed-build residual the drop half exists for: a card
+        # for the call that this process's seams never mounted.
+        card = ToolCard("q1", "no_reply", {})
+        app._append_block(card)
+        await pilot.pause()
+        assert app._painted_tool_card("q1") is card
+
+        app.on_tool_ended(
+            ToolEnded(
+                event=ToolExecutionEndEvent(
+                    tool_call_id="q1",
+                    tool_name="no_reply",
+                    result=ToolResult(
+                        tool_call_id="q1",
+                        tool_name="no_reply",
+                        content=[TextContent(text="Quiet.")],
+                        details={QUIET_TURN_KEY: True},
+                    ),
+                )
+            )
+        )
+        await pilot.pause()
+        assert app._painted_tool_card("q1") is None
+        assert list(app.query(ToolCard)) == []
