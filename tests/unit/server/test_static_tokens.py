@@ -41,6 +41,33 @@ PNG = (
 
 LOG_NAME = "local_operator.server.utils.local_tokens"
 
+#: Shapes an attacker can send that no boot could have minted. Every one must
+#: classify "invalid" WITHOUT raising, and identically whatever generation the
+#: daemon serves (R1-1/S-1: two of these used to raise -- a 500 on a route
+#: whose contract is "served regardless" -- and the non-ASCII one raised only
+#: when its prefix MATCHED the serving generation, which made it a generation
+#: oracle).
+MALFORMED_TOKENS = (
+    "",
+    ".",
+    "..",
+    "7",
+    "x.y",
+    "7.",
+    ".abc",
+    "\u0667.abc",
+    "-1.abc",
+    " 7.abc",
+    "7.a\t",
+    "7.a b",
+    "7.a.b",
+    "7.a!",
+    "9" * 5000 + ".x",  # past the interpreter's str-digit wall: int() would raise
+    "9" * 4300 + ".x",  # below the wall, still bounded out before conversion
+    "1.\u00e9",  # non-ASCII secret: the digest comparison would raise, and the old
+    "2.\u00e9",  # raise distinguished "prefix == serving generation"
+)
+
 
 @pytest.fixture(autouse=True)
 def _fresh_process_state(monkeypatch):
@@ -117,9 +144,20 @@ def test_token_status_classifies_valid_stale_and_invalid():
     # future number is still a mismatch, and capped logging bounds the noise).
     assert keys.token_status("6.anything") == "stale"
     assert keys.token_status("99.x") == "stale"
-    for malformed in ("", "7", "x.y", "7.", ".abc", "٧.abc"):
+    for malformed in MALFORMED_TOKENS:
         assert keys.token_status(malformed) == "invalid", malformed
     assert keys.token_status("7." + "z" * 43) == "invalid"  # right generation, wrong secret
+
+
+def test_malformed_tokens_never_raise_and_never_depend_on_the_generation():
+    """R1-1/S-1: classification is TOTAL and generation-independent for shapes
+    no boot could have minted -- a crafted token can neither error a served
+    route nor learn the serving generation from a difference between shapes."""
+    serving = SurfaceKeys(generation=5, access_token="5.abc_def", signing_key=b"k" * 32)
+    other = SurfaceKeys(generation=9, access_token="9.ghi-jkl", signing_key=b"k" * 32)
+    for shape in MALFORMED_TOKENS:
+        assert serving.token_status(shape) == "invalid", shape
+        assert other.token_status(shape) == "invalid", shape
 
 
 def test_mint_process_keys_is_first_call_wins():
@@ -252,38 +290,41 @@ def test_bump_generation_treats_a_torn_file_as_zero(tmp_path: Path):
 
 def test_observation_counts_a_valid_token(caplog):
     keys = _keys(generation=4)
-    local_tokens.observe_credentials(
-        route="images", path="/x.png", token=keys.access_token, exp_raw=None, sig_raw=None
-    )
+    with caplog.at_level(logging.INFO, logger=LOG_NAME):
+        local_tokens.observe_credentials(
+            route="images", path="/x.png", token=keys.access_token, exp_raw=None, sig_raw=None
+        )
     assert local_tokens.stats()["tokens_valid"] == 1
-    assert not caplog.records
+    assert not caplog.records  # not even at INFO, where the stale line used to sit
 
 
 def test_a_stale_token_logs_once_per_distinct_generation(caplog):
     _keys(generation=4)
-    with caplog.at_level(logging.INFO, logger=LOG_NAME):
-        for _ in range(3):
-            local_tokens.observe_credentials(
-                route="images", path="/x.png", token="3.old", exp_raw=None, sig_raw=None
-            )
+    for _ in range(3):
         local_tokens.observe_credentials(
-            route="images", path="/x.png", token="2.older", exp_raw=None, sig_raw=None
+            route="images", path="/x.png", token="3.old", exp_raw=None, sig_raw=None
         )
+    local_tokens.observe_credentials(
+        route="images", path="/x.png", token="2.older", exp_raw=None, sig_raw=None
+    )
     assert local_tokens.stats()["tokens_stale"] == 4
+    # NO ``caplog.at_level`` here, and that is the point (S-2/Q1): the line must
+    # be visible at the DEFAULT capture level. INFO was invisible on a default
+    # daemon's console; WARNING is what the operator's log level shows.
     assert len(caplog.records) == 2  # once per DISTINCT generation, not per request
+    assert all(record.levelno == logging.WARNING for record in caplog.records)
 
 
 def test_the_stale_log_is_capped_against_fabricated_generations(caplog):
     _keys(generation=100)
-    with caplog.at_level(logging.INFO, logger=LOG_NAME):
-        for generation in range(1, 40):
-            local_tokens.observe_credentials(
-                route="images",
-                path="/x.png",
-                token=f"{generation}.x",
-                exp_raw=None,
-                sig_raw=None,
-            )
+    for generation in range(1, 40):
+        local_tokens.observe_credentials(
+            route="images",
+            path="/x.png",
+            token=f"{generation}.x",
+            exp_raw=None,
+            sig_raw=None,
+        )
     assert len(caplog.records) == local_tokens._STALE_LOG_CAP
 
 
@@ -454,19 +495,84 @@ async def test_a_stale_token_through_the_route_is_logged_once(test_app_client, c
     client = _loopback_client()
     response = None
     try:
-        with caplog.at_level(logging.INFO, logger=LOG_NAME):
-            for _ in range(3):
-                response = await client.get(
-                    "/v1/static/images",
-                    params={"path": str(outside)},
-                    headers={local_tokens.ACCESS_TOKEN_HEADER: stale},
-                )
+        for _ in range(3):
+            response = await client.get(
+                "/v1/static/images",
+                params={"path": str(outside)},
+                headers={local_tokens.ACCESS_TOKEN_HEADER: stale},
+            )
     finally:
         await client.aclose()
     assert response is not None
     assert response.status_code == 200
     logged = [record for record in caplog.records if "generation" in record.getMessage()]
     assert len(logged) == 1
+    # Default capture level (no at_level): a WARNING is what a daemon without
+    # LOG_LEVEL shows -- the compat signal has to be visible there (S-2/Q1).
+    assert logged[0].levelno == logging.WARNING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "shape", [("9" * 5000 + ".x").encode("ascii"), "1.\u00e9".encode("latin-1")]
+)
+async def test_a_crafted_token_is_served_not_errored(test_app_client, configured, shape):
+    """R1-1/S-1 at the route layer: the two shapes that used to 500 now
+    classify as absent -- 200, the file, and no exception text anywhere."""
+    outside = _outside_png(configured)
+    client = _loopback_client()
+    try:
+        response = await client.get(
+            "/v1/static/images",
+            params={"path": str(outside)},
+            headers={local_tokens.ACCESS_TOKEN_HEADER: shape},
+        )
+    finally:
+        await client.aclose()
+    assert response.status_code == 200
+    assert response.content == PNG
+    assert b"Exceeds the limit" not in response.content
+    assert b"non-ASCII" not in response.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "shape", [("9" * 5000 + ".x").encode("ascii"), "1.\u00e9".encode("latin-1")]
+)
+async def test_the_sign_door_classifies_crafted_tokens_to_the_stable_401(
+    test_app_client, configured, shape
+):
+    """The sign door's contract for a malformed token is the SAME single
+    refusal as every other credential failure -- never a 500 (R1-1/S-1)."""
+    response = await test_app_client.post(
+        "/v1/static/sign",
+        json={"route": "images", "path": "/tmp/x.png"},
+        headers={local_tokens.ACCESS_TOKEN_HEADER: shape},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"] == "A local access token or desktop bearer is required."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "shape", [("9" * 5000 + ".x").encode("ascii"), "1.\u00e9".encode("latin-1")]
+)
+async def test_the_sign_door_crafted_tokens_do_not_pre_empt_a_valid_bearer(
+    test_app_client, configured, monkeypatch, shape
+):
+    """R1-1/S-1: the door is token OR bearer -- a malformed token riding along
+    must not stop a valid bearer from opening it (it used to raise first)."""
+    bearer = "bearer-for-crafted-token-row"
+    monkeypatch.setenv(desktop.TOKEN_ENV, bearer)
+    response = await test_app_client.post(
+        "/v1/static/sign",
+        json={"route": "images", "path": "/tmp/x.png"},
+        headers={
+            local_tokens.ACCESS_TOKEN_HEADER: shape,
+            "Authorization": f"Bearer {bearer}",
+        },
+    )
+    assert response.status_code == 200
 
 
 @pytest.mark.asyncio

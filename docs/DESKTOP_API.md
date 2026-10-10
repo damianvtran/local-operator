@@ -244,9 +244,13 @@ restart re-derives the secret and bumps the generation, so a token and the
 record that carried it are classifiable against each other.
 
 **Presenting the token.** A surface reads the record and sends the token as
-`X-Local-Token: <generation>.<secret>`. Phase A: a valid token is validated
-and counted; an invalid or stale one is treated as ABSENT -- never a refusal
--- and the first sighting of each stale generation logs one line. A surface
+`X-Local-Token: <generation>.<secret>`. Phase A, on the general
+(loopback-accepted) posture: a valid token is validated and counted; an
+invalid or stale one is treated as ABSENT -- never a refusal, and every
+malformed shape classifies as invalid rather than erroring -- and the first
+sighting of each stale generation logs one WARNING line (visible at the
+daemon's default log level). Rooted-mode requests do not read tokens at all
+(rooted is unaffected by token handling in these phases). A surface
 can compare its token's generation prefix (or the `boot_generation` it cached)
 against the record and re-read on a mismatch. The later phases turn a missing
 or invalid token on a static GET into `401` with the stable code
@@ -281,6 +285,11 @@ decodes before verifying -- there is no second canonicalisation dialect);
 the path, the route or `exp`, editing `sig`, or using the URL after `exp`
 fails verification -- which runs before any filesystem resolution, so an
 invalid signature can never probe what exists.
+
+**Replay and log exposure.** A signed URL is a bearer URL: whoever holds one
+can replay it until `exp`, and it travels in the query string, so the daemon's
+access log records `path`, `exp` and `sig` on every fetch. The token itself
+never lands in a log (headers are not logged).
 
 **`<video>` Range/seek lifetime.** Streaming issues many Range GETs against
 one URL. Mint with a `ttl_s` covering the viewing session (up to the 3600 s
