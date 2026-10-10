@@ -301,6 +301,7 @@ from local_operator.tui.notify import (
     remote_park_banner,
     remote_park_card,
 )
+from local_operator.tui.quota_notice import await_prewarm, start_prewarm
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
 from local_operator.tui.session_interaction import (
@@ -4702,6 +4703,13 @@ class OperatorApp(App[None]):
         # commands; ``None`` degrades /provider /usage /model-switch to
         # pointer notices when it is absent.
         self._providers = provider_controller
+        # The splash's quota-verdict prewarm, engaged from CONSTRUCTION — not
+        # a mount hook — because Textual dispatches the welcome's own
+        # on_mount (its first read) before the app's; scheduling there ran
+        # one full read too late (CI review round 4, R4-1). See
+        # ``start_prewarm`` for why this is a plain thread, and
+        # ``_prewarm_quota_notice`` for the post-load re-snapshot.
+        start_prewarm()
         #: True once session construction has DEFINITIVELY failed and no
         #: replacement is in flight (U7-1).
         #:
@@ -5205,6 +5213,14 @@ class OperatorApp(App[None]):
         #: This session's OWN spend, accumulated per turn. The number the band
         #: shows is this plus every child's — see :meth:`_spend_total`.
         self._total_cost = 0.0
+        #: The LAST published ``spend_channels`` object this app applied (see
+        #: ``_apply_frontend_state``), or ``None`` when the runtime does not
+        #: publish one. When present it is the AUTHORITY for the band's money
+        #: (total and marks) and for ``/session``'s channel section: one number
+        #: computed in one place, so the band, the panel, the phone and the
+        #: Electron strip cannot disagree (design §5.1). ``None`` keeps every
+        #: reader on its legacy path, which is what an old runtime gets.
+        self._spend_channels_state: Any | None = None
         #: Delegated spend, keyed by job id and holding the LAST cost observed
         #: for that child. A dict rather than a running sum because a child's
         #: figure grows while it works, so each tick has to replace its entry
@@ -11636,6 +11652,10 @@ class OperatorApp(App[None]):
         # Cached: every appended block asks the splash to hide, and that path
         # should not pay for a DOM query per block.
         self._welcome = self.query_one(WelcomeView)
+        # Await the construction-time verdict prewarm and re-snapshot the
+        # splash once it lands (the read SKIPPED the row while the import
+        # was in flight — see `tui/quota_notice`).
+        self.run_worker(self._prewarm_quota_notice(), thread=False, group="quota-prewarm")
         # An empty transcript is the boot layout's whole precondition, and the
         # session starts empty — so the app opens in it. Set here rather than in
         # the stylesheet's base rules because this is state, not style: it is the
@@ -11750,6 +11770,17 @@ class OperatorApp(App[None]):
         from local_operator.session_factory import warm_session_imports
 
         await asyncio.to_thread(warm_session_imports)
+
+    async def _prewarm_quota_notice(self) -> None:
+        """Re-snapshot the splash once the construction-time prewarm lands.
+
+        The import itself starts at construction (``start_prewarm``, and see
+        there for why not a mount hook); this worker only waits for it OFF
+        the loop and refreshes, so the row a skip deferred is painted.
+        """
+        loaded = await await_prewarm()
+        if loaded and self._welcome is not None:
+            self._welcome.refresh_info()
 
     async def _construct_session(self) -> Any:
         """Apply the factory's import policy and await it. RAISES; adopts nothing.
@@ -12354,6 +12385,7 @@ class OperatorApp(App[None]):
             "value",
             "unknown",
         )
+        self._spend_channels_state = getattr(state, "spend_channels", None)
         if cost is not None:
             self._total_cost = float(getattr(state, "cumulative_parent_cost", 0.0) or 0.0)
             self._subagent_costs = self._frontend_child_costs(state)
@@ -12411,20 +12443,7 @@ class OperatorApp(App[None]):
             context_tokens=getattr(state, "context_tokens", None),
             context_is_estimate=getattr(state, "context_is_estimate", None),
             context_window=getattr(state, "context_window", None),
-            cost=(
-                self._spend_text((cost or 0.0) + search_usd)
-                if cost is not None
-                else (
-                    # Model money unpriceable, search money real: the cell can
-                    # only show the half it knows, so it carries the band's
-                    # floor mark (``≥``). Showing a partial figure as if it were
-                    # the total is the lie
-                    # ``_spend_text``'s docstring calls the more expensive one.
-                    self._spend_text(search_usd, floor=True)
-                    if search_usd
-                    else (UNKNOWN_COST_CELL if billed_unknown else None)
-                )
-            ),
+            cost=self._band_cost_cell(cost, search_usd, billed_unknown),
             # A local opener label is DISPLAY state until a generated title is
             # accepted. Canonical snapshots correctly keep their persisted title
             # empty during that interval, but must not turn "empty in storage"
@@ -44975,6 +44994,11 @@ class OperatorApp(App[None]):
             # read inside ``capture`` -- the panel then renders it even on a
             # frame whose ledger read failed.
             search_spend=self._session_search_spend(),
+            # The published channel object, attached on the same pass as the
+            # band's floor mark: it is the one source the section renders, and
+            # ``None`` (an old runtime) makes the panel draw the legacy search
+            # block instead.
+            spend_channels=self._spend_channels_state,
         )
         # Own a visible, cancellable surface before starting IO. A late disk
         # result must update this surface, never push over a user's new draft.
@@ -45453,13 +45477,21 @@ class OperatorApp(App[None]):
         Deliberately NOT the panel's ``group="usage"`` worker: a warm-up must
         neither cancel an in-flight panel fetch nor be cancelled by one, and it
         has no surface to update — its only output is the shared cache row the
-        next `/usage` reads.
+        next `/usage` reads. The one splash-facing line IS refreshed here: the
+        pre-emptive quota notice reads the row this worker maintains
+        (``tui/quota_notice``), so the empty session that was painted before
+        the row existed must re-snapshot once it lands — otherwise a cold boot
+        would show the notice only after some unrelated refresh event.
         """
         try:
             assert self._providers is not None
             await self._providers.fetch_usage([provider])
         except Exception:  # noqa: BLE001 — warm-up failure is a future live fetch
             pass
+        # Cheap and idempotent: `refresh_info` only repaints when the snapshot
+        # actually changed, so a failed fetch (cache unchanged) costs nothing.
+        if self._welcome is not None:
+            self._welcome.refresh_info()
 
     def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
         """``r`` in the panel — re-run the same fetch behind the same view.
@@ -47922,7 +47954,7 @@ class OperatorApp(App[None]):
             # A PAIR WITH NO VALUE IS REFUSED HERE, in this family's words. Left
             # to the CLI it would be one more argparse sentence, and a caller who
             # typed half a command should read the surface's own usage line
-            # (`_dispatch_network_cli` [redacted] the same way for a missing
+            # (`_dispatch_network_cli` refuses the same way for a missing
             # token). Any OTHER flag is refused rather than handed on: a leading
             # one would reach the CLI as the NETWORK NAME (`--network --expires`
             # is the same argparse failure this branch was filed for) and a
@@ -54003,7 +54035,19 @@ class OperatorApp(App[None]):
         spend = self._spend_total() if total is None else total
         if not spend:
             return ""
-        is_floor = self._spend_is_floor or self._search_spend_is_floor() if floor is None else floor
+        published = self._spend_channels_state if total is None else None
+        if published is not None:
+            # The marks are the BACKEND's knowledge, not a re-derivation: a
+            # partial or floor total is a lower bound on every surface, and
+            # ``exact`` is the only state that may print an unmarked figure.
+            is_floor = str(getattr(published, "knowledge", "unknown")) in {
+                "floor",
+                "partial",
+            }
+        else:
+            is_floor = (
+                self._spend_is_floor or self._search_spend_is_floor() if floor is None else floor
+            )
         return f"{RESTORED_COST_PREFIX if is_floor else ''}{format_cost(spend)}"
 
     @staticmethod
@@ -54015,6 +54059,39 @@ class OperatorApp(App[None]):
             cost = getattr(state, "subagent_cost", None)
             return {"owner-ledger": cost} if cost is not None else {}
         return dict(getattr(state, "child_costs", {}) or {})
+
+    def _band_cost_cell(self, cost: Any, search_usd: float, billed_unknown: bool) -> str | None:
+        """The band's money cell: the published total when there is one.
+
+        The published ``spend_channels`` object spans this session's inference,
+        its channels AND its children, computed in ONE backend place — so when
+        it is present the cell is its ``total_micro`` with marks from its
+        ``knowledge``, rather than the local model+search sum this path used
+        before. Two sums is how the band and the other surfaces came to
+        disagree (design §5.1).
+
+        ``None`` (no published object — an old runtime, or a store that has not
+        republished yet) keeps the legacy arithmetic VERBATIM, including the
+        ``$—`` for billed-but-unpriceable money and the floor mark on a
+        search-only figure. ``knowledge == "unknown"`` on the published object
+        means "nothing is stateable", which renders exactly as the legacy
+        unpriceable case does: ``$—`` when there was billed activity, nothing at
+        all when there was none (the band's zero policy).
+        """
+        published = self._spend_channels_state
+        if published is not None:
+            if str(getattr(published, "knowledge", "unknown")) == "unknown":
+                return UNKNOWN_COST_CELL if billed_unknown else None
+            return self._spend_text() or None
+        if cost is not None:
+            return self._spend_text((cost or 0.0) + search_usd)
+        if search_usd:
+            # Model money unpriceable, search money real: the cell can only
+            # show the half it knows, so it carries the band's floor mark
+            # (``≥``). Showing a partial figure as if it were the total is the
+            # lie ``_spend_text``'s docstring calls the more expensive one.
+            return self._spend_text(search_usd, floor=True)
+        return UNKNOWN_COST_CELL if billed_unknown else None
 
     def _spend_total(self) -> float:
         """Everything this session has spent: its own turns, its children's, and
@@ -54049,7 +54126,17 @@ class OperatorApp(App[None]):
         ledger keys by the session that asked, a child's id is its own, and no
         parent-to-child map for it exists here. ``/analytics``' process-wide total
         is where a tree's search spend is complete; see ``_process_search_spend``.
+
+        THE PUBLISHED OBJECT WINS when the runtime has one: its
+        ``total_micro`` already spans this session's inference, its channels
+        AND its children, computed in one backend place, so the band simply
+        renders it rather than summing locally. A runtime that publishes
+        nothing (an old build, a reduced host) keeps the legacy sum below
+        verbatim.
         """
+        published = self._spend_channels_state
+        if published is not None:
+            return float(getattr(published, "total_micro", 0) or 0) / 1_000_000.0
         return (
             self._total_cost + sum(self._subagent_costs.values()) + self._session_search_spend().usd
         )

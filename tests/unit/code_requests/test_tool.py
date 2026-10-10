@@ -328,3 +328,46 @@ async def test_the_tool_renders_the_hint_and_cooling_lines(tmp_path: Path) -> No
     assert "cooling: this host is rate-limited until " in result.text
     assert "nothing was fetched yet" in result.text
     assert "hint: Link only — sign in with the gh CLI to track this one." in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_pending_row_renders_as_loading_not_link_only(tmp_path: Path) -> None:
+    """Design §5: a row whose first read has not resolved says it is fetching —
+    never the bare "link-only" and never a sign-in. No cache entry = pending."""
+    context = _context(tmp_path)
+    _seed_index(tmp_path)
+    result = await code_requests_tool.execute_code_requests(
+        "c16", {"op": "list"}, None, None, context
+    )
+    assert not result.is_error
+    assert "fetching current state…" in result.text
+    assert "link-only" not in result.text
+    assert "sign in" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_show_of_a_row_whose_first_read_is_owed_says_loading(tmp_path: Path) -> None:
+    """Design §5: ``_render_show`` for ``pending`` prints the loading line and
+    NO hint line (the hint is suppressed at the source for pending rows)."""
+    entry = {
+        "pieces": {},
+        "validators": {},
+        "summary": None,
+        "state": "",
+        "ci": None,
+        "lanes": None,
+        "comments_total": 0,
+        "checked_at": time.time(),
+        "fetched_at": None,
+        "stale": False,
+        "refresh_error": None,
+        "failure_kind": None,
+    }
+    assert cache.write_entry(tmp_path, entry, ref=REF)
+    result = await code_requests_tool.execute_code_requests(
+        "c17", {"op": "show", "ref": REF.url}, None, None, _context(tmp_path)
+    )
+    assert not result.is_error
+    assert "link-only: fetching current state — retry in a moment" in result.text
+    assert "hint:" not in result.text
+    assert "sign in" not in result.text
