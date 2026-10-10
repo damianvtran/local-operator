@@ -281,19 +281,17 @@ def _kill_switch(environ: Mapping[str, str] | None) -> bool:
     return source.get("LOP_I18N") == "0"
 
 
-def resolve_language(
-    config: str | None = None,
-    *,
-    environ: Mapping[str, str] | None = None,
-    system: str | None = None,
-    home: Path | None = None,
+def _resolve_candidate(
+    config: str | None,
+    environ: Mapping[str, str] | None,
+    system: str | None,
+    home: Path | None,
 ) -> str:
-    """Resolve the active locale for this process/call (never raises).
+    """The chain's winner, normalised; ``en`` when nothing qualifies (no filter).
 
-    ``config=None`` reads the config file; pass ``"auto"`` to exercise the
-    chain without a config read (tests, `exec`). The result is always a
-    SHIPPED locale — today that means ``"en"`` — so every consumer can treat
-    it as renderable.
+    The shared front half of :func:`resolve_language` and
+    :func:`resolve_preference` — they differ ONLY in the final acceptance
+    filter, and splitting that is what keeps the chain itself single-sourced.
     """
     if _kill_switch(environ):
         return "en"
@@ -310,7 +308,99 @@ def resolve_language(
         candidate = os_language(system=system, environ=environ, home=home)
     if candidate is None:
         return "en"
+    return candidate
+
+
+def resolve_language(
+    config: str | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    system: str | None = None,
+    home: Path | None = None,
+) -> str:
+    """Resolve the active locale for this process/call (never raises).
+
+    ``config=None`` reads the config file; pass ``"auto"`` to exercise the
+    chain without a config read (tests, `exec`). The result is always a
+    SHIPPED locale — today that means ``"en"`` — so every consumer can treat
+    it as renderable.
+    """
+    candidate = _resolve_candidate(config, environ, system, home)
     return candidate if candidate in shipped_locales() else "en"
+
+
+def resolve_preference(
+    config: str | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    system: str | None = None,
+    home: Path | None = None,
+) -> str:
+    """The user's EXPRESSED language preference; the SUPPORTED set, never raises.
+
+    :func:`resolve_language` filters the chain's candidate through the SHIPPED
+    ledger because live surfaces may only render audited catalogues. The
+    model-facing preference line asks a different question — which language
+    does this user prefer? — and must answer truthfully for a SUPPORTED locale
+    whose translation wave has not shipped yet: a user whose OS is French gets
+    ``en`` UI copy today, but the model can already reply in French. The chain
+    is shared with :func:`resolve_language`; only this final filter differs.
+    Unknown/unsupported values and any read failure resolve to ``en``.
+    """
+    candidate = _resolve_candidate(config, environ, system, home)
+    return candidate if candidate in SUPPORTED_LOCALES else "en"
+
+
+#: English display names for the supported set. The model-facing sentence in
+#: the stable prefix names the language in ENGLISH by design (RFC §10: prompt
+#: text stays English so the prefix cache is stable across locales); this is
+#: naming the code-owned vocabulary, not rendering locale data, so it is a
+#: static table rather than a generated one — and a test pins that every
+#: :data:`SUPPORTED_LOCALES` member has an entry, so the set cannot grow
+#: without this table following.
+_LANGUAGE_NAMES = {
+    "en": "English",
+    "fr": "French",
+    "es": "Spanish",
+    "zh-CN": "Chinese (Simplified)",
+    "ru": "Russian",
+    "vi": "Vietnamese",
+    "ur": "Urdu",
+    "hi": "Hindi",
+}
+
+
+def language_name(locale: str) -> str:
+    """The English display name for a supported locale (falls back to ``en``)."""
+    return _LANGUAGE_NAMES.get(locale, _LANGUAGE_NAMES["en"])
+
+
+def preferred_language_line(
+    config: str | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    system: str | None = None,
+    home: Path | None = None,
+) -> str:
+    """The model-facing sentence about the user's language (stable prefix).
+
+    English wording, parameterised by the ONE backend language setting — the
+    same chain and normalisation as :func:`resolve_language`, accepting the
+    SUPPORTED set rather than the shipped one (see :func:`resolve_preference`).
+    Uniform for every locale INCLUDING ``en``, so the prefix's SHAPE does not
+    change when the language does. Computed once at session start and never
+    re-read mid-session (the head block is cache-anchored; a language change
+    takes effect at the next session / stable-prefix rebuild).
+    """
+    try:
+        resolved = resolve_preference(config, environ=environ, system=system, home=home)
+    except Exception:  # noqa: BLE001 — never block session assembly
+        resolved = "en"
+    return (
+        f"The user's preferred language is {language_name(resolved)} ({resolved}). "
+        "Reply in that language by default; if the conversation context clearly "
+        "establishes another language, follow that instead."
+    )
 
 
 def language_options() -> tuple[tuple[str, str], ...]:

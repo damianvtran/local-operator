@@ -2726,6 +2726,7 @@ async def _construct_child_session(
 
     from local_operator.config import ConfigManager
     from local_operator.harness.types import ToolContext
+    from local_operator.i18n.resolve import preferred_language_line
     from local_operator.prompts_api import CHANNEL_HUB, build_system_blocks
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
@@ -2785,6 +2786,11 @@ async def _construct_child_session(
     # the parent — children are built outside the factory, and this keeps the
     # one source of truth in one function.
     user_instructions = load_user_instructions()
+    # Same read-once discipline as the instructions above, and for the same
+    # reason: the language line rides the child's STABLE head block, so it is
+    # resolved at spawn, never per turn. The operator's preference is
+    # machine-wide, so a child inherits it by resolving the same chain.
+    language_line = preferred_language_line()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
     # Whether this child runs on a role allowlist. Decided HERE, before the
@@ -3048,6 +3054,7 @@ async def _construct_child_session(
             goal_status=getattr(parent_session, "goal_status", ""),
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
+            language_line=language_line,
             credentials=names,
             model_label=model_label,
             # THE PARENT'S ANSWER, read live off the parent's holder for the same

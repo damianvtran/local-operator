@@ -2763,6 +2763,78 @@ async def test_a_subagent_inherits_the_operators_instructions(
     assert "<user_instructions>" in blocks[0]
 
 
+@pytest.mark.asyncio
+async def test_a_real_session_carries_the_language_line(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SYS1 wiring: the line the model reads is the one the resolver produced.
+
+    The unit tests for ``preferred_language_line`` and ``build_system_blocks``
+    both pass with the ``language_line=`` argument deleted from ``_prepare`` —
+    this drives the real composition root and reads the blocks the provider
+    actually returns. ``LOP_LANG`` stands in for the chain's winner (the same
+    chain incl. config and OS is covered in ``tests/unit/i18n/test_resolve``).
+    """
+    monkeypatch.setenv("LOP_LANG", "fr")
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        produced = session._system_blocks_provider()
+        blocks = await produced if inspect.isawaitable(produced) else produced
+    finally:
+        await session.dispose()
+
+    assert len(blocks) == 4, "block arity is load-bearing for cache breakpoints"
+    assert "The user's preferred language is French (fr)." in blocks[0]
+    assert not any("preferred language" in block for block in blocks[1:])
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_carries_the_language_line(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Child half of the same wiring gap: deleting ``language_line=`` from the
+    subagent's ``build_system_blocks`` call also leaves the suite green."""
+    monkeypatch.setenv("LOP_LANG", "vi")
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job",
+        )
+        try:
+            blocks = child._system_blocks_provider()
+            if inspect.isawaitable(blocks):
+                blocks = await blocks
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
+
+    assert "The user's preferred language is Vietnamese (vi)." in blocks[0]
+
+
 def _session_state_rows(session: Session) -> list[Any]:
     """Every ``[session-state]`` custom row this session's transcript holds.
 
