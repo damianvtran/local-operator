@@ -141,6 +141,13 @@ async def _fake_ask_for_blocks(questions: list[Any]) -> dict[str, list[str]] | N
     return None
 
 
+async def _quiet_door_for_blocks() -> None:
+    """Minimal quiet-end door so create_tools includes no_reply for ordering
+    checks (docs/design/quiet-turns.md §4; presence-only, like the ask hook
+    above — the ordering assertion spans the FULL surface)."""
+    return None
+
+
 # ---------------------------------------------------------------------------
 # render_string / render_template engine
 # ---------------------------------------------------------------------------
@@ -694,6 +701,11 @@ def test_inventory_block_matches_default_tool_order() -> None:
             # presence-only here like the registries above, and never read
             # because the tool is not called by an ordering test.
             session_dir="/stub-session",
+            # ``no_reply`` (docs/design/quiet-turns.md §4) is createIf-gated on
+            # the quiet-end door a real session binds per turn — presence-only
+            # here, same rule as the gates above, so the assertion below sees
+            # the fully-capable inventory DEFAULT_TOOL_NAMES describes.
+            quiet_end=_quiet_door_for_blocks,
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)

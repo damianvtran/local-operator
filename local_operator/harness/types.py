@@ -1617,6 +1617,13 @@ class ToolContext(BaseModel):
     #: session with an output contract (the gate reads a textless end as a
     #: missing final response), and under the ``LOP_NO_REPLY`` kill switch.
     #:
+    #: TWO OF THOSE ARE ONLY KNOWABLE AFTER CONSTRUCTION (the contract, the
+    #: one-shot declaration), so those setters also re-filter the MOUNTED
+    #: inventory through ``refresh_tools`` — a door that turns ``None`` under an
+    #: already-advertised tool would fire a refusal once per attempt. Door and
+    #: inventory agree in both directions; see
+    #: ``Session._quiet_end_callable`` and ``Session.set_output_contract``.
+    #:
     #: TOTAL by contract, like the door pair above: it returns either a refusal
     #: SENTENCE the model must act on (write text instead) or ``None`` when the
     #: quiet end is allowed. A refusal is never coerced into a message.

@@ -159,12 +159,18 @@ async def test_the_door_binds_on_a_plain_session(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_the_door_is_none_for_a_subagent_child(tmp_path) -> None:
     """A child's final text is what its parent's ``wait`` reads as the report;
-    silence there is a lost result, so the tool must not exist (docs §4)."""
+    silence there is a lost result, so the tool must not exist (docs §4). The
+    child never even receives it: ``_job_id`` is set before the constructor's
+    capability merge runs, so the builder refuses and — the mechanism
+    ``harness/subagent``'s derived prune relies on — there is nothing to undo."""
     session = _session(tmp_path, job_id="job-s0a")
     try:
         assert session._quiet_end_callable() is None
         assert session._build_tool_context().quiet_end is None
         assert create_tools(session._build_tool_context(), enabled=["no_reply"]) == []
+        assert "no_reply" not in {
+            tool.name for tool in session._tools
+        }, "the constructor's merge must not have mounted it for a child"
     finally:
         await session.dispose()
 
@@ -173,12 +179,18 @@ async def test_the_door_is_none_for_a_subagent_child(tmp_path) -> None:
 async def test_the_door_is_none_for_a_one_shot_host(tmp_path) -> None:
     """A one-shot host's product IS the final text (``headless_print`` prints
     ``if final_text``), and nothing there distinguishes "silent on purpose"
-    from "produced nothing" — so the tool is absent, not inert."""
+    from "produced nothing" — so the tool is absent, not inert. The declaration
+    lands AFTER construction (the merge already mounted it), so the setter
+    itself must drop it from the live inventory."""
     session = _session(tmp_path)
+    assert "no_reply" in {tool.name for tool in session._tools}, "mounted before"
     session.declare_one_shot_exit()
     try:
         assert session._quiet_end_callable() is None
         assert create_tools(session._build_tool_context(), enabled=["no_reply"]) == []
+        assert "no_reply" not in {
+            tool.name for tool in session._tools
+        }, "the declaration must drop the mounted tool, not just null the door"
     finally:
         await session.dispose()
 
