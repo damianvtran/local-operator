@@ -413,3 +413,85 @@ def test_a_fabricated_number_in_svg_text_or_an_aria_label_is_still_refused() -> 
     result = validate_output(in_attribute, EVIDENCE)
     assert not result.components, "a fabricated aria-label reached the accepted set"
     assert any("<data> supports" in error for error in result.repair_errors), result.repair_errors
+
+
+# --- structural geometry at chart scale (round-2 review R2-1/R2-2) -------------------------
+
+
+def test_a_raw_svg_chart_scale_is_not_refused_for_its_geometry() -> None:
+    r"""R2-1: the literal rule must exempt structural geometry, not only ``viewBox``/style.
+
+    The round-1 acceptance case drew on a 48x20 canvas, so every geometry number stayed
+    under the ``\d{3,}`` rule's reach and a real chart was still refused:
+    ``points="0,480 320,240 640,60"`` tripped ``inline numeric literal '480'``, and a
+    normalized 0-100 chart tripped on ``100``. ``x1``/``y1`` are exercised because the
+    pair regex could not match them at all (its name class had no digits), leaving their
+    values to the static-numeral scan as false positives too.
+    """
+    data = json.dumps(
+        {
+            "lat": {
+                "title": "Latency (ms)",
+                "columns": ["region", "ms"],
+                "rows": [["us-east", 120], ["us-west", 98.5], ["eu-west", 143]],
+            }
+        }
+    )
+    raw = component(
+        data,
+        '<svg viewBox="0 0 640 480" role="img">'
+        '<polyline points="0,480 320,240 640,60"></polyline>'
+        '<line x1="0" y1="480" x2="640" y2="60" stroke="currentColor"></line>'
+        "</svg>",
+    )
+    result = validate_output(raw, EVIDENCE)
+    assert result.components and not result.rejected, result.repair_errors
+
+    normalized = component(
+        data,
+        '<svg viewBox="0 0 100 100">'
+        '<rect x="0" y="0" width="100" height="100" fill="none"></rect>'
+        '<polyline points="0,100 50,60 100,10"></polyline>'
+        "</svg>",
+    )
+    result = validate_output(normalized, EVIDENCE)
+    assert result.components and not result.rejected, result.repair_errors
+
+
+def test_a_fabricated_three_digit_numeral_in_text_or_aria_label_is_still_refused() -> None:
+    """R2-1's guard, at the literal rule's own scale: blanking GEOMETRY must not exempt
+    readable CLAIMS. A fabricated 3+ digit numeral in element text or ``aria-label`` is
+    still refused -- including a text numeral that also appears as geometry, which is the
+    shape the exemption could most plausibly hide.
+    """
+    data = json.dumps(
+        {
+            "lat": {
+                "title": "Latency (ms)",
+                "columns": ["region", "ms"],
+                "rows": [["us-west", 98.5]],
+            }
+        }
+    )
+    in_text = component(data, '<svg viewBox="0 0 48 20"><text x="4" y="14">999 ms</text></svg>')
+    result = validate_output(in_text, EVIDENCE)
+    assert not result.components, "a 3-digit fabricated text literal reached the accepted set"
+    assert any("999" in error for error in result.repair_errors), result.repair_errors
+
+    in_attribute = component(
+        data,
+        '<svg viewBox="0 0 48 20" role="img" aria-label="p50: 999 ms">'
+        '<rect x="0" y="0" width="48" height="20"></rect></svg>',
+    )
+    result = validate_output(in_attribute, EVIDENCE)
+    assert not result.components, "a 3-digit fabricated aria-label reached the accepted set"
+    assert any("999" in error for error in result.repair_errors), result.repair_errors
+
+    beside_geometry = component(
+        data,
+        '<svg viewBox="0 0 640 480"><polyline points="0,480 320,240 640,60"></polyline>'
+        '<text x="4" y="14">480 ms</text></svg>',
+    )
+    result = validate_output(beside_geometry, EVIDENCE)
+    assert not result.components, "a fabricated text numeral beside geometry was accepted"
+    assert any("<data> supports" in error for error in result.repair_errors), result.repair_errors

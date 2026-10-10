@@ -762,7 +762,11 @@ task per session. Rules:
   of evidence values. They must be declared as columns named `"… (derived: a/b)"`, and the
   validator recomputes them. Anything else fails validation → repair turn → drop.
 - Inline numeric literals in component scripts beyond layout constants are rejected by a
-  static scan (§4.2): `\d{3,}` outside `viewBox`/style is a reject reason.
+  static scan (§4.2): `\d{3,}` outside the structural attribute values (`viewBox`, SVG
+  geometry, `style`) is a reject reason. The scan verifies **readable numerals** — element
+  text and data-bearing attributes — not drawn geometry: a chart whose shape encodes a value
+  its text does not state is outside a lexical scan's reach by construction, and §5's
+  golden-set spot-check is that boundary's control (round-2 review R2-1/R2-2).
 - Every component carries `source` (required). Surfaces render it as one caption line,
   `Source: bench.csv (rows 1-12)` — `text-meta`, `ink-muted`, single line, ellipsis with
   the full text available; the caption idiom of §2.8 means chrome and a model `caption`

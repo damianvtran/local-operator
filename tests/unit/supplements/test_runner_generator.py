@@ -23,10 +23,12 @@ from local_operator.session.transcript import Transcript
 from local_operator.supplements import generator, policy
 from local_operator.supplements.contract import (
     SUPPLEMENT_CUSTOM_TYPE,
+    newest_per_anchor,
     reader_disposition,
 )
 from local_operator.supplements.decision import Decision
 from local_operator.supplements.evidence import Dataset
+from local_operator.supplements.persistence import append_row, build_details
 from tests.unit.session.test_session import ScriptedStream, wait_for
 
 pytestmark = pytest.mark.asyncio
@@ -457,4 +459,343 @@ async def test_the_wall_clock_bound_keeps_the_blocks_that_already_passed(
         assert done.get("error", "") == "", "a kept row must not read as a failure"
         assert reader_disposition(done, job_live=False) == "block"
     finally:
+        await handle.dispose()
+
+
+# --- the settle races and the per-anchor version rule (round-2 R2-3/R2-4; QA Q-1/Q-2) -------
+
+
+async def test_cancel_that_races_a_settling_job_answers_already_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-3: a cancel arriving as the job settles must not rewrite the settled row.
+
+    The gate runs before the op's first await; the job can write its terminal row inside
+    the ``cancelling`` beat. Pre-fix the cancel then cut the settling task and wrote
+    ``cancelled`` over ``done`` -- a cold reader flips the settled block to
+    "cancelled - Retry". The receipt is the neutral one and the row stays ``done``.
+    """
+    session = _make_session(tmp_path / "sessions" / "settle-cancel", tmp_path)
+    handle = await _handle(session, tmp_path)
+    stub = StubRunner(handle._supplements, answers=[BLOCK])
+    stub.install(monkeypatch)
+    entered = asyncio.Event()
+    release_beat = asyncio.Event()
+    original_progress = handle._supplements._progress
+    gate = {"first": True}
+
+    async def hold_done_beat(details: Any, state: str, **kwargs: Any) -> None:
+        if state == "done" and gate["first"]:
+            gate["first"] = False
+            entered.set()
+            await release_beat.wait()
+        await original_progress(details, state, **kwargs)
+
+    monkeypatch.setattr(handle._supplements, "_progress", hold_done_beat)
+    try:
+        handle._supplements._render("anchor-sc", _decision(), DATASETS, "u", "a", _settings())
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        # The terminal row is written (and ``inputs.details`` advanced); the task is stuck
+        # mid-beat, so ``task.done()`` is still False -- the exact gate-blind spot.
+        assert [row["state"] for row in _rows(session.transcript)] == ["decided", "done"]
+        job = _rows(session.transcript)[0]["job"]
+        receipt = await asyncio.wait_for(handle._supplements.cancel_job("anchor-sc", job), 10)
+        assert receipt == "already finished"
+        rows = _rows(session.transcript)
+        assert [row["state"] for row in rows] == ["decided", "done"], rows
+        release_beat.set()
+        await _drain(handle)
+        rows = _rows(session.transcript)
+        assert [row["state"] for row in rows] == ["decided", "done"], rows
+        assert reader_disposition(rows[-1], job_live=False) == "block"
+    finally:
+        release_beat.set()
+        await handle.dispose()
+
+
+async def test_restart_that_races_a_settling_job_skips_the_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-3 for the restart shape: a job that settled inside the beat is NOT cut.
+
+    The next version starts straight away; no ``cancelled`` row lands over the settled
+    pair (pre-fix: the settling task was cut and ``cancelled`` was written at version 3,
+    painting a settled block as cancelled for a moment).
+    """
+    session = _make_session(tmp_path / "sessions" / "settle-restart", tmp_path)
+    handle = await _handle(session, tmp_path)
+    stub = StubRunner(handle._supplements, answers=[BLOCK, BLOCK])
+    stub.install(monkeypatch)
+    entered = asyncio.Event()
+    release_beat = asyncio.Event()
+    original_progress = handle._supplements._progress
+    gate = {"first": True}
+
+    async def hold_done_beat(details: Any, state: str, **kwargs: Any) -> None:
+        if state == "done" and gate["first"]:
+            gate["first"] = False
+            entered.set()
+            await release_beat.wait()
+        await original_progress(details, state, **kwargs)
+
+    monkeypatch.setattr(handle._supplements, "_progress", hold_done_beat)
+    try:
+        handle._supplements._render("anchor-sr", _decision(), DATASETS, "u", "a", _settings())
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        job = _rows(session.transcript)[0]["job"]
+        receipt = await asyncio.wait_for(handle._supplements.restart_job("anchor-sr", job), 10)
+        assert receipt == "restarting"
+        release_beat.set()
+        await _drain(handle)
+        rows = _rows(session.transcript)
+        states = [row["state"] for row in rows]
+        assert states == ["decided", "done", "decided", "done"], rows
+        assert "cancelled" not in states, rows
+        assert [row["version"] for row in rows] == [1, 2, 3, 4], rows
+    finally:
+        release_beat.set()
+        await handle.dispose()
+
+
+async def test_a_restart_racing_a_paused_cancel_cannot_clobber_the_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-4: two overlapping ops must not clear or settle over each other.
+
+    Probe: pause the cancel inside its ``cancelling`` beat, start a restart, then let the
+    cancel resume. Pre-fix the restart had run to completion in the window: the resumed
+    cancel cleared ``_task`` (None while the restarted job ran), a further cancel for that
+    live job answered "already finished", and version 4 ended up with two rows. The ops
+    serialise, so the restart waits; the observable end state must be coherent either way.
+    """
+    session = _make_session(tmp_path / "sessions" / "race", tmp_path)
+    handle = await _handle(session, tmp_path)
+
+    def resolve(settings: Any) -> generator.DesignModel:
+        return generator.DesignModel(MODEL, "session", "test/m")
+
+    monkeypatch.setattr(handle._supplements, "_resolve_model", resolve)
+    started = asyncio.Event()
+    release_job = asyncio.Event()
+
+    async def complete(request: Any) -> tuple[str, Any]:
+        started.set()
+        await release_job.wait()
+        return BLOCK, _Usage()
+
+    monkeypatch.setattr(handle._supplements, "_complete", complete)
+    entered = asyncio.Event()
+    release_beat = asyncio.Event()
+    original_progress = handle._supplements._progress
+    gate = {"first": True}
+
+    async def hold_cancelling_beat(details: Any, state: str, **kwargs: Any) -> None:
+        if state == "cancelling" and gate["first"]:
+            gate["first"] = False
+            entered.set()
+            await release_beat.wait()
+        await original_progress(details, state, **kwargs)
+
+    monkeypatch.setattr(handle._supplements, "_progress", hold_cancelling_beat)
+    try:
+        handle._supplements._render("anchor-race", _decision(), DATASETS, "u", "a", _settings())
+        await asyncio.wait_for(started.wait(), timeout=10)
+        job = _rows(session.transcript)[0]["job"]
+        cancel = asyncio.create_task(handle._supplements.cancel_job("anchor-race", job))
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        restart = asyncio.create_task(handle._supplements.restart_job("anchor-race", job))
+        # Let the restart run to completion if it can: pre-fix it does, resuming the
+        # interleave; post-fix it is waiting on the ops lock behind the paused cancel.
+        try:
+            await asyncio.wait_for(asyncio.shield(restart), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
+        release_beat.set()
+        assert await asyncio.wait_for(cancel, timeout=10) == "cancelled"
+        assert await asyncio.wait_for(restart, timeout=10) == "restarting"
+        await wait_for(lambda: handle._supplements.is_live(job), timeout=10)
+        # The restarted version is live and coherently owned.
+        assert handle._supplements._task is not None, "a live job's task was cleared"
+        assert handle._supplements.running
+        assert handle._supplements._running == ("anchor-race", job)
+        # A further cancel for that live job cuts it, rather than answering a stale
+        # "already finished" (the probe's exact symptom).
+        again = await asyncio.wait_for(handle._supplements.cancel_job("anchor-race", job), 10)
+        assert again == "cancelled"
+        release_job.set()
+        await _drain(handle)
+        rows = _rows(session.transcript)
+        versions = [row["version"] for row in rows]
+        assert len(set(versions)) == len(versions), rows
+        assert [row["state"] for row in rows] == [
+            "decided",
+            "cancelled",
+            "decided",
+            "cancelled",
+        ], rows
+    finally:
+        release_beat.set()
+        release_job.set()
+        await handle.dispose()
+
+
+async def test_cancel_then_dismiss_keeps_one_version_sequence_per_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-1 (QA round 1): cancel-then-dismiss must not put two rows at one version.
+
+    ``_settle`` used to leave ``inputs.details`` on the ``decided`` row, so the dismiss
+    built ``next_version`` from a version the cancelled row already held -- two rows at
+    version 2, and ``_newest_row`` (first-wins) and ``contract.newest_per_anchor``
+    (later-wins) then disagreed on "newest".
+    """
+    session = _make_session(tmp_path / "sessions" / "cancel-dismiss", tmp_path)
+    handle = await _handle(session, tmp_path)
+
+    def resolve(settings: Any) -> generator.DesignModel:
+        return generator.DesignModel(MODEL, "session", "test/m")
+
+    monkeypatch.setattr(handle._supplements, "_resolve_model", resolve)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def complete(request: Any) -> tuple[str, Any]:
+        started.set()
+        await release.wait()
+        return BLOCK, _Usage()
+
+    monkeypatch.setattr(handle._supplements, "_complete", complete)
+    try:
+        handle._supplements._render("anchor-cd", _decision(), DATASETS, "u", "a", _settings())
+        await asyncio.wait_for(started.wait(), timeout=10)
+        job = _rows(session.transcript)[0]["job"]
+        assert (
+            await asyncio.wait_for(handle._supplements.cancel_job("anchor-cd", job), 10)
+            == "cancelled"
+        )
+        assert await asyncio.wait_for(handle._supplements.dismiss("anchor-cd"), 10) == "dismissed"
+        rows = _rows(session.transcript)
+        assert [row["version"] for row in rows] == [1, 2, 3], rows
+        assert [row["state"] for row in rows] == ["decided", "cancelled", "skipped"], rows
+        # Both readers name the same newest row -- the dismiss, carrying ``dismissed``.
+        runtime_newest = handle._supplements._newest_row("anchor-cd")
+        agreed = newest_per_anchor(rows)["anchor-cd"]
+        assert runtime_newest is not None
+        assert runtime_newest["state"] == agreed["state"] == "skipped", (runtime_newest, agreed)
+        assert runtime_newest.get("dismissed") is True and agreed.get("dismissed") is True
+    finally:
+        release.set()
+        await handle.dispose()
+
+
+async def test_a_second_job_ever_started_for_one_anchor_keeps_versions_monotone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-2 (QA round 1): one anchor, one version sequence.
+
+    A second job on an anchor (synthetic here: the render path is the only traffic, and a
+    turn carries a fresh answer anchor) used to start at version 1 again -- rows [1, 2]
+    under two job ids, and the two readers disagreeing on which is newest. The attempt
+    re-reads the journal before its first write and sits past the rows the anchor holds.
+    """
+    session = _make_session(tmp_path / "sessions" / "second-job", tmp_path)
+    handle = await _handle(session, tmp_path)
+    stub = StubRunner(handle._supplements, answers=[BLOCK, BLOCK])
+    stub.install(monkeypatch)
+    try:
+        handle._supplements._render("anchor-q2", _decision(), DATASETS, "u", "a", _settings())
+        await _drain(handle)
+        first = _rows(session.transcript)
+        assert [row["version"] for row in first] == [1, 2], first
+        handle._supplements._render("anchor-q2", _decision(), DATASETS, "u", "a", _settings())
+        await _drain(handle)
+        rows = _rows(session.transcript)
+        assert [row["version"] for row in rows] == [1, 2, 3, 4], rows
+        assert len({row["job"] for row in rows}) == 2, rows
+        assert [row["state"] for row in rows] == ["decided", "done", "decided", "done"], rows
+        runtime_newest = handle._supplements._newest_row("anchor-q2")
+        agreed = newest_per_anchor(rows)["anchor-q2"]
+        assert runtime_newest is not None
+        assert runtime_newest["version"] == agreed["version"] == 4, (runtime_newest, agreed)
+        assert runtime_newest["job"] == agreed["job"]
+    finally:
+        await handle.dispose()
+
+
+async def test_the_runtime_reader_breaks_version_ties_like_the_contract(
+    tmp_path: Path,
+) -> None:
+    """Q-1 (QA round 1): one tie-break for "newest", wherever it is read.
+
+    The write paths keep versions unique per anchor now, but the reader rules must still
+    agree when a journal carries a tie: ``contract.newest_per_anchor`` documents later-row-
+    in-journal-order; ``_newest_row`` used ``max``'s first-wins and named the other row.
+    """
+    session = _make_session(tmp_path / "sessions" / "tie", tmp_path)
+    handle = await _handle(session, tmp_path)
+    try:
+        earlier = dict(
+            build_details(
+                anchor="anchor-tie", job="j1", version=2, state="cancelled", decision=_decision()
+            )
+        )
+        later = dict(
+            build_details(
+                anchor="anchor-tie", job="j1", version=2, state="skipped", decision=_decision()
+            )
+        )
+        later["dismissed"] = True
+        await append_row(session.transcript, earlier)
+        await append_row(session.transcript, later)
+        runtime_newest = handle._supplements._newest_row("anchor-tie")
+        agreed = newest_per_anchor(_rows(session.transcript))["anchor-tie"]
+        assert runtime_newest is not None
+        assert runtime_newest["state"] == "skipped", runtime_newest
+        assert agreed["state"] == runtime_newest["state"]
+        assert agreed.get("dismissed") is True
+    finally:
+        await handle.dispose()
+
+
+async def test_a_superseded_row_advances_the_pointer_before_a_dismiss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-1, the supersede site: the pointer moves with ``_close_superseded``'s write too.
+
+    The supersede tail journals ``cancelled``/``superseded`` over the job's open row; a
+    stale ``inputs.details`` then had a dismiss rebuild the version that row just took
+    (two rows at version 2). Driven directly -- the full supersede wiring (a second turn)
+    is test_runner.py's, and this pins the pointer half.
+    """
+    session = _make_session(tmp_path / "sessions" / "supersede", tmp_path)
+    handle = await _handle(session, tmp_path)
+
+    def resolve(settings: Any) -> generator.DesignModel:
+        return generator.DesignModel(MODEL, "session", "test/m")
+
+    monkeypatch.setattr(handle._supplements, "_resolve_model", resolve)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def complete(request: Any) -> tuple[str, Any]:
+        started.set()
+        await release.wait()
+        return BLOCK, _Usage()
+
+    monkeypatch.setattr(handle._supplements, "_complete", complete)
+    try:
+        handle._supplements._render("anchor-sup", _decision(), DATASETS, "u", "a", _settings())
+        await asyncio.wait_for(started.wait(), timeout=10)
+        await handle._supplements._close_superseded()
+        assert [row["state"] for row in _rows(session.transcript)] == [
+            "decided",
+            "cancelled",
+        ], _rows(session.transcript)
+        receipt = await asyncio.wait_for(handle._supplements.dismiss("anchor-sup"), 10)
+        assert receipt == "dismissed"
+        rows = _rows(session.transcript)
+        assert [row["version"] for row in rows] == [1, 2, 3], rows
+        assert [row["state"] for row in rows] == ["decided", "cancelled", "skipped"], rows
+    finally:
+        release.set()
         await handle.dispose()

@@ -94,6 +94,17 @@ GENERATOR_AVAILABLE: Final = True
 #: evidence datasets: a session that ran fifty jobs must not pin fifty of them in memory.
 _KEPT_INPUTS: Final = 3
 
+#: The journaled states a version can END in: once one of these is the job's newest row, the
+#: job is settled and no control op may cut or re-settle that version (round-2 review R2-3;
+#: the non-terminal pair ``decided``/``queued`` is what a stalled reader paints as
+#: "cancelled - Retry").
+_TERMINAL_STATES: Final[frozenset[str]] = frozenset({"done", "failed", "cancelled", "skipped"})
+
+
+def _is_terminal(details: Mapping[str, Any] | None) -> bool:
+    """Whether the job's newest row (``_JobInputs.details``) is already a settled state."""
+    return isinstance(details, Mapping) and str(details.get("state", "")) in _TERMINAL_STATES
+
 
 @dataclass
 class _JobInputs:
@@ -162,6 +173,12 @@ class SupplementRunner:
         #: when the job it waits behind settles. It survives a later supersede on purpose --
         #: the request was explicit, and §2.9 names exactly one eviction rule.
         self._pending: tuple[_JobInputs, str] | None = None
+        #: Serialises the four control ops (round-2 review R2-4): two ops overlapping across
+        #: an emit await could each clear or start over the other's bookkeeping -- a stale
+        #: clear answered "already finished" for a live job and put two rows at one version.
+        #: The task tails can still interleave with an op; the ops' post-await re-checks
+        #: (round-2 review R2-3) cover that half.
+        self._ops_lock = asyncio.Lock()
 
     # -- the synchronous trigger ----------------------------------------------------------
 
@@ -274,7 +291,14 @@ class SupplementRunner:
         if row is None:
             return
         try:
-            await append_row(self._session.transcript, superseded(row))
+            final = superseded(row)
+            await append_row(self._session.transcript, final)
+            # The pointer moves with the write even here (QA round 1, Q-1): a later dismiss
+            # builds its version from ``inputs.details``, and a stale pointer rebuilt the
+            # version this row just took.
+            held = self._inputs.get(str(row.get("anchor", "")))
+            if held is not None and held.job == str(row.get("job", "")):
+                held.details = dict(final)
         except Exception:  # noqa: BLE001
             logger.debug("could not journal the superseded supplement row", exc_info=True)
 
@@ -475,6 +499,16 @@ class SupplementRunner:
         outer hard guard agree on the deadline.
         """
         transcript = self._session.transcript
+        # One version sequence per ANCHOR (QA round 1, Q-2): ``_start`` mints for
+        # steer/restart, but the render path starts at version 1 in memory -- a second job
+        # ever started for one anchor would write rows at versions the first job's rows
+        # hold, and the runtime reader and ``contract.newest_per_anchor`` (different
+        # tie-breaks) would then disagree on "newest". Re-reading the journal as late as
+        # possible (threaded: it is I/O) sits past the rows the anchor already holds; the
+        # normal first job for an anchor has none and keeps version 1.
+        newest = await asyncio.to_thread(self._newest_row, inputs.anchor)
+        if newest is not None:
+            inputs.version = int(newest.get("version", 0) or 0) + 1
         details = build_details(
             anchor=inputs.anchor,
             job=inputs.job,
@@ -554,6 +588,9 @@ class SupplementRunner:
         final = next_version(details, state="failed", error=error)
         try:
             await append_row(self._session.transcript, final)
+            # The pointer moves with the write (QA round 1, Q-1): a later dismiss builds on
+            # the job's newest row, never on the one this row replaced.
+            inputs.details = dict(final)
             await self._progress(final, "failed")
         except Exception:  # noqa: BLE001 -- a failed write is a missing callout, not a turn error
             logger.debug("supplement failure row could not be written", exc_info=True)
@@ -762,13 +799,20 @@ class SupplementRunner:
         return inputs
 
     async def _settle(self, inputs: _JobInputs, *, state: str, error: str = "") -> None:
-        """Write a terminal row for a job an op just cut, and emit its beat."""
+        """Write a terminal row for a job an op just cut, and emit its beat.
+
+        ``inputs.details`` moves to the row written here (QA round 1, Q-1): it is the job's
+        newest row, and the NEXT op builds its version from it -- a stale pointer rebuilt
+        the version number this settle just took (cancel-then-dismiss put two rows at
+        version 2, and the two readers then disagreed on "newest").
+        """
         if inputs.details is None:
             return
         final = next_version(inputs.details, state=state, error=error)
         self.set_open_row(final)
         try:
             await append_row(self._session.transcript, final)
+            inputs.details = dict(final)
             await self._progress(final, state)
         finally:
             self.set_open_row(None)
@@ -781,20 +825,32 @@ class SupplementRunner:
         told something happened. The running task is cut ONLY when it runs this very
         ``(anchor, job)`` (round-1 review R1): a cancel for a settled job arriving while a
         NEWER job runs must leave that newer job alone and must not rewrite the settled row.
+        Both awaits re-check what the gate checked (round-2 review R2-3/R2-4): the job can
+        settle inside the ``cancelling`` beat -- its terminal row is already in
+        ``inputs.details`` while the task is not yet ``done()`` -- and the bookkeeping can
+        move across the reap; either way the cut is no longer this op's to make, and the
+        surface gets the neutral receipt without a newer task being touched.
         """
-        inputs = self.recall(anchor, job)
-        task = self._task
-        if inputs is None or task is None or task.done() or self._running != (anchor, job):
-            return "already finished"
-        await self._progress(inputs.details or {}, "cancelling")
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        self._task = None
-        self._running = None
-        await self._settle(inputs, state="cancelled")
-        # The cut settled the running job: whatever waited behind it (memo §2.9) starts now.
-        self._drain_pending()
-        return "cancelled"
+        async with self._ops_lock:
+            inputs = self.recall(anchor, job)
+            task = self._task
+            if inputs is None or task is None or task.done() or self._running != (anchor, job):
+                return "already finished"
+            await self._progress(inputs.details or {}, "cancelling")
+            if _is_terminal(inputs.details) or self._task is not task:
+                return "already finished"
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if self._task is not task:
+                # A newer flow owns the bookkeeping; its own supersede path journals what
+                # this cut left non-terminal, so clearing or settling here would clobber it.
+                return "already finished"
+            self._task = None
+            self._running = None
+            await self._settle(inputs, state="cancelled")
+            # The cut settled the running job: whatever waited behind it (memo §2.9) starts now.
+            self._drain_pending()
+            return "cancelled"
 
     async def steer_job(self, anchor: str, job: str, text: str) -> str:
         """``supplement_steer``: cancel any in-flight attempt, start version + 1.
@@ -808,7 +864,8 @@ class SupplementRunner:
         if inputs is None:
             return "already finished"
         instruction = " ".join(str(text or "").split())[:MAX_INSTRUCTION_CHARS]
-        await self._cut_and_restart(inputs, instruction=instruction)
+        async with self._ops_lock:
+            await self._cut_and_restart(inputs, instruction=instruction)
         return "steering"
 
     async def restart_job(self, anchor: str, job: str) -> str:
@@ -820,7 +877,8 @@ class SupplementRunner:
         inputs = self.recall(anchor, job)
         if inputs is None:
             return "already finished"
-        await self._cut_and_restart(inputs, instruction=inputs.instruction)
+        async with self._ops_lock:
+            await self._cut_and_restart(inputs, instruction=inputs.instruction)
         return "restarting"
 
     async def _cut_and_restart(self, inputs: _JobInputs, *, instruction: str) -> None:
@@ -834,6 +892,10 @@ class SupplementRunner:
         A request naming a job that is NOT the running one does not cut it: it is queued
         behind the running job, depth 1 (memo §2.9; round-1 review R1) -- a newer request
         replaces the queued one, and the queue drains when the job it waits behind settles.
+        Both checks re-run after the ``cancelling`` beat (round-2 review R2-3/R2-4): a job
+        that settled inside it is not cut -- its terminal row already exists and the next
+        version starts straight away -- and bookkeeping that moved sends the request to the
+        queue, exactly as the sequential shape would.
         """
         task = self._task
         if task is not None and not task.done():
@@ -841,12 +903,20 @@ class SupplementRunner:
                 self._pending = (inputs, instruction)
                 return
             await self._progress(inputs.details or {}, "cancelling")
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            self._task = None
-            self._running = None
-            if inputs.details is not None:
-                await self._settle(inputs, state="cancelled")
+            if self._task is not task:
+                # The bookkeeping moved while the beat emitted (round-2 review R2-4): the
+                # request no longer names the running job, so it queues behind it -- the
+                # sequential shape (memo §2.9, depth 1).
+                self._pending = (inputs, instruction)
+                return
+            if not _is_terminal(inputs.details):
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                if self._task is task:
+                    self._task = None
+                    self._running = None
+                    if inputs.details is not None:
+                        await self._settle(inputs, state="cancelled")
         # This request executes NOW, so it replaces whatever was queued (memo §2.9's one
         # eviction rule).
         self._pending = None
@@ -894,36 +964,41 @@ class SupplementRunner:
         running job being that anchor's (round-1 review R1): dismissing anchor A while a job
         of anchor B runs must never cut B.
         """
-        task = self._task
-        inputs = self._inputs.get(anchor)
-        cut = inputs is not None and self._running_under(anchor)
-        if cut:
-            assert task is not None  # implied by _running_under; named for the type
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            self._task = None
-            self._running = None
-        if self._pending is not None and self._pending[0].anchor == anchor:
-            # A queued steer/restart for this anchor would resurrect the row the dismiss just
-            # hid -- the same reason the live job is cut.
-            self._pending = None
-        if cut:
-            # The cut settled the running job: whatever waited behind it (memo §2.9) starts.
-            self._drain_pending()
-        details = inputs.details if inputs is not None else None
-        if details is None:
-            # No live or remembered job: the row may still be in the journal (a restart, or a
-            # surface dismissing a callout from history), and dismissing it is exactly the
-            # spam signal the metric reads. Read the anchor's newest version and build on it.
-            details = await asyncio.to_thread(self._newest_row, anchor)
-        if details is None:
-            return "already finished"
-        final = next_version(details, state="skipped")
-        final["dismissed"] = True
-        self.set_open_row(None)
-        await append_row(self._session.transcript, final)
-        await self._progress(final, "skipped")
-        return "dismissed"
+        async with self._ops_lock:
+            task = self._task
+            inputs = self._inputs.get(anchor)
+            cut = inputs is not None and self._running_under(anchor)
+            if cut:
+                assert task is not None  # implied by _running_under; named for the type
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                self._task = None
+                self._running = None
+            if self._pending is not None and self._pending[0].anchor == anchor:
+                # A queued steer/restart for this anchor would resurrect the row the dismiss just
+                # hid -- the same reason the live job is cut.
+                self._pending = None
+            if cut:
+                # The cut settled the running job: whatever waited behind it (memo §2.9) starts.
+                self._drain_pending()
+            details = inputs.details if inputs is not None else None
+            if details is None:
+                # No live or remembered job: the row may still be in the journal (a restart, or a
+                # surface dismissing a callout from history), and dismissing it is exactly the
+                # spam signal the metric reads. Read the anchor's newest version and build on it.
+                details = await asyncio.to_thread(self._newest_row, anchor)
+            if details is None:
+                return "already finished"
+            final = next_version(details, state="skipped")
+            final["dismissed"] = True
+            self.set_open_row(None)
+            await append_row(self._session.transcript, final)
+            if inputs is not None:
+                # The pointer moves with the write (QA round 1, Q-1): a second dismiss on this
+                # job builds on the skipped row, never on the one it replaced.
+                inputs.details = dict(final)
+            await self._progress(final, "skipped")
+            return "dismissed"
 
     def _next_free_version(self, inputs: _JobInputs) -> int:
         """One past the newest row this anchor already has (memo §2.4's version rule).
@@ -961,5 +1036,11 @@ class SupplementRunner:
             return None
         if not rows:
             return None
-        newest = max(rows, key=lambda row: int(row.get("version", 0) or 0))
+        newest = rows[0]
+        for row in rows[1:]:
+            # Ties keep the LATER journal row -- ``contract.newest_per_anchor``'s documented
+            # tie-break: the runtime reader and the contract reader must not disagree on
+            # "newest" (QA round 1, Q-1).
+            if int(row.get("version", 0) or 0) >= int(newest.get("version", 0) or 0):
+                newest = row
         return cast(SupplementDetails, newest)
