@@ -338,7 +338,7 @@ async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -
 
 
 def write_tail_anchor(root: str | Path, session_id: str) -> bool:
-    """Record this journal's newest checkpoint row — or prove it has none.
+    """Record that this journal's newest checkpoint row is ABSENT — the cold-read hint.
 
     Idempotent and cheap when the record already holds: the existing sidecar is
     validated first (one stat, plus a scan of anything appended since), so a

@@ -38,15 +38,17 @@ assumed absent.
 
 IT IS A HINT, NEVER AN AUTHORITY. Every use is validated against the journal the
 reader has open: same inode, a journal that has not shrunk below the recorded size,
-and a scan of everything from the recorded size on that proves the type's spelling
-absent. Anything unproven falls back to the walking reader. The scan's assumption
-is that the format writes compact JSON separators, which
+the same last complete row ending at that size (a digest of it), and a scan of
+everything from the recorded size on that proves the type's spelling absent.
+Anything unproven falls back to the walking reader. The scan's assumption is that
+the format writes compact JSON separators, which
 ``transcript.find_row_for_custom_type`` already assumes for its cursor and which
 every writer of this format has emitted since the format was introduced.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -64,7 +66,16 @@ logger = logging.getLogger(__name__)
 ANCHOR_FILENAME = "tail-anchor.v1.json"
 
 #: Sidecar schema version. A file from another version is ignored.
-ANCHOR_VERSION = 1
+#:
+#: 2 since review round 2 (M1). Version 1 also carried a recorded offset for
+#: journals that DO hold the checkpoint row; this reader ignores fields it does not
+#: know, so such a record — which says "a row exists at N" — would be read as the
+#: proof of ABSENCE that version 2 records — the exact opposite of what it says.
+#: No released store can hold one (that revision never merged), but a development
+#: store that ran it keeps the file forever, because the selector sees a matching
+#: size and never revisits the journal, so the version moves and those records are
+#: ignored rather than reinterpreted.
+ANCHOR_VERSION = 2
 
 #: The custom type this sidecar answers for. One type, deliberately: it is the one
 #: the cold open requires and cannot bound without.
@@ -95,6 +106,15 @@ class TailAnchor:
 
     inode: int
     size: int
+    #: sha256 (first 16 hex) of the last complete row — its newline included.
+    #:
+    #: ``size`` alone cannot show that the bytes BELOW it are the ones the scan saw
+    #: (review round 2, M2): the write path's rollback removes bytes with
+    #: ``os.truncate``, and a later append can regrow the same inode past the
+    #: recorded size, after which the not-shrunk guard sees a long file and the
+    #: suffix scan sees only bytes the record never claimed. The digest pins the row
+    #: that ends at ``size``, so a boundary that moved under the record is refused.
+    tail_digest: str
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -102,6 +122,7 @@ class TailAnchor:
             "custom_type": ANCHOR_CUSTOM_TYPE,
             "inode": self.inode,
             "size": self.size,
+            "tail_digest": self.tail_digest,
         }
 
 
@@ -122,9 +143,12 @@ def read_anchor(directory: str | Path) -> TailAnchor | None:
         return None
     inode = raw.get("inode")
     size = raw.get("size")
+    digest = raw.get("tail_digest")
     if not isinstance(inode, int) or not isinstance(size, int):
         return None
-    return TailAnchor(inode=inode, size=size)
+    if not isinstance(digest, str):
+        return None
+    return TailAnchor(inode=inode, size=size, tail_digest=digest)
 
 
 def write_anchor(directory: str | Path, anchor: TailAnchor) -> bool:
@@ -170,6 +194,28 @@ def _complete_row_end(path: Path, size: int) -> int:
     return 0 if cut < 0 else size - window + cut + 1
 
 
+def _last_complete_row(path: Path, end: int) -> bytes:
+    """The bytes of the row that ends at ``end``, its newline included.
+
+    Reads BACKWARD from ``end`` to the previous newline, in windows that start at
+    2 MiB and grow, because a real checkpoint row is 0.65-0.83 MB — a fixed small
+    window would return a partial row and its digest would then depend on the
+    window size rather than on the bytes.
+    """
+    window = min(end, 2 << 20)
+    while True:
+        try:
+            with path.open("rb") as handle:
+                handle.seek(end - window)
+                tail = handle.read(window)
+        except OSError:
+            return b""
+        cut = tail.rfind(b"\n", 0, len(tail) - 1)
+        if cut >= 0 or window >= end:
+            return tail[cut + 1 :]
+        window = min(end, window * 4)
+
+
 def build_anchor(directory: str | Path) -> TailAnchor | None:
     """The anchor for this journal, or ``None`` when none is needed.
 
@@ -189,9 +235,18 @@ def build_anchor(directory: str | Path) -> TailAnchor | None:
     complete = _complete_row_end(path, stat.st_size)
     if complete == 0:
         # Nothing complete to anchor on: a record here would claim a region the
-        # scan cannot describe. The walking reader serves this journal.
+        # scan cannot describe, so no record is written and the walking reader
+        # serves this journal (the ``0`` return of ``_complete_row_end`` has no
+        # other caller — review round 2, N4).
         return None
-    return TailAnchor(inode=stat.st_ino, size=complete)
+    row = _last_complete_row(path, complete)
+    if not row:
+        return None
+    return TailAnchor(
+        inode=stat.st_ino,
+        size=complete,
+        tail_digest=hashlib.sha256(row).hexdigest()[:16],
+    )
 
 
 def _needle_absent(path: Path, start: int, end: int) -> bool:
@@ -205,17 +260,24 @@ def _needle_absent(path: Path, start: int, end: int) -> bool:
     needle = _needle()
     overlap = len(needle) - 1
     position = end
-    while position > start:
-        window_start = max(start, position - _WINDOW_BYTES)
-        try:
-            with path.open("rb") as handle:
+    # ONE handle for the whole scan (review round 2, N3): the loop re-reads a
+    # needle's worth of overlap per window, and a large appended delta would
+    # otherwise pay an open() per MiB on the reader's cold path.
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return False
+    with handle:
+        while position > start:
+            window_start = max(start, position - _WINDOW_BYTES)
+            try:
                 handle.seek(window_start)
                 window = handle.read(position - window_start + overlap)
-        except OSError:
-            return False
-        if needle in window:
-            return False
-        position = window_start
+            except OSError:
+                return False
+            if needle in window:
+                return False
+            position = window_start
     return True
 
 
@@ -237,6 +299,13 @@ def validate_anchor(directory: str | Path, anchor: TailAnchor | None) -> TailAnc
         return None
     if stat.st_ino != anchor.inode or stat.st_size < anchor.size:
         return None
+    # The boundary pin (M2): the row ending at the recorded size must be the row the
+    # scan saw. A truncate-and-regrow of the same inode leaves the size guard blind
+    # and can hide a checkpoint row below the record.
+    if anchor.size:
+        row = _last_complete_row(path, anchor.size)
+        if not row or hashlib.sha256(row).hexdigest()[:16] != anchor.tail_digest:
+            return None
     if stat.st_size == anchor.size:
         # Nothing was appended since the scan; the record describes the file.
         return anchor
