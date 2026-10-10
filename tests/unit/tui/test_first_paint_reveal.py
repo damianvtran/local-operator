@@ -826,23 +826,36 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
     # D4. `region`, not `outer_size`: the reviewer's point, and it is the region the
     # reader's rows are clipped to.
     settled = content[-1]
-    # RESIDUAL, MEASURED (R2-F1/R2-F2, review round 2). The reservation now mounts
-    # the card IN THIS TURN (`_mount_prompt_in_this_turn`), which removed the
-    # systematic miss the round-2 probe found (`card_mounted=False`, `host_h=3`,
-    # transcript 38 in 5 of 5 settles): measured here, 14 of 15 runs now paint the
-    # settled geometry (`region 23`, host 24/15) in the frame that carries the
-    # card. The remaining 1 in 15 painted `region 35` — the card in the DOM but a
-    # PART of its height authored, because the card's own children compose on
-    # Textual's async pipeline and the suppressed pass can only reserve what is
-    # composed at that instant. That residue is why this asserts the invariant
-    # rather than equality: the transcript can never be tighter than its settled
-    # self in this frame (the dock only ever takes rows away), and an equality on a
-    # 1-in-15 race is a CI flake, which is what round 2 measured on the old pin.
-    assert first["region"] >= settled["region"], (
-        "the reveal frame gave the transcript MORE rows than it settles with: the "
-        "dock's rows were reserved in the wrong direction",
+    # THE ACCEPTANCE CRITERION FOR THIS FRAME, asserted as an equality and
+    # deliberately NOT one-sided. The frame that first carries the card must
+    # already have taken the CARD'S OWN ROWS out of the transcript: the
+    # transcript's region and the dock's own height both equal to their settled
+    # values. An earlier revision asserted `region >= settled`, which passes on
+    # both of the defects this exists to catch, because both of them give the
+    # transcript MORE rows than it settles with:
+    #
+    # * the round-1 shape — region `h=38` against a settled `23`, the dock at its
+    #   3 rows of chrome instead of 15 (the card added BELOW the transcript, then
+    #   a second state at +147 ms taking the rows back);
+    # * the partial reserve — region `35`, the card in the dock with only part of
+    #   its height authored.
+    #
+    # Both are measured shapes (review rounds 2 and 3), so this pin must be RED on
+    # either, on the head without the reservation, and on a head whose reservation
+    # only half-lands.
+    assert first["region"] == settled["region"], (
+        "the frame that carries the card did not take the card's rows out of the "
+        "transcript: the region is not the settled one (round-1 defect 38 vs 23; "
+        "partial reserve 35 vs 23)",
         first["region"],
         settled["region"],
+        content[:4],
+    )
+    assert first["host_h"] == settled["host_h"], (
+        "the dock's own height is not the settled one in the frame that carries "
+        "the card: the card's rows are not reserved there",
+        first["host_h"],
+        settled["host_h"],
         content[:4],
     )
     assert first["host_y"] + first["host_h"] <= first["screen_h"] + 0.5, (
@@ -851,19 +864,14 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
         first["host_h"],
         first["screen_h"],
     )
-    # WHAT THIS PINS, and what it does not. The pin is the commit's own claim: the
-    # card exists BEFORE the frame that carries it, so the reveal is not followed
-    # by a second state that takes the card's rows out of the transcript.
-    #
-    # RESIDUAL (F2, review round 1), measured with a display-attributed sampler at
-    # this same 160x45: in the frame that carries the card the transcript's own
-    # region is still the pre-dock one — region `y=1 h=38`, the prompt host pushed
-    # to `y=39` with 15 rows on a 45-row screen, i.e. the card is CLIPPED there —
-    # and the settled `1/23` + host `24/15` lands one display later (147 ms, with
-    # the scroll moving 93 -> 108, the card's own height). So the earlier comment
-    # here ("one layout pass apart in this smaller pilot") was wrong twice over:
-    # this pilot IS 160x45, and the reason the equality was removed is not
-    # coalescing but that the dock's rows are not subtracted from the transcript's
-    # region in that frame. Making the reveal reserve the dock's rows before the
-    # commit (the same lever the PR names for the live case) is the fix; until it
-    # lands, this residual is named rather than asserted away.
+    # WHAT THIS PINS: the card's rows are in the frame that carries the card, as
+    # one equality over the geometry a reader sees — not a claim about the code
+    # path. `_settle_dock_rows_before_reveal` runs its pass while the card is still
+    # composing (instrumented: `card_mounted=False` in every run the reviewer and
+    # this lane took), so the pass cannot be credited with the reservation; what
+    # decides the frame is the card's own composition landing before the reveal is
+    # painted. The rate therefore belongs to the pin, not to a comment: at matched
+    # load the reviewer measured 16 of 16 and 21 of 23 in the two arms, with no
+    # measurable gain from the in-turn mount helper, which is why that helper is
+    # gone from this branch — a mechanism that does not move the number is not kept
+    # for its name.

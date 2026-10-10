@@ -9664,23 +9664,24 @@ class OperatorApp(App[None]):
             # section, so the reveal's own frame already excludes its rows
             # (`_prearm_known_gate`; the ladder adopts the card when it runs).
             self._prearm_known_gate(source)
-            # RESERVE THE CARD'S ROWS IN THE FRAME THAT REVEALS THEM. Mounting
-            # the card is not the same as taking its rows out of the transcript:
-            # a widget authors its own height during a layout pass, and the pass
-            # that resolved the transcript's `1fr` ran before this mount. The
-            # compositor then paints the transcript at its pre-card height with
-            # the card's rows pushed below it — measured at 160x45: transcript
-            # region `1/38`, prompt host at `y=39` (15 rows on a 45-row screen,
-            # i.e. clipped), settling to `1/23` a display later with the scroll
-            # moving 93 -> 108 by exactly the card's height. That one frame is
-            # review round 1's F2, QA round 1's Q2 and design round 1's D1/D4.
+            # SETTLE THE DOCK'S GEOMETRY IN THE REVEAL'S OWN TURN. Mounting the
+            # card is not the same as taking its rows out of the transcript: a
+            # widget authors its height during a layout pass, and the pass that
+            # resolved the transcript's `1fr` ran before this mount. Without a
+            # pass here the compositor can paint the transcript at its pre-card
+            # height with the card's rows below it — measured at 160x45: region
+            # `1/38`, host at `y=39` (15 rows on a 45-row screen, i.e. clipped),
+            # settling to `1/23` a display later with the scroll moving 93 -> 108
+            # by exactly the card's height. That frame is review round 1's F2,
+            # QA's Q2 and design's D1/D4.
             #
-            # The SAME SPELLING as the resume's pre-reveal settle, for the same
-            # reason: `_refresh_layout()` ends in `_compositor_refresh()`, i.e.
-            # it PAINTS, and a frame painted here would be a half-arranged one —
-            # so the paint is suppressed and only the layout (the heights, the
-            # reservation) is taken. This commit may not await; the call is
-            # synchronous by construction.
+            # WHAT THIS DOES NOT BUY, measured (rounds 2-3): the pass runs while
+            # the card is still composing (`card_mounted=False` in 23 of 23
+            # instrumented runs), so it does not itself reserve the card's rows —
+            # the pin on painted frames is what decides whether the reader got
+            # them. Same spelling as the resume's pre-reveal settle, for the same
+            # reason: `_refresh_layout()` ends in `_compositor_refresh()`, i.e. it
+            # PAINTS, so the paint is suppressed and only the layout is taken.
             self._settle_dock_rows_before_reveal()
             # IMMEDIATELY AFTER the adopt, and never before it. `_adopt_session`
             # is the single place a source becomes current: it has just moved
@@ -28005,11 +28006,21 @@ class OperatorApp(App[None]):
             self._approval = None
 
     def _settle_dock_rows_before_reveal(self) -> None:
-        """Author the dock's rows before the reveal paints — see the caller.
+        """Run the dock's layout in the reveal's own turn — and what that is NOT.
 
-        Kept as its own method rather than inlined so the one dangerous part (a
-        layout pass that would otherwise paint mid-commit) has one home, next to
-        the same suppression the resume path already uses.
+        MEASURED, review rounds 2 and 3: the pre-armed card is NOT composed when
+        this pass runs (23 of 23 instrumented runs: `card_mounted=False`, the host
+        at its 3 rows of chrome), so this pass does not reserve the card's rows
+        and must not be described as doing so. What it does is the thing its call
+        site needs: one layout pass inside the turn that reveals the transcript,
+        with the paint suppressed, so the compositor paints the arrangement that
+        exists rather than a half-arranged one.
+
+        The property the reader sees — the frame that carries the card carries the
+        settled geometry too — is asserted on PAINTED FRAMES by
+        `test_a_gate_the_app_already_holds_is_in_the_reveal_frame`, and it is the
+        card's own composition (Textual's async pipeline) that decides it: the
+        pin's rate is the honest measure of that, not this method's intent.
         """
         # GUARDED ON THE CARD, not only on the call site: this is a synchronous
         # full reflow on a path whose whole target is first-paint time, and a
@@ -28097,47 +28108,7 @@ class OperatorApp(App[None]):
         )
         self._prearmed_approval = prompt
         self._approval = prompt
-        # IN THIS TURN, not the next one: the reveal's frame is laid out at the
-        # end of this turn (see `_mount_prompt_in_this_turn`).
-        self._mount_prompt_in_this_turn(prompt)
-
-    def _mount_prompt_in_this_turn(self, card: Widget) -> None:
-        """Register a prompt in the dock NOW, not on the next message-loop turn.
-
-        WHY NOT ``_mount_prompt``. `Widget.mount` ends in ``call_next(await_mount)``:
-        the widget is registered at once but its composition — and therefore the
-        height it takes out of the transcript — waits for the next turn. The
-        reveal's frame is painted at the END of this turn, so a card mounted the
-        ordinary way is not in the layout that frame uses. Review round 2 measured
-        it: `_settle_dock_rows_before_reveal` saw `card_mounted=False` and
-        `host_h=3` (the host's own chrome, not the card's 15 rows) in 5 of 5 runs,
-        and the frame came out at 38 rows 3 times in 9 at fleet load.
-
-        ``App._register`` is the call ``mount`` makes for the DOM half, minus the
-        deferred await; the app already reaches into the screen's privates for
-        what the first-paint target needs (`screen._refresh_layout`,
-        `screen._compositor_refresh`). The remaining halves of ``mount`` are the
-        ones that do not matter here: the order-style refresh (no `before`/`after`
-        is used) and the ``AwaitMount`` (nothing awaits a speculative card — the
-        ladder ADOPTS it).
-
-        WHAT THIS DOES NOT GUARANTEE, measured: 14 of 15 runs now reserve the
-        card's own rows in this turn's frame (`region 23`, host `24/15` at 160x45);
-        the fifteenth reserved PART of them (`region 35`), because the card's own
-        children compose on Textual's async pipeline and the suppressed pass can
-        only reserve what is composed at that instant. The systematic miss — the
-        card not mounted at all, transcript at its pre-card height — is what this
-        removes; the residue is recorded with the pin rather than papered over.
-        """
-        try:
-            host = self.query_one("#prompt-host", Container)
-        except Exception:  # pragma: no cover - only before the dock is composed
-            logger.debug("prompt host is not mounted yet", exc_info=True)
-            return
-        self.app._register(host, card)
-        card.refresh(layout=True)
-        host.display = True
-        self._sync_boot_layout()
+        self._mount_prompt(prompt)
 
     def _mount_prompt(self, card: Widget) -> None:
         """Put a prompt into the dock's prompt host, above the status band.
