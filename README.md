@@ -1504,6 +1504,9 @@ their authors and contributors for building in the open.
 - **[agent-config](https://github.com/event4u-app/agent-config)**: created by
   the [event4u-app](https://github.com/event4u-app) team. Its governed-skill and
   design-review material informed our design-qa builtin.
+- **[ehmo/platform-design-skills](https://github.com/ehmo/platform-design-skills)**:
+  created by [ehmo](https://github.com/ehmo). Its condensed Apple HIG, Material 3
+  and WCAG 2.2 rule sets informed our design-qa checks.
 - **[microsoft/skills](https://github.com/microsoft/skills)**: created by
   [Microsoft](https://github.com/microsoft). Its frontend-design-review skill
   informed our frontend-design and design-qa builtins.
@@ -1520,8 +1523,8 @@ implementation; any mistakes here are our own.
 
 ### A note on reuse and credit
 
-All of the projects above are open source under permissive licenses (MIT,
-except Anthropic's `skills`, which is Apache-2.0), and Local Operator itself is
+All of the projects above are open source under permissive licenses (MIT; the
+Anthropic skills cited above are Apache-2.0), and Local Operator itself is
 MIT. Under that license, you are free to draw inspiration from or reuse code
 from Local Operator in your own work. Verbatim reuse of the code requires
 retaining the copyright notice and license text, as the license states. Beyond that legal

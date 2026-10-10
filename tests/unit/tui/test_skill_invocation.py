@@ -42,7 +42,13 @@ from .test_slash_echo import _user_rows
 
 @pytest.fixture
 def skill_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A skills root wired in as the ONLY root, via the documented env var."""
+    """A fixture skills root wired in via the documented env var.
+
+    It is not the only root: the packaged builtin catalog is part of every
+    install's vocabulary (``skills/api.py`` appends its root last), so the
+    full match set is the fixture's skills PLUS the catalog — assertions scope
+    to the fixture's own names rather than a fixed total.
+    """
     root = tmp_path / "skills"
     for name, description, body, hide in [
         ("research", "Investigate a question.", "Read primary sources.", False),
