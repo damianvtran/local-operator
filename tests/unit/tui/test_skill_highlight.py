@@ -418,15 +418,23 @@ async def test_a_slash_claimed_token_stays_prose() -> None:
 async def test_an_empty_vocabulary_resolves_nothing_but_still_dims(tmp_path, monkeypatch) -> None:
     """Settled-empty is an ANSWER: no skill can fire, and `$zzz` says so.
 
-    The fixture wires in an EMPTY skills root as the only root, so discovery
-    really answers "none" — the state a fresh machine boots in (where the bare
-    `$` arm shows its own notice; that surface predates this ink and is out of
-    scope here).
+    The builtin catalog is appended to every discovery, so the empty answer
+    can no longer be produced through the roots environment knob — it is
+    pinned here by patching the root computation itself. (The bare `$` arm's
+    own notice is out of scope here.)
     """
     dim = theme_mod.semantic_color("dim").lower()
     root = tmp_path / "skills"
     root.mkdir()
-    monkeypatch.setenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", str(root))
+    # Pin the empty answer through the call-time seam, not the environment:
+    # the catalog rides every discovery, so the EXTRA_ROOTS knob can no
+    # longer produce it and an env line would imply it still wires the empty
+    # root. `_discovered_skills` imports `default_skill_roots` from
+    # `skills.api` at call time — that module attribute is the seam patched
+    # here.
+    monkeypatch.setattr(
+        "local_operator.skills.api.default_skill_roots", lambda cwd=None: [root]
+    )
     monkeypatch.chdir(tmp_path)
 
     app = OperatorApp(lambda: _factory(FakeSession()))
