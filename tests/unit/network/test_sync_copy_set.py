@@ -459,6 +459,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/i18n/catalogues.py": (
+        1,
+        "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "
+        "sidecar inside the packaged ``local_operator/i18n/catalogues/`` tree — package "
+        "data shipped with the wheel, never an entry of a session directory",
+    ),
     "local_operator/network/audit.py": (
         1,
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "

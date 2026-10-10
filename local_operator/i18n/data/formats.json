@@ -1,0 +1,1362 @@
+{
+  "locales": {
+    "en": {
+      "date": {
+        "long": "{mon_full} {d}, {yyyy}",
+        "medium": "{mon} {d}, {yyyy}",
+        "monthsShort": [
+          "Jan",
+          "Feb",
+          "Mar",
+          "Apr",
+          "May",
+          "Jun",
+          "Jul",
+          "Aug",
+          "Sep",
+          "Oct",
+          "Nov",
+          "Dec"
+        ],
+        "monthsWide": [
+          "January",
+          "February",
+          "March",
+          "April",
+          "May",
+          "June",
+          "July",
+          "August",
+          "September",
+          "October",
+          "November",
+          "December"
+        ],
+        "short": "{m}/{d}/{yy}",
+        "weekdaysShort": [
+          "Sun",
+          "Mon",
+          "Tue",
+          "Wed",
+          "Thu",
+          "Fri",
+          "Sat"
+        ],
+        "weekdaysWide": [
+          "Sunday",
+          "Monday",
+          "Tuesday",
+          "Wednesday",
+          "Thursday",
+          "Friday",
+          "Saturday"
+        ]
+      },
+      "datetime": "{mon} {d}, {yyyy}, {h}:{min} {ampm}",
+      "number": {
+        "decimal": ".",
+        "group": ",",
+        "groupSizes": [
+          3,
+          3
+        ],
+        "minimumGroupingDigits": 1,
+        "probes": {
+          "1": "1",
+          "1000": "1,000",
+          "1234": "1,234",
+          "10000": "10,000",
+          "100000": "100,000",
+          "123456": "123,456",
+          "1234567": "1,234,567",
+          "12345678": "12,345,678",
+          "0.001": "0.001",
+          "0.12345": "0.123",
+          "0.25": "0.25",
+          "1.5": "1.5",
+          "12345.67": "12,345.67",
+          "999.5": "999.5"
+        }
+      },
+      "percent": {
+        "pattern": "{n}%",
+        "probes": {
+          "1": "100%",
+          "0.075": "8%",
+          "0.25": "25%"
+        }
+      },
+      "relative": {
+        "day": {
+          "future": {
+            "one": "in {n} day",
+            "other": "in {n} days"
+          },
+          "past": {
+            "one": "{n} day ago",
+            "other": "{n} days ago"
+          }
+        },
+        "hour": {
+          "future": {
+            "one": "in {n} hour",
+            "other": "in {n} hours"
+          },
+          "past": {
+            "one": "{n} hour ago",
+            "other": "{n} hours ago"
+          }
+        },
+        "minute": {
+          "future": {
+            "one": "in {n} minute",
+            "other": "in {n} minutes"
+          },
+          "past": {
+            "one": "{n} minute ago",
+            "other": "{n} minutes ago"
+          }
+        },
+        "month": {
+          "future": {
+            "one": "in {n} month",
+            "other": "in {n} months"
+          },
+          "past": {
+            "one": "{n} month ago",
+            "other": "{n} months ago"
+          }
+        },
+        "second": {
+          "future": {
+            "one": "in {n} second",
+            "other": "in {n} seconds"
+          },
+          "past": {
+            "one": "{n} second ago",
+            "other": "{n} seconds ago"
+          }
+        },
+        "week": {
+          "future": {
+            "one": "in {n} week",
+            "other": "in {n} weeks"
+          },
+          "past": {
+            "one": "{n} week ago",
+            "other": "{n} weeks ago"
+          }
+        },
+        "year": {
+          "future": {
+            "one": "in {n} year",
+            "other": "in {n} years"
+          },
+          "past": {
+            "one": "{n} year ago",
+            "other": "{n} years ago"
+          }
+        }
+      },
+      "time": {
+        "cycle": "h12",
+        "medium": "{h}:{min}:{ss} {ampm}",
+        "periods": {
+          "am": "AM",
+          "pm": "PM"
+        },
+        "short": "{h}:{min} {ampm}"
+      }
+    },
+    "es": {
+      "date": {
+        "long": "{d} de {mon_full} de {yyyy}",
+        "medium": "{d} {mon} {yyyy}",
+        "monthsShort": [
+          "ene",
+          "feb",
+          "mar",
+          "abr",
+          "may",
+          "jun",
+          "jul",
+          "ago",
+          "sept",
+          "oct",
+          "nov",
+          "dic"
+        ],
+        "monthsWide": [
+          "enero",
+          "febrero",
+          "marzo",
+          "abril",
+          "mayo",
+          "junio",
+          "julio",
+          "agosto",
+          "septiembre",
+          "octubre",
+          "noviembre",
+          "diciembre"
+        ],
+        "short": "{d}/{m}/{yy}",
+        "weekdaysShort": [
+          "dom",
+          "lun",
+          "mar",
+          "mié",
+          "jue",
+          "vie",
+          "sáb"
+        ],
+        "weekdaysWide": [
+          "domingo",
+          "lunes",
+          "martes",
+          "miércoles",
+          "jueves",
+          "viernes",
+          "sábado"
+        ]
+      },
+      "datetime": "{d} {mon} {yyyy}, {H}:{min}",
+      "number": {
+        "decimal": ",",
+        "group": ".",
+        "groupSizes": [
+          3,
+          3
+        ],
+        "minimumGroupingDigits": 1,
+        "probes": {
+          "1": "1",
+          "1000": "1.000",
+          "1234": "1.234",
+          "10000": "10.000",
+          "100000": "100.000",
+          "123456": "123.456",
+          "1234567": "1.234.567",
+          "12345678": "12.345.678",
+          "0.001": "0,001",
+          "0.12345": "0,123",
+          "0.25": "0,25",
+          "1.5": "1,5",
+          "12345.67": "12.345,67",
+          "999.5": "999,5"
+        }
+      },
+      "percent": {
+        "pattern": "{n} %",
+        "probes": {
+          "1": "100 %",
+          "0.075": "8 %",
+          "0.25": "25 %"
+        }
+      },
+      "relative": {
+        "day": {
+          "future": {
+            "many": "dentro de {n} días",
+            "one": "dentro de {n} día",
+            "other": "dentro de {n} días"
+          },
+          "past": {
+            "many": "hace {n} días",
+            "one": "hace {n} día",
+            "other": "hace {n} días"
+          }
+        },
+        "hour": {
+          "future": {
+            "many": "dentro de {n} horas",
+            "one": "dentro de {n} hora",
+            "other": "dentro de {n} horas"
+          },
+          "past": {
+            "many": "hace {n} horas",
+            "one": "hace {n} hora",
+            "other": "hace {n} horas"
+          }
+        },
+        "minute": {
+          "future": {
+            "many": "dentro de {n} minutos",
+            "one": "dentro de {n} minuto",
+            "other": "dentro de {n} minutos"
+          },
+          "past": {
+            "many": "hace {n} minutos",
+            "one": "hace {n} minuto",
+            "other": "hace {n} minutos"
+          }
+        },
+        "month": {
+          "future": {
+            "many": "dentro de {n} meses",
+            "one": "dentro de {n} mes",
+            "other": "dentro de {n} meses"
+          },
+          "past": {
+            "many": "hace {n} meses",
+            "one": "hace {n} mes",
+            "other": "hace {n} meses"
+          }
+        },
+        "second": {
+          "future": {
+            "many": "dentro de {n} segundos",
+            "one": "dentro de {n} segundo",
+            "other": "dentro de {n} segundos"
+          },
+          "past": {
+            "many": "hace {n} segundos",
+            "one": "hace {n} segundo",
+            "other": "hace {n} segundos"
+          }
+        },
+        "week": {
+          "future": {
+            "many": "dentro de {n} semanas",
+            "one": "dentro de {n} semana",
+            "other": "dentro de {n} semanas"
+          },
+          "past": {
+            "many": "hace {n} semanas",
+            "one": "hace {n} semana",
+            "other": "hace {n} semanas"
+          }
+        },
+        "year": {
+          "future": {
+            "many": "dentro de {n} años",
+            "one": "dentro de {n} año",
+            "other": "dentro de {n} años"
+          },
+          "past": {
+            "many": "hace {n} años",
+            "one": "hace {n} año",
+            "other": "hace {n} años"
+          }
+        }
+      },
+      "time": {
+        "cycle": "h23",
+        "medium": "{H}:{min}:{ss}",
+        "periods": null,
+        "short": "{H}:{min}"
+      }
+    },
+    "fr": {
+      "date": {
+        "long": "{d} {mon_full} {yyyy}",
+        "medium": "{d} {mon} {yyyy}",
+        "monthsShort": [
+          "janv.",
+          "févr.",
+          "mars",
+          "avr.",
+          "mai",
+          "juin",
+          "juil.",
+          "août",
+          "sept.",
+          "oct.",
+          "nov.",
+          "déc."
+        ],
+        "monthsWide": [
+          "janvier",
+          "février",
+          "mars",
+          "avril",
+          "mai",
+          "juin",
+          "juillet",
+          "août",
+          "septembre",
+          "octobre",
+          "novembre",
+          "décembre"
+        ],
+        "short": "{dd}/{mm}/{yyyy}",
+        "weekdaysShort": [
+          "dim.",
+          "lun.",
+          "mar.",
+          "mer.",
+          "jeu.",
+          "ven.",
+          "sam."
+        ],
+        "weekdaysWide": [
+          "dimanche",
+          "lundi",
+          "mardi",
+          "mercredi",
+          "jeudi",
+          "vendredi",
+          "samedi"
+        ]
+      },
+      "datetime": "{d} {mon} {yyyy}, {HH}:{min}",
+      "number": {
+        "decimal": ",",
+        "group": " ",
+        "groupSizes": [
+          3,
+          3
+        ],
+        "minimumGroupingDigits": 1,
+        "probes": {
+          "1": "1",
+          "1000": "1 000",
+          "1234": "1 234",
+          "10000": "10 000",
+          "100000": "100 000",
+          "123456": "123 456",
+          "1234567": "1 234 567",
+          "12345678": "12 345 678",
+          "0.001": "0,001",
+          "0.12345": "0,123",
+          "0.25": "0,25",
+          "1.5": "1,5",
+          "12345.67": "12 345,67",
+          "999.5": "999,5"
+        }
+      },
+      "percent": {
+        "pattern": "{n} %",
+        "probes": {
+          "1": "100 %",
+          "0.075": "8 %",
+          "0.25": "25 %"
+        }
+      },
+      "relative": {
+        "day": {
+          "future": {
+            "many": "dans {n} jours",
+            "one": "dans {n} jour",
+            "other": "dans {n} jours"
+          },
+          "past": {
+            "many": "il y a {n} jours",
+            "one": "il y a {n} jour",
+            "other": "il y a {n} jours"
+          }
+        },
+        "hour": {
+          "future": {
+            "many": "dans {n} heures",
+            "one": "dans {n} heure",
+            "other": "dans {n} heures"
+          },
+          "past": {
+            "many": "il y a {n} heures",
+            "one": "il y a {n} heure",
+            "other": "il y a {n} heures"
+          }
+        },
+        "minute": {
+          "future": {
+            "many": "dans {n} minutes",
+            "one": "dans {n} minute",
+            "other": "dans {n} minutes"
+          },
+          "past": {
+            "many": "il y a {n} minutes",
+            "one": "il y a {n} minute",
+            "other": "il y a {n} minutes"
+          }
+        },
+        "month": {
+          "future": {
+            "many": "dans {n} mois",
+            "one": "dans {n} mois",
+            "other": "dans {n} mois"
+          },
+          "past": {
+            "many": "il y a {n} mois",
+            "one": "il y a {n} mois",
+            "other": "il y a {n} mois"
+          }
+        },
+        "second": {
+          "future": {
+            "many": "dans {n} secondes",
+            "one": "dans {n} seconde",
+            "other": "dans {n} secondes"
+          },
+          "past": {
+            "many": "il y a {n} secondes",
+            "one": "il y a {n} seconde",
+            "other": "il y a {n} secondes"
+          }
+        },
+        "week": {
+          "future": {
+            "many": "dans {n} semaines",
+            "one": "dans {n} semaine",
+            "other": "dans {n} semaines"
+          },
+          "past": {
+            "many": "il y a {n} semaines",
+            "one": "il y a {n} semaine",
+            "other": "il y a {n} semaines"
+          }
+        },
+        "year": {
+          "future": {
+            "many": "dans {n} ans",
+            "one": "dans {n} an",
+            "other": "dans {n} ans"
+          },
+          "past": {
+            "many": "il y a {n} ans",
+            "one": "il y a {n} an",
+            "other": "il y a {n} ans"
+          }
+        }
+      },
+      "time": {
+        "cycle": "h23",
+        "medium": "{HH}:{min}:{ss}",
+        "periods": null,
+        "short": "{HH}:{min}"
+      }
+    },
+    "hi": {
+      "date": {
+        "long": "{d} {mon_full} {yyyy}",
+        "medium": "{d} {mon} {yyyy}",
+        "monthsShort": [
+          "जन॰",
+          "फ़र॰",
+          "मार्च",
+          "अप्रैल",
+          "मई",
+          "जून",
+          "जुल॰",
+          "अग॰",
+          "सित॰",
+          "अक्टू॰",
+          "नव॰",
+          "दिस॰"
+        ],
+        "monthsWide": [
+          "जनवरी",
+          "फ़रवरी",
+          "मार्च",
+          "अप्रैल",
+          "मई",
+          "जून",
+          "जुलाई",
+          "अगस्त",
+          "सितंबर",
+          "अक्टूबर",
+          "नवंबर",
+          "दिसंबर"
+        ],
+        "short": "{d}/{m}/{yy}",
+        "weekdaysShort": [
+          "रवि",
+          "सोम",
+          "मंगल",
+          "बुध",
+          "गुरु",
+          "शुक्र",
+          "शनि"
+        ],
+        "weekdaysWide": [
+          "रविवार",
+          "सोमवार",
+          "मंगलवार",
+          "बुधवार",
+          "गुरुवार",
+          "शुक्रवार",
+          "शनिवार"
+        ]
+      },
+      "datetime": "{d} {mon} {yyyy}, {h}:{min} {ampm}",
+      "number": {
+        "decimal": ".",
+        "group": ",",
+        "groupSizes": [
+          3,
+          2
+        ],
+        "minimumGroupingDigits": 1,
+        "probes": {
+          "1": "1",
+          "1000": "1,000",
+          "1234": "1,234",
+          "10000": "10,000",
+          "100000": "1,00,000",
+          "123456": "1,23,456",
+          "1234567": "12,34,567",
+          "12345678": "1,23,45,678",
+          "0.001": "0.001",
+          "0.12345": "0.123",
+          "0.25": "0.25",
+          "1.5": "1.5",
+          "12345.67": "12,345.67",
+          "999.5": "999.5"
+        }
+      },
+      "percent": {
+        "pattern": "{n}%",
+        "probes": {
+          "1": "100%",
+          "0.075": "8%",
+          "0.25": "25%"
+        }
+      },
+      "relative": {
+        "day": {
+          "future": {
+            "one": "{n} दिन में",
+            "other": "{n} दिन में"
+          },
+          "past": {
+            "one": "{n} दिन पहले",
+            "other": "{n} दिन पहले"
+          }
+        },
+        "hour": {
+          "future": {
+            "one": "{n} घंटे में",
+            "other": "{n} घंटे में"
+          },
+          "past": {
+            "one": "{n} घंटे पहले",
+            "other": "{n} घंटे पहले"
+          }
+        },
+        "minute": {
+          "future": {
+            "one": "{n} मिनट में",
+            "other": "{n} मिनट में"
+          },
+          "past": {
+            "one": "{n} मिनट पहले",
+            "other": "{n} मिनट पहले"
+          }
+        },
+        "month": {
+          "future": {
+            "one": "{n} माह में",
+            "other": "{n} माह में"
+          },
+          "past": {
+            "one": "{n} माह पहले",
+            "other": "{n} माह पहले"
+          }
+        },
+        "second": {
+          "future": {
+            "one": "{n} सेकंड में",
+            "other": "{n} सेकंड में"
+          },
+          "past": {
+            "one": "{n} सेकंड पहले",
+            "other": "{n} सेकंड पहले"
+          }
+        },
+        "week": {
+          "future": {
+            "one": "{n} सप्ताह में",
+            "other": "{n} सप्ताह में"
+          },
+          "past": {
+            "one": "{n} सप्ताह पहले",
+            "other": "{n} सप्ताह पहले"
+          }
+        },
+        "year": {
+          "future": {
+            "one": "{n} वर्ष में",
+            "other": "{n} वर्ष में"
+          },
+          "past": {
+            "one": "{n} वर्ष पहले",
+            "other": "{n} वर्ष पहले"
+          }
+        }
+      },
+      "time": {
+        "cycle": "h12",
+        "medium": "{h}:{min}:{ss} {ampm}",
+        "periods": {
+          "am": "am",
+          "pm": "pm"
+        },
+        "short": "{h}:{min} {ampm}"
+      }
+    },
+    "ru": {
+      "date": {
+        "long": "{d} {mon_full} {yyyy} г.",
+        "medium": "{d} {mon} {yyyy} г.",
+        "monthsShort": [
+          "янв.",
+          "февр.",
+          "мар.",
+          "апр.",
+          "мая",
+          "июн.",
+          "июл.",
+          "авг.",
+          "сент.",
+          "окт.",
+          "нояб.",
+          "дек."
+        ],
+        "monthsWide": [
+          "января",
+          "февраля",
+          "марта",
+          "апреля",
+          "мая",
+          "июня",
+          "июля",
+          "августа",
+          "сентября",
+          "октября",
+          "ноября",
+          "декабря"
+        ],
+        "short": "{dd}.{mm}.{yyyy}",
+        "weekdaysShort": [
+          "вс",
+          "пн",
+          "вт",
+          "ср",
+          "чт",
+          "пт",
+          "сб"
+        ],
+        "weekdaysWide": [
+          "воскресенье",
+          "понедельник",
+          "вторник",
+          "среда",
+          "четверг",
+          "пятница",
+          "суббота"
+        ]
+      },
+      "datetime": "{d} {mon} {yyyy} г., {HH}:{min}",
+      "number": {
+        "decimal": ",",
+        "group": " ",
+        "groupSizes": [
+          3,
+          3
+        ],
+        "minimumGroupingDigits": 1,
+        "probes": {
+          "1": "1",
+          "1000": "1 000",
+          "1234": "1 234",
+          "10000": "10 000",
+          "100000": "100 000",
+          "123456": "123 456",
+          "1234567": "1 234 567",
+          "12345678": "12 345 678",
+          "0.001": "0,001",
+          "0.12345": "0,123",
+          "0.25": "0,25",
+          "1.5": "1,5",
+          "12345.67": "12 345,67",
+          "999.5": "999,5"
+        }
+      },
+      "percent": {
+        "pattern": "{n} %",
+        "probes": {
+          "1": "100 %",
+          "0.075": "8 %",
+          "0.25": "25 %"
+        }
+      },
+      "relative": {
+        "day": {
+          "future": {
+            "few": "через {n} дня",
+            "many": "через {n} дней",
+            "one": "через {n} день",
+            "other": "через {n} дня"
+          },
+          "past": {
+            "few": "{n} дня назад",
+            "many": "{n} дней назад",
+            "one": "{n} день назад",
+            "other": "{n} дня назад"
+          }
+        },
+        "hour": {
+          "future": {
+            "few": "через {n} часа",
+            "many": "через {n} часов",
+            "one": "через {n} час",
+            "other": "через {n} часа"
+          },
+          "past": {
+            "few": "{n} часа назад",
+            "many": "{n} часов назад",
+            "one": "{n} час назад",
+            "other": "{n} часа назад"
+          }
+        },
+        "minute": {
+          "future": {
+            "few": "через {n} минуты",
+            "many": "через {n} минут",
+            "one": "через {n} минуту",
+            "other": "через {n} минуты"
+          },
+          "past": {
+            "few": "{n} минуты назад",
+            "many": "{n} минут назад",
+            "one": "{n} минуту назад",
+            "other": "{n} минуты назад"
+          }
+        },
+        "month": {
+          "future": {
+            "few": "через {n} месяца",
+            "many": "через {n} месяцев",
+            "one": "через {n} месяц",
+            "other": "через {n} месяца"
+          },
+          "past": {
+            "few": "{n} месяца назад",
+            "many": "{n} месяцев назад",
+            "one": "{n} месяц назад",
+            "other": "{n} месяца назад"
+          }
+        },
+        "second": {
+          "future": {
+            "few": "через {n} секунды",
+            "many": "через {n} секунд",
+            "one": "через {n} секунду",
+            "other": "через {n} секунды"
+          },
+          "past": {
+            "few": "{n} секунды назад",
+            "many": "{n} секунд назад",
+            "one": "{n} секунду назад",
+            "other": "{n} секунды назад"
+          }
+        },
+        "week": {
+          "future": {
+            "few": "через {n} недели",
+            "many": "через {n} недель",
+            "one": "через {n} неделю",
+            "other": "через {n} недели"
+          },
+          "past": {
+            "few": "{n} недели назад",
+            "many": "{n} недель назад",
+            "one": "{n} неделю назад",
+            "other": "{n} недели назад"
+          }
+        },
+        "year": {
+          "future": {
+            "few": "через {n} года",
+            "many": "через {n} лет",
+            "one": "через {n} год",
+            "other": "через {n} года"
+          },
+          "past": {
+            "few": "{n} года назад",
+            "many": "{n} лет назад",
+            "one": "{n} год назад",
+            "other": "{n} года назад"
+          }
+        }
+      },
+      "time": {
+        "cycle": "h23",
+        "medium": "{HH}:{min}:{ss}",
+        "periods": null,
+        "short": "{HH}:{min}"
+      }
+    },
+    "ur": {
+      "date": {
+        "long": "{d} {mon_full}، {yyyy}",
+        "medium": "{d} {mon}، {yyyy}",
+        "monthsShort": [
+          "جنوری",
+          "فروری",
+          "مارچ",
+          "اپریل",
+          "مئی",
+          "جون",
+          "جولائی",
+          "اگست",
+          "ستمبر",
+          "اکتوبر",
+          "نومبر",
+          "دسمبر"
+        ],
+        "monthsWide": [
+          "جنوری",
+          "فروری",
+          "مارچ",
+          "اپریل",
+          "مئی",
+          "جون",
+          "جولائی",
+          "اگست",
+          "ستمبر",
+          "اکتوبر",
+          "نومبر",
+          "دسمبر"
+        ],
+        "short": "{d}/{m}/{yy}",
+        "weekdaysShort": [
+          "اتوار",
+          "پیر",
+          "منگل",
+          "بدھ",
+          "جمعرات",
+          "جمعہ",
+          "ہفتہ"
+        ],
+        "weekdaysWide": [
+          "اتوار",
+          "پیر",
+          "منگل",
+          "بدھ",
+          "جمعرات",
+          "جمعہ",
+          "ہفتہ"
+        ]
+      },
+      "datetime": "{d} {mon}، {yyyy}، {h}:{min} {ampm}",
+      "number": {
+        "decimal": ".",
+        "group": ",",
+        "groupSizes": [
+          3,
+          3
+        ],
+        "minimumGroupingDigits": 1,
+        "probes": {
+          "1": "1",
+          "1000": "1,000",
+          "1234": "1,234",
+          "10000": "10,000",
+          "100000": "100,000",
+          "123456": "123,456",
+          "1234567": "1,234,567",
+          "12345678": "12,345,678",
+          "0.001": "0.001",
+          "0.12345": "0.123",
+          "0.25": "0.25",
+          "1.5": "1.5",
+          "12345.67": "12,345.67",
+          "999.5": "999.5"
+        }
+      },
+      "percent": {
+        "pattern": "{n}%",
+        "probes": {
+          "1": "100%",
+          "0.075": "8%",
+          "0.25": "25%"
+        }
+      },
+      "relative": {
+        "day": {
+          "future": {
+            "one": "{n} دن میں",
+            "other": "{n} دنوں میں"
+          },
+          "past": {
+            "one": "{n} دن پہلے",
+            "other": "{n} دنوں پہلے"
+          }
+        },
+        "hour": {
+          "future": {
+            "one": "{n} گھنٹے میں",
+            "other": "{n} گھنٹے میں"
+          },
+          "past": {
+            "one": "{n} گھنٹہ پہلے",
+            "other": "{n} گھنٹے پہلے"
+          }
+        },
+        "minute": {
+          "future": {
+            "one": "{n} منٹ میں",
+            "other": "{n} منٹ میں"
+          },
+          "past": {
+            "one": "{n} منٹ پہلے",
+            "other": "{n} منٹ پہلے"
+          }
+        },
+        "month": {
+          "future": {
+            "one": "{n} مہینہ میں",
+            "other": "{n} مہینے میں"
+          },
+          "past": {
+            "one": "{n} مہینہ پہلے",
+            "other": "{n} مہینے پہلے"
+          }
+        },
+        "second": {
+          "future": {
+            "one": "{n} سیکنڈ میں",
+            "other": "{n} سیکنڈ میں"
+          },
+          "past": {
+            "one": "{n} سیکنڈ پہلے",
+            "other": "{n} سیکنڈ پہلے"
+          }
+        },
+        "week": {
+          "future": {
+            "one": "{n} ہفتہ میں",
+            "other": "{n} ہفتے میں"
+          },
+          "past": {
+            "one": "{n} ہفتہ پہلے",
+            "other": "{n} ہفتے پہلے"
+          }
+        },
+        "year": {
+          "future": {
+            "one": "{n} سال میں",
+            "other": "{n} سال میں"
+          },
+          "past": {
+            "one": "{n} سال پہلے",
+            "other": "{n} سال پہلے"
+          }
+        }
+      },
+      "time": {
+        "cycle": "h12",
+        "medium": "{h}:{min}:{ss} {ampm}",
+        "periods": {
+          "am": "AM",
+          "pm": "PM"
+        },
+        "short": "{h}:{min} {ampm}"
+      }
+    },
+    "vi": {
+      "date": {
+        "long": "{d} {mon_full}, {yyyy}",
+        "medium": "{d} {mon}, {yyyy}",
+        "monthsShort": [
+          "thg 1",
+          "thg 2",
+          "thg 3",
+          "thg 4",
+          "thg 5",
+          "thg 6",
+          "thg 7",
+          "thg 8",
+          "thg 9",
+          "thg 10",
+          "thg 11",
+          "thg 12"
+        ],
+        "monthsWide": [
+          "tháng 1",
+          "tháng 2",
+          "tháng 3",
+          "tháng 4",
+          "tháng 5",
+          "tháng 6",
+          "tháng 7",
+          "tháng 8",
+          "tháng 9",
+          "tháng 10",
+          "tháng 11",
+          "tháng 12"
+        ],
+        "short": "{d}/{m}/{yy}",
+        "weekdaysShort": [
+          "CN",
+          "Thứ 2",
+          "Thứ 3",
+          "Thứ 4",
+          "Thứ 5",
+          "Thứ 6",
+          "Thứ 7"
+        ],
+        "weekdaysWide": [
+          "Chủ Nhật",
+          "Thứ Hai",
+          "Thứ Ba",
+          "Thứ Tư",
+          "Thứ Năm",
+          "Thứ Sáu",
+          "Thứ Bảy"
+        ]
+      },
+      "datetime": "{HH}:{min} {d} {mon}, {yyyy}",
+      "number": {
+        "decimal": ",",
+        "group": ".",
+        "groupSizes": [
+          3,
+          3
+        ],
+        "minimumGroupingDigits": 1,
+        "probes": {
+          "1": "1",
+          "1000": "1.000",
+          "1234": "1.234",
+          "10000": "10.000",
+          "100000": "100.000",
+          "123456": "123.456",
+          "1234567": "1.234.567",
+          "12345678": "12.345.678",
+          "0.001": "0,001",
+          "0.12345": "0,123",
+          "0.25": "0,25",
+          "1.5": "1,5",
+          "12345.67": "12.345,67",
+          "999.5": "999,5"
+        }
+      },
+      "percent": {
+        "pattern": "{n}%",
+        "probes": {
+          "1": "100%",
+          "0.075": "8%",
+          "0.25": "25%"
+        }
+      },
+      "relative": {
+        "day": {
+          "future": {
+            "other": "sau {n} ngày nữa"
+          },
+          "past": {
+            "other": "{n} ngày trước"
+          }
+        },
+        "hour": {
+          "future": {
+            "other": "sau {n} giờ nữa"
+          },
+          "past": {
+            "other": "{n} giờ trước"
+          }
+        },
+        "minute": {
+          "future": {
+            "other": "sau {n} phút nữa"
+          },
+          "past": {
+            "other": "{n} phút trước"
+          }
+        },
+        "month": {
+          "future": {
+            "other": "sau {n} tháng nữa"
+          },
+          "past": {
+            "other": "{n} tháng trước"
+          }
+        },
+        "second": {
+          "future": {
+            "other": "sau {n} giây nữa"
+          },
+          "past": {
+            "other": "{n} giây trước"
+          }
+        },
+        "week": {
+          "future": {
+            "other": "sau {n} tuần nữa"
+          },
+          "past": {
+            "other": "{n} tuần trước"
+          }
+        },
+        "year": {
+          "future": {
+            "other": "sau {n} năm nữa"
+          },
+          "past": {
+            "other": "{n} năm trước"
+          }
+        }
+      },
+      "time": {
+        "cycle": "h23",
+        "medium": "{HH}:{min}:{ss}",
+        "periods": null,
+        "short": "{HH}:{min}"
+      }
+    },
+    "zh-CN": {
+      "date": {
+        "long": "{yyyy}年{m}月{d}日",
+        "medium": "{yyyy}年{m}月{d}日",
+        "monthsShort": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12"
+        ],
+        "monthsWide": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12"
+        ],
+        "short": "{yyyy}/{m}/{d}",
+        "weekdaysShort": [
+          "周日",
+          "周一",
+          "周二",
+          "周三",
+          "周四",
+          "周五",
+          "周六"
+        ],
+        "weekdaysWide": [
+          "星期日",
+          "星期一",
+          "星期二",
+          "星期三",
+          "星期四",
+          "星期五",
+          "星期六"
+        ]
+      },
+      "datetime": "{yyyy}年{m}月{d}日 {HH}:{min}",
+      "number": {
+        "decimal": ".",
+        "group": ",",
+        "groupSizes": [
+          3,
+          3
+        ],
+        "minimumGroupingDigits": 1,
+        "probes": {
+          "1": "1",
+          "1000": "1,000",
+          "1234": "1,234",
+          "10000": "10,000",
+          "100000": "100,000",
+          "123456": "123,456",
+          "1234567": "1,234,567",
+          "12345678": "12,345,678",
+          "0.001": "0.001",
+          "0.12345": "0.123",
+          "0.25": "0.25",
+          "1.5": "1.5",
+          "12345.67": "12,345.67",
+          "999.5": "999.5"
+        }
+      },
+      "percent": {
+        "pattern": "{n}%",
+        "probes": {
+          "1": "100%",
+          "0.075": "8%",
+          "0.25": "25%"
+        }
+      },
+      "relative": {
+        "day": {
+          "future": {
+            "other": "{n}天后"
+          },
+          "past": {
+            "other": "{n}天前"
+          }
+        },
+        "hour": {
+          "future": {
+            "other": "{n}小时后"
+          },
+          "past": {
+            "other": "{n}小时前"
+          }
+        },
+        "minute": {
+          "future": {
+            "other": "{n}分钟后"
+          },
+          "past": {
+            "other": "{n}分钟前"
+          }
+        },
+        "month": {
+          "future": {
+            "other": "{n}个月后"
+          },
+          "past": {
+            "other": "{n}个月前"
+          }
+        },
+        "second": {
+          "future": {
+            "other": "{n}秒钟后"
+          },
+          "past": {
+            "other": "{n}秒钟前"
+          }
+        },
+        "week": {
+          "future": {
+            "other": "{n}周后"
+          },
+          "past": {
+            "other": "{n}周前"
+          }
+        },
+        "year": {
+          "future": {
+            "other": "{n}年后"
+          },
+          "past": {
+            "other": "{n}年前"
+          }
+        }
+      },
+      "time": {
+        "cycle": "h23",
+        "medium": "{HH}:{min}:{ss}",
+        "periods": null,
+        "short": "{HH}:{min}"
+      }
+    }
+  },
+  "schema": 1
+}
