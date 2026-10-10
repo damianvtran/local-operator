@@ -1029,7 +1029,10 @@ class SupplementRunner:
         review R3-1): a job that settled while its terminal append was still in flight, or
         inside the ``cancelling`` beat, is not cut -- its terminal row already exists and
         the next version starts straight away -- and bookkeeping that moved sends the
-        request to the queue, exactly as the sequential shape would.
+        request to the queue, exactly as the sequential shape would. Round-4 review R4-2:
+        the queue rule is checked after EVERY await this cut crosses (the beat, the journal
+        read, the reap, the settle) -- a newer flow that took the bookkeeping at any of
+        them owns it, and starting over it would orphan its task.
         """
         task = self._task
         if task is not None and not task.done():
@@ -1047,10 +1050,28 @@ class SupplementRunner:
             if not _is_terminal(newest):
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-                if self._task is task:
-                    self._task = None
-                    self._running = None
-                    await self._settle(inputs, state="cancelled")
+                if self._task is not task:
+                    # A newer flow took the bookkeeping across the reap (round-4 review
+                    # R4-2). Queue behind it exactly like the beat's guard above: starting
+                    # over it would orphan its task -- it still runs, but no op can cut it
+                    # by ``_task`` any more, and its terminal write can follow a row this
+                    # request went on to write.
+                    self._pending = (inputs, instruction)
+                    return
+                self._task = None
+                self._running = None
+                await self._settle(inputs, state="cancelled")
+                if self._task is not None:
+                    # The settle's own awaits are a window too (R4-2): a newer flow that
+                    # started inside them owns the bookkeeping; queue rather than orphan
+                    # it (the same rule, one write later).
+                    self._pending = (inputs, instruction)
+                    return
+            elif self._task is not task:
+                # The journal read while the bookkeeping moved (R4-2's terminal arm: the
+                # row settled, and a newer flow started): queue, do not start under it.
+                self._pending = (inputs, instruction)
+                return
         # This request executes NOW, so it replaces whatever was queued (memo §2.9's one
         # eviction rule).
         self._pending = None

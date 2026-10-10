@@ -133,7 +133,9 @@ _STATIC_SKIP_RE: Final = re.compile(r"<(script|style|data)\b.*?</\1\s*>", re.DOT
 #: READABLE numerals -- element text and data-bearing attributes -- not drawn geometry: a
 #: chart's SHAPE may encode a value its text does not state (a bar ``height`` of 42 against
 #: data that says 98.5 is accepted, by construction), and proportion-level deception is the
-#: golden-set QA spot-check's territory (memo §5), not this check's.
+#: golden-set QA spot-check's territory (memo §5), not this check's. The table is applied by
+#: the tag walk (:func:`_blank_structural`), which blanks a value only when its tag parses
+#: cleanly -- what cannot be proven structural stays scannable (round-4 review R4-1).
 _STRUCTURAL_ATTRS: Final[frozenset[str]] = frozenset(
     {
         "viewbox",
@@ -162,19 +164,15 @@ _STRUCTURAL_ATTRS: Final[frozenset[str]] = frozenset(
         "style",
     }
 )
-#: One attribute pair, either quote style OR unquoted, values may span lines:
-#: ``name="…"``, ``name='…'`` or ``name=…`` (round-2 review R2-1, widened by round-3 review
-#: R3-2). The name class carries digits because :data:`_STRUCTURAL_ATTRS` does: ``x1``/
-#: ``y1``/``x2``/``y2`` could never match while it did not (R2-1), so their values were still
-#: refused as displayed numbers by both scans. ``re.DOTALL`` lets a quoted value run over
-#: lines (an SVG ``points`` list is routinely wrapped); an UNQUOTED value cannot contain
-#: whitespace (HTML's attribute grammar), so a spaced coordinate list still has to be quoted
-#: to be blanked -- that boundary is the one this grammar records.
-_ATTR_PAIR_RE: Final = re.compile(
-    r"(?P<name>[a-zA-Z0-9:-]+)\s*=\s*"
-    r"(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s\"'=<>`]+))",
-    re.DOTALL,
-)
+#: The characters that end a tag or attribute NAME in the walk (:func:`_scan_start_tag`):
+#: whitespace, ``/``, ``<``, ``>``, ``=`` and the quote characters. A name stopping where no
+#: name can continue is the ambiguous shape the walk refuses to read (round-4 review R4-1)
+#: -- the span is scanned instead.
+_NAME_END: Final = " \t\n\r\f/<>=\"'"
+#: The characters that end an UNQUOTED value: HTML's attribute grammar, which has no
+#: whitespace, quotes, ``=``, ``<``, ``>`` or backtick inside one (round-3 review R3-2
+#: keeps the unquoted form; the backtick stayed out of values under the pair regex too).
+_BARE_END: Final = " \t\n\r\f<>=\"'`"
 
 _VOID: Final[frozenset[str]] = frozenset(
     {
@@ -463,17 +461,169 @@ def _check_data(data: Mapping[str, Any], evidence: _EvidenceIndex) -> tuple[list
     return errors, units
 
 
-def _blank_structural(match: re.Match[str]) -> str:
-    """Blank one structural attribute pair, leave every other attribute as written.
+def _blank_structural(text: str) -> str:
+    """Every structural attribute value a CLEAN tag parse proves, replaced by one space.
 
-    The ``re.sub`` callback for :data:`_ATTR_PAIR_RE`: a value whose attribute NAME is in
-    :data:`_STRUCTURAL_ATTRS` is layout and is removed from the scanned text; everything
-    else survives to be matched by :data:`_STATIC_NUMBER_RE` and :data:`_INLINE_NUMBER_RE`
-    (round-1 review R3; shared by both scans since round-2 review R2-1).
+    THE INVARIANT (round-4 review R4-1). If a span cannot be PROVEN structural geometry,
+    its numerals must stay scannable: refuse an honest geometry number rather than hide a
+    fabricated claim (fail-closed -- over-refuse, never under-refuse). The pair regex this
+    replaced paired quotes by proximity, so a parity-balanced skew (``x="0 width=640>``
+    closing at a LATER quote) blanked ``<text>7000 ms</text>`` as one attribute value --
+    hidden from both scans while the tag stack stayed balanced.
+
+    WHAT "PROVE IT IS STRUCTURAL" MEANS. A tag blanks its :data:`_STRUCTURAL_ATTRS` values
+    only when it parses cleanly to its closing ``>``: quoting balanced, attribute
+    boundaries unambiguous, and no ``<``/``>`` inside a quoted value (a legitimate
+    attribute value never contains either -- one that does is evidence the quote pairing
+    is a skew, not a value). Any imbalance, unterminated quote, cross-tag span or
+    truncated tag leaves everything from that tag on scannable. A ``<`` that cannot open a
+    tag (``a < b``) is plain text. A quoted value may run over lines; an UNQUOTED value
+    cannot contain whitespace (HTML's attribute grammar), so a spaced coordinate list
+    still has to be quoted to be blanked (round-3 review R3-2).
     """
-    if match.group("name").lower() not in _STRUCTURAL_ATTRS:
-        return match.group(0)
-    return " "
+    out: list[str] = []
+    index = 0
+    size = len(text)
+    while index < size:
+        start = text.find("<", index)
+        if start < 0:
+            out.append(text[index:])
+            break
+        out.append(text[index:start])
+        second = text[start + 1 : start + 2]
+        opens = second == "/" or second == "!" or second == "?"
+        if opens or (second.isascii() and second.isalpha()):
+            tag = _scan_tag(text, start)
+            if tag is None:
+                # Not provable: every numeral from here stays scannable.
+                out.append(text[start:])
+                break
+            end, replacement = tag
+            out.append(replacement)
+            index = end
+        else:
+            # A "<" that cannot open a tag ("a < b"): text, nothing to blank.
+            out.append("<")
+            index = start + 1
+    return "".join(out)
+
+
+def _scan_tag(text: str, start: int) -> tuple[int, str] | None:
+    """The tag at ``text[start] == "<"`` -- ``(end, replacement)``, or ``None`` if unprovable.
+
+    Recognises the constructs an inline component uses: start tags (through
+    :func:`_scan_start_tag`), end tags, comments (``<!-- … -->``), CDATA, declarations
+    (``<!doctype …>``) and processing instructions. Everything except a start tag comes
+    back unchanged -- its extent just has to be found so the walk resumes after it; nothing
+    inside it is blanked, so a numeral there stays scannable like anything else the walk
+    cannot read.
+    """
+    size = len(text)
+    second = text[start + 1 : start + 2]
+    if second == "!":
+        if text.startswith("<!--", start):
+            end = text.find("-->", start + 4)
+            return None if end < 0 else (end + 3, text[start : end + 3])
+        if text[start : start + 9].upper() == "<![CDATA[":
+            end = text.find("]]>", start + 9)
+            return None if end < 0 else (end + 3, text[start : end + 3])
+        end = text.find(">", start + 2)
+        return None if end < 0 else (end + 1, text[start : end + 1])
+    if second == "?":
+        end = text.find(">", start + 2)
+        return None if end < 0 else (end + 1, text[start : end + 1])
+    if second == "/":
+        index = start + 2
+        name = index
+        while index < size and text[index] not in _NAME_END:
+            index += 1
+        if index == name:
+            return None
+        index = _skip_space(text, index)
+        if index < size and text[index] == ">":
+            return index + 1, text[start : index + 1]
+        return None
+    return _scan_start_tag(text, start)
+
+
+def _scan_start_tag(text: str, start: int) -> tuple[int, str] | None:
+    """The attribute walk for ONE start tag; ``None`` when it cannot be proven clean.
+
+    Boundaries follow HTML's own grammar where it is unambiguous: a name runs to
+    :data:`_NAME_END`, ``=`` opens a value, quoted (must close before ``<``, ``>`` or the
+    end) or bare (stops at :data:`_BARE_END`). A name stopping where a name cannot
+    continue, a ``/`` that is not the self-closing end, a quoted value reaching
+    ``<``/``>`` or the end, an ``=`` with no value -- each is the ambiguous class the walk
+    refuses to read: ``None``, and the caller leaves the span scannable (R4-1). The span
+    blanked for a :data:`_STRUCTURAL_ATTRS` name is its pair, name through value.
+    """
+    size = len(text)
+    index = start + 1
+    while index < size and text[index] not in _NAME_END:
+        index += 1
+    spans: list[tuple[int, int]] = []
+    while True:
+        index = _skip_space(text, index)
+        if index >= size:
+            return None  # EOF inside the tag
+        char = text[index]
+        if char == ">":
+            return index + 1, _render_tag(text, start, index + 1, spans)
+        if char == "/":
+            if text[index + 1 : index + 2] == ">":
+                return index + 2, _render_tag(text, start, index + 2, spans)
+            return None  # a "/" that is not the self-closing end
+        if char == "<":
+            return None  # a tag boundary inside a tag: not provable
+        span = index
+        while index < size and text[index] not in _NAME_END:
+            index += 1
+        if index == span:
+            return None  # '=', a quote or '/' where an attribute name must start
+        attribute = text[span:index]
+        index = _skip_space(text, index)
+        if index < size and text[index] == "=":
+            index = _skip_space(text, index + 1)
+            if index >= size:
+                return None
+            quote = text[index]
+            if quote in "\"'":
+                index += 1
+                while index < size and text[index] != quote:
+                    if text[index] in "<>":
+                        return None  # the skew this walk exists for (R4-1)
+                    index += 1
+                if index >= size:
+                    return None  # unterminated quote
+                index += 1
+            else:
+                value = index
+                while index < size and text[index] not in _BARE_END:
+                    index += 1
+                if index == value:
+                    return None  # "name=" with no value
+            if attribute.lower() in _STRUCTURAL_ATTRS:
+                spans.append((span, index))
+
+
+def _render_tag(text: str, start: int, end: int, spans: list[tuple[int, int]]) -> str:
+    """The tag's own text with each structural pair's span replaced by one space (R4-1)."""
+    if not spans:
+        return text[start:end]
+    parts: list[str] = []
+    cursor = start
+    for span, stop in spans:
+        parts.append(text[cursor:span])
+        parts.append(" ")
+        cursor = stop
+    parts.append(text[cursor:end])
+    return "".join(parts)
+
+
+def _skip_space(text: str, index: int) -> int:
+    while index < len(text) and text[index] in " \t\n\r\f":
+        index += 1
+    return index
 
 
 def _check_static_numbers(body: str, data: Mapping[str, Any], units: set[str]) -> list[str]:
@@ -509,9 +659,9 @@ def _check_static_numbers(body: str, data: Mapping[str, Any], units: set[str]) -
                     allowed.add(fmt_mod.fmt(number, unit=unit))
     errors: list[str] = []
     text = _STATIC_SKIP_RE.sub(" ", body)
-    # Blank the structural attributes' values (see _STRUCTURAL_ATTRS) before matching, the
-    # same shape _check_scan uses for viewBox/style: layout numbers are not displayed values.
-    text = _ATTR_PAIR_RE.sub(_blank_structural, text)
+    # Blank the proven structural attributes' values first (see _blank_structural): layout
+    # numbers are not displayed values, and only a clean tag parse is blanked (R4-1).
+    text = _blank_structural(text)
     for match in _STATIC_NUMBER_RE.finditer(text):
         printed = match.group(0).strip()
         number = _numeric(match.group("num"))
@@ -530,11 +680,12 @@ def _check_static_numbers(body: str, data: Mapping[str, Any], units: set[str]) -
 def _check_scan(blob: str) -> list[str]:
     """The §4.2 string scan plus the 3-digit literal rule, on the body (data excluded).
 
-    The literal rule blanks the structural attribute values before searching (round-2
-    review R2-1): a chart drawn at a 640x480 ``viewBox`` or carrying ``points="0,480 …"``
-    draws with those numbers and must not be refused for them -- the same table
-    :func:`_check_static_numbers` uses, so both scans read readable numerals only (R2-2;
-    the boundary it buys is at :data:`_STRUCTURAL_ATTRS`).
+    The literal rule blanks the structural attribute values the walk can prove before
+    searching (round-2 review R2-1; only a clean tag parse since round-4 review R4-1): a
+    chart drawn at a 640x480 ``viewBox`` or carrying ``points="0,480 …"`` draws with those
+    numbers and must not be refused for them -- the same table :func:`_check_static_numbers`
+    uses, so both scans read readable numerals only (R2-2; the boundary it buys is at
+    :data:`_STRUCTURAL_ATTRS`).
     """
     body = strip_data(blob)
     lowered = body.lower()
@@ -542,8 +693,8 @@ def _check_scan(blob: str) -> list[str]:
         f"rejected string {needle!r}" for needle in _BANNED if needle.lower() in lowered
     ]
     # The banned-string pass above reads the RAW body (attributes and all); this scan reads
-    # the blanked text -- §4.2's viewBox/style carve-out widened to the structural table.
-    scannable = _ATTR_PAIR_RE.sub(_blank_structural, body)
+    # the walked text -- §4.2's viewBox/style carve-out widened to the structural table.
+    scannable = _blank_structural(body)
     match = _INLINE_NUMBER_RE.search(scannable)
     if match is not None:
         errors.append(
