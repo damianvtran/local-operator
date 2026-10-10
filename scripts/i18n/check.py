@@ -463,6 +463,23 @@ def check_catalogues() -> list[str]:
                 continue
             _check_plural_categories(problems, "en", namespace, key, source, plural, "en")
         _check_context_sidecar(problems, "en", namespace, messages)
+    # Cross-file duplicates: one message is defined by exactly ONE file (the
+    # collision rule `messages._namespace_for` relies on, resolving
+    # deepest-first). The per-file checks above cannot see this — a key like
+    # `wire.errors.auth.x` satisfies both the `wire.errors` and the
+    # `wire.errors.auth` prefix tests — so a duplicate would silently shadow
+    # instead of failing. Translation-side duplicates reduce to this case or
+    # to the missing/unknown-key parity checks below.
+    owners: dict[str, str] = {}
+    for namespace in en_namespaces:
+        for key in en_messages[namespace]:
+            if key in owners:
+                problems.append(
+                    # i18n: ignore checker diagnostic (operator tooling output, English-only)
+                    f"en: key {key!r} is defined by both {owners[key]!r} and {namespace!r}"
+                )
+            else:
+                owners[key] = namespace
     for locale in catalogues.locales():
         if locale == "en":
             continue

@@ -120,13 +120,21 @@ def catalogue_sha256(locale: str, namespace: str) -> str:
 def load_catalogue(locale: str, namespace: str) -> dict[str, str]:
     """Parse one catalogue into a message map, validating its shape.
 
-    A catalogue must be a JSON object whose values are all strings; anything
-    else raises :class:`CatalogueInvalid` rather than handing a half-typed map
-    to a renderer. The checker validates the same shape at build time, so this
+    A catalogue must be valid UTF-8 JSON forming an object whose values are
+    all strings; anything else — a truncated or garbled file included — raises
+    :class:`CatalogueInvalid` rather than handing a half-typed map to a
+    renderer. The checker validates the same shape at build time, so this
     is the runtime twin of that guarantee, not the only line of defence.
     """
     raw = catalogue_bytes(locale, namespace)
-    data = json.loads(raw.decode("utf-8"))
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # Decode/parse failures surface as THE catalogue exception the render
+        # path handles. A bare ValueError here would escape `messages.render`
+        # (and the resolver's probe) and break the never-raise contract a wire
+        # client reads through — the runtime twin of the checker's parse gate.
+        raise CatalogueInvalid(f"{locale}/{namespace}: file is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise CatalogueInvalid(f"{locale}/{namespace}: catalogue root must be an object")
     for key, value in data.items():

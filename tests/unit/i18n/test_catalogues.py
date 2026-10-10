@@ -70,6 +70,23 @@ def test_invalid_shapes_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         catalogues.load_catalogue("en", "value")
 
 
+def test_malformed_file_raises_catalogue_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Core hardening (S2 M1): decode/parse failures surface as the ONE
+    # catalogue exception the render path handles, so a garbled file degrades
+    # a render rather than raising a bare ValueError through it.
+    root = tmp_path / "catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / "en" / "demo.json").write_text("{not json", encoding="utf-8")
+    (root / "en" / "demo.bad.json").write_bytes(b"\xff\xfe{}")
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+    with pytest.raises(catalogues.CatalogueInvalid):
+        catalogues.load_catalogue("en", "demo")
+    with pytest.raises(catalogues.CatalogueInvalid):
+        catalogues.load_catalogue("en", "demo.bad")
+
+
 def test_context_sidecar_is_not_a_namespace_and_reads_when_present(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
