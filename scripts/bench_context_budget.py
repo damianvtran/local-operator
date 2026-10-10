@@ -1351,15 +1351,18 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:   delta      +94 chars = ~+34
 #:
 #: Components, each measured: the ``generate_image`` parameter schema carries
-#: one new field — ``source_attachment`` (+91 chars: name, type, the one-line
-#: description and its JSON furniture) — less 19 chars saved by the reworded
-#: ``prompt``/``strength`` descriptions, less the class docstring's detail
-#: trimmed after the first CI reading: a model docstring renders VERBATIM
-#: into the schema's ``description`` and cost ~330 chars on the wire, so it
-#: went back to its one line and the v1 single-source constraint moved into
-#: comments + ``read tool://generate_image`` + the guide (the first head
-#: measured 27,354 = +172; the trim took it to +34). Everything else on the
-#: surface is byte-identical.
+#: one new field — ``source_attachment`` (+113 chars: the serialized property
+#: entry, 111, plus the 2-char ``, `` separator the serializer adds) — less
+#: 19 chars saved by the reworded ``prompt``/``strength`` descriptions
+#: (prompt -9, strength -10): +113 - 19 = the +94-char delta, closed exactly.
+#: Everything else on the surface is byte-identical to base.
+#:
+#: The FIRST head measured 27,354 billed (+172): its class docstring rendered
+#: VERBATIM into the schema's ``description`` and cost ~336 chars on the
+#: wire, so the detail moved into comments + ``read tool://generate_image`` +
+#: the guide and the docstring went back to its one line; the trim (the
+#: docstring's 336 plus 50 of field-description text) took the delta from
+#: +172 to +94 chars (~+34 billed).
 #:
 #: The residual ~+34 is the honest cost of ONE new wire parameter: a field a
 #: model must see to use the feature, with the shortest description that
