@@ -699,3 +699,36 @@ async def test_failure_notes_carry_the_failure_event_label() -> None:
     assert isinstance(failure_note, TextContent) and isinstance(ok_note, TextContent)
     assert 'event="PostToolUseFailure"' in failure_note.text
     assert 'event="PostToolUse"' in ok_note.text
+
+
+@pytest.mark.asyncio
+async def test_a_tagged_note_keeps_its_own_event_not_the_callers() -> None:
+    """A mixed note list: bare strings take the caller's event, TaggedNotes theirs.
+
+    The session's own code-request note is a HARNESS fact riding the post-tool
+    seam, not a forwarded hook event — on a FAILED call it must still read
+    ``code-requests``, not ``PostToolUseFailure``.
+    """
+    from local_operator.hook_forwarding import TaggedNote
+
+    async def hook(*_a: Any) -> list[Any]:
+        return ["plain", TaggedNote("code-requests", "Tracked: #1904 (opened).")]
+
+    config = LoopConfig(
+        model=MODEL,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=_Scripted([]),
+        post_tool_hooks=hook,
+    )
+    failed = ToolResult(
+        tool_call_id="c",
+        tool_name="bash",
+        is_error=True,
+        content=[TextContent(text="boom")],
+    )
+    rendered = await AgentLoop._apply_post_tool_hooks(config, "bash", {}, "c", failed)
+    note = rendered.content[-1]
+    assert isinstance(note, TextContent)
+    assert 'event="code-requests"' in note.text
+    assert "Tracked: #1904 (opened)." in note.text
+    assert 'event="PostToolUseFailure"' in note.text  # the bare string still carries it

@@ -1336,6 +1336,16 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # "saves this" carrier the footer needs for its 43-cell budget. The
         # notice a bare `/model` prints is the surface with room for the full
         # three-route sentence; `/help` needs only the persist command's name.
+        #
+        # `--all` CANNOT ride this row, and the measurement is why (design
+        # review round 1, D1): the description column folds past ~55 cells
+        # (D7), and this carrier already measures 54 with the two literals the
+        # D14 agreement test pins — `/model default` and `for new sessions`.
+        # Every phrasing that adds a legible `--all` clause lands at 60+, and
+        # the ones inside the cap are dangling fragments (`…; --all`), which is
+        # the exact defect D7 was filed against. The flag is taught by the
+        # picker footer's own clause (`/model --all shows`); this row keeps the
+        # one consequence D14 made every surface state.
         "Switch model; /model default saves it for new sessions",
         aliases=("models",),
         # The trailing selector is a value this command owns, not the start of a

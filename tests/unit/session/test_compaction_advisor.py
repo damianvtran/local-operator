@@ -197,7 +197,7 @@ async def test_accepted_hint_lowers_the_trigger(tmp_path, monkeypatch):
     await talk(session)
     pin_measured_context(monkeypatch, 400_000)
 
-    # Without a hint the ordinary 600k trigger governs.
+    # Without a hint the ordinary 400k trigger governs.
     assert refusal_reason(await session._plan_compaction(respect_threshold=True)) == (
         "below_threshold"
     )
@@ -788,7 +788,7 @@ async def test_two_advisory_snapcompact_passes_still_replay(tmp_path, monkeypatc
 # provider figure fails the ORDINARY trigger, so in production the advisor was
 # only ever consulted once the context had already passed the line it exists to
 # pull down. Measured before the fix: ctx 350k/400k/500k/590k -> 0 advisor
-# calls on a 600k trigger; 650k -> 1.
+# calls on a 600k trigger (then the default); 650k -> 1.
 #
 # So these tests drive `_on_turn_end` (the real boundary hook the tool loop
 # calls) and assert on the SPAWN, never on the helper. A regression that
@@ -844,16 +844,21 @@ async def _settle_background(session: Session, tries: int = 50) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("context_tokens", [350_000, 400_000, 500_000, 590_000])
+# Strictly BELOW the 400k default trigger: the advisor's band is
+# [advisor_trigger_tokens, trigger), so a size above the line would pass for
+# the wrong reason (a size pass is already due there).
+@pytest.mark.parametrize("context_tokens", [300_000, 350_000, 390_000, 399_000])
 async def test_advisor_fires_in_its_own_band_through_the_real_boundary(
     tmp_path, monkeypatch, context_tokens
 ):
     """THE blocker-1 regression: between `advisor_trigger_tokens` (300k) and
-    the ordinary trigger (600k), a real turn boundary must reach the advisor.
+    the ordinary trigger (400k), a real turn boundary must reach the advisor.
 
-    These four sizes are the exact ones that produced zero calls before the
-    fix. Driving `_on_turn_end` rather than `_maybe_spawn_advisor` is the
-    entire point: the helper was always reachable, the boundary was not.
+    These four sizes sit in that band. The defect was first measured when the
+    trigger was 600k (350k/400k/500k/590k produced zero calls); the sizes moved
+    with the default but the property is the same. Driving `_on_turn_end`
+    rather than `_maybe_spawn_advisor` is the entire point: the helper was
+    always reachable, the boundary was not.
     """
     stream = BoundaryStream()
     session = make_session(tmp_path, stream=stream, compaction_settings=advisor_settings())
@@ -880,7 +885,9 @@ async def test_a_landed_hint_survives_the_mid_turn_pre_gate(tmp_path, monkeypatc
     """The spawn alone is not enough: the pre-gate must also let a boundary
     through once a usable hint exists, or the hint is spawned, lands, and is
     then unreachable because the gate returned before the plan gate could read
-    it. Asserted as a real compaction pass at 400k, below the 600k trigger.
+    it. Asserted as a real compaction pass at 400k: exactly ON the 400k default
+    trigger, where a size pass needs strictly more, so it is the hint — not
+    size — that fires this pass.
 
     The pass an advisory authorises now runs OFF the turn and applies at the
     next safe boundary, so the receipt arrives one boundary later than it used
@@ -1010,7 +1017,7 @@ async def test_one_boundary_spawns_at_most_one_advisor_call(tmp_path, monkeypatc
     during the `_persist_new_messages` await between the two sites spawned a
     second one (agent review round 2, minor-1).
 
-    Driven at 700k — above the 600k trigger, so the pre-gate does NOT return
+    Driven at 700k — above the trigger, so the pre-gate does NOT return
     early and both former sites are reachable — with `advisor_every_n_turns=0`
     so the interval gate cannot mask a duplicate the way the shipped default
     does.
@@ -1123,11 +1130,15 @@ async def test_the_preserve_cap_is_the_smaller_of_a_task_and_a_capacity_bound(tm
     assert cap_for(32_768, "floored") == 20_000
 
     # A user who widens the verbatim window widens the task term with it,
-    # still bounded by capacity.
-    wide = CompactionSettings(keep_recent_tokens=250_000)
+    # still bounded by capacity. 150k keeps the capacity term (400k // 2 =
+    # 200k) the binding one: at the 250k this once used, the outer ``max``
+    # against keep_recent would bind instead and the test would stop pinning
+    # the capacity bound.
+    wide = CompactionSettings(keep_recent_tokens=150_000)
     assert cap_for(1_000_000, "wide", wide) == min(
-        250_000 * _TASK_FLOOR_KEEP_MULTIPLE, resolve_threshold_tokens(1_000_000, wide) // 2
+        150_000 * _TASK_FLOOR_KEEP_MULTIPLE, resolve_threshold_tokens(1_000_000, wide) // 2
     )
+    assert cap_for(1_000_000, "wide2", wide) == 200_000
 
 
 @pytest.mark.asyncio

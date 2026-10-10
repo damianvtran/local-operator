@@ -685,6 +685,19 @@ def feature_flags() -> dict[str, Any]:
         # client that shows one against an older backend would be offering a
         # route that 404s.
         "projects_request_update": 1,
+        # THE DELIBERATE FORCE-CLOSE DOOR on the projects surface: `force_done`
+        # on `PATCH /v1/desktop/projects/{key}` (and the relay's `PATCH
+        # /api/projects/{key}`), plus the `project_done_incomplete` refusal code
+        # (with the `incomplete` names) and the `forced_done` flag on the PATCH
+        # answer. Before it, the `done` gate's refusal told the caller to "pass
+        # force_done=true" while `ProjectPatch` (`extra="forbid"`) 422'd that
+        # very field, so no desktop or phone client could ever close a project
+        # over open milestones. ITS OWN KEY, not a bump of `projects`, by the
+        # rule above: an older renderer keeps working untouched, and a client
+        # must NOT offer a force it cannot send — on a backend without this key
+        # the body would be rejected as an unknown field. Absent ⇒ no
+        # "close anyway" affordance anywhere.
+        "projects_force_done": 1,
         # THE SILENT INPUT-METADATA CARRIAGE: `input_mode`/`input_path` on a
         # message body (`POST /v1/desktop/sessions/{id}/messages`) and onto the
         # durable user row. ONE key un-gates BOTH fields, because they landed
@@ -740,5 +753,22 @@ def feature_flags() -> dict[str, Any]:
         # additive — an absent key means the surface is not there, which is the
         # pre-voicing behaviour rather than a degraded one.
         "tts": 1,
+        # THE PER-SESSION CODE-REQUEST SURFACE: `GET
+        # /v1/desktop/sessions/{id}/code-requests` (this conversation's PRs/MRs, from the
+        # derived index) plus its `/refresh` child. ONE key for the family, because the
+        # read and the refresh are one contract revision: a renderer that can draw the
+        # list is the renderer that owns the Retry affordance.
+        #
+        # WHY A KEY AT ALL: the routes are ADDITIVE — an older renderer never calls one —
+        # so this gates nothing for an old client. It is how a renderer learns the surface
+        # EXISTS before it builds a rail item or a chip whose query would 404 on a backend
+        # without it. Absent, the conversation shows no code-request affordance at all,
+        # which is the pre-feature state rather than a degraded one.
+        #
+        # `1` IS THE FEATURE'S FIRST VERSION, not the contract's: this slice's rows are
+        # link-only, and the adapter slice that adds remote state is expected to widen the
+        # row (an additive field) rather than bump this key — a renderer that can read
+        # link-only rows can read a fuller one.
+        "code_requests": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }

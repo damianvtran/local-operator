@@ -30,6 +30,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "agents",
         "browser",
         "classification",
+        "code-requests",
         "configuration",
         "console",
         "credentials",
@@ -111,6 +112,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
         (
             "list the other lop sessions running on this machine",
             "sessions",
+        ),
+        (
+            "check the review rounds and CI on this pull request",
+            "code-requests",
         ),
     ],
 )
@@ -620,6 +625,21 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
     artefacts, archives, anything the shell built) rather than as "build output"
     alone: a dependency tree is the largest single shape in the audit and calling
     it build output is what let it read as somebody else's problem.
+
+    The boundary MOVED when the shell channel gained its own after-the-fact
+    check: the tools still refuse BEFORE the write, while a command that NAMES
+    the pad — the variable, its path, or a leading home spelling — now gets a
+    ``[scratch]`` line on its result when it took the pad over its budget or
+    entry cap, or put a refused name in it (a name the command spelled or one a
+    copy brought in), and the ``eval`` kernel gets the budget and entry-cap
+    line only. The precise trigger and the channel split are pinned together
+    with the claim (design review round 1, D4): "pad-touching" read as every
+    command, and the reader who sees no line on an alias spelling or a
+    Python-side creation must not take that for a clean run. Review round 2
+    (R2-3) added the over-read's other half to the copy clause: the check
+    reads the COMMAND, not the disk, so a copy that failed still reports the
+    name it would have created — pinned so the sentence cannot be quietly
+    re-tightened into a promise the layer does not keep.
     """
     resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
     body = resolver("guide://scratchpad")
@@ -632,9 +652,15 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
 
     assert "build trees, dependency trees, compiled artefacts" in collapsed
     assert "git worktree add" in collapsed
-    # The boundary: the tools are checked, a shell is not.
-    assert "enforced at the TOOLS and not in a shell" in collapsed
-    assert "NOT policed" in collapsed
+    # The boundary: a write is refused before it lands; the shell channel is
+    # checked AFTER the command and can only be reported on — and the check's
+    # trigger is the pad being NAMED, not any command that touched it.
+    assert "enforced at the TOOLS, and the shell channel is CHECKED AFTER THE FACT" in collapsed
+    assert "a command that names the pad" in collapsed
+    assert "copied it in" in collapsed
+    assert "reads the command, not the disk" in collapsed
+    assert "The `eval` kernel gets the budget and entry-cap line only." in collapsed
+    assert "it cannot undo" in collapsed
 
 
 def test_scratchpad_guide_states_the_shapes_and_the_pad_total() -> None:

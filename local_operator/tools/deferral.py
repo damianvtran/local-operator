@@ -85,6 +85,13 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         "team_delete",
         "read_variable",
         "list_variables",
+        # ``code_requests`` joins the deferred set on the design's own
+        # measurement (§E): most sessions never touch a PR, and 93% of sessions
+        # are subagents. The known failure mode is adoption (``network`` was
+        # re-admitted for exactly that), so the deterministic recommendation
+        # and the tracked note exist to keep the tool findable, and the
+        # deferral PR's A/B measurement ships as the evidence.
+        "code_requests",
     }
 )
 
@@ -104,6 +111,7 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "team_delete": "delete a team",
     "read_variable": "read one variable",
     "list_variables": "list variable names",
+    "code_requests": "PR/MR status, review rounds, CI",
 }
 
 #: ``tools.defer`` — the kill switch. On by default; off publishes every

@@ -366,6 +366,15 @@ def _compose_body(
         if failure:
             return failure, False, True
     if kind != "complete" or not names_ok or session_dir is None:
+        # ``names_ok`` False is the operator's own privacy switch (the
+        # notification-names setting), so a COMPLETE body degrades to
+        # BODY_COMPLETE on purpose — including for an Aida check-in whose reply
+        # was actionable (design review D3, ACCEPTED as deliberate): the banner
+        # states nothing about the operator's sessions beyond "a session
+        # finished", and the click still opens the session where the action is
+        # described. Do not "fix" this into leaking a snippet when names are
+        # off. The same fallback covers ``kind != complete`` bodies (kept) and
+        # a complete with no resolvable session dir.
         return BODIES.get(kind, BODY_COMPLETE), False, False
     # `max_chars` is PASSED rather than applied afterwards, so the
     # word-boundary ellipsis `session_preview` computes lands against the

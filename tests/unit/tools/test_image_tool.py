@@ -86,11 +86,13 @@ def test_the_builder_gates_on_reachability(monkeypatch: pytest.MonkeyPatch) -> N
     assert tool.label == "Generate image"
     assert tool.approval_tier == "write"
     assert tool.interruptible is True
-    # The wire description is pinned whole (design §2.3): 186 chars, and its
-    # FIRST sentence is what the classification roster may quote.
-    assert len(tool.description) == 186
+    # The wire description is pinned whole (media wave-2, design D9): 160
+    # chars, and its FIRST sentence is what the classification roster may
+    # quote. The provider list left the wire for the guide; the pins moved
+    # with the deliberate rewrite.
+    assert len(tool.description) == 160
     first = tool.description.split(". ", 1)[0] + "."
-    assert len(first) == 117
+    assert len(first) == 91
     assert tool.describe_approval is not None
 
 

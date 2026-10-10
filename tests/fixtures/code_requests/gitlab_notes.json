@@ -1,0 +1,45 @@
+{
+ "_comment": [
+  "SYNTHESIZED GitLab fixtures. The real GitLab notes this grammar was measured on live in a",
+  "company repository (minervaai/minerva-skills) whose note bodies must NOT be vendored into this",
+  "public repository. These bodies are written by hand to carry the SHAPES that the real ones",
+  "showed: list-item fields (``- Reviewer:``), a symbolic-base scope (``main..72bea95``), the",
+  "``changes-required`` verdict, ``- Verdict: Approve``, a remediation table, and an",
+  "``APPROVE — TERMINAL`` sign-off. Every id, SHA and sentence here is invented."
+ ],
+ "3974547000": {
+  "repo": "example-org/service",
+  "number": 57,
+  "url": "https://gitlab.com/example-org/service/-/merge_requests/57#note_3974547000",
+  "created_at": "2026-09-02T10:04:11Z",
+  "body": "### Agent review — round 1\n\n- Reviewer: reviewer subagent, model `vendor/model-x`\n- Scope: `main..72bea95` — the three changed files plus their direct importers.\n- Verdict: **changes-required (1 major)** — the refusal path answers 200.\n\n**F1 (MAJOR) — a refused write still answers 200.** The route returns the store's\nreceipt without asking whether the write landed, so a caller reads success.\n\n**F2 (MINOR)** — the docstring still names the old op.\n\nReviewed on `72bea95`, the branch head at review time."
+ },
+ "3974547001": {
+  "repo": "example-org/service",
+  "number": 57,
+  "url": "https://gitlab.com/example-org/service/-/merge_requests/57#note_3974547001",
+  "created_at": "2026-09-02T11:20:03Z",
+  "body": "### Agent review remediation — round 1\n\n| Finding | Disposition |\n|---|---|\n| **F1** (MAJOR) | **fixed (`0c1d2e3`).** The route now asks the store for the durable outcome and answers 409 with `write_refused` when the write did not land. |\n| **F2** (MINOR) | **fixed (`0c1d2e3`).** Docstring renamed. |\n| **F3** (NIT) | **deferred** — wording of the log line; a follow-up ticket on the board, not this MR. |\n\nHead is now `0c1d2e3`."
+ },
+ "3974547002": {
+  "repo": "example-org/service",
+  "number": 57,
+  "url": "https://gitlab.com/example-org/service/-/merge_requests/57#note_3974547002",
+  "created_at": "2026-09-02T12:02:44Z",
+  "body": "### Agent review — round 2\n\n- Reviewer: reviewer subagent, model `vendor/model-x` — no fallback this round.\n- Scope: `72bea95..0c1d2e3` — the remediation delta only; nothing else re-audited.\n- Verdict: APPROVE — TERMINAL.\n\n**F1 (MAJOR) — verified fixed.** Reproduced the refusal first (`409 write_refused`), then the\nsuccess path (`201`) on the same head. No new findings; nothing outside the delta was re-read."
+ },
+ "3974547003": {
+  "repo": "example-org/service",
+  "number": 56,
+  "url": "https://gitlab.com/example-org/service/-/merge_requests/56#note_3974547003",
+  "created_at": "2026-09-01T08:41:00Z",
+  "body": "### QA report — round 1\n\n- Reviewer: qa-tester, model `vendor/model-y`\n- Head: `a1b2c3d4e5f60718293a4b5c6d7e8f9012345678`\n- Verdict: **PASS** — 14/14 matrix rows, no FAIL, no BLOCKED.\n\n| # | Surface | Command | Actual | Verdict |\n|---|---|---|---|---|\n| 1 | MR route | `pytest tests/api -q -n0` | 14 passed | PASS |\n| 2 | refusal shape | `curl -s -o - -w '%{http_code}' -X POST` | `409` + `write_refused` | PASS |"
+ },
+ "3974547004": {
+  "repo": "example-org/service",
+  "number": 56,
+  "url": "https://gitlab.com/example-org/service/-/merge_requests/56#note_3974547004",
+  "created_at": "2026-09-01T09:15:22Z",
+  "body": "### Design review — round 1\n\n- Reviewer: designer, model `vendor/model-x`\n- Scope: `main..a1b2c3d` — the new status row.\n\n#### Verdict\n\n**Not terminal — one required change (D1). The empty state still shows a spinner that never settles.**\n\n**D1 — the empty state spins forever.**"
+ }
+}

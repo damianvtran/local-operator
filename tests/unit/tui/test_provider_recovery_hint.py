@@ -33,7 +33,7 @@ from local_operator.providers.auth_store import AuthStore
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import NoticeBlock
 
-RENDERED_QUOTA = "rate limit or quota exceeded (HTTP 402): insufficient credits"
+RENDERED_QUOTA = "out of credits (HTTP 402): insufficient credits"
 RENDERED_AUTH = "authentication failed (HTTP 401): bad key"
 
 
@@ -89,7 +89,7 @@ async def test_the_awaited_arm_gains_the_usage_limit_remedy(
     out = await app._with_recovery_hint_async(RENDERED_QUOTA)
 
     assert out.startswith(RENDERED_QUOTA)
-    assert "check your email" in out and "$5.00" in out
+    assert "Check your inbox" in out and "$5 in free credits" in out
     assert "/login" not in out, "the quota remedy must not borrow the auth remedy"
     assert calls == ["tok-1"]
 
@@ -116,7 +116,7 @@ async def test_the_sync_arm_is_cache_only_and_never_blocks(
     await app._with_recovery_hint_async(RENDERED_QUOTA)  # warms the shared cache
 
     warm = app._with_recovery_hint(RENDERED_QUOTA)
-    assert "check your email" in warm and "$5.00" in warm
+    assert "Check your inbox" in warm and "$5 in free credits" in warm
     assert calls == ["tok-1"], "the warm render must come from the cache"
 
 
@@ -164,8 +164,7 @@ def test_the_sync_arm_answers_the_no_credential_case_without_a_probe(
 
     out = app._with_recovery_hint(RENDERED_QUOTA)
 
-    assert "No Radient account is signed in" in out
-    assert "/login radient" in out and "Settings" in out
+    assert out == f"{RENDERED_QUOTA}\n{rr._neutral_text()}"
     assert calls == []
 
 
@@ -181,7 +180,7 @@ async def test_a_radient_auth_error_keeps_its_login_hint_only(
     awaited = await app._with_recovery_hint_async(RENDERED_AUTH)
 
     assert "/login radient" in out and "/login radient" in awaited
-    assert "check your email" not in out and "check your email" not in awaited
+    assert "Check your inbox" not in out and "Check your inbox" not in awaited
     assert calls == [], "an auth error must not spend a Radient usage probe"
 
 
@@ -211,7 +210,7 @@ async def test_the_notice_gains_the_sentence_when_the_probe_lands(
 
     text = notice.text()
     assert text.startswith(RENDERED_QUOTA)
-    assert "check your email" in text and "$5.00" in text
+    assert "Check your inbox" in text and "$5 in free credits" in text
     assert calls == ["tok-1"]
 
 
@@ -237,7 +236,7 @@ async def test_the_scheduler_kicks_only_when_a_probe_could_decide(
     app._schedule_recovery_notice(notice, RENDERED_QUOTA)
     assert len(tasks) == 1
     await tasks[0]
-    assert "check your email" in notice.text()
+    assert "Check your inbox" in notice.text()
 
     # Warm cache, non-quota error, non-Radient provider: nothing more scheduled.
     app._schedule_recovery_notice(notice, RENDERED_QUOTA)

@@ -113,6 +113,62 @@ def count_changes(old: str, new: str) -> tuple[int, int]:
     return added, removed
 
 
+#: A ``read`` line-number gutter (``12| ``) — presentation the tool adds, not
+#: content, so it must not make a lone timestamp line look like a record.
+_GUTTER_RE = re.compile(r"^\s*\d+\|\s?")
+
+
+def _strip_gutters(lines: list[str]) -> list[str]:
+    """``read``'s ``N| `` line-number gutter removed from every line."""
+    return [_GUTTER_RE.sub("", line) for line in lines]
+
+
+def is_pure_addition(old: str, new: str) -> bool:
+    """Whether ``new`` only ADDS content to ``old``: no line removed or changed.
+
+    The shape of an append-only log (a build-progress file, an audit trail) and
+    of a listing that gained a row. It is the one delta shape the classifier
+    gate must not judge: the gate's suppress classes are about bookkeeping that
+    CHANGED without meaning (timestamps, ordering, volatile ids), and a model
+    asked about ``+ 4| === c2 done rc=0 <ts> ===`` answered
+    ``non-material-metadata`` in the 2026-10-09 regression. An added line is a
+    new record, which is what the gate's own rubric calls MATERIAL.
+
+    Guard: at least one added line must carry content beyond the line-number
+    gutter and the ``<ts>`` scrub marker, so a delta that adds only blank or
+    timestamp-only lines still goes to the gate.
+
+    An EMPTY ``old`` (the watched command printed nothing last time) counts as
+    zero lines, so ``"" -> "ERROR x"`` (the ``grep``/``ls`` first-match shape)
+    is an addition; ``"".split("\\n")`` would otherwise be ``[""]`` and make it
+    a replace. This is not baseline establishment: that path has no snapshot
+    and never reaches a delta.
+
+    Callers must not use this on a TRUNCATED snapshot: a tail edit beyond the
+    stored window reads as a pure insert there (the scheduler checks).
+
+    ``read``'s gutter is stripped from BOTH sides before comparing (QA round 1,
+    Q1): crossing 9→10 lines re-pads every line number (``9| `` -> ``10| ``),
+    which without this reads as a full replace and would gate an append that
+    only gained a line. A content change that merely alters a gutter-like
+    prefix (``3| x`` -> ``4| x``) then shows no opcodes at all and returns
+    False — it keeps going to the gate, which is the conservative direction.
+    """
+    old_lines = _strip_gutters(old.split("\n")) if old else []
+    new_lines = _strip_gutters(new.split("\n"))
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+    carries_content = False
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "delete"):
+            return False
+        if tag == "insert":
+            for line in new_lines[j1:j2]:
+                body = line.replace(_TS_MARKER, "")
+                if any(ch.isalnum() for ch in body):
+                    carries_content = True
+    return carries_content
+
+
 def render_delta(
     old: str,
     new: str,

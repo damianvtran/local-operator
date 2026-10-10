@@ -371,6 +371,17 @@ class SessionList(BaseModel):
     scope: ScopedAsk | None = None
     #: The per-group census, present only when ``with_counts=true`` asked for it.
     counts: ScopeCounts | None = None
+    #: The ONE-TIME notice that delegated sessions (subagent and background
+    #: runs) were cleaned up, or ``None``. Carried by EVERY listed read until the
+    #: renderer acknowledges it (``POST /v1/desktop/delegated-cleanup-notice/ack``
+    #: flips the on-disk ``notice_acknowledged`` flag); a read must never consume
+    #: it, because this route is polled by many callers — including the app's own
+    #: attach and auth probes, which must not eat the band before the renderer
+    #: renders it (``session.delegated_retention``; the TUI keeps its
+    #: consume-on-show read). ``message`` is the finished text; render it as a
+    #: notice, once. Additive and defaulted: a client that ignores it behaves as
+    #: it always has.
+    delegated_cleanup_notice: dict[str, Any] | None = None
 
     # THE FOUR FIELDS ABOVE ARE ADDITIVE AND ALWAYS PRESENT, which is the whole
     # compatibility promise stated precisely: a request that sends none of

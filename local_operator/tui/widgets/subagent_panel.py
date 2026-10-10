@@ -43,7 +43,7 @@ from local_operator.ansi import strip_control_sequences
 from local_operator.harness.jobs import FALLBACK_MARKER, is_model_fallback
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
-from local_operator.tui.costs import job_cost
+from local_operator.tui.costs import SubtreeComponents, subtree_components, subtree_cost
 from local_operator.tui.widgets.status_line import context_spelling, format_cost
 from local_operator.tui.widgets.tool_card import (
     clean_intent,
@@ -310,6 +310,12 @@ LABEL_FLOOR = 12
 #: and one digit, appended to the LABEL rather than given a column of its own:
 #: it is a property of the name (see :func:`_lay_out`), and a second column
 #: would re-solve a layout that already has a ladder for the label.
+#:
+#: A row carrying this mark shows its WHOLE subtree's spend in its cost cell (its
+#: own calls plus every nested child, running or settled), so the rows on a page
+#: add up to the footer's subagent total; the context and elapsed cells stay the
+#: row's own. No separate glyph says so — the trailing ``+`` already means "lower
+#: bound" and this mark already means "there is a level below".
 CHILDREN_MARKER = "⊞"
 
 #: The widest a SCOPE label may be before the header truncates it with `…`.
@@ -561,7 +567,9 @@ class JobStats:
     billed: bool = False
 
 
-def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
+def job_stats(
+    job: Any, *, default_model_label: str = "", subtree: SubtreeComponents | None = None
+) -> JobStats:
     """One task job's model/usage/cost facts, read defensively.
 
     ``default_model_label`` is the PARENT's label. A child launched with no
@@ -577,8 +585,18 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
     reports what it was billed for. Same precedence the parent's band uses
     (``tui/events.py``), so one number cannot mean two things four rows apart.
 
-    Never raises, and the money is never computed here: :func:`costs.job_cost`
-    is the app's ONE pricing path and this function only reads it.
+    Never raises, and the money is never computed here: :func:`costs.subtree_cost`
+    is the app's ONE pricing path and this function only reads it. The figure is
+    the row's WHOLE subtree (its own calls, settled descendants and the live
+    child manager) because that is what the session footer adds up; a parent
+    row that showed only its own cents while its scouts spent dollars made the
+    rows contradict the total.
+
+    ``subtree`` is that subtree already gathered. The gather reads the live job
+    manager, whose accounting cache is not thread-safe, so the panel does it on
+    the loop (:meth:`SubagentPanel._read_stats`) and hands the detached result to
+    the worker that prices it; omitted, it is gathered here, which is right for a
+    caller already on the loop.
 
     Neither is the context WINDOW resolved here, and that is a correctness
     requirement rather than tidiness. This runs on the paint path, off a
@@ -624,7 +642,14 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
             cost = getattr(job, "direct_cost", None)
             partial = knowledge in {"partial", "floor"}
         else:
-            cost = job_cost(job, default_model_label=default_model_label or None)
+            gathered = subtree if subtree is not None else subtree_components(job)
+            cost, partial = subtree_cost(
+                gathered, default_model_label=model_label or default_model_label or None
+            )
+            # A parent that has reported nothing itself but whose children have
+            # is billed: its row must read ``$—`` when they are unpriceable, not
+            # nothing.
+            billed = billed or bool(gathered.components)
     except Exception:
         # A job the panel cannot read is a row with fewer numbers on it, never
         # a broken frame: this is observability, and it runs against embedder
@@ -2828,9 +2853,18 @@ class SubagentPanel(Container):
             return
         self._stats_pending.add(job_id)
         label = self._model_label
+        # Gathered HERE, on the loop that owns the live job managers, and priced
+        # on the worker: the worker exists because pricing a cold model can touch
+        # the network, while the gather reads a manager cache that is written
+        # without a lock (it is the same cache the footer total reads).
+        # A row the runtime already priced (``direct_cost_knowledge`` set: a
+        # follower's frozen row) is never repriced here, so it gathers nothing.
+        gathered = (
+            subtree_components(job) if getattr(job, "direct_cost_knowledge", None) is None else None
+        )
 
         def read() -> None:
-            stats = job_stats(job, default_model_label=label)
+            stats = job_stats(job, default_model_label=label, subtree=gathered)
             self.app.call_from_thread(self._stats_read, job_id, stats)
 
         try:
@@ -2841,7 +2875,7 @@ class SubagentPanel(Container):
             # No app to run a worker on (an unmounted panel in a unit test).
             # Read inline: there is no UI thread to protect.
             self._stats_pending.discard(job_id)
-            self._stats[job_id] = job_stats(job, default_model_label=label)
+            self._stats[job_id] = job_stats(job, default_model_label=label, subtree=gathered)
 
     def _stats_read(self, job_id: str, stats: JobStats) -> None:
         """Land an off-thread reading and let the next tick paint it."""

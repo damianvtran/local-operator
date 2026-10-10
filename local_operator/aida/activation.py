@@ -108,3 +108,56 @@ def human_surface_present() -> bool:
     this boot create her" cannot disagree about a switch they share.
     """
     return _has_terminal() or _desktop_plane_open()
+
+
+def home_is_the_users() -> bool:
+    """Whether this process's ``$HOME`` is the real user's — R17's third signal.
+
+    THE GAP THIS CLOSES, stated because the two halves above each have one: a
+    ``lop serve`` under a PTY but a redirected HOME satisfies both of them
+    while being exactly the "a run, not a person" shape the toast gate already
+    refuses (``tui.notify.desktop_belongs_to_this_process``). A rig, a
+    container, an orchestrator that allocates a pty — none of them is a seat
+    the user is sitting in, and none should pay for a session, a cadence and a
+    wake supervisor. One spelling of the comparison lives in
+    ``supervisors.home_is_the_users``; this wrapper exists so consumers
+    never raise (a boot must degrade to "try again later", never crash) and
+    so "cannot tell" FAILS OPEN, the same direction as the toast gate's — an
+    unknowable platform must not take the feature away.
+    """
+    try:
+        from local_operator.supervisors import home_is_the_users as _shared
+
+        return _shared() is not False
+    except Exception:  # noqa: BLE001 — "cannot tell" means "behave as today"
+        logger.debug("aida: could not tell whose home this boot has", exc_info=True)
+        return True
+
+
+def terminal_under_a_foreign_home() -> bool:
+    """Whether the boot's human signal is a PTY whose HOME is not the user's.
+
+    R17's third signal, SCOPED TO THE ARM THE DESIGN NAMES: the gap is the
+    TERMINAL half of :func:`human_surface_present` — it answers True for ANY
+    pty, including a rig's, a container's or an orchestrator's — and a pty
+    under a redirected HOME is a RUN, not a person (a pty-allocating
+    ``lop serve`` under a rig HOME is the measured shape).
+
+    The DESKTOP-token half is deliberately NOT gated by HOME here. The desktop
+    app spawns its daemon itself, as the user, so the token is an app-issued
+    human signal rather than an ambient one — and the platform's desktop-e2e
+    suites simulate exactly that plane with a token plus an isolated HOME, so
+    gating it would recast the shipped desktop contract for the benefit of a
+    shape nothing ships. A desktop daemon under a genuinely foreign HOME is
+    still kept quiet where the operator requirement lands: the toast and
+    announce gates stay per-process HOME-based (``tui.notify`` claims, the
+    serving quiet arm), so it neither banners nor costs a retry ladder.
+
+    Never raises, and "cannot tell" FAILS OPEN (the shared predicate's own
+    direction): the gate may only ever remove a convenience, never a feature.
+    """
+    try:
+        return bool(_has_terminal()) and home_is_the_users() is False
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("aida: could not tell whose home this boot has", exc_info=True)
+        return False

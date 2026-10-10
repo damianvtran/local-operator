@@ -411,6 +411,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the cleanup log and last-cleanup record (sessions root) and the store marker "
         "that gates removal: none of them is a file a session directory holds",
     ),
+    "local_operator/session/delegated_retention.py": (
+        2,
+        "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
+        "sweep lock): the former sits at the sessions root, the latter at the config root; "
+        "neither inside a session directory. (``ROSTER_NAME`` is a session entry, already "
+        "classified by the copy set.)",
+    ),
     "local_operator/session_factory.py": (
         2,
         "the store-maintenance lock and stamp at the config root",
@@ -584,6 +591,29 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``monitors`` under the store root: the derived index, the ``wakes`` twin",
     ),
+    # ``INDEX_DIRNAME`` and ``CACHE_DIRNAME`` are both spelled ``code_requests``: the
+    # derived per-session index under the store root and the scan cache under
+    # ``cache/``. Neither is part of a session directory, and both are regenerated
+    # from the transcript by the scanner, so a session travelling between devices
+    # carries neither value (review round 1, Q3).
+    "local_operator/code_requests/ledger.py": (
+        2,
+        "``code_requests``: the derived index under the store root and the scan cache "
+        "under ``cache/`` — the ``monitors`` twin, both regenerable from the transcript",
+    ),
+    "local_operator/code_requests/cache.py": (
+        1,
+        "``_DIRTY_DIRNAME`` (``.dirty``): the session dirty-mark directory under "
+        "``<config>/cache/code_requests/`` — cached fetch state, regenerable from the "
+        "transcript and the TTLs, and never an entry of a session directory (the "
+        "``ledger.py`` / ``monitors`` case; review round 1, F5)",
+    ),
+    "local_operator/code_requests/detect.py": (
+        1,
+        "``SELF_TOOL_NAME``: the code-request TOOL's name — an identifier resolved "
+        "through the tool registry (the ``reply_channel``/``action-tool`` "
+        "identifier-not-a-path case), never a file a session directory holds",
+    ),
     "local_operator/monitors/state.py": (
         1,
         "``state`` under ``monitors/``: the per-monitor counters/snapshot directory",
@@ -617,8 +647,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     # ---- the desktop app's own feeds and the TUI's per-user state ----
     "local_operator/server/utils/desktop_feed.py": (
-        2,
-        "the agent and team directories the desktop app reads: the profile store",
+        3,
+        "the agent and team directories the desktop app reads (the profile store), plus "
+        "``code_requests``: the derived per-session index the feed's 1 s probe stats to "
+        "invalidate one conversation's rows (review round 1, Q3)",
     ),
     "local_operator/tui/sidebar_pins.py": (1, "the sidebar's pinned-session list"),
     "local_operator/tui/move_targets.py": (1, "the move dialog's recent-targets list"),

@@ -913,13 +913,11 @@ def test_an_agent_end_error_carries_the_radient_quota_remedy(
     renderer = PrintRenderer(json_mode=False, console=console)
     renderer._session = MagicMock(model_label="radient/auto")
 
-    renderer.handle(
-        AgentEndEvent(error="rate limit or quota exceeded (HTTP 402): insufficient credits")
-    )
+    renderer.handle(AgentEndEvent(error="out of credits (HTTP 402): insufficient credits"))
 
     out = buffer.getvalue()
-    assert "Error: rate limit or quota exceeded (HTTP 402): insufficient credits" in out
-    assert "check your email" in out and "$5.00" in out
+    assert "Error: out of credits (HTTP 402): insufficient credits" in out
+    assert "Check your inbox" in out and "$5 in free credits" in out
     rr.reset_recovery_cache()
 
 
@@ -930,13 +928,11 @@ def test_a_non_radient_error_renders_bare(tmp_path: Path, monkeypatch: pytest.Mo
     renderer = PrintRenderer(json_mode=False, console=console)
     renderer._session = MagicMock(model_label="openai/gpt-5")
 
-    renderer.handle(
-        AgentEndEvent(error="rate limit or quota exceeded (HTTP 402): insufficient credits")
-    )
+    renderer.handle(AgentEndEvent(error="out of credits (HTTP 402): insufficient credits"))
 
     out = buffer.getvalue()
     assert "console.radienthq.com" not in out
-    assert "check your email" not in out
+    assert "Check your inbox" not in out
 
 
 @pytest.mark.asyncio

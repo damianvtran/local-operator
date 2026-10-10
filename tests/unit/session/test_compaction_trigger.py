@@ -37,7 +37,7 @@ from local_operator.session.transcript import Transcript
 
 #: The model from the report: 1M advertised context, vision-capable.
 BIG_MODEL = ModelSpec(provider="test", model_id="opus-like", context_window=1_000_000)
-#: A 200k-context model, where the 600k absolute default cannot ever be reached
+#: A 200k-context model, where the 400k absolute default cannot ever be reached
 #: and the percentage has to govern instead.
 SMALL_MODEL = ModelSpec(provider="test", model_id="sonnet-like", context_window=200_000)
 
@@ -128,18 +128,18 @@ async def test_a_1m_session_does_not_compact_at_235k(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_1m_session_compacts_just_past_600k(tmp_path, monkeypatch):
-    """min(80% x 1M, 600k) = 600k: the absolute ceiling governs a huge window,
+async def test_a_1m_session_compacts_just_past_400k(tmp_path, monkeypatch):
+    """min(80% x 1M, 400k) = 400k: the absolute ceiling governs a huge window,
     because re-sending 800k tokens on every request is slow and expensive even
     though it fits."""
     session = make_session(tmp_path)
     await talk(session)
 
-    pin_measured_context(monkeypatch, 600_000)  # exactly on the line: stable
+    pin_measured_context(monkeypatch, 400_000)  # exactly on the line: stable
     refused = await session._plan_compaction(respect_threshold=True)
     assert refusal_reason(refused) == "below_threshold"
 
-    pin_measured_context(monkeypatch, 600_001)
+    pin_measured_context(monkeypatch, 400_001)
     plan = await session._plan_compaction(respect_threshold=True)
     assert refusal_reason(plan) is None  # a plan, not a refusal
     outcome = await session._run_compaction(as_plan(plan), reason="context-window")
@@ -149,7 +149,7 @@ async def test_a_1m_session_compacts_just_past_600k(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_200k_session_still_compacts_at_80_percent(tmp_path, monkeypatch):
-    """The 600k absolute default is larger than the whole 200k window. min()
+    """The 400k absolute default is larger than the whole 200k window. min()
     makes it inert rather than disabling compaction: the percentage governs and
     the pass fires at 160k."""
     session = make_session(tmp_path, model=SMALL_MODEL)

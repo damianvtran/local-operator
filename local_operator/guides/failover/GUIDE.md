@@ -78,18 +78,6 @@ carries a pin marker, and the pinned-child rules below are gated on that marker
 alone. Parent sessions and inherit-children never carry it, and their routing
 is unchanged.
 
-Who can create a pin: the operator (a role's `effort` profile pin, or the
-`subagents.models` tiers) and, only under `subagents.model_choice: model` and
-only in the top-level session, the delegating model — by passing `effort` on
-`task`, or by writing a role pin with `agent` create/update. A subagent is
-never offered the picker and is refused if it passes a tier to `task` or tries
-to write a tier pin, whatever the key says, so a subagent's own children are
-never pinned by a model-chosen tier: they inherit the model that subagent is
-running on (an unpinned child of a pinned child inherits the pinned child's
-model, not the root session's). A stored role pin is a different thing: it still
-applies at any depth, however it was written, and a subagent's `effort='inherit'`
-on `agent` update can still clear one.
-
 - **Same-family first, always.** Candidates are ordered pin-preserving →
   same-vendor → cross-vendor, and that ordering is shared with the quota
   preflight (`_first_available_fallback`), so the cascade walk and the

@@ -157,6 +157,24 @@ def test_reachable_is_the_any_of_matrix(
     monkeypatch.delenv("OPENAI_API_KEY")
 
     store.upsert_credential(
+        "openai",
+        {"type": "oauth", "refresh": "r", "access": "a", "expires": 4_000_000_000_000},
+    )
+    assert availability.image_provider_reachable(config_root) is True
+
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "gk")
+    assert availability.image_provider_reachable(config_root) is True
+    monkeypatch.delenv("GOOGLE_AI_STUDIO_API_KEY")
+
+    monkeypatch.setenv("XAI_API_KEY", "xk")
+    assert availability.image_provider_reachable(config_root) is True
+    monkeypatch.delenv("XAI_API_KEY")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ork")
+    assert availability.image_provider_reachable(config_root) is True
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+
+    store.upsert_credential(
         "radient", {"type": "oauth", "refresh": "r", "access": "a", "expires": 4_000_000_000_000}
     )
     assert availability.image_provider_reachable(config_root) is True
@@ -173,6 +191,10 @@ def test_probes_never_raise(config_root: Path, monkeypatch: pytest.MonkeyPatch) 
     assert availability.radient_available(config_root) is False
     assert availability.fal_key(config_root) is None
     assert availability.openai_images_key(config_root) is None
+    assert availability.openai_subscription_grant(config_root) is False
+    assert availability.google_key(config_root) is None
+    assert availability.xai_available(config_root) is False
+    assert availability.openrouter_key(config_root) is None
     assert availability.image_provider_reachable(config_root) is False
 
 
@@ -194,3 +216,191 @@ async def test_the_async_twin_agrees_with_the_sync_probe(
     store.upsert_credential("openai-key", {"type": "api_key", "source": "login", "key": "sk-x"})
     assert availability.openai_images_key(config_root) == "sk-x"
     assert await availability.openai_call_key(store) == "sk-x"
+
+
+# ---------------------------------------------------------------------------
+# The subscription grant: OAuth rows only, the inverse of the images rule
+# ---------------------------------------------------------------------------
+
+
+def test_openai_subscription_probe_reads_oauth_rows_only(
+    store: AuthStore, config_root: Path
+) -> None:
+    # A platform api_key is NOT a subscription grant (that row belongs to
+    # openai-key); the OAuth grant the images API rejects is exactly what the
+    # Codex-backend rung spends. The two probes must never blur into one.
+    store.upsert_credential("openai-key", {"type": "api_key", "source": "login", "key": "sk-x"})
+    assert availability.openai_subscription_grant(config_root) is False
+
+    store.upsert_credential(
+        "openai",
+        {
+            "type": "oauth",
+            "refresh": "r1",
+            "access": "chatgpt-token",
+            "expires": 4_000_000_000_000,
+        },
+    )
+    assert availability.openai_subscription_grant(config_root) is True
+
+
+def test_openai_subscription_env_never_lights_the_gate(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A grant is stored by a sign-in, never exported; an ambient platform key
+    # must not advertise this rung.
+    monkeypatch.setenv("OPENAI_API_KEY", "exported-key")
+    assert availability.openai_subscription_grant(config_root) is False
+
+
+@pytest.mark.asyncio
+async def test_the_subscription_access_twin_serves_the_stored_grant(store: AuthStore) -> None:
+    assert await availability.openai_sub_access(store) is None
+
+    store.upsert_credential(
+        "openai",
+        {
+            "type": "oauth",
+            "refresh": "r1",
+            "access": "chatgpt-token",
+            "expires": 4_000_000_000_000,
+            "account_id": "acc-1",
+        },
+    )
+    access = await availability.openai_sub_access(store)
+    assert access is not None
+    assert access.kind == "oauth"
+    assert access.access_token == "chatgpt-token"
+    assert access.account_id == "acc-1"
+
+
+# ---------------------------------------------------------------------------
+# Google: login row -> provider store row -> exported key (the FAL shape)
+# ---------------------------------------------------------------------------
+
+
+def test_google_reads_the_exported_key_when_nothing_is_stored(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert availability.google_key(config_root) is None
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "exported-key")
+    assert availability.google_key(config_root) == "exported-key"
+
+
+def test_google_login_row_wins_over_the_export(
+    store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "exported-key")
+    store.upsert_credential("google", {"type": "api_key", "source": "login", "key": "gkey"})
+    assert availability.google_key(config_root) == "gkey"
+
+
+def test_google_store_row_answers_when_no_login_row_exists(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    def fake_provider_secret(name: str, *, base: Path | None = None) -> str | None:
+        seen.append(name)
+        return "store-row-key" if name == "GOOGLE_AI_STUDIO_API_KEY" else None
+
+    monkeypatch.setattr(
+        "local_operator.providers.registry.provider_secret_value", fake_provider_secret
+    )
+    assert availability.google_key(config_root) == "store-row-key"
+    assert seen == ["GOOGLE_AI_STUDIO_API_KEY"]
+
+
+@pytest.mark.asyncio
+async def test_the_google_async_twin_agrees_with_the_sync_probe(
+    store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GOOGLE_AI_STUDIO_API_KEY", raising=False)
+    assert availability.google_key(config_root) is None
+    assert await availability.google_call_key(store) is None
+
+    store.upsert_credential("google", {"type": "api_key", "source": "login", "key": "gkey"})
+    assert availability.google_key(config_root) == "gkey"
+    assert await availability.google_call_key(store) == "gkey"
+
+
+# ---------------------------------------------------------------------------
+# xAI: key rows OR the Grok OAuth grant (both store under "xai"), or env
+# ---------------------------------------------------------------------------
+
+
+def test_xai_lights_from_an_api_key_row(store: AuthStore, config_root: Path) -> None:
+    assert availability.xai_available(config_root) is False
+    store.upsert_credential("xai", {"type": "api_key", "source": "login", "key": "xk"})
+    assert availability.xai_available(config_root) is True
+
+
+def test_xai_lights_from_an_oauth_grant(store: AuthStore, config_root: Path) -> None:
+    store.upsert_credential(
+        "xai",
+        {"type": "oauth", "refresh": "r", "access": "a", "expires": 4_000_000_000_000},
+    )
+    assert availability.xai_available(config_root) is True
+
+
+def test_xai_lights_from_the_export(config_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XAI_API_KEY", "exported")
+    assert availability.xai_available(config_root) is True
+    monkeypatch.delenv("XAI_API_KEY")
+    assert availability.xai_available(config_root) is False
+
+
+@pytest.mark.asyncio
+async def test_the_xai_bearer_prefers_the_key_row_then_the_grant_then_env(
+    store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Reviewer round 1 F4: the API key is the reliable path (xAI tiers its
+    # OAuth surface; the 403 class is unprobed), so a stored key wins over
+    # the grant; persisted rows beat an ambient export, the lane's rule.
+    monkeypatch.setenv("XAI_API_KEY", "exported")
+    assert await availability.xai_call_bearer(store) == "exported"
+
+    store.upsert_credential(
+        "xai",
+        {"type": "oauth", "refresh": "r", "access": "grant", "expires": 4_000_000_000_000},
+    )
+    assert await availability.xai_call_bearer(store) == "grant"
+
+    store.upsert_credential("xai", {"type": "api_key", "source": "login", "key": "xk"})
+    assert await availability.xai_call_bearer(store) == "xk"
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter: login row -> provider store row -> exported key (the FAL shape)
+# ---------------------------------------------------------------------------
+
+
+def test_openrouter_reads_the_exported_key_when_nothing_is_stored(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert availability.openrouter_key(config_root) is None
+    monkeypatch.setenv("OPENROUTER_API_KEY", "exported-key")
+    assert availability.openrouter_key(config_root) == "exported-key"
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    assert availability.openrouter_key(config_root) is None
+
+
+def test_openrouter_login_row_wins_over_the_export(
+    store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "exported-key")
+    store.upsert_credential("openrouter", {"type": "api_key", "source": "login", "key": "ork"})
+    assert availability.openrouter_key(config_root) == "ork"
+
+
+@pytest.mark.asyncio
+async def test_the_openrouter_async_twin_agrees_with_the_sync_probe(
+    store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert availability.openrouter_key(config_root) is None
+    assert await availability.openrouter_call_key(store) is None
+
+    store.upsert_credential("openrouter", {"type": "api_key", "source": "login", "key": "ork"})
+    assert availability.openrouter_key(config_root) == "ork"
+    assert await availability.openrouter_call_key(store) == "ork"
