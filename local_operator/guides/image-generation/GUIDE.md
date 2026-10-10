@@ -144,9 +144,12 @@ large local source can fail there first.
 
 `strength` (0..1) tunes how far the edit may move from the source, where the
 provider supports it (FAL's flux-class image-to-image apps; its
-multi-reference editors document no strength field). Wherever it cannot be
-honoured, the result says it was ignored rather than dropping it silently.
-`strength` without a source is rejected.
+multi-reference editors document no strength field). Where the harness can
+detect the drop — FAL's schema-guided path — the result says the value was
+ignored rather than dropping it silently; on Radient it rides the hub's
+verbatim passthrough, and a pin that does not document it gives no drop
+signal, so the result does not claim one. `strength` without a source is
+rejected.
 
 Edits run on Radient, FAL, OpenAI, Google, xAI and OpenRouter. The
 ChatGPT-plan rung records an explicit skip, so an edit never silently
