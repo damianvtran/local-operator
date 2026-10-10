@@ -1445,6 +1445,19 @@ def test_a_warm_spawn_carries_the_engage_claim(
     something earlier must not hand its claim to a runtime that has real work to
     do.
 
+    THE ORDER OF THE THREE SPAWNS IS LOAD-BEARING (review round 2, M1).
+    ``_spawn_runtime`` seeds the child environment from ``dict(os.environ)``,
+    so a claim already present in the parent is inherited by ANY spawn, the
+    warm one included — and against a parent that carries it, the warm
+    assertion below would pass even with production's own
+    ``env[ENGAGED_ENV] = "1"`` deleted, which is exactly the deletion this
+    cell exists to catch. The warm spawn therefore runs while this process
+    holds NO claim (any ambient value is removed first), so the claim it
+    carries can only have been ADDED by production. The two scrub directions
+    then run AFTER a claim is planted in the parent, so their assertions
+    prove the pop removes an inherited claim rather than passing on an
+    environment that was clean to begin with.
+
     THE SEAM IS ``spawn_disclaimed`` AND THE COUNT COMES FROM IT (2026-10-10).
     #2139 (0a6054b625) rewired ``_spawn_runtime`` to spawn through
     ``spawn_disclaimed``; on macOS that is a real ``posix_spawn``, so the three
@@ -1470,12 +1483,23 @@ def test_a_warm_spawn_carries_the_engage_claim(
     # #2139. It receives ``env`` as a keyword (see its signature), so the
     # recorder reads the claim from exactly the dict the child would inherit.
     monkeypatch.setattr(launch_module, "spawn_disclaimed", fake_spawn)
-    # A claim left over in THIS process, which no non-warm spawn may pass on.
-    monkeypatch.setenv(ENGAGED_ENV, "1")
 
+    # THE WARM SPAWN RUNS ON A CLEAN PARENT (review round 2, M1): the child
+    # environment is ``dict(os.environ)`` before production adds anything, so
+    # a claim left in THIS process would reach the warm child whatever
+    # production did — and the assert below would hold with production's own
+    # assignment deleted. Removing any ambient value first makes the claim
+    # the warm child receives (or fails to receive) proof of production's own
+    # ``env[ENGAGED_ENV] = "1"`` and nothing else's.
+    monkeypatch.delenv(ENGAGED_ENV, raising=False)
     warm = launch_module._spawn_runtime(
         "sess-warm01", str(tmp_path), defer_materialise=True, warm=True
     )
+
+    # Now a claim IS left over in THIS process, which no non-warm spawn may
+    # pass on: both scrub directions are asserted against a parent that holds
+    # it, so the pops below are shown to remove an inherited claim.
+    monkeypatch.setenv(ENGAGED_ENV, "1")
     deferred = launch_module._spawn_runtime("sess-defer01", str(tmp_path), defer_materialise=True)
     ordinary = launch_module._spawn_runtime("sess-cold01", str(tmp_path), defer_materialise=False)
     for process in (warm, deferred, ordinary):
