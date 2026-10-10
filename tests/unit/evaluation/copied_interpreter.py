@@ -27,11 +27,14 @@ first exec. The repair used to run only after a failed probe, and on a
 uv-managed base every such probe IS a dyld abort (SIGABRT) that posts a crash
 report under ``~/Library/Logs/DiagnosticReports`` and feeds ReportCrashService:
 measured 37 ``python3.12`` reports in 24 h on the build fleet -- one per venv
-build across the hosts this helper serves -- and the helper was the
-per-process-limit jetsam victim in 4 of 5 recent OOM events there. Repairing
-first removes the abort entirely; it costs one extra healthy exec of the BASE
-interpreter (tens of ms), and a probe moved back in front of the carry would
-reintroduce one crash report per venv build.
+build across the hosts this helper serves -- and the service consuming that
+feed was the per-process-limit jetsam victim in 4 of 5 OOM events in the same
+window. Repairing first removes the abort on every path where the base
+advertises a shared library (where the metadata query fails there is nothing
+to carry, and the copy is still probed, with the query failure deferred into
+the message); it costs one extra healthy exec of the BASE interpreter (tens of
+ms), and a probe moved back in front of the carry would reintroduce one crash
+report per venv build.
 
 THE RULES HERE. (1) Only the RUNNING interpreter is ever copied: the ``.pth``
 is derived from it (``sysconfig`` purelib plus wherever ``pydantic`` was
@@ -149,9 +152,11 @@ def copied_interpreter(venv: Path) -> Path:
     if library is not None:
         target = venv / "lib" / library.name
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.is_symlink():
-            # Never copy2 THROUGH a symlink: a write through one lands in the
-            # uv-managed machine-wide interpreter the library comes from.
+        if target.exists() or target.is_symlink():
+            # Never copy2 through a pre-existing name: a symlink or hardlink
+            # at target would land the write inside the uv-managed,
+            # machine-wide interpreter the library comes from. Unlinking drops
+            # only this name; copy2 then creates a fresh inode.
             target.unlink()
         shutil.copy2(library, target)
 
