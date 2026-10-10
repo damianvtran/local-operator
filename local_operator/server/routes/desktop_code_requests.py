@@ -125,9 +125,10 @@ def _row_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
     fields and relations, the folded ``mentions`` list, and — once the fetch
     cache has data for the ref — ``summary``/``lanes``/``fetched_at``/
     ``stale``/``refresh_error``. This function folds the mentions into the
-    single ``mention`` object the client draws and otherwise passes fields
-    through; unknown keys survive (``extra="allow"``) so a later slice can
-    add one without touching this function.
+    single ``mention`` object the client draws and otherwise passes the fields
+    it lists through; the model tolerates extras (``extra="allow"``), but a
+    new wire field must still be added to the tuple below or it is silently
+    dropped here.
     """
     mentions: list[Any] = raw["mentions"] if isinstance(raw.get("mentions"), list) else []
     sources = [str(item.get("source")) for item in mentions if isinstance(item, Mapping)]
@@ -171,6 +172,7 @@ def _row_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         "evidence",
         "reason",
         "link_only_hint",
+        "fetch_state",
         "cooling_until",
         "summary",
         "lanes",
