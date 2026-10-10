@@ -141,6 +141,69 @@ async def test_a_peer_message_into_an_idle_session_can_end_quietly(
             await dispose_quietly(session)
 
 
+@pytest.mark.asyncio
+async def test_a_peer_message_answered_with_text_stays_quiet(tmp_path: Path, monkeypatch) -> None:
+    """The TEXT twin of the cell above: the reply is ordinary prose, not
+    ``no_reply`` — the write that used to re-arm the banner for every peer
+    turn. Over the same real path: the end carries notify=False, the reply is
+    persisted for the reader, the completion row exists and stays unread (the
+    discovery surface is deliberately separate from the announcement), and no
+    notifier is called.
+    """
+    import local_operator.tui.notify as notify_module
+
+    calls: list[tuple[str, str]] = []
+
+    def record_notify(title: str, body: str, **kwargs: Any) -> bool:
+        calls.append((title, body))
+        return True
+
+    monkeypatch.setattr(notify_module, "detached_notify", record_notify)
+    directory = tmp_path / "sess-text"
+    directory.mkdir(parents=True, exist_ok=True)
+    stream = ScriptedStream([text_turn("the peer's answer, in prose")])
+    session = build_session(directory, stream)
+    ends: list[Any] = []
+    session.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+    with bounded(60, "quiet e2e: peer message answered with text"):
+        try:
+            await session.receive_peer_message(
+                "child reporting in",
+                mode="mailbox",
+                wake=True,
+                sender={"pid": 42, "conversation_name": "child"},
+            )
+            await _wait_until(lambda: bool(ends))
+            await _wait_until(lambda: session._attention_run_settled)
+
+            assert len(stream.requests) == 1, "the reply bought no further call"
+            assert ends[-1].notify is False, "a text reply to a peer raises no banner"
+
+            # The reply is persisted — the operator opens the session and reads it.
+            rows = _payloads(directory)
+            assert any(
+                payload.get("role") == "assistant"
+                and any(
+                    "prose" in str(part.get("text", "")) for part in (payload.get("content") or [])
+                )
+                for payload in rows
+            ), "the text reply is persisted"
+
+            # The row EXISTS and is unread: the unread mark is the discovery
+            # surface, and it is deliberately independent of `notify`.
+            state = await session.refresh_attention()
+            assert state["completion_token"] is not None, "a quiet row for the unread mark"
+            assert state["notify"] is False, "the one value every notifier reads"
+            assert state["unseen"] is True, "still unread; not announced"
+
+            # And nothing asked a notifier to say anything.
+            assert calls == [], "no notifier call"
+        finally:
+            await dispose_quietly(session)
+
+
 #: The kill cell's child driver. Spawned via ``sys.executable``; it builds a
 #: REAL session over the same directory (the real ``no_reply`` tool, a real
 #: discovery record as the runtime publishes for itself) and PARKS inside the

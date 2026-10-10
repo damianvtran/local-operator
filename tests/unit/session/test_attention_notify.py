@@ -133,6 +133,9 @@ async def test_a_quiet_wake_turn_is_silent_on_the_event_and_the_row(
         assert state["kind"] == "complete"
         assert state["notify"] is False
         assert session._run_triggers == {"wake_prompt"}
+        assert (
+            session._run_input_types == set()
+        ), "wake deliveries are not recorded among the raw input types"
         assert session._run_notify_requested is False
         ends = _ends(events)
         assert len(ends) == 1
@@ -341,6 +344,88 @@ async def test_a_mixed_user_and_quiet_wake_run_notifies_with_one_publication(
         assert len(ends) == 1, "one run, one end — a second would double-announce"
         # One publication: the receipt watermark advanced by exactly one row.
         assert state["revision"][0] == 1
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_wake_folded_into_a_peer_run_stays_quiet(tmp_path: Path) -> None:
+    """The invariant the direct-set cells cannot see, pinned where it lives: a
+    REAL quiet wake folds into a live peer-woken run mid-tool, and the run is
+    still silent — because the wake class never enters ``_run_input_types``
+    (the raw-type record is internal-only). If the wake branch of
+    ``_note_run_input`` ever started recording its type, a real peer+quiet
+    wake run would flip loud while the direct-set cells stayed green; this
+    cell is the tripwire for exactly that trap."""
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    async def blocking_execute(tool_call_id, args, signal, on_update, context):
+        tool_started.set()
+        await release_tool.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="block",
+            content=[TextContent(text="finished")],
+        )
+
+    tool = AgentTool(
+        name="block",
+        parameters={"type": "object", "properties": {}},
+        interruptible=True,
+        execute=blocking_execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="block", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="peer reply"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[tool])
+    events: list[Any] = []
+    session.subscribe(events.append)
+    try:
+        peer_task = asyncio.ensure_future(
+            session.receive_peer_message(
+                "child reporting in",
+                mode="mailbox",
+                wake=True,
+                sender={"pid": 42, "conversation_name": "child"},
+            )
+        )
+        await wait_for(lambda: tool_started.is_set())
+        schedule = WakeSchedule(id="w2", message="check the build", next_due_at=0, created_at=0)
+        assert schedule.notify is False, "the quiet delivery this fold must not un-quiet"
+        await session._deliver_wake(
+            DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+        )
+        release_tool.set()
+        await peer_task
+        # ``receive_peer_message`` returns at admission, not at the end (the
+        # transport's contract); wait for the publication like every peer cell.
+        await wait_for(
+            lambda: session._attention_run_settled
+            and bool(session._attention.get("completion_token"))
+        )
+
+        state = await session.refresh_attention()
+        assert state["kind"] == "complete"
+        assert (
+            state["notify"] is False
+        ), "a quiet wake folded into a peer run does not release the peer silence"
+        assert session._run_triggers == {
+            "internal",
+            "wake_prompt",
+        }, "the wake folded into the SAME run"
+        assert session._run_input_types == {
+            "peer_message"
+        }, "the wake delivery left no raw type behind"
+        ends = _ends(events)
+        assert len(ends) == 1, "one run, one end"
+        assert ends[0].notify is False
     finally:
         await session.dispose()
 
@@ -645,6 +730,65 @@ def test_a_pre_field_row_reads_as_notifying_and_a_write_migrates(tmp_path: Path)
         ).fetchone()
     assert old_value == (1,), "a pre-field row must be backfilled to notify=1"
     assert new_value == (0,)
+
+
+@pytest.mark.asyncio
+async def test_a_notify_false_marker_republishes_verbatim(tmp_path: Path) -> None:
+    """The replay half of the policy: ``_republish_journalled_outcome`` reads
+    the journal marker's stamped value verbatim, so a quiet run's marker
+    (``notify: False``) re-lands as a quiet row — and a pre-field marker with
+    the key ABSENT keeps its notify=1 behaviour. The markers are written
+    directly (they are the exact shape ``_publish_attention_outcome``
+    appends) because this cell pins the REPLAY read; the write half is every
+    turn cell above."""
+    from local_operator.session.attention import (
+        ATTENTION_CUSTOM_TYPE,
+        conversation_identity,
+    )
+
+    session = make_session(tmp_path, _complete_stream())
+    try:
+        identity = conversation_identity(session._transcript.directory)
+        token = str(uuid.uuid4())
+        await session._transcript.append_custom(
+            ATTENTION_CUSTOM_TYPE,
+            {
+                "conversation_id": identity,
+                "token": token,
+                "anchor": f"completion-{token}",
+                "kind": "complete",
+                "cause": "",
+                "reason": "",
+                "notify": False,
+            },
+        )
+        assert await session._republish_journalled_outcome() is True
+        state = await session.refresh_attention()
+        assert state["completion_token"] == token
+        assert state["notify"] is False, "the marker's stamped value replays verbatim"
+        assert state["unseen"] is True, "a republished quiet row is still unread"
+    finally:
+        await session.dispose()
+
+    legacy = make_session(tmp_path / "legacy", _complete_stream())
+    try:
+        identity = conversation_identity(legacy._transcript.directory)
+        token = str(uuid.uuid4())
+        await legacy._transcript.append_custom(
+            ATTENTION_CUSTOM_TYPE,
+            {
+                "conversation_id": identity,
+                "token": token,
+                "anchor": f"completion-{token}",
+                "kind": "complete",
+            },
+        )
+        assert await legacy._republish_journalled_outcome() is True
+        state = await legacy.refresh_attention()
+        assert state["completion_token"] == token
+        assert state["notify"] is True, "an absent key keeps its pre-fix notify=1 default"
+    finally:
+        await legacy.dispose()
 
 
 # ---------------------------------------------------------------------------
