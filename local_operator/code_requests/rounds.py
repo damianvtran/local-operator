@@ -111,7 +111,14 @@ _FIELD = re.compile(
     rf"{_DASH}]\s*(?P<value>.*)$",
     re.IGNORECASE,
 )
-_VERDICT_HEADING = re.compile(r"^\s*#{3,4}\s*\**\s*verdict\s*\**\s*:?\s*$", re.IGNORECASE)
+#: ``##`` is accepted beside ``###``/``####``: #2112's agent reviews r1-r3 (the
+#: first three of the four rounds) head their verdict ``## Verdict`` and read as
+#: ``unstated`` without it. A survey of the 27 real convention comments on
+#: #2094/#2106/#2112 found ``## Verdict`` only ever as the verdict section (never
+#: as an unrelated heading); the match stays exact-line, and the classifier still
+#: reads only a recognised leading token of the line that follows, so a
+#: misplaced heading degrades to ``unstated`` rather than inventing a verdict.
+_VERDICT_HEADING = re.compile(r"^\s*#{2,4}\s*\**\s*verdict\s*\**\s*:?\s*$", re.IGNORECASE)
 
 #: ``base..head``, with or without backticks. Both sides must be hex for the END
 #: to be a reviewed head; a symbolic base (``main..72bea95``) is fine.
@@ -548,6 +555,22 @@ def _strip_wrapping_parens(text: str) -> str:
     return text
 
 
+def _quoted_lines(lines: Sequence[str]) -> list[bool]:
+    """Per line: is it inside a ``` fence or a ``>`` blockquote (text that is not
+    the comment's own words)? The fence state is tracked from line 0, so a fence
+    opened inside the field window still covers lines past it."""
+    flags: list[bool] = []
+    fenced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            fenced = not fenced
+            flags.append(True)
+            continue
+        flags.append(fenced or stripped.startswith(">"))
+    return flags
+
+
 def _scan_fields(lines: Sequence[str]) -> dict[str, str]:
     """The ``Reviewer:``/``Scope:``/``Head:``/``Verdict:`` fields, first spelling wins.
 
@@ -556,6 +579,7 @@ def _scan_fields(lines: Sequence[str]) -> dict[str, str]:
     the real comments always put the fields at the top.
     """
     fields: dict[str, str] = {}
+    quoted = _quoted_lines(lines)
     for line in lines[1:FIELD_SCAN_LINES]:
         stripped = line.strip()
         if _VERDICT_HEADING.match(stripped) is not None:
@@ -587,21 +611,6 @@ def _scan_fields(lines: Sequence[str]) -> dict[str, str]:
                 fields.setdefault("verdict", following.strip())
             break
     if "verdict" not in fields:
-        # A LABELLED verdict past the field window: the closing summary of a long
-        # review. ``damianvtran/local-operator#2112``'s round-4 agent review keeps
-        # ``**Verdict: `clean` — … TERMINAL …**`` on line 44 of 46, and the bounded
-        # scan above read that whole round as ``unstated`` even from the FULL body
-        # (so parsing before the size trim was necessary but not sufficient). Only
-        # the verdict is rescued: ``Reviewer``/``Scope``/``Head`` stay window-bound
-        # because a review quotes its own prompt further down, and a quoted
-        # ``Scope:`` there would move the reviewed head. The classifier reads only
-        # a recognised leading token, so a quoted line cannot invent a verdict.
-        for line in lines[FIELD_SCAN_LINES:]:
-            match = _FIELD.match(line.strip())
-            if match is not None and match.group("name").lower() == "verdict":
-                fields["verdict"] = match.group("value").strip()
-                break
-    if "verdict" not in fields:
         # No ``Verdict:`` label: a standalone bold verdict paragraph is the third
         # real spelling (``**Clean — merge-ready.**``). Only the recognised leading
         # words qualify, so ordinary prose never becomes a verdict.
@@ -612,6 +621,32 @@ def _scan_fields(lines: Sequence[str]) -> dict[str, str]:
             bare = _strip_markup(stripped)
             if _BARE_VERDICT.match(bare):
                 fields["verdict"] = stripped
+                break
+    if "verdict" not in fields:
+        # A LABELLED verdict past the field window: the closing summary of a long
+        # review. ``damianvtran/local-operator#2112``'s round-4 agent review keeps
+        # ``**Verdict: `clean` — … TERMINAL …**`` on line 44 of 46, and the bounded
+        # scan above read that whole round as ``unstated`` even from the FULL body
+        # (so parsing before the size trim was necessary but not sufficient).
+        #
+        # Fail-closed constraints (review round 1, F1/Q1), because the classifier
+        # reads the leading token of WHATEVER line it is handed, so a quoted
+        # ``Verdict: clean`` is as good as a real one to it:
+        # * it runs LAST, after the bare-bold fallback: a review's own in-window
+        #   verdict outranks anything quoted further down;
+        # * blockquote (``>``) and fenced lines are skipped: a round-2+ review
+        #   quotes the previous round's verdict in its fix-verification section;
+        # * the LAST labelled line wins, not the first: the closing summary is the
+        #   comment's own, whatever it quotes above it.
+        # Only the verdict is rescued: ``Reviewer``/``Scope``/``Head`` stay
+        # window-bound because a review quotes its own prompt further down, and a
+        # quoted ``Scope:`` there would move the reviewed head.
+        for index in reversed(range(FIELD_SCAN_LINES, len(lines))):
+            if quoted[index]:
+                continue
+            match = _FIELD.match(lines[index].strip())
+            if match is not None and match.group("name").lower() == "verdict":
+                fields["verdict"] = match.group("value").strip()
                 break
     return fields
 

@@ -1300,16 +1300,46 @@ async def test_a_piece_with_no_stored_parse_refetches_instead_of_reading_the_cap
     An entry with stored pieces but no ``convention`` (written before the
     fetch-time parse existed, or edited) used to answer 304 for a comment piece
     and then parse the capped copy it kept. The validators of such a piece must
-    be dropped so the pass refetches it whole.
+    be dropped so the pass refetches it whole, ONCE: the refetch writes the parse,
+    after which the pieces revalidate normally (no refetch loop; review F3).
     """
-    await _prime_deep_verdict(tmp_path, monkeypatch)
+    import httpx
+
+    body = _deep_verdict_body()
+    sent: list[tuple[str, bool]] = []  # (comment-piece path, carried If-None-Match)
+    _COMMENTS_PATH, _REVIEWS_PATH = "/repos/o/r/issues/7/comments", "/repos/o/r/pulls/7/reviews"
+
+    def factory():
+        inner = _mixed_handler([], body, changing="reviews")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith(("/issues/7/comments", "/pulls/7/reviews")):
+                sent.append((request.url.path, bool(request.headers.get("if-none-match"))))
+            return inner(request)
+
+        return handler
+
+    _install_proxy(monkeypatch, factory)
+    await service.refresh_keys(tmp_path, [REF])
     entry = cache.read_entry(tmp_path, REF)
     assert entry is not None
     legacy = {k: v for k, v in entry.items() if k != "convention"}
     legacy["lanes"] = []
     cache.write_entry(tmp_path, legacy, ref=REF)
     cache._reset_for_tests()
-    cache.clear_key_backoff(REF.key)
-    # A bound-trimmed copy is what is on disk now, and its validators say 304.
-    await service.refresh_keys(tmp_path, [REF], force=True)
+
+    async def forced_pass() -> list[tuple[str, bool]]:
+        cache.clear_key_backoff(REF.key)
+        sent.clear()
+        await service.refresh_keys(tmp_path, [REF], force=True)
+        return list(sent)
+
+    # Pass 1: the legacy entry's validators are dropped -> unconditional GETs.
+    first = await forced_pass()
+    assert sorted(first) == [(_COMMENTS_PATH, False), (_REVIEWS_PATH, False)], first
     assert _agent_lane(tmp_path)["state"] == "terminal"
+    # Passes 2 and 3: the parse is stored, so both pieces revalidate (304) again.
+    for _ in range(2):
+        later = await forced_pass()
+        assert sorted(later) == [(_COMMENTS_PATH, True), (_REVIEWS_PATH, True)], later
+        assert _agent_lane(tmp_path)["state"] == "terminal"
