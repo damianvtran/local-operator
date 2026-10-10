@@ -27,22 +27,28 @@ import dataclasses
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
+from rich.text import Text
 
 from local_operator.harness.types import ModelSpec
 from local_operator.providers import radient_recovery as rr
 from local_operator.providers import usage as usage_module
 from local_operator.providers.billing_links import BILLING_LINKS
-from local_operator.providers.controller import CatalogueEntry, ProviderController
+from local_operator.providers.controller import (
+    CatalogueEntry,
+    ControllerAuthStore,
+    ProviderController,
+)
 from local_operator.providers.quota_notice import (
     QuotaAction,
     QuotaVerdict,
     evaluate_quota_notice,
 )
 from local_operator.providers.radient_recovery import (
+    CLAIM_URL,
     RecoveryFacts,
     VerificationFacts,
     recovery_line,
@@ -261,7 +267,12 @@ async def test_the_read_answers_from_the_warm_row_and_never_fetches(
     monkeypatch.setenv("HOME", str(tmp_path))
     store = FakeAuthStore()
     cache = UsageCacheStore(tmp_path / "usage_cache.db")
-    controller = ProviderController(store, login_callbacks=None, usage_cache=cache)
+    # ``cast``: the double is the same deliberately-partial stand-in
+    # ``test_controller`` uses behind unannotated fixtures; pyright cannot see
+    # a duck as the protocol it stands in for.
+    controller = ProviderController(
+        cast(ControllerAuthStore, store), login_callbacks=None, usage_cache=cache
+    )
     try:
         # ``api_keys`` is the surface ``get_api_key`` answers from — an
         # ``upsert_credential`` row alone never feeds the fetch path's
@@ -357,6 +368,7 @@ def test_a_url_already_in_the_sentence_is_not_printed_twice(
 ) -> None:
     """Radient's sentences carry their own links; a trailing duplicate helps nobody."""
     url = BILLING_LINKS["radient"].url
+    assert url is not None  # the dashboard table always carries Radient's link
     monkeypatch.setattr(
         tui_quota,
         "evaluate_quota_notice",
@@ -442,6 +454,49 @@ def test_no_cached_radient_answer_degrades_to_the_neutral_text(
     assert line.text == " ".join(recovery_line(RecoveryFacts(signed_in=None)).split())
     # The neutral sentence carries both of its URLs itself; none is appended.
     assert line.url is None
+
+
+def test_a_cold_cache_with_a_stored_credential_still_never_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1 (m1): credential present, cache cold — no probe, no block.
+
+    The warm-cache tests can be served by either twin from the same cache, and
+    the empty-store test gives a probing twin no token to probe with — so
+    neither pins "this path never probes". Here a real store holds a Radient
+    login while the process cache is cold (the autouse fixture resets it), and
+    BOTH probe legs are recorders: swapping ``recovery_facts_cached()`` for
+    ``get_recovery_facts_sync()`` would block the splash paint on the wire and
+    land here as a recorded probe.
+    """
+    from local_operator.providers import auth_store as auth_store_mod
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("radient", {"type": "oauth", "access": "tok-cold", "refresh": "r"})
+    monkeypatch.setattr(auth_store_mod, "shared_auth_store", lambda: store)
+
+    sync_probes: list[str] = []
+    async_probes: list[str] = []
+
+    def probe_sync(token: str) -> VerificationFacts:
+        sync_probes.append(token)
+        return VerificationFacts(signup_grant="pending", email_verified=False)
+
+    async def probe_async(token: str) -> VerificationFacts:
+        async_probes.append(token)
+        return VerificationFacts(signup_grant="pending", email_verified=False)
+
+    monkeypatch.setattr(rr, "_probe_verification_sync", probe_sync)
+    monkeypatch.setattr(rr, "_probe_verification_async", probe_async)
+
+    controller = QuotaController(reports=[_report("radient", _balance_limit(0.0))])
+    line = quota_notice_line(QuotaSession("radient", "auto"), controller, now_ms=NOW_MS)
+
+    assert line is not None
+    assert line.text == " ".join(recovery_line(RecoveryFacts(signed_in=None)).split())
+    assert sync_probes == [], "the cached arm must never probe"
+    assert async_probes == [], "and neither may the async twin"
 
 
 @pytest.mark.asyncio
@@ -670,6 +725,7 @@ def test_the_row_paints_beside_the_credential_warning_in_the_warning_ink() -> No
 
 def test_the_url_is_dropped_whole_when_the_rows_width_cannot_hold_it() -> None:
     url = BILLING_LINKS["deepseek"].url
+    assert url is not None  # the dashboard table always carries DeepSeek's link
     info = _quota_info()
     full = f"! No balance on DeepSeek — top up at the DeepSeek platform. {url}"
     exact = cell_len(full)
@@ -689,6 +745,74 @@ def test_a_sentence_wider_than_the_row_truncates_from_the_tail() -> None:
     row = _row_with(lines, "No balance")
     assert row.plain.rstrip().endswith("…")
     assert "! No balance on DeepSeek" in row.plain
+
+
+def test_the_notice_row_never_moves_the_shared_pad() -> None:
+    """Design round 1 (D1): the stack's left edge is identical with the row on/off.
+
+    The row is a sentence centred on its own width, like the tip; the shared
+    pad is computed without it. Before the fix the pad collapsed to zero the
+    moment the row landed — the whole stack re-anchored left by half the row
+    (280 px at 96 cells) on the cold-boot path the warmer repaints.
+    """
+    width = ROOMY_W
+    with_row = build_welcome_lines(_quota_info(), width, ROOMY_H)
+    without = build_welcome_lines(_quota_info(quota_notice=None), width, ROOMY_H)
+    assert len(with_row) == len(without) + 1, "exactly the one measured row is added"
+
+    quota = _row_with(with_row, "No balance on DeepSeek")
+    assert quota.plain.strip().startswith("! "), "the row keeps its warning glyph"
+    pad = len(quota.plain) - len(quota.plain.lstrip(" "))
+    assert pad == (width - cell_len(quota.plain.strip())) // 2, "centred on its own width"
+
+    def pads(lines: list[Any]) -> list[int]:
+        return [
+            len(line.plain) - len(line.plain.lstrip(" "))
+            for line in lines
+            if line.plain.strip() and "No balance on DeepSeek" not in line.plain
+        ]
+
+    assert pads(with_row) == pads(without), "the shared pad must not see the notice row"
+
+
+def test_no_url_is_half_printed_at_any_width() -> None:
+    """Design round 1 (D2) / QA Q2: a URL shows whole or not at all, every width.
+
+    The appended-URL rule only governs a URL appended at the tail; Radient's
+    rides INSIDE its sentence, where the final truncation used to cut
+    mid-address across content widths 181–227. ``_status_rows`` is swept with
+    the same truncation the builder applies, so the band cannot regress
+    quietly.
+    """
+    pending = RecoveryFacts(
+        signed_in=True,
+        verification=VerificationFacts(
+            signup_grant="pending", email_verified=False, grant_amount=5.0
+        ),
+    )
+    radient = dataclasses.replace(
+        _info("radient"),
+        quota_notice=QuotaNoticeLine(text=" ".join(recovery_line(pending).split()), url=None),
+    )
+    for info, url in ((_quota_info(), BILLING_LINKS["deepseek"].url), (radient, CLAIM_URL)):
+        assert url is not None
+        for width in range(24, 260):
+            rows = _status_rows(info, width)
+            row = next(line for priority, line in rows if priority == _PRIORITY_QUOTA)
+            rendered = Text(row.plain)
+            rendered.truncate(width, overflow="ellipsis")
+            text = rendered.plain
+            if url in text:
+                continue
+            assert "https://" not in text, (width, text)
+
+    # The band's middle: at 200 the address is gone WHOLE — with the clause
+    # that introduced it — rather than losing its tail mid-name.
+    rows = _status_rows(radient, 200)
+    row = next(line for priority, line in rows if priority == _PRIORITY_QUOTA)
+    rendered = Text(row.plain)
+    rendered.truncate(200, overflow="ellipsis")
+    assert rendered.plain.rstrip().endswith("verification email…"), rendered.plain
 
 
 def test_the_stack_orders_and_sheds_the_quota_row_before_the_warning() -> None:

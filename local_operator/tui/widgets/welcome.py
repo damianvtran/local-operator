@@ -69,6 +69,7 @@ from __future__ import annotations
 import math
 import os
 import random
+import re
 import time
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
@@ -90,6 +91,7 @@ from local_operator import terminals
 from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
+from local_operator.tui.link_targets import _URL_START_RE, _body_end, _trim
 from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
 from local_operator.tui.widgets.status_line import format_model_label
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
@@ -902,6 +904,52 @@ def _fit_tail(text: str, width: int) -> str:
     return "…" + kept
 
 
+#: A URL's introducer, left dangling when the URL under it is dropped
+#: (``…, or open``, ``…, visit``, ``…:``). Bounded to the verbs a link is
+#: actually introduced with — this finishes a clipped sentence, it does not
+#: parse grammar.
+_INTRO_TAIL_RE = re.compile(r"(?:,|;)?\s*(?:or|and)?\s*(?:open|visit|see)\s*$", re.IGNORECASE)
+
+
+def _drop_dangling_intro(head: str) -> str:
+    """Strip a URL introducer the URL's removal left dangling.
+
+    ``…verification email, or open`` → ``…verification email``. Also drops the
+    punctuation an introducer can end on, so a clipped row never stops on a
+    comma that introduces nothing.
+    """
+    head = head.rstrip()
+    while True:
+        trimmed = _INTRO_TAIL_RE.sub("", head).rstrip(",;:—- ")
+        if trimmed == head:
+            return head
+        head = trimmed
+
+
+def _clip_whole_url(row: str, width: int) -> str:
+    """Clip ``row`` to ``width`` without ever printing a partial URL.
+
+    The final truncation pass keeps a row's head and marks the loss with an
+    ellipsis — right for prose, wrong for a row whose tail CARRIES a URL:
+    ``…, or open https://cons…`` is half an address nobody can open and a word
+    nobody can read (design round 1, D2; QA Q2 measured it across content
+    widths 181–227). When the cut would land inside a URL, the row is cut at
+    the URL's start instead and the dangling introducer goes with it — the
+    same WHOLE-drop the appended URL gets in ``_status_rows``. Rows without a
+    URL, and rows that fit, come back untouched. The cut is a cell position,
+    not a character index: an em dash is one cell.
+    """
+    if width <= 1 or cell_len(row) <= width:
+        return row
+    cut = width - 1  # the cells a trailing ellipsis leaves for the text
+    for match in _URL_START_RE.finditer(row):
+        start = match.start()
+        end = start + len(_trim(row[start : _body_end(row, start)]))
+        if cell_len(row[:start]) < cut < cell_len(row[:end]):
+            return f"{_drop_dangling_intro(row[:start])}…"
+    return row
+
+
 def _center(line: Text, width: int) -> Text:
     """Left-pad ``line`` so it sits centered in ``width``."""
     pad = (width - cell_len(line.plain)) // 2
@@ -1073,13 +1121,17 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
         # authored here); the URL is the remedy the TUI cannot click, so it
         # trails the sentence and is dropped WHOLE when the row cannot hold
         # it — a half-printed address is a link nobody can open, the same
-        # rule `/login <provider>` follows. When the sentence alone overflows,
-        # the final truncation keeps its head: that names the condition.
+        # rule `/login <provider>` follows. A URL INSIDE the sentence (the
+        # Radient copy) gets the same WHOLE-drop via `_clip_whole_url`: its
+        # tail goes rather than being cut mid-address (design round 1, D2).
+        # When the sentence alone overflows, the final truncation keeps its
+        # head: that names the condition.
         glyph = NOTICE_GLYPHS["warning"]
         quota = info.quota_notice
         body = f"{glyph} {quota.text}"
         if quota.url is not None and cell_len(f"{body} {quota.url}") <= width:
             body = f"{body} {quota.url}"
+        body = _clip_whole_url(body, width)
         rows.append((_PRIORITY_QUOTA, Text(body, style=warn, no_wrap=True)))
     if info.missing_credential:
         # The single most common first-run failure, so it is spelled as the
@@ -1430,7 +1482,24 @@ def build_welcome_lines(
     # a single left edge below the wordmark whatever the model label turns out to
     # be. The logo is centred separately because it is centred as a LOCKUP —
     # sharing the pad would left-align the mark against the text blocks.
-    status_lines, hints = _center_blocks([[line for _, line in status], hints], width)
+    #
+    # The quota row is excluded from that pad and centred on its own width,
+    # exactly like the tip below: it is a sentence, it is usually the widest
+    # line on screen, and the warmer paints it into a LIVE splash — folding it
+    # in would collapse the pad to zero the moment it lands, re-anchoring the
+    # whole stack left by half the row (design round 1, D1: measured as a
+    # 280 px jump at 96 cells, on the cold-boot path this feature exists for).
+    status_texts = [line for _, line in status]
+    quota_index = next(
+        (index for index, (priority, _) in enumerate(status) if priority == _PRIORITY_QUOTA),
+        None,
+    )
+    if quota_index is None:
+        status_lines, hints = _center_blocks([status_texts, hints], width)
+    else:
+        hosted = [line for index, line in enumerate(status_texts) if index != quota_index]
+        status_lines, hints = _center_blocks([hosted, hints], width)
+        status_lines.insert(quota_index, _center(status_texts[quota_index], width))
     lines: list[Text] = []
     if show_mark:
         lines.extend(mark)
