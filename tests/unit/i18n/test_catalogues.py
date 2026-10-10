@@ -10,11 +10,24 @@ import pytest
 
 from local_operator.i18n import catalogues
 
+#: The `wire.*` namespaces still awaiting their extraction slice: stub files
+#: that M0 shipped and no slice has populated yet (RFC §5: later slices
+#: populate them). An extraction slice removes its namespace from this tuple
+#: in its own PR, so the set shrinks until P5 and the file-list assertion
+#: below stays the part that must never change.
+_PENDING_EXTRACTION = (
+    "wire.errors",
+    "wire.exec",
+    "wire.incidents",
+    "wire.notices",
+)
+
 
 def test_shipped_wire_namespaces_exist() -> None:
-    # M0 shipped the six `wire.*` namespace files as STUBS; slices populate
-    # them one namespace per PR (RFC §5). `wire.settings` is populated by S1;
-    # the rest stay empty until their own slices land.
+    # M0 shipped the six `wire.*` namespace files as STUBS (RFC §5): the files
+    # exist so later slices populate them. `wire.slash` was populated by the S2
+    # extraction slice and `wire.settings` by S1; the rest stay empty until
+    # their own slices land.
     assert catalogues.locales() == ("en",)
     assert catalogues.namespaces("en") == (
         "wire.errors",
@@ -24,13 +37,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.settings",
         "wire.slash",
     )
-    populated = {"wire.settings"}
-    for namespace in catalogues.namespaces("en"):
-        messages = catalogues.load_catalogue("en", namespace)
-        if namespace in populated:
-            assert messages, f"{namespace} is populated by its slice"
-        else:
-            assert messages == {}, f"{namespace} is still a stub"
+    for namespace in _PENDING_EXTRACTION:
+        assert catalogues.load_catalogue("en", namespace) == {}
+    assert catalogues.load_catalogue("en", "wire.slash") != {}
+    assert catalogues.load_catalogue("en", "wire.settings") != {}
 
 
 def test_hash_is_over_file_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

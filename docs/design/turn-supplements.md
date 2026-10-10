@@ -1028,16 +1028,20 @@ should land as its own UI PR **immediately — this week** (§8 F6). The supplem
 round adds one row mounting the *preview* sandbox with the S1-S11 set, because it is the
 closest existing analogue.
 
-> **Status (core PR #2134, remediation round 1).** The *allow-root* half of the route fix
-> landed in core: `/v1/static/*` now serves only a regular file inside a served root (agent
-> home, session scratchpads, uploads, a running session's cwd below `$HOME`, `static.roots`),
-> refuses a non-loopback `Host`, drops its CORS grant for every non-admitted origin, and
-> carries `nosniff` + a CSP ending in `frame-ancestors` on every response. The UI sandbox
-> half is local-operator-ui PR #931. **Still open:** the *desktop-bearer* half -- the routes
-> stay unauthenticated because `<img>/<iframe src>` cannot carry a header; the fix is a
-> short-lived signed query token minted by an authenticated endpoint and verified in core,
-> which needs the UI lane. Known cost until the UI reads local file bytes over IPC: previews
-> and thumbnails of files outside every root 403 (see `docs/DESKTOP_API.md`).
+> **Status (core PR #2134, remediation round 1; refreshed for the file-serving RFC,
+> core P1).** The *allow-root* half of the route fix landed in core: `/v1/static/*`
+> now serves unclamped for connections accepted on loopback -- any readable regular
+> file -- with the served-roots clamp kept only as the rooted fallback posture
+> (`docs/design/file-serving-and-surface-convergence.md` §3); it refuses a
+> non-loopback `Host` (fail-closed for a wildcard/empty announced host), drops its
+> CORS grant for every non-admitted origin, and carries `nosniff` + a CSP ending in
+> `frame-ancestors` on every response. The UI sandbox half is local-operator-ui PR
+> #931. **Still open:** the *desktop-bearer* half -- the routes stay unauthenticated
+> because `<img>/<iframe src>` cannot carry a header; the fix is a short-lived signed
+> query token minted by an authenticated endpoint and verified in core, which needs
+> the UI lane. Known cost until the UI reads local file bytes over IPC: the
+> `<img>`-observable existence/dimension signal now covers the disk rather than a
+> root list (accepted residual, RFC §7e).
 
 ### 4.2 Host-side validation (defence in depth, not the boundary)
 

@@ -4381,8 +4381,11 @@ SETTINGS: tuple[Setting, ...] = (
         default=[],
         empty_unsets=True,
         validate_value=_validate_static_roots,
-        # The consequence is the point of the row: every entry WIDENS what an
-        # unauthenticated local caller can trigger a read of.
+        # The consequence is now scoped (file-serving RFC §3, core P1): this row
+        # is consulted only by the rooted FALLBACK posture -- a connection the
+        # server cannot prove is loopback. The default posture serves any
+        # readable file, so setting this no longer widens the normal path, and
+        # the daemon itself can no longer be bound beyond loopback at all.
         warning=_t(_ws.static_roots_warning()),
         help=(_t(_ws.static_roots_help())),
         placeholder=_t(_ws.static_roots_placeholder()),
