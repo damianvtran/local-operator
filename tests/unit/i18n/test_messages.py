@@ -41,6 +41,13 @@ def fixture_catalogues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         ),
         encoding="utf-8",
     )
+    # Core hardening (S2 M1): decode/parse failures are runtime
+    # CatalogueInvalid, so they degrade. `wire.errors.retry.json` is
+    # deliberately malformed beside the valid `wire.errors.retry.exhausted` in
+    # `wire.errors.json`: the resolver must SKIP a candidate that fails to
+    # parse, not raise through it.
+    (root / "en" / "wire.errors.retry.json").write_bytes(b"{garbled")
+    (root / "en" / "wire.errors.malformed.json").write_bytes(b"\xff\xfe{}")
     (root / "fr").mkdir()
     (root / "fr" / "wire.errors.json").write_text(
         json.dumps({"wire.errors.model_unavailable": "Le modèle {model} est indisponible."}),
@@ -160,3 +167,53 @@ def test_a_deeper_file_does_not_shadow_a_key_in_the_shallower_one(
 def test_unknown_deep_code_still_degrades(fixture_catalogues: None) -> None:
     got = messages.envelope("wire.errors.auth.no_such_key", {})
     assert got["text"] == "wire.errors.auth.no_such_key"
+
+
+def test_malformed_catalogue_degrades_instead_of_raising(fixture_catalogues: None) -> None:
+    # Core hardening (S2 M1): a file that is not valid UTF-8/JSON must degrade
+    # a lookup to the code — the never-raise contract — and an envelope keeps
+    # its code and params.
+    got = messages.envelope("wire.errors.malformed.thing", {"x": 1})
+    assert got["text"] == "wire.errors.malformed.thing"
+    assert got["params"] == {"x": 1}
+
+
+def test_a_malformed_deeper_file_does_not_block_a_shallower_definition(
+    fixture_catalogues: None,
+) -> None:
+    # The resolver's probe skips a candidate that fails to parse (the malformed
+    # `wire.errors.retry.json` beside the valid definition in
+    # `wire.errors.json`) instead of raising through it.
+    assert messages.render("wire.errors.retry.exhausted", {"n": 2}) == (
+        "Retries exhausted after 2 attempts."
+    )
+
+
+def test_two_fixture_roots_resolve_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # NIT-2 (#2166), reshaped per review round 1: the two trees must define the
+    # same code in DIFFERENT namespaces, or a root-blind cache key is
+    # invisible — message loading is uncached, so same-namespace fixtures flow
+    # per root even when the resolved namespace is wrongly shared. Here
+    # `demo.deep.word` lives in `demo` for root A and in `demo.deep` for root
+    # B: if `root` ever leaves the cache key, B's render reuses A's cached
+    # namespace (`demo`), finds no `demo.json` in B, and degrades to the bare
+    # code — the B assertion below goes red (mutation-probed in round 1).
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    (root_a / "en").mkdir(parents=True)
+    (root_a / "en" / "demo.json").write_text(
+        json.dumps({"demo.deep.word": "from A"}), encoding="utf-8"
+    )
+    (root_b / "en").mkdir(parents=True)
+    (root_b / "en" / "demo.deep.json").write_text(
+        json.dumps({"demo.deep.word": "from B"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root_a)
+    assert messages.render("demo.deep.word", {}) == "from A"
+    assert messages.render("demo.deep.word", {}) == "from A"  # cached resolution
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root_b)
+    assert messages.render("demo.deep.word", {}) == "from B"
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root_a)
+    assert messages.render("demo.deep.word", {}) == "from A"
