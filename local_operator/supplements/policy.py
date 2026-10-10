@@ -71,7 +71,12 @@ DEFAULT_MAX_TURNS: Final = 2
 MAX_TURNS_BOUNDS: Final = (1, 4)
 DEFAULT_MAX_OUTPUT_TOKENS: Final = 6000
 DEFAULT_TIMEOUT_S: Final = 90
-DEFAULT_MAX_COST_USD: Final = 0.20
+#: Soft, BETWEEN-TURNS cap on one job's spend (memo §2.12): it stops a job that crosses it,
+#: never a turn mid-flight. $1.00 covers roughly one Opus-class turn -- operator directive,
+#: 2026-10-10 -- where the original $0.20 assumed a Sonnet-class generator envelope (2 x
+#: the memo's measured $0.08 per-job high end plus $0.04 of headroom, §5.3). The generator
+#: (C1b) is its reader; C1a writes no spend against it.
+DEFAULT_MAX_COST_USD: Final = 1.00
 #: The "N more" threshold: how many callouts are featured before the rest collapse.
 DEFAULT_MAX_FEATURED: Final = 4
 DEFAULT_DENY_PREFIXES: Final[tuple[str, ...]] = ()
@@ -163,7 +168,7 @@ def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
 def _nonnegative_float(value: Any, default: float) -> float:
     # ``0`` is a VALID stored value here, not a malformed one (agent review round 1, R4):
     # the settings page accepts ``maxCostUsd: 0`` -- "never spend" -- and mapping it to the
-    # 0.20 default turned a block into a permit. Negative, bool and non-numeric stay
+    # default turned a block into a permit. Negative, bool and non-numeric stay
     # malformed -> default, and there is deliberately NO upper cutoff: the registry's 100.0
     # is the page's control ceiling, while a hand-edited higher cap is the user's own
     # written money guard -- substituting the default would silently change a limit they

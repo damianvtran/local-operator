@@ -3235,11 +3235,13 @@ SETTINGS: tuple[Setting, ...] = (
         section="supplements",
         label="↳ cost cap ($)",
         kind=Kind.FLOAT,
-        default=0.20,
+        default=1.00,
         help="Needs graphics on. Soft cap on one job's spend.",
         # ``0`` is a VALID value -- "never spend" -- and the reader honours it as stored
         # (round-1 R4); the range is only the page's control window, not the reader's
-        # limit (a hand-edited higher cap stays the user's own stated guard).
+        # limit (a hand-edited higher cap stays the user's own stated guard). The literal
+        # must equal ``policy.DEFAULT_MAX_COST_USD`` (the defaults-drift test compares
+        # them); $1.00 since the operator directive of 2026-10-10 (was $0.20).
         minimum=0.0,
         maximum=100.0,
         gated_by="supplements.graphics",

@@ -630,7 +630,7 @@ def test_supplements_registry_bounds_are_honoured_by_the_reader() -> None:
     accept range (``policy``'s bounds, applied by ``SupplementSettings.from_values``)
     must CONTAIN it, or a value a user clicked is silently swapped for the default.
     Agent review round 1, R4 found the two pairs disagreeing both ways: ``maxCostUsd: 0``
-    -- "never spend" -- came back as the 0.20 default, and ``maxOutputTokens`` had no page
+    -- "never spend" -- came back as the default, and ``maxOutputTokens`` had no page
     maximum while the reader maps anything above 1,000,000 to 6000. Exercised THROUGH
     ``from_values`` at both extremes of every bounded row, so it fails on whichever side
     of the pair drifts -- the shape ``test_the_team_depth_maximum_matches_max_org_depth``
@@ -672,6 +672,23 @@ def test_supplements_registry_bounds_are_honoured_by_the_reader() -> None:
     assert (
         SupplementSettings.from_values({"supplements": {"maxCostUsd": 100.0}}).max_cost_usd == 100.0
     )
+
+
+def test_supplements_max_cost_default_is_pinned_as_a_literal() -> None:
+    """The shipped cap is $1.00 per job, pinned as a LITERAL.
+
+    ``test_every_default_matches_its_consumer`` compares the registry row against
+    ``policy.DEFAULT_MAX_COST_USD``, so the two moving together stays green; the NUMBER is
+    what needs pinning. $1.00 is the operator directive of 2026-10-10 -- roughly one
+    Opus-class turn -- where the original $0.20 assumed a Sonnet-class generator envelope.
+    """
+    from local_operator.supplements import policy
+    from local_operator.supplements.policy import SupplementSettings
+
+    assert settings_io.BY_KEY["supplements.maxCostUsd"].default == 1.00
+    assert policy.DEFAULT_MAX_COST_USD == 1.00
+    # And the reader's own fallback agrees, so an absent key stores the same number.
+    assert SupplementSettings.from_values({}).max_cost_usd == 1.00
 
 
 def test_display_keys_are_flat_dotted() -> None:
