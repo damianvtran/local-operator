@@ -715,10 +715,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     # -- the one legitimate remover -----------------------------------------
     (
-        "local_operator/session/cleanup.py::remove_session_dir",
+        "local_operator/session/cleanup.py::_bounded_rmtree",
         "shutil.rmtree",
-        "THE session remover: guarded by the store marker, the config dir, "
-        "the hard guards and the cleanup log",
+        "THE ONE directory remover under sessions/, shared by remove_session_dir "
+        "and the scratchpad-content pass (remove_scratchpad_entry): called only "
+        "with a target those two already guarded, and its widen/retry phases "
+        "touch nothing outside the target itself",
+    ),
+    (
+        "local_operator/session/cleanup.py::remove_scratchpad_entry",
+        "os.unlink",
+        "The content phase's FILE remover: _scratchpad_refusal has cleared the "
+        "target (pre-resolve symlink check, strict containment below "
+        "<store>/<session>/scratchpad/, store marker, config dir), the removal "
+        "shape is an lstat-confirmed non-directory, and the caller only plans "
+        "files whose shape+size+age passed",
     ),
     (
         "local_operator/session/cleanup.py::_write_record",
@@ -2608,6 +2619,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes this request's tempfile.mkdtemp() upload spool; never session-derived",
         2,
     ),
+    # -- the delegated content layer's rescue-bundle housekeeping ------------
+    # Both calls touch the SAME two artefacts, both spelled from the plan's
+    # ``bundle_path`` (``<pad>/reap-rescue-<tree>.bundle``, strictly inside a
+    # session's ``scratchpad/``): git's ``<bundle>.lock`` and the partial
+    # bundle itself. They are the only files this pass ever writes into a pad.
+    # The lock is cleared before ``git bundle create`` so a killed attempt
+    # cannot block every later retry with "File exists" (measured on the
+    # acceptance copy), and both are removed on failure so the next pass
+    # retries from nothing. Neither call can name a session entry or a
+    # directory — the lock is a sibling of a path the plan already vetted.
+    (
+        "local_operator/session/delegated_retention.py::_write_rescue_bundle",
+        "<path>.unlink",
+        "Clears <bundle>.lock before git bundle create; the bundle target is the "
+        "plan's own path inside the pad, and clearing its stale lock is self-healing",
+    ),
+    (
+        "local_operator/session/delegated_retention.py::_write_rescue_bundle._clean_up",
+        "<path>.unlink",
+        "Best-effort removal of those same two artefacts (partial bundle + lock) "
+        "after a failed create or verify, so the next pass starts clean",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
@@ -2874,7 +2907,13 @@ def test_cleanup_module_is_the_only_directory_remover_near_sessions() -> None:
         for rel, _line, label, owner in _call_sites()
         if rel in near and label.rsplit(".", 1)[-1] in ("rmtree", "rmdir", "removedirs")
     )
-    assert hits == [f"{CLEANUP_MODULE}::remove_session_dir"], hits
+    # The single remover MOVED when the scratchpad-content pass arrived
+    # (delegated content reclaim): remove_session_dir now delegates its rmtree
+    # to _bounded_rmtree so ONE call site — hook and pre-widen walk included —
+    # serves both it and remove_scratchpad_entry (see the allow-list rows).
+    # The belt's intent is unchanged: exactly ONE function, inside the cleanup
+    # module, holds a directory remover anywhere near sessions.
+    assert hits == [f"{CLEANUP_MODULE}::_bounded_rmtree"], hits
 
 
 def test_displacers_near_sessions_are_the_named_set() -> None:

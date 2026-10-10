@@ -14,6 +14,7 @@ touches the operator's real one.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import time
@@ -29,6 +30,7 @@ from local_operator.session.cleanup import (
     clamp_delegated_hours,
     mark_store,
     policy_from_config,
+    remove_scratchpad_entry,
     run_cleanup,
 )
 
@@ -1095,3 +1097,511 @@ def test_the_desktop_wire_notice_carries_the_message_and_the_numbers() -> None:
         wire["removed"] == 12 and wire["in_progress"] is True and "Cleaned up 12" in wire["message"]
     )
     assert dr.notice_wire({"removed_total": 12})["in_progress"] is False
+
+
+# --------------------------------------------------------------------------
+# THE CONTENT LAYER (the carve-out): what a KEPT record's pad still releases
+# --------------------------------------------------------------------------
+#
+# These fixtures build REAL repositories with the real toolchain: the rules
+# are about what git says (ancestry, ref reachability), and a mocked git
+# would only restate the mock. Everything happens under ``tmp_path`` stores
+# with a fake HOME; nothing touches an operator's directories.
+
+_GIT_TEST_ENV = {key: value for key, value in os.environ.items() if key != "XPC_FLAGS"}
+_GIT_TEST_ENV.update(_GIT)
+
+
+def _git_stdout(*args: str) -> str:
+    """Run one git command outside any repository (``bundle list-heads``)."""
+    done = subprocess.run(
+        ["git", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_GIT_TEST_ENV,
+        timeout=60,
+    )
+    return done.stdout
+
+
+def _kept_pad(root: Path, name: str) -> Path:
+    """A delegated session whose RECORD the pass keeps, with a scratchpad/.
+
+    The keep comes from an active parent (a roster edge) — the carve-out's
+    case: the record stays, the content rules still run.
+    """
+    _mk(root, f"parent-{name}", None, age_h=10, roster=[name])
+    directory = _mk(root, name)
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    return pad
+
+
+def _stale_file(path: Path, *, size_mb: int = 11, age_h: float = 24) -> Path:
+    """A sparse file of roughly ``size_mb`` MiB, last modified ``age_h`` ago."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.seek(size_mb * 1024 * 1024 - 1)
+        handle.write(b"\0")
+    stamp = NOW - age_h * HOUR
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def _merged_tree(pad: Path, name: str, root: Path) -> Path:
+    """A clone that is clean, pushed, and whose HEAD is on origin/main."""
+    origin = root / "origins" / f"{name}.git"
+    origin.parent.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "--bare", "-b", "main", os.fspath(origin))
+    tree = pad / name
+    tree.mkdir()
+    _git(tree, "init", "-q", "-b", "main")
+    _git(tree, "remote", "add", "origin", os.fspath(origin))
+    (tree / "a.txt").write_text("a\n")
+    _git(tree, "add", "a.txt")
+    _git(tree, "commit", "-qm", "one")
+    _git(tree, "push", "-q", "origin", "main")
+    _git(tree, "fetch", "-q", "origin")
+    _git(tree, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    return tree
+
+
+def test_a_merged_clean_clone_past_the_window_is_reclaimed_whole(root: Path) -> None:
+    pad = _kept_pad(root, "reapme")
+    tree = _merged_tree(pad, "clone", root)
+    result = _pass(root)
+    assert (root / "sessions" / "reapme").exists(), "only content goes; the record stays"
+    assert not tree.exists()
+    assert [(row.session, row.reason) for row in result.content] == [
+        ("reapme", "merged-clean clone past the window")
+    ]
+    row = result.content[0]
+    assert row.classes == ("merged-clean clone",) and row.entries >= 1 and row.bytes > 0
+    assert row.rescue_bundle == "", "every local ref is on the remote: no bundle needed"
+    assert not (pad / "reap-rescue-clone.bundle").exists()
+    assert list(pad.iterdir()) == [], "the pad root itself stays, its content goes"
+
+
+def test_a_pushed_but_unmerged_clone_is_kept(root: Path) -> None:
+    pad = _kept_pad(root, "unmerged")
+    tree = _merged_tree(pad, "clone", root)
+    (tree / "b.txt").write_text("b\n")
+    _git(tree, "add", "b.txt")
+    _git(tree, "commit", "-qm", "two")
+    _git(tree, "push", "-q", "origin", "HEAD:feature")
+    result = _pass(root)
+    assert tree.exists() and (tree / "b.txt").exists()
+    assert result.content == []
+    assert result.content_kept == [("unmerged", "clone: HEAD is not merged into the remote trunk")]
+
+
+def test_a_dirty_clone_is_kept(root: Path) -> None:
+    pad = _kept_pad(root, "dirtyone")
+    tree = _merged_tree(pad, "clone", root)
+    (tree / "a.txt").write_text("changed\n")
+    result = _pass(root)
+    assert tree.exists()
+    assert result.content_kept == [("dirtyone", "clone: uncommitted changes")]
+
+
+def test_a_clone_with_no_remote_is_kept(root: Path) -> None:
+    pad = _kept_pad(root, "noremote")
+    tree = pad / "clone"
+    tree.mkdir()
+    _git(tree, "init", "-q", "-b", "main")
+    (tree / "a.txt").write_text("a\n")
+    _git(tree, "add", "a.txt")
+    _git(tree, "commit", "-qm", "one")
+    result = _pass(root)
+    assert tree.exists()
+    assert result.content_kept == [
+        (
+            "noremote",
+            "clone: no remote trunk (origin/HEAD, origin/main or origin/master) to compare",
+        )
+    ]
+
+
+def test_a_broken_gitdir_link_keeps_the_directory_whole(root: Path) -> None:
+    pad = _kept_pad(root, "broken")
+    tree = pad / "clone"
+    tree.mkdir()
+    (tree / ".git").write_text("gitdir: /nonexistent/elsewhere.git\n")
+    (tree / "notes.txt").write_text("evidence\n")
+    result = _pass(root)
+    assert tree.exists() and (tree / "notes.txt").exists()
+    assert result.content_kept == [
+        ("broken", "clone: HEAD does not resolve (or the gitdir link is broken)")
+    ]
+
+
+def test_a_stale_big_log_is_reclaimed_and_small_or_fresh_files_stay(root: Path) -> None:
+    pad = _kept_pad(root, "logs")
+    big = _stale_file(pad / "desktop-suite.log")
+    big_size = big.stat().st_size
+    small = _stale_file(pad / "fd-run.log", size_mb=1)
+    fresh = _stale_file(pad / "today.log", age_h=1)
+    (pad / "notes.md").write_text("what happened\n")
+    (pad / "drive.py").write_text("print('x')\n")
+    evidence = pad / "evidence"
+    evidence.mkdir()
+    (evidence / "frame.png").write_bytes(b"\x89PNG")
+    result = _pass(root)
+    assert not big.exists()
+    assert small.exists() and fresh.exists()
+    assert (pad / "notes.md").exists() and (pad / "drive.py").exists()
+    assert (evidence / "frame.png").exists()
+    assert [(row.session, row.bytes, row.entries) for row in result.content] == [
+        ("logs", big_size, 1)
+    ]
+
+
+def test_a_loose_node_modules_is_reclaimed_whole(root: Path) -> None:
+    pad = _kept_pad(root, "mods")
+    (pad / "node_modules").mkdir()
+    (pad / "node_modules" / "pkg.js").write_text("x\n")
+    result = _pass(root)
+    assert not (pad / "node_modules").exists()
+    assert [(row.session, row.reason, row.classes) for row in result.content] == [
+        ("mods", "build shapes past the window", ("build shapes",))
+    ]
+
+
+def test_content_inside_a_kept_tree_is_never_touched(root: Path) -> None:
+    pad = _kept_pad(root, "held")
+    tree = _merged_tree(pad, "clone", root)
+    (tree / ".gitignore").write_text("node_modules/\n")
+    _git(tree, "add", ".gitignore")
+    _git(tree, "commit", "-qm", "ignore")
+    _git(tree, "push", "-q", "origin", "HEAD:feature")
+    (tree / "node_modules").mkdir()
+    (tree / "node_modules" / "pkg.js").write_text("x\n")
+    result = _pass(root)
+    assert result.content == []
+    assert (tree / "node_modules" / "pkg.js").exists()
+    assert result.content_kept == [("held", "clone: HEAD is not merged into the remote trunk")]
+
+
+def test_a_dot_git_entry_is_never_taken_by_shape(root: Path) -> None:
+    pad = _kept_pad(root, "gitroot")
+    (pad / ".git").mkdir()
+    (pad / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (pad / "notes.md").write_text("kept\n")
+    result = _pass(root)
+    assert (pad / ".git" / "HEAD").exists() and (pad / "notes.md").exists()
+    assert result.content == []
+    assert result.content_kept == [("gitroot", "the scratchpad root is itself a git tree")]
+
+
+def test_a_build_named_directory_with_a_gitdir_is_judged_as_a_tree(root: Path) -> None:
+    pad = _kept_pad(root, "treeshape")
+    build = pad / "build"
+    build.mkdir()
+    (build / ".git").mkdir()
+    (build / "junk.txt").write_text("x\n")
+    loose = pad / "out"
+    loose.mkdir()
+    (loose / "payload.bin").write_text("y\n")
+    result = _pass(root)
+    assert build.exists() and (build / ".git").exists() and (build / "junk.txt").exists()
+    assert not loose.exists()
+    assert [row.reason for row in result.content] == ["build shapes past the window"]
+    assert (
+        "treeshape",
+        "build: HEAD does not resolve (or the gitdir link is broken)",
+    ) in result.content_kept
+
+
+def test_a_symlink_entry_is_skipped_not_followed(root: Path) -> None:
+    pad = _kept_pad(root, "linked")
+    outside = root / "outside"
+    outside.mkdir()
+    _stale_file(outside / "big.log")
+    os.symlink(os.fspath(outside), os.fspath(pad / "node_modules"))
+    os.symlink(os.fspath(outside / "big.log"), os.fspath(pad / "copy.log"))
+    result = _pass(root)
+    assert result.content == []
+    assert (outside / "big.log").exists()
+    assert (pad / "node_modules").is_symlink() and (pad / "copy.log").is_symlink()
+
+
+def test_a_read_only_tree_is_reclaimed_through_the_widen_path(root: Path) -> None:
+    pad = _kept_pad(root, "husk")
+    tree = pad / "node_modules"
+    tree.mkdir()
+    (tree / "pkg.js").write_text("x\n")
+    os.chmod(tree / "pkg.js", 0o444)
+    os.chmod(tree, 0o555)
+    result = _pass(root)
+    assert not tree.exists()
+    assert len(result.content) == 1 and result.errors == 0
+
+
+def test_an_unreadable_tree_is_reclaimed_through_the_pre_widen_walk(root: Path) -> None:
+    pad = _kept_pad(root, "husk0")
+    tree = pad / "node_modules"
+    tree.mkdir()
+    (tree / "pkg.js").write_text("x\n")
+    os.chmod(tree, 0o000)
+    result = _pass(root)
+    assert not tree.exists()
+    assert len(result.content) == 1 and result.errors == 0
+
+
+def test_a_failed_file_removal_keeps_the_file_and_counts_an_error(
+    root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pad = _kept_pad(root, "stuck")
+    holder = pad / "holder"
+    holder.mkdir()
+    big = _stale_file(holder / "big.log")
+    os.chmod(holder, 0o555)  # readable, not writable: the unlink fails
+    with caplog.at_level(logging.WARNING):
+        result = _pass(root)
+    assert big.exists()
+    assert result.content == [] and result.errors == 1
+    assert ("stuck", "scratchpad/holder/big.log: cannot be removed") in result.content_kept
+    assert any("cannot remove" in message for message in caplog.messages)
+
+
+def test_the_content_drain_batches_and_the_second_pass_is_idempotent(root: Path) -> None:
+    for name in ("c1", "c2", "c3"):
+        _stale_file(_kept_pad(root, name) / "big.log")
+    first = _pass(root, batch_size=1, budget_s=0.0)
+    assert [row.session for row in first.content] == ["c1"]
+    assert first.content_remaining == 2 and first.content_budget_exhausted
+    second = _pass(root, batch_size=1, budget_s=60.0)
+    assert [row.session for row in second.content] == ["c2", "c3"]
+    assert second.content_remaining == 0 and not second.content_budget_exhausted
+    third = _pass(root)
+    assert third.content == [] and third.content_remaining == 0
+
+
+def test_a_content_reclaim_writes_one_log_row_per_pad(root: Path) -> None:
+    pad = _kept_pad(root, "rowy")
+    big = _stale_file(pad / "desktop-suite.log")
+    size = big.stat().st_size
+    _pass(root)
+    rows = [
+        json.loads(line) for line in (root / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["session"] == "rowy"
+    assert row["policy"] == "delegated_scratchpad"
+    assert row["reason"] == "stale output past the window"
+    assert row["bytes"] == size and row["entries"] == 1
+    assert row["title"] == "" and row["actor"] == "startup"
+    assert row["classes"] == ["stale output"]
+
+
+def test_content_totals_land_in_the_state_file_without_touching_the_notice_keys(
+    root: Path,
+) -> None:
+    state = root / "sessions" / dr.STATE_NAME
+    state.write_text(
+        json.dumps(
+            {
+                "removed_total": 5,
+                "first_removal_at": "2026-10-01T00:00:00+0000",
+                "notice_acknowledged": False,
+            }
+        )
+    )
+    _stale_file(_kept_pad(root, "stated") / "big.log")
+    _pass(root)
+    data = json.loads(state.read_text())
+    assert data["removed_total"] == 5, "content reclaims remove no sessions"
+    assert data["first_removal_at"] == "2026-10-01T00:00:00+0000"
+    assert data["content_reclaimed_total"] == 1
+    assert data["content_freed_bytes_estimate"] >= 11 * 1024 * 1024
+    assert "content_last_removal_at" in data
+
+
+def test_a_dry_run_lists_the_content_it_would_take_and_writes_nothing(root: Path) -> None:
+    pad = _kept_pad(root, "drypad")
+    tree = _merged_tree(pad, "clone", root)
+    _git(tree, "checkout", "-qb", "stray")
+    (tree / "b.txt").write_text("b\n")
+    _git(tree, "add", "b.txt")
+    _git(tree, "commit", "-qm", "two")
+    _git(tree, "checkout", "-q", "main")
+    _stale_file(pad / "desktop-suite.log")
+    result = _pass(root, dry_run=True)
+    assert [row.session for row in result.content] == ["drypad"]
+    row = result.content[0]
+    assert row.classes == ("merged-clean clone", "stale output")
+    assert row.rescue_bundle.endswith("reap-rescue-clone.bundle")
+    assert tree.exists() and (pad / "desktop-suite.log").exists()
+    assert not (pad / "reap-rescue-clone.bundle").exists(), "a dry run writes no bundle"
+    assert not (root / "sessions" / CLEANUP_LOG_NAME).exists()
+    assert not (root / "sessions" / dr.STATE_NAME).exists()
+
+
+def test_unique_sidebar_refs_are_rescued_into_a_bundle_before_the_tree_goes(
+    root: Path,
+) -> None:
+    pad = _kept_pad(root, "strayrefs")
+    tree = _merged_tree(pad, "clone", root)
+    _git(tree, "checkout", "-qb", "stray")
+    (tree / "b.txt").write_text("b\n")
+    _git(tree, "add", "b.txt")
+    _git(tree, "commit", "-qm", "two")
+    (tree / "a.txt").write_text("held aside\n")
+    _git(tree, "stash", "push", "-q", "-m", "held")
+    _git(tree, "checkout", "-q", "main")
+    result = _pass(root)
+    assert not tree.exists()
+    row = result.content[0]
+    assert row.reason == "merged-clean clone past the window"
+    bundle = Path(row.rescue_bundle)
+    assert bundle == pad / "reap-rescue-clone.bundle"
+    assert bundle.exists()
+    assert row.rescue_bundle_bytes == bundle.stat().st_size and row.rescue_bundle_bytes > 0
+    heads = _git_stdout("bundle", "list-heads", os.fspath(bundle))
+    assert "refs/heads/stray" in heads and "refs/stash" in heads
+    assert "refs/heads/main" not in heads, "a pushed ref needs no rescue"
+    log_row = json.loads((root / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()[-1])
+    assert log_row["rescue_bundle"] == os.fspath(bundle)
+
+
+def test_a_tree_over_the_uniqueness_cap_is_kept(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pad = _kept_pad(root, "capped")
+    tree = _merged_tree(pad, "clone", root)
+    _git(tree, "checkout", "-qb", "stray")
+    for name in ("b", "c"):
+        (tree / f"{name}.txt").write_text(f"{name}\n")
+        _git(tree, "add", f"{name}.txt")
+        _git(tree, "commit", "-qm", name)
+    _git(tree, "checkout", "-q", "main")
+    monkeypatch.setattr(dr, "CONTENT_MAX_UNIQUE_COMMITS", 1)
+    result = _pass(root)
+    assert tree.exists() and result.content == []
+    assert result.content_kept == [
+        ("capped", "clone: more unique commits than the rescue check will list")
+    ]
+
+
+def test_a_bundle_failure_keeps_the_tree_and_counts_an_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pad = _kept_pad(root, "rescuefail")
+    tree = _merged_tree(pad, "clone", root)
+    _git(tree, "checkout", "-qb", "stray")
+    (tree / "b.txt").write_text("b\n")
+    _git(tree, "add", "b.txt")
+    _git(tree, "commit", "-qm", "two")
+    _git(tree, "checkout", "-q", "main")
+
+    def _fail(repo: Path, bundle_path: Path, refnames: list[str]) -> str:
+        return "git bundle create failed for clone"
+
+    monkeypatch.setattr(dr, "_write_rescue_bundle", _fail)
+    result = _pass(root)
+    assert tree.exists()
+    assert result.content == [] and result.errors == 1
+    assert result.content_kept == [("rescuefail", "clone: git bundle create failed for clone")]
+
+
+def test_a_stale_bundle_lock_does_not_block_the_next_pass(root: Path) -> None:
+    pad = _kept_pad(root, "locky")
+    tree = _merged_tree(pad, "clone", root)
+    _git(tree, "checkout", "-qb", "stray")
+    (tree / "b.txt").write_text("b\n")
+    _git(tree, "add", "b.txt")
+    _git(tree, "commit", "-qm", "two")
+    _git(tree, "checkout", "-q", "main")
+    # A killed earlier attempt leaves git's lock file behind; without the
+    # self-heal, "File exists" blocks every retry (measured on the acceptance
+    # copy: a 5 s bound firing mid-create did exactly that).
+    (pad / "reap-rescue-clone.bundle.lock").write_text("")
+    result = _pass(root)
+    assert not tree.exists()
+    bundle = pad / "reap-rescue-clone.bundle"
+    assert bundle.exists() and not (pad / "reap-rescue-clone.bundle.lock").exists()
+    assert result.content and result.errors == 0
+
+
+def test_content_of_a_young_session_is_never_evaluated(root: Path) -> None:
+    young = _mk(root, "young", age_h=1)
+    pad = young / "scratchpad"
+    pad.mkdir()
+    _stale_file(pad / "big.log")
+    result = _pass(root)
+    assert result.content == [] and result.content_kept == []
+    assert (pad / "big.log").exists()
+
+
+def test_content_of_a_live_claimed_session_is_untouched(root: Path) -> None:
+    pad = _kept_pad(root, "livemod")
+    _stale_file(pad / "big.log")
+    (root / "sessions" / "livemod" / ".session.pid").write_text(str(os.getpid()))
+    result = _pass(root)
+    assert result.content == []
+    assert result.content_kept == [("livemod", "claimed by a live process")]
+    assert (pad / "big.log").exists()
+
+
+def test_content_of_a_wake_armed_session_is_untouched(root: Path) -> None:
+    pad = _kept_pad(root, "woken")
+    _stale_file(pad / "big.log")
+    wakes = root / "wakes"
+    wakes.mkdir()
+    (wakes / "woken.json").write_text(json.dumps({"schedules": [{"id": "w1"}]}))
+    result = _pass(root)
+    assert result.content == []
+    assert result.content_kept == [("woken", "armed wake for this session")]
+    assert (pad / "big.log").exists()
+
+
+def test_content_of_a_monitored_session_is_untouched(root: Path) -> None:
+    pad = _kept_pad(root, "watched")
+    _stale_file(pad / "big.log")
+    (root / "monitors").mkdir()
+    (root / "monitors" / "watched.json").write_text(
+        json.dumps({"monitors": [{"id": "m1", "every_ms": 60000}]})
+    )
+    result = _pass(root)
+    assert result.content == []
+    assert result.content_kept == [("watched", "armed monitor for this session")]
+    assert (pad / "big.log").exists()
+
+
+def test_record_guards_do_not_block_content_the_project_case(root: Path) -> None:
+    directory = _mk(root, "kid")
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    _stale_file(pad / "big.log")
+    _project(root, "proj", "active", ["kid"])
+    result = _pass(root)
+    assert "kid" in _kept(result), "the record is kept by the open project"
+    assert [row.session for row in result.content] == ["kid"]
+
+
+def test_the_scratchpad_remover_refuses_outside_paths_and_keeps_its_contract(
+    root: Path,
+) -> None:
+    pad = _kept_pad(root, "guarded")
+    sessions = root / "sessions"
+    entry = pad / "junk"
+    entry.mkdir()
+    (entry / "x.txt").write_text("x\n")
+    assert remove_scratchpad_entry(entry, config_dir=None, sessions_dir=sessions) is True
+    assert not entry.exists()
+    piece = pad / "keepme"
+    piece.mkdir()
+    assert remove_scratchpad_entry(pad, config_dir=None, sessions_dir=sessions) is False
+    assert (
+        remove_scratchpad_entry(sessions / "guarded", config_dir=None, sessions_dir=sessions)
+        is False
+    )
+    victim = root / "victim.txt"
+    victim.write_text("x")
+    assert remove_scratchpad_entry(victim, config_dir=None, sessions_dir=sessions) is False
+    symlinked = pad / "link"
+    os.symlink(os.fspath(victim), os.fspath(symlinked))
+    assert remove_scratchpad_entry(symlinked, config_dir=None, sessions_dir=sessions) is False
+    assert piece.exists() and victim.exists() and symlinked.is_symlink()

@@ -412,11 +412,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "that gates removal: none of them is a file a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
-        2,
+        4,
         "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
         "sweep lock): the former sits at the sessions root, the latter at the config root; "
-        "neither inside a session directory. (``ROSTER_NAME`` is a session entry, already "
-        "classified by the copy set.)",
+        "neither inside a session directory. ``RESCUE_BUNDLE_PREFIX``/``RESCUE_BUNDLE_SUFFIX`` "
+        "are the FRAGMENTS of the rescue bundle's name (``reap-rescue-<tree>.bundle``), joined "
+        "to a tree's name; the result is written beside that tree inside the pad and is never "
+        "a bare session entry. "
+        "(``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
     ),
     "local_operator/session_factory.py": (
         2,
