@@ -111,17 +111,29 @@ def load_per_cpu() -> float | None:
     return load1 / cpus
 
 
-def skip_reason(
-    root: str | Path, *, free: int | None = None, load: float | None = None
-) -> str | None:
-    """Why the warm must not run now, or ``None`` when it may.
+def skip_reason(root: str | Path, *, free: int | None = None) -> str | None:
+    """Why the warm must not run AT ALL now, or ``None`` when it may.
 
-    Injected values keep the decision testable without a full disk or a busy
-    host; the defaults are the measurements above.
+    DISK PRESSURE ONLY, and that is the degradation: this fleet runs at 1-8 load
+    per CPU through the working day, so a load clause here refused the queue exactly
+    when a store needed it and a machine that is never quiet warmed nothing (QA round
+    2 measured the refusal — ``load: 1.28 per CPU ...``, 0 caches). Disk pressure is
+    different in kind: it is the one condition under which the warm must not write.
+    Load now PACES the queue instead — see :func:`pace_reason`.
     """
     measured_free = free_bytes(root) if free is None else free
     if measured_free is not None and measured_free < PREWARM_MIN_FREE_BYTES:
         return f"disk: {measured_free} bytes free is under {PREWARM_MIN_FREE_BYTES}"
+    return None
+
+
+def pace_reason(*, load: float | None = None) -> str | None:
+    """Why the queue should STOP here — not why it must not start.
+
+    Re-checked before every journal AFTER the first, so a host that becomes busy
+    mid-warm keeps what it warmed and drops the rest, and a host that is already busy
+    does ONE journal per pass rather than none.
+    """
     measured_load = load_per_cpu() if load is None else load
     if measured_load is not None and measured_load >= PREWARM_MAX_LOAD_PER_CPU:
         return f"load: {measured_load:.2f} per CPU is at or above {PREWARM_MAX_LOAD_PER_CPU}"
@@ -171,6 +183,40 @@ def sessions_needing_index(root: str | Path, *, limit: int = PREWARM_JOURNALS) -
     return candidates
 
 
+def start_session_warm(root: str | Path, session_id: str) -> bool:
+    """Warm ONE session's index now — the per-session path — and return at once.
+
+    WHY IT EXISTS. The queue above covers the newest journals once, at core start. A
+    conversation opened minutes later has no such pass and pays the cold index scan
+    on whoever opens it. A client that knows which session it is about to open can
+    ask for that work now, on a background task.
+
+    THE ANCHOR WRITE IS NOT HERE, and that is layering rather than an omission: a
+    journal's tail-anchor sidecar belongs to the stacked anchor change
+    (``session.tail_anchor``), which extends this function to schedule it alongside
+    the refresh. On this branch the per-session warm is the index half.
+
+    NEVER RAISES and NEVER BLOCKS: the caller is an HTTP handler. The scan is the
+    same single-flight task ``start_refresh`` hands out, so a second request — or the
+    startup queue — joins it rather than repeating it. Returns whether work was
+    scheduled; a joiner, or a machine under disk pressure, gets ``False`` and no
+    error.
+    """
+    reason = skip_reason(root)
+    if reason is not None:
+        logger.debug("session warm skipped (%s)", reason)
+        return False
+    try:
+        # The module-level import, deliberately: a local one would shadow the name
+        # every other call in this file goes through, and with it the seam a test
+        # (or a caller) uses to see that the refresh was scheduled.
+        start_refresh(root, session_id)
+    except Exception:  # noqa: BLE001 — a hint must never be the failure of a request
+        logger.debug("session warm could not be scheduled", exc_info=True)
+        return False
+    return True
+
+
 async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -> int:
     """Warm up to ``limit`` journals, one at a time; returns how many were started.
 
@@ -188,9 +234,18 @@ async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -
         logger.debug("index prewarm skipped (%s)", reason)
         return 0
     candidates = await asyncio.to_thread(sessions_needing_index, root, limit=limit)
+    # DEGRADED MODE: a host that is already busy gets ONE journal this pass instead
+    # of a refused queue, and the pass after it — the next core start, or a request
+    # that asks for its own session (:func:`start_session_warm`) — can do one more.
+    already_busy = pace_reason()
+    if already_busy is not None:
+        candidates = candidates[:1]
+        logger.debug("index prewarm degraded (%s): one journal this pass", already_busy)
     started = 0
-    for session_id in candidates:
-        later = skip_reason(root)
+    for position, session_id in enumerate(candidates):
+        # AFTER the first, not before it: the degraded pass is allowed the one
+        # journal it came for.
+        later = pace_reason() if position else None
         if later is not None:
             logger.debug("index prewarm dropped after %d journals (%s)", started, later)
             break
@@ -211,8 +266,9 @@ def start_index_prewarm(root: str | Path) -> asyncio.Task[Any] | None:
 
     NEVER RAISES and NEVER BLOCKS: the caller is the daemon's ``lifespan``, where
     an escaping exception fails startup and where anything awaited is startup
-    latency. The guard is consulted HERE as well as inside the task so a machine
-    that cannot afford the warm does not even get a task, and the returned task is
+    latency. The DISK guard is consulted HERE as well as inside the task so a
+    machine that cannot afford the writes does not even get a task; load pressure
+    does not suppress the task, it shortens the queue inside it. The returned task is
     held in :data:`_TASKS` until it settles.
     """
     try:

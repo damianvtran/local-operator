@@ -100,16 +100,48 @@ async def test_the_disk_guard_skips_the_whole_warm(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_load_guard_drops_the_warm(tmp_path, monkeypatch):
-    """A host with every core queued has no one waiting on a cache."""
+async def test_a_busy_host_degrades_the_warm_to_one_journal(tmp_path, monkeypatch):
+    """Load PACES the queue now; it does not refuse it (the pre-warm degradation).
+
+    The old rule refused the whole warm at or above ``PREWARM_MAX_LOAD_PER_CPU``,
+    which on this fleet is the working day: QA measured the refusal (``load: 1.28 per
+    CPU ...``, 0 caches) on a host that then never warmed anything. A busy host now
+    gets ONE journal per pass — the work is a single scan that yields the loop between
+    journals — and ``skip_reason`` answers only for DISK pressure.
+    """
     root = tmp_path
-    journal(root, "s1", mtime=1_000.0)
+    for index in range(3):
+        journal(root, f"s{index}", mtime=1_000.0 + index)
     monkeypatch.setattr(prewarm, "load_per_cpu", lambda: prewarm.PREWARM_MAX_LOAD_PER_CPU)
 
-    load_reason = prewarm.skip_reason(root)
-    assert load_reason is not None and load_reason.startswith("load: ")
-    assert await prewarm.warm_index_cache(root, limit=3) == 0
-    assert prewarm.start_index_prewarm(root) is None
+    assert prewarm.skip_reason(root) is None, "load must not refuse the whole warm"
+    pace = prewarm.pace_reason()
+    assert pace is not None and pace.startswith("load: ")
+    assert (
+        await prewarm.warm_index_cache(root, limit=3) == 1
+    ), "a busy host warms exactly one journal, not none"
+    # ... and the startup hook still schedules the (degraded) pass rather than
+    # declining to create a task.
+    assert prewarm.start_index_prewarm(root) is not None
+
+
+@pytest.mark.asyncio
+async def test_the_per_session_warm_schedules_the_refresh_and_never_raises(tmp_path, monkeypatch):
+    """``start_session_warm`` is the per-session path: schedule, return, no wait."""
+    root = tmp_path
+    journal(root, "s1", mtime=1_000.0)
+    started: list[str] = []
+
+    monkeypatch.setattr(prewarm, "start_refresh", lambda _root, sid: started.append(sid))
+
+    assert prewarm.start_session_warm(root, "s1") is True
+    assert started == ["s1"]
+
+    # A machine under disk pressure takes no work and reports it instead of raising.
+    monkeypatch.setattr(
+        prewarm, "free_bytes", lambda _root=None: prewarm.PREWARM_MIN_FREE_BYTES - 1
+    )
+    assert prewarm.start_session_warm(root, "s1") is False
 
 
 @pytest.mark.asyncio

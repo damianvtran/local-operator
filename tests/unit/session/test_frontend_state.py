@@ -2516,16 +2516,22 @@ def test_the_closing_merge_never_overrules_a_shrinking_context_reading():
     assert closing_state_overrides(quiet, durable)["context_tokens"] == 48_000
 
 
-def test_the_closing_merge_keeps_the_user_set_latch_and_a_set_goal():
-    """QA round 2, Q6/Q7: two fields the blank-field rule had missed.
+def test_the_closing_merge_leaves_a_cleared_goal_and_a_released_latch_alone():
+    """F13: both fields legitimately GO BACKWARDS, so the merge must not carry them.
 
-    Q6: ``conversation_title_user_set`` is the latch that stops a later GENERATED
-    title from overwriting the name the user gave the conversation, so a closing row
-    that clears it re-opens the conversation to being renamed. The title TEXT may
-    legitimately be this runtime's; the latch may not go backwards.
+    ``/goal --clear`` (``set_goal("")`` -> ``delete_goal``) and ``/title refresh``
+    (``release_user_set``) are real user actions, and both produce exactly the shape
+    round 2's rule overruled: a blank live value against a set durable one. Carrying
+    the durable value over therefore resurrected a goal the user cleared and re-set a
+    latch the user released, in every later closing row.
 
-    Q7: ``goal`` is a conversation-level field like the title and the todo list, so
-    a runtime with no goal of its own must not blank the one on the row it read.
+    What makes that shape unambiguous is that the runtime's own view is the only one
+    that has OBSERVED the release — a runtime that was merely restored carries the
+    durable values as its own, because the checkpoint restore seeds them.
+
+    Verified failing with those two branches restored: the first assertion raises
+    ``KeyError: 'conversation_title_user_set'``, which is why they were removed
+    rather than reordered.
     """
     durable = FrontendSessionState(
         session_id="conv",
@@ -2533,6 +2539,7 @@ def test_the_closing_merge_keeps_the_user_set_latch_and_a_set_goal():
         conversation_title="Real title",
         conversation_title_user_set=True,
         goal="ship it",
+        cumulative_parent_cost=12.34,
     )
     live = FrontendSessionState(
         session_id="conv",
@@ -2540,17 +2547,14 @@ def test_the_closing_merge_keeps_the_user_set_latch_and_a_set_goal():
         conversation_title="Real title (auto)",
         conversation_title_user_set=False,
         goal="",
+        cumulative_parent_cost=1.0,
     )
 
     overrides = closing_state_overrides(live, durable)
 
-    assert overrides["conversation_title_user_set"] is True, "the user-set latch was cleared"
-    assert overrides["goal"] == "ship it", "a runtime with no goal of its own blanked the row's"
-    assert (
-        "conversation_title" not in overrides
-    ), "the title text is this runtime's when it has one; only the latch is taken"
-    # A runtime with its OWN goal keeps it: the rule is about blanks, not about the
-    # durable row winning.
-    assert "goal" not in closing_state_overrides(
-        FrontendSessionState(session_id="conv", epoch="e3", goal="mine"), durable
-    )
+    assert "conversation_title_user_set" not in overrides, "a released latch was re-set"
+    assert "goal" not in overrides, "a cleared goal was brought back"
+    assert "conversation_title" not in overrides, "the title text is this runtime's"
+    # The accumulating fields still take the larger value, which is the rule those
+    # two branches were wrongly copied from.
+    assert overrides["cumulative_parent_cost"] == 12.34

@@ -117,6 +117,7 @@ from local_operator.session.frontend_state import (
     SlashResult,
     sync_wire_payload,
 )
+from local_operator.session.index_prewarm import start_session_warm
 from local_operator.session.remote_open import PeerSessionUnresolved
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
@@ -4418,6 +4419,21 @@ async def warm(session_id: str, body: Warm, request: Request):
     # feature adds nothing to (spec §0.1/§1.3).
     async with errors(request), host(request).session(session_id, allow_draft=True) as bridge:
         assert bridge.remote is not None
+        # THE INDEX WARM RIDES THIS ROUTE (the per-session warm path), scheduled HERE
+        # rather than before the admission checks (review round 3, F12): above this
+        # line the call can still be refused — an unknown session (404) or a daemon
+        # that has LATCHED against new work (503, ``daemon-retiring``) — and a
+        # retiring daemon must not start a scan on its way out. Fire-and-forget by
+        # contract: ``start_session_warm`` schedules and returns, never raises, and is
+        # never awaited, so the engage below does not wait on a scan and a session
+        # whose index cannot be warmed still opens, paying the scan itself.
+        #
+        # WHAT IT IS WORTH, stated honestly: the desktop UI fires ``sessions.warm``
+        # on the FIRST KEYSTROKE while the manifest read on MOUNT already starts the
+        # same refresh (``checkpoints_view`` -> ``start_refresh``), so the index half
+        # usually JOINS a build that is already running. It is the anchor write the
+        # stacked anchor change adds here that is new work on every open.
+        start_session_warm(store_root(request), session_id)
         return reply({"state": await bridge.warm()})
 
 

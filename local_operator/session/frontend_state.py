@@ -880,22 +880,19 @@ def closing_state_overrides(live: Any, durable: Any) -> dict[str, Any]:
         )
     if not getattr(live, "todos", None) and getattr(durable, "todos", None):
         overrides["todos"] = durable.todos
-    # THE USER-SET LATCH IS MONOTONIC (QA round 2, Q6). ``user_set`` is the flag
-    # that stops a later GENERATED title from overwriting the name the user gave
-    # the conversation, so a closing row must never clear it. It is deliberately
-    # separate from the empty-title branch above: the title TEXT may legitimately
-    # be this runtime's (it may have renamed the conversation, or auto-titled it),
-    # while the latch only ever goes one way.
-    if getattr(durable, "conversation_title_user_set", False) and not getattr(
-        live, "conversation_title_user_set", False
-    ):
-        overrides["conversation_title_user_set"] = True
-    # ``goal`` follows the same rule as the title and the todo list: a runtime whose
-    # own goal is empty has none to report, and the goal belongs to the
-    # CONVERSATION (QA round 2, Q7 — the same "a blank field never overwrites a set
-    # one" rule, applied to the field the fix had missed).
-    if not getattr(live, "goal", "") and getattr(durable, "goal", ""):
-        overrides["goal"] = durable.goal
+    # NEITHER THE LATCH NOR THE GOAL IS CARRIED OVER (review round 3, F13). Round 2
+    # added two "a blank never overwrites a set one" branches here, for the title
+    # latch and for ``goal``, and both were the wrong rule for the same reason
+    # ``context_tokens`` was wrong in F7: these fields legitimately go BACKWARDS,
+    # because the user can release them. ``/goal --clear`` (``set_goal("")`` ->
+    # ``delete_goal``) and ``/title refresh`` (``release_user_set``) are real
+    # actions, and both produce exactly the shape the branches overruled — a blank
+    # live field against a set durable one — so the merge resurrected a goal the
+    # user cleared and re-set a latch the user released, in every later closing row.
+    # What makes that shape unambiguous is that the runtime's own view is the only
+    # one that has OBSERVED the release: a runtime that was merely restored carries
+    # the durable values as its own (the checkpoint restore seeds them), so a blank
+    # live field means someone cleared it.
     # ``context_tokens`` has its own rule (see the docstring): taken from the
     # durable row only when this runtime has NO reading of its own, because a
     # compaction legitimately lowers it and the larger-of-two rule would hold the
