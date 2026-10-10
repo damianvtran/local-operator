@@ -36,6 +36,30 @@ from local_operator.tui import notifier_app, notify
 from local_operator.tui import resume_click as rc
 
 # ---------------------------------------------------------------------------
+# The safety precondition for every helper build: the seam must exist
+# ---------------------------------------------------------------------------
+
+
+def _refuse_seamless_source() -> None:
+    """Fail BEFORE a helper is built from a source that cannot honour the seam.
+
+    WHY. ``LOCAL_OPERATOR_NOTIFIER_DRY_RUN`` is this file's whole safety story
+    for running the real binary, and the seam exists only in the source this PR
+    ships. A baseline run — this file dropped onto an older tree, e.g.
+    ``origin/main`` — would otherwise compile THAT tree's ``notifier.m``, which
+    ignores the variable, and the first ``window()`` call would post a real
+    banner. That is not hypothetical: the one banner this feature has put on a
+    screen unasked (2026-10-09 20:44:18) came through exactly this shape. The
+    check makes such a run fail before ``clang`` is even invoked.
+    """
+    source = (Path(notifier_app.__file__).parent / "notifier.m").read_text(encoding="utf-8")
+    assert "LOCAL_OPERATOR_NOTIFIER_DRY_RUN" in source, (
+        "refusing to build or run the notifier helper: this source has no dry-run "
+        "seam, so it would ignore LOCAL_OPERATOR_NOTIFIER_DRY_RUN"
+    )
+
+
+# ---------------------------------------------------------------------------
 # macOS: the helper's wait window is a parameter
 # ---------------------------------------------------------------------------
 
@@ -104,6 +128,7 @@ def test_the_compiled_helper_uses_the_window_it_is_given(tmp_path: Path) -> None
     """The REAL binary, built from the shipped source, reports the window it
     would wait for. Its dry-run seam exits before touching Notification Centre,
     so nothing is posted to the desktop."""
+    _refuse_seamless_source()
     # Compiled directly, NOT through `build_bundle`: that also runs `lsregister
     # -f`, which would point LaunchServices' record for our one real bundle id
     # (`me.damiantran.localoperator`) at a throwaway pytest directory and could
@@ -919,6 +944,7 @@ def test_the_real_open_reports_a_missing_bundle_as_a_refusal() -> None:
 def dry_run_helper(tmp_path_factory: pytest.TempPathFactory) -> str:
     if sys.platform != "darwin" or not __import__("shutil").which("clang"):
         pytest.skip("needs macOS and a compiler to build the real helper")
+    _refuse_seamless_source()
     binary = str(tmp_path_factory.mktemp("helper") / "notifier")
     subprocess.run(
         [
@@ -1101,3 +1127,39 @@ def test_the_click_preparation_does_not_delay_loop_shutdown(
     thread = next(t for t in threading.enumerate() if t.name == "click-preparation")
     assert thread.daemon is True
     thread.join(timeout=5)
+
+
+# --- the Popen guard: the seam is the ONLY way a unit run reaches the helper ---
+
+
+def test_a_unit_run_cannot_start_a_real_notifier_without_the_seam(tmp_path: Path) -> None:
+    """The conftest guard (``refuse_real_notifier_spawn``), pinned from both sides.
+
+    WHY. The guard keeps a future test — or a reverted revision of this file —
+    from starting the real helper (or a real ``osascript display notification``)
+    and putting a banner on the developer's screen while every assertion still
+    passes. A guard asserted by nothing is one refactor from being gone, and a
+    guard that refuses too much is one refactor from being deleted: so this pin
+    shows the refusal AND the visible opt-in every helper run in this file uses.
+    """
+    fake = tmp_path / "notifier"
+    fake.write_text("#!/bin/sh\necho ran\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="LOCAL_OPERATOR_NOTIFIER_DRY_RUN"):
+        subprocess.run([str(fake)], capture_output=True, text=True)
+
+    with pytest.raises(RuntimeError, match="display notification"):
+        subprocess.run(
+            ["/usr/bin/osascript", "-e", 'display notification "probe"'],
+            capture_output=True,
+            text=True,
+        )
+
+    allowed = subprocess.run(
+        [str(fake)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LOCAL_OPERATOR_NOTIFIER_DRY_RUN": "1"},
+    )
+    assert allowed.stdout.strip() == "ran"
