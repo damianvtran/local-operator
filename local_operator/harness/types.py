@@ -1367,6 +1367,23 @@ class ToolContext(BaseModel):
     record_resolved_path: Callable[[str, bool], None] | None = Field(
         default=None, exclude=True, repr=False
     )
+    # The channel-spend ingest seam (``docs/design/spend-channels.md``): a tool
+    # that spends money OUTSIDE the token path (image, web search, voice)
+    # builds a frozen ``session.channel_spend.ChannelSpendRecord`` and hands it
+    # here; the session folds it, journals it and publishes it. Declared rather
+    # than probed because every capability a built-in tool looks for is
+    # declared (see the class docstring). ``None`` is the documented "this host
+    # does not track channels" value — an emission site must skip QUIETLY then,
+    # never fail the call; a record it never records is money nobody can see,
+    # which is today's behaviour and strictly better than a broken turn.
+    #
+    # The parameter is typed ``Any`` because ``harness`` must not import the
+    # session package: ``session`` imports ``harness``, and a module-level
+    # import here would close that cycle. The record's OWN module is a leaf
+    # precisely so the tools can import it directly.
+    record_channel_spend: Callable[[Any], None] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     session_id: str = ""
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
