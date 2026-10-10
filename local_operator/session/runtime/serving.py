@@ -7157,6 +7157,11 @@ class ServingSessionHandle(SessionHandle):
             return await self._wake_slash(session, args, SlashResult)
         if command == "monitor":
             return await self._monitor_slash(session, args, SlashResult)
+        if command == "highlights":
+            # Supplement actions (memo §3.2 T5) as a routed verb: the follower's
+            # typed command and the phone composer land here with the VERB only,
+            # so the target is chosen runtime-side (``newest_actionable``).
+            return await self._highlights_slash(args, SlashResult)
         if command == "loop":
             from local_operator.slash_commands import unknown_flag_refusal
 
@@ -7565,6 +7570,61 @@ class ServingSessionHandle(SessionHandle):
         """One shape for every refusal this command produces, so the route can
         map a code to a status without reading prose."""
         return SlashResult(kind="error", text=text, data={"code": code})
+
+    async def _highlights_slash(self, arg: str, SlashResult: Any) -> Any:
+        """``/highlights cancel | retry | adjust <text>`` — the routed supplement actions.
+
+        The runtime half of the TUI's ``_cmd_highlights`` (memo §3.2 T5). The command is
+        advertised ``authoritative_session``, so a follower's typed command and the phone
+        composer both land here carrying the VERB only; the target is the newest actionable
+        job the runner still holds (``SupplementRunner.newest_actionable``). The receipts
+        are the TUI's words for the same ops, kept word for word (``_run_highlights_op``'s
+        map), so one gesture reads one sentence whether the session is local or detached.
+        """
+        words = arg.split(maxsplit=1)
+        verb = words[0].strip().lower() if words and words[0].strip() else ""
+        text = words[1].strip() if len(words) > 1 else ""
+        if verb not in ("cancel", "retry", "adjust"):
+            return SlashResult(
+                kind="notice",
+                text="Usage: /highlights cancel | retry | adjust <text>",
+                style="warning",
+            )
+        if verb == "adjust" and not text:
+            return SlashResult(
+                kind="notice", text="Usage: /highlights adjust <text>", style="warning"
+            )
+        target = await self._supplements.newest_actionable(verb)
+        if target is None:
+            missing = {
+                "cancel": "nothing is being prepared right now",
+                "retry": "nothing to retry — no highlights were cancelled or failed",
+                "adjust": "no highlights to adjust yet",
+            }
+            return SlashResult(kind="notice", text=missing[verb], style="warning")
+        anchor, job = target
+        try:
+            if verb == "adjust":
+                receipt = await self._supplements.steer_job(anchor, job, text)
+            elif verb == "retry":
+                receipt = await self._supplements.restart_job(anchor, job)
+            else:
+                receipt = await self._supplements.cancel_job(anchor, job)
+        except Exception as exc:  # noqa: BLE001 — a refused op is a notice, not a turn error
+            return SlashResult(
+                kind="notice",
+                text=str(exc) or "could not update highlights",
+                style="warning",
+            )
+        receipts = {
+            "cancelled": "Highlights cancelled",
+            "steering": "Updating highlights…",
+            "restarting": "Preparing highlights again…",
+            "already finished": "those highlights already finished",
+        }
+        return SlashResult(
+            kind="notice", text=receipts.get(str(receipt), str(receipt)), style="info"
+        )
 
     def _archive_slash(self, session: Any, archived: bool, SlashResult: Any) -> Any:
         """``/archive`` and ``/unarchive`` on a DETACHED runtime.
