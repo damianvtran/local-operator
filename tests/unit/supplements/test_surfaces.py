@@ -34,11 +34,26 @@ def test_the_static_feature_flag_is_published() -> None:
 # --- the owner record's capability list ----------------------------------------------------
 
 
+class _WithoutReadOp(ServingSessionHandle):
+    """The C0 case a real handle can no longer be: one that PREDATES the read op.
+
+    Lane C1b implements ``supplements_for`` on the production handle, so "an owner whose
+    handle has no read op" has to be built. A property that raises ``AttributeError`` is the
+    one spelling that makes ``hasattr`` answer False -- the exact question the owner record
+    asks -- without changing the class under test or patching the server.
+    """
+
+    @property
+    def supplements_for(self):  # type: ignore[override]
+        raise AttributeError(SUPPLEMENTS_READ_OP)
+
+
 async def _server(tmp_path: Path, *, with_read_op: bool) -> RuntimeServer:
     directory = tmp_path / "sessions" / "supplements-capability"
     await seed_transcript(directory, [Message.user("row")])
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
-    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    holder = ServingSessionHandle if with_read_op else _WithoutReadOp
+    handle = holder(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     if with_read_op:
         # what the engine lane (C1) adds for real; here only its PRESENCE is under test
         setattr(handle, SUPPLEMENTS_READ_OP, lambda anchors: {})

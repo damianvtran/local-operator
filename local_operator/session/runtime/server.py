@@ -127,11 +127,13 @@ from local_operator.session.transcript import (
     durable_conversation_path,
 )
 from local_operator.supplements.contract import (
+    SUPPLEMENT_CONTROL_OPS,
     SUPPLEMENTS_AUTH_FIELD,
     SUPPLEMENTS_CAPABILITY,
     SUPPLEMENTS_READ_OP,
     negotiated,
 )
+from local_operator.supplements.prompt import MAX_INSTRUCTION_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -7170,6 +7172,53 @@ class RuntimeServer:
                 raise ValueError("this session cannot cancel at a tool boundary")
             typed_cancel = cast(Callable[[], Awaitable[str]], cancel)
             return await typed_cancel()
+        if op in SUPPLEMENT_CONTROL_OPS:
+            # Turn supplements ("Highlights"), memo §2.7. Additive and getattr-probed exactly
+            # like ``cancel`` above: a reduced test handle or an older bridge answers the
+            # unknown-op error rather than a silent no-op, so no PROTOCOL_VERSION moves.
+            # NONE of these four is in ``_SYNC_PRIORITY_OPS``: ``steer`` and ``restart`` spend
+            # money, and none of them is a way to regain control of a RUNNING turn.
+            method = getattr(h, op, None)
+            if not callable(method):
+                raise ValueError("this session cannot run turn supplements; update the owner")
+            anchor = str(frame.get("anchor", ""))
+            if not anchor:
+                raise ValueError(f"{op} needs the answer's anchor")
+            if op == "supplement_dismiss":
+                dismiss = cast(Callable[[str], Awaitable[str]], method)
+                return await dismiss(anchor)
+            job = str(frame.get("job", ""))
+            if not job:
+                raise ValueError(f"{op} needs the job id")
+            if op == "supplement_steer":
+                text = frame.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("supplement_steer needs a non-empty instruction")
+                # The bound is the contract's (memo §2.7: <= 500 chars), enforced HERE so a
+                # caller cannot spend a turn on text the fork's grammar would truncate.
+                if len(text) > MAX_INSTRUCTION_CHARS:
+                    raise ValueError(
+                        f"supplement_steer text must be at most {MAX_INSTRUCTION_CHARS} "
+                        "characters"
+                    )
+                steer = cast(Callable[[str, str, str], Awaitable[str]], method)
+                return await steer(anchor, job, text)
+            job_method = cast(Callable[[str, str], Awaitable[str]], method)
+            return await job_method(anchor, job)
+        if op == SUPPLEMENTS_READ_OP:
+            # The lazy read (memo §2.11): `{anchor: newest row}` for the anchors a viewer
+            # just mounted. Gated exactly like the four above, and it is the op the owner's
+            # capability advertisement is keyed on -- a handle that cannot honour it must
+            # not advertise `supplements-v1`.
+            reader = getattr(h, SUPPLEMENTS_READ_OP, None)
+            if not callable(reader):
+                raise ValueError("this session cannot serve turn supplements; update the owner")
+            anchors = frame.get("anchors")
+            if not isinstance(anchors, list):
+                raise ValueError("anchors must be a list of answer ids")
+            read = cast(Callable[[list[str]], Awaitable[dict[str, Any]]], reader)
+            rows = await read([str(item) for item in anchors])
+            return AckDetail(detail="supplements", attention={}, fields={"supplements": rows})
         if op == "set_model":
             provider = str(frame.get("provider", ""))
             model_id = str(frame.get("model_id", ""))
@@ -8160,6 +8209,12 @@ class RuntimeServer:
         # runs on the runtime's loop today, but the iteration is over a dict the
         # session's loop can mutate (see that method), and one line is cheaper
         # than the reasoning that would have to hold forever.
+        # Supplements reach ONLY a viewer that negotiated ``supplements-v1`` (memo §2.7): the
+        # owner advertised the capability AND the viewer declared it on its auth frame. The
+        # filter is here, on the fan-out, and not on the emitter, because the gate is a fact
+        # about the VIEWER; a runtime with no negotiated viewer still journals every row,
+        # which is the half that must never depend on who is watching.
+        supplement_event = event_type == "supplement_progress"
         recipients = [
             conn
             for conn in list(self._clients.values())
@@ -8167,6 +8222,7 @@ class RuntimeServer:
             and conn.wants_events
             and conn.events_ready
             and not (conn.events_muted and event_type in EVENT_MUTE_DROP_TYPES)
+            and not (supplement_event and not conn.supplements)
         ]
         if not recipients:
             return
