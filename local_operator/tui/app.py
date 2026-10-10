@@ -45453,13 +45453,21 @@ class OperatorApp(App[None]):
         Deliberately NOT the panel's ``group="usage"`` worker: a warm-up must
         neither cancel an in-flight panel fetch nor be cancelled by one, and it
         has no surface to update — its only output is the shared cache row the
-        next `/usage` reads.
+        next `/usage` reads. The one splash-facing line IS refreshed here: the
+        pre-emptive quota notice reads the row this worker maintains
+        (``tui/quota_notice``), so the empty session that was painted before
+        the row existed must re-snapshot once it lands — otherwise a cold boot
+        would show the notice only after some unrelated refresh event.
         """
         try:
             assert self._providers is not None
             await self._providers.fetch_usage([provider])
         except Exception:  # noqa: BLE001 — warm-up failure is a future live fetch
             pass
+        # Cheap and idempotent: `refresh_info` only repaints when the snapshot
+        # actually changed, so a failed fetch (cache unchanged) costs nothing.
+        if self._welcome is not None:
+            self._welcome.refresh_info()
 
     def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
         """``r`` in the panel — re-run the same fetch behind the same view.
