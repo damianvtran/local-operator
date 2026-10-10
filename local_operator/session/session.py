@@ -614,6 +614,17 @@ _STOPPED_WORK_RESIDUE_TYPES = frozenset(
     }
 )
 
+#: Inputs that are another SESSION talking, not the operator this session's
+#: notifications belong to: a ``peer_message`` (another local session's agent,
+#: or a person at the other end of ``lop send``) and a ``hub_message`` (a
+#: child reporting to its parent — defensive here: every hub delivery routes
+#: through :meth:`Session.queue_aside`, so it cannot reach ``_note_run_input``
+#: today; the member keeps a future producer correct). §14's trigger record
+#: collapses every non-wake/monitor input into one "internal" class, so the
+#: peer-quiet rule in ``_finalize_attention_notify`` reads the finer
+#: ``_run_input_types`` record instead of widening that class vocabulary.
+PEER_FAMILY_INPUT_TYPES = frozenset({PEER_MESSAGE_MESSAGE_TYPE, HUB_MESSAGE_TYPE})
+
 #: Event families a provider stream produces at TOKEN rate. An unobserved
 #: subagent does not fold these into its own frontend store (see ``_emit``):
 #: nothing can read that store's live seed, and at N children the per-token
@@ -2856,6 +2867,15 @@ class Session:
         #: consumed exactly once by ``_finalize_attention_notify``.
         self._run_triggers: set[str] = set()
         self._run_notify_requested: bool = False
+        #: The raw ``custom_type`` of every INTERNAL-class input this run
+        #: consumed, beside the trigger record and reset with it. The class
+        #: vocabulary deliberately collapses all of them into "internal", and
+        #: its other readers depend on the exact four names — so the
+        #: peer-quiet rule in ``_finalize_attention_notify`` reads this finer
+        #: record instead of learning a new class. ``""`` records an internal
+        #: row with no custom type: a sentinel that can never match the peer
+        #: family, so an unclassifiable input keeps the loud default.
+        self._run_input_types: set[str] = set()
         #: TURN SUPPLEMENTS' provenance (docs/design/turn-supplements.md §2.1/§2.2). The
         #: trigger set above is insufficient for "a person asked": goal-loop continuations
         #: and spooled owner chrome call ``prompt(harness_injected=True)`` and classify as
@@ -11891,6 +11911,12 @@ class Session:
         ``_run_wake_ids`` beside the trigger classes: the Aida banner veto needs
         "which rows woke this run" at settle time, and the delivery row is the
         only place that fact exists.
+
+        Beside the class set, the raw ``custom_type`` of every internal input
+        is recorded into ``_run_input_types``: the peer-quiet rule in
+        ``_finalize_attention_notify`` must tell a peer message from a job
+        result or an incident notice, which the collapsed "internal" class
+        deliberately cannot — and no other reader may be taught a new name.
         """
         custom_type = getattr(message, "custom_type", None)
         if custom_type in (WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE):
@@ -11921,6 +11947,11 @@ class Session:
                     self._run_catchup_unidentified = True
         elif custom_type is not None or getattr(message, "role", None) != "user":
             self._run_triggers.add("internal")
+            # The raw type rides beside the class record for the peer-quiet
+            # rule (see ``_run_input_types``): the collapsed "internal" class
+            # cannot tell a peer message from a job result. ``""`` is the
+            # fail-loud sentinel for a custom-type-less internal row.
+            self._run_input_types.add(str(custom_type) if custom_type is not None else "")
         else:
             self._run_triggers.add("user")
             # Turn supplements (§2.2 rules 1-2): a user-role row is "typed" only if the
@@ -11958,8 +11989,19 @@ class Session:
           unconsumed one (``awaiting_user``), notifies, and a mixed run keeps
           that behaviour with EXACTLY one publication (one row per turn);
         * any non-user trigger that is not exclusively wake/monitor deliveries
-          (a peer message, a job result, an incident notice, a wake+peer mix)
-          notifies exactly as today — a quiet delivery never suppresses it;
+          notifies (a job result, an incident notice, a wake+job mix) — a
+          quiet delivery never suppresses it;
+        * EXCEPT a PEER-ONLY run: a run whose non-user inputs are exclusively
+          peer-family — a ``peer_message`` from another local session, or a
+          defensive ``hub_message`` (``PEER_FAMILY_INPUT_TYPES``) — optionally
+          alongside quiet wake/monitor deliveries, stays SILENT by default:
+          a peer is another session's agent (or a person at the other end of
+          ``lop send``), not the operator this session's notifications belong
+          to, and the sender reads the reply as the turn's own outcome. It
+          notifies again the moment a typed or queued user joins the run, a
+          delivery asked to be told, or the run errors; peer mixed with any
+          other internal input keeps that input's loud semantics — fail loud
+          for every class the policy has not explicitly quieted;
         * wake/monitor-only runs notify iff one of their deliveries asked to
           (``notify_requested``, the OR of their ``notify`` parameters);
         * AIDA'S CHECK-IN QUIETING VETO, applied after the rule above and only
@@ -11980,11 +12022,25 @@ class Session:
         )
         triggers = set(self._run_triggers)
         non_user = triggers - {"user"}
+        # PEER-ONLY runs stay quiet: non-user inputs that are exclusively
+        # peer-family (the peer-notify policy, 2026-10-10). ``_run_input_types``
+        # holds the raw custom types of this run's INTERNAL inputs —
+        # wake/monitor deliveries are not recorded there — and the empty or
+        # unknown sentinel can never match, so every input the policy has not
+        # explicitly quieted is LOUD.
+        peer_only = (
+            "internal" in non_user
+            and bool(self._run_input_types)
+            and self._run_input_types <= PEER_FAMILY_INPUT_TYPES
+        )
         notify = (
             self._has_awaiting_user()
             or "user" in triggers
             or not (
-                non_user and non_user <= {WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE}
+                non_user
+                and (
+                    non_user <= {WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE} or peer_only
+                )
             )
             or self._run_notify_requested
         ) or kind == "error"
@@ -13475,6 +13531,7 @@ class Session:
         # exactly once, at turn end, by ``_finalize_attention_notify``.
         self._run_triggers = set()
         self._run_notify_requested = False
+        self._run_input_types = set()
         self._run_wake_ids = set()
         self._run_catchup_unidentified = False
         self._run_aida_checkin = False

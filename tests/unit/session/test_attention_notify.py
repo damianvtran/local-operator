@@ -12,8 +12,13 @@ published on the ``completions`` row. The rule's edges are R15a's:
   failing assertion is duplication, not presence (cases 4-5);
 * errors notify regardless of the parameter (case 6);
 * a run whose non-user inputs are not exclusively wake/monitor deliveries —
-  a peer message, a job result, a wake+peer mix — behaves exactly as today
+  a job result, an incident notice, a wake+job mix — behaves exactly as today
   and a quiet delivery never suppresses it (case 8, the §14.2 F7 note);
+* EXCEPT a peer-only run (the peer-notify policy, 2026-10-10): non-user
+  inputs exclusively peer-family — possibly beside quiet wake/monitor
+  deliveries — stay SILENT unless a user joins, a delivery asked to notify,
+  or the run errors; that includes a peer reply that writes ordinary TEXT
+  (case 9);
 * a pre-§14 row reads as notify=1 and a write migrates the store (case 7).
 
 THE RIG IS THE REAL ONE: ``ScriptedStream`` + a real ``Session`` + the real
@@ -241,6 +246,23 @@ async def test_a_queued_user_message_makes_a_quiet_wake_notify(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_a_queued_user_message_makes_a_peer_run_notify(tmp_path: Path) -> None:
+    """The peer variant of the cell above: a peer-only run is quiet until a
+    person is waiting — a typed message on the steering queue makes the run
+    notify, exactly as it does for a quiet wake."""
+    session = make_session(tmp_path, _complete_stream())
+    try:
+        session._run_triggers = {"internal"}
+        session._run_input_types = {"peer_message"}
+        session._run_notify_requested = False
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is False
+        session.steer("actually, also check staging")
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_queued_delivery_does_not_count_as_an_awaiting_user(tmp_path: Path) -> None:
     """The queue holds a custom delivery, not a person: no awaiting_user."""
     from local_operator.harness.types import CustomMessage
@@ -360,34 +382,228 @@ async def test_an_interrupted_quiet_wake_is_formula_quiet(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Case 8 (§14.2 F7) — non-wake/monitor origins behave exactly as today.
+# Case 8 (§14.2 F7, amended by the peer-notify policy) — non-peer internal and
+# mixed runs stay loud; only an explicitly quieted class may silence a run.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_a_quiet_delivery_never_suppresses_internal_or_mixed_runs(
+async def test_a_quiet_delivery_never_suppresses_non_peer_internal_or_mixed_runs(
     tmp_path: Path,
 ) -> None:
     session = make_session(tmp_path, _complete_stream())
     try:
-        # A peer message (or any internal input) joined the run: unchanged —
-        # notifies even though every delivery was quiet, because the delivery
-        # parameter only governs runs whose non-user triggers are EXCLUSIVELY
-        # wake/monitor.
+        # A NON-peer internal input (a job result; any raw type outside the
+        # peer family): unchanged — notifies even though every delivery was
+        # quiet, because only a class the policy explicitly quieted may
+        # silence a run.
         session._run_triggers = {"internal"}
+        session._run_input_types = {"job_result"}
         session._run_notify_requested = False
         assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
 
+        # An internal row with NO custom type records the empty sentinel: it
+        # can never match the peer family, so it keeps the loud default.
+        session._run_input_types = {""}
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
+
+        # A non-peer internal folded beside a quiet wake: still loud.
         session._run_triggers = {"wake_prompt", "internal"}
+        session._run_input_types = {"job_result"}
         assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
 
         # The exclusive case, as the control: quiet stays quiet.
         session._run_triggers = {"wake_prompt", "monitor_prompt"}
+        session._run_input_types = set()
         assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is False
 
         # ...until ONE delivery asks: the OR over deliveries wins.
         session._run_notify_requested = True
         assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
+    finally:
+        await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Case 9 (peer-notify policy, 2026-10-10) — a peer-only run stays silent by
+# default; every non-peer class, a person, and the error arm keep it loud.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_peer_only_run_is_silent_by_default(tmp_path: Path) -> None:
+    """The policy matrix at the formula boundary. ``_run_input_types`` is set
+    directly (as the trigger record is elsewhere in this file) so each row is
+    the exact input set the pipeline would have recorded for it."""
+    session = make_session(tmp_path, _complete_stream())
+    try:
+        # peer only → quiet.
+        session._run_triggers = {"internal"}
+        session._run_input_types = {"peer_message"}
+        session._run_notify_requested = False
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is False
+
+        # hub_message is a member defensively — it cannot reach the record
+        # today (every hub delivery routes through queue_aside) — so a future
+        # producer lands quiet rather than loud.
+        session._run_input_types = {"hub_message"}
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is False
+
+        # peer + quiet wake → quiet. Wake/monitor deliveries are not recorded
+        # in _run_input_types; their own notify bit is the only raise.
+        session._run_triggers = {"wake_prompt", "internal"}
+        session._run_input_types = {"peer_message"}
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is False
+
+        # peer + a wake that asked to be told → loud.
+        session._run_notify_requested = True
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
+        session._run_notify_requested = False
+
+        # peer + monitor: quiet / notify, same as the wake row.
+        session._run_triggers = {"monitor_prompt", "internal"}
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is False
+        session._run_notify_requested = True
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
+        session._run_notify_requested = False
+
+        # peer + job result → LOUD: the settled-job banner is deliberately
+        # kept, and this row is the tripwire if the policy ever flips it.
+        session._run_triggers = {"internal"}
+        session._run_input_types = {"peer_message", "job_result"}
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
+
+        # peer + an ask response/timeout → LOUD: a person deciding is never
+        # quieter than a peer.
+        session._run_input_types = {"peer_message", "ask_response"}
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
+        session._run_input_types = {"peer_message", "ask_timeout"}
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
+
+        # peer + a CONSUMED typed user → user semantics win.
+        session._run_triggers = {"user", "internal"}
+        session._run_input_types = {"peer_message"}
+        assert session._finalize_attention_notify(AgentEndEvent(messages=[])) is True
+
+        # peer only + error → the error arm is untouched.
+        session._run_triggers = {"internal"}
+        session._run_input_types = {"peer_message"}
+        assert (
+            session._finalize_attention_notify(
+                AgentEndEvent(messages=[], error="provider exploded")
+            )
+            is True
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_peer_message_answered_with_text_stays_quiet(tmp_path: Path) -> None:
+    """THE OPERATOR'S REPRO, end to end: a peer message into an idle session
+    whose reply is ordinary TEXT (not ``no_reply``) leaves notify=False on the
+    end and on the store row. This is the write that used to re-arm the
+    banner: before this policy, a text reply to a peer notified a user nobody
+    had asked to hear. The row still exists and the session still reads
+    unseen — discoverability is deliberately independent of ``notify`` — only
+    the announcement is gone."""
+    stream = _complete_stream()
+    session = make_session(tmp_path, stream)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    try:
+        await session.receive_peer_message(
+            "child reporting in",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 42, "conversation_name": "child"},
+        )
+        await _wait_published(session, stream)
+        assert session._run_triggers == {"internal"}, "a peer run is an internal run"
+        assert session._run_input_types == {"peer_message"}
+        ends = _ends(events)
+        assert len(ends) == 1
+        assert ends[0].notify is False, "a text reply to a peer does not notify"
+        state = await session.refresh_attention()
+        assert state["kind"] == "complete"
+        assert state["notify"] is False, "the one value every notifier reads"
+        assert state["unseen"] is True, "the unread mark stays: read, not announced"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_peer_turn_raising_an_ask_stays_quiet_while_the_ask_surfaces(
+    tmp_path: Path,
+) -> None:
+    """CHANNEL INDEPENDENCE: raising an ask mid-peer-turn surfaces the question
+    on the queue's own path (an open record) while the run's completion value
+    stays False. The ask's surface is the ask machinery's business — pending
+    gate state, the picker, the phone card — and none of it reads §14's value,
+    so this suppression cannot touch it.
+
+    The third scripted call is the ask CLEARANCE gate's fork (the default
+    ``LOP_ASK_GATE`` arm runs one short check off the main turn); its reply
+    carries no ``VERDICT:`` line, so it parses as no-verdict and the question
+    enqueues unchanged. With the gate switched off the third turn is simply
+    unused — the script must not assume either way."""
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(
+                    index=0,
+                    id="a1",
+                    name="ask",
+                    argument_delta=json.dumps(
+                        {
+                            "questions": [
+                                {
+                                    "id": "q1",
+                                    "question": "Which deploy window?",
+                                    "options": [
+                                        {"label": "now"},
+                                        {"label": "later"},
+                                    ],
+                                }
+                            ]
+                        }
+                    ),
+                ),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [
+                StreamTextDelta(delta="no structured verdict here"),
+                StreamEndEvent(stop_reason="stop"),
+            ],
+            [StreamTextDelta(delta="the question is queued"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    async def _never_answered(_questions):
+        return None  # pragma: no cover — the queued arm enqueues without the hook
+
+    session.set_ask_handler(_never_answered)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    try:
+        await session.receive_peer_message(
+            "child reporting in",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 42, "conversation_name": "child"},
+        )
+        await _wait_published(session, stream)
+        assert session._run_input_types == {
+            "peer_message"
+        }, "tool traffic never joins the input record — the ask call itself is not an input"
+        ends = _ends(events)
+        assert ends and ends[-1].notify is False
+        queue = session.ask_queue()
+        assert queue is not None
+        open_records = [record for record in queue.open_records() if record["status"] == "open"]
+        assert len(open_records) == 1, "the ask is on its own path, unanswered"
+        assert open_records[0]["questions"][0]["question"] == "Which deploy window?"
     finally:
         await session.dispose()
 
@@ -488,6 +704,7 @@ async def test_a_peer_only_quiet_run_publishes_nothing(tmp_path: Path) -> None:
         await wait_for(lambda: not session.is_streaming and not session._turn_lock.locked())
 
         assert session._run_triggers == {"internal"}, "a peer run is an internal run"
+        assert session._run_input_types == {"peer_message"}, "the raw input type rides beside it"
         ends = _ends(events)
         assert len(ends) == 1
         assert ends[0].notify is False, "the one value every notifier reads"
