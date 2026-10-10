@@ -29,6 +29,10 @@ class Outcome:
     listener_error: Exception | None = None
     frames: list[dict[str, Any]] = field(default_factory=list)
     listener_bytes: int = 0
+    #: The record codecs ``Handshake.codec`` built, so a cell can assert what the
+    #: NEGOTIATION decided (record compression) rather than re-derive it.
+    dialer_codec: Any = None
+    listener_codec: Any = None
 
 
 def policy_for(
@@ -65,6 +69,8 @@ def run_handshake(
     mutate_challenge: Any = None,
     join_block: dict[str, Any] | None = None,
     listener_credential: Any = None,
+    dialer_capabilities: list[str] | None = None,
+    listener_capabilities: list[str] | None = None,
 ) -> Outcome:
     """Run one full exchange, listener and dialer concurrently, and collect both ends."""
     outcome = Outcome()
@@ -80,7 +86,7 @@ def run_handshake(
                 instance_id="i_listener",
                 session_protocol=SESSION_PROTOCOL,
                 mode=mode,  # type: ignore[arg-type]
-                capabilities=list(wire.LINK_CAPABILITIES),
+                capabilities=list(listener_capabilities or wire.LINK_CAPABILITIES),
                 build={"version": "test"},
             )
             reader = wire.FrameReader(server)
@@ -91,6 +97,7 @@ def run_handshake(
             listener.verify_auth(reader, deadline, policy)
             result = listener.establish()
             outcome.listener = result
+            outcome.listener_codec = listener.codec()
             listener.send_welcome(
                 server, listener.welcome_frame(phase=result.phase, epoch=result.epoch)
             )
@@ -111,7 +118,7 @@ def run_handshake(
                 instance_id="i_dialer",
                 session_protocol=SESSION_PROTOCOL,
                 mode=mode,  # type: ignore[arg-type]
-                capabilities=list(wire.LINK_CAPABILITIES),
+                capabilities=list(dialer_capabilities or wire.LINK_CAPABILITIES),
                 build={"version": "test"},
             )
             if join_block is not None:
@@ -135,6 +142,7 @@ def run_handshake(
             welcome = dialer.read_welcome(reader, deadline)
             outcome.frames.append(welcome)
             outcome.dialer = dialer.establish()
+            outcome.dialer_codec = dialer.codec()
         except Exception as exc:  # noqa: BLE001
             outcome.dialer_error = exc
 
@@ -577,3 +585,62 @@ def test_a_frame_over_the_line_budget_is_never_sent(
     the real culprit, rather than producing a mysterious close on the peer."""
     assert hs_mod.frame_size_ok({"op": "hello", "n": 1})
     assert not hs_mod.frame_size_ok({"op": "hello", "big": "x" * (wire.MAX_HANDSHAKE_LINE + 1)})
+
+
+# ---------------------------------------------------------------------------
+# Record compression is negotiated, never assumed (wire.py "Record compression")
+# ---------------------------------------------------------------------------
+
+_OLD_CAPABILITIES = [c for c in wire.LINK_CAPABILITIES if c != wire.ZLIB_RECORDS_V1]
+
+
+def _big_frame() -> dict[str, Any]:
+    rows = [{"id": i, "text": "lorem ipsum dolor sit amet " * 40} for i in range(60)]
+    return {"op": "ack", "req": 1, "detail": {"entries": rows}}
+
+
+@pytest.mark.parametrize(
+    ("dialer_caps", "listener_caps", "compressing"),
+    [
+        (None, None, True),  # new <-> new
+        (None, _OLD_CAPABILITIES, False),  # new dialer, old listener
+        (_OLD_CAPABILITIES, None, False),  # old dialer, new listener
+        (_OLD_CAPABILITIES, _OLD_CAPABILITIES, False),  # old <-> old
+    ],
+)
+def test_the_real_handshake_negotiates_record_compression(
+    socketpair: tuple[socket.socket, socket.socket],
+    peers: tuple[Any, Any],
+    dialer_caps: list[str] | None,
+    listener_caps: list[str] | None,
+    compressing: bool,
+) -> None:
+    """Both roles, through the real handshake, land on the same decision, and a big
+    frame survives the trip in both directions either way. On a mixed pair the
+    new end's record is the BYTES of the build before this capability."""
+    client, server = socketpair
+    dialer_identity, listener_identity = peers
+    policy = policy_for(members={dialer_identity.device_id: dialer_identity.public_key})
+    outcome = run_handshake(
+        client,
+        server,
+        dialer_identity=dialer_identity,
+        listener_identity=listener_identity,
+        policy=policy,
+        dialer_capabilities=dialer_caps,
+        listener_capabilities=listener_caps,
+    )
+    assert outcome.dialer_error is None and outcome.listener_error is None
+    assert outcome.dialer_codec.compression is compressing
+    assert outcome.listener_codec.compression is compressing
+    frame = _big_frame()
+    legacy = wire.LinkCrypto(outcome.dialer.keys, role="dialer")  # no compression arg
+    record = outcome.dialer_codec.seal(frame)
+    if compressing:
+        assert record != legacy.seal(frame)
+        assert len(record) < len(legacy.seal(frame)) // 3
+    else:
+        assert record == legacy.seal(frame)
+    assert outcome.listener_codec.open(record[4:]) == frame
+    back = outcome.listener_codec.seal(frame)
+    assert outcome.dialer_codec.open(back[4:]) == frame

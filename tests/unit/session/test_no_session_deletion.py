@@ -151,6 +151,33 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Drops both derived files for one session id, on that session's own deletion",
     ),
+    # -- the code-request FETCH cache (1b): same derived-store argument as the
+    # ledger entries above. Every path here is built from ``fetch_dir()``
+    # (``<config>/cache/code_requests``) plus a sanitized host segment and a
+    # quoted-filename stem; no caller string can contribute a separator, and the
+    # files are cached fetch state, regenerable by the next refresh pass — a
+    # deleted entry is one conditional request away from being rebuilt.
+    (
+        "local_operator/code_requests/cache.py::_write_json",
+        "os.replace",
+        "Atomic pid-temp replace of one <config>/cache/code_requests/<host>/<file>.json",
+    ),
+    (
+        "local_operator/code_requests/cache.py::drop_entry",
+        "<path>.unlink",
+        "Drops one cached ref entry (memory + this file) on an explicit drop",
+    ),
+    (
+        "local_operator/code_requests/cache.py::clear_dirty",
+        "<path>.unlink",
+        "Drops one session's dirty marks once its fetch pass consumed them",
+        2,
+    ),
+    (
+        "local_operator/code_requests/cache.py::sweep",
+        "<path>.unlink",
+        "Drops entries untouched for SWEEP_AGE_S — the derived-store age sweep",
+    ),
     (
         "local_operator/operator/devices.py::clear_pairing",
         "<path>.unlink",
@@ -938,6 +965,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # paths come from `keys.key_path()`, which is `config_dir()/secrets/` plus
     # a fixed basename — no caller input and no session id reaches either, so
     # neither can name a path under sessions/.
+    # The tail-anchor sidecar: an atomic write of a session's OWN file. Both paths
+    # are that directory's own children (``tail-anchor.v1.json`` and its
+    # ``.<name>.<pid>.tmp``), and the target is a regular file inside the session —
+    # never the directory the store walks, and never another session's.
+    (
+        "local_operator/session/tail_anchor.py::write_anchor",
+        "os.replace",
+        "Atomic write of <session>/tail-anchor.v1.json; both paths are its own children",
+    ),
+    (
+        "local_operator/session/tail_anchor.py::write_anchor",
+        "<path>.unlink",
+        "Clears this pid's own .tmp sidecar in the same directory after a failed write",
+    ),
     (
         "local_operator/secrets/keys.py::replace_master_key",
         "os.replace",
@@ -1686,15 +1727,35 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ("local_operator/tools/group_reaper.py::_safe_unlink", "<path>.unlink", "pgid ledger FILE"),
     ("local_operator/tools/group_reaper.py::kill_own_groups", "<path>.unlink", "pgid ledger FILE"),
     ("local_operator/tools/spill.py::SpillStore._remove", "<path>.unlink", "spill FILE"),
+    # The notifier's own files under <config_dir>/notifier/: a build lock, the
+    # terminal memory and the --action probe cache, each built from
+    # ``config_dir()`` plus a fixed basename — none can name a path under
+    # sessions/. The ``_build_in_background`` rows that stood here moved when
+    # the single-builder rework split the marker into claim/release.
     (
-        "local_operator/tui/notifier_app/__init__.py::_build_in_background",
+        "local_operator/tui/notifier_app/__init__.py::_claim_build_lock",
         "<path>.unlink",
-        "build marker FILE",
+        "stale build-marker FILE <config_dir>/notifier/.building; config-dir lock",
     ),
     (
-        "local_operator/tui/notifier_app/__init__.py::_build_in_background._run",
+        "local_operator/tui/notifier_app/__init__.py::_release_build_lock",
         "<path>.unlink",
-        "build marker FILE",
+        "build-marker FILE <config_dir>/notifier/.building; config-dir lock",
+    ),
+    (
+        "local_operator/spawn/remembered.py::remember",
+        "os.replace",
+        "Atomic write of <config_dir>/notifier/last-terminal.json; config-dir FILE",
+    ),
+    (
+        "local_operator/spawn/remembered.py::forget",
+        "<path>.unlink",
+        "Removes <config_dir>/notifier/last-terminal.json; config-dir FILE",
+    ),
+    (
+        "local_operator/tui/notify.py::_write_persisted_action_support",
+        "os.replace",
+        "Atomic write of <config_dir>/notifier/notify-send-actions.json; config-dir FILE",
     ),
     ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
@@ -2735,6 +2796,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
+        "local_operator/session/tail_anchor.py::write_anchor",
         # tmp -> update-window.json (the update window's handover marker)
         "local_operator/session/runtime/inbox.py::write_update_window",
         # stop-sweeps.jsonl -> stop-sweeps.jsonl.1 (a FILE under config_dir()/logs)

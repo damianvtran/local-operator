@@ -414,8 +414,9 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/session/delegated_retention.py": (
         2,
         "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
-        "sweep lock): both sit beside the store at the sessions root, never inside a session "
-        "directory. (``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
+        "sweep lock): the former sits at the sessions root, the latter at the config root; "
+        "neither inside a session directory. (``ROSTER_NAME`` is a session entry, already "
+        "classified by the copy set.)",
     ),
     "local_operator/session_factory.py": (
         2,
@@ -424,8 +425,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/session/archived.py": (1, "the archived-ids list, a store-level record"),
     "local_operator/session/search_index.py": (1, "the search index, a store-level record"),
     "local_operator/session/transcript_index.py": (
-        1,
-        "the transcript index cache directory under the cache root, a store-level record",
+        2,
+        "the transcript index cache directory under the cache root, a store-level record; "
+        "and the tool name whose rows the desktop hides when display.hide_cross_session is "
+        "on, a comparison word rather than a path",
     ),
     "local_operator/session/retention.py": (
         1,
@@ -604,6 +607,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``code_requests``: the derived index under the store root and the scan cache "
         "under ``cache/`` — the ``monitors`` twin, both regenerable from the transcript",
     ),
+    "local_operator/code_requests/cache.py": (
+        1,
+        "``_DIRTY_DIRNAME`` (``.dirty``): the session dirty-mark directory under "
+        "``<config>/cache/code_requests/`` — cached fetch state, regenerable from the "
+        "transcript and the TTLs, and never an entry of a session directory (the "
+        "``ledger.py`` / ``monitors`` case; review round 1, F5)",
+    ),
+    "local_operator/code_requests/detect.py": (
+        1,
+        "``SELF_TOOL_NAME``: the code-request TOOL's name — an identifier resolved "
+        "through the tool registry (the ``reply_channel``/``action-tool`` "
+        "identifier-not-a-path case), never a file a session directory holds",
+    ),
     "local_operator/monitors/state.py": (
         1,
         "``state`` under ``monitors/``: the per-monitor counters/snapshot directory",
@@ -665,6 +681,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_MARKER`` (``.build-stamp``): the notifier app's own build stamp, written into its "
         "package directory",
     ),
+    "local_operator/spawn/remembered.py": (
+        1,
+        "``_FILE`` (``last-terminal.json``): the attended-terminal memory, written under "
+        "``<config>/notifier/`` — machine-local state about an emulator, never an entry of "
+        "a session directory",
+    ),
+    "local_operator/tui/notify.py": (
+        1,
+        "``_ACTION_PROBE_FILE`` (``notify-send-actions.json``): the per-binary ``--action`` "
+        "probe cache under ``<config>/notifier/`` — machine-local state about an installed "
+        "binary, never an entry of a session directory",
+    ),
     # ---- the signed helper app the macOS wheel ships ----
     "local_operator/operator/macos/keyagent.py": (
         2,
@@ -687,6 +715,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``config.evidence_root/<episode-id>-<arm-id>`` -- an evidence directory "
         "the caller owns (the benchmark run root), never an entry of a session "
         "directory; a replica re-creates the reserve rather than carrying it",
+    ),
+    # ---- the turn-supplement feature's rule IDS ----
+    "local_operator/supplements/denylist.py": (
+        4,
+        "``RULE_CONFIG_DIR``/``RULE_NAME``/``RULE_NAME_PREFIX``/``RULE_SUFFIX`` are rule "
+        "IDS: the tags ``is_sensitive`` returns and a surface logs to say which class "
+        "refused a path (the module's docstring: 'every rule has a stable id'). Bare "
+        "words, never entries of a session directory; they trip this guard only because "
+        "their constant names end in DIR/NAME/PREFIX/SUFFIX while their values read as "
+        "path-shaped spellings",
     ),
     # ---- ID / KEY FRAGMENTS (widened guard): a ``*_PREFIX``/``*_SUFFIX`` constant is a
     # ---- FRAGMENT joined to some id or key, never a bare entry of a session directory.

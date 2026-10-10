@@ -4333,6 +4333,10 @@ class TranscriptView(ScrollableContainer):
         #: :meth:`insert_blocks` for why a single late restore is not enough.
         #: ``None`` when no insert is settling.
         self._insert_anchor: tuple[TranscriptBlock, float] | None = None
+        #: ``(anchor_id, part, offset)`` for a saved position whose block has no
+        #: geometry yet — see :meth:`arm_navigation_anchor`. Applied by
+        #: :meth:`arrange`, i.e. before the compositor places the rows.
+        self._pending_anchor: tuple[str, int, int] | None = None
         #: Set by :meth:`hold_tail_through_layout` while a caller is landing a
         #: follower on the tail across several layout passes.
         self._hold_tail_placement = False
@@ -4515,7 +4519,14 @@ class TranscriptView(ScrollableContainer):
         # batch that grows the extent leaves the viewport measurably far from
         # the new end, so asking afterwards reports "scrolled up" for a reader
         # who never moved.
-        was_at_tail = self._tail_anchor.following or self.is_near_bottom()
+        # A QUEUED POSITION IS NOT A FOLLOWER. `is_near_bottom()` is true of an
+        # unmeasured parked view (0 >= 0), so a saved-position reveal was carried
+        # to the tail by this landing and then walked back to the anchor — the
+        # tail frame QA round 2 measured at 146 ms (Q8). The reader asked for
+        # their saved position, not for the end of the conversation.
+        was_at_tail = self._tail_anchor.following or (
+            self._pending_anchor is None and self.is_near_bottom()
+        )
         release_revision = self._tail_anchor.release_revision
         self.mount_all(blocks)
         # A batch arrives as ONE ledger change, so it gets one resync rather than
@@ -5537,8 +5548,102 @@ class TranscriptView(ScrollableContainer):
         for block in self._blocks:
             block.set_navigation_visible(visible)
 
-    def restore_navigation_anchor(self, anchor_id: str, part: int, offset: int) -> bool:
-        """Restore the same message, not a stale screen-row offset after resize."""
+    def arm_navigation_anchor(self, anchor_id: str, part: int, offset: int) -> None:
+        """Queue a saved position to be taken in the pass that gives it geometry.
+
+        WHY THIS IS NOT :meth:`restore_navigation_anchor`. That call places the
+        viewport with arithmetic over ``block.region``, and a block that has
+        never been laid out has a ZERO region — the arithmetic degenerates to a
+        clamp at scroll 0, the top of the conversation, which is both the wrong
+        end and a frame the reader sees (QA round 2, Q8). Nor is
+        ``_size_updated`` the place for it: that runs after the reflow has
+        already placed the rows, so the offset it corrects has been painted.
+
+        ``arrange`` is the seam instead — the same one the insertion anchor uses
+        — because the compositor reads ``scroll_offset`` immediately after it
+        returns. A caller that knows it is revealing rows with no geometry yet (a
+        ``display_only`` source, whose prepare skips the layout wait) arms the
+        position here, and the reveal's first frame is already at it.
+
+        The tail anchor is released here as well as parked: a queued position and
+        a follower are two answers to the same question, and a pending anchor
+        that left ``following`` armed would be dragged back to the tail by the
+        next extent change (measured before this released it: the reveal landed
+        at the saved position and then walked to the end).
+        """
+        self._pending_anchor = (anchor_id, part, offset)
+        self._hold_tail_placement = False
+        self._tail_anchor.release()
+
+    def _place_pending_anchor(self, result: DockArrangeResult) -> None:
+        """Take the queued position, or keep it for the next pass.
+
+        Bounded by the FRESH content extent (``result.total_region``), exactly as
+        the insertion anchor below is: ``max_scroll_y`` is stale until
+        ``_size_updated`` runs, so clamping to it would refuse a destination the
+        reader is entitled to.
+        """
+        pending = self._pending_anchor
+        if pending is None:
+            return
+        anchor_id, part, offset = pending
+        block = next(
+            (
+                candidate
+                for candidate in self._blocks
+                if candidate.navigation_anchor_id == anchor_id
+                and candidate.navigation_anchor_part == part
+            ),
+            None,
+        )
+        if block is None:
+            block = next(
+                (
+                    candidate
+                    for candidate in self._blocks
+                    if candidate.navigation_anchor_id == anchor_id
+                ),
+                None,
+            )
+        if block is None:
+            self._pending_anchor = None
+            return
+        placement = next((entry for entry in result.placements if entry.widget is block), None)
+        height = placement.region.height if placement is not None else block.region.height
+        if height <= 0:
+            # Not this pass: the block is in the container but has not been given
+            # rows yet. Keeping it is not a wait for a frame — `arrange` runs
+            # before placement, so the next pass carries it — and a queued
+            # position must survive a pass that cannot honour it rather than
+            # being silently dropped.
+            return
+        self._pending_anchor = None
+        y = (placement.region.y if placement is not None else block.region.y) + min(
+            offset, max(0, height - 1)
+        )
+        target = min(max(0.0, float(y)), max(0, result.total_region.bottom - self.size.height))
+        if abs(target - self.scroll_y) >= 0.5:
+            self.set_reactive(Widget.scroll_y, target)
+            self.set_reactive(cast(Reactive[float], Widget.scroll_target_y), target)
+            self.vertical_scrollbar.set_reactive(ScrollBar.position, target)
+
+    def restore_navigation_anchor(
+        self, anchor_id: str, part: int, offset: int, *, only_when_measured: bool = False
+    ) -> bool:
+        """Restore the same message, not a stale screen-row offset after resize.
+
+        ``only_when_measured`` makes the call REFUSE rather than guess, and the
+        commit is the caller that needs it. An unmeasured block's region is a
+        zero ``Region``, so the arithmetic below degenerates to
+        ``scroll_y - content_region.y``: a clamp to the TOP of the conversation.
+        For a view being revealed that is a frame at the wrong end — the reader
+        of a mid-conversation source sees the first message, and
+        ``restore_revealed_anchor`` then walks the viewport forward onto the
+        anchor, which is two painted states with the wrong one first. The caller
+        that knows its geometry is not final yet (``display_only`` first visits
+        skip the prepare-time layout) asks for the refusal and leaves the
+        placement to the net.
+        """
         anchor = next(
             (
                 block
@@ -5553,6 +5658,8 @@ class TranscriptView(ScrollableContainer):
             )
         if anchor is None:
             return False
+        if only_when_measured and anchor.region.height <= 0:
+            return False
         self._tail_anchor.release()
         y = (
             self.scroll_y
@@ -5564,6 +5671,11 @@ class TranscriptView(ScrollableContainer):
             # Disabled means no user input, not no restoration: staged views
             # are non-interactive while their canonical anchor is laid out.
             self.scroll_to(y=max(0, y), animate=False, immediate=True, force=True)
+        # Placed on measured geometry means the queued position has been
+        # superseded by the same position: leaving it armed would place it again
+        # on the next arrange — harmless while the two agree, wrong the moment
+        # the reader moves on.
+        self._pending_anchor = None
         return True
 
     def follow_tail(self) -> None:
@@ -5678,6 +5790,14 @@ class TranscriptView(ScrollableContainer):
         a frame later and, under a burst of deltas, land permanently one flush
         short of the tail.
         """
+        if self.max_scroll_y <= 0:
+            # NO MEASURED EXTENT, NO TAIL. `scroll_to(y=0)` here is the TOP of the
+            # conversation, and a queued call arrives before a batch has authored
+            # any heights — which is how a reveal painted the top of the
+            # transcript for a frame (QA round 2, Q8, state-104ms). There is
+            # nothing to land on yet; an armed follower is landed by
+            # `_size_updated`, the one place the extent is documented as fresh.
+            return
         with self._tail_anchor.programmatic_scroll():
             self.scroll_to(y=self.max_scroll_y, animate=False, immediate=True, force=True)
 
@@ -5693,6 +5813,11 @@ class TranscriptView(ScrollableContainer):
         estimate is needed.
         """
         result = super().arrange(size, optimal)
+        if self._pending_anchor is not None:
+            # FIRST, and before the follower's own branch below: a queued saved
+            # position is a destination the reader chose, while both other
+            # branches here move the viewport to the END of the content.
+            self._place_pending_anchor(result)
         if (
             self._hold_tail_placement
             and self._tail_anchor.following

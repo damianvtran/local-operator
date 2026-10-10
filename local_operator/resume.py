@@ -1523,11 +1523,13 @@ def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = 
     :func:`local_operator.procstate.is_zombie`.
 
     ``check_zombie=False`` is for the engage loop's DISCOVERY path, which calls
-    this on every pass of its dense 10 ms grid: the proof costs a `ps` fork
-    (2.4-4.6 ms measured across runs on this host), which is more than the dead
-    time that grid exists to remove. At the three user-facing call sites (the
-    TUI's ``/resume``, ``lop exec --resume`` and the phone's attach) the answer
-    IS the decision, so they keep the default.
+    this on every pass of its dense 10 ms grid: the proof costs a platform
+    probe — on macOS a ``sysctl`` read, ~90 µs for one pid (2026-10-09), and the
+    ``ps`` spawn it replaced measured 255-300 ms under fleet load (see
+    ``procstate._sysctl_samples``) — against a 23-30 µs iteration budget. At the
+    three user-facing call sites (the TUI's ``/resume``, ``lop exec
+    --resume`` and the phone's attach) the answer IS the decision, so they keep
+    the default.
 
     Cheap mode is not merely a wait, and saying so would be wrong. It cannot
     change ARBITRATION — the loop's decision to attach or spawn still ends in a
@@ -1586,8 +1588,9 @@ def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = 
         # The engage loop's dense 10 ms grid: the cheap answer only, which is
         # the same deferral the corpse proof gets below and the identity proof
         # gets with it. The grid exists to shorten the dead time between a
-        # runtime publishing and the parent noticing; a ``ps`` fork costs
-        # 2.4-4.6 ms against a 23-30 µs iteration budget. What it can cost here
+        # runtime publishing and the parent noticing; the probe costs ~90 µs
+        # (macOS ``sysctl``; a ``ps`` fallback is far more) against a 23-30 µs
+        # iteration budget. What it can cost here
         # is bounded and cannot recovers the impersonation: on that path the
         # cheap answer selects a record or reports an errand ready, and the
         # decision to attach or spawn still ends in a runtime that must acquire

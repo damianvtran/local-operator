@@ -39,7 +39,7 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,6 +63,24 @@ CONTEXT_CAP = 10_000
 
 POST_TOOL_USE = "PostToolUse"
 POST_TOOL_USE_FAILURE = "PostToolUseFailure"
+
+
+@dataclass(frozen=True)
+class TaggedNote:
+    """A note that carries its OWN event tag rather than the caller's event.
+
+    The post-tool seam wraps every note as ``<hook-context event="…">``, where
+    the event is the CALLER's (``PostToolUse``/``PostToolUseFailure``). The
+    session's own code-request note is neither — it is a harness fact about the
+    call, not a forwarded hook event — so it carries its own tag
+    (``code-requests``) and :func:`format_notes` honours it. A bare ``str``
+    keeps the pre-existing behaviour exactly, which is why the list type widened
+    instead of the wrapper replacing it.
+    """
+
+    event: str
+    text: str
+
 
 #: lop tool name -> the Claude Code tool name matchers are written against.
 #: Unmapped tools (MCP tools, lop-only tools) pass through under their own name.
@@ -633,11 +651,20 @@ async def run_post_tool_hooks(
     return [note for notes in results for note in notes]
 
 
-def format_notes(event_notes: list[str], event: str) -> str:
+def format_notes(event_notes: Sequence[str | TaggedNote], event: str) -> str:
     """The block appended to the tool result, one per note.
 
     ``event`` is the event the notes came from: the caller knows whether the
     tool call failed, and a failure note labelled ``PostToolUse`` would report
-    the wrong event to whatever reads the tag.
+    the wrong event to whatever reads the tag. A :class:`TaggedNote` supplies
+    its own tag instead. ``Sequence`` (not ``list``) because the loop's hook is
+    typed to return ``list[str]``: a list is invariant, so a list-typed
+    parameter would reject the plain-strings case at the call site.
     """
-    return "\n\n".join(f'<hook-context event="{event}">\n{n}\n</hook-context>' for n in event_notes)
+    rendered: list[str] = []
+    for item in event_notes:
+        if isinstance(item, TaggedNote):
+            rendered.append(f'<hook-context event="{item.event}">\n{item.text}\n</hook-context>')
+        else:
+            rendered.append(f'<hook-context event="{event}">\n{item}\n</hook-context>')
+    return "\n\n".join(rendered)

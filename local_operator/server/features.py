@@ -20,6 +20,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from local_operator.supplements.contract import (
+    SUPPLEMENTS_FEATURE_KEY,
+    SUPPLEMENTS_FEATURE_VERSION,
+)
+
 
 def feature_flags() -> dict[str, Any]:
     """The versioned feature map, resolved per call.
@@ -336,6 +341,25 @@ def feature_flags() -> dict[str, Any]:
         # key exists so the NEW renderer can tell whether asking is worthwhile
         # before it sends a flag the old backend ignores.
         "entry_ts": 1,
+        # THE OPEN FRAME. `open_frame=1` on `GET .../{id}` (the snapshot),
+        # `GET .../{id}/history` and `GET .../{id}/events` asks for the page in
+        # the unit a surface PAINTS: `limit` counts paintable rows, the cut
+        # extends back to a run's opening user row under a hard cap (with
+        # `head_cut` when the cap binds), non-painted bytes are stripped, and
+        # `runs`/`runs_state` carry the per-run facts a collapsed turn's bar
+        # needs — settled runs only, so a live tail is never stated as settled.
+        #
+        # Its own key rather than a bump of anything: the shape is ADDITIVE (a
+        # client that sends no flag receives today's page byte-for-byte), and the
+        # clients gate on it before sending, because the UNIT of `limit` changes
+        # with it — a renderer that sent the flag without reading `runs` would
+        # simply get fewer rows than it asked for and no reason stated.
+        #
+        # LOCAL JOURNALS ONLY in this revision. A peer-owned id answers today's
+        # shape with `runs_state: "unsupported"` (the owner-side read is where
+        # the same strip belongs), so a renderer must treat `unsupported` and an
+        # absent `runs` alike.
+        "open_frame": 1,
         # ``/info``'s host read and ``/session``'s one-snapshot ledger
         # report. A NEW key rather than a bump of `catalogues`, and the
         # rule is the one `session_search` states above: a renderer
@@ -741,6 +765,18 @@ def feature_flags() -> dict[str, Any]:
         # additive — an absent key means the surface is not there, which is the
         # pre-voicing behaviour rather than a degraded one.
         "tts": 1,
+        # TURN SUPPLEMENTS ("Highlights"), the STATIC HTTP flag: the contract (event,
+        # row, capability strings, document assembler) is in this build. The document
+        # routes are 404 stubs until lane C2 fills them in, and nothing emits a
+        # supplement until lane C1, so no renderer is yet answered. It is deliberately
+        # NOT the attach gate --
+        # live events and projected rows ride the ``supplements-v1`` capability on
+        # the owner record ANDed with the viewer's own declaration (see
+        # ``supplements.contract.negotiated``) -- so a renderer reads this key to decide
+        # whether to ASK, and the capability decides whether it is ANSWERED. No
+        # released renderer reads it; lane C1 puts it behind the ``LOP_SUPPLEMENTS``
+        # kill switch the way ``references`` is.
+        SUPPLEMENTS_FEATURE_KEY: SUPPLEMENTS_FEATURE_VERSION,
         # THE PER-SESSION CODE-REQUEST SURFACE: `GET
         # /v1/desktop/sessions/{id}/code-requests` (this conversation's PRs/MRs, from the
         # derived index) plus its `/refresh` child. ONE key for the family, because the
@@ -758,5 +794,19 @@ def feature_flags() -> dict[str, Any]:
         # row (an additive field) rather than bump this key — a renderer that can read
         # link-only rows can read a fuller one.
         "code_requests": 1,
+        # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
+        # empty-session advisory that the selected account has no quota left
+        # (design: "pre-emptive no-quota notice"). Its OWN key rather than a
+        # bump of `catalogues`/`auth`, by the rule `code_requests` states
+        # above: the route is ADDITIVE — an older renderer never calls it —
+        # so this gates nothing for an old client. It is how a renderer
+        # learns the surface EXISTS before it mounts the notice line and
+        # starts a refetch cycle whose request an older backend answers with
+        # a 404. Absent, the empty session renders exactly as today, with no
+        # notice affordance and no request; that is the pre-feature state
+        # rather than a degraded one. The renderer must also treat a 404 as
+        # definitive (show nothing, do not retry), because a backend that
+        # answers this key yet 404s the route is broken, not slow.
+        "quota_notice": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }

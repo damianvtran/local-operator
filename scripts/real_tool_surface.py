@@ -80,6 +80,16 @@ class _UntypedStub:
         return lambda *args, **kwargs: None
 
 
+async def _allow_quiet() -> None:
+    """A quiet-end door that allows — the value a real session binds.
+
+    ``build_no_reply_tool`` only checks PRESENCE, and every call the benchmark
+    makes is a builder call, so the body is never run; it stays async to match
+    the field's declared type.
+    """
+    return None
+
+
 def build_real_tool_context(cwd: str) -> ToolContext:
     """A ToolContext whose capabilities are all present.
 
@@ -118,6 +128,20 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # a surface no user has (the exact defect this module's docstring
         # records for the project registry and the patience class).
         withdraw_ask=lambda *args, **kwargs: {"ok": True},
+        # The code-requests tool's createIf gate reads the session's own
+        # DIRECTORY (its derived index lives beside the transcript) — context
+        # DATA rather than a machine probe, so the stub simply carries one;
+        # the tool is never called by a measurement. Without it the measured
+        # surface is one tool lighter than a real session's, the same defect
+        # the project registry above records.
+        session_dir=f"{cwd}/.stub-session",
+        # The quiet-end door (docs/design/quiet-turns.md §4): the newest
+        # createIf gate, carried as a bare callable rather than a Protocol —
+        # a real session binds it, so leaving it unbound here would measure a
+        # surface one tool short of every session's (``no_reply``), the same
+        # defect the project registry above records. The stub is never
+        # awaited: the builder only checks presence.
+        quiet_end=_allow_quiet,
     )
 
 

@@ -20,7 +20,14 @@ import sys
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -106,6 +113,19 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.last_user import last_user_at
 from local_operator.session.model_selection import session_uses_test_hosting
+from local_operator.session.open_frame import (
+    OPEN_FRAME_MAX_BYTES,
+    OPEN_FRAME_MAX_EXTRA_ROWS,
+    OPEN_FRAME_MAX_RAW_PAGES,
+    OPEN_FRAME_MAX_ROWS,
+    OPEN_FRAME_SNAPSHOT_BUDGET_S,
+    align_page,
+    build_frame,
+    page_seq_bounds,
+    paintable,
+    served_bytes,
+    tail_head_reachable,
+)
 from local_operator.session.page_cache import load_transcript_page
 
 # The ownership stamp and the local default: read once per row to publish the
@@ -3114,7 +3134,14 @@ class DesktopSessionBridge:
         self.attention_refresh = task
         return task
 
-    async def snapshot(self, *, entry_times: bool = False) -> dict[str, Any]:
+    async def snapshot(
+        self, *, entry_times: bool = False, open_frame: bool = False
+    ) -> dict[str, Any]:
+        # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
+        # everything this method does before the page (the attention glance, the
+        # canonical state) is time the renderer pays for too, so it comes out of
+        # the same budget rather than being spent on top of it.
+        started = time.monotonic()
         # Decorative, so a busy or damaged receipt sidecar cannot stop a
         # conversation from OPENING. Before this field existed the snapshot
         # never touched `attention.db`; letting it raise here turned routine
@@ -3210,7 +3237,15 @@ class DesktopSessionBridge:
             # and reads stay bounded by their OWN source's cut: see
             # ``read_transcript_page`` for the inclusive-boundary rule it still
             # applies when a caller asks for one.
-            history = await self.history(entry_times=entry_times)
+            history = await self.history(
+                entry_times=entry_times,
+                open_frame=open_frame,
+                # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
+                # read may spend what REMAINS of it on facts and nothing more. See
+                # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
+                # why the renderer's own paint time is the reason for it.
+                deadline=started + OPEN_FRAME_SNAPSHOT_BUDGET_S,
+            )
         # THE WATERMARK IS READ WITH THE STATE IT DESCRIBES, AND NOTHING AWAITS
         # BETWEEN THEM. Both reads used to sit ABOVE the ``history()`` await, so
         # this frame's ``seq`` was a watermark older than the last suspension in
@@ -3249,6 +3284,8 @@ class DesktopSessionBridge:
         after: int | None = None,
         limit: int = 100,
         entry_times: bool = False,
+        open_frame: bool = False,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """One page of the durable journal.
 
@@ -3296,6 +3333,15 @@ class DesktopSessionBridge:
         façade is a door other callers reach directly and its own contract must
         not depend on this method having run first.
 
+        ``open_frame`` IS THE RENDERER'S DECLARATION that it paints from the
+        page in the unit the page is READ in — see
+        :meth:`_open_frame_history`. It changes three things at once (the unit of
+        ``limit``, the row cut, and the bytes), so it is asked for as ONE flag
+        rather than three: a client that took the stripped bytes without the
+        run-aligned cut would paint fewer rows than it asked for with nothing
+        stating why. False — every existing client — serves today's page
+        byte-for-byte.
+
         ``entry_times`` IS THE RENDERER'S DECLARATION that it can consume the
         per-row ``ts_source`` vocabulary (``docs/DESKTOP_API.md``), threaded from
         the ``entry_ts`` request flag. It changes the WIRE reader's answer only:
@@ -3304,6 +3350,50 @@ class DesktopSessionBridge:
         leaves the wire reader exactly as it was, serve-stamp included.
         """
         validate_page_request(before_id, through_id, around_id, before, after, limit)
+        if open_frame:
+            # THE REMOTE ARMS ARE BELOW THIS FLAG, DELIBERATELY. A peer's page is
+            # built by its OWNER (``net_session_history`` for a stored journal,
+            # the wire window for a live one), so stripping it here would be a
+            # second page builder for rows this device did not derive — and the
+            # rows a peer sends are messages, not journal entries, so the local
+            # strip's key list does not even describe them. The answer is today's
+            # shape with ``runs_state: "unsupported"``: a client must treat that
+            # and an absent ``runs`` alike, and the seam is the owner-side read
+            # (docs/DESKTOP_API.md, "The open frame").
+            # ``remote_row`` is the PEER marker and a missing facade is the
+            # stored-peer read (``_peer_stored_history``); ``self.remote`` is
+            # this device's own facade and must NOT be read as "a peer" — it is
+            # present for every local session the bridge has touched, which is
+            # exactly the case this frame is built for.
+            if self.remote_row is not None or self.remote is None:
+                page = await self.history(
+                    before_id=before_id,
+                    through_id=through_id,
+                    around_id=around_id,
+                    before=before,
+                    after=after,
+                    limit=limit,
+                    entry_times=entry_times,
+                )
+                return {**page, "runs": [], "runs_state": "unsupported", "head_cut": False}
+            return await self._open_frame_history(
+                before_id=before_id,
+                through_id=through_id,
+                around_id=around_id,
+                before=before,
+                after=after,
+                limit=limit,
+                entry_times=entry_times,
+                deadline=(
+                    deadline
+                    if deadline is not None
+                    # A request that arrives on its own route carries its own
+                    # budget from this point; the snapshot threads its earlier
+                    # one through so a page embedded in it cannot buy time the
+                    # client did not agree to.
+                    else time.monotonic() + OPEN_FRAME_SNAPSHOT_BUDGET_S
+                ),
+            )
         if self.remote_row is not None:
             if around_id is not None:
                 # V1 CANNOT ANCHOR A PEER'S WINDOW (design §D4; the exact remote
@@ -3357,6 +3447,332 @@ class DesktopSessionBridge:
             "has_more": page.has_more,
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,
+        }
+
+    async def _open_frame_history(
+        self,
+        *,
+        before_id: str | None,
+        through_id: str | None,
+        around_id: str | None,
+        before: int | None,
+        after: int | None,
+        limit: int,
+        entry_times: bool,
+        deadline: float,
+    ) -> dict[str, Any]:
+        """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
+
+        THE UNIT OF ``limit`` IS THE PAINTABLE ROW, and that is the whole point of
+        this flag: counting journal entries let a 349 KB checkpoint row and a
+        716 KB compaction take window slots from rows a reader can see (1,480 of
+        3,999 served rows on this machine's real tail pages were bookkeeping or
+        compaction rows). The row count is taken AFTER ``open_frame.strip_entry``,
+        so ``limit`` means what a client thinks it means.
+
+        THE CUT EXTENDS BACK TO A USER ROW. A page that ends mid-run is what makes
+        a client condense a partial turn and re-condense it as pages land — the
+        align walk this contract exists to retire — so the read keeps pulling
+        older pages while the OLDEST row on the page is not a user message row,
+        bounded by ``OPEN_FRAME_MAX_RAW_PAGES``, ``OPEN_FRAME_MAX_ROWS`` and
+        ``OPEN_FRAME_MAX_BYTES``. A user row is the client's own run opener
+        (``walkTurns``), so the rule is stated in rows rather than in the index's
+        turns: it holds for a conversation whose index has never been built, and
+        it is a fact about the page the client will paint.
+
+        ``head_cut`` IS THE HONEST HALF. When a cap (or the journal's own start)
+        stops the extension with a non-user row still at the page's head, the page
+        says so: the client then knows its oldest run is a fragment and that
+        ``runs`` — never the page — is where that run's true size lives. A page
+        that reached a user row, or that had no room to extend because the journal
+        begins above it, reports ``False``: nothing was cut.
+
+        THE ANCHORED MODE KEEPS ITS OWN CONTRACT. ``around_id`` is the renderer's
+        FAR JUMP (design §D4): its ``before``/``after`` counts stay journal rows
+        and its window is the reader's, because the client asked for a POSITION,
+        not for a page — re-centring it on paintable rows would move the row the
+        client jumped to. The strip still applies (the bytes are the bytes), and
+        the runs intersecting the window are still published.
+
+        ``entry_times`` IS UNUSED HERE AND THAT IS NOT AN OVERSIGHT: every row on
+        a local page is a journal entry, so ``ts`` is the entry time by
+        construction and this page stamps ``entry`` whatever the flag says. It
+        stays in the signature because the snapshot threads one request's flags
+        through one call, and splitting the parameter list per flag is how the two
+        pages would come to disagree about the same rows.
+        """
+        directory = self.root / "sessions" / self.session_id
+        if around_id is not None:
+            try:
+                page = await load_transcript_page(
+                    directory, around_id=around_id, before=before, after=after, limit=limit
+                )
+            except FileNotFoundError:
+                return {
+                    "entries": [],
+                    "has_more": False,
+                    "cursor_missing": True,
+                    "has_newer": None,
+                    "runs": [],
+                    "runs_state": "unsupported",
+                    "head_cut": False,
+                }
+            anchored = self._wire_rows(page.entries)
+            anchored_index = await self._frame_index(deadline)
+            result = build_frame(
+                anchored,
+                index=anchored_index,
+                runs_state="building",
+                has_more=page.has_more,
+                cursor_missing=page.reconciled,
+                has_newer=page.has_newer,
+                # THE ANCHOR IS THE PAGE'S REASON TO EXIST (review round 1, F1).
+                # Without it the cap cut the jump target away — a client asked for
+                # a position and got a window that no longer contained it — and
+                # ``capped`` was not folded into the flags either, so ``has_more``
+                # said the conversation began at the cut and the older rows became
+                # unreachable.
+                anchor_id=around_id,
+                bounds=(
+                    page_seq_bounds(anchored_index, anchored, reaches_eof=False)
+                    if anchored_index is not None
+                    else None
+                ),
+            )
+            answer = self._frame_answer(result)
+            # ONLY the older side (review round 3, F15): a cut on the newer side
+            # leaves older rows untouched, so folding it here made ``has_more``
+            # true on a page whose oldest row is the journal's first.
+            answer["has_more"] = page.has_more or result.capped_older
+            # AND THE NEWER SIDE (review round 2, F10): a cap that refuses rows on
+            # the newer side leaves them beyond the page, so the flag has to say
+            # so — ``page.has_newer`` is the reader's pre-cap answer and cannot
+            # know about the cap. Measured before this: ``around_id=u0050`` with
+            # 450 rows after it served 400 and answered ``has_newer: false`` while
+            # 50 newer rows sat inside the request.
+            answer["has_newer"] = bool(page.has_newer) or result.capped_newer
+            # AN ANCHORED PAGE NEVER CLAIMS ITS OLDEST RUN IS WHOLE: it is a jump
+            # window, not a tail cut, so the only honest reading of ``head_cut``
+            # here is "a cap dropped rows from this window".
+            answer["head_cut"] = result.capped
+            return answer
+
+        collected: list[dict[str, Any]] = []
+        has_more = False
+        cursor_missing = False
+        cursor = before_id
+        index: Any = None
+        for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
+            try:
+                page = await load_transcript_page(
+                    directory,
+                    before_id=cursor,
+                    # ``through_id`` bounds the FIRST read only: the pages pulled
+                    # above it (the head hunt) are strictly older, so re-applying
+                    # the bound would be a second cut over rows the caller's own
+                    # bound never described.
+                    through_id=through_id if not collected else None,
+                    # THE PAGE PLUS ITS CONTINUATION, IN ONE READ (QA round 1,
+                    # Q3): the reader's own window is sized to the request and a
+                    # SMALL request is the case that suffers — at ``limit <= 20``
+                    # the raw read is a few dozen rows, so the user-row hunt ran
+                    # out of rows it had never asked for and the cut stopped
+                    # short. Reading ``limit + OPEN_FRAME_MAX_EXTRA_ROWS`` on every
+                    # page costs nothing when the hunt is unnecessary (the page
+                    # still serves ``limit`` rows) and makes the bound the same
+                    # number the hunt is allowed to spend.
+                    limit=limit + OPEN_FRAME_MAX_EXTRA_ROWS,
+                )
+            except FileNotFoundError:
+                if collected:
+                    break
+                # A draft's journal does not exist yet. The empty page is the
+                # documented answer (see ``history``), and the frame says its
+                # facts are unsupported rather than promising a scan of nothing.
+                return {
+                    "entries": [],
+                    "has_more": False,
+                    "cursor_missing": bool(before_id or through_id),
+                    "runs": [],
+                    "runs_state": "unsupported",
+                    "head_cut": False,
+                }
+            if not collected:
+                cursor_missing = page.reconciled
+            has_more = page.has_more
+            rows = self._wire_rows(page.entries)
+            if not rows:
+                break
+            collected = rows + collected
+            if not collected:
+                break
+            kept, reached = align_page(collected, limit)
+            paintable_rows = paintable(collected)
+            if reached and len(paintable(kept)) >= limit:
+                break
+            # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
+            # what the client asked for and it must not wait behind a scan, while
+            # the head hunt is the part that can be called off. With an index in
+            # hand the reachability test is one subtraction (see
+            # ``open_frame.tail_head_reachable``) and a run too long to reach is
+            # left to ``runs`` rather than paid for in bytes.
+            # F3: THE SHORTCUT STOPS THE EXTRA HUNT ONLY, AND ONLY ON A TAIL
+            # READ. Two ways this was wrong: it ended the read while the page
+            # still held FEWER than ``limit`` paintable rows (the ordinary shape
+            # of a long live run is a ``tool`` row followed by a
+            # ``session_spend.v1`` row per provider round, so one read of ``limit``
+            # raw rows can hold half that many painted ones), and it asked about
+            # the JOURNAL's last run even when the cursor was a ``before_id`` in
+            # the middle of the conversation. A page is owed its ``limit`` rows;
+            # the shortcut only decides whether to spend MORE on a head that
+            # ``runs`` already describes exactly.
+            if (
+                attempt == 0
+                and index is None
+                and before_id is None
+                and through_id is None
+                and around_id is None
+            ):
+                index = await self._frame_index(deadline)
+            if (
+                index is not None
+                and len(paintable_rows) >= limit
+                and before_id is None
+                and through_id is None
+                and around_id is None
+                and not tail_head_reachable(index, limit=limit)
+            ):
+                break
+            if len(paintable_rows) >= limit + OPEN_FRAME_MAX_EXTRA_ROWS:
+                # The head hunt's own budget, in ROWS and not pages: past it the
+                # page is not aligned and the rows above the limit are ones the
+                # cut refuses to serve anyway (see ``align_page``).
+                break
+            if (
+                len(paintable_rows) >= OPEN_FRAME_MAX_ROWS
+                or served_bytes(paintable_rows) >= OPEN_FRAME_MAX_BYTES
+            ):
+                break
+            if not page.has_more:
+                break
+            cursor = str(collected[0].get("id") or "")
+            if not cursor:
+                break
+        if index is None:
+            index = await self._frame_index(deadline)
+        # THE CUT IS APPLIED ONCE, HERE, AND IT IS THE CONTRACT ITSELF: at least
+        # ``limit`` paintable rows, starting at a user row when one is in reach,
+        # and exactly ``limit`` rows with ``head_reached=False`` when none is. A
+        # page whose oldest run is a fragment either way is not made better by
+        # extra rows — measured on the S3 fixture, serving the overshoot was 231
+        # rows and 264 KB against 100 rows and 114 KB — so the hunt that failed is
+        # not paid for, and ``runs`` carries that run's true size instead.
+        kept, reached = align_page(collected, limit)
+        result = build_frame(
+            kept,
+            index=index,
+            runs_state="building",
+            has_more=has_more,
+            cursor_missing=cursor_missing,
+            has_newer=None,
+            bounds=(
+                page_seq_bounds(
+                    index,
+                    collected,
+                    # A read with NO cursor is the journal's TAIL, so its newest
+                    # row is the newest row there is and the run window stays
+                    # open at the top — which is what lets the live tail's own
+                    # run be stated rather than skipped as an edge case.
+                    reaches_eof=(before_id is None and through_id is None and around_id is None),
+                )
+                if index is not None
+                else None
+            ),
+        )
+        answer = self._frame_answer(result)
+        # A cut that DROPPED rows the read had already fetched still owes the
+        # client a "there is more above this page": ``has_more`` describes the
+        # page served, never the reads behind it, and a reader that trimmed rows
+        # above the cut would otherwise be told the conversation starts there.
+        trimmed = len(kept) < len(collected)
+        answer["has_more"] = has_more or result.capped or trimmed
+        # F2: ``head_cut`` IS COMPUTED FROM WHAT WAS SERVED, AFTER THE CAPS.
+        # ``reached`` describes ``collected``, and ``build_frame`` may then have
+        # dropped the oldest rows — the page's user row first — so a page could
+        # report ``head_cut: false`` while its oldest run WAS cut by the cap. That
+        # is the one reading a client acts on (it stops walking and condenses the
+        # page's oldest run from the rows it holds), which makes the false answer
+        # worse than no answer.
+        answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
+        return answer
+
+    @staticmethod
+    def _wire_rows(entries: Any) -> list[dict[str, Any]]:
+        """Journal rows as the wire states them, oldest first.
+
+        THE ONE SPELLING of a local row on this plane: the same
+        ``{id,ts,type,payload}`` envelope plus the ``ts_source: "entry"`` stamp
+        every other local read carries, filtered by the same
+        :func:`visible_transcript_rows` predicate. A second reader would be a
+        second vocabulary for one screen.
+        """
+        return visible_transcript_rows(
+            [{**json.loads(entry.to_json()), "ts_source": "entry"} for entry in entries]
+        )
+
+    async def _frame_index(self, deadline: float) -> Any:
+        """The index this frame's run facts come from, or ``None``.
+
+        TWO BOUNDED STEPS, and neither of them scans unboundedly on the open path
+        (docs/DESKTOP_API.md §"The open frame"):
+
+        1. an index already RESIDENT and current for the journal's stat (two
+           ``stat`` calls, no I/O);
+        2. otherwise a refresh, awaited only for WHAT IS LEFT of the read's own
+           deadline (``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S``, measured from
+           the request reaching the bridge). The wait is spent out of the SAME
+           budget as the page read, never on top of it: the renderer still has to
+           paint in the 300 ms wall, and a slow index must degrade the frame's
+           facts rather than the first paint. Past the deadline the answer is
+           ``building``, the refresh runs on, and the next frame — or the
+           ``/history`` that follows inside the same open — carries the facts.
+
+        The refresh is STARTED either way, which is the promise that makes that
+        follow-up read cheap: by the time the client asks again the index is
+        resident, or its cache file exists so the refresh costs 3-62 ms.
+        """
+        from local_operator.session import transcript_index as index_module
+
+        index = index_module.fresh_resident(self.root, self.session_id)
+        if index is not None:
+            return index
+        try:
+            task, _started = index_module.start_refresh(self.root, self.session_id)
+        except Exception:  # noqa: BLE001 — a refresh is an optimisation, not the answer
+            logger.debug("open frame: refresh start failed", exc_info=True)
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        done, _pending = await asyncio.wait({task}, timeout=remaining)
+        if task not in done:
+            return None
+        try:
+            return task.result()
+        except Exception:  # noqa: BLE001 — a failed scan is an absent fact, not an error
+            logger.debug("open frame: refresh failed", exc_info=True)
+            return None
+
+    def _frame_answer(self, result: Any) -> dict[str, Any]:
+        """The frame's page as the wire states it, in the existing envelope."""
+        return {
+            "entries": result.entries,
+            "has_more": result.has_more,
+            "cursor_missing": result.cursor_missing,
+            "has_newer": result.has_newer,
+            "runs": result.runs,
+            "runs_state": result.runs_state,
+            "head_cut": result.head_cut,
         }
 
     async def _remote_history(
@@ -4516,6 +4932,7 @@ class DesktopSessionBridge:
         epoch: str | None,
         after_seq: int,
         entry_times: bool = False,
+        open_frame: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         try:
             cutoff = self.sequence
@@ -4524,7 +4941,7 @@ class DesktopSessionBridge:
             replay = (
                 [f for f, _ in self.replay if after_seq < f["seq"] <= cutoff] if not gap else []
             )
-            snapshot = await self.snapshot(entry_times=entry_times)
+            snapshot = await self.snapshot(entry_times=entry_times, open_frame=open_frame)
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
             # ``snapshot()``'s state and sequence are its last reads with nothing
             # awaiting between them, so no frame can have been published after
@@ -4558,16 +4975,36 @@ class DesktopSessionBridge:
                 if frame["seq"] > snapshot["seq"]:
                     pending_frames.append(frame)
             sub.opened = True
+            open_payload: dict[str, Any] = {
+                "subscription_id": sub.id,
+                "gap": gap,
+                "watch_ttl_seconds": WATCH_TTL,
+            }
+            if open_frame:
+                # LIVE IS COMING, SAID ONE FRAME EARLIER (docs/DESKTOP_API.md
+                # §"The open frame"). The snapshot below carries the same fact,
+                # but a renderer paints its chrome from this frame — and the cue
+                # it draws from a cold snapshot is "nothing is running", which
+                # the attach that lands a moment later contradicts. Stating the
+                # dial's existence here lets that cue start neutral instead of
+                # being corrected in front of the reader.
+                #
+                # NO HOLD IS ADDED FOR THE DIAL, and the measurement is why: the
+                # read envelope already spends READ_FIRST_FRAME_GRACE_S (50 ms)
+                # on the attach before this generator runs, and on the S4
+                # fixture the attach landed 356-985 ms after the open — a second
+                # hold would delay every attaching open for a frame that does not
+                # land inside it. A session with no runtime reports
+                # ``attaching: false``, so nothing here can delay one.
+                open_payload["attaching"] = bool(
+                    (snapshot.get("payload") or {}).get("attaching", False)
+                )
             yield {
                 "session_id": self.session_id,
                 "epoch": self.epoch,
                 "seq": cutoff,
                 "type": "open",
-                "payload": {
-                    "subscription_id": sub.id,
-                    "gap": gap,
-                    "watch_ttl_seconds": WATCH_TTL,
-                },
+                "payload": open_payload,
             }
             # Replay receipts BEFORE the authoritative snapshot so cumulative
             # record updates cannot repaint newer snapshot text with old deltas.
@@ -5699,6 +6136,96 @@ class DesktopSessions:
             if bridge.warm_task is not None and not bridge.warm_task.done():
                 return f"a runtime being started for session {bridge.session_id}"
         return None
+
+    async def rehome_stranded_sessions(
+        self, accessible: set[str] | None, provider: str, model_id: str
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Repair the bound sessions this sign-in stranded, or ask nothing and move none.
+
+        The pool half of the sign-in re-home (see ``server/utils/desktop_rehome``):
+        a user signed in to ``provider``, and the sessions still pinned to a
+        provider with no credential left are repaired onto it — but only the ones
+        this process is bound to, and only under every guard below. Returns TWO
+        lists: the ``(old_label, new_label)`` pairs actually moved, and the
+        old labels of the busy sessions that were ASKED and refused — the
+        deferrals, which the caller folds into its receipt so a sign-in where
+        every session was busy is not silent (UX review U1).
+
+        The guards, and who owns each:
+
+        * ``provider``/``model_id`` must be the ACCESSIBLE new default
+          (``accessible`` is the post-sign-in predicate computed once per
+          request), or the whole pass is a no-op;
+        * a bridge owned by ANOTHER DEVICE is skipped outright — its session runs
+          on that device's credentials, which this machine cannot see and must not
+          second-guess (the design's "never on a follower or a borrowing device");
+        * a cold facade, or one whose mirror is not vouched current, is skipped:
+          a snapshot read off a stale mirror is not evidence to act on at all,
+          and the owner's re-check is the only thing that could rescue it;
+        * the SELECTED provider must be stranded by ``model_access.is_stranded``;
+        * BUSY is NOT filtered here (round 1: it used to skip the ask, which is
+          how a mid-turn session ended up repaired by nothing and told nothing).
+          The owner answers ``REHOME_BUSY_REPLY``, speaks the deferral sentence
+          into its own conversation, and the pair is counted as deferred — the
+          pool only records what the owner decided.
+
+        Every check above is a SNAPSHOT, and that is why the owner's
+        ``rehome_if_current`` re-checks all of it under its own state before it
+        applies anything: between this read and that request the user can pick a
+        model, send a prompt, or sign in again. This method only decides whom to
+        ASK; the compare-and-set decides whether the ask lands.
+        """
+        from local_operator.providers.model_access import (
+            REHOME_BUSY_REPLY,
+            is_accessible,
+            is_stranded,
+        )
+
+        moved: list[tuple[str, str]] = []
+        deferred: list[str] = []
+        if accessible is None or not is_accessible(provider, accessible):
+            return moved, deferred
+
+        for bridge in list(self.bridges.values()):
+            if bridge.remote_row is not None:
+                continue
+            remote = bridge.remote
+            if remote is None or remote.is_cold or not remote.canonical_current:
+                continue
+            state = getattr(remote, "frontend_state", None)
+            selected = getattr(state, "selected_model", None) if state is not None else None
+            selected_provider = str(getattr(selected, "provider", "") or "")
+            selected_model = str(getattr(selected, "model_id", "") or "")
+            if not selected_provider or not selected_model:
+                continue
+            if not is_stranded(selected_provider, accessible):
+                continue
+            client = bridge._owner_connection()
+            ask: Any = getattr(client, "rehome_if_current", None)
+            if not callable(ask):
+                # Cold, or an owner too old to know the op: nothing to ask.
+                continue
+            expected = f"{selected_provider}/{selected_model}"
+            try:
+                typed_ask = cast("Callable[[str, str, str], Awaitable[str]]", ask)
+                detail = str(await typed_ask(expected, provider, model_id))
+            except Exception:  # noqa: BLE001 — one unreachable owner must not stop the rest
+                # The sign-in already succeeded; a session that could not be
+                # reached keeps its model and the picker/state surfaces are the
+                # fallback (the design's lazy cross-process rule).
+                logger.debug(
+                    "re-home request failed for session %s", bridge.session_id, exc_info=True
+                )
+                continue
+            if detail.startswith("rehomed: "):
+                moved.append((expected, f"{provider}/{model_id}"))
+            elif detail == REHOME_BUSY_REPLY:
+                # The owner has already told the conversation itself; this is
+                # the count the sign-in's receipt names.
+                deferred.append(expected)
+            else:
+                logger.debug("re-home refused for session %s: %s", bridge.session_id, detail)
+        return moved, deferred
 
     async def acknowledge_attention(self, session_id: str, token: str) -> dict[str, Any]:
         """A read receipt never admits work, binds a viewer, or starts a runtime.

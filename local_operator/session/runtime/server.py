@@ -126,6 +126,12 @@ from local_operator.session.transcript import (
     ATTACHMENT_KEY,
     durable_conversation_path,
 )
+from local_operator.supplements.contract import (
+    SUPPLEMENTS_AUTH_FIELD,
+    SUPPLEMENTS_CAPABILITY,
+    SUPPLEMENTS_READ_OP,
+    negotiated,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1649,6 +1655,12 @@ class _ClientConn:
     #: message (nulls included) and a pre-carriage viewer's ``Message`` forbids
     #: extras, so an unstripped frame is a failed attach, not a degrade.
     input_metadata: bool = False
+    #: This viewer negotiated ``supplements-v1`` (``contract.negotiated``): the owner
+    #: advertised it AND the viewer declared ``supplements`` on its auth frame. Only
+    #: then may the runtime send it ``supplement_progress`` events or project
+    #: ``supplement`` entries; rows are journaled either way. Nothing reads this until
+    #: the runner lane (C1) sends the first event.
+    supplements: bool = False
     frontend_ready: bool = False
     #: True only while ``_push_to`` is writing THIS connection's welcome. It is
     #: what tells ``_readable_frame`` whether an unreadable projection has a
@@ -1842,6 +1854,12 @@ class SessionHandle(Protocol):
     #   switch, reads back the model in force, and records a peer audit card.
     #   Raises ValueError("refused: …; still on …") on refusal. Optional and
     #   getattr-probed like receive_peer_message.
+    # rehome_if_current(expected, provider, model_id) -> str: a sign-in moving
+    #   this session off a model whose provider has no credential left, applied
+    #   only if the selection has not moved and the session is idle. Answers
+    #   "rehomed: <old> → <new>" or "kept: <why>". Optional and getattr-probed
+    #   like receive_peer_model — an older handle cannot be re-homed, which the
+    #   caller reports as zero moved sessions, never as an error.
     # cancel_gracefully() -> str: stop the turn at the POST-TOOL boundary
     #   instead of cutting the running tool (Session.request_graceful_cancel).
     #   Serves the ``cancel`` op's default mode. Deliberately distinct from
@@ -2167,6 +2185,15 @@ class RuntimeServer:
                 # validation outright. See
                 # ``DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY``.
                 + (["display-history-entry-times-v1"] if hasattr(handle, "history_page") else [])
+                # TURN SUPPLEMENTS ("Highlights"): advertised only by a handle that
+                # implements the lazy read op, for the reason every entry here is
+                # gated on what the handle can honour. The attach gate is TWO halves --
+                # this string ANDed with the viewer's own ``supplements`` auth boolean
+                # (``contract.negotiated``) -- so an older viewer never receives a
+                # ``supplement_progress`` event or a ``supplement`` entry it would
+                # paint as an unknown kind. No handle implements the op in the
+                # contract lane (C0), so no owner advertises it yet.
+                + ([SUPPLEMENTS_CAPABILITY] if hasattr(handle, SUPPLEMENTS_READ_OP) else [])
                 # INPUT-MODE CARRIAGE, gated on the handle that would HONOUR it
                 # rather than advertised unconditionally: the reader of this
                 # string (the mobile stream) must never send the fields to an
@@ -3771,6 +3798,14 @@ class RuntimeServer:
             # ``_ClientConn.input_metadata``).
             conn.input_metadata = bool(frame.get("input_mode")) and (
                 INPUT_MODE_CAPABILITY in self._record.capabilities
+            )
+            # The supplements twin: both halves of the gate, never the viewer's
+            # word alone. ``is True``, not truthiness, on purpose: a declaration is
+            # the JSON boolean, and a stray "false"/"0" string from a buggy client
+            # must fail CLOSED (it would otherwise opt that viewer into an event
+            # kind it may paint as unknown).
+            conn.supplements = negotiated(
+                self._record.capabilities, frame.get(SUPPLEMENTS_AUTH_FIELD) is True
             )
 
             # THE FRONTEND BIND IS A SESSION-LOOP CALL, for a stronger reason
@@ -7156,6 +7191,27 @@ class RuntimeServer:
             return await h.set_model(provider, model_id)
         if op == "set_effort":
             return await h.set_effort(str(frame.get("effort", "")))
+        if op == "rehome_if_current":
+            # A sign-in re-homing a session whose model provider has no credential
+            # left (design: the stranded default). Optional capability,
+            # getattr-probed like every other addition to this dispatch: an older
+            # or reduced handle answers the unknown-op sentence, which the caller
+            # reads as "this session cannot be re-homed" and counts as zero moved
+            # sessions — never as a failure of the sign-in that prompted it.
+            #
+            # Unlike the ``set_model`` arm above, there is no two-argument legacy
+            # shape to preserve: the op is new in this build, so every
+            # implementation takes all three fields, and the shape was validated
+            # at the wire (``validate_control_frame``).
+            rehome = getattr(h, "rehome_if_current", None)
+            if not callable(rehome):
+                raise ValueError("this session cannot be re-homed")
+            typed_rehome = cast(Callable[[str, str, str], Awaitable[str]], rehome)
+            return await typed_rehome(
+                str(frame.get("expected", "")),
+                str(frame.get("provider", "")),
+                str(frame.get("model_id", "")),
+            )
         if op == "complete_aside":
             complete_aside = getattr(h, "complete_aside", None)
             if not callable(complete_aside):

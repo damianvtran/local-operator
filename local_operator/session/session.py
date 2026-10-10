@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import inspect
 import json
 import logging
@@ -126,6 +127,7 @@ from local_operator.harness.render import (
     _is_todo_reminder,
 )
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
     is_inherit_tier_sentinel,
@@ -136,6 +138,7 @@ from local_operator.harness.subagent import (
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
+    QUIET_TURN_KEY,
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
@@ -282,6 +285,16 @@ from local_operator.session.transcript import (
 )
 from local_operator.session.usage_seed import seed_reported_usage
 from local_operator.stt import AudioPath
+from local_operator.supplements.trigger import (
+    TRIGGER_INJECTED,
+    TRIGGER_TYPED,
+    TURN_TEXT_BUDGET,
+    USER_TEXT_MAX_CHARS,
+    RunProvenance,
+    TurnItem,
+    items_text_size,
+    snapshot_messages,
+)
 from local_operator.tools.builtin import (
     open_todos,
     restore_todos,
@@ -664,6 +677,14 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # end of the provider-visible array stays appended (design
     # sessions-tool.md §3.3).
     "sessions",
+    # The quiet-end tool is gated the same way (`quiet_end` is a field only the
+    # session's own per-turn context binds), so without this line the tool is
+    # created nowhere a real session looks and the feature is unreachable in
+    # production (round-1 blocker B1). A child never receives it: `_job_id` is
+    # set in `__init__` before the merge runs, so the builder refuses there and
+    # the derived prune finds nothing to undo. Appended last for the same
+    # prefix reason as `sessions` above.
+    "no_reply",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -2704,6 +2725,13 @@ class Session:
         #: the naming owners; a captured answer would pin a seam hosts and tests
         #: swap after construction.
         title_fit_check: TitleFitCheck | None = None,
+        #: Turn supplements' view of the SAME shared ``ClassificationService`` the two
+        #: callables above ride: a per-call resolver returning the service (or ``None``
+        #: when the layer is off). A resolver and not the object because the seam is an
+        #: injectable attribute on the factory's hooks, swapped by tests after construction
+        #: and rebuilt when the layer is toggled. ``None`` (a session built without one)
+        #: means the decision has no vendor and the files half degrades to its heuristic.
+        supplement_seam: Callable[[], Any] | None = None,
         # Called each turn with the session's live ``model_label`` so the env
         # block names the running model; accepts it positionally (``...``) and
         # may return sync or async. A provider that ignores the argument is
@@ -2828,6 +2856,36 @@ class Session:
         #: consumed exactly once by ``_finalize_attention_notify``.
         self._run_triggers: set[str] = set()
         self._run_notify_requested: bool = False
+        #: TURN SUPPLEMENTS' provenance (docs/design/turn-supplements.md §2.1/§2.2). The
+        #: trigger set above is insufficient for "a person asked": goal-loop continuations
+        #: and spooled owner chrome call ``prompt(harness_injected=True)`` and classify as
+        #: "user" there. ``_run_typed_user`` is True once a typed (non-injected) user row
+        #: joined the run; ``_run_last_trigger`` is the class of the LAST non-internal
+        #: input (``supplements.trigger.TRIGGER_TYPED``, ``"injected"`` or a wake/monitor
+        #: custom type) so a courtesy wake folded in AFTER the user's message makes the run
+        #: ineligible. Reset at the pipeline head beside ``_run_triggers``, written by
+        #: ``_note_run_input``, frozen onto ``_last_run_provenance`` by ``_emit``.
+        self._run_typed_user: bool = False
+        self._run_last_trigger: str | None = None
+        self._run_user_text: str = ""
+        #: The LOGICAL turn's messages across EVERY loop run of the pipeline (first run plus
+        #: each ``_drain_continuation`` run), snapshotted as they end. The held end is
+        #: replaced per run, so the emitted end alone would carry only the LAST run's
+        #: messages and a turn that compacted and auto-continued would lose its
+        #: pre-compaction file writes (memo round-1 R2). Reset at the pipeline head and
+        #: NEVER in ``_flush_held_end`` -- that method clears ``_logical_generation``
+        #: BEFORE the ``_emit`` that freezes this record, and mirroring that neighbouring
+        #: clear would freeze an empty accumulator (memo round-2 R2-5).
+        self._turn_items: list[TurnItem] = []
+        self._turn_text_budget: int = TURN_TEXT_BUDGET
+        self._last_run_provenance: RunProvenance | None = None
+        #: Bumped in the pipeline ``finally`` AFTER ``on_turn_settled``; the supplement job
+        #: waits for it to pass the mark frozen on its provenance, so the answer, the
+        #: attention marker and the banner always precede any supplement work. A counter
+        #: and not a bare Event because a next turn that cleared the event first must not
+        #: strand a waiter that was woken late.
+        self._turns_settled: int = 0
+        self._turn_settled_event = asyncio.Event()
         #: §14.3's wake-id record, beside the trigger record and consumed the
         #: same way: EVERY ``details["wake_id"]`` (and every id a resume
         #: catch-up folds, from ``details["wake_ids"]``) seen in this run's
@@ -3277,6 +3335,14 @@ class Session:
         #: spec) — session state, like the tool declaration, never persisted.
         self._output_contract: OutputContract | None = None
         self._has_ui = has_ui
+        #: Whether a TURN has ended on this runtime. Set at the turn-end
+        #: bookkeeping boundary, read by :meth:`dispose` to decide whether the
+        #: runtime owes the journal a closing checkpoint (see
+        #: :meth:`_write_closing_checkpoint`). Deliberately not "the store holds
+        #: state": a store restored from a previous runtime holds plenty and has
+        #: observed nothing, and a session a user only looked at must not gain a
+        #: row for it.
+        self._turn_ended_since_engage = False
         self._cwd = cwd or "."
         # ``tool://`` is chained AHEAD of the factory's knowledge resolver in
         # the ONE place every session must pass through — root or subagent,
@@ -3957,6 +4023,9 @@ class Session:
         #: cascade hedges rather than asking. See
         #: ``tests/unit/session/test_viewer_protocol.py``'s owner-only probe set.
         self.title_fit_check = title_fit_check
+        #: Read by ``ServingSessionHandle`` (the supplement runner's seam). Public like
+        #: ``title_fit_check`` because the runtime handle holds the session, not the hooks.
+        self.supplement_seam = supplement_seam
         #: Whether this session is AIDA's (``local_operator.aida``), resolved
         #: once per open by :meth:`_aida_is_hers` — one stat of
         #: ``<config>/aida/state.json`` on every session that is not hers, and
@@ -9960,6 +10029,28 @@ class Session:
         from local_operator.session_factory import _tool_roster_rows
 
         hooks.tool_roster = _tool_roster_rows(self._tools)
+        # The code-requests recommendation's ledger probe rides the same attach
+        # point (it is session-owned state the factory's construction-time object
+        # cannot read): a CALLABLE because the answer moves — the first open
+        # during the session flips it, and the trigger must see that on the next
+        # message rather than on the next session.
+        hooks.code_requests_ledger = self._code_requests_ledger_nonempty
+
+    def _code_requests_ledger_nonempty(self) -> bool:
+        """Whether this session's derived code-request index has any rows.
+
+        The deterministic recommendation trigger's second arm (design §F):
+        review/CI vocabulary only fires when this returns True. One small JSON
+        read, and only on a message whose text already matched the vocabulary.
+        Never raises (a hooks probe must not break a prompt build).
+        """
+        try:
+            from local_operator.code_requests import ledger
+
+            entry = ledger.read_index(self._config_dir, self._session_id)
+            return bool(entry and entry.get("rows"))
+        except Exception:  # noqa: BLE001 - a probe never breaks a prompt build
+            return False
 
     def _wire_tools(self) -> list[AgentTool]:
         """The tools array to advertise to the provider NOW — at most once a turn.
@@ -10435,6 +10526,20 @@ class Session:
         if self._is_streaming:
             raise RuntimeError("cannot change the output contract while a turn is running")
         self._output_contract = contract
+        # "ABSENT, not inert" (docs/design/quiet-turns.md §4): this setter runs
+        # AFTER the inventory was built (``exec_startup``, ``sdk``), so the
+        # constructor's capability merge has already mounted ``no_reply`` —
+        # nulling the per-turn door alone would leave an advertised tool whose
+        # every call could only refuse, firing once per attempt. Re-filter the
+        # inventory through ``refresh_tools``, the way ``set_ask_handler(None)``
+        # drops ``ask``; clearing the contract restores the door, so re-run the
+        # merge and let the builder decide (it refuses wherever the door stays
+        # ``None`` for some other reason).
+        if contract is not None:
+            if any(tool.name == "no_reply" for tool in self._tools):
+                self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
+        else:
+            self._merge_capability_tools(("no_reply",))
 
     def materialize_declared_tools(self) -> tuple[str, ...]:
         """Grant the SCHEMAS of this session's declared tools that are lazy.
@@ -11790,6 +11895,7 @@ class Session:
         custom_type = getattr(message, "custom_type", None)
         if custom_type in (WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE):
             self._run_triggers.add(str(custom_type))
+            self._run_last_trigger = str(custom_type)
             details = getattr(message, "details", None)
             if isinstance(details, Mapping):
                 if details.get("notify"):
@@ -11817,6 +11923,15 @@ class Session:
             self._run_triggers.add("internal")
         else:
             self._run_triggers.add("user")
+            # Turn supplements (§2.2 rules 1-2): a user-role row is "typed" only if the
+            # harness did not mint it. ``is_harness_injection`` reads the stamp every
+            # injection site writes (goal/judge continuations, spooled owner chrome).
+            if is_harness_injection(message):
+                self._run_last_trigger = TRIGGER_INJECTED
+            else:
+                self._run_typed_user = True
+                self._run_last_trigger = TRIGGER_TYPED
+                self._run_user_text = str(getattr(message, "text", "") or "")[:USER_TEXT_MAX_CHARS]
 
     def _has_awaiting_user(self) -> bool:
         """§14.2's ``awaiting_user``: a plain user message queued, unconsumed.
@@ -11873,6 +11988,16 @@ class Session:
             )
             or self._run_notify_requested
         ) or kind == "error"
+        # THE QUIET-TURN FORCE (docs/design/quiet-turns.md §4): a run that ended
+        # with ``no_reply`` notifies nobody. Applied BEFORE the veto below so a
+        # quiet run never reaches the banner-budget journal that follows the
+        # veto (``_run_aida_checkin`` stays False with it), and skipped for the
+        # error arm (review R3): an error "always notifies, whatever the
+        # origins were" — reachable when a quiet batch's re-entry (a todo nudge,
+        # a late steer) then fails — and this must not silence the one signal
+        # that a turn died.
+        if notify and kind != "error" and self._run_ended_quiet(event):
+            notify = False
         if notify and kind != "error" and self._aida_cadence_banner_veto(event):
             notify = False
         # THE BANNER-BUDGET STASH (review MAJOR-2): whether this publish is one
@@ -11999,6 +12124,110 @@ class Session:
                 return str(text)
         return ""
 
+    def _run_ended_quiet(self, event: AgentEndEvent) -> bool:
+        """Whether this run ended with a ``no_reply`` call and no answer after it.
+
+        THE QUIET-TURN PREDICATE (docs/design/quiet-turns.md §4): true when the
+        run's LAST tool result carries the ``QUIET_TURN_KEY`` marker and no
+        assistant text exists after it — the marker must be the run's last
+        word. Read by exactly two consumers, ``_finalize_attention_notify``
+        (suppress the notify) and ``_publish_attention_outcome`` (publish
+        nothing), and it is a pure function of the end event's messages, so the
+        two cannot disagree.
+
+        A backwards scan, and the order is load-bearing: walking back from the
+        end, the first thing seen is either assistant TEXT (a real answer
+        produced after the call — not quiet, and it does not matter whether the
+        marker is still in the history) or the run's LAST tool result (its
+        marker decides). Earlier narration does NOT block the verdict — text
+        already streamed stays visible and persisted; the explicit quiet signal
+        governs the END — which is why this is not "no assistant text in the
+        run". A run with no tool result at all is not quiet.
+        """
+        for message in reversed(event.messages):
+            if getattr(message, "role", None) == "tool":
+                payload = getattr(message, "provider_payload", None)
+                details = payload.get("details") if isinstance(payload, Mapping) else None
+                return bool(details) and details.get(QUIET_TURN_KEY) is True
+            if getattr(message, "role", None) == "assistant" and getattr(message, "text", ""):
+                return False
+        return False
+
+    def _quiet_end_callable(self) -> Callable[[], Awaitable[str | None]] | None:
+        """The ``no_reply`` tool's quiet-end door, or ``None`` where silence is unavailable.
+
+        Bound per turn beside the ask doors (:meth:`_ask_gate_callable`); its
+        presence IS the fact that this session may end a turn quietly, which is
+        exactly what ``build_no_reply_tool``'s createIf gate reads — the tool is
+        ABSENT, not inert, where a quiet end could not be honoured (footprint
+        rung 3, docs/design/quiet-turns.md §4). It is ``None`` for:
+
+        * a subagent child (``_job_id`` set): a parent's ``wait`` reads the
+          child's final text AS the report, so a quiet end there is a lost
+          result rather than a courtesy;
+        * a one-shot/headless host (``_one_shot_exit``): the host's product IS
+          the final text (``headless_print.py`` prints ``if final_text``), and
+          nothing distinguishes "silent on purpose" from "produced nothing";
+        * a session with an output contract: the contract gate reads a textless
+          end as a missing final response and would re-ask forever;
+        * ``LOP_NO_REPLY=0`` — the env kill switch, read ONCE at import by
+          ``builtin.no_reply_enabled`` and deliberately not a config key
+          (docs §10), so restoring the old behaviour needs no config edit.
+
+        ABSENCE IS ENFORCED ON THE INVENTORY TOO, and this half is load-bearing
+        because two of the four conditions are knowable only AFTER construction:
+        ``exec_startup`` installs the contract and ``run_print_mode`` declares
+        the one-shot exit long after the constructor's capability merge has
+        already mounted the tool. Nulling this door would leave a mounted schema
+        whose every call could only refuse — so :meth:`set_output_contract`
+        (when a contract is set) and :meth:`declare_one_shot_exit` drop
+        ``no_reply`` through :meth:`refresh_tools`, the way
+        ``set_ask_handler(None)`` drops ``ask``. The child case needs no such
+        drop: ``_job_id`` is set before the merge runs, so the builder refuses
+        there and the tool never enters the inventory at all.
+        """
+        if self._job_id is not None:
+            return None
+        if self._one_shot_exit:
+            return None
+        if self._output_contract is not None:
+            return None
+        from local_operator.tools import builtin
+
+        if not builtin.no_reply_enabled():
+            return None
+        return self._quiet_end_refusal
+
+    async def _quiet_end_refusal(self) -> str | None:
+        """The refusal sentence for a quiet end, or ``None`` when it is allowed.
+
+        THE RULE IS A DENYLIST (review R4, docs/design/quiet-turns.md §4):
+        ``_note_run_input`` collapses every custom non-wake/monitor input into
+        the single class ``internal`` — peer, hub, job result, incident notice,
+        session_state — so an allowlist of "quietable" origins cannot be
+        written at this seam without a new finer-grained per-run record; the
+        implementable rule is the short list of runs whose words someone is
+        waiting on:
+
+        * a person asked this turn (a consumed user message) or is waiting to
+          (``_has_awaiting_user``): user semantics win, and a refusal is never
+          coerced into a message — the model reads the sentence and writes
+          text on the next, one extra, call;
+        * the wake/monitor delivery said ``notify``: the operator expected to
+          be told, so the sentence path (and Aida's cadence sentence) stays.
+
+        Everything else — peer, hub_message, job_result, a ``session_incident``
+        notice, session_state, resume catch-up, wake/monitor with
+        ``notify=false`` — may end quietly: an incident notice's
+        operator-visible row is already published, so silence about it loses
+        nothing (pinned by test).
+        """
+        if "user" in self._run_triggers or self._has_awaiting_user():
+            return "A person asked this turn; answer them in one line."
+        if self._run_notify_requested:
+            return "This wake or monitor asked to tell the user; say what they need to know."
+        return None
+
     async def _publish_attention_outcome(self) -> None:
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
@@ -12122,7 +12351,14 @@ class Session:
         # opens, so the pair is serialised rather than left to interleave
         # (review round 1, MAJOR-1).
         async with self._attention_publish_lock:
-            if kind == "complete" and (not messages or delegated):
+            # A QUIET END PUBLISHES NOTHING (docs/design/quiet-turns.md §4): the
+            # same ``eligible:false`` shape the textless branch below writes —
+            # no row, no unread mark, no banner — but the condition needs the
+            # affirmative signal, because a quiet run can still hold EARLIER
+            # narration text and ``not messages`` alone would miss it. Errors
+            # never reach this branch (``kind == "complete"``), which keeps
+            # R3's "always notifies" for a quiet batch whose re-entry fails.
+            if kind == "complete" and (not messages or delegated or self._run_ended_quiet(outcome)):
                 await self._transcript.append_custom(
                     ATTENTION_CUSTOM_TYPE,
                     {
@@ -12782,6 +13018,20 @@ class Session:
             # re-deriving it. One value, four readers, decided by nobody else.
             event = event.model_copy(update={"notify": self._finalize_attention_notify(event)})
             self._attention_outcome = event
+            # Turn supplements (§2.1): freeze the facts the runtime subscriber needs, while
+            # they still exist -- ``_run_triggers`` and the accumulator are reset at the
+            # NEXT pipeline head. Beside ``_attention_outcome`` on purpose; the subscriber
+            # reads this through ``last_run_provenance`` after the end event is delivered.
+            self._last_run_provenance = RunProvenance(
+                typed_user=self._run_typed_user,
+                last_trigger=self._run_last_trigger,
+                user_text=self._run_user_text,
+                items=tuple(self._turn_items),
+                job_id=self._job_id,
+                one_shot=self._one_shot_exit,
+                settled_mark=self._turns_settled,
+                triggers=frozenset(self._run_triggers),
+            )
             # The emitted end is the logical turn's outcome (held ends flush
             # here from the pipeline finally; abort/error skip the hold and
             # emit immediately). The canonical snapshot copies this field so a
@@ -12999,7 +13249,10 @@ class Session:
         ``carried_prompt`` is True only for the peer callers — a peer message
         is a person's words at the other end of `lop send`, so a run it opens
         keeps the cut-off verdict a harness delivery does not get (see
-        ``_attention_run_has_evidence``).
+        ``_attention_run_has_evidence``) — and for the turn-end flush opening
+        a batch containing one: the parked row is the same person's words
+        whichever consumer took it (agent review round 1, MINOR-1; see
+        ``_flush_parked_deliveries``).
 
         ``guard`` is the patience delivery's under-lock re-check: it runs once
         the turn lock is held, and a False return retires the delivery
@@ -13225,6 +13478,11 @@ class Session:
         self._run_wake_ids = set()
         self._run_catchup_unidentified = False
         self._run_aida_checkin = False
+        self._run_typed_user = False
+        self._run_last_trigger = None
+        self._run_user_text = ""
+        self._turn_items = []
+        self._turn_text_budget = TURN_TEXT_BUDGET
         for message in initial:
             self._note_run_input(message)
         # Cleared at the head of EVERY turn, alongside the outcome, so a cause
@@ -13308,6 +13566,33 @@ class Session:
                     settled()
                 except Exception:  # noqa: BLE001 — a publish failure is not a turn failure
                     logger.debug("on_turn_settled hook failed", exc_info=True)
+            # AFTER the hook, the last statement of the pipeline: turn supplements' "settled"
+            # signal (memo §2.1). Nothing the user sees about this turn follows it.
+            self._turns_settled += 1
+            self._turn_settled_event.set()
+
+    @property
+    def turns_settled(self) -> int:
+        """How many turn pipelines have fully finished (see ``_turns_settled``)."""
+        return self._turns_settled
+
+    @property
+    def last_run_provenance(self) -> RunProvenance | None:
+        """The facts of the run whose end event was emitted last (turn supplements)."""
+        return self._last_run_provenance
+
+    async def wait_turn_settled(self, mark: int) -> None:
+        """Return once more than ``mark`` turn pipelines have finished.
+
+        The loop re-checks the counter after every wake, so a settle that already happened
+        returns at once and a wake that raced the next turn's clear still terminates.
+        """
+        while self._turns_settled <= mark:
+            # Clear-then-wait with no await between the check and the clear (one thread), so
+            # a stale "set" from an earlier turn cannot make this spin and a settle that
+            # lands after the clear still wakes it.
+            self._turn_settled_event.clear()
+            await self._turn_settled_event.wait()
 
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
@@ -13681,6 +13966,17 @@ class Session:
                     continue
                 if isinstance(event, AgentEndEvent):
                     new_messages = list(event.messages)
+                    # Turn supplements: accumulate EVERY run's messages (see
+                    # ``_turn_items``). Snapshotted now because compaction prunes tool
+                    # results in place.
+                    try:
+                        snapped = snapshot_messages(
+                            new_messages, text_budget=self._turn_text_budget
+                        )
+                        self._turn_text_budget -= items_text_size(snapped)
+                        self._turn_items.extend(snapped)
+                    except Exception:  # noqa: BLE001 — an instrument never fails a turn
+                        logger.debug("supplement snapshot failed", exc_info=True)
                     if event.aborted or event.error:
                         # A failed or interrupted run is a real boundary: never
                         # hold it behind a compaction that may not happen. The
@@ -13723,8 +14019,16 @@ class Session:
                 # start is what keeps a call whose end never arrived (batch
                 # skip, abort) from reading as no work at all. Reset in
                 # _run_turn_pipeline's head, beside the guardrail latches.
+                #
+                # EXCEPT THE QUIET CALL (docs/design/quiet-turns.md §1):
+                # ``no_reply`` is not work, and counting it would let a quiet
+                # wake trigger the stale-project nudge — a continuation the
+                # operator never asked for, caused by a call that produced
+                # nothing. Excluded here so both halves of the pair leave
+                # together, exactly as they would if the call had never run.
                 if isinstance(event, (ToolExecutionStartEvent, ToolExecutionEndEvent)):
-                    self._turn_tool_calls += 1
+                    if event.tool_name != "no_reply":
+                        self._turn_tool_calls += 1
                 is_todo_end = isinstance(event, ToolExecutionEndEvent) and event.tool_name == "todo"
                 if is_todo_end:
                     # The tool has already mutated its store when this event is
@@ -13753,6 +14057,11 @@ class Session:
             # replayable cut target; re-appending those would resurrect
             # messages after the compaction entry that superseded them.
             await self._persist_new_messages(new_messages)
+            # A turn just ended — one of the design's code-request refetch
+            # moments (§D.5). The run may have pushed, commented or merged;
+            # the mark makes the next look revalidate regardless of TTL, and
+            # costs one stat for a session with no tracked rows.
+            await self._mark_code_requests_dirty()
 
             # The SECOND fork drain point, and it is not redundant with the one
             # in ``_on_turn_end``. That hook fires only when the loop will
@@ -13788,6 +14097,9 @@ class Session:
             # ``from_checkpoint`` — clobber the richer checkpoint a TUI wrote.
             if self._has_ui or self._frontend_state_store.has_subscribers:
                 await self._frontend_state_store.checkpoint(self._transcript)
+            # A turn ENDED here, which is what the closing checkpoint's gate
+            # reads (dispose is reached by runtimes that never ran one too).
+            self._turn_ended_since_engage = True
 
             # Child events reach the shared comms watcher before either durable
             # append. Notify only after messages AND todos are stable, including
@@ -13860,6 +14172,108 @@ class Session:
             # this process can decide it is finished -- a spawned write is precisely
             # what ``dispose`` cancels in flight.
             await self._deliver_deferred_job_results()
+            # ...and whatever a busy latch parked for "the next boundary" on a
+            # turn that never reached one again (see ``_flush_parked_deliveries``).
+            self._flush_parked_deliveries()
+
+    def _flush_parked_deliveries(self) -> None:
+        """Hand over what a busy latch parked, now that the turn has ended.
+
+        THE HOLE THIS CLOSES, measured on CI (run 37980552652, macos e2e).
+        The busy arms of the delivery paths (``deliver_ask_messages``,
+        ``_deliver_wake``, ``_deliver_monitor``) park their message on the
+        steering queue to ride "the next successful tool boundary" whenever
+        ``_is_streaming`` reads True. That latch is a SNAPSHOT: a turn already
+        past its LAST boundary drain -- the tail after
+        ``_persist_new_messages``, which a thread hop such as
+        ``_mark_code_requests_dirty`` can hold open long enough for a
+        reconcile to land inside it -- ends without ever draining again, and
+        the parked delivery then has no reader at all: nothing re-checks the
+        steering queue when a turn ends. The hand-off had reported success
+        (``deliver_ask_messages`` returned), the row never arrived, and
+        ``test_an_answer_racing_a_withdrawal_wins_in_both_orders`` timed out
+        with the ask folded ``answered``, NOT delivered, and no delivery task
+        pending.
+
+        The flush is the arrival-side twin of ``_deliver_deferred_job_results``
+        just above: what arrived while the turn was LIVE and could not ride it
+        is handed over the moment the turn stops being live, through the same
+        idle arm a delivery arriving one instant later would take. Only
+        ``CustomMessage`` deliveries are taken -- their receipt events are
+        emitted at hand-off, BEFORE the park, so opening a turn for them needs
+        no drain bookkeeping. A plain ``Message`` (a typed or spooled steer)
+        keeps its place: its ``SteeringDeliveredEvent`` and the UI's
+        recall-the-held-steer affordance live in ``_drain_steering``, which
+        stays its one consumer.
+
+        The leaving arms are skipped on purpose: a turn opened under
+        ``_leaving_deliveries`` or a one-shot exit could only ever be aborted
+        by the disposal that follows (see ``_deliver_job_results``' leaving
+        arm), and an ask is not lost to the skip -- its answer is durable in
+        the log and the next runtime's boot reconcile re-delivers it.
+
+        One baked-in premise rides a flushed row (agent review round 1,
+        MINOR-2): the busy-resume note some busy arms attach at hand-off
+        (``_append_busy_resume_note`` -- the wake, monitor and resume-catch-up
+        paths) tells the model the delivery "was held for a tool boundary" and
+        to resume the interrupted work. At a turn-end flush the turn it was
+        held from has ENDED, so that premise is past -- kept anyway, not
+        un-baked: the note stays conservative ("unless this [delivery] makes
+        it obsolete") and the model can see the finished turn, while un-baking
+        would cost the busy arms one shared sentence. Recorded here so the
+        next reader does not re-derive the mismatch as a bug.
+        """
+        if self._disposed or self._leaving_deliveries or self._one_shot_exit:
+            return
+        drained: list[AgentMessage] = []
+        parked: list[AgentMessage] = []
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            drained.append(item)
+            if isinstance(item, CustomMessage):
+                parked.append(item)
+        if not parked:
+            for item in drained:
+                self._steering_queue.put_nowait(item)
+            return
+        # PARITY WITH THE PEER ARMS (agent review round 1, MINOR-1): both
+        # ``receive_peer_message`` arms spawn with ``carried_prompt=True``,
+        # and this flush is a third consumer of the same parked row -- a
+        # person is at the other end of it whichever consumer took it, so a
+        # flush-opened run cut before its first provider round-trip must earn
+        # the neutral closure instead of settling silently. A batch with no
+        # peer row keeps the harness shape: a wake's, ask's or monitor's
+        # zero-work run gets no verdict. The discriminator is ``custom_type``,
+        # never attribution (see ``_note_run_input``).
+        carries_peer = any(
+            getattr(item, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE for item in parked
+        )
+        task = self._spawn_background(self._prompt_messages(parked, carried_prompt=carries_peer))
+        if task is None:
+            # A belt with no race to catch (agent review round 1, NIT-2):
+            # nothing between the guard above and this spawn awaits, and
+            # ``_spawn_background`` answers None only while disposed -- which
+            # the guard already excluded. Kept so a future await introduced
+            # above cannot silently drop the queue; the coroutine was closed
+            # by ``_spawn_background``, so the queue goes back exactly as it
+            # was.
+            for item in drained:
+                self._steering_queue.put_nowait(item)
+            return
+        for item in drained:
+            if not isinstance(item, CustomMessage):
+                self._steering_queue.put_nowait(item)
+        # The drain is a consumer, so courtesy counts held for the taken
+        # items must not survive to misclassify a later enqueue -- the same
+        # reset ``_drain_steering`` performs. What remains queued is plain
+        # steers, which are never counted as courtesy.
+        self._courtesy_wake_count = 0
+        # The take changed what ``queued_steering()`` folds into the frontend
+        # snapshot, so refresh before returning -- a follower must not keep
+        # rendering the taken row as still queued until the spawned turn's
+        # next refresh. Parity with ``_drain_steering`` and
+        # ``_drop_queued_wake_deliveries`` (agent review round 1, NIT-1).
+        self.refresh_frontend_state()
 
     async def _drop_pre_aborted_turn(
         self,
@@ -14176,7 +14590,7 @@ class Session:
 
     async def _run_post_tool_hooks(
         self, tool_name: str, args: Mapping[str, Any], call_id: str, result: ToolResult
-    ) -> list[str]:
+    ) -> list[Any]:
         """Run the operator's native and forwarded ``PostToolUse`` hooks for one call.
 
         A child reports ``agent_id``/``agent_type`` exactly as a Claude Code
@@ -14187,18 +14601,21 @@ class Session:
         # CODE-REQUEST DETECTION rides this seam rather than a hook of its own, and it
         # is deliberately independent of the operator's hooks: the interesting fact is
         # "this call created PR #1904", which must be recorded whether or not a hook is
-        # configured. It writes one small ledger row and returns no notes, so the tool
-        # result the model sees is byte-identical to what it would have been; a detector
-        # failure is swallowed exactly as the forwarded hooks' is (AGENTS.md: a hook
-        # must never break a turn).
+        # configured. It writes one small ledger row and, since PR1b, returns the
+        # session's OWN tracked note (tagged ``code-requests``, never mislabelled as a
+        # forwarded hook event) plus an acted-event dirty mark for the fetch service; a
+        # detector failure is swallowed exactly as the forwarded hooks' is (AGENTS.md: a
+        # hook must never break a turn).
         #
         # CHEAPEST TESTS FIRST, because this runs for EVERY tool result of EVERY session:
         # ``could_matter`` is a handful of substring checks, while the two loads below are
         # worker-thread hops that read the operator's gh/glab/tea config and the MCP server
         # list. Gating first means an ordinary ``ls`` costs the substring scan and nothing
         # else — review round 1 (F4) caught the loads running ahead of the gate, which put
-        # two executor hops on the hottest path in the runtime.
-        await self._detect_code_requests(tool_name, args, call_id, result)
+        # two executor hops on the hottest path in the runtime. PR1b adds one thing on top:
+        # the call returns the session's OWN tracked/acted notes, appended below with their
+        # ``code-requests`` tag.
+        code_request_notes = await self._detect_code_requests(tool_name, args, call_id, result)
 
         is_child = self._job_id is not None
         transcript_path: str | None = None
@@ -14214,7 +14631,7 @@ class Session:
             agent_id=self._job_id if is_child else None,
             agent_type=(self._agent_type or "task") if is_child else None,
         )
-        return await run_post_tool_hooks(
+        notes = await run_post_tool_hooks(
             identity,
             tool_name=tool_name,
             args=args,
@@ -14223,25 +14640,38 @@ class Session:
             is_error=result.is_error,
             duration_s=result.duration_s,
         )
+        if code_request_notes:
+            # The session's own notes ride the same list; each carries its tag.
+            notes = [*notes, *code_request_notes]
+        return notes
 
     async def _detect_code_requests(
         self, tool_name: str, args: Mapping[str, Any], call_id: str, result: ToolResult
-    ) -> None:
-        """Record any code request this tool result proves the session opened or acted on.
+    ) -> list[Any]:
+        """Record any code request this tool result proves, and build its tracked note.
 
         The detection itself (``code_requests/hook.py``) owns every rule; this method is
         the session's half: what it may write, and where it must NOT intrude. Nothing is
         written for a session without a transcript directory (a speculative runtime), and
         a failure is a debug line rather than a warning, because an unknown session id or
         a read-only directory is not an operator-visible fault.
+
+        Returns the notes to append to the tool result (PR1b): one tagged line per
+        ``opened``/``acted`` detection — and for a ``monitor``/``wake`` ARM call whose
+        arguments name a ref, the same tracked line, because "tell me when round 2
+        lands" is exactly the moment the tool becomes worth knowing about. An
+        ``acted`` event ALSO marks the row dirty (the fetch service consumes the mark
+        on its next pass): the session's own comment/push/merge/post is the one
+        eagerness the polling-free design allows.
         """
+        notes: list[Any] = []
         try:
             if self._transcript.directory is None:
-                return
+                return notes
             from local_operator.code_requests import hook as code_requests_hook
 
             if not code_requests_hook.could_matter(tool_name, args, result.text):
-                return
+                return notes
             context = await code_requests_hook.load_context_async(self._cwd)
             servers = await asyncio.to_thread(code_requests_hook.load_mcp_servers, self._cwd)
             detections = code_requests_hook.classify(
@@ -14257,8 +14687,154 @@ class Session:
                 await code_requests_hook.record_detections(
                     self, detections, tool=tool_name, call_id=call_id
                 )
+            notes = await asyncio.to_thread(
+                self._code_request_notes,
+                detections,
+                tool_name,
+                args,
+                context,
+                asyncio.get_running_loop(),
+            )
         except Exception:  # noqa: BLE001 - bookkeeping never breaks a turn
             logger.debug("code-request detection skipped", exc_info=True)
+        return notes
+
+    def _code_request_notes(
+        self,
+        detections: Any,
+        tool_name: str,
+        args: Mapping[str, Any],
+        context: Any,
+        loop: Any = None,
+    ) -> list[Any]:
+        """The tracked one-liners for one tool result, plus its dirty marks (blocking).
+
+        Runs on a worker thread: it reads the fetch cache (small JSON files) and
+        writes the dirty mark. Both are local I/O, but this sits on the tool-result
+        path, so it stays off the event loop like the detection's own file reads.
+        ``loop`` is the caller's event loop (passed because a worker thread has
+        none): the ACTED kick below is handed back to it.
+        """
+        from local_operator.code_requests import cache as code_requests_cache
+        from local_operator.code_requests import service as code_requests_service
+        from local_operator.code_requests.detect import KIND_ACTED, KIND_OPENED
+        from local_operator.code_requests.refs import iter_refs
+        from local_operator.hook_forwarding import TaggedNote
+
+        notes: list[Any] = []
+        acted_keys: list[str] = []
+        merged_keys: set[str] = set()
+        drafts: list[tuple[Any, str]] = []
+        for detection in detections or ():
+            ref = getattr(detection, "ref", None)
+            if ref is None:
+                continue
+            kind = getattr(detection, "kind", "")
+            act = getattr(detection, "act", None)
+            if kind == KIND_ACTED and ref.key:
+                acted_keys.append(ref.key)
+                if act == "merge":
+                    merged_keys.add(ref.key)
+            if kind not in (KIND_OPENED, KIND_ACTED):
+                continue
+            drafts.append((ref, self._tracked_line(ref, act)))
+        if not detections and tool_name in ("monitor", "wake"):
+            # "tell me when round 2 lands on #1904" arms a watch rather than acting:
+            # the SAME tracked line, keyed off the refs in the arm's arguments.
+            blob = " ".join(str(value) for value in args.values() if isinstance(value, str))
+            for ref in iter_refs(blob, context):
+                drafts.append(
+                    (
+                        ref,
+                        f"Tracked: {self._ref_handle(ref)} (armed with {tool_name}). "
+                        "code_requests show for review rounds and CI.",
+                    )
+                )
+                if len(drafts) >= 3:
+                    break
+        if acted_keys:
+            code_requests_cache.mark_dirty(self._config_dir, self._session_id, keys=acted_keys)
+            # THE MARK ALONE IS NOT ENOUGH (QA round 2, Q12). It only lets a
+            # READER revalidate, and with no client-triggered read after an
+            # acted event the feed never moves — the pane was poll-bound
+            # (measured: zero frames over 75 s). Kick a pass for the ACTED
+            # keys here, on the caller's loop: the forge answer then moves
+            # the index revision, and the feed frame follows without a GET.
+            # Scoped to the keys so the rest of the session keeps its TTLs;
+            # best-effort — a kick never breaks the turn.
+            if loop is not None:
+                try:
+                    from local_operator.code_requests import (
+                        ledger as code_requests_ledger,
+                    )
+
+                    entry = code_requests_ledger.read_index(self._config_dir, self._session_id)
+                    rows = (entry or {}).get("rows") or []
+                    loop.call_soon_threadsafe(
+                        functools.partial(
+                            code_requests_service.schedule_session_refresh,
+                            self._config_dir,
+                            self._session_id,
+                            rows,
+                            keys=list(acted_keys),
+                            # The seam has no cached read to fall back on: a
+                            # kick that joins an in-flight pass must still be
+                            # served (review round 3, N6).
+                            chain=True,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - see above
+                    logger.debug("could not schedule a code-request refresh", exc_info=True)
+        for ref, text in drafts:
+            # A merge note carries the row's round freshness when the cache
+            # already knows it (design §F): "agent review r2 clean, fresh on
+            # 9d29452". Advisory only — a missing cache entry just omits it.
+            if getattr(ref, "key", "") in merged_keys:
+                entry = code_requests_cache.read_entry(self._config_dir, ref)
+                head_sha = ""
+                summary = (entry or {}).get("summary")
+                if isinstance(summary, Mapping):
+                    head_sha = str(summary.get("head_sha") or "")
+                fragment = code_requests_service.lane_freshness_note(entry, head_sha)
+                if fragment:
+                    text = text + f" Latest: {fragment}."
+            notes.append(TaggedNote("code-requests", text))
+        return notes
+
+    @staticmethod
+    def _ref_handle(ref: Any) -> str:
+        """``#1904``/``!57`` — the short handle a note uses (the forge's own spelling)."""
+        sep = "!" if getattr(ref, "forge", "") == "gitlab" else "#"
+        return f"{sep}{getattr(ref, 'number', '')}"
+
+    async def _mark_code_requests_dirty(self) -> None:
+        """Mark this session's code-request rows dirty (design §D.5).
+
+        Callers are the moments a refetch becomes worth it without a poll: the
+        end of a turn, and a wake/monitor delivery into the session. The mark
+        fetches nothing — it tells the fetch service the next look may
+        revalidate regardless of TTL. Best-effort; a failed mark costs
+        nothing, and a session with no tracked rows is a no-op inside.
+        """
+        try:
+            from local_operator.code_requests import cache as code_requests_cache
+
+            await asyncio.to_thread(
+                code_requests_cache.mark_dirty,
+                self._config_dir,
+                self._session_id,
+                all_rows=True,
+            )
+        except Exception:  # noqa: BLE001 - a mark never breaks a turn or delivery
+            logger.debug("could not mark code-request rows dirty", exc_info=True)
+
+    def _tracked_line(self, ref: Any, act: str | None) -> str:
+        """One tracked note line: what happened, then where to look next."""
+        what = act or "opened"
+        return (
+            f"Tracked: {self._ref_handle(ref)} ({what}). "
+            "code_requests show for review rounds and CI."
+        )
 
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
@@ -14342,6 +14918,12 @@ class Session:
             # "this ask would queue" — which is exactly the population the
             # gate exists for. ``None`` means the tool never awaits a check.
             gate_ask=self._ask_gate_callable(),
+            # THE QUIET-END DOOR (design docs/design/quiet-turns.md §4): the
+            # whole availability fact of ``no_reply`` — ``None`` for subagent
+            # children, one-shot hosts, output-contract sessions and under the
+            # kill switch, which is exactly where the tool must not exist. Its
+            # presence is what ``build_no_reply_tool``'s createIf gate reads.
+            quiet_end=self._quiet_end_callable(),
             # The BOUND METHOD, not its value: this context is a snapshot taken
             # once per turn, so a stored boolean would freeze the answer for the
             # whole turn and a re-read per call is what the browser flow needs
@@ -15997,6 +16579,14 @@ class Session:
         its turns are the run's own work, not teardown leftovers.
         """
         self._one_shot_exit = True
+        # The inventory follows the door (docs/design/quiet-turns.md §4,
+        # "absent, not inert"): this declaration lands after the constructor's
+        # capability merge, so ``no_reply`` may already be mounted, and the door
+        # this method just closed is a one-way latch — the mounted tool could
+        # only refuse from here on. Drop it the way
+        # ``set_ask_handler(None)`` drops ``ask``.
+        if any(tool.name == "no_reply" for tool in self._tools):
+            self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
 
     def retire_job_deliveries_to_transcript(self) -> None:
         """From now on, a settled job's result is durable and opens NO turn.
@@ -19934,6 +20524,11 @@ class Session:
         # broken wake cannot become a hot loop), so it must still count as a
         # fire for the purpose of "when did this last go off".
         self._wake_fired_since_persist = True
+        # The code-request refetch rule (§D.5) hangs its wake half HERE rather
+        # than in the delivery methods: this trampoline sees every fire,
+        # including the ones the resume catch-up folds into one message (which
+        # never reach ``_deliver_wake`` at all).
+        await self._mark_code_requests_dirty()
         await self._wake_deliver_hook(due)
 
     async def _purge_removed_wakes(self, removed: Sequence[WakeSchedule]) -> None:
@@ -20908,6 +21503,126 @@ class Session:
                 self._subagent_roster_writer = writer
             await asyncio.shield(writer)
 
+    async def _write_closing_checkpoint(self) -> None:
+        """Leave the tail anchor that bounds the NEXT cold open of this session.
+
+        WHY IT EXISTS. Without a checkpoint row, ``read_replay_suffix`` has no
+        compaction boundary to stop at and scans the journal to BOF on every
+        request: 200 ms per snapshot/``/history``/``/events`` on a 35.5 MB
+        journal, paid three times per open and again on every reconnect. 15 of
+        the 40 largest real journals carry no checkpoint, and the reason is this
+        method's absence rather than a bug: the only writer runs at turn end and
+        only "for any session with a UI or an attach subscriber"
+        (``FrontendStateStore.checkpoint``), so a session driven headlessly —
+        ``lop exec``, a scheduled job, a scripted run — was never anchored at
+        all. One row per RUNTIME LIFE is the whole cost, against a per-turn row
+        for a session a user is watching.
+
+        AND IT IS WRITTEN BY EVERY RUNTIME, not once per session (review round 1,
+        F1). The first revision skipped a journal that already carried a row its
+        session recognised, which fixed the N1 lowering but froze the row: after
+        one headless runtime the newest checkpoint stayed at that runtime's
+        reading — a cold open painted ``context_tokens: 51000`` while the journal's
+        own receipts said 121000 — and, because the reader must reach the newest
+        checkpoint row, the C3(b) bound decayed with every later runtime and was
+        gone entirely after a compaction (measured: 100% of a 5.08 MB journal read
+        again). The row is therefore written every time and MERGED over the row it
+        read (``frontend_state.closing_state_overrides``), so nothing is lowered
+        while what this runtime observed is current.
+
+        WHY THE CLOCK IS HELD STILL. The row is appended with
+        ``preserve_mtime=True``, so it does not move
+        ``retention.session_activity`` — the one ranking clock the picker and
+        ``session.cleanup`` share. A runtime closing hours after the user's last
+        turn must not rank the conversation as freshly worked; the transcript
+        layer validates the request against ``BOOKKEEPING_CUSTOM_TYPES`` (which
+        this type is now a member of) rather than taking the caller's word for
+        it.
+
+        FOUR GATES, each of which is a case that must not write:
+
+        * **A child session is skipped.** Subagent transcripts are read through
+          page reads (the child panel, ``subagent_view``), never through the
+          cold replay this row would bound, and a wide roster would pay one
+          checkpoint per child per run for nothing.
+        * **A runtime that ended no turn is skipped.** ``dispose`` is reached by
+          runtimes that only looked at a conversation, and a session a user
+          merely opened must not gain a row for it (the same principle the cold
+          viewer states: opening a terminal is not work).
+        * **Nothing the durable row already holds richer is lowered.** Readers
+          take the NEWEST row, so this write is replacement state: the row it read
+          is merged UNDER this runtime's view field by field
+          (``frontend_state.closing_state_overrides`` — money and tokens take the
+          larger, a blank title or todo list never overwrites a set one, the
+          attached operator's ``active_duration_s`` survives a headless turn, and
+          identity fields stay this runtime's so a fork cannot inherit a parent's
+          children back).
+        * **The write is bounded and best-effort**, like every other teardown
+          transcript write: a wedged mount must not hang disposal, and a lost
+          closing row costs one open the cost this method exists to remove —
+          never the conversation, which is already on disk.
+        """
+        if self._job_id is not None or not self._turn_ended_since_engage:
+            return
+        store = getattr(self, "_frontend_state_store", None)
+        transcript = getattr(self, "_transcript", None)
+        if store is None or transcript is None:
+            return
+        self._merge_closing_state(store, transcript)
+        try:
+            await asyncio.wait_for(
+                store.checkpoint(transcript, preserve_mtime=True),
+                timeout=_NAME_FLUSH_TIMEOUT_S,
+            )
+        except (Exception, asyncio.TimeoutError):  # noqa: BLE001 — teardown must proceed
+            logger.warning("closing checkpoint did not land", exc_info=True)
+
+    def _merge_closing_state(self, store: Any, transcript: Any) -> None:
+        """Carry the durable row's richer fields into this runtime's state.
+
+        Reads the NEWEST checkpoint row through ``read_latest_custom_entry`` — a
+        byte scan of the journal's chunks, not a parse (measured 66 ms on the
+        118 MB reference journal) — and applies
+        ``frontend_state.closing_state_overrides`` through the store's own
+        ``mutate``, so the row that follows is current where this runtime observed
+        something newer and unchanged where the durable row was richer. Silent on
+        every failure: a status row is never worth failing a teardown for, and the
+        row that follows is this runtime's own view — the pre-merge behaviour.
+        """
+        from local_operator.session.frontend_state import (
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            FrontendSessionState,
+            closing_state_overrides,
+        )
+        from local_operator.session.transcript import read_latest_custom_entry
+
+        try:
+            # THE TRANSCRIPT'S OWN DIRECTORY, not a path rebuilt from the config
+            # dir: they are the same thing for a session this process owns
+            # (``<config>/sessions/<id>``), but a session built on a transcript
+            # somewhere else — a relocated home, a test's tmp tree, a
+            # ``--session-dir`` run — writes its rows where its transcript is, and
+            # a lookup against the config path would then read a DIFFERENT journal
+            # (or none) and merge nothing. ``Transcript.directory`` is the writer's
+            # answer to "where does this session live", which is the only one that
+            # can be right.
+            directory = Path(getattr(transcript, "directory", "") or "")
+            if not directory:
+                directory = self._config_dir / "sessions" / self._session_id
+            entry = read_latest_custom_entry(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+            if entry is None:
+                return
+            details = entry.payload.get("details") or {}
+            payload = details.get("state")
+            if not isinstance(payload, dict):
+                return
+            durable = FrontendSessionState.model_validate(payload)
+            overrides = closing_state_overrides(store.state, durable)
+            if overrides:
+                store.mutate(**overrides)
+        except Exception:  # noqa: BLE001 — a merge is not worth failing a teardown for
+            logger.debug("closing checkpoint merge skipped", exc_info=True)
+
     async def _final_persist_snapshots(self) -> None:
         """Write the last roster and todo snapshots at teardown, in order.
 
@@ -21535,6 +22250,9 @@ class Session:
         this one's schedule list; the load-time filter and the supervisor skip
         cover the other two paths.
         """
+        # A delivery into the session is one of the design's refetch moments
+        # (§D.5): the context moved, and the operator may look next.
+        await self._mark_code_requests_dirty()
         from local_operator.wakes.store import is_ask_timeout_row, is_patience_row
 
         if is_ask_timeout_row(due.schedule):
@@ -21920,6 +22638,9 @@ class Session:
         delta budget (§9.1).
         """
         text = format_monitor_delivery_text(delivery)
+        # A delivery into the session is one of the design's refetch moments
+        # (§D.5); the monitor's own finding may even be about a tracked row.
+        await self._mark_code_requests_dirty()
         busy = self._is_streaming
         if busy:
             text = self._append_busy_resume_note(text, kind="monitor")
@@ -23342,6 +24063,10 @@ class Session:
             # through a host path without a turn task.
             if self._pending_shell_records:
                 await self._flush_shell_records()
+            # C3: THE CLOSING CHECKPOINT. Written once per runtime that ended a
+            # turn, UI or not — see :meth:`_write_closing_checkpoint` for why
+            # this is what keeps the next cold open bounded rather than O(file).
+            await self._write_closing_checkpoint()
             self._transcript.flush()
         finally:
             # Drop the retention claim FIRST in the finally: everything in the

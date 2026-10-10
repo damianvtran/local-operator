@@ -27,6 +27,7 @@ the product consumes it at turn end).
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import uuid
 from pathlib import Path
@@ -34,9 +35,12 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
 from local_operator.harness.types import (
+    QUIET_TURN_KEY,
     AgentEndEvent,
     AgentTool,
+    CustomMessage,
     StreamEndEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -45,7 +49,10 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import DueWake, WakeSchedule
 from local_operator.monitors.delivery import MonitorDelivery
+from local_operator.providers.failover import ProviderError
 from local_operator.session.attention import AttentionStore
+from local_operator.session.transcript import Transcript
+from local_operator.tools import builtin
 from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
 
 
@@ -422,3 +429,302 @@ def test_a_pre_field_row_reads_as_notifying_and_a_write_migrates(tmp_path: Path)
         ).fetchone()
     assert old_value == (1,), "a pre-field row must be backfilled to notify=1"
     assert new_value == (0,)
+
+
+# ---------------------------------------------------------------------------
+# The quiet turn (docs/design/quiet-turns.md §4): a ``no_reply`` end publishes
+# nothing and notifies nobody — and the two arms that must NOT be silenced.
+# ---------------------------------------------------------------------------
+
+
+def _quiet_session(tmp_path, stream, **kwargs) -> Any:
+    """A session whose inventory holds the REAL ``no_reply`` tool.
+
+    Mounted by the constructor's own capability merge — NO manual
+    ``refresh_tools``: the hand-splice this helper used to carry is what let
+    round 1's blocker (the tool absent from every real session) ship, because
+    a spliced inventory proves the tool works, never that a session has it.
+    """
+    session = make_session(tmp_path, stream, **kwargs)
+    assert any(tool.name == "no_reply" for tool in session._tools)
+    return session
+
+
+def _rows(directory: Path) -> list[dict[str, Any]]:
+    """Every transcript row's payload, in order."""
+    path = directory / "transcript.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line)["payload"] for line in path.read_text().splitlines() if line]
+
+
+@pytest.mark.asyncio
+async def test_a_peer_only_quiet_run_publishes_nothing(tmp_path: Path) -> None:
+    """A peer message answered with ``no_reply``: the end carries notify=False
+    and the store gets NO completion row at all — hence no unread mark, no
+    banner and no notifier call — while the transcript still holds the pair
+    (the assistant call and its stamped result), which is what a viewer needs
+    and what a replay must find wire-legal."""
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="q1", name="no_reply", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ]
+        ]
+    )
+    session = _quiet_session(tmp_path, stream)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    try:
+        await session.receive_peer_message(
+            "child reporting in",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 42, "conversation_name": "child"},
+        )
+        await wait_for(lambda: bool(stream.requests))
+        await wait_for(lambda: session._attention_run_settled)
+        await wait_for(lambda: not session.is_streaming and not session._turn_lock.locked())
+
+        assert session._run_triggers == {"internal"}, "a peer run is an internal run"
+        ends = _ends(events)
+        assert len(ends) == 1
+        assert ends[0].notify is False, "the one value every notifier reads"
+
+        state = await session.refresh_attention()
+        assert state["completion_token"] is None, "no completion row was published"
+        assert state["unseen"] is False
+
+        payloads = _rows(tmp_path / "sess")
+        assert any(
+            call.get("name") == "no_reply"
+            for payload in payloads
+            for call in (payload.get("tool_calls") or ())
+        ), "the assistant call is persisted"
+        assert any(
+            ((payload.get("provider_payload") or {}).get("details") or {}).get(QUIET_TURN_KEY)
+            is True
+            for payload in payloads
+            if payload.get("role") == "tool"
+        ), "and so is its stamped result"
+        marker = Transcript(tmp_path / "sess").latest_custom("completion_attention")
+        assert (
+            marker is not None and marker["eligible"] is False
+        ), "the journal holds the eligible:false marker (what a republish boots from)"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_user_turn_refuses_the_quiet_call_and_answers_in_text(tmp_path: Path) -> None:
+    """R15a: user semantics win. The quiet call comes back as an ``is_error``
+    result carrying the refusal sentence, the model writes the answer on the
+    next call, and the turn notifies as any user turn does."""
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="q1", name="no_reply", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="All good here."), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = _quiet_session(tmp_path, stream)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    try:
+        await session.prompt("how are you?")
+
+        assert len(stream.requests) == 2, "the refusal bought the answer call"
+        results = [
+            message
+            for message in session._context.messages
+            if getattr(message, "role", None) == "tool"
+        ]
+        assert results and results[-1].is_error
+        assert "A person asked this turn" in results[-1].text
+        # ``details`` is None on a plain error result, so the read must sink
+        # through it rather than iterate it.
+        assert QUIET_TURN_KEY not in ((results[-1].provider_payload or {}).get("details") or {})
+        state = await session.refresh_attention()
+        assert state["kind"] == "complete" and state["notify"] is True
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_notify_requested_wake_refuses_the_quiet_call(tmp_path: Path) -> None:
+    """A delivery that asked to tell the user keeps its sentence path: the
+    refusal names the ask, and the run notifies (§4)."""
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="q1", name="no_reply", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="The build is green."), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = _quiet_session(tmp_path, stream)
+    try:
+        schedule = WakeSchedule(
+            id="w-notify", message="report the build", next_due_at=0, created_at=0, notify=True
+        )
+        await session._deliver_wake(
+            DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+        )
+        await wait_for(lambda: len(stream.requests) >= 2)
+        await wait_for(lambda: session._attention_run_settled)
+
+        results = [
+            message
+            for message in session._context.messages
+            if getattr(message, "role", None) == "tool"
+        ]
+        assert results and results[-1].is_error
+        assert "asked to tell the user" in results[-1].text
+        state = await session.refresh_attention()
+        assert state["kind"] == "complete" and state["notify"] is True
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_rule_is_the_denylist(tmp_path: Path) -> None:
+    """R4, pinned at the seam that decides it: refuse iff a person asked or a
+    delivery asked to notify — everything else, including every ``internal``
+    run, may end quietly."""
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    try:
+        session._run_triggers = {"internal"}
+        assert await session._quiet_end_refusal() is None
+
+        session._run_triggers = {"user"}
+        assert await session._quiet_end_refusal() == (
+            "A person asked this turn; answer them in one line."
+        )
+
+        session._run_triggers = {"wake_prompt"}
+        session._run_notify_requested = True
+        assert await session._quiet_end_refusal() == (
+            "This wake or monitor asked to tell the user; say what they need to know."
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_user_message_refuses_the_quiet_end(tmp_path: Path) -> None:
+    """``awaiting_user`` counts too: a typed message sitting on the steering
+    queue is a person waiting for an answer, and the runner must not end the
+    turn silently underneath it."""
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    try:
+        session._run_triggers = {"wake_prompt"}
+        session.steer("actually, also check staging")
+        assert await session._quiet_end_refusal() == (
+            "A person asked this turn; answer them in one line."
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_incident_notice_run_may_end_quietly(tmp_path: Path) -> None:
+    """R4's reach: a run opened by a ``session_incident`` notice is ``internal``
+    and may end quietly — the incident's operator-visible row is already
+    published, so silence about it loses nothing. This is the denylist working
+    as designed, not an accident: the same call in a user run is refused."""
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="q1", name="no_reply", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ]
+        ]
+    )
+    session = _quiet_session(tmp_path, stream)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    try:
+        await session._prompt_messages(
+            [
+                CustomMessage(
+                    custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+                    attribution="system",
+                    details={"text": "[session incident] provider hiccup"},
+                )
+            ]
+        )
+        await wait_for(lambda: session._attention_run_settled)
+
+        assert session._run_triggers == {"internal"}
+        ends = _ends(events)
+        assert ends and ends[-1].notify is False
+        state = await session.refresh_attention()
+        assert state["completion_token"] is None
+    finally:
+        await session.dispose()
+
+
+class _FailingSecondCall(ScriptedStream):
+    """The first call answers the quiet batch; every call after it fails."""
+
+    def __call__(self, request, signal):
+        if self.requests:
+            self.requests.append(request)
+
+            async def gen():
+                raise ProviderError(400, "the re-entry failed")
+                yield  # pragma: no cover — generator shape only
+
+            return gen()
+        return super().__call__(request, signal)
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_batch_whose_re_entry_errors_still_notifies(tmp_path: Path) -> None:
+    """REVIEW R3: the notify force is skipped for the error arm, and the case
+    is reachable — a quiet batch, a todo reminder at the yield boundary
+    re-enters the loop, and the re-entry's provider call fails. The run then
+    ends as an error with the quiet marker still the last tool result, and
+    "an error always notifies, whatever the origins were" must not be silenced
+    by the earlier quiet call."""
+    session_id = "quiet-reentry"
+    builtin.TODO_STORE[session_id] = [{"text": "ship it", "status": "pending"}]
+    stream = _FailingSecondCall(
+        [
+            [
+                StreamToolCallDelta(index=0, id="q1", name="no_reply", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ]
+        ]
+    )
+    session = _quiet_session(tmp_path, stream, session_id=session_id)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    try:
+        schedule = WakeSchedule(
+            id="w-quiet", message="check the build", next_due_at=0, created_at=0
+        )
+        await session._deliver_wake(
+            DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+        )
+        await wait_for(lambda: len(stream.requests) >= 2)
+        await wait_for(lambda: session._attention_run_settled)
+
+        ends = _ends(events)
+        assert ends, "the run still ends with an end event"
+        end = ends[-1]
+        assert session._run_ended_quiet(end) is True, (
+            "the quiet marker is still the run's last word — this test is about "
+            "the error arm's exemption, not about the predicate"
+        )
+        assert end.notify is True, "the error arm always notifies"
+        state = await session.refresh_attention()
+        assert state["kind"] == "error"
+        assert state["notify"] is True
+    finally:
+        builtin.TODO_STORE.pop(session_id, None)
+        await session.dispose()
