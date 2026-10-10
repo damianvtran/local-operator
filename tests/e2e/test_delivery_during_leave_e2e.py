@@ -47,6 +47,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJob
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.types import AbortSignal, ChatRequest, StreamEvent
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.session import Session
@@ -1010,6 +1011,113 @@ async def test_a_peer_prompt_cut_with_zero_round_trips_closes_neutrally(
     assert [row.get("kind") for row in rows] == ["closed"], rows
     assert rows[-1].get("cause") == "disposed", rows[-1]
     assert stream.exhausted_at is None, "the run must not have consumed a scripted turn"
+
+
+@pytest.mark.asyncio
+async def test_a_flushed_peer_steer_keeps_its_provenance_to_disposal(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR-1: the turn-end flush carries a parked peer steer's provenance.
+
+    The busy steer arm of ``receive_peer_message`` parks the peer's
+    ``CustomMessage`` while a turn streams; when that turn ends past its last
+    drain, the FLUSH -- not a drain -- opens the run for it. Both peer arms
+    pass ``carried_prompt=True``, so the flush must as well for any batch
+    containing a peer row: a run cut before its first provider round-trip
+    must close neutrally rather than settle silently while a person at the
+    other end of `lop send` waits. The tail hold (patched
+    ``_mark_code_requests_dirty`` -- the thread hop that opened this window
+    on CI) forces the park past the last drain instead of racing CI for it.
+    """
+    config = headless_tui_env
+    directory = config / "flushed-peer-steer-cut-pre-dispatch"
+    directory.mkdir(parents=True, exist_ok=True)
+    stream = ScriptedStream(
+        [
+            text_turn("warm up answer"),
+            text_turn("hold the work"),
+            # Spare: the released flushed run still CALLS its stream function
+            # -- ``_abortable_stream`` evaluates its argument eagerly, and the
+            # pre-aborted fast path only cancels the pump before any statement
+            # runs (see ``marking_stream_fn``) -- and the tape is indexed by
+            # call, not by iteration.
+            text_turn("never iterated"),
+        ]
+    )
+    session = build_session(directory, stream)
+
+    in_tail = asyncio.Event()
+    release = asyncio.Event()
+    armed = [False]
+    original = Session._mark_code_requests_dirty
+
+    async def held_mark(self: Session) -> None:
+        if armed[0]:
+            armed[0] = False
+            in_tail.set()
+            await release.wait()
+        return await original(self)
+
+    monkeypatch.setattr(Session, "_mark_code_requests_dirty", held_mark)
+    release_run: asyncio.Event | None = None
+    try:
+        with bounded(120, "a flushed peer steer cut before dispatch"):
+            await session.prompt("warm up")
+            armed[0] = True
+            task = asyncio.ensure_future(session.prompt("hold the work"))
+            # The hold is the test's own event, so awaiting it is the proof
+            # the tail was reached -- not a sleep.
+            await asyncio.wait_for(in_tail.wait(), _STEP_TIMEOUT_S)
+            assert session._is_streaming, "the second turn must still be live"
+            run_token = session._attention_run_token
+
+            # The BUSY steer arm parks the peer row; the idle arm would open
+            # its own run instead (the other door, pinned above).
+            receipt = await session.receive_peer_message(
+                "peer note while busy",
+                mode="steer",
+                sender={"pid": 999999, "conversation_name": "peer", "model_label": "m"},
+            )
+            assert receipt.delivery["committed"] is True, receipt
+            assert "steered" in receipt, receipt
+            parked_types = [getattr(m, "custom_type", None) for m in session.queued_steering()]
+            assert parked_types == [
+                PEER_MESSAGE_MESSAGE_TYPE
+            ], "the busy arm must have parked exactly the peer row"
+
+            # From here the exit arrives before the flushed run's first
+            # round-trip: park the next admitted run (the flush's; the held
+            # work run is excepted) and dispose it pre-dispatch.
+            parked, release_run = _park_runs_before_dispatch(session, except_token=run_token)
+            release.set()
+            await asyncio.wait_for(parked.wait(), _STEP_TIMEOUT_S)
+            assert session._turn_task is not None and not session._turn_task.done()
+            assert (
+                session._attention_run_carried_prompt is True
+            ), "the flushed run must carry the peer's provenance (review round 1, MINOR-1)"
+
+            dispose_task = asyncio.ensure_future(session.dispose())
+            while not (session._signal is not None and session._signal.aborted):
+                await asyncio.sleep(0.005)
+            release_run.set()
+            await asyncio.wait_for(dispose_task, timeout=_STEP_TIMEOUT_S)
+            await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+
+        rows = _completion_rows(directory)
+        # Two honest completions (warm up + the held turn), then the flushed
+        # run's neutral closure -- never an error row, and never bare silence
+        # (the mutation: without the provenance parity the row set stops at
+        # ["complete", "complete"]).
+        assert [row.get("kind") for row in rows] == ["complete", "complete", "closed"], rows
+        assert not [row for row in rows if row.get("kind") == "error"], rows
+        assert rows[-1].get("cause") == "disposed", rows[-1]
+        assert stream.exhausted_at is None, "the flushed run must not have consumed a scripted turn"
+    finally:
+        release.set()
+        if release_run is not None:
+            release_run.set()
+        if not session._disposed:
+            await session.dispose()
 
 
 @pytest.mark.asyncio
