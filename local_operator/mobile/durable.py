@@ -602,8 +602,10 @@ def _row_group(row_id: str, known: Container[str]) -> str:
     (``subagent-launch:<job>``), so neither "strip everything after the first
     colon" nor "strip the last segment" is right on its own.
 
-    ``known`` IS THE PAGE'S ROW IDS *AND* ITS JOURNAL ENTRY IDS, and the entry
-    ids are load-bearing rather than belt-and-braces: an assistant message with
+    ``known`` IS THE ROWS BEING CUT *AND* THE JOURNAL ENTRY IDS READ ON THE WAY
+    (on a multi-read page, every entry id seen so far — a superset of the page's
+    own, which can only move a cut further back), and the entry ids are
+    load-bearing rather than belt-and-braces: an assistant message with
     tool calls and NO TEXT paints no row of its own, only ``m:call-0``,
     ``m:call-1``, …, so ``m`` never appears among the row ids and every sibling
     would answer with its own id as its group. The cut could then land between
@@ -855,6 +857,10 @@ def journal_rows_older_than(
     entry_ids: set[str] = set()
     candidates = _cursor_candidates(before_id)
     candidate = next(candidates)
+    # Whether the narrowed-cursor recovery below has run. It can only ever apply
+    # to the caller's own first read: every later cursor is a page row, and a page
+    # never starts mid-group.
+    recovered = False
     while len(rows) < limit:
         try:
             # AN ANCHORED read rather than a plain ``before_id`` one: the page
@@ -878,7 +884,14 @@ def journal_rows_older_than(
             continue
         anchor = next((i for i, entry in enumerate(page.entries) if entry.id == candidate), None)
         if anchor is None:
-            return None
+            # Defensive only: an anchored page that did not reconcile always
+            # contains its anchor. Falling through to the next candidate rather
+            # than giving up keeps a future change to that contract from
+            # re-breaking the colon-id fix above.
+            candidate = next(candidates, None)
+            if candidate is None:
+                return None
+            continue
         older = list(page.entries[:anchor])
         newer = list(page.entries[anchor:])
         entry_ids.update(entry.id for entry in page.entries)
@@ -886,6 +899,42 @@ def journal_rows_older_than(
         if messages:
             messages += _pairing_messages(newer, messages, prunes)
             rows = _fold(messages) + rows
+        if not recovered and candidate != before_id:
+            # THE CALLER'S ID WAS ONE OF A MESSAGE'S CALL ROWS, so the page it is
+            # asking for is not simply "everything older than that message".
+            #
+            # WHY THIS IS NEEDED AT ALL. The mobile projection caps its
+            # transcript and makes room for the pinned opener by dropping the
+            # OLDEST row of the tail (``projection.py:_cap_tail``), so a message
+            # with tool calls can be split across the cap: the client keeps
+            # ``m:call_0…`` and loses ``m`` itself. Its oldest row is then a call
+            # row, that call row is its first cursor, and the entry that cursor
+            # resolves to is the message — whose rows strictly older than the
+            # ENTRY are the rows before ``m``. The rows ABOVE the cursor row
+            # inside ``m``'s own group (``m`` itself, and any call row before it)
+            # are in no other page: the walk has already started below them.
+            # Measured by review round 3 on a real journal: one row stranded at
+            # page 20 and at page 120, and 5 of the 14 largest journals here have
+            # the shape (1-2 rows).
+            #
+            # ONLY when the id was narrowed to reach this entry: had the caller
+            # named the entry itself, its own row is the caller's to hold, and
+            # serving it back would put a repeat in every page.
+            anchor_messages = _page_messages([page.entries[anchor]], prunes)
+            anchor_messages += _pairing_messages(newer, anchor_messages, prunes)
+            above = _fold(anchor_messages)
+            stop = next((i for i, row in enumerate(above) if str(row.id) == before_id), None)
+            # ONLY when the caller's id really is one of that message's rows. If
+            # it names nothing in the group — a cursor from a transcript that was
+            # replaced under the client, an id minted by an older build — there is
+            # no row above it to recover, and the honest answer stays the one
+            # below: the rows strictly older than the message, and end-of-history
+            # when there are none (which is what keeps a stale cursor from
+            # re-serving the client's own window).
+            if stop is not None:
+                # Older than the caller's row, newer than this page's rows.
+                rows = rows + above[:stop]
+                recovered = True
         has_more = page.has_more
         if not older or not has_more:
             break

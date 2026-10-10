@@ -43,6 +43,10 @@ from local_operator.mobile.durable import (
     _attachments,
     _fold,
 )
+
+# The projection's own cap (``_cap_tail``): the seed window is only capped once the
+# render passes it, and the client's cursor rule turns on being AT it.
+from local_operator.mobile.types import PROJECTION_TRANSCRIPT_LIMIT
 from local_operator.session.transcript import (
     ENTRY_COMPACTION,
     ENTRY_MESSAGE,
@@ -322,7 +326,18 @@ def _walk(config: Path, monkeypatch: pytest.MonkeyPatch, *, page: int = PAGE) ->
 
     pages: list[list[str]] = []
     page_rows: list[Any] = []
-    cursor = seed_ids[0]
+    # THE CLIENT'S OWN FIRST CURSOR. A projection at its cap pins the
+    # conversation's opening user row ahead of a disjoint tail, and that pinned
+    # row is not the tail's chronological neighbour — the web client pages from
+    # the row after it (``transcript.tsx``), and every fixture whose projection is
+    # UNDER the cap behaves identically either way.
+    cursor = (
+        seed_ids[1]
+        if len(seed_ids) >= PROJECTION_TRANSCRIPT_LIMIT
+        and seed_ids[1:]
+        and projection.transcript[0].kind == "user"
+        else seed_ids[0]
+    )
     seen_more = True
     for _ in range(60):
         entries, has_more = _history_page(SESSION_ID, cursor, page)
@@ -898,11 +913,110 @@ def test_a_cursor_on_a_colon_bearing_call_id_still_pages(
     page, _ = _history_page(SESSION_ID, ids["colon_call_row"], 10)
     served = [row.id for row in page]
     assert served, "a cursor on a colon-bearing call id served nothing"
-    # The rows below the call's own message: the page crossed the cursor instead
-    # of answering end-of-history.
-    assert "early-u1" in served
+    # The message's OWN row comes back with it. The caller's id is one of that
+    # message's call rows — which is exactly the capped projection's shape (the
+    # cap drops a group's row and keeps its calls) — so the rows above the
+    # cursor row inside the group are this page's to serve; nothing else will
+    # ever ask for them (review round 3, R3-1).
+    assert "coloncall" in served
+    # …and the page crossed the cursor rather than answering end-of-history.
+    assert any(row_id.startswith("early-") for row_id in served)
 
     walk = _walk(config, monkeypatch, page=5)
     observed = set(_observed(walk))
     expected = {row.id for row in _journal_rows(walk["directory"])}
     assert expected <= observed, f"unreachable rows: {sorted(expected - observed)[:4]}"
+
+
+#: Row counts that put the cap's dropped row EXACTLY on a message's own row.
+#: ``_cap_tail`` drops ``render[-PROJECTION_TRANSCRIPT_LIMIT]``, so the shape is
+#: arithmetic rather than luck: 2 x 10 plain rows, then a text + 3-call message
+#: (4 rows), then 2 x 38 plain — the dropped index is 100 - 80 = 20.
+_CAPPED_TURNS_BEFORE = 10
+_CAPPED_TURNS_AFTER = 38
+
+
+def _build_capped(config: Path) -> dict[str, Any]:
+    """A render whose cap DROPS a message's own row and keeps its call rows.
+
+    The mobile projection makes room for its pinned opener by dropping the oldest
+    row of the tail (``projection.py:_cap_tail``), so a message with tool calls
+    can be split across the cap: the phone keeps ``m:call_0…`` and loses ``m``.
+    Its oldest row is then a call row, that call row is its first cursor, and the
+    reader has to serve the rows ABOVE it inside that message's group or they are
+    in no page at all (review round 3, R3-1).
+    """
+    directory = config / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    ids: dict[str, Any] = {}
+
+    async def run() -> None:
+        for i in range(_CAPPED_TURNS_BEFORE):
+            await transcript.append_message(Message.user(f"before {i}", id=f"capped-b{i}"))
+            await transcript.append_message(Message.assistant(f"answer {i}", id=f"capped-ba{i}"))
+        calls = [
+            ToolCall(id=f"capped-call-{i}", name="bash", arguments={"i": "run the checks"})
+            for i in range(3)
+        ]
+        await transcript.append_message(
+            Message(
+                role="assistant",
+                content=[TextContent(text="the row the cap drops")],
+                tool_calls=calls,
+                stop_reason="toolUse",
+                id="capped-own",
+            )
+        )
+        for call in calls:
+            await transcript.append_message(
+                Message(
+                    role="tool",
+                    content=[TextContent(text="ok")],
+                    tool_call_id=call.id,
+                    tool_name="bash",
+                    id=f"{call.id}-result",
+                )
+            )
+        for i in range(_CAPPED_TURNS_AFTER):
+            await transcript.append_message(Message.user(f"after {i}", id=f"capped-a{i}"))
+            await transcript.append_message(Message.assistant(f"reply {i}", id=f"capped-aa{i}"))
+        ids["own_row"] = "capped-own"
+        ids["first_call_row"] = "capped-own:capped-call-0"
+
+    asyncio.run(run())
+    return ids
+
+
+def test_a_capped_projection_does_not_strand_the_row_the_cap_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row the projection's cap drops has to come back on the first page.
+
+    ``_cap_tail`` makes room for the pinned opener by dropping the OLDEST row of
+    the tail. When that row is a message's own row and the kept tail begins at one
+    of its call rows, the client's first cursor IS a call row: the reader resolved
+    it to the message and served only rows strictly older than the message, so the
+    dropped row sat above everything the walk could reach. Round 3 measured one
+    stranded row on a real journal at page 20 AND at page 120, and 5 of the 14
+    largest journals here carry the shape — while no fixture could show it, since
+    every fixture's projection sits under the cap.
+    """
+    config = tmp_path / "config"
+    ids = _build_capped(config)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+
+    projection = _durable_projection(SESSION_ID)
+    assert projection is not None
+    seed = [row.id for row in projection.transcript]
+    assert len(seed) == PROJECTION_TRANSCRIPT_LIMIT, "the fixture must sit AT the cap"
+    assert ids["own_row"] not in seed, "the cap was supposed to drop the own row"
+    assert ids["first_call_row"] in seed
+    assert seed[1] == ids["first_call_row"], "the client's first cursor is the call row"
+
+    for page in (20, 120):
+        walk = _walk(config, monkeypatch, page=page)
+        observed = set(_observed(walk))
+        expected = {row.id for row in _journal_rows(walk["directory"])}
+        assert ids["own_row"] in observed, f"page {page} stranded the dropped row"
+        assert expected <= observed, f"page {page} stranded {sorted(expected - observed)[:3]}"
