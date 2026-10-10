@@ -10,10 +10,24 @@ import pytest
 
 from local_operator.i18n import catalogues
 
+#: The `wire.*` namespaces still awaiting their extraction slice: stub files
+#: that M0 shipped and no slice has populated yet (RFC §5: later slices
+#: populate them). An extraction slice removes its namespace from this tuple
+#: in its own PR, so the set shrinks until P5 and the file-list assertion
+#: below stays the part that must never change.
+_PENDING_EXTRACTION = (
+    "wire.errors",
+    "wire.exec",
+    "wire.incidents",
+    "wire.notices",
+    "wire.settings",
+)
+
 
 def test_shipped_wire_namespaces_exist() -> None:
     # M0 ships the six `wire.*` namespace STUBS (RFC §5): the files exist so
-    # later slices populate them; being empty is the correct current state.
+    # later slices populate them. `wire.slash` was populated by the S2
+    # extraction slice; the rest stay empty until their own slice lands.
     assert catalogues.locales() == ("en",)
     assert catalogues.namespaces("en") == (
         "wire.errors",
@@ -23,8 +37,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.settings",
         "wire.slash",
     )
-    for namespace in catalogues.namespaces("en"):
+    for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
+    assert catalogues.load_catalogue("en", "wire.slash") != {}
 
 
 def test_hash_is_over_file_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -6,3 +6,201 @@ shape RFC §2.4 proved: a mistyped key or kwarg fails pyright.
 """
 
 from __future__ import annotations
+
+from ..messages import Msg
+
+
+def accounts() -> Msg:
+    return Msg("wire.slash.accounts", {})
+
+
+def agent() -> Msg:
+    return Msg("wire.slash.agent", {})
+
+
+def aida() -> Msg:
+    return Msg("wire.slash.aida", {})
+
+
+def analytics() -> Msg:
+    return Msg("wire.slash.analytics", {})
+
+
+def approvals() -> Msg:
+    return Msg("wire.slash.approvals", {})
+
+
+def archive() -> Msg:
+    return Msg("wire.slash.archive", {})
+
+
+def btw() -> Msg:
+    return Msg("wire.slash.btw", {})
+
+
+def clear() -> Msg:
+    return Msg("wire.slash.clear", {})
+
+
+def compact() -> Msg:
+    return Msg("wire.slash.compact", {})
+
+
+def context() -> Msg:
+    return Msg("wire.slash.context", {})
+
+
+def copy() -> Msg:
+    return Msg("wire.slash.copy", {})
+
+
+def credential() -> Msg:
+    return Msg("wire.slash.credential", {})
+
+
+def delete() -> Msg:
+    return Msg("wire.slash.delete", {})
+
+
+def effort() -> Msg:
+    return Msg("wire.slash.effort", {})
+
+
+def exit() -> Msg:
+    return Msg("wire.slash.exit", {})
+
+
+def failovers() -> Msg:
+    return Msg("wire.slash.failovers", {})
+
+
+def fast() -> Msg:
+    return Msg("wire.slash.fast", {})
+
+
+def fork() -> Msg:
+    return Msg("wire.slash.fork", {})
+
+
+def goal() -> Msg:
+    return Msg("wire.slash.goal", {})
+
+
+def help() -> Msg:
+    return Msg("wire.slash.help", {})
+
+
+def info() -> Msg:
+    return Msg("wire.slash.info", {})
+
+
+def keys() -> Msg:
+    return Msg("wire.slash.keys", {})
+
+
+def links() -> Msg:
+    return Msg("wire.slash.links", {})
+
+
+def login() -> Msg:
+    return Msg("wire.slash.login", {})
+
+
+def logout() -> Msg:
+    return Msg("wire.slash.logout", {})
+
+
+def loop() -> Msg:
+    return Msg("wire.slash.loop", {})
+
+
+def mcp() -> Msg:
+    return Msg("wire.slash.mcp", {})
+
+
+def mobile() -> Msg:
+    return Msg("wire.slash.mobile", {})
+
+
+def model() -> Msg:
+    return Msg("wire.slash.model", {})
+
+
+def move() -> Msg:
+    return Msg("wire.slash.move", {})
+
+
+def network() -> Msg:
+    return Msg("wire.slash.network", {})
+
+
+def new() -> Msg:
+    return Msg("wire.slash.new", {})
+
+
+def notifications() -> Msg:
+    return Msg("wire.slash.notifications", {})
+
+
+def project() -> Msg:
+    return Msg("wire.slash.project", {})
+
+
+def provider() -> Msg:
+    return Msg("wire.slash.provider", {})
+
+
+def reload() -> Msg:
+    return Msg("wire.slash.reload", {})
+
+
+def rename() -> Msg:
+    return Msg("wire.slash.rename", {})
+
+
+def resume() -> Msg:
+    return Msg("wire.slash.resume", {})
+
+
+def search() -> Msg:
+    return Msg("wire.slash.search", {})
+
+
+def session() -> Msg:
+    return Msg("wire.slash.session", {})
+
+
+def settings() -> Msg:
+    return Msg("wire.slash.settings", {})
+
+
+def sidebar() -> Msg:
+    return Msg("wire.slash.sidebar", {})
+
+
+def skills() -> Msg:
+    return Msg("wire.slash.skills", {})
+
+
+def stop() -> Msg:
+    return Msg("wire.slash.stop", {})
+
+
+def team() -> Msg:
+    return Msg("wire.slash.team", {})
+
+
+def theme() -> Msg:
+    return Msg("wire.slash.theme", {})
+
+
+def unarchive() -> Msg:
+    return Msg("wire.slash.unarchive", {})
+
+
+def update() -> Msg:
+    return Msg("wire.slash.update", {})
+
+
+def usage() -> Msg:
+    return Msg("wire.slash.usage", {})
