@@ -590,6 +590,120 @@ GITHUB_STATELESS_TOKEN = (
 )
 
 
+#: 2026-10-09 (session ``565245718d90``): a vendor-prefixed SINGLE-WORD identifier is a NAME.
+#: ``xai_`` plus nine lowercase letters is an ordinary snake_case symbol; the vendor rule
+#: masked it, the model then SAW the mask in ``read``/``grep`` output and in its own
+#: replayed calls, copied it, and ``edit`` wrote the marker into source (a SyntaxError).
+#: Every identifier here is ASSEMBLED from parts: this file is read by agents through the
+#: pass it documents, and a literal spelling would show them the mask in its place —
+#: the defect itself. The words are 8-15 lowercase letters, the band the rule releases.
+VENDOR_IDENTIFIER_WORD = "availab" + "le"
+VENDOR_IDENTIFIER_WORDS: tuple[str, ...] = (
+    VENDOR_IDENTIFIER_WORD,  # 9 letters: the reported identifier's tail
+    "enab" + "ledfor",  # 10 letters
+    "probe" + "ready",  # 10 letters
+    "wait" + "forkey",  # 10 letters
+    "cap" + "ability",  # 10 letters
+    "verifi" + "cation",  # 12 letters
+    "ready" + "now",  # 8 letters: the bottom of the released band (the rule's own floor)
+    "supports" + "streams",  # 15 letters: the top of the released band
+    "image" + "gen" + "ready",  # 13 letters
+)
+
+#: Every prefix in the vendor tables, in the spelling an identifier takes (the separated
+#: prefixes with ``_`` and ``-``, the fixed ones as they are). Derived from the module's
+#: own tables so a prefix added there is covered here without anyone remembering.
+
+
+def _vendor_identifier_prefixes() -> tuple[str, ...]:
+    from local_operator import redaction_shapes as rs
+
+    separated = tuple(
+        prefix + separator for prefix in rs._VENDOR_SEPARATED_PREFIXES for separator in ("_", "-")
+    )
+    return separated + tuple(rs._VENDOR_FIXED_PREFIXES)
+
+
+#: The same identifier in the four places source puts one, so a context-sensitive
+#: regression (a rule that masks only in a position) cannot hide behind a bare string.
+VENDOR_IDENTIFIER_CONTEXTS: tuple[tuple[str, str], ...] = (
+    ("{x}", "bare"),
+    ("def {x}() -> bool:\n    return False\n", "a Python def"),
+    ("cfg = provider.{x}(cfg)", "a dotted call"),
+    ('{{"{x}": true}}', "a JSON key"),
+    ("export const {x} = false;", "a TypeScript export"),
+    ("{x} = True", "a spaced assignment (the bare word, no `=` against it)"),
+)
+
+#: The corpus rows: the reported identifier in each source position. Deliberately FEW —
+#: ``test_the_gate_does_not_trip_on_ordinary_text`` bounds the share of negatives that
+#: carry a shape anchor, and every prefix-bearing row carries one, so the exhaustive
+#: matrix lives in :data:`VENDOR_IDENTIFIER_MATRIX` and is run by its own test instead.
+VENDOR_IDENTIFIER_NEGATIVES: tuple[Case, ...] = tuple(
+    Case(
+        template.format(x="xai" + "_" + VENDOR_IDENTIFIER_WORD),
+        f"a vendor-prefixed single-word identifier ({kind}) is a NAME, not a token",
+    )
+    for template, kind in VENDOR_IDENTIFIER_CONTEXTS
+)
+
+#: The exhaustive matrix: EVERY prefix in both tables in every source position, and every
+#: word length in the released band under one prefix. Name-agnostic is a claim about all
+#: of them, so it is tested against all of them.
+VENDOR_IDENTIFIER_MATRIX: tuple[Case, ...] = (
+    *(
+        Case(
+            template.format(x=prefix + VENDOR_IDENTIFIER_WORD),
+            f"{prefix!r} identifier ({kind})",
+        )
+        for prefix in _vendor_identifier_prefixes()
+        for template, kind in VENDOR_IDENTIFIER_CONTEXTS
+    ),
+    *(
+        Case("xai" + "_" + word, f"{len(word)}-letter word under one prefix")
+        for word in VENDOR_IDENTIFIER_WORDS
+    ),
+)
+
+#: The boundary on the MASKED side, and the real-key pins. Realistic shapes only: a
+#: mixed-case-and-digit tail (what Anthropic, OpenAI, xAI, Groq, Tavily, HF, fal and the
+#: rest actually mint), a lowercase tail carrying a digit, and an all-lowercase tail at the
+#: 16-letter ceiling — the shortest letters-only POSITIVE this corpus has always held.
+VENDOR_REAL_KEY_POSITIVES: tuple[Case, ...] = (
+    Case(
+        "xai" + "-" + "Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6kM9nP2rS5tU8wX1yA4cD7fG0iL3oQ6",
+        "a realistic xAI key: mixed case and digits",
+    ),
+    Case(
+        'client = Client(api_key="' + "xai" + "-" + "q7Zk2LmN9vXb4RtY8sWc3HdG6fJp1AeU5oIi0" + '")',
+        "a realistic xAI key inside a constructor call",
+    ),
+    Case("gsk" + "_" + "k3m9p2x7q4w8z5v1n6b0c2d4f6h8j0", "a lowercase tail CARRYING digits"),
+    Case(
+        "tvly" + "-" + "dev" + "-" + "Qx7Lm2Vb9Nk4Pz8Rt3Yw6Hc1", "a mixed-case tail with separators"
+    ),
+    Case("hf" + "_" + "aBcDeFgHiJkLmNoPqRsTuVwXyZ", "a mixed-case tail, letters only"),
+    Case(
+        "xai" + "_" + "abcdefghijklmnop",
+        "the ceiling: an all-lowercase tail of SIXTEEN letters keeps its mask",
+    ),
+    Case(
+        "sk" + "-" + "qwertyuiopasdfghjklzxcvbnm",
+        "a long all-lowercase unbroken tail keeps its mask",
+    ),
+    Case("xai" + "_" + "availab" + "leProbeFlag", "a camelCase tail is a token by the rule's bet"),
+    Case("xai" + "_" + "availab" + "le2", "a tail carrying a digit is a token by the rule's bet"),
+    # Agent review R1: the ``=value`` spelling is NOT released. A one-word name glued to
+    # ``=<value>`` is masked whole, as it was before the identifier form existed, so the
+    # VALUE of a ``<prefix>_<word>=<secret>`` pair never survives. Both halves pinned: the
+    # pair masks (here), and the bare word beside it is released (the matrix rows).
+    Case(
+        "gsk" + "_" + "availab" + "le" + "=" + "Hunter2" + "Secret99",
+        "a one-word name followed by =VALUE keeps the base masking: the value is not released",
+    ),
+)
+
+
 POSITIVE_CASES: tuple[Case, ...] = (
     # --- added in round 2: the leaks the original corpus did not spell ---------
     # Every one of these was published at some point in this PR's own history, and
@@ -1165,6 +1279,7 @@ POSITIVE_CASES: tuple[Case, ...] = (
         "key=sk-" + "abcdefghijklmnopqrstuvwxyz",
         "an unbroken issuer tail keeps its mask (and the base label)",
     ),
+    *VENDOR_REAL_KEY_POSITIVES,
 )
 
 
@@ -1884,6 +1999,8 @@ NEGATIVE_CASES: tuple[Case, ...] = (
             ("password", "JSON field"),
         )
     ),
+    # --- 2026-10-09: a vendor-prefixed single-word identifier is a NAME -----------
+    *VENDOR_IDENTIFIER_NEGATIVES,
 )
 
 

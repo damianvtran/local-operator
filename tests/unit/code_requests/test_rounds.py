@@ -258,3 +258,132 @@ def test_verdict_classification_by_leading_token(verdict, expected):
 )
 def test_freshness_needs_a_real_prefix(reviewed, head, expected):
     assert freshness(reviewed, head) == expected
+
+
+def test_a_labelled_verdict_past_the_field_window_is_still_read():
+    """#2112's round-4 review: ``Reviewer:``/``Scope:`` on top, the verdict on line 44.
+
+    The 40-line field window protects ``Reviewer``/``Scope``/``Head`` (a review quotes
+    its own prompt further down), but a ``Verdict:`` label with no other spelling in
+    the window is the closing summary, and bounding it turned a clean TERMINAL round
+    into ``unstated``.
+    """
+    body = (
+        "### Agent review — round 4\n\nReviewer: reviewer on a-model\n"
+        "Scope: `46b12d2ff9..039476dff3`\n\n"
+        + "".join(f"- note {index}\n" for index in range(50))
+        + "\n**Verdict: `clean` — no BLOCKER, no MAJOR — round 4 is TERMINAL on `039476dff3`.**\n"
+    )
+    assert len(body.splitlines()) > 40
+    report = parse([Comment(id="1", created_at="2026-10-08T00:00:00Z", body=body)])
+    (item,) = report.passes
+    assert item.verdict_class == STATE_TERMINAL
+    assert item.reviewed_head == "039476dff3"
+
+
+def test_a_scope_line_past_the_field_window_is_still_ignored():
+    """The window still guards the quoted-prompt case for every field but the verdict."""
+    body = (
+        "### Agent review — round 1\n\nReviewer: r\nScope: `aaaaaaa..bbbbbbb`\n"
+        + "".join(f"- note {index}\n" for index in range(50))
+        + "Scope: `ccccccc..ddddddd`\nHead: eeeeeee\n"
+    )
+    (item,) = parse([Comment(id="1", created_at="2026-10-08T00:00:00Z", body=body)]).passes
+    assert item.reviewed_head == "bbbbbbb"
+
+
+# -- review round 1 (F1/F2, Q1): the past-window verdict rescue must fail CLOSED ----------
+# The classifier reads the leading token of whatever line it is handed, so a quoted or
+# fenced ``Verdict: clean`` is as good as a real one to it. These are the shapes the
+# rescue must not be fooled by, each asserting the EXACT class.
+
+_ROUND4_TOP = "### Agent review — round 4\n\nReviewer: r on a-model\nScope: `aaaaaaa..bbbbbbb`\n\n"
+
+
+def _long_review(*, early: tuple[str, ...] = (), late: dict[int, str] | None = None) -> str:
+    """A review whose own lines sit near the top (``early``) and whose ``late`` lines
+    sit at ABSOLUTE line numbers past ``FIELD_SCAN_LINES`` (the filler is neutral)."""
+    lines = _ROUND4_TOP.splitlines() + list(early) + [f"- note {index}" for index in range(80)]
+    for number, text in (late or {}).items():
+        assert number > 40, "a late line must sit past the field window"
+        lines[number] = text
+    return "\n".join(lines) + "\n"
+
+
+def _only_pass(body: str):
+    (item,) = parse([Comment(id="1", created_at="2026-10-08T00:00:00Z", body=body)]).passes
+    return item
+
+
+@pytest.mark.parametrize(
+    ("label", "early", "late", "expected"),
+    [
+        (
+            "quoted earlier-round clean, then the review's own changes-required",
+            (),
+            {45: "> **Verdict: clean**", 70: "**Verdict: changes required**"},
+            STATE_FINDINGS_OPEN,
+        ),
+        (
+            "only a quoted clean: the review states none",
+            (),
+            {45: "> **Verdict: clean**"},
+            STATE_UNSTATED,
+        ),
+        (
+            "own bare-bold changes-required in the window, quoted clean past it",
+            ("**Changes required — 1 MAJOR**",),
+            {50: "> **Verdict: clean**"},
+            STATE_FINDINGS_OPEN,
+        ),
+        (
+            "own bare-bold clean in the window, quoted changes-required past it",
+            ("**Clean — merge-ready.**",),
+            {50: "> Verdict: changes required"},
+            STATE_CLEAN,
+        ),
+        (
+            "own late clean, quoted changes-required after it",
+            (),
+            {45: "**Verdict: clean**", 60: "> Verdict: changes required"},
+            STATE_CLEAN,
+        ),
+        (
+            "two own late verdicts: the closing one wins",
+            (),
+            {45: "Verdict: changes required", 70: "**Verdict: clean — TERMINAL**"},
+            STATE_TERMINAL,
+        ),
+        (
+            "a verdict inside a code fence is a sample, not a verdict",
+            (),
+            {45: "```", 46: "Verdict: clean TERMINAL", 47: "```"},
+            STATE_UNSTATED,
+        ),
+    ],
+)
+def test_the_past_window_verdict_rescue_fails_closed(label, early, late, expected):
+    assert _only_pass(_long_review(early=early, late=late)).verdict_class == expected, label
+
+
+@pytest.mark.parametrize(
+    ("following", "expected"),
+    [
+        ("**NOT clean.** 1 BLOCKER (F1), 4 MAJOR (F2–F5).", STATE_FINDINGS_OPEN),
+        (
+            "**`clean` — no BLOCKER, no MAJOR — round 3 is TERMINAL** on `46b12d2ff`.",
+            STATE_TERMINAL,
+        ),
+    ],
+)
+def test_a_two_hash_verdict_heading_is_read(following, expected):
+    """#2112's agent reviews r1-r3 head the verdict ``## Verdict`` (two hashes)."""
+    lines = _ROUND4_TOP.splitlines() + [f"- note {index}" for index in range(34)]
+    body = "\n".join(lines + ["", "## Verdict", "", following, ""])
+    assert _only_pass(body).verdict_class == expected
+
+
+def test_a_two_hash_verdict_heading_without_a_verdict_stays_unstated():
+    """Tolerant, not strict: a ``## Verdict`` followed by prose is not a verdict."""
+    body = _ROUND4_TOP + "## Verdict\n\nSee the findings above for the full picture.\n"
+    assert _only_pass(body).verdict_class == STATE_UNSTATED

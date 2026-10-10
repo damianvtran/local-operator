@@ -883,13 +883,30 @@ _REJECTED = "credential rejected — sign in again with gh/glab, then refresh"
 
 
 def _validators_of(prior: Mapping[str, Any] | None) -> dict[str, dict[str, str]]:
+    """The stored conditional-request validators, minus any that would force a
+    parse of a size-bounded copy.
+
+    A comment piece may answer 304 only while a fetch-time parse is stored for
+    it (``convention.pieces``): ``_build_entry`` replays that parse for a 304'd
+    piece. An entry with the piece's comments but no stored parse for it (written
+    before the parse was stored) would otherwise answer 304 and be re-parsed from
+    the body the size bound truncated, reading a verdict past 4 KiB as
+    ``unstated``. Dropping that piece's validators makes the next pass fetch it
+    unconditionally, whole, and parse it.
+    """
     raw = (prior or {}).get("validators")
     if not isinstance(raw, Mapping):
         return {}
+    convention = (prior or {}).get("convention")
+    parsed = convention.get("pieces") if isinstance(convention, Mapping) else None
     return {
         str(piece): {str(k): str(v) for k, v in value.items()}
         for piece, value in raw.items()
         if isinstance(value, Mapping)
+        and (
+            piece not in _COMMENT_PIECES
+            or (isinstance(parsed, Mapping) and isinstance(parsed.get(piece), list))
+        )
     }
 
 

@@ -293,6 +293,26 @@ is a 404, not a state.
 Read-only by design: the naming warm (`sessions.checkpoints.warm`) is a
 desktop-plane spend and is not served on this route.
 
+### The open frame (`open_frame: 1`) — the relay's seam
+
+The desktop open frame (`docs/DESKTOP_API.md`, §"The open frame") is a page
+counted in paintable rows, cut back to the oldest included run's opening user
+row, with non-painted bytes stripped and per-run facts attached. **The phone
+does not serve its first frame from it in this revision, and that is a
+precondition rather than a preference.** The relay's first frame is the
+PROJECTION, and `_durable_projection` folds todos, subagents and asks out of
+rows the strip removes — a fold started from a stripped page would lose derived
+state that no later read can restore, because `/api/sessions/{id}/history`
+cannot bring back a row the fold never carried. The lane that bounds the fold
+(`DurableFoldCache.load` folds from the newest compaction's `first_kept` or a
+tail anchor instead of BOF) lands that precondition.
+
+The seam is `local_operator/session/open_frame.py`: the strip, the row cut and
+the facts join are a pure function of (rows, index facts, limits), with no HTTP
+route and no desktop bridge in it, so `mobile/` can import it the day its fold
+has a bounded suffix to start from. Nothing in this contract changes the
+daemon's routes, the projection's shape or the web UI.
+
 ### The peers' rows — other devices' sessions (`GET /api/sessions?include_peers`)
 
 The relay half of "sessions and delegation": the sessions OTHER devices hold,
