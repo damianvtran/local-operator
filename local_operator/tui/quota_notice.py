@@ -52,7 +52,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from local_operator.providers.quota_notice import evaluate_quota_notice
+# ``providers.quota_notice`` (the verdict) is imported at the READ below, not
+# here: it pulls in the provider stack — httpx with it — and the startup path
+# must reach the first frame without httpx
+# (``tests/unit/test_import_graph.py`` pins it, ~88 ms / 16.5 MB). Same
+# deferred-import pattern this module already uses for the registry and
+# recovery reads.
 
 if TYPE_CHECKING:  # pragma: no cover - import weight guard, not a behaviour
     from local_operator.providers.controller import CatalogueEntry
@@ -98,6 +103,8 @@ def quota_notice_line(
     URL extraction above).
     """
     try:
+        from local_operator.providers.quota_notice import evaluate_quota_notice
+
         spec = getattr(session, "model", None)
         provider = str(getattr(spec, "provider", "") or "")
         model_id = str(getattr(spec, "model_id", "") or "")
