@@ -11,6 +11,7 @@ a dismiss leaves behind.
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,40 @@ def _rows(transcript: Transcript) -> list[dict[str, Any]]:
         for entry in transcript.entries()
         if entry.type == "custom" and entry.payload.get("custom_type") == SUPPLEMENT_CUSTOM_TYPE
     ]
+
+
+def _hold_terminal_write(
+    monkeypatch: pytest.MonkeyPatch, transcript: Transcript
+) -> tuple[threading.Event, threading.Event]:
+    """Hold the next supplement TERMINAL write open inside ``_commit``'s worker thread.
+
+    The round-3 review's R3-1 window is the append's suspension (thread dispatch + file
+    write): the row reaches disk and is published by ``_commit`` while the writing task is
+    suspended before it can return, so only the journal knows the row exists. Returns
+    ``(entered, release)``: wait for ``entered`` (the write is inside the thread), position
+    the op, then set ``release``. The filter matches terminal ``done`` supplement rows
+    only -- turn entries and ``decided`` rows pass straight through.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    original = transcript._write_entries
+
+    def held(entries: list[Any], *, preserve_mtime: bool = False) -> None:
+        terminal = any(
+            entry.type == "custom"
+            and isinstance(entry.payload, dict)
+            and entry.payload.get("custom_type") == SUPPLEMENT_CUSTOM_TYPE
+            and isinstance(entry.payload.get("details"), dict)
+            and entry.payload["details"].get("state") == "done"
+            for entry in entries
+        )
+        if terminal:
+            entered.set()
+            assert release.wait(10), "the held terminal write was never released"
+        original(entries, preserve_mtime=preserve_mtime)
+
+    monkeypatch.setattr(transcript, "_write_entries", held)
+    return entered, release
 
 
 class StubRunner:
@@ -639,6 +674,137 @@ async def test_a_restart_racing_a_paused_cancel_cannot_clobber_the_runner(
         await handle.dispose()
 
 
+# --- the in-flight terminal append (round-3 review R3-1) ------------------------------------
+#
+# The three reproductions round 3 ran on all three op sites, pinned: the op is delivered
+# while the job's terminal append sits inside ``_commit``'s worker thread, so the ``done``
+# row is durable and published while ``inputs.details`` still reads ``decided``. Pre-fix
+# each op cut the settling task and rebuilt the version that row already held. Each test
+# asserts the post-fix journal and receipt, and fails on the pre-fix source.
+
+
+async def test_a_cancel_during_the_terminal_append_answers_already_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-1 repro A: the cancel lands while the terminal append is in the worker thread.
+
+    Pre-fix: the cancel cut the settling task and settled from the stale pointer --
+    [(1,decided),(2,done),(2,cancelled)], receipt ``cancelled``, the delivered block
+    flipping to "cancelled - Retry". Post-fix: the append is part of the cancel's own
+    write lock, the decision reads the journal, and the sequential answer applies --
+    nothing to cut, receipt ``already finished``, rows [(1,decided),(2,done)].
+    """
+    session = _make_session(tmp_path / "sessions" / "r31-cancel", tmp_path)
+    handle = await _handle(session, tmp_path)
+    stub = StubRunner(handle._supplements, answers=[BLOCK])
+    stub.install(monkeypatch)
+    entered, release = _hold_terminal_write(monkeypatch, session.transcript)
+    try:
+        handle._supplements._render("anchor-r31c", _decision(), DATASETS, "u", "a", _settings())
+        assert await asyncio.to_thread(entered.wait, 10), "the terminal append was never held"
+        job = _rows(session.transcript)[0]["job"]
+        cancel = asyncio.create_task(handle._supplements.cancel_job("anchor-r31c", job))
+        for _ in range(20):  # let the op reach its suspension: the write lock, or the reap
+            await asyncio.sleep(0)
+        assert not cancel.done(), "the op finished without waiting on the held write"
+        release.set()
+        receipt = await asyncio.wait_for(cancel, 10)
+        rows = _rows(session.transcript)
+        states = [row["state"] for row in rows]
+        versions = [row["version"] for row in rows]
+        assert (receipt, states, versions) == (
+            "already finished",
+            ["decided", "done"],
+            [1, 2],
+        ), (receipt, states, versions)
+        assert reader_disposition(rows[-1], job_live=False) == "block"
+        await _drain(handle)
+    finally:
+        release.set()
+        await handle.dispose()
+
+
+async def test_a_restart_during_the_terminal_append_skips_the_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-1 repro B: the restart lands while the terminal append is in the worker thread.
+
+    Pre-fix: [(1,decided),(2,done),(2,cancelled),(3,decided),(4,done)] -- a duplicate
+    version 2, then the next version. Post-fix: the restart reads the journal, does not
+    cut the settled job and runs version 3 straight away -- [(1,decided),(2,done),
+    (3,decided),(4,done)].
+    """
+    session = _make_session(tmp_path / "sessions" / "r31-restart", tmp_path)
+    handle = await _handle(session, tmp_path)
+    stub = StubRunner(handle._supplements, answers=[BLOCK, BLOCK])
+    stub.install(monkeypatch)
+    entered, release = _hold_terminal_write(monkeypatch, session.transcript)
+    try:
+        handle._supplements._render("anchor-r31r", _decision(), DATASETS, "u", "a", _settings())
+        assert await asyncio.to_thread(entered.wait, 10), "the terminal append was never held"
+        job = _rows(session.transcript)[0]["job"]
+        restart = asyncio.create_task(handle._supplements.restart_job("anchor-r31r", job))
+        for _ in range(20):  # let the op reach its suspension: the write lock, or the reap
+            await asyncio.sleep(0)
+        assert not restart.done(), "the op finished without waiting on the held write"
+        release.set()
+        receipt = await asyncio.wait_for(restart, 10)
+        await _drain(handle)
+        rows = _rows(session.transcript)
+        states = [row["state"] for row in rows]
+        versions = [row["version"] for row in rows]
+        assert (receipt, states, versions) == (
+            "restarting",
+            ["decided", "done", "decided", "done"],
+            [1, 2, 3, 4],
+        ), (receipt, states, versions)
+    finally:
+        release.set()
+        await handle.dispose()
+
+
+async def test_a_dismiss_during_the_terminal_append_builds_on_the_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-1 repro C: the dismiss lands while the terminal append is in the worker thread.
+
+    Pre-fix: [(1,decided),(2,done),(2,skipped)] -- the stale pointer rebuilt version 2
+    over the delivered ``done``. Post-fix: the dismiss reads the journal inside the write
+    lock and the skipped row follows it -- [(1,decided),(2,done),(3,skipped)], with both
+    readers agreeing on the newest row.
+    """
+    session = _make_session(tmp_path / "sessions" / "r31-dismiss", tmp_path)
+    handle = await _handle(session, tmp_path)
+    stub = StubRunner(handle._supplements, answers=[BLOCK])
+    stub.install(monkeypatch)
+    entered, release = _hold_terminal_write(monkeypatch, session.transcript)
+    try:
+        handle._supplements._render("anchor-r31d", _decision(), DATASETS, "u", "a", _settings())
+        assert await asyncio.to_thread(entered.wait, 10), "the terminal append was never held"
+        dismiss = asyncio.create_task(handle._supplements.dismiss("anchor-r31d"))
+        for _ in range(20):  # let the op reach its suspension: the write lock, or the reap
+            await asyncio.sleep(0)
+        assert not dismiss.done(), "the op finished without waiting on the held write"
+        release.set()
+        receipt = await asyncio.wait_for(dismiss, 10)
+        await _drain(handle)
+        rows = _rows(session.transcript)
+        states = [row["state"] for row in rows]
+        versions = [row["version"] for row in rows]
+        runtime_newest = handle._supplements._newest_row("anchor-r31d")
+        contract_newest = newest_per_anchor(rows)["anchor-r31d"]
+        assert (receipt, states, versions) == (
+            "dismissed",
+            ["decided", "done", "skipped"],
+            [1, 2, 3],
+        ), (receipt, states, versions)
+        assert runtime_newest is not None, rows
+        assert runtime_newest["state"] == contract_newest["state"] == "skipped"
+    finally:
+        release.set()
+        await handle.dispose()
+
+
 async def test_cancel_then_dismiss_keeps_one_version_sequence_per_anchor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -757,15 +923,15 @@ async def test_the_runtime_reader_breaks_version_ties_like_the_contract(
         await handle.dispose()
 
 
-async def test_a_superseded_row_advances_the_pointer_before_a_dismiss(
+async def test_a_superseded_row_leaves_the_next_version_to_the_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Q-1, the supersede site: the pointer moves with ``_close_superseded``'s write too.
+    """Q-1's supersede site, re-derived on the round-3 invariant: the journal decides.
 
-    The supersede tail journals ``cancelled``/``superseded`` over the job's open row; a
-    stale ``inputs.details`` then had a dismiss rebuild the version that row just took
-    (two rows at version 2). Driven directly -- the full supersede wiring (a second turn)
-    is test_runner.py's, and this pins the pointer half.
+    ``_close_superseded`` journals ``cancelled``/``superseded`` over the job's leftover
+    non-terminal row, and the dismiss a surface sends next reads THAT row as its base, so
+    its version follows it (3, not a rebuild of 2). Driven directly -- the full supersede
+    wiring (a second turn) is test_runner.py's, and this pins the journal half.
     """
     session = _make_session(tmp_path / "sessions" / "supersede", tmp_path)
     handle = await _handle(session, tmp_path)

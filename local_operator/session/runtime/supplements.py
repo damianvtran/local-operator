@@ -26,9 +26,11 @@ A cut job leaves at worst a non-terminal row that readers render as ``cancelled 
 (the stale-row rule). :meth:`SupplementRunner.cancel` is called by the handle's ``dispose``.
 
 SUPERSEDE. At most one job per session. A NEW eligible turn cancels the running one; if the
-cancelled job had already journaled a non-terminal row, :meth:`SupplementRunner.set_open_row`
-tells the runner so it can journal ``cancelled`` / ``error="superseded"`` (a row that renders
-nothing -- no Retry under an answer the user has moved past).
+cancelled job's newest journal row is still non-terminal, the next task's
+:meth:`SupplementRunner._close_superseded` journals ``cancelled`` / ``error="superseded"``
+over it (a row that renders nothing -- no Retry under an answer the user has moved past).
+Whether there is a row to close is the JOURNAL's decision, read under the write lock
+(round-3 review R3-1); the register only names the anchor it belongs to.
 
 THE GENERATOR TAIL (lane C1b). A graphics "yes" from the decision starts the fork
 (``supplements/generator.py``): the job writes a ``decided`` row first (files are known and do
@@ -39,7 +41,16 @@ are methods here, dispatched by ``session/runtime/server.py`` -- the image-gen r
 (``"already finished"`` for a settled job) and the memo's semantics (§2.7). An op is GATED ON
 IDENTITY (round-1 review R1): it can only ever affect the ``(anchor, job)`` it names, and a
 steer/restart on an older anchor is queued behind the running job (§2.9, depth 1) instead of
-cutting it. The row and the
+cutting it.
+
+THE WRITE INVARIANT (round-3 review R3-1). Every supplement row for an anchor -- the job's
+own decided/terminal appends and every op's settle/supersede/dismiss write -- is written by
+:meth:`SupplementRunner._commit_row`, which under ONE lock reads the journal, decides the
+version, appends, and publishes the in-memory pointer as a single critical section; the four
+ops hold that same lock ACROSS their cut, so no terminal transition can ever decide from a
+row staler than the journal. The class this closes (a duplicate version, a ``cancelled`` row
+over a delivered ``done``) had appeared three times in different shapes because the
+atomicity lived at the call sites; it now lives in that one method. The row and the
 live events are SEPARATE on purpose: the row is durable and outside the model's context, the
 events are transient and go only to a viewer that negotiated ``supplements-v1``.
 
@@ -52,7 +63,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Final, Mapping, Sequence, cast
+from typing import Any, Awaitable, Callable, Final, Literal, Mapping, Sequence, cast
 
 from local_operator.supplements import generator, policy
 from local_operator.supplements.candidates import prefilter
@@ -94,16 +105,59 @@ GENERATOR_AVAILABLE: Final = True
 #: evidence datasets: a session that ran fifty jobs must not pin fifty of them in memory.
 _KEPT_INPUTS: Final = 3
 
-#: The journaled states a version can END in: once one of these is the job's newest row, the
-#: job is settled and no control op may cut or re-settle that version (round-2 review R2-3;
-#: the non-terminal pair ``decided``/``queued`` is what a stalled reader paints as
-#: "cancelled - Retry").
+#: The journaled states a version can END in: once one of these is the job's newest
+#: JOURNAL row, the job is settled and no control op may cut or re-settle that version
+#: (round-2 review R2-3; the non-terminal pair ``decided``/``queued`` is what a stalled reader
+#: paints as "cancelled - Retry"). Round-3 review R3-1 made the invariant structural: every
+#: decision path reads the journal inside the write lock, so a terminal append still in
+#: flight is seen as the settled row it already is -- not as the stale ``decided`` pointer it
+#: has not yet superseded.
 _TERMINAL_STATES: Final[frozenset[str]] = frozenset({"done", "failed", "cancelled", "skipped"})
 
 
 def _is_terminal(details: Mapping[str, Any] | None) -> bool:
-    """Whether the job's newest row (``_JobInputs.details``) is already a settled state."""
+    """Whether a row is a settled state -- applied to JOURNAL rows in every decision path."""
     return isinstance(details, Mapping) and str(details.get("state", "")) in _TERMINAL_STATES
+
+
+class _OpsLock:
+    """The supplement write lock: task-scoped re-entrant (round-3 review R3-1).
+
+    THE INVARIANT IT CARRIES. Every writer of a supplement row -- the four control ops and
+    the job's own decided/terminal appends -- must read the anchor's newest journal row,
+    decide the version from it, append, and publish the in-memory pointer as ONE critical
+    section; the ops additionally hold it ACROSS their cut (cancel -> await the cut task ->
+    settle). The job's terminal append therefore has to take the same lock the ops take, and
+    an op's own settle nests inside its hold. A plain ``asyncio.Lock`` deadlocks on that
+    nest, and splitting the settle onto a second lock would put half the invariant back
+    outside the section that decides it. Re-entrancy is TASK-scoped: only the task already
+    holding the lock re-enters; every other task still serialises on the same lock.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task[Any] | None = None
+        self._depth = 0
+
+    async def __aenter__(self) -> "_OpsLock":
+        task = asyncio.current_task()
+        if task is not None and task is self._owner:
+            self._depth += 1
+            return self
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+        return self
+
+    async def __aexit__(self, *exc: Any) -> Literal[False]:
+        # ``Literal[False]``, not ``bool``: the lock never suppresses an exception, and a
+        # plain ``bool`` makes a type checker widen every ``return`` inside an ``async with``
+        # body into a fall-off-the-end path (measured: two reportReturnType false positives).
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self._lock.release()
+        return False
 
 
 @dataclass
@@ -125,8 +179,11 @@ class _JobInputs:
     answer_text: str
     instruction: str = ""
     version: int = 1
-    #: The job's newest row, as the builders return it (a plain mapping of the contract's
-    #: shapes). ``None`` until the first write.
+    #: The job's newest row, as the write path published it after its append landed (a plain
+    #: mapping of the contract's shapes). ``None`` until the first write. DECISIONS NEVER
+    #: READ THIS (round-3 review R3-1): it lags a row that is already durable, so every
+    #: settle/cut/dismiss decides from the journal; the ``cancelling`` beats read it as their
+    #: payload, and that is the whole of its contract.
     details: dict[str, Any] | None = None
 
 
@@ -173,12 +230,12 @@ class SupplementRunner:
         #: when the job it waits behind settles. It survives a later supersede on purpose --
         #: the request was explicit, and §2.9 names exactly one eviction rule.
         self._pending: tuple[_JobInputs, str] | None = None
-        #: Serialises the four control ops (round-2 review R2-4): two ops overlapping across
-        #: an emit await could each clear or start over the other's bookkeeping -- a stale
-        #: clear answered "already finished" for a live job and put two rows at one version.
-        #: The task tails can still interleave with an op; the ops' post-await re-checks
-        #: (round-2 review R2-3) cover that half.
-        self._ops_lock = asyncio.Lock()
+        #: Serialises the four control ops (round-2 review R2-4) AND every writer of a
+        #: supplement row (round-3 review R3-1; the invariant is stated on ``_OpsLock`` and
+        #: enforced in ``_commit_row``): read-journal -> decide -> append -> publish is one
+        #: critical section, so an op can never settle from a row staler than the journal --
+        #: a terminal append in flight is atomic with the decision that must see it.
+        self._ops_lock = _OpsLock()
 
     # -- the synchronous trigger ----------------------------------------------------------
 
@@ -287,18 +344,29 @@ class SupplementRunner:
             self._drain_pending()
 
     async def _close_superseded(self) -> None:
+        """Journal the ``cancelled``/``superseded`` row for a previous task's leftover.
+
+        Round-3 review R3-1: whether there IS a row to close, and which row, is decided from
+        the JOURNAL under the write lock -- never from the registered open row's state. A
+        terminal write that completed while its task was cancelled inside the append left a
+        stale register, and the old shape wrote a spurious ``superseded`` row (version + 1)
+        over a delivered one. The register names the anchor to re-read; a terminal or absent
+        newest row means there is nothing left to close.
+        """
         row, self._open_row = self._open_row, None
         if row is None:
             return
+        anchor = str(row.get("anchor", ""))
+        if not anchor:
+            return
+
+        def build_supersede(base: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+            if base is None or _is_terminal(base):
+                return None
+            return superseded(base)
+
         try:
-            final = superseded(row)
-            await append_row(self._session.transcript, final)
-            # The pointer moves with the write even here (QA round 1, Q-1): a later dismiss
-            # builds its version from ``inputs.details``, and a stale pointer rebuilt the
-            # version this row just took.
-            held = self._inputs.get(str(row.get("anchor", "")))
-            if held is not None and held.job == str(row.get("job", "")):
-                held.details = dict(final)
+            await self._commit_row(anchor=anchor, build=build_supersede)
         except Exception:  # noqa: BLE001
             logger.debug("could not journal the superseded supplement row", exc_info=True)
 
@@ -400,11 +468,18 @@ class SupplementRunner:
         try:
             # Files-only: no generator is coming, so the first row is TERMINAL. A ``decided``
             # row would be read cold as "cancelled - Retry" under an answer with nothing to
-            # retry (contract.reader_disposition).
-            details = build_details(
-                anchor=anchor, job=job, version=1, state="done", decision=decision
-            )
-            await append_row(self._session.transcript, details)
+            # retry (contract.reader_disposition). Through the one write path like every row
+            # (round-3 review R3-1), so the version is read from the journal instead of being
+            # assumed to be 1 -- a re-used anchor must not collide with rows it already has.
+            def build_done(base: Mapping[str, Any] | None) -> Mapping[str, Any]:
+                version = int(base.get("version", 0) or 0) + 1 if base is not None else 1
+                return dict(
+                    build_details(
+                        anchor=anchor, job=job, version=version, state="done", decision=decision
+                    )
+                )
+
+            await self._commit_row(anchor=anchor, build=build_done)
         finally:
             self._live_jobs.discard(job)
 
@@ -498,32 +573,37 @@ class SupplementRunner:
         same clock the ``wait_for`` counts from, so the in-loop between-turns check and the
         outer hard guard agree on the deadline.
         """
-        transcript = self._session.transcript
-        # One version sequence per ANCHOR (QA round 1, Q-2): ``_start`` mints for
-        # steer/restart, but the render path starts at version 1 in memory -- a second job
-        # ever started for one anchor would write rows at versions the first job's rows
-        # hold, and the runtime reader and ``contract.newest_per_anchor`` (different
-        # tie-breaks) would then disagree on "newest". Re-reading the journal as late as
-        # possible (threaded: it is I/O) sits past the rows the anchor already holds; the
-        # normal first job for an anchor has none and keeps version 1.
-        newest = await asyncio.to_thread(self._newest_row, inputs.anchor)
-        if newest is not None:
-            inputs.version = int(newest.get("version", 0) or 0) + 1
-        details = build_details(
-            anchor=inputs.anchor,
-            job=inputs.job,
-            version=inputs.version,
-            state="decided",
-            decision=inputs.decision,
-        )
-        inputs.details = dict(details)
-        self.set_open_row(details)
+
+        # One version sequence per ANCHOR (QA round 1, Q-2; hardened by round-3 review
+        # R3-1): ``_start`` mints for steer/restart, but the render path starts at version 1
+        # in memory -- a second job ever started for one anchor would write rows at versions
+        # the first job's rows hold, and the runtime reader and ``contract.newest_per_anchor``
+        # (different tie-breaks) would then disagree on "newest". The version is read from
+        # the journal INSIDE the write's own critical section now, so nothing can land
+        # between the read and the append the way a just-published terminal row used to.
+        def build_decided(base: Mapping[str, Any] | None) -> Mapping[str, Any]:
+            version = int(base.get("version", 0) or 0) + 1 if base is not None else inputs.version
+            inputs.version = version
+            return dict(
+                build_details(
+                    anchor=inputs.anchor,
+                    job=inputs.job,
+                    version=version,
+                    state="decided",
+                    decision=inputs.decision,
+                )
+            )
+
         try:
             # The runtime's half of the reader rule: the job is LIVE from before its first
             # await until this block's ``finally``. C1a left this registry as the C1b seam;
             # round-1 review R2 found the graphics path never added to it.
             self._live_jobs.add(inputs.job)
-            await append_row(transcript, details)
+            details = await self._commit_row(
+                anchor=inputs.anchor, build=build_decided, inputs=inputs
+            )
+            if details is None:  # a declined build: nothing was written, nothing to run
+                return
             await self._progress(details, "decided")
             resolved = await asyncio.to_thread(self._resolve_model, settings)
             if resolved is None:
@@ -551,51 +631,60 @@ class SupplementRunner:
             components = await self._store(outcome.components)
             error = outcome.error if not components else ""
             state = "failed" if error else "done"
-            final: dict[str, Any] = dict(next_version(details, state=state, error=error))
-            final["components"] = components
-            final["model"] = outcome.model
-            final["turns"] = outcome.turns
-            final["tokens_in"] = outcome.tokens_in
-            final["tokens_out"] = outcome.tokens_out
-            final["cost_usd"] = round(outcome.cost_usd, 6)
-            if outcome.instruction:
-                final["instruction"] = outcome.instruction[:MAX_INSTRUCTION_CHARS]
-            if outcome.detail:
-                # The generator's own notes REACH THE JOURNAL even when blocks survived and
-                # ``error`` is cleared: a bound that fired after acceptance is reported here,
-                # never as ``error`` on a ``done`` row (memo §2.5 as amended; round-1 R7).
-                final["detail"] = list(outcome.detail)
-            self.set_open_row(final)
-            await append_row(transcript, final)
-            # The job's own pointer moves to the row it just wrote: a later steer/restart
-            # builds on the NEWEST row, never on the ``decided`` one it started from (which
-            # would reuse the terminal row's version number).
-            inputs.details = dict(final)
-            self.set_open_row(None)
+
+            def build_final(base: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+                if base is None:
+                    # Nothing to replace: the decided write never landed (a cut before its
+                    # append), and a terminal row without a version to follow would invent
+                    # one. Leaving the absence is the memo's cut-job shape (§2.9).
+                    return None
+                final: dict[str, Any] = dict(next_version(base, state=state, error=error))
+                final["components"] = components
+                final["model"] = outcome.model
+                final["turns"] = outcome.turns
+                final["tokens_in"] = outcome.tokens_in
+                final["tokens_out"] = outcome.tokens_out
+                final["cost_usd"] = round(outcome.cost_usd, 6)
+                if outcome.instruction:
+                    final["instruction"] = outcome.instruction[:MAX_INSTRUCTION_CHARS]
+                if outcome.detail:
+                    # The generator's own notes REACH THE JOURNAL even when blocks survived
+                    # and ``error`` is cleared: a bound that fired after acceptance is
+                    # reported here, never as ``error`` on a ``done`` row (memo §2.5 as
+                    # amended; round-1 R7).
+                    final["detail"] = list(outcome.detail)
+                return final
+
+            final = await self._commit_row(
+                anchor=inputs.anchor, build=build_final, job=inputs.job, inputs=inputs
+            )
+            if final is None:
+                return
             await self._progress(final, state)
         finally:
             self._live_jobs.discard(inputs.job)
 
     async def _fail(self, inputs: _JobInputs, error: str) -> None:
-        """Terminal ``failed`` row for a job that never produced anything (bound or crash)."""
-        details = inputs.details or build_details(
-            anchor=inputs.anchor,
-            job=inputs.job,
-            version=inputs.version,
-            state="decided",
-            decision=inputs.decision,
-        )
-        final = next_version(details, state="failed", error=error)
+        """Terminal ``failed`` row for a job that never produced anything (bound or crash).
+
+        The base comes from the JOURNAL like every terminal write (round-3 review R3-1):
+        the job's decided row is already durable whenever this is reachable, so the old
+        in-memory rebuild of a decided row -- and the version number it invented when the
+        pointer was empty -- is gone with the stale-pointer class it belonged to.
+        """
+
+        def build_failed(base: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+            return None if base is None else next_version(base, state="failed", error=error)
+
         try:
-            await append_row(self._session.transcript, final)
-            # The pointer moves with the write (QA round 1, Q-1): a later dismiss builds on
-            # the job's newest row, never on the one this row replaced.
-            inputs.details = dict(final)
+            final = await self._commit_row(
+                anchor=inputs.anchor, build=build_failed, job=inputs.job, inputs=inputs
+            )
+            if final is None:
+                return
             await self._progress(final, "failed")
         except Exception:  # noqa: BLE001 -- a failed write is a missing callout, not a turn error
             logger.debug("supplement failure row could not be written", exc_info=True)
-        finally:
-            self.set_open_row(None)
 
     async def _finish_bound(
         self,
@@ -615,28 +704,26 @@ class SupplementRunner:
         if not components:
             await self._fail(inputs, f"bound:{generator.BOUND_TIME}")
             return
-        details = inputs.details or build_details(
-            anchor=inputs.anchor,
-            job=inputs.job,
-            version=inputs.version,
-            state="decided",
-            decision=inputs.decision,
+
+        def build_bound(base: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+            if base is None:
+                return None
+            final: dict[str, Any] = dict(next_version(base, state="done"))
+            final["components"] = components
+            detail = [str(line) for line in (final.get("detail") or [])]
+            detail.append(
+                f"bound:{generator.BOUND_TIME} wall clock {settings.timeout_s}s reached mid-job; "
+                f"{len(components)} block(s) kept"
+            )
+            final["detail"] = detail
+            return final
+
+        final = await self._commit_row(
+            anchor=inputs.anchor, build=build_bound, job=inputs.job, inputs=inputs
         )
-        final: dict[str, Any] = dict(next_version(details, state="done"))
-        final["components"] = components
-        detail = [str(line) for line in (final.get("detail") or [])]
-        detail.append(
-            f"bound:{generator.BOUND_TIME} wall clock {settings.timeout_s}s reached mid-job; "
-            f"{len(components)} block(s) kept"
-        )
-        final["detail"] = detail
-        try:
-            self.set_open_row(final)
-            await append_row(self._session.transcript, final)
-            inputs.details = dict(final)
-            await self._progress(final, "done")
-        finally:
-            self.set_open_row(None)
+        if final is None:
+            return
+        await self._progress(final, "done")
 
     def _resolve_model(self, settings: policy.SupplementSettings) -> generator.DesignModel:
         """Gather the live inputs ``generator.resolve_design_model`` needs (memo §2.5).
@@ -798,24 +885,68 @@ class SupplementRunner:
             return None
         return inputs
 
+    # -- the one write path (round-3 review R3-1) -------------------------------------------
+
+    async def _commit_row(
+        self,
+        *,
+        anchor: str,
+        build: Callable[[Mapping[str, Any] | None], Mapping[str, Any] | None],
+        job: str | None = None,
+        inputs: _JobInputs | None = None,
+    ) -> dict[str, Any] | None:
+        """THE supplement write path: read the journal, decide, append, publish (R3-1).
+
+        Under the one ``_OpsLock`` -- the same lock the control ops hold across a cut -- this
+        reads the anchor's newest journal row (``job`` narrows the read to one job's rows),
+        lets ``build`` build the row from it (returning ``None`` writes nothing), appends,
+        and publishes ``inputs.details``. The read and the append being ONE critical section
+        IS the invariant: no other writer can land between a decision and its write, so two
+        rows for an anchor can never be built from the same base version, and a terminal
+        transition is seen for what it already is by every later decider. That class had
+        appeared three times before this shape existed (round-2 R2-3, QA Q-1, round-3 R3-1)
+        because the atomicity used to live at the call sites; it now lives here, and a new
+        call site inherits it.
+
+        Called both inside an op's hold (its own settle / supersede / dismiss write, via the
+        re-entrant lock) and from the job's own task (decided / terminal appends); the helper
+        owns the lock either way, so no caller can forget it.
+        """
+        async with self._ops_lock:
+            base = await asyncio.to_thread(self._newest_row, anchor, job=job)
+            row = build(base)
+            if row is None:
+                return None
+            # The supersede register moves with the write, inside the section: a NON-terminal
+            # row is the leftover a future turn may need to close, a terminal one leaves
+            # nothing open. The journal still decides whether a close is owed (R3-1); the
+            # register only names the anchor for `_close_superseded`.
+            self.set_open_row(None if _is_terminal(row) else row)
+            await append_row(self._session.transcript, row)
+            if inputs is not None:
+                inputs.details = dict(row)
+            return dict(row)
+
     async def _settle(self, inputs: _JobInputs, *, state: str, error: str = "") -> None:
         """Write a terminal row for a job an op just cut, and emit its beat.
 
-        ``inputs.details`` moves to the row written here (QA round 1, Q-1): it is the job's
-        newest row, and the NEXT op builds its version from it -- a stale pointer rebuilt
-        the version number this settle just took (cancel-then-dismiss put two rows at
-        version 2, and the two readers then disagreed on "newest").
+        The row is built from the JOURNAL inside the caller's own hold of the write lock
+        (round-3 review R3-1): the row a terminal append just made durable is the base,
+        never the stale in-memory pointer that used to rebuild the version that row had
+        taken (the cancel-over-delivered-``done`` class). A job that never wrote anything
+        has no newest row and settles nothing -- the reader paints its absence with the
+        stale-row rule (memo §2.5).
         """
-        if inputs.details is None:
+
+        def build_settle(base: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+            return None if base is None else next_version(base, state=state, error=error)
+
+        final = await self._commit_row(
+            anchor=inputs.anchor, build=build_settle, job=inputs.job, inputs=inputs
+        )
+        if final is None:
             return
-        final = next_version(inputs.details, state=state, error=error)
-        self.set_open_row(final)
-        try:
-            await append_row(self._session.transcript, final)
-            inputs.details = dict(final)
-            await self._progress(final, state)
-        finally:
-            self.set_open_row(None)
+        await self._progress(final, state)
 
     async def cancel_job(self, anchor: str, job: str) -> str:
         """``supplement_cancel``: cancel the running attempt, write ``cancelled``.
@@ -825,11 +956,12 @@ class SupplementRunner:
         told something happened. The running task is cut ONLY when it runs this very
         ``(anchor, job)`` (round-1 review R1): a cancel for a settled job arriving while a
         NEWER job runs must leave that newer job alone and must not rewrite the settled row.
-        Both awaits re-check what the gate checked (round-2 review R2-3/R2-4): the job can
-        settle inside the ``cancelling`` beat -- its terminal row is already in
-        ``inputs.details`` while the task is not yet ``done()`` -- and the bookkeeping can
-        move across the reap; either way the cut is no longer this op's to make, and the
-        surface gets the neutral receipt without a newer task being touched.
+        Both re-checks read the JOURNAL, not the pointer (round-2 review R2-3/R2-4; round-3
+        review R3-1): the job can settle while its terminal append is still in flight --
+        the row is already durable and published while ``inputs.details`` still reads
+        ``decided`` -- or inside the ``cancelling`` beat, and the bookkeeping can move
+        across the reap; either way the cut is no longer this op's to make, and the surface
+        gets the neutral receipt without a newer task being touched.
         """
         async with self._ops_lock:
             inputs = self.recall(anchor, job)
@@ -837,7 +969,8 @@ class SupplementRunner:
             if inputs is None or task is None or task.done() or self._running != (anchor, job):
                 return "already finished"
             await self._progress(inputs.details or {}, "cancelling")
-            if _is_terminal(inputs.details) or self._task is not task:
+            newest = await asyncio.to_thread(self._newest_row, anchor, job=job)
+            if _is_terminal(newest) or self._task is not task:
                 return "already finished"
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -892,10 +1025,11 @@ class SupplementRunner:
         A request naming a job that is NOT the running one does not cut it: it is queued
         behind the running job, depth 1 (memo §2.9; round-1 review R1) -- a newer request
         replaces the queued one, and the queue drains when the job it waits behind settles.
-        Both checks re-run after the ``cancelling`` beat (round-2 review R2-3/R2-4): a job
-        that settled inside it is not cut -- its terminal row already exists and the next
-        version starts straight away -- and bookkeeping that moved sends the request to the
-        queue, exactly as the sequential shape would.
+        Both re-checks read the JOURNAL, not the pointer (round-2 review R2-3/R2-4; round-3
+        review R3-1): a job that settled while its terminal append was still in flight, or
+        inside the ``cancelling`` beat, is not cut -- its terminal row already exists and
+        the next version starts straight away -- and bookkeeping that moved sends the
+        request to the queue, exactly as the sequential shape would.
         """
         task = self._task
         if task is not None and not task.done():
@@ -909,14 +1043,14 @@ class SupplementRunner:
                 # sequential shape (memo §2.9, depth 1).
                 self._pending = (inputs, instruction)
                 return
-            if not _is_terminal(inputs.details):
+            newest = await asyncio.to_thread(self._newest_row, inputs.anchor, job=inputs.job)
+            if not _is_terminal(newest):
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 if self._task is task:
                     self._task = None
                     self._running = None
-                    if inputs.details is not None:
-                        await self._settle(inputs, state="cancelled")
+                    await self._settle(inputs, state="cancelled")
         # This request executes NOW, so it replaces whatever was queued (memo §2.9's one
         # eviction rule).
         self._pending = None
@@ -962,7 +1096,11 @@ class SupplementRunner:
         metric reads ``dismissed`` (§5.2) -- and cancels a live job for that anchor first, so
         a dismissed row cannot be overwritten by the job it just hid. The cut is gated on the
         running job being that anchor's (round-1 review R1): dismissing anchor A while a job
-        of anchor B runs must never cut B.
+        of anchor B runs must never cut B. The version it writes follows the JOURNAL, read
+        inside the write lock (round-3 review R3-1): the newest row -- including one a
+        terminal append just made durable while its task was still suspended -- is the one a
+        surface dismissing from history has to find, and rebuilding a version that row
+        already holds is the class this closes.
         """
         async with self._ops_lock:
             task = self._task
@@ -981,22 +1119,17 @@ class SupplementRunner:
             if cut:
                 # The cut settled the running job: whatever waited behind it (memo §2.9) starts.
                 self._drain_pending()
-            details = inputs.details if inputs is not None else None
-            if details is None:
-                # No live or remembered job: the row may still be in the journal (a restart, or a
-                # surface dismissing a callout from history), and dismissing it is exactly the
-                # spam signal the metric reads. Read the anchor's newest version and build on it.
-                details = await asyncio.to_thread(self._newest_row, anchor)
-            if details is None:
+
+            def build_skipped(base: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+                if base is None:
+                    return None
+                row: dict[str, Any] = dict(next_version(base, state="skipped"))
+                row["dismissed"] = True
+                return row
+
+            final = await self._commit_row(anchor=anchor, build=build_skipped, inputs=inputs)
+            if final is None:
                 return "already finished"
-            final = next_version(details, state="skipped")
-            final["dismissed"] = True
-            self.set_open_row(None)
-            await append_row(self._session.transcript, final)
-            if inputs is not None:
-                # The pointer moves with the write (QA round 1, Q-1): a second dismiss on this
-                # job builds on the skipped row, never on the one it replaced.
-                inputs.details = dict(final)
             await self._progress(final, "skipped")
             return "dismissed"
 
@@ -1012,13 +1145,16 @@ class SupplementRunner:
             return inputs.version + 1
         return int(newest.get("version", 0) or 0) + 1
 
-    def _newest_row(self, anchor: str) -> SupplementDetails | None:
-        """The newest journaled row for one anchor, or ``None`` (memo §2.4's reader rule).
+    def _newest_row(self, anchor: str, *, job: str | None = None) -> SupplementDetails | None:
+        """The newest journaled row for one anchor -- or one ``(anchor, job)`` -- or ``None``.
 
-        A journal walk on a user action, not on a path: it is the only way ``dismiss`` can
-        honour a row whose job this process never ran (a restart, or a history-page click),
-        and the alternative -- refusing -- would silently drop the operator's one explicit
-        "not useful" signal.
+        A journal walk on a user action or inside a write's critical section, not on a path:
+        it is the only way ``dismiss`` can honour a row whose job this process never ran (a
+        restart, or a history-page click), and the alternative -- refusing -- would silently
+        drop the operator's one explicit "not useful" signal. ``job`` narrows the read to
+        ONE job's rows, which is what the control ops' "has THIS job settled?" decision
+        needs (round-3 review R3-1): a different job's terminal row must not answer it, and
+        a newer job that has not written its first row yet is still live.
         """
         rows: list[dict[str, Any]] = []
         try:
@@ -1029,8 +1165,11 @@ class SupplementRunner:
                 if payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
                     continue
                 details = payload.get("details")
-                if isinstance(details, dict) and str(details.get("anchor", "")) == anchor:
-                    rows.append(details)
+                if not isinstance(details, dict) or str(details.get("anchor", "")) != anchor:
+                    continue
+                if job is not None and str(details.get("job", "")) != job:
+                    continue
+                rows.append(details)
         except Exception:  # noqa: BLE001 -- an unreadable journal is a missing callout
             logger.debug("supplement row could not be read for dismiss", exc_info=True)
             return None

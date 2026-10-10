@@ -162,12 +162,18 @@ _STRUCTURAL_ATTRS: Final[frozenset[str]] = frozenset(
         "style",
     }
 )
-#: One quoted attribute pair, either quote style: ``name="…"`` or ``name='…'``. The name
-#: class carries digits because :data:`_STRUCTURAL_ATTRS` does: ``x1``/``y1``/``x2``/``y2``
-#: could never match while it did not (round-2 review R2-1), so their values were still
-#: refused as displayed numbers by both scans.
+#: One attribute pair, either quote style OR unquoted, values may span lines:
+#: ``name="…"``, ``name='…'`` or ``name=…`` (round-2 review R2-1, widened by round-3 review
+#: R3-2). The name class carries digits because :data:`_STRUCTURAL_ATTRS` does: ``x1``/
+#: ``y1``/``x2``/``y2`` could never match while it did not (R2-1), so their values were still
+#: refused as displayed numbers by both scans. ``re.DOTALL`` lets a quoted value run over
+#: lines (an SVG ``points`` list is routinely wrapped); an UNQUOTED value cannot contain
+#: whitespace (HTML's attribute grammar), so a spaced coordinate list still has to be quoted
+#: to be blanked -- that boundary is the one this grammar records.
 _ATTR_PAIR_RE: Final = re.compile(
-    r"(?P<name>[a-zA-Z0-9:-]+)\s*=\s*(?P<quote>[\"'])(?P<value>.*?)(?P=quote)"
+    r"(?P<name>[a-zA-Z0-9:-]+)\s*=\s*"
+    r"(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s\"'=<>`]+))",
+    re.DOTALL,
 )
 
 _VOID: Final[frozenset[str]] = frozenset(
