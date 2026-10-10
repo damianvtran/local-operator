@@ -129,6 +129,22 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "this device's own store-write refusal code, shown as the caveat's parenthetical",
     ),
+    # The update verb's origin tail reads the MEMBER'S OWN reply sentence and puts it
+    # on the human line as ``message`` — and that is the design's whole contract
+    # ("report the member's own words", RU §3). The member's updater authors the
+    # field as prose (``UpdateError``'s texts, the state sentences), so the read is a
+    # PASS-THROUGH rather than a gloss: round 3 (M2/Q-R3-2) measured the gloss
+    # RE-WORDING receipts into false states — `uv tool install failed: disk full` lost
+    # its leading clause, and `…: E2BIG` / `[Errno 13] Permission denied: '…'` read as
+    # "it did not answer" when the member had answered. The relay's DIAL seam in the
+    # same function IS glossed (``resume.peer_reason_words``), because that one
+    # carries the relay's wire tokens; the two registers must not swap verdicts.
+    ("local_operator/network/meshupdate.py", "update_peer", "reason"): (
+        1,
+        "the member's own receipt sentence, authored-for-a-reader prose passed "
+        "through verbatim (the design's 'the member's own words'); glossing it "
+        "re-worded receipts into false states (round 3, M2/Q-R3-2)",
+    ),
     # The relay's OWN sentence for a session op (``runtime joining``), printed verbatim
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.
