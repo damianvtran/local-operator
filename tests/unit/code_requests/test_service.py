@@ -1438,20 +1438,53 @@ def test_a_resolved_failure_classifies_by_its_recorded_kind(tmp_path: Path) -> N
     assert "sign in" not in str(row.get("reason") or "")
 
 
+#: Every message shape the credential resolver can store (``credentials.py``:
+#: the two gh refusals, the glab refusal, the gh/glab spawn failure, the
+#: per-host remedy form, the unreachable detect-and-link refusal) plus the 401
+#: path's ``_REJECTED``. The spawn failure does NOT say "sign in" — the gap
+#: agent review round 1 (F1) closed in the marker set.
+_LEGACY_CREDENTIAL_MESSAGES = (
+    "Can't refresh — sign in with the gh CLI (`gh auth login`), then refresh.",
+    "Can't refresh — the gh CLI login could not be read on this device; "
+    "sign in again with `gh auth login`, then refresh.",
+    "Can't refresh — sign in with the glab CLI (`glab auth login`), then refresh.",
+    "Can't refresh — the gitlab CLI could not be asked (TimeoutExpired).",
+    "Can't refresh — sign in with the glab CLI (`glab auth login --hostname "
+    "gitlab.example`), then refresh.",
+    "credential rejected — sign in again with gh/glab, then refresh",
+    "no credential path exists for gitea (detect-and-link host)",
+)
+
+#: The non-credential shapes ``_handle_fetch_error`` can store: none may match
+#: a legacy credential marker.
+_LEGACY_OTHER_MESSAGES = (
+    "refresh failed (server 503); keeping the last known data",
+    "refresh failed (network); keeping the last known data",
+    "not found at the forge",
+    "refresh failed (HTTP 500)",
+)
+
+
 def test_a_legacy_entry_falls_back_to_its_message_for_the_kind(tmp_path: Path) -> None:
     """Entries written before ``failure_kind``: the message is the only signal.
-    Every credential message contains "sign in"; no other failure message does.
-    The fallback is bounded to those entries and disappears as they revalidate."""
-    legacy_credential = _entry(
-        pieces={},
-        stale=True,
-        refresh_error="credential rejected — sign in again with gh/glab, then refresh",
-    )
-    assert "failure_kind" not in legacy_credential
-    assert service.view_row(ROW, legacy_credential)["fetch_state"] == "unauthenticated"
-    legacy_other = _entry(pieces={}, stale=True, refresh_error="not found at the forge")
-    assert "failure_kind" not in legacy_other
-    assert service.view_row(ROW, legacy_other)["fetch_state"] == "failed"
+    EVERY credential message the resolver can store (plus the 401 path's
+    ``_REJECTED``) classifies as credential — including the gh/glab spawn
+    failure, which does not say "sign in" (agent review round 1, F1) — and no
+    non-credential failure message may. The fallback is bounded to those
+    entries and disappears as they revalidate."""
+    for message in _LEGACY_CREDENTIAL_MESSAGES:
+        legacy = _entry(pieces={}, stale=True, refresh_error=message)
+        assert "failure_kind" not in legacy
+        assert service.view_row(ROW, legacy)["fetch_state"] == "unauthenticated", message
+    for message in _LEGACY_OTHER_MESSAGES:
+        legacy = _entry(pieces={}, stale=True, refresh_error=message)
+        assert "failure_kind" not in legacy
+        assert service.view_row(ROW, legacy)["fetch_state"] == "failed", message
+    # F1's repro, both ways: a pre-upgrade entry (no kind) and a post-upgrade
+    # write of the SAME spawn failure (kind recorded) must agree on the state.
+    spawned = "Can't refresh — the gitlab CLI could not be asked (TimeoutExpired)."
+    with_kind = _entry(pieces={}, stale=True, refresh_error=spawned, failure_kind="credential")
+    assert service.view_row(ROW, with_kind)["fetch_state"] == "unauthenticated"
 
 
 def test_a_successful_fetch_clears_the_failure_kind(tmp_path: Path) -> None:
