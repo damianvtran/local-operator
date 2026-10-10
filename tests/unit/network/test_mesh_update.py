@@ -116,6 +116,38 @@ def _member_audit_rows(server_a: Any, event: str) -> list[dict[str, Any]]:
     return [row for row in server_a.audit.tail(200) if str(row.get("event")) == event]
 
 
+class _Outcome:
+    """A stand-in for ``control.RefreshOutcome`` (the fields the pass reads)."""
+
+    def __init__(self, method: str, session_id: str = "") -> None:
+        self.method = method
+        self.session_id = session_id
+        self.pid = 0
+        self.name = ""
+        self.line = ""
+
+
+def _stub_pass(
+    monkeypatch: pytest.MonkeyPatch, *, outcomes: tuple[Any, ...] = ()
+) -> dict[str, Any]:
+    """Neutralise the pass tail: ``outcomes`` as given, the recorder for the roll.
+
+    A cell that only needs the install path must not dial this host's real
+    runtimes, spawn successors, or roll the operator's daemons — the pass's
+    tail (sweep, re-engage, services roll) is neutralised here and each piece
+    has its own cell below. Returns the roll recorder.
+    """
+    calls: dict[str, Any] = {"rolls": []}
+    monkeypatch.setattr(
+        meshupdate, "refresh_runtimes", lambda root, *, live_count: (list(outcomes), "")
+    )
+    monkeypatch.setattr(
+        meshupdate, "reengage_displaced", lambda root, records, found, version: (0, "")
+    )
+    monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: calls["rolls"].append(1))
+    return calls
+
+
 # ---------------------------------------------------------------------------
 # Tables and registration
 # ---------------------------------------------------------------------------
@@ -423,6 +455,7 @@ def test_an_idle_member_moves_one_version(
     state = _concrete_member(monkeypatch, current="0.0.1")
     monkeypatch.setattr(meshupdate, "busy_sessions", lambda root: (0, ""))
     monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    _stub_pass(monkeypatch)  # the tail dials real runtimes; its own cells cover it
     calls: list[str] = []
 
     def _install(version: str, *, runner: Any = None) -> str:
@@ -463,6 +496,261 @@ def test_an_install_that_does_not_move_the_version_answers_failed(
     assert detail["ok"] is False, detail
     assert detail["state"] == "failed", detail
     assert calls == ["0.99.0"]
+
+
+# ---------------------------------------------------------------------------
+# The member pass (S2): wait → move → roll → re-engage, and its disclosures
+# ---------------------------------------------------------------------------
+
+
+def test_the_pass_waits_for_the_turn_then_updates_and_the_transcript_survives(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """S2's headline: the wait, the move, and the never-force artifact.
+
+    The member is busy: the ask answers ``busy`` and touches nothing. The turn
+    ends and the SAME ask path re-asks (a fresh probe, the origin's cadence) —
+    the pass installs and answers ``done``, the sweep's outcome rides the
+    receipt, and the session's own files are BYTE-IDENTICAL across both asks:
+    the drain waited for the turn; it never cut one.
+    """
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    state = _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    calls: list[str] = []
+
+    def _install(version: str, *, runner: Any = None) -> str:
+        calls.append(version)
+        state["current"] = version  # the install MOVED the member's build
+        return meshupdate.METHOD_GENERATION
+
+    monkeypatch.setattr(meshupdate, "install_build", _install)
+    sid = "w4it-cell-0001"
+    pass_calls = _stub_pass(monkeypatch, outcomes=(_Outcome("moved", sid),))
+    transcript = server_a.root / "sessions" / sid / "transcript.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text('{"role": "user", "text": "a long turn"}\n', encoding="utf-8")
+    before = transcript.read_bytes()
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="daemon",
+            session_id=sid,
+            conversation_name="the long turn",
+            cwd=str(server_a.root),
+            model_label="test/mock",
+            control_port=1,
+            control_key="k" * 32,
+            busy=True,
+            started=True,
+        ),
+        server_a.root,
+    )
+
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "busy", detail
+    assert calls == [], "the busy ask must not install"
+    assert transcript.read_bytes() == before, "the busy ask touched the session's files"
+
+    # THE TURN ENDS (the record's own busy bit clears); the origin re-asks.
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="daemon",
+            session_id=sid,
+            conversation_name="the long turn",
+            cwd=str(server_a.root),
+            model_label="test/mock",
+            control_port=1,
+            control_key="k" * 32,
+            busy=False,
+            started=True,
+        ),
+        server_a.root,
+    )
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "done", detail
+    assert calls == ["0.99.0"]
+    assert detail["sessions"] == {"moved": 1, "kept": 0}, detail
+    assert "1 session(s) retired for the new build" in detail["message"], detail
+    assert transcript.read_bytes() == before, "the transcript must survive byte for byte"
+    rows = registry.scan(server_a.root, reap=False, check_zombie=False)
+    live = [record_ for record_, _state in rows if record_.session_id == sid]
+    assert live and live[0].busy is False, rows
+    assert pass_calls["rolls"] == [1], "the services roll is scheduled only after the reply"
+
+
+def test_the_classic_install_is_disclosed_when_the_generation_layout_cannot_run(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """§8.1's fallback: a uv-tool member without the layout takes the in-place arm, disclosed.
+
+    The argv is the classic pinned reinstall; the receipt's ``method`` says
+    ``uv-tool-classic``; the attestation pair ``perform_upgrade`` stages for its
+    own in-place branch is staged here too (and NOT withdrawn on success).
+    """
+    from local_operator import update as update_mod
+
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    state = {"current": "0.0.1"}
+    monkeypatch.setattr(meshupdate, "detect_install_kind", lambda: update_mod.InstallKind.UV_TOOL)
+    monkeypatch.setattr(meshupdate, "generation_layout_supported", lambda: False)
+    monkeypatch.setattr(meshupdate, "current_member_version", lambda: state["current"])
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    _stub_pass(monkeypatch)
+    stubs: dict[str, list[Any]] = {"attested": [], "withdrawn": []}
+    monkeypatch.setattr(
+        update_mod, "note_doomed_runtimes", lambda root, **kw: stubs["attested"].append(root) or []
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "withdraw_involuntary_stops",
+        lambda attested, **kw: stubs["withdrawn"].append(1),
+    )
+    monkeypatch.setattr(update_mod, "write_source_marker", lambda root, **kw: True)
+    seen: list[list[str]] = []
+
+    def _runner(argv: list[str], env: dict[str, str]) -> int:
+        seen.append(list(argv))
+        state["current"] = "0.99.0"
+        return 0
+
+    reply = meshupdate.member_execute(
+        server_a,
+        None,
+        {"target": {"version": "0.99.0", "source_ref": ""}},
+        runner=_runner,
+    )
+    assert reply["state"] == "done", reply
+    assert reply["method"] == "uv-tool-classic", reply
+    assert seen == [
+        [
+            "uv",
+            "tool",
+            "install",
+            "--force",
+            "--refresh-package",
+            "local-operator",
+            "local-operator==0.99.0",
+        ]
+    ], seen
+    assert stubs["attested"] and not stubs["withdrawn"], stubs
+
+
+def test_a_non_uv_tool_member_without_the_layout_is_refused(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The carve-out is exactly the uv-tool member: other shapes keep S1's refusal."""
+    from local_operator import update as update_mod
+
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    monkeypatch.setattr(meshupdate, "detect_install_kind", lambda: update_mod.InstallKind.PIPX)
+    monkeypatch.setattr(meshupdate, "generation_layout_supported", lambda: False)
+    monkeypatch.setattr(meshupdate, "current_member_version", lambda: "0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    reply = meshupdate.member_execute(
+        server_a, None, {"target": {"version": "0.99.0", "source_ref": ""}}
+    )
+    assert reply["state"] == "refused", reply
+    assert reply["code"] == "editable_install", reply
+
+
+def test_the_sweep_passes_outcomes_through_and_degrades_to_a_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sweep that cannot run is a note on the receipt, never a failed pass."""
+    from pathlib import Path as _Path
+
+    from local_operator.session.runtime import control
+
+    outcomes = [_Outcome("moved"), _Outcome("busy")]
+
+    async def _fake(*, timeout_s: float, own_pid: int, _root: Any) -> list[Any]:
+        return outcomes
+
+    monkeypatch.setattr(control, "refresh_all", _fake)
+    got, note = meshupdate.refresh_runtimes(_Path("/nonexistent"), live_count=2)
+    assert got == outcomes and note == ""
+
+    async def _boom(*, timeout_s: float, own_pid: int, _root: Any) -> list[Any]:
+        raise OSError("registry unreadable")
+
+    monkeypatch.setattr(control, "refresh_all", _boom)
+    got, note = meshupdate.refresh_runtimes(_Path("/nonexistent"), live_count=2)
+    assert got == [] and "could not run" in note, note
+
+
+def test_reengage_targets_only_the_displaced_and_reports_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``busy``/``current`` keep a working runtime; retiring and gone sessions get a successor."""
+    from pathlib import Path as _Path
+    from types import SimpleNamespace
+
+    records = [SimpleNamespace(session_id="s1"), SimpleNamespace(session_id="s3")]
+    calls: list[str] = []
+
+    def _engage(record: Any, *, root: Any) -> str:
+        calls.append(record.session_id)
+        return "no runtime accepted the engage" if record.session_id == "s3" else ""
+
+    monkeypatch.setattr(meshupdate, "_engage_successor", _engage)
+    outcomes = [
+        _Outcome("moved", "s1"),
+        _Outcome("busy", "s2"),
+        _Outcome("unreachable", "s3"),
+        _Outcome("current", "s4"),
+    ]
+    engaged, note = meshupdate.reengage_displaced(_Path("/x"), records, outcomes, "0.99.0")
+    assert calls == ["s1", "s3"], calls
+    assert engaged == 1, engaged
+    assert "1 session(s) could not be re-engaged" in note, note
+
+
+def test_the_successor_engage_uses_the_warm_errand_and_reports_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engage is the relay's own speculative shape — start the runtime, deliver nothing."""
+    from pathlib import Path as _Path
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime import launch
+
+    seen: list[tuple[Any, ...]] = []
+
+    async def _engage(
+        session_id: str, cwd: str, errand: Any, *, config_dir: Any, deadline_s: float
+    ) -> None:
+        seen.append((session_id, cwd, errand, config_dir, deadline_s))
+
+    monkeypatch.setattr(launch, "engage_runtime", _engage)
+    record = SimpleNamespace(session_id="s9", cwd="/tmp/x")
+    assert meshupdate._engage_successor(record, root=_Path("/root")) == ""
+    session_id, cwd, errand, config_dir, deadline = seen[0]
+    assert session_id == "s9" and cwd == "/tmp/x"
+    assert isinstance(errand, launch.WarmErrand), errand
+    assert config_dir == _Path("/root") and deadline == meshupdate.REENGAGE_DEADLINE_S
+
+    async def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("could not start a runtime for session s9: no credential")
+
+    monkeypatch.setattr(launch, "engage_runtime", _boom)
+    assert "no credential" in meshupdate._engage_successor(record, root=_Path("/root"))
+
+
+def test_the_services_roll_is_scheduled_after_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The thread starts the stage's own child; the stage never raises into the pass."""
+    import threading
+
+    from local_operator import update as update_mod
+
+    fired = threading.Event()
+    monkeypatch.setattr(
+        update_mod, "refresh_service_daemons_after_upgrade", lambda **kw: fired.set()
+    )
+    meshupdate.roll_services_after_reply()
+    assert fired.wait(5.0), "the roll thread did not start the stage"
 
 
 # ---------------------------------------------------------------------------

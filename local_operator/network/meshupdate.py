@@ -55,16 +55,23 @@ classification moves off the wire entirely.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
+import subprocess
+import sys
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from local_operator.network import wire
 from local_operator.network.types import MeshRefusal
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.network.relay import PeerLink, RelayServer
@@ -96,10 +103,32 @@ PUBLISHED_CHECK_TIMEOUT_S = 5.0
 UPDATE_LOCK_RELPATH: tuple[str, ...] = ("network", "update.lock")
 
 #: The install shapes the receipt's ``method`` may disclose (RU §3: "``method``
-#: discloses the install shape on ``done``"). S1 ships the generation-layout
-#: pinned install and nothing else; the classic in-place fallback is S2's
-#: disclosed last resort and MUST NOT appear here until the drain exists.
+#: discloses the install shape on ``done``"). S1 shipped the generation-layout
+#: pinned install; S2 adds the classic in-place fallback (§8.1: "the classic
+#: uv-tool fallback ships until [the lane's `--to` verb] lands") as the
+#: DISCLOSED LAST RESORT — taken only where the generation layout cannot run on
+#: this member at all (``update.perform_upgrade``'s own documented degradation
+#: boundary), and only after this pass's drain has proved no turn is live.
 METHOD_GENERATION = "uv-tool-generation"
+METHOD_CLASSIC = "uv-tool-classic"
+
+#: The member pass's bounds (RU §4.2 steps 4–5).
+#:
+#: The sweep is "bounded at ~60 s" (RU §4.2 step 4). The budget is spent
+#: SEQUENTIALLY across the live set — ``control.refresh_all`` is deliberately
+#: sequential (each dial may wait out its timeout) — so the per-call timeout is
+#: this budget divided by the live count, clamped to the control module's own
+#: default. A sweep that cannot finish inside the budget degrades to counts;
+#: it never fails the pass (the runtimes also retire on their own watch).
+REFRESH_SWEEP_DEADLINE_S = 60.0
+
+#: The re-engage budget (RU §4.2 step 5): the same 60 s ``relay.ENGAGE_DEADLINE_S``
+#: gives its own warm path, per session, and this is the TOTAL the loop may spend
+#: before it stops engaging — the op's 900 s deadline must still hold after the
+#: install and the sweep, and a member with many dead sessions (exactly the
+#: classic path's world) must not spend it one successor at a time.
+REENGAGE_DEADLINE_S = 60.0
+REENGAGE_BUDGET_S = 120.0
 
 
 # ---------------------------------------------------------------------------
@@ -225,24 +254,86 @@ def check_published(version: str, *, client: Any | None = None) -> tuple[bool, s
 def install_build(
     version: str, *, runner: Callable[[list[str], dict[str, str]], int] | None = None
 ) -> str:
-    """Install ``version`` into its own generation. Returns the receipt's method.
+    """Install ``version``; returns the receipt's ``method``. THE ONLY CHOICE OF SHAPE.
 
-    THE ONLY PLACE THE MEMBER'S INSTALL SHAPE IS CHOSEN, and it is deliberately
-    one shape: ``install_into_generation`` — the pinned-PyPI, verified-tree,
-    atomic-pointer install the onboarding lane already uses for an exact version
-    (``onboard.step_install``'s ``lop-update <tag>`` / ``uv tool install
-    --force --refresh local-operator==<tag>`` spellings, resolved through THIS
-    device's own uv). ``source=None`` is what makes it a PyPI resolution; no
-    source directory, no ref, ever.
+    TWO SHAPES, in the design's order (RU §4.2 step 3):
 
-    ``runner`` is the test seam ``install_into_generation`` documents (it
-    receives ``(argv, env)`` because the environment is the mechanism under
-    test). A real member passes nothing and gets uv.
+    - THE GENERATION ROUTE FIRST — ``install_into_generation``, the pinned-PyPI,
+      verified-tree, atomic-pointer install for an exact version: the same
+      function the onboarding lane's ``lop update --to <version>`` routes
+      through. (§8.1's verb is not on main — verified 2026-10-11 — so the pass
+      calls the function directly; the effect on a repo-less member is exactly
+      the lane's pin mechanics. Stated in the PR.) ``source=None`` is what
+      makes it a PyPI resolution; no source directory, no ref, ever.
+
+    - THE CLASSIC IN-PLACE FALLBACK LAST, and only where the generation layout
+      cannot run at all (``perform_upgrade``'s own degradation boundary — the
+      caller reaches here on such a member). An in-place rewrite, safe here
+      because the drain succeeded moments before (RU §4.2 step 3: "*only*
+      then") — and disclosed as ``METHOD_CLASSIC`` on the receipt, so an
+      operator can tell the two shapes apart afterwards.
+
+    ``runner`` is the test seam both shapes take (it receives ``(argv, env)``
+    because the environment IS the mechanism under test for the generation
+    route; the classic route passes the inherited environment).
     """
     from local_operator import update as update_mod
 
-    update_mod.install_into_generation(source=None, version=version, runner=runner)
-    return METHOD_GENERATION
+    if generation_layout_supported():
+        update_mod.install_into_generation(source=None, version=version, runner=runner)
+        return METHOD_GENERATION
+    _install_classic(version, runner=runner, update_mod=update_mod)
+    return METHOD_CLASSIC
+
+
+def _install_classic(
+    version: str,
+    *,
+    runner: Callable[[list[str], dict[str, str]], int] | None,
+    update_mod: Any,
+) -> None:
+    """The classic uv-tool in-place reinstall, with ``perform_upgrade``'s own discipline.
+
+    MIRRORS ``update.perform_upgrade``'s classic branch step for step, because
+    that branch owns the one hazard this shape commits ("THE IN-PLACE INSTALL IS
+    THE ONE HAZARD THIS FUNCTION STILL COMMITS"): the tree the running fleet
+    imports from is rewritten where it stands, so runtimes can die mid-turn and
+    cannot record anything themselves. Hence the same attestation pair —
+    ``note_doomed_runtimes`` staged IMMEDIATELY BEFORE the installer runs (after
+    the fact, the party that could say what happened is the party that was
+    killed), withdrawn on both failure shapes so the marker cannot narrate a
+    later death as this install's doing. The marker (``.lop-source``) is written
+    best-effort after exit 0, exactly as there.
+
+    Unlike the generation route this touches the LIVE tree, which is why it
+    exists only on members where the layout cannot run, and only under the
+    drain the caller has already proven.
+    """
+    argv = update_mod.installer_argv(update_mod.InstallKind.UV_TOOL, version=version)
+    root = Path(sys.prefix)
+    attested = update_mod.note_doomed_runtimes(
+        root, mechanism=update_mod.MECHANISM_IN_PLACE_INSTALL, actor=update_mod.ACTOR_UPGRADE
+    )
+    try:
+        if runner is not None:
+            code = runner(argv, dict(os.environ))
+        else:
+            code = int(subprocess.run(argv, check=False).returncode)
+    except BaseException:
+        update_mod.withdraw_involuntary_stops(
+            attested, mechanism=update_mod.MECHANISM_IN_PLACE_INSTALL
+        )
+        raise
+    if code != 0:
+        update_mod.withdraw_involuntary_stops(
+            attested, mechanism=update_mod.MECHANISM_IN_PLACE_INSTALL
+        )
+        raise update_mod.UpdateError(f"installer exited {code}")
+    if not update_mod.write_source_marker(root, version=version):
+        # Deliberately not fatal, the same call ``perform_upgrade`` makes: the
+        # install SUCCEEDED, and a failed marker only costs accuracy in the
+        # labels (it logs there for the same reason).
+        logger.warning("updated to %s but could not record it in %s/.lop-source", version, root)
 
 
 # ---------------------------------------------------------------------------
@@ -393,8 +484,164 @@ def update_lock(root: Path, target: UpdateTarget) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# The member executor (S1's single call; S2's drain/re-engage pass extends it)
+# The member executor (S1's call, S2's snapshot/drain/install/roll/re-engage)
 # ---------------------------------------------------------------------------
+
+
+def live_session_targets(root: Path) -> list[Any]:
+    """The member's LIVE set at the start of a pass — RU §4.2 step 1, the snapshot.
+
+    The registry is the same authority the drain trusts (§4.3) and this is the
+    same selector the CLI's rotation sweep uses (``control._rotation_targets``,
+    private access the way every cross-module seam here is): live AND wedged
+    records, the caller's own excluded. Best-effort by design: a registry that
+    cannot be read yields an empty set, because the DRAIN's own fresh read
+    (under the lock, moments before the install) is the gate that refuses on
+    unreadability — this read only sizes counts and picks re-engage candidates,
+    and one fault must not fail the pass twice.
+    """
+    from local_operator.session.runtime import control
+
+    try:
+        return control._rotation_targets(root, own_pid=os.getpid())  # noqa: SLF001
+    except Exception:  # noqa: BLE001 — see the docstring: the drain is the gate
+        return []
+
+
+def refresh_runtimes(root: Path, *, live_count: int) -> tuple[list[Any], str]:
+    """Ask every live runtime to move to the build on disk — RU §4.2 step 4. NEVER raises.
+
+    ``control.refresh_all`` IS ``lop refresh --all``: sequential asks over the
+    live set, each runtime judging its own ``may_refresh`` and answering with
+    its own sentence — nothing is signalled, nothing is stopped, and a busy
+    runtime answers ``busy`` and keeps its intact tree. The per-call timeout is
+    the 60 s budget (:data:`REFRESH_SWEEP_DEADLINE_S`) divided across the live
+    set, because the sweep is sequential and one unreachable runtime must not
+    spend the whole budget in a single dial.
+
+    Returns ``(outcomes, note)``; a sweep that could not run at all returns no
+    outcomes and a note, never an exception — the install already succeeded,
+    the runtimes also retire on their own watch, and the receipt is where the
+    degradation is said (RU §4.2 step 4: the receipt says how many, honestly).
+    """
+    from local_operator.session.runtime import control
+
+    per_call = REFRESH_SWEEP_DEADLINE_S / max(live_count, 1)
+    per_call = min(max(per_call, 2.0), control.DEFAULT_REFRESH_TIMEOUT_S)
+    try:
+        outcomes = asyncio.run(
+            control.refresh_all(timeout_s=per_call, own_pid=os.getpid(), _root=root)
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade to counts, never fail the pass
+        return [], f"the runtime sweep could not run ({exc})"
+    return list(outcomes), ""
+
+
+#: The methods that mean "this session's runtime is leaving or gone", and so
+#: the re-engage candidates (RU §4.2 step 5): a retirement just committed
+#: (``moved``/``draining``), or nothing a successor can reuse answered
+#: (``unreachable``/``unsupported`` — a dead or pre-op runtime). ``busy``,
+#: ``kept``, ``current`` and ``unsettled`` keep a working runtime and are left
+#: alone. Deliberately a closure over the control module's own vocabulary —
+#: its ``RefreshOutcome`` docstring is the source of these names.
+_DISPLACED_METHODS = frozenset({"moved", "draining", "unreachable", "unsupported"})
+
+
+def reengage_displaced(
+    root: Path, records: Sequence[Any], outcomes: Sequence[Any], version: str
+) -> tuple[int, str]:
+    """Ensure a runtime exists for displaced sessions — RU §4.2 step 5. NEVER raises.
+
+    THE HALF "NOTHING ELSE PERFORMS FOR UNWATCHED SESSIONS": an attached viewer
+    re-engages its session when its runtime retires, but a session nobody is
+    watching keeps no successor — the sweep (§4.2 step 4) has just asked its
+    runtime to leave, so this step walks the displaced set and engages one.
+    The engage is the relay's own speculative shape (``WarmErrand``: "start the
+    runtime, deliver nothing") — nothing is claimed about a death that did not
+    happen, and no invented message shape is posted into a session's inbox.
+
+    THE DESIGN'S "TRUTHFUL ONE-LINE NUDGE" rides the receipt and the member's
+    audit (``<n> re-engaged``), not the session's store: v1 delivers the
+    sentence where an operator reads pass outcomes, and the open question —
+    whether the line should also land in the session's inbox or attention row —
+    is named in the PR rather than invented silently here.
+    """
+    by_id = {str(getattr(record, "session_id", "")): record for record in records}
+    engaged = 0
+    failed = 0
+    skipped = 0
+    deadline = time.monotonic() + REENGAGE_BUDGET_S
+    for outcome in outcomes:
+        if str(getattr(outcome, "method", "")) not in _DISPLACED_METHODS:
+            continue
+        if time.monotonic() >= deadline:
+            skipped += 1
+            continue
+        record = by_id.get(str(getattr(outcome, "session_id", "")))
+        if record is None:
+            failed += 1
+            continue
+        reason = _engage_successor(record, root=root)
+        if reason:
+            failed += 1
+        else:
+            engaged += 1
+    notes = []
+    if failed:
+        notes.append(f"{failed} session(s) could not be re-engaged")
+    if skipped:
+        notes.append(f"{skipped} not re-engaged inside the budget")
+    return engaged, "; ".join(notes)
+
+
+def _engage_successor(record: Any, *, root: Path) -> str:
+    """Engage one successor runtime for ``record``; return "" or the failure reason.
+
+    The call shape mirrors the relay's own warm path (``relay._warm_after_create``'s
+    ``asyncio.run(engage_runtime(...))``) and the model is taken from the record's
+    own published facts; the deadline is :data:`REENGAGE_DEADLINE_S`. A failure is
+    reported to the caller, never raised: one session that cannot come back must
+    not fail a pass whose install already succeeded.
+    """
+    from local_operator.session.runtime.launch import WarmErrand, engage_runtime
+
+    try:
+        asyncio.run(
+            engage_runtime(
+                str(record.session_id),
+                str(record.cwd or Path.home()),
+                WarmErrand(),
+                config_dir=root,
+                deadline_s=REENGAGE_DEADLINE_S,
+            )
+        )
+    except (TimeoutError, RuntimeError, ConnectionError, OSError) as exc:
+        return " ".join(str(exc).split())[:200]
+    return ""
+
+
+def roll_services_after_reply() -> None:
+    """Kick the supervised daemons and THIS relay onto the new build — AFTER the reply.
+
+    the note's Q4 recommendation, recorded: "the executor replies first and
+    rolls services as a detached child" — because the daemon-refresh stage's
+    relay step asks this very process to move, and a kickstart racing the
+    ``done`` frame would cut the receipt off the wire. The thread's only job is
+    to START the stage's own child (the stage spawns one child for all the
+    daemons, and its kickstarts are OS-level: they complete whether or not this
+    process lives to watch them). Never raises — the upgrade already succeeded,
+    so the worst outcome here is a warning (the stage's own contract).
+    """
+
+    def _run() -> None:
+        try:
+            from local_operator import update as update_mod
+
+            update_mod.refresh_service_daemons_after_upgrade()
+        except Exception:  # noqa: BLE001 — see the docstring: never fail a settled pass
+            logger.warning("the services roll after the update did not run", exc_info=True)
+
+    threading.Thread(target=_run, name="mesh-update-services-roll", daemon=True).start()
 
 
 def _refused(code: str, sentence: str, *, current: str = "") -> dict[str, Any]:
@@ -498,7 +745,17 @@ def _execute_validated(
     from local_operator import update as update_mod
 
     kind = detect_install_kind()
-    if kind is update_mod.InstallKind.EDITABLE or not generation_layout_supported():
+    if kind is update_mod.InstallKind.EDITABLE:
+        raise MeshRefusal(
+            "editable_install",
+            "this device runs from a development tree; updates are out of scope there "
+            "(`lop update` by hand is the path)",
+        )
+    if not generation_layout_supported() and kind is not update_mod.InstallKind.UV_TOOL:
+        # A non-uv-tool install without the generation layout keeps S1's refusal
+        # verbatim; the CARVE-OUT is the uv-tool member, which takes the
+        # classic in-place arm inside ``install_build`` (RU §4.2 step 3's
+        # last resort; ``perform_upgrade``'s own degradation boundary).
         raise MeshRefusal(
             "editable_install",
             "this device runs from a development tree; updates are out of scope there "
@@ -656,13 +913,33 @@ def _execute_validated(
         target=target,
         detail={"method": method, "from": current, "version": target_version},
     )
+    # STEPS 4–5, THE MEMBER PASS'S ROLL: ask the live runtimes onto the new build,
+    # then re-engage the displaced. Both are bounded and both degrade to a note
+    # (RU §4.2's own bounds); the reply below is where the counts are said.
+    snapshot = live_session_targets(root)
+    outcomes, sweep_note = refresh_runtimes(root, live_count=len(snapshot))
+    moved = sum(1 for o in outcomes if str(getattr(o, "method", "")) in ("moved", "draining"))
+    kept = max(len(outcomes) - moved, 0)
+    engaged, engage_note = reengage_displaced(root, snapshot, outcomes, target_version)
+    reason = f"this device moved from {current or 'an unknown build'} to {target_version}"
+    if outcomes:
+        reason += f"; {moved} session(s) retired for the new build, {kept} kept"
+    if engaged:
+        reason += f", {engaged} re-engaged"
+    for note in (sweep_note, engage_note):
+        if note:
+            reason += f" ({note})"
+    # THE SERVICES ROLL GOES LAST, AFTER THE REPLY IS COMPOSED (note Q4): its
+    # relay step asks this very process to move, and the receipt must be on the
+    # wire before that kickstart can cut it.
+    roll_services_after_reply()
     return {
         "state": "done",
         "code": "",
-        "reason": f"this device moved from {current or 'an unknown build'} to {target_version}",
+        "reason": reason,
         "method": method,
         "version": target_version,
-        "sessions": {"moved": 0, "kept": 0},
+        "sessions": {"moved": moved, "kept": kept},
         "updated_at": time.time(),
     }
 
