@@ -4668,6 +4668,8 @@ def _content_row_text(row: Any, verb: str) -> str:
     tail = f"{row.reason}; {entries}"
     if row.rescue_bundle:
         tail += f"; rescue bundle {os.path.basename(row.rescue_bundle)}"
+    elif row.method == "worktree-remove":
+        tail += "; worktree remove"
     return f"  {verb:<14} {row.session:<12} {title:<16} {_format_bytes(row.bytes):>8} ({tail})"
 
 

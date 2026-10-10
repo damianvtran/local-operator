@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.cli import sessions_cleanup_command
+from local_operator.cli import _content_row_text, sessions_cleanup_command
 from local_operator.config import ConfigManager
 from local_operator.session import delegated_retention as dr
 from local_operator.session.cleanup import CLEANUP_LOG_NAME, mark_store
@@ -435,3 +435,23 @@ def test_force_runs_the_content_phase_when_the_scratchpad_switch_is_off(
     big = _big_log(pad / "desktop-suite.log")
     assert sessions_cleanup_command(_args(force=True, yes=True)) == 0
     assert not big.exists()
+
+
+def test_a_worktree_row_says_its_removal_is_a_git_worktree_remove() -> None:
+    row = dr.ContentRow(
+        session="abcdef123456",
+        reason="merged-clean clone past the window",
+        bytes=1024,
+        entries=3,
+        classes=("merged-clean clone",),
+        method="worktree-remove",
+    )
+    assert "; worktree remove" in _content_row_text(row, "would reclaim")
+    plain = dr.ContentRow(
+        session="abcdef123456",
+        reason="stale output past the window",
+        bytes=1024,
+        entries=1,
+        classes=("stale output",),
+    )
+    assert "worktree remove" not in _content_row_text(plain, "will reclaim")
