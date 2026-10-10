@@ -351,6 +351,7 @@ def _walk(config: Path, monkeypatch: pytest.MonkeyPatch, *, page: int = PAGE) ->
             break
     return {
         "seed_ids": seed_ids,
+        "first_cursor": cursor if pages else None,
         "pages": pages,
         "page_rows": page_rows,
         "exhausted": not seen_more,
@@ -1039,7 +1040,7 @@ def _build_capped_compaction(config: Path) -> dict[str, Any]:
     rows between ``first_kept_entry_id`` and the entry are NEWER than the cursor
     the client sends, and no page's ``older`` half can ever contain it (review
     round 4, R4-1 — measured on two of eleven large real journals, one row each).
-    Seventy turns keep the window at 82 painted rows so the cap has to drop it.
+    Seventy turns keep the window at 81 painted rows so the cap has to drop it.
     """
     directory = config / "sessions" / SESSION_ID
     directory.mkdir(parents=True)
@@ -1087,15 +1088,28 @@ def test_a_capped_render_still_serves_the_newest_compactions_marker(
     assert len(seed) == PROJECTION_TRANSCRIPT_LIMIT, "the render must sit AT its cap"
     assert ids["marker"] not in seed, "the cap was supposed to drop the marker"
 
+    # The gate the splice needs is per WALK, not per call: this function runs once
+    # per HTTP page, so anything it can see per call is true on every page. The
+    # daemon's window head is that per-walk fact, and it has to be the cursor the
+    # client's own rule produces — asserted here against the walk's own first
+    # cursor rather than trusted.
+    from local_operator.mobile.daemon import _window_head
+
     for page in (20, 120):
         walk = _walk(config, monkeypatch, page=page)
         observed = _observed(walk)
         expected = {row.id for row in _journal_rows(walk["directory"])}
+        assert len(walk["pages"]) >= 4, f"page {page}: a one-page walk proves nothing here"
+        assert (
+            _window_head(projection) == walk["first_cursor"]
+        ), "the daemon's window head is not the cursor this walk's client sends"
         assert ids["marker"] in observed, f"page {page} stranded the boundary marker"
         assert expected <= set(
             observed
         ), f"page {page} stranded {sorted(expected - set(observed))[:3]}"
-        served = [row for rows in walk["pages"] for row in rows]
-        assert (
-            served.count(ids["marker"]) == 1
-        ), f"page {page} served the marker {served.count(ids['marker'])} times"
+        serving = [
+            index for index, rows in enumerate(walk["pages"], start=1) if ids["marker"] in rows
+        ]
+        assert serving == [
+            1
+        ], f"page {page} served the marker on pages {serving}, not once on the first"

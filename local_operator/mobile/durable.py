@@ -590,13 +590,21 @@ _ARCHIVE_READ_LIMIT = 200
 #: performs for an anchored page.
 _ARCHIVE_PAIRING_MARGIN = 64
 
-#: Entries read NEWER than the CALLER'S own cursor, on its own read only, to find
-#: the newest compaction whose marker the render dropped (see the splice's comment
-#: in :func:`journal_rows_older_than`). Wider than the pairing margin because that
-#: marker sits INSIDE the client's own window — as far forward as the render's own
-#: rows reach — and a page that cannot see the compaction entry can never serve
-#: its marker. Bounded by the reader's page ceiling, so this stays one page-sized
-#: read rather than a scan of the file.
+#: Entries read NEWER than the CALLER'S own window head, on its own read only, to
+#: find the newest compaction whose marker the render dropped (see the splice's
+#: comment in :func:`journal_rows_older_than`). Wider than the pairing margin
+#: because the compaction ENTRY sits INSIDE the client's own window — as far
+#: forward as the render's rows reach — and a page that cannot see the entry can
+#: never serve its marker. Bound by the reader's page ceiling, so this stays one
+#: page-sized read rather than a scan of the file.
+#:
+#: ITS LIMIT, STATED RATHER THAN IMPLIED: this counts ENTRIES while the cap that
+#: dropped the marker counts ROWS, and the two do not run at the same rate — S6
+#: folds ~1.8 entries per painted row (summaries, results and prunes paint
+#: nothing). A session whose window spans more than this many entries between the
+#: cursor and its newest compaction therefore still strands the marker, exactly as
+#: review round 4 found it. Raising the bound buys reach at a linear cost in the
+#: first page; removing the limit needs a cursor-keyed fact rather than a window.
 _ARCHIVE_SEED_MARGIN = 200
 
 
@@ -819,6 +827,7 @@ def journal_rows_older_than(
     before_id: str,
     limit: int,
     prunes_complete: bool = True,
+    window_head: str | None = None,
 ) -> tuple[list[Any], bool] | None:
     """Phone rows for the journal entries OLDER than ``before_id``.
 
@@ -863,6 +872,17 @@ def journal_rows_older_than(
     ``call_00_x7:06c08d4847`` call id — is located by whichever attempt names a
     real row, and a miss is a miss only once every attempt has failed.
 
+    ``window_head`` IS THE ONE PIECE OF PER-WALK STATE THIS FUNCTION CANNOT
+    DERIVE. A walk is many pages, and this function is entered once per page, so
+    everything it can see per call ("the first read of this call") is true on
+    every page — which is how review round 5 caught the newest compaction's
+    marker being re-served on pages 1-4 of the walk that was supposed to serve it
+    once. The daemon therefore hands down the id the client's OWN seed pages from
+    on its first call (see ``daemon._window_head``): the marker splice fires only
+    for that id, and since pages serve only entries strictly older than their
+    anchor, no page of the walk can carry it. ``None`` — a caller with no seed to
+    speak of — means no splice, which is the safe direction.
+
     Returns ``None`` when ``before_id`` names no journal row — the cursor a
     client holds can outlive the file it came from (a compaction that landed
     mid-scroll, a replaced transcript) — so the caller keeps its own
@@ -884,11 +904,19 @@ def journal_rows_older_than(
     # splice on a multi-read page (every later cursor is a page row, and a page
     # never starts mid-group, so the first splice is the only one it can undo).
     recovered = False
-    # The CALLER'S own read looks further forward than a page's pairing needs —
-    # see the marker splice below — and every later read is a page row's, which
-    # wants only its answers.
+    # WHICH CALL THIS IS, not which read of it: ``_journal_page`` runs once per
+    # HTTP page, so a fact the reader can only derive per call ("the first read of
+    # this call") is true on EVERY page of a walk — that is round 5's blocker,
+    # where the marker below came back on pages 1-4. ``window_head`` is the id the
+    # client's OWN window pages from on its first call, handed down by the daemon
+    # that holds the render; pages serve only entries strictly older than their
+    # anchor, so no page of the walk can carry it, and the splice happens once.
+    splice_marker = window_head is not None and before_id == window_head
+    # The caller's own call also looks further forward than a page's pairing needs
+    # — see the marker splice below — while every later read is a page row's,
+    # which wants only its answers.
     after = _ARCHIVE_SEED_MARGIN
-    first_page = True
+    first_read = True
     while len(rows) < limit:
         try:
             # AN ANCHORED read rather than a plain ``before_id`` one: the page
@@ -924,11 +952,11 @@ def journal_rows_older_than(
         older = list(page.entries[:anchor])
         newer = list(page.entries[anchor:])
         entry_ids.update(entry.id for entry in page.entries)
-        caller_read = first_page
-        first_page = False
+        caller_read = first_read
+        first_read = False
         after = _ARCHIVE_PAIRING_MARGIN
         messages = _page_messages(older, prunes)
-        if caller_read:
+        if splice_marker and caller_read:
             # THE NEWEST COMPACTION'S MARKER CAN BE NEWER THAN EVERY ANCHOR, and
             # then no page in the walk can serve it.
             #
@@ -946,10 +974,10 @@ def journal_rows_older_than(
             # review round 4 on two of eleven large real journals, one row each,
             # and it is the row that TELLS the reader there is older history.
             #
-            # Served on the caller's own read only, and at the NEWEST end of its
+            # Served on the caller's own call only — see ``splice_marker`` above,
+            # which is what makes that per-WALK — and at the NEWEST end of its
             # rows: the compaction entry is newer than everything in ``older``,
-            # the desktop paints a marker where its entry sits, and every later
-            # read starts below this cursor, so the splice cannot repeat.
+            # and the desktop paints a marker where its entry sits.
             #
             # ``newer[1:]`` — the anchor is excluded on purpose. When the cursor
             # IS the compaction entry (an uncapped render, whose first row is the
