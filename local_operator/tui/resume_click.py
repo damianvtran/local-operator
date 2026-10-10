@@ -39,7 +39,9 @@ order the operator asked for — the UI first, a terminal last:
 4. **A terminal** — the original premise genuinely holds, and the spawn below
    runs the argv it always ran. That path is why this module exists. What it no
    longer does is claim a landing it did not make: it opens a window, or it
-   reports failure.
+   reports failure. WHICH terminal: the one detection finds (almost never, from
+   a click), then the one the user LAST ATTENDED (``spawn.remembered``, written
+   by :func:`prepare_for_clicks` when a TUI boots), then Terminal.app on macOS.
 
 THREE RUNGS BECAME FOUR when the ordering was corrected (review round 1, R9):
 asking "is anything running?" before discovery let a TUI that happened to be
@@ -547,6 +549,80 @@ def _route_to_viewer(session_id: str, *, surface: str | None = None) -> bool:
     return False
 
 
+def prepare_for_clicks() -> None:
+    """Make the NEXT banner's click work, from a moment a person is present.
+
+    Called off the event loop by the surfaces a human is looking at (the TUI at
+    boot, the desktop daemon at boot). Two independent preparations, each of
+    which can only be done at an attended moment and each of which a click
+    cannot do for itself:
+
+    - **Remember the terminal** (:func:`local_operator.spawn.remembered.remember_current`).
+      Emulator markers exist only here; the click that needs the answer has none.
+    - **Pre-warm the macOS identity bundle** (:func:`notifier_app.prewarm`). On a
+      cold machine the first banner otherwise goes out through ``osascript``,
+      which cannot be clicked, and Aida's check-in — a one-turn runtime's only
+      banner — is always that first one.
+
+    Gated on the same two questions every banner asks first, so a user who
+    turned notifications off, or a rig under a redirected HOME, pays no compile
+    and writes no memory: ``notifications_enabled`` and
+    ``desktop_belongs_to_this_process(report=False)`` (quiet, because this is
+    not a refusal anyone should be told about). Never raises, never logs above
+    debug: a warm-up is not worth a boot failure.
+    """
+    try:
+        from local_operator.paths import config_dir
+        from local_operator.tui import notifier_app
+        from local_operator.tui.notify import (
+            desktop_belongs_to_this_process,
+            notifications_enabled,
+        )
+
+        if not notifications_enabled() or not desktop_belongs_to_this_process(report=False):
+            return
+        root = config_dir()
+        from local_operator.spawn import remembered
+
+        remembered.remember_current(root)
+        notifier_app.prewarm(root)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("could not prepare the click path", exc_info=True)
+
+
+def _remembered_backend(env: EnvMap, already: list[SpawnBackend]) -> SpawnBackend | None:
+    """The backend for the terminal the user last attended, or None.
+
+    Written by the TUI at boot (``spawn.remembered.remember_current``), read
+    here because a click cannot detect. Withheld over ssh for the same reason
+    as :func:`_last_resort_backend`: every emulator backend needs a window
+    server this session does not have, and would report a landing that never
+    happened. Withheld when it is the candidate detection already chose, so a
+    refusal is not reported twice and the failure is not delayed.
+
+    Nothing here checks that the terminal is installed: each backend's ``spawn``
+    answers False for a missing binary, and the loop in
+    :func:`_spawn_terminal` then moves on to the next candidate, so a stale
+    memory costs one refused spawn, never the click.
+    """
+    try:
+        from local_operator import terminals
+        from local_operator.paths import config_dir
+        from local_operator.spawn import remembered
+        from local_operator.spawn.registry import backend_named
+
+        name = remembered.recall(config_dir())
+        if not name or terminals.is_ssh(env):
+            return None
+        found = backend_named(name)
+    except Exception:  # noqa: BLE001 — a memory problem must not eat the click
+        logger.debug("could not recall the attended terminal", exc_info=True)
+        return None
+    if found is None or any(candidate.name == found.name for candidate in already):
+        return None
+    return found
+
+
 def _last_resort_backend(env: EnvMap, detected: SpawnBackend | None) -> SpawnBackend | None:
     """The backend that can open a window WITHOUT being inside one, or None.
 
@@ -661,8 +737,17 @@ def _spawn_terminal(session_id: str) -> bool:
     candidates: list[SpawnBackend] = []
     if backend is not None:
         candidates.append(backend)
+    # THE TERMINAL THE USER LAST ATTENDED comes before the hard-coded last
+    # resort. A click's process has no emulator markers, so `active_backend`
+    # above almost always answers None here and this used to be Terminal.app
+    # for everyone — including the person who lives in Ghostty.
+    remembered = _remembered_backend(env, candidates)
+    if remembered is not None:
+        candidates.append(remembered)
     last_resort = _last_resort_backend(env, backend)
-    if last_resort is not None:
+    if last_resort is not None and not any(
+        isinstance(candidate, type(last_resort)) for candidate in candidates
+    ):
         candidates.append(last_resort)
 
     # A backend is abandoned only where it opened NOTHING — a missing binary, a

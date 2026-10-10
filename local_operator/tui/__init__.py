@@ -184,6 +184,31 @@ def _schedule_aida_boot_ensure(app: Any) -> "asyncio.Task[None]":
     return task
 
 
+def _schedule_click_preparation(app: Any) -> "asyncio.Task[None]":
+    """Prepare the notification click path off the event loop (see
+    ``resume_click.prepare_for_clicks``).
+
+    SCHEDULED, NEVER AWAITED, for the reason ``_schedule_aida_boot_ensure``
+    gives: a first-run compile of the macOS bundle is seconds of work that
+    belongs nowhere near the first paint. ``to_thread`` because the compile
+    BLOCKS; held on the app so the task cannot be collected mid-flight. The TUI
+    is the surface where terminal markers exist, which is the only reason the
+    remembered-terminal half can run here and not in the click.
+    """
+
+    async def _prepare() -> None:
+        try:
+            from local_operator.tui.resume_click import prepare_for_clicks
+
+            await asyncio.to_thread(prepare_for_clicks)
+        except Exception:  # noqa: BLE001 — never the boot's failure
+            logger.debug("click preparation failed", exc_info=True)
+
+    task = asyncio.create_task(_prepare())
+    app._click_prep_task = task
+    return task
+
+
 def _schedule_seed_update_notices(app: Any) -> "asyncio.Task[None]":
     """Deliver the starter-update notices the startup seam queued, once.
 
@@ -331,6 +356,7 @@ async def run_tui(
         # (§13).
         registration = _register_secret_session(app)
         _schedule_aida_boot_ensure(app)
+        _schedule_click_preparation(app)
         _schedule_seed_update_notices(app)
         try:
             await app.run_async()
