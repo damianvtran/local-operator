@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from local_operator.artifacts import RungAvailability
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import TextContent, ToolContext
 from local_operator.tools import video_tool
 from local_operator.video import VideoRoute
 from local_operator.video import cascade as video_cascade
@@ -155,7 +155,7 @@ def test_resolve_sources_image_uses_image_lane_loaders(
     )
     mode, kind, wire, rows = video_tool._resolve_sources(params, ".")
     assert (mode, kind) == ("i2v", "image")
-    assert wire.startswith("data:image/png;base64,")
+    assert wire is not None and wire.startswith("data:image/png;base64,")
     # The record row carries the PATH, never the bytes.
     assert rows == [{"kind": "image", "path": "pic.png"}]
 
@@ -200,7 +200,9 @@ async def test_execute_generate_video_submits_and_reports(
     result = await video_tool.execute_generate_video(
         "call-1",
         {"prompt": "paper boat", "duration_s": 8, "resolution": "720p"},
-        context=ctx,
+        None,
+        None,
+        ctx,
     )
     assert not result.is_error
     details = result.details or {}
@@ -216,7 +218,9 @@ async def test_execute_generate_video_submits_and_reports(
     assert journal[0]["state"] == "registered"
     assert journal[0]["mode"] == "t2v"
     assert [row.id for row in scheduler.schedules] == ["video-check-job-1"]
-    text = result.content[0].text
+    first_block = result.content[0]
+    assert isinstance(first_block, TextContent)
+    text = first_block.text
     assert "job `job-1`" in text and "cancel with" in text
 
 
@@ -235,15 +239,20 @@ async def test_execute_generate_video_refuses_no_capable(
     monkeypatch.setattr(
         image_tool, "_load_source_image", lambda path, cwd: "data:image/png;base64,AAAA"
     )
-    ctx = ToolContext(cwd=str(tmp_path), jobs=_FakeJobs())  # type: ignore[arg-type]
+    jobs = _FakeJobs()
+    ctx = ToolContext(cwd=str(tmp_path), jobs=jobs)  # type: ignore[arg-type]
     result = await video_tool.execute_generate_video(
         "call-2",
         {"prompt": "p", "source_image_path": "pic.png"},
-        context=ctx,
+        None,
+        None,
+        ctx,
     )
     assert result.is_error
-    assert "No available provider can generate a video from an image" in result.content[0].text
-    assert ctx.jobs.registered == []  # nothing was registered
+    refused = result.content[0]
+    assert isinstance(refused, TextContent)
+    assert "No available provider can generate a video from an image" in refused.text
+    assert jobs.registered == []  # nothing was registered
 
 
 def test_approval_describer_names_duration_and_estimate(
@@ -321,9 +330,11 @@ async def test_video_status_terminal_record(tmp_path: Path) -> None:
     ctx = ToolContext(
         cwd=str(tmp_path), session_dir=str(tmp_path), jobs=_FakeJobs()  # type: ignore[arg-type]
     )
-    result = await video_tool.execute_video_status("call-3", {"job_id": "jjj"}, context=ctx)
+    result = await video_tool.execute_video_status("call-3", {"job_id": "jjj"}, None, None, ctx)
     assert not result.is_error
-    text = result.content[0].text
+    completed_block = result.content[0]
+    assert isinstance(completed_block, TextContent)
+    text = completed_block.text
     assert "completed" in text and "digest dddd" in text
     assert result.details and result.details["digest"] == "d" * 32
 
@@ -335,11 +346,13 @@ async def test_video_status_unknown_and_pending(
     ctx = ToolContext(
         cwd=str(tmp_path), session_dir=str(tmp_path), jobs=_FakeJobs()  # type: ignore[arg-type]
     )
-    result = await video_tool.execute_video_status("call-4", {"job_id": "nope"}, context=ctx)
+    result = await video_tool.execute_video_status("call-4", {"job_id": "nope"}, None, None, ctx)
     # An unknown id is an ANSWER, not a fault: the record may have been swept,
     # and the model must not be pushed to retry an id that will never exist.
     assert not result.is_error
-    assert "no video job" in result.content[0].text.lower()
+    unknown_block = result.content[0]
+    assert isinstance(unknown_block, TextContent)
+    assert "no video job" in unknown_block.text.lower()
 
     _write_records(
         tmp_path,
@@ -380,9 +393,11 @@ async def test_video_status_unknown_and_pending(
         jobs=_FakeJobs(),  # type: ignore[arg-type]
         journal_video_job=fake_journal,
     )
-    result = await video_tool.execute_video_status("call-5", {}, context=ctx2)
+    result = await video_tool.execute_video_status("call-5", {}, None, None, ctx2)
     assert not result.is_error
-    text = result.content[0].text
+    pending_block = result.content[0]
+    assert isinstance(pending_block, TextContent)
+    text = pending_block.text
     assert "still running" in text
     assert "observation resumed" in text
     assert runner_seen, "the watcher runner must be built for the pending record"
@@ -458,16 +473,18 @@ async def test_video_status_dedupes_the_watcher(
         journal_video_job=fake_journal,
     )
 
-    first = await video_tool.execute_video_status("call-6", {}, context=ctx)
+    first = await video_tool.execute_video_status("call-6", {}, None, None, ctx)
     assert not first.is_error
     assert len(jobs.registered) == 1
     assert stamped and stamped[0].get("watcher") == "job-1"
     assert stamped[0].get("provider_ref") == {"request_id": "r"}
 
-    second = await video_tool.execute_video_status("call-7", {}, context=ctx)
+    second = await video_tool.execute_video_status("call-7", {}, None, None, ctx)
     assert not second.is_error
     assert len(jobs.registered) == 1, "a second status call registered a twin watcher"
-    second_text = second.content[0].text
+    second_block = second.content[0]
+    assert isinstance(second_block, TextContent)
+    second_text = second_block.text
     assert "already resumed as job job-1" in second_text
     assert "jobs op='cancel', job_id='job-1'" in second_text
 

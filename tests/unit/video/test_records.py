@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from local_operator.session import transcript as transcript_module
 from local_operator.video import records as video_records
 
 
-def _row(*, entry_id: str, ts: float, custom_type: str, details: dict) -> str:
+def _row(*, entry_id: str, ts: float, custom_type: str, details: dict[str, Any]) -> str:
     return json.dumps(
         {
             "id": entry_id,

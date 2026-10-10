@@ -8,12 +8,14 @@ every open.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from tests.unit.session.test_session import ScriptedStream, make_session
 
 
-def _record(job_id: str) -> dict:
+def _record(job_id: str) -> dict[str, Any]:
     return {
         "job": job_id,
         "v": 1,
