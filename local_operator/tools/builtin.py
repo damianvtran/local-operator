@@ -10868,11 +10868,11 @@ def _contained(path: Path, confinement: ToolConfinement | None) -> bool:
 
     WHY RESOLUTION AND NOT ``lstat``: a symlink is a name INSIDE the root whose
     target is somewhere else, and every sibling reader (``read``, ``write``,
-    ``edit``, ``grep``, the shell) judges the [redacted] target -- so this must
+    ``edit``, ``grep``, the shell) judges the RESOLVED target -- so this must
     too, or ``glob`` becomes the one reader with a different rule (review
     round 1, R-1: ``linkapp/**/*`` through a root symlink listed 500 of 1335
     entries of the gated apparatus tree; ``linkapp/*`` listed its three top
-    directories). Fail-closed: a path that cannot be [redacted] cannot be shown
+    directories). Fail-closed: a path that cannot be resolved cannot be shown
     to be inside. ``confinement is None`` is the free-session default and keeps
     the old behaviour byte for byte.
     """

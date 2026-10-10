@@ -47879,7 +47879,7 @@ class OperatorApp(App[None]):
             # A PAIR WITH NO VALUE IS REFUSED HERE, in this family's words. Left
             # to the CLI it would be one more argparse sentence, and a caller who
             # typed half a command should read the surface's own usage line
-            # (`_dispatch_network_cli` [redacted] the same way for a missing
+            # (`_dispatch_network_cli` refuses the same way for a missing
             # token). Any OTHER flag is refused rather than handed on: a leading
             # one would reach the CLI as the NETWORK NAME (`--network --expires`
             # is the same argparse failure this branch was filed for) and a

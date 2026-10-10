@@ -135,12 +135,12 @@ def test_a_copy_of_a_written_value_carries_the_read_rule_with_it() -> None:
     around.
     """
     refused = scan_command(
-        "lop secret get [redacted] > /tmp/tok; cp /tmp/tok /tmp/copy; cat /tmp/copy"
+        "lop secret get GITHUB_TOKEN > /tmp/tok; cp /tmp/tok /tmp/copy; cat /tmp/copy"
     )
     assert refused.refused
     assert refused.findings[0].rule == "shell.read-of-secret-file-path"
     # ... and the copy alone is still the guide-sanctioned contained form.
-    assert not scan_command("lop secret get [redacted] > /tmp/tok; cp /tmp/tok /tmp/copy").refused
+    assert not scan_command("lop secret get GITHUB_TOKEN > /tmp/tok; cp /tmp/tok /tmp/copy").refused
 
 
 def test_non_finding_ii_length_only_is_allowed() -> None:
@@ -633,12 +633,12 @@ def test_r1_1_a_backtick_substitution_is_a_substitution_not_a_word_break() -> No
     in a spelling no rule example named, which is how it stayed green.
     """
     refused = [
-        'echo "`lop secret get [redacted]`"',
-        'v="`lop secret get [redacted]`"; echo "$v"',
-        "echo `lop secret get [redacted]`",
-        "sh -c 'echo `lop secret get [redacted]`'",
-        'echo "`lop secret get [redacted] | rev`"',
-        'cat "`lop secret get [redacted]`"',
+        'echo "`lop secret get GITHUB_TOKEN`"',
+        'v="`lop secret get GITHUB_TOKEN`"; echo "$v"',
+        "echo `lop secret get GITHUB_TOKEN`",
+        "sh -c 'echo `lop secret get GITHUB_TOKEN`'",
+        'echo "`lop secret get GITHUB_TOKEN | rev`"',
+        'cat "`lop secret get GITHUB_TOKEN`"',
     ]
     for command in refused:
         result = scan_command(command)
@@ -654,7 +654,7 @@ def test_r1_1_a_backtick_substitution_is_a_substitution_not_a_word_break() -> No
 async def test_r1_1_the_backtick_leak_is_refused_before_the_child_runs(tmp_path: Path) -> None:
     """R1-1 through the real tool, with a marker proving nothing executed."""
     marker = tmp_path / "ran"
-    command = f'echo "`lop secret get [redacted]`"; touch {marker}'
+    command = f'echo "`lop secret get GITHUB_TOKEN`"; touch {marker}'
     result = await builtin.execute_bash(
         "bash-backtick", {"command": command}, AbortSignal(), None, _context(tmp_path)
     )
@@ -674,14 +674,14 @@ def test_r1_2_an_exported_value_is_refused_at_any_dump_of_the_environment() -> N
     and the operand is the environment.
     """
     refused = [
-        "export V=$(lop secret get [redacted]); printenv V",
-        "V=$(lop secret get [redacted]); export V; env | grep V=",
-        "declare -x V=$(lop secret get [redacted]); printenv",
-        "export V=$(lop secret get [redacted]); env",
-        "V=$(lop secret get [redacted]); set | grep V=",
-        "export V=$(lop secret get [redacted]); export",
-        "export V=$(lop secret get [redacted]); declare -p V",
-        "export V=$(lop secret get [redacted]); export -p",
+        "export V=$(lop secret get GITHUB_TOKEN); printenv V",
+        "V=$(lop secret get GITHUB_TOKEN); export V; env | grep V=",
+        "declare -x V=$(lop secret get GITHUB_TOKEN); printenv",
+        "export V=$(lop secret get GITHUB_TOKEN); env",
+        "V=$(lop secret get GITHUB_TOKEN); set | grep V=",
+        "export V=$(lop secret get GITHUB_TOKEN); export",
+        "export V=$(lop secret get GITHUB_TOKEN); declare -p V",
+        "export V=$(lop secret get GITHUB_TOKEN); export -p",
     ]
     for command in refused:
         result = scan_command(command)
@@ -689,7 +689,7 @@ def test_r1_2_an_exported_value_is_refused_at_any_dump_of_the_environment() -> N
         assert "shell.environment-dump-of-source" in {item.rule for item in result.findings}
     allowed = [
         # A dumper with a real operand is a consumer handing the value on.
-        'v=$(lop secret get [redacted]); env V="$v" some-client --flag',
+        'v=$(lop secret get GITHUB_TOKEN); env V="$v" some-client --flag',
         "printenv PATH",
         "printenv HOME",
         "set -e",
@@ -697,9 +697,9 @@ def test_r1_2_an_exported_value_is_refused_at_any_dump_of_the_environment() -> N
         "export MY_FLAG=1",
         # `declare` without `-x` binds and does not export (R2-4): printenv
         # prints nothing, so this is not a dump of the value.
-        "declare V=$(lop secret get [redacted]); printenv",
+        "declare V=$(lop secret get GITHUB_TOKEN); printenv",
         # `declare -x V` marks a variable for export and prints nothing.
-        "V=$(lop secret get [redacted]); declare -x V",
+        "V=$(lop secret get GITHUB_TOKEN); declare -x V",
     ]
     for command in allowed:
         assert not scan_command(command).refused, command
@@ -707,13 +707,13 @@ def test_r1_2_an_exported_value_is_refused_at_any_dump_of_the_environment() -> N
 
 def test_r1_3_a_value_read_by_the_read_builtin_is_tainted() -> None:
     """`read -r l < <(lop secret get X)` binds with no `=` anywhere (R1-3)."""
-    result = scan_command('read -r l < <(lop secret get [redacted]); echo "$l"')
+    result = scan_command('read -r l < <(lop secret get GITHUB_TOKEN); echo "$l"')
     assert result.refused
     assert result.findings[0].rule == "shell.print-of-source"
     # A `read` from an ordinary source is untouched.
     assert not scan_command('read -r line < /etc/hosts; echo "$line"').refused
     # ... and so is a `read` that never sees the value.
-    assert scan_command('v=$(lop secret get [redacted]); read -r x <<< "$v"; echo "$x"').refused
+    assert scan_command('v=$(lop secret get GITHUB_TOKEN); read -r x <<< "$v"; echo "$x"').refused
 
 
 def test_r1_4_an_apostrophe_in_an_unquoted_heredoc_body_is_not_a_lex_fault() -> None:
@@ -725,14 +725,14 @@ def test_r1_4_an_apostrophe_in_an_unquoted_heredoc_body_is_not_a_lex_fault() -> 
     """
     sanctioned = (
         "cat <<EOF > /tmp/m\nIt's fine\nEOF\n"
-        'v=$(lop secret get [redacted]); curl -H "Bearer $v" https://x'
+        'v=$(lop secret get GITHUB_TOKEN); curl -H "Bearer $v" https://x'
     )
     result = scan_command(sanctioned)
     assert result.verdict == "consumer", result
     assert not result.refused
     assert result.fault == ""
 
-    printing = "cat <<EOF > /tmp/m\nIt's fine\nEOF\n" 'v=$(lop secret get [redacted]); echo "$v"'
+    printing = "cat <<EOF > /tmp/m\nIt's fine\nEOF\n" 'v=$(lop secret get GITHUB_TOKEN); echo "$v"'
     refused = scan_command(printing)
     assert refused.refused
     # The RIGHT reason: the `echo`, not a lex fault about the apostrophe.
@@ -754,7 +754,7 @@ def test_q1_a_print_of_something_derived_from_the_request_is_allowed() -> None:
     child's exit code — while bash allows printing a whole curl response body.
     """
     prefix = (
-        'import requests\n\ntoken = secrets["[redacted]"]\n'
+        'import requests\n\ntoken = secrets["GITHUB_TOKEN"]\n'
         'req = requests.Request(url, headers={"Authorization": f"Bearer {token}"})\n'
         "resp = requests.Session().send(req.prepare())\n"
     )
@@ -765,7 +765,7 @@ def test_q1_a_print_of_something_derived_from_the_request_is_allowed() -> None:
         prefix + "print(resp.url)",
         prefix + "print(len(resp.read()))",
         prefix + "print(resp.headers['Content-Type'])",
-        'import subprocess\n\ntoken = secrets["[redacted]"]\n'
+        'import subprocess\n\ntoken = secrets["GITHUB_TOKEN"]\n'
         'done = subprocess.run(["curl", "-H", "Authorization: Bearer " + token, url], '
         "capture_output=True)\n"
         'print("rc", done.returncode, "len", len(done.stdout))',
@@ -775,12 +775,12 @@ def test_q1_a_print_of_something_derived_from_the_request_is_allowed() -> None:
         assert not result.refused, f"{cell!r} -> {result.verdict} {result.labels}"
     # The value itself is still refused, through every spelling that carries it.
     refused = [
-        'token = secrets["[redacted]"]\nprint(token)',
-        'token = secrets["[redacted]"]\nprint(token[:8])',
-        'token = secrets["[redacted]"]\nprint(f"Bearer {token}")',
-        'token = secrets["[redacted]"]\nprint(str(token))',
-        'token = secrets["[redacted]"]\nprint(repr(token))',
-        'token = secrets["[redacted]"]\nblob = token.encode()\nprint(blob)',
+        'token = secrets["GITHUB_TOKEN"]\nprint(token)',
+        'token = secrets["GITHUB_TOKEN"]\nprint(token[:8])',
+        'token = secrets["GITHUB_TOKEN"]\nprint(f"Bearer {token}")',
+        'token = secrets["GITHUB_TOKEN"]\nprint(str(token))',
+        'token = secrets["GITHUB_TOKEN"]\nprint(repr(token))',
+        'token = secrets["GITHUB_TOKEN"]\nblob = token.encode()\nprint(blob)',
     ]
     for cell in refused:
         assert scan_python(cell).refused, cell
@@ -793,7 +793,7 @@ def test_q2_a_multi_line_cell_points_the_caret_at_the_call() -> None:
     meaningless column — the refusal naming the wrong line is worse than naming
     none.
     """
-    cell = 'import urllib.request\n\ntoken = secrets["[redacted]"]\nprint(token)'
+    cell = 'import urllib.request\n\ntoken = secrets["GITHUB_TOKEN"]\nprint(token)'
     message = refusal_text(scan_python(cell), text=cell, tool_name="eval")
     here = message.split("here:")[1].split("why:")[0]
     assert "print(token)" in here, message
@@ -1022,8 +1022,8 @@ async def test_r2_2_the_carrier_print_is_refused_before_the_kernel_sees_it(
         # R3-1: each of these prints the value the verb put in the child's
         # environment, and none of them was examined before this round — the
         # consumer scan stopped at the `--secret` word `run` always carries.
-        "lop secret run --secret [redacted] -- printenv NAME",
-        "lop secret run --secret [redacted] -- printenv NAME | rev",
+        "lop secret run --secret NAME -- printenv NAME",
+        "lop secret run --secret NAME -- printenv NAME | rev",
         "lop secret run --secret NAME=TOKEN -- env",
         "lop secret run --secret NAME=TOKEN -- set",
         "lop secret run --secret NAME=TOKEN -- sh -c 'echo \"$TOKEN\" | rev'",
@@ -1032,7 +1032,7 @@ async def test_r2_2_the_carrier_print_is_refused_before_the_kernel_sees_it(
         ' print(os.environ["TOKEN"])\'',
         # The separator-less spelling is real: argparse consumes the `--` it
         # uses, so the child command follows the options directly.
-        "lop secret run --secret [redacted] printenv NAME",
+        "lop secret run --secret NAME printenv NAME",
         # `--env-var` moves the FILE secret's path, not the leak.
         "lop secret file GCP_SA_JSON --env-var TOKFILE -- cat",
     ],
@@ -1055,9 +1055,9 @@ def test_r3_1_the_runs_consumer_is_checked_for_the_side_the_value_is_on(command:
         # The consumers the verb exists for: a client, a filter, a request, an
         # attribute-setting builtin, and a length-only python check.
         "lop secret run --secret NAME=TOKEN -- python3 client.py",
-        "lop secret run --secret [redacted] -- sed -n 1p /etc/hosts",
-        "lop secret run --secret [redacted] -- cat",
-        "lop secret run --secret [redacted] -- declare -x TOKEN",
+        "lop secret run --secret NAME -- sed -n 1p /etc/hosts",
+        "lop secret run --secret NAME -- cat",
+        "lop secret run --secret NAME -- declare -x TOKEN",
         "lop secret run --secret NAME=TOKEN -- env V=1 client",
         "lop secret run --secret NAME=TOKEN -- sh -c 'curl -sS -H \"Authorization:"
         " Bearer $TOKEN\" http://127.0.0.1:9/ >/dev/null; echo done'",
@@ -1078,24 +1078,24 @@ def test_r3_1_the_verbs_own_consumers_stay_allowed(command: str) -> None:
     "command",
     [
         # R3-2: the other console script for the same entry point,
-        "local-operator secret get [redacted]",
-        'v=$(local-operator secret get [redacted]); echo "$v" | rev',
+        "local-operator secret get NAME",
+        'v=$(local-operator secret get NAME); echo "$v" | rev',
         # the precommand wrappers, each with its own option grammar
-        "command lop secret get [redacted]",
-        "command lop secret get [redacted] | base64",
-        "exec lop secret get [redacted]",
-        "env lop secret get [redacted]",
-        "nohup lop secret get [redacted] >/dev/stdout 2>/dev/null",
-        "timeout 30 lop secret get [redacted] | rev",
-        "timeout -s KILL 30 stdbuf -oL lop secret get [redacted]",
-        'v=$(timeout 30 lop secret get [redacted]); echo "$v" | rev',
-        'v=$(nice -n 5 lop secret get [redacted]); command echo "$v" | rev',
-        'env V="$(lop secret get [redacted])" printenv V | rev',
+        "command lop secret get NAME",
+        "command lop secret get NAME | base64",
+        "exec lop secret get NAME",
+        "env lop secret get NAME",
+        "nohup lop secret get NAME >/dev/stdout 2>/dev/null",
+        "timeout 30 lop secret get NAME | rev",
+        "timeout -s KILL 30 stdbuf -oL lop secret get NAME",
+        'v=$(timeout 30 lop secret get NAME); echo "$v" | rev',
+        'v=$(nice -n 5 lop secret get NAME); command echo "$v" | rev',
+        'env V="$(lop secret get NAME)" printenv V | rev',
         # a name bound to the program
-        "l=lop; $l secret get [redacted]",
-        'l=lop; v=$("$l" secret get [redacted]); echo "$v" | rev',
+        "l=lop; $l secret get NAME",
+        'l=lop; v=$("$l" secret get NAME); echo "$v" | rev',
         # and the value in command position, which bash prints back
-        "v=$(lop secret get [redacted]); $v",
+        "v=$(lop secret get NAME); $v",
     ],
 )
 def test_r3_2_the_reach_covers_the_program_names_and_the_wrappers(command: str) -> None:
@@ -1110,8 +1110,8 @@ def test_r3_2_the_reach_covers_the_program_names_and_the_wrappers(command: str) 
         "command -v lop",
         "timeout 5 sleep 0.1",
         "env | grep -c lop",
-        "lop secret get [redacted] > /tmp/contained 2>/dev/null; echo contained",
-        'v=$(lop secret get [redacted]); curl -H "Authorization: Bearer $v" https://x',
+        "lop secret get NAME > /tmp/contained 2>/dev/null; echo contained",
+        'v=$(lop secret get GITHUB_TOKEN); curl -H "Authorization: Bearer $v" https://x',
     ],
 )
 def test_r3_2_the_wrapper_reach_does_not_refuse_ordinary_commands(command: str) -> None:
@@ -1123,18 +1123,18 @@ def test_r3_2_the_wrapper_reach_does_not_refuse_ordinary_commands(command: str) 
     "command",
     [
         # R3-3: the ways a value is re-bound that the `NAME=$(…)` rule never saw.
-        "for x in $(lop secret get [redacted]); do echo $x; done",
-        'v=$(lop secret get [redacted]); a=("$v"); echo "${a[@]}"',
-        'v=$(lop secret get [redacted]); a[0]="$v"; echo "${a[0]}"',
-        'v=$(lop secret get [redacted]); v+=$(lop secret get [redacted]); echo "$v"',
-        'lop secret get [redacted] > /tmp/f; read -r l < /tmp/f; echo "$l"',
-        'lop secret get [redacted] > /tmp/f; mapfile -t a < /tmp/f; echo "${a[0]}"',
-        'lop secret get [redacted] > /tmp/f; l=$(< /tmp/f); echo "$l"',
-        'lop secret get [redacted] > /tmp/f; l=$(cat /tmp/f); echo "$l"',
-        "lop secret get [redacted] > /tmp/f; cat /tmp/f",
+        "for x in $(lop secret get NAME); do echo $x; done",
+        'v=$(lop secret get NAME); a=("$v"); echo "${a[@]}"',
+        'v=$(lop secret get NAME); a[0]="$v"; echo "${a[0]}"',
+        'v=$(lop secret get NAME); v+=$(lop secret get NAME); echo "$v"',
+        'lop secret get NAME > /tmp/f; read -r l < /tmp/f; echo "$l"',
+        'lop secret get NAME > /tmp/f; mapfile -t a < /tmp/f; echo "${a[0]}"',
+        'lop secret get NAME > /tmp/f; l=$(< /tmp/f); echo "$l"',
+        'lop secret get NAME > /tmp/f; l=$(cat /tmp/f); echo "$l"',
+        "lop secret get NAME > /tmp/f; cat /tmp/f",
         # stderr is part of this result, and a `2>` beside it changes nothing
-        "lop secret get [redacted] 2>/dev/null",
-        "lop secret get [redacted] >&2",
+        "lop secret get NAME 2>/dev/null",
+        "lop secret get NAME >&2",
     ],
 )
 def test_r3_3_a_rebinding_carries_the_value(command: str) -> None:
@@ -1145,7 +1145,7 @@ def test_r3_3_a_rebinding_carries_the_value(command: str) -> None:
 
 def test_r3_3_an_export_declared_before_the_assignment_still_exports() -> None:
     """`export V; V=$(…)` exports the later binding (bash: measured, rc 0)."""
-    result = scan_command("export V; V=$(lop secret get [redacted]); printenv V")
+    result = scan_command("export V; V=$(lop secret get NAME); printenv V")
     assert result.verdict == "printing"
     assert "shell.environment-dump-of-source" in result.labels
     # …and an `export` whose name is never bound reaches nothing of ours.
@@ -1200,9 +1200,9 @@ def test_r3_4_the_new_eval_rules_do_not_refuse_derived_observations(cell: str) -
         # Fold-in (round 4): the `=` inside an ARGUMENT is not a shell
         # assignment, and skipping assignment-shaped words stage-wide let the
         # incident's own `KEY = value` print through as a consumer.
-        "v=$(lop secret get [redacted]); echo TOKEN=$v",
-        'v=$(lop secret get [redacted]); echo "TOKEN=$v" | rev',
-        'v=$(lop secret get [redacted]); printf "%s\\n" TOKEN=$v',
+        "v=$(lop secret get NAME); echo TOKEN=$v",
+        'v=$(lop secret get NAME); echo "TOKEN=$v" | rev',
+        'v=$(lop secret get NAME); printf "%s\\n" TOKEN=$v',
     ],
 )
 def test_the_key_value_print_is_not_a_binding(command: str) -> None:
@@ -1214,7 +1214,7 @@ def test_the_key_value_print_is_not_a_binding(command: str) -> None:
     "command",
     [
         "V=1 echo TOKEN=literal",
-        "v=$(lop secret get [redacted]); printf '%s\\n' X=$v > /tmp/contained",
+        "v=$(lop secret get NAME); printf '%s\\n' X=$v > /tmp/contained",
         "export V=1; printenv V",
     ],
 )
