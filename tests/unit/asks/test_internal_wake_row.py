@@ -124,6 +124,10 @@ _SCHEDULES_READERS: dict[str, dict[str, str]] = {
     "local_operator/session/session.py": {
         "_aida_reconcile_now": "full-list writer (Aida's cadence reconcile)",
         "_apply": "full-list writer (the ask deadline row's arm/retire)",
+        "_catchup_notify_from_live_rows": (
+            "an engine reader: the catch-up delivery's notify intent, re-read "
+            "from the live rows at take time; it renders nothing"
+        ),
         "_flush_patience_armed_after": "full-list writer (patience's armed-after patch)",
         "_rebuild_wake_index_entry": "full-list writer (the index the supervisor reads)",
         "arm_ask_wake": "full-list writer (the ask deadline row)",

@@ -95,7 +95,11 @@ def notification_path_opt_in() -> Iterator[None]:
     os.environ.pop(ENV_DISABLE, None)
     os.environ[ENV_ALLOW_TEST_HOSTING_NOTIFY] = "1"
     try:
-        with mock.patch(_IDENTITY_GATE, lambda: True):
+        # The lambda accepts (and ignores) the gate's `report` parameter: the
+        # runtime's quiet arm calls the predicate as `(report=False)`, and a
+        # zero-arg lambda would turn that legitimate call into a TypeError for
+        # every test that takes this opt-in while driving a completion arm.
+        with mock.patch(_IDENTITY_GATE, lambda *, report=True: True):
             yield
     finally:
         for name, value in prior.items():
