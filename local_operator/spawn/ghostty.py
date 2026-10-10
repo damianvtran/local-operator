@@ -46,6 +46,47 @@ def linux_argv(binary: str, launch: ForkLaunch) -> list[str]:
     return [binary, f"--working-directory={launch.cwd}", "-e", *launch.argv]
 
 
+#: How long to wait for ``open``'s EXIT STATUS. ``open -na`` returns as soon as
+#: LaunchServices has accepted the launch, well inside this; a missing bundle
+#: exits 1 in a few hundred milliseconds (measured: ``open -na Missing.app`` ->
+#: rc=1 in 0.3 s). Same bound, same reason and same "a timeout counts as
+#: success" rule as ``apple.APPLESCRIPT_EXIT_TIMEOUT_S`` and
+#: ``resume_click._launch_once``.
+OPEN_EXIT_TIMEOUT_S = 2.0
+
+
+def _open_reported(argv: list[str]) -> bool:
+    """Start ``open`` detached and report whether it LAUNCHED, not merely started.
+
+    ``spawn_detached`` answers True when the child STARTED, and ``open`` always
+    starts: pointed at a Ghostty that is not installed it still returned True, so
+    a caller trying the next candidate (the notification click's remembered-
+    terminal rung, then Terminal.app) never did, the receipt was suppressed, and
+    the click did nothing — reproduced with the app name pointed at a missing
+    bundle (review, F3). ``/fork`` benefits identically: it now prints its receipt
+    for a Ghostty that is gone. A timeout means ``open`` is still working, which
+    is success; it is never killed.
+    """
+    import subprocess
+
+    from local_operator.procstate import detached_popen_kwargs
+
+    try:
+        process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **detached_popen_kwargs(),
+        )
+    except Exception:  # noqa: BLE001 — best-effort, like every spawn here
+        return False
+    try:
+        return process.wait(timeout=OPEN_EXIT_TIMEOUT_S) == 0
+    except subprocess.TimeoutExpired:
+        return True
+
+
 class GhosttyBackend:
     """Opens a fork in a new ghostty window."""
 
@@ -65,7 +106,7 @@ class GhosttyBackend:
         if sys.platform == "darwin":
             # `open` is in the base system; no resolution needed, and its
             # absence would mean a far more broken machine than this can help.
-            return spawn_detached(macos_argv(launch))
+            return _open_reported(macos_argv(launch))
         binary = shutil.which("ghostty")
         if binary is None:
             # Markers present but no binary: an ssh hop out of a ghostty window,

@@ -34,7 +34,6 @@ from local_operator.session.page_cache import (
     load_transcript_page,
     page_cache,
     page_key,
-    reset_page_cache,
     retained_bytes,
 )
 from local_operator.session.transcript import (
@@ -54,14 +53,6 @@ _JOIN_TURNS = 8
 #: assertion is always the state the wait produces, and this only turns a
 #: regression into a named failure instead of a hung suite.
 _BACKSTOP_S = 30.0
-
-
-@pytest.fixture(autouse=True)
-def _empty_cache():
-    """A process-wide cache is process-wide state: no test may inherit another's."""
-    reset_page_cache()
-    yield
-    reset_page_cache()
 
 
 def _journal(directory: Path, ids: list[str]) -> Path:

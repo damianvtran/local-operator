@@ -56,6 +56,13 @@ def feature_flags() -> dict[str, Any]:
         # bug, so the sentence stands alone.
         "commands": 2,
         "catalogues": 1,
+        # The catalogue route and the resolved `language` field beside this
+        # map. Additive like every key here: a client that predates it ignores
+        # it and reads exactly what it read before — which is why `i18n` is a
+        # NEW key rather than a bump of an existing one (nothing is withheld)
+        # and why no existing client changes behaviour while it is dark
+        # (M0 state: en-only, RFC §9 P1).
+        "i18n": 1,
         # The SESSIONLESS skill catalogue: `GET /v1/desktop/skills` answers
         # for an explicit `cwd` (home when omitted) with no session at all,
         # and every answer — sessionless or session form — carries `version`,
@@ -787,5 +794,19 @@ def feature_flags() -> dict[str, Any]:
         # row (an additive field) rather than bump this key — a renderer that can read
         # link-only rows can read a fuller one.
         "code_requests": 1,
+        # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
+        # empty-session advisory that the selected account has no quota left
+        # (design: "pre-emptive no-quota notice"). Its OWN key rather than a
+        # bump of `catalogues`/`auth`, by the rule `code_requests` states
+        # above: the route is ADDITIVE — an older renderer never calls it —
+        # so this gates nothing for an old client. It is how a renderer
+        # learns the surface EXISTS before it mounts the notice line and
+        # starts a refetch cycle whose request an older backend answers with
+        # a 404. Absent, the empty session renders exactly as today, with no
+        # notice affordance and no request; that is the pre-feature state
+        # rather than a degraded one. The renderer must also treat a 404 as
+        # definitive (show nothing, do not retry), because a backend that
+        # answers this key yet 404s the route is broken, not slow.
+        "quota_notice": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }

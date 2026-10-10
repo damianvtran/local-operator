@@ -79,6 +79,11 @@ async def _ask_user(questions: list[Any]) -> dict[str, list[str]] | None:
     return None
 
 
+async def _allow_quiet() -> None:
+    """Presence-only door for the quiet-end tool; the builder reads no more."""
+    return None
+
+
 def _engine_context(**kwargs) -> ToolContext:
     """A context carrying every capability the default surface reads, so the
     whole table can build: the wake scheduler, the subagent launcher, the job
@@ -113,6 +118,10 @@ def _engine_context(**kwargs) -> ToolContext:
         # whole table builds only while the door is present, exactly as the
         # ask hook above keeps ``ask`` buildable.
         withdraw_ask=lambda ask_id, **kwargs: {"ok": True},
+        # The quiet-end door (docs/design/quiet-turns.md §4): presence-only,
+        # exactly as the two above — the session binds it per turn and it is
+        # the ONE fact ``build_no_reply_tool``'s createIf gate reads.
+        quiet_end=_allow_quiet,
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -234,6 +243,32 @@ def test_default_set_drops_ask_withdraw_without_the_queue_door() -> None:
     assert without == [name for name in withdoor if name != "ask_withdraw"]
 
 
+def test_default_set_drops_no_reply_without_the_quiet_end_door() -> None:
+    """createIf rung 3 for the quiet-end tool (docs/design/quiet-turns.md §4).
+
+    The door is the session's ONE availability fact, and the session binds it
+    to ``None`` in exactly the cases the design names — a subagent child, a
+    one-shot/headless host, an output-contract session and under
+    ``LOP_NO_REPLY=0`` — so from the registry's point of view those four are
+    one predicate, asserted here as a delta against the fully-capable surface.
+    The session-side binding of each case is pinned where it lives:
+    tests/unit/tools/test_no_reply_tool.py (child, one-shot, kill switch) and
+    tests/unit/test_output_contract.py (contract).
+    """
+    withdoor = [tool.name for tool in create_tools(_engine_context())]
+    without = [tool.name for tool in create_tools(_engine_context(quiet_end=None))]
+    assert "no_reply" in withdoor
+    assert without == [name for name in withdoor if name != "no_reply"]
+
+
+def test_no_reply_is_appended_last_in_both_tables() -> None:
+    """Appending never shifts a provider-visible array prefix — the prompt
+    cache keys on that array — so both tables must END with the tool, not
+    merely contain it (docs §8)."""
+    assert DEFAULT_TOOL_NAMES[-1] == "no_reply"
+    assert list(TOOL_BUILDERS)[-1] == "no_reply"
+
+
 def _invalid_enum_nodes(node: Any) -> list[str]:
     findings: list[str] = []
 
@@ -284,10 +319,12 @@ def test_every_tool_has_schema_and_metadata() -> None:
         assert "properties" in tool.parameters
         # A zero-arg tool (e.g. list_variables, jobs) legitimately has no params
         # of its own. `i` is injected into every schema, so "no params" is now
-        # "nothing but `i`".
+        # "nothing but `i`". The tuple below is the DELIBERATE census of such
+        # tools — ``no_reply`` is the newest member: an argumentless call whose
+        # whole content is its existence (docs/design/quiet-turns.md §4).
         own = {k: v for k, v in tool.parameters["properties"].items() if k != INTENT_FIELD}
         if own == {}:
-            assert tool.name in ("list_variables", "jobs")
+            assert tool.name in ("list_variables", "jobs", "no_reply")
         else:
             assert own
         # presentation + scheduling metadata are populated

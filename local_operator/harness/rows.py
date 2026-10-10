@@ -417,6 +417,62 @@ def is_hidden_tool_message(message: Any) -> bool:
     return all(is_hidden_tool_call(call) for call in calls)
 
 
+#: The quiet-turn tool's name (design ``docs/design/quiet-turns.md`` §4/§5, slice
+#: S1). The literal lives with the tool's builder (``tools/builtin.py``); this
+#: module only ever COMPARES against it, so a rename shows up here as a predicate
+#: that stops matching rather than as a silent pass (the ``_ASK_TOOL_NAME`` rule).
+#:
+#: Deliberately NOT in :data:`HIDDEN_TOOL_NAMES`, and every edge of that
+#: exclusion is load-bearing: that set is subtracted from the history window's
+#: DISPLAY pages (``session/history_window.py``), from the served journal rows
+#: (:func:`visible_transcript_rows`) and from the transcript index's counts, and
+#: the dashboard UI needs the persisted pair as the structural close of its
+#: settled turn (design §5, the quiet-close rule). The pair therefore hides at
+#: the PAINT seams of the TUI and the relay fold — each host asks these
+#: predicates there — and stays an ordinary row everywhere else: the model's
+#: context, the journal, the display pages.
+QUIET_TURN_TOOL = "no_reply"
+
+
+def is_quiet_turn_name(name: Any) -> bool:
+    """Whether a tool NAME is the quiet-turn tool's (``no_reply``)."""
+    return str(name or "") == QUIET_TURN_TOOL
+
+
+def is_quiet_turn_call(call: Any) -> bool:
+    """Whether a ``ToolCall``-shaped object names the quiet-turn tool.
+
+    The call half of the pair the TUI and relay folds skip (design §5): the
+    assistant row's call never paints a ledger row, which is what keeps the
+    sentinel out of the transcript the operator reads while the pair itself
+    stays persisted. The result half is :func:`is_quiet_turn_result`.
+    """
+    return is_quiet_turn_name(getattr(call, "name", None))
+
+
+def is_quiet_turn_result(result: Any) -> bool:
+    """Whether a tool RESULT-shaped object is the quiet pair's result.
+
+    Reads the marker (``harness.types.QUIET_TURN_KEY``) the loop stamps on the
+    result's ``details`` — the details-mapping shape
+    :func:`is_ask_gate_divert_details` classifies. Unlike the call predicate this
+    does not read a name: a result can reach a settle seam without its call's
+    name being freshly readable, and the marker is the quiet end's OWN fact.
+    A fold that receives one settles nothing for it — no row may be born for the
+    pair at any seam (design §5: "hidden in TUI and relay").
+    """
+    details = getattr(result, "details", None)
+    if not isinstance(details, Mapping):
+        return False
+    # Imported HERE, not at module scope: this module imports no harness type at
+    # module scope (see the header), and the key lives beside ``FAULT_KEY`` in
+    # ``harness.types`` because that is where the harness declares what it writes
+    # into ``ToolResult.details``. The same shape as ``output_limit_call_receipt``.
+    from local_operator.harness.types import QUIET_TURN_KEY
+
+    return details.get(QUIET_TURN_KEY) is True
+
+
 def is_ask_gate_divert_details(details: Any) -> bool:
     """Whether a tool result's ``details`` mapping carries the divert marker.
 

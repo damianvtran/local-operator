@@ -92,6 +92,20 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         # and the tracked note exist to keep the tool findable, and the
         # deferral PR's A/B measurement ships as the evidence.
         "code_requests",
+        # ``no_reply`` joins on the design's own reasoning (docs/design/
+        # quiet-turns.md §4): the call has NO arguments, so no schema is needed
+        # to form it, and calls to tools absent from the array were measured
+        # accepted on four wires (see the module docstring). The system-prompt
+        # sentence that will NAME the rule is slice S0b and has not landed yet:
+        # until it does, the only model-visible mention is this set's own
+        # purpose phrase below ("end a turn silently"), so do not read the
+        # adoption probe as already carried by prompt text. Cost avoided:
+        # roughly 60 schema tokens per request on every top-level session that
+        # holds it. The named probe guarding this choice (owner S0b): 20
+        # scripted peer-ping turns per arm on one live model; under 80%
+        # adoption removes it from this set (one line — ``network`` and
+        # ``ask_withdraw`` were re-admitted on exactly this signal).
+        "no_reply",
     }
 )
 
@@ -112,6 +126,7 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "read_variable": "read one variable",
     "list_variables": "list variable names",
     "code_requests": "PR/MR status, review rounds, CI",
+    "no_reply": "end a turn silently",
 }
 
 #: ``tools.defer`` — the kill switch. On by default; off publishes every

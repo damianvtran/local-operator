@@ -459,6 +459,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/i18n/catalogues.py": (
+        1,
+        "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "
+        "sidecar inside the packaged ``local_operator/i18n/catalogues/`` tree — package "
+        "data shipped with the wheel, never an entry of a session directory",
+    ),
     "local_operator/network/audit.py": (
         1,
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
@@ -675,6 +681,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_MARKER`` (``.build-stamp``): the notifier app's own build stamp, written into its "
         "package directory",
     ),
+    "local_operator/spawn/remembered.py": (
+        1,
+        "``_FILE`` (``last-terminal.json``): the attended-terminal memory, written under "
+        "``<config>/notifier/`` — machine-local state about an emulator, never an entry of "
+        "a session directory",
+    ),
+    "local_operator/tui/notify.py": (
+        1,
+        "``_ACTION_PROBE_FILE`` (``notify-send-actions.json``): the per-binary ``--action`` "
+        "probe cache under ``<config>/notifier/`` — machine-local state about an installed "
+        "binary, never an entry of a session directory",
+    ),
     # ---- the signed helper app the macOS wheel ships ----
     "local_operator/operator/macos/keyagent.py": (
         2,
@@ -697,6 +715,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``config.evidence_root/<episode-id>-<arm-id>`` -- an evidence directory "
         "the caller owns (the benchmark run root), never an entry of a session "
         "directory; a replica re-creates the reserve rather than carrying it",
+    ),
+    # ---- the turn-supplement feature's rule IDS ----
+    "local_operator/supplements/denylist.py": (
+        4,
+        "``RULE_CONFIG_DIR``/``RULE_NAME``/``RULE_NAME_PREFIX``/``RULE_SUFFIX`` are rule "
+        "IDS: the tags ``is_sensitive`` returns and a surface logs to say which class "
+        "refused a path (the module's docstring: 'every rule has a stable id'). Bare "
+        "words, never entries of a session directory; they trip this guard only because "
+        "their constant names end in DIR/NAME/PREFIX/SUFFIX while their values read as "
+        "path-shaped spellings",
     ),
     # ---- ID / KEY FRAGMENTS (widened guard): a ``*_PREFIX``/``*_SUFFIX`` constant is a
     # ---- FRAGMENT joined to some id or key, never a bare entry of a session directory.

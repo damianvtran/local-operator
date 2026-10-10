@@ -4,7 +4,8 @@ What is pinned: the Interactions-API call shape (endpoint, ``x-goog-api-key``,
 the documented content-block input, the image-only ``response_format`` and the
 aspect-ratio mapping), the response parse across BOTH documented shapes
 (``steps[].model_output`` content blocks; the ``output_image`` convenience
-property), the recorded v1 skips (img2img, >1 image), and the failure classes
+property), the wired edit path (the source as an image content block),
+the recorded skip for >1 image, and the failure classes
 that fail forward. NO live probe ran in this wave (operator decision) — the
 tiered citations live in ``docs/design/image-providers.md``.
 """
@@ -178,12 +179,34 @@ async def test_a_pinned_model_overrides_the_default() -> None:
 
 
 @pytest.mark.asyncio
-async def test_img2img_and_multi_image_are_recorded_skips() -> None:
-    http = _client(lambda request: httpx.Response(500))
+async def test_an_edit_appends_the_source_as_an_image_content_block() -> None:
+    recorder = _Recorder()
+    response = _steps_response({"type": "image", "data": PNG_B64, "mime_type": "image/png"})
+    http = _client(recorder.handler(response))
 
-    with pytest.raises(RungSkipped) as caught:
-        await _run(_Recorder(), source_url="data:image/png;base64,AAAA", client=http)
-    assert caught.value.reason_class == "unsupported"
+    result = await _run(recorder, source_url=f"data:image/png;base64,{PNG_B64}", client=http)
+
+    body = recorder.bodies[0]
+    # The docs' own block shape: base64 WITHOUT the data-URI prefix, the mime
+    # split into its own field, appended after the text block.
+    assert body["input"][0] == {"type": "text", "text": "a cat"}
+    assert body["input"][1] == {"type": "image", "data": PNG_B64, "mime_type": "image/png"}
+    assert result.assets[0].data == PNG_1X1
+
+
+@pytest.mark.asyncio
+async def test_an_edit_with_a_non_data_uri_source_is_refused_before_the_wire() -> None:
+    recorder = _Recorder()
+    http = _client(recorder.handler(httpx.Response(200, json={})))
+
+    with pytest.raises(APIError):
+        await _run(recorder, source_url="https://example.com/x.png", client=http)
+    assert recorder.requests == []
+
+
+@pytest.mark.asyncio
+async def test_multi_image_is_still_a_recorded_skip() -> None:
+    http = _client(lambda request: httpx.Response(500))
 
     with pytest.raises(RungSkipped) as caught:
         await _run(_Recorder(), num_images=2, client=http)
@@ -237,11 +260,13 @@ async def test_a_pre_aborted_signal_stops_before_the_request() -> None:
 
 
 def test_the_spec_declares_no_cancel_and_a_rate_table() -> None:
-    from local_operator.artifacts.rung import CancelSupport
+    from local_operator.artifacts.rung import CancelSupport, SourceSupport
     from local_operator.imagegen import ImageRoute, cascade
 
     spec = cascade.RUNG_SPECS[ImageRoute.GOOGLE]
     assert spec.label == "Google"
     assert spec.cancel_support == CancelSupport.NONE
     assert spec.cost == "rate_table"
-    assert spec.capabilities == frozenset({"t2i"})
+    assert spec.capabilities == frozenset({"t2i", "i2i"}), "the edit path is wired"
+    assert spec.sources == SourceSupport.MULTI
+    assert spec.max_sources == 14

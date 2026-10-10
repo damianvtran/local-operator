@@ -36,6 +36,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "credentials",
         "extensions",
         "failover",
+        "highlights",
         "image-generation",
         "mcp",
         "mobile",
@@ -90,6 +91,7 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("list available agents or spawn a subagent", "agents"),
         ("set up phone access so I can drive lop from my mobile", "mobile"),
         ("generate an image of a cat", "image-generation"),
+        ("what are the highlights under my answer and how do I turn them off", "highlights"),
         ("create a Radient personal tunnel with OpenCode routes and billing", "tunnel"),
         ("why is my usage blank", "qwencloud"),
         (
