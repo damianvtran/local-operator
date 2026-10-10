@@ -602,35 +602,53 @@ def refuse_real_notifier_spawn(monkeypatch):
 
     A test that deliberately runs the real helper opts in the visible way the
     gates above document: pass ``LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1`` in the
-    child's environment. The pin is ``test_click_durability.py::
-    test_a_unit_run_cannot_start_a_real_notifier_without_the_seam``.
+    child's environment. The pins are ``test_click_durability.py::
+    test_a_unit_run_cannot_start_a_real_notifier_without_the_seam`` and, for
+    the class contract, ``::test_the_spawn_guard_keeps_the_popen_class_contract``.
     """
-    real_popen = subprocess.Popen
 
-    def guarded_popen(args, *rest, **kwargs):
-        argv = [args] if isinstance(args, (str, bytes)) else list(args)
-        name = os.path.basename(str(argv[0])) if argv else ""
-        if name == "notifier" or name.startswith("notifier-"):
-            child_env = kwargs.get("env")
-            seam = (child_env if child_env is not None else os.environ).get(
-                "LOCAL_OPERATOR_NOTIFIER_DRY_RUN"
-            )
-            if seam != "1":
+    # The base is the REAL ``Popen``: this class body evaluates before the
+    # ``setattr`` below, so the name still holds the unpatched class.
+    class _GuardedPopen(subprocess.Popen[bytes]):
+        """The refusal, expressed as a Popen SUBCLASS — never a replacement.
+
+        WHY NOT A FUNCTION (round-3 regression). Whatever occupies
+        ``subprocess.Popen`` here IS Popen for every consumer in the process,
+        and consumers subscript it at runtime — the ``mcp`` package evaluates
+        ``subprocess.Popen[bytes]`` as its platform utility modules import,
+        and the repo's own annotations name ``Popen[...]`` widely. A plain
+        function answers the subscript — and ``isinstance()`` — with
+        ``TypeError: 'function' object is not subscriptable``: a measured 35
+        tests across the MCP auth and desktop catalog suites went red on the
+        broken head. Subclassing keeps ``Popen[str]``, ``isinstance`` and
+        ``issubclass`` working; the pin is
+        ``test_click_durability.py::test_the_spawn_guard_keeps_the_popen_class_contract``.
+        """
+
+        def __init__(self, args, *rest, **kwargs):
+            argv = [args] if isinstance(args, (str, bytes)) else list(args)
+            name = os.path.basename(str(argv[0])) if argv else ""
+            if name == "notifier" or name.startswith("notifier-"):
+                child_env = kwargs.get("env")
+                seam = (child_env if child_env is not None else os.environ).get(
+                    "LOCAL_OPERATOR_NOTIFIER_DRY_RUN"
+                )
+                if seam != "1":
+                    raise RuntimeError(
+                        f"refusing to start {argv[0]!r} without "
+                        "LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1: the dry-run seam is the "
+                        "only way a unit run reaches the notification helper (see "
+                        "tests/conftest.py::refuse_real_notifier_spawn)"
+                    )
+            if name == "osascript" and any("display notification" in str(arg) for arg in argv):
                 raise RuntimeError(
-                    f"refusing to start {argv[0]!r} without "
-                    "LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1: the dry-run seam is the "
-                    "only way a unit run reaches the notification helper (see "
+                    "refusing to spawn a real 'osascript display notification' from a "
+                    "test; stub the spawn instead (see "
                     "tests/conftest.py::refuse_real_notifier_spawn)"
                 )
-        if name == "osascript" and any("display notification" in str(arg) for arg in argv):
-            raise RuntimeError(
-                "refusing to spawn a real 'osascript display notification' from a "
-                "test; stub the spawn instead (see "
-                "tests/conftest.py::refuse_real_notifier_spawn)"
-            )
-        return real_popen(args, *rest, **kwargs)
+            super().__init__(args, *rest, **kwargs)
 
-    monkeypatch.setattr(subprocess, "Popen", guarded_popen)
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
 
 
 @pytest.fixture(autouse=True)

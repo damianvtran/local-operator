@@ -1181,3 +1181,24 @@ def test_a_unit_run_cannot_start_a_real_notifier_without_the_seam(tmp_path: Path
         env={**os.environ, "LOCAL_OPERATOR_NOTIFIER_DRY_RUN": "1"},
     )
     assert allowed.stdout.strip() == "ran"
+
+
+def test_the_spawn_guard_keeps_the_popen_class_contract() -> None:
+    """Whatever the guard puts in ``subprocess.Popen`` must still BE a class.
+
+    WHY. The fixture is autouse and suite-wide, so its replacement is the
+    ``subprocess.Popen`` every test and every imported module sees. Consumers
+    subscript it at runtime — the ``mcp`` package evaluates
+    ``subprocess.Popen[bytes]`` as its platform utility modules import — and
+    a plain function answers that subscript, and ``isinstance()``, with
+    ``TypeError: 'function' object is not subscriptable``: a measured 35
+    tests across the MCP auth and desktop catalog suites went red on the
+    broken head. A subclass keeps ``Popen[str]``, ``isinstance`` and
+    ``issubclass`` working; this pin runs under the live guard.
+    """
+    assert isinstance(subprocess.Popen, type)
+    assert subprocess.Popen[str] is not None
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    assert isinstance(proc, subprocess.Popen)
+    assert proc.wait(timeout=30) == 0
