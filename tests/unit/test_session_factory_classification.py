@@ -588,9 +588,10 @@ def test_the_generate_image_row_is_appended_last_and_membership_gated(
         "generate_image",
     ], "appended at the END, after the session-management set"
     assert rows[-1].resource_url == "tool://generate_image"
-    # The tool's own first sentence (design §2.3 measured it at 117 chars),
-    # within the per-row cap the classification block bounds.
-    assert len(rows[-1].description) == 117
+    # The tool's own first sentence (media wave-2 design D9 re-measured it
+    # at 91 chars — the wire description is 160), within the per-row cap the
+    # classification block bounds.
+    assert len(rows[-1].description) == 91
     assert held[-1].description.startswith(rows[-1].description)
     assert len(rows[-1].description) <= session_factory._TOOL_ROSTER_DESCRIPTION_LIMIT
 
