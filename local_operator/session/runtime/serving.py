@@ -1032,6 +1032,17 @@ class ServingSessionHandle(SessionHandle):
         #: ``create_task`` whose result nobody holds can be collected before it
         #: runs, which is the failure this attribute exists to prevent.
         self._completion_task: asyncio.Task[None] | None = None
+        #: Turn supplements' runner (``session/runtime/supplements.py``). Built here, once
+        #: per handle, because the subscriber that feeds it is installed at boot. Its task
+        #: is deliberately NOT in ``_background_tasks``: see the runner's module docstring.
+        from local_operator.session.runtime.supplements import SupplementRunner
+
+        self._supplements = SupplementRunner(
+            session,
+            cwd=cwd,
+            config_dir=config_dir,
+            seam=getattr(session, "supplement_seam", None),
+        )
         # Same shape as ``on_turn_settled``: the session flips the record's
         # ``started`` bit the first time a real turn runs (see
         # ``_run_turn_pipeline``), and the registrant owns the publish.
@@ -1565,6 +1576,8 @@ class ServingSessionHandle(SessionHandle):
         task = self._completion_task
         if task is not None and not task.done():
             task.cancel()
+        # The supplement job is droppable by contract: shutdown never waits on it.
+        await self._supplements.cancel()
         # The dispose rung of EVERY exit that is not a viewer-driven retirement:
         # SIGTERM/SIGINT in ``amain``, the reaper's ``_clean_exit``, and a host
         # that disposes in place. Recorded BEFORE the abort below so the turn's
@@ -3099,6 +3112,9 @@ class ServingSessionHandle(SessionHandle):
             # the first heartbeat and with no client attached.
             if isinstance(event, AgentEndEvent):
                 self._maybe_judge_goal(event)
+                # AFTER the judge and, like it, schedule-only: the supplement job waits for
+                # the pipeline to settle before it does anything (memo §2.1).
+                self._maybe_supplement(event)
 
         unsubscribe = self._session.subscribe(handler)
         try:
@@ -3669,6 +3685,24 @@ class ServingSessionHandle(SessionHandle):
             )
         except Exception:  # noqa: BLE001 — the event path never fails on the judge
             logger.debug("goal judge trigger failed", exc_info=True)
+
+    def _maybe_supplement(self, event: AgentEndEvent) -> None:
+        """Schedule a turn supplement off a turn's end (docs/design/turn-supplements.md §2.1).
+
+        SYNCHRONOUS and total, like :meth:`_maybe_judge_goal`: every refusal is a silent
+        return and the work is a detached task, so the answer, the attention marker and the
+        notifications always go out first. Ownership is checked here for the judge's reason:
+        a follower must never spend or write.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+
+        try:
+            if not owns_the_session(self._session):
+                return
+            loop_running = self._goal_loop is not None and bool(self._goal_loop.running)
+            self._supplements.on_agent_end(event, goal_loop_running=loop_running)
+        except Exception:  # noqa: BLE001 — the event path never fails on this feature
+            logger.debug("supplement trigger failed", exc_info=True)
 
     def rearm_goal_judge(self) -> None:
         """Trigger 3, once per boot: re-engage a goal whose judge was in flight.

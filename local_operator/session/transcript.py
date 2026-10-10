@@ -77,6 +77,7 @@ from local_operator.session.runtime.engagement import (  # noqa: F401
     durable_conversation_path,
 )
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
+from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
 
 if TYPE_CHECKING:
     from local_operator.session.history_window import _DisplayWindowCache
@@ -167,6 +168,10 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
+        # A turn supplement lands AFTER the turn settled (memo §2.4 "Activity clock"):
+        # re-ranking a session as freshly worked because a callout arrived would reorder
+        # the sidebar for nothing. The writer passes ``preserve_mtime=True``.
+        SUPPLEMENT_CUSTOM_TYPE,
     }
 )
 

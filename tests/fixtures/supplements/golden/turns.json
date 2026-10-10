@@ -1,0 +1,906 @@
+{
+  "version": 1,
+  "provenance": "Authored for lane C1a against docs/design/turn-supplements.md \u00a75.2. Labels are the class definitions' expected outcome, reviewed as data in the PR; the operator's dogfood week is the acceptance measure.",
+  "turns": [
+    {
+      "id": "g01",
+      "class": "qa",
+      "user": "What is the capital of France?",
+      "answer": "Paris.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g02",
+      "class": "qa",
+      "user": "Explain a mutex in one sentence.",
+      "answer": "A lock that only one thread can hold at a time.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g03",
+      "class": "qa",
+      "user": "Why is the sky blue?",
+      "answer": "Rayleigh scattering \u2014 shorter wavelengths scatter more.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g04",
+      "class": "qa",
+      "user": "Who wrote Middlemarch?",
+      "answer": "George Eliot.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g05",
+      "class": "qa",
+      "user": "What does HTTP 301 mean?",
+      "answer": "Moved permanently: the resource has a new URL.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g06",
+      "class": "qa",
+      "user": "Is Python pass-by-reference?",
+      "answer": "Neither: names bind to objects, arguments are passed by assignment.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g07",
+      "class": "qa",
+      "user": "What is the difference between TCP and UDP?",
+      "answer": "TCP is ordered and acknowledged; UDP is not.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g08",
+      "class": "qa",
+      "user": "When should I use a hash map over a sorted list?",
+      "answer": "When you look up by key far more than you scan in order.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g09",
+      "class": "qa",
+      "user": "Summarise CRDTs briefly.",
+      "answer": "Data types that merge concurrent edits without coordination.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g10",
+      "class": "qa",
+      "user": "What is idempotence in HTTP?",
+      "answer": "Repeating the request has the same effect as sending it once.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g11",
+      "class": "short",
+      "user": "Did you finish?",
+      "answer": "Done.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g12",
+      "class": "short",
+      "user": "Status?",
+      "answer": "Merged #123; CI green.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g13",
+      "class": "short",
+      "user": "Anything else?",
+      "answer": "No \u2014 all set.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g14",
+      "class": "short",
+      "user": "Can you check the log?",
+      "answer": "Checked: no errors.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g15",
+      "class": "short",
+      "user": "Ready?",
+      "answer": "Ready.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g16",
+      "class": "short",
+      "user": "Any blockers?",
+      "answer": "None.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g17",
+      "class": "short",
+      "user": "Did the tests pass?",
+      "answer": "Yes, 812 passed.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g18",
+      "class": "short",
+      "user": "Ping",
+      "answer": "Pong.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g19",
+      "class": "code-edit",
+      "user": "Fix the off-by-one in the paginator",
+      "answer": "Edited src/paginate.py: the slice now starts at the offset.",
+      "tool": "edit",
+      "call": {
+        "path": "src/paginate.py"
+      },
+      "result": "ok",
+      "files": {
+        "src/paginate.py": "def f():\n    return 1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g20",
+      "class": "code-edit",
+      "user": "Rename the config key",
+      "answer": "Renamed `use_new_parser` to `new_parser_enabled` across 3 call sites.",
+      "tool": "edit",
+      "call": {
+        "path": "src/config.py"
+      },
+      "result": "ok",
+      "files": {
+        "src/config.py": "def f():\n    return 1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g21",
+      "class": "code-edit",
+      "user": "Add a retry to the client",
+      "answer": "Added a bounded retry with backoff to src/client.py.",
+      "tool": "edit",
+      "call": {
+        "path": "src/client.py"
+      },
+      "result": "ok",
+      "files": {
+        "src/client.py": "def f():\n    return 1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g22",
+      "class": "code-edit",
+      "user": "Tidy the imports",
+      "answer": "Sorted the imports in src/app.py.",
+      "tool": "edit",
+      "call": {
+        "path": "src/app.py"
+      },
+      "result": "ok",
+      "files": {
+        "src/app.py": "def f():\n    return 1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g23",
+      "class": "code-edit",
+      "user": "Fix the flaky test",
+      "answer": "The test now waits on the event instead of sleeping.",
+      "tool": "edit",
+      "call": {
+        "path": "tests/test_flaky.py"
+      },
+      "result": "ok",
+      "files": {
+        "tests/test_flaky.py": "def f():\n    return 1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g24",
+      "class": "code-edit",
+      "user": "Harden the regex",
+      "answer": "The path regex no longer matches a trailing slash.",
+      "tool": "edit",
+      "call": {
+        "path": "src/parse.py"
+      },
+      "result": "ok",
+      "files": {
+        "src/parse.py": "def f():\n    return 1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g25",
+      "class": "code-edit",
+      "user": "Update the docstring",
+      "answer": "Documented the 409 return in src/api.py.",
+      "tool": "edit",
+      "call": {
+        "path": "src/api.py"
+      },
+      "result": "ok",
+      "files": {
+        "src/api.py": "def f():\n    return 1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g26",
+      "class": "code-edit",
+      "user": "Bump the dependency",
+      "answer": "Pinned httpx to 0.28.1 in pyproject.toml.",
+      "tool": "edit",
+      "call": {
+        "path": "pyproject.toml"
+      },
+      "result": "ok",
+      "files": {
+        "pyproject.toml": "def f():\n    return 1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g27",
+      "class": "deliverable",
+      "user": "Write me a Q3 summary",
+      "answer": "Wrote reports/q3-summary.md \u2014 three sections and the outlook.",
+      "tool": "write",
+      "call": {
+        "path": "reports/q3-summary.md"
+      },
+      "result": "ok",
+      "files": {
+        "reports/q3-summary.md": "# Title\n\nBody.\n"
+      },
+      "expect_files": [
+        "reports/q3-summary.md"
+      ],
+      "expect_graphics": false,
+      "expect_nothing": false
+    },
+    {
+      "id": "g28",
+      "class": "deliverable",
+      "user": "Export the customer list",
+      "answer": "Exported 412 customers to exports/customers.csv.",
+      "tool": "write",
+      "call": {
+        "path": "exports/customers.csv"
+      },
+      "result": "ok",
+      "files": {
+        "exports/customers.csv": "col_a,col_b\n1,2\n"
+      },
+      "expect_files": [
+        "exports/customers.csv"
+      ],
+      "expect_graphics": false,
+      "expect_nothing": false
+    },
+    {
+      "id": "g29",
+      "class": "deliverable",
+      "user": "Draft the meeting minutes",
+      "answer": "Drafted the minutes in notes/standup.md.",
+      "tool": "write",
+      "call": {
+        "path": "notes/standup.md"
+      },
+      "result": "ok",
+      "files": {
+        "notes/standup.md": "# Title\n\nBody.\n"
+      },
+      "expect_files": [
+        "notes/standup.md"
+      ],
+      "expect_graphics": false,
+      "expect_nothing": false
+    },
+    {
+      "id": "g30",
+      "class": "deliverable",
+      "user": "Produce a one-page brief",
+      "answer": "Wrote the brief to briefs/launch.md.",
+      "tool": "write",
+      "call": {
+        "path": "briefs/launch.md"
+      },
+      "result": "ok",
+      "files": {
+        "briefs/launch.md": "# Title\n\nBody.\n"
+      },
+      "expect_files": [
+        "briefs/launch.md"
+      ],
+      "expect_graphics": false,
+      "expect_nothing": false
+    },
+    {
+      "id": "g31",
+      "class": "deliverable",
+      "user": "Save the config table as JSON",
+      "answer": "Wrote exports/config.json.",
+      "tool": "write",
+      "call": {
+        "path": "exports/config.json"
+      },
+      "result": "ok",
+      "files": {
+        "exports/config.json": "{}\n"
+      },
+      "expect_files": [
+        "exports/config.json"
+      ],
+      "expect_graphics": false,
+      "expect_nothing": false
+    },
+    {
+      "id": "g32",
+      "class": "deliverable",
+      "user": "Generate the invoice",
+      "answer": "Rendered the invoice to billing/invoice-1042.html.",
+      "tool": "write",
+      "call": {
+        "path": "billing/invoice-1042.html"
+      },
+      "result": "ok",
+      "files": {
+        "billing/invoice-1042.html": "# Title\n\nBody.\n"
+      },
+      "expect_files": [
+        "billing/invoice-1042.html"
+      ],
+      "expect_graphics": false,
+      "expect_nothing": false
+    },
+    {
+      "id": "g33",
+      "class": "deliverable",
+      "user": "Write the release notes",
+      "answer": "Release notes are in docs/RELEASE.md.",
+      "tool": "write",
+      "call": {
+        "path": "docs/RELEASE.md"
+      },
+      "result": "ok",
+      "files": {
+        "docs/RELEASE.md": "# Title\n\nBody.\n"
+      },
+      "expect_files": [
+        "docs/RELEASE.md"
+      ],
+      "expect_graphics": false,
+      "expect_nothing": false
+    },
+    {
+      "id": "g34",
+      "class": "deliverable",
+      "user": "Make a README for the tool",
+      "answer": "Added tools/importer/README.md with setup and usage.",
+      "tool": "write",
+      "call": {
+        "path": "tools/importer/README.md"
+      },
+      "result": "ok",
+      "files": {
+        "tools/importer/README.md": "# Title\n\nBody.\n"
+      },
+      "expect_files": [
+        "tools/importer/README.md"
+      ],
+      "expect_graphics": false,
+      "expect_nothing": false
+    },
+    {
+      "id": "g35",
+      "class": "benchmark",
+      "user": "Benchmark the three hosts",
+      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {
+        "bench/hosts.csv": "host,req_per_s,p50_ms\nA,120,12\nB,340,9\nC,90,22\n"
+      },
+      "expect_files": [
+        "bench/hosts.csv"
+      ],
+      "expect_graphics": true,
+      "expect_nothing": false
+    },
+    {
+      "id": "g36",
+      "class": "benchmark",
+      "user": "Profile the endpoints",
+      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {
+        "bench/endpoints.tsv": "host,req_per_s,p50_ms\nA,120,12\nB,340,9\nC,90,22\n"
+      },
+      "expect_files": [
+        "bench/endpoints.tsv"
+      ],
+      "expect_graphics": true,
+      "expect_nothing": false
+    },
+    {
+      "id": "g37",
+      "class": "benchmark",
+      "user": "Compare p50 across regions",
+      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": true,
+      "expect_nothing": false
+    },
+    {
+      "id": "g38",
+      "class": "benchmark",
+      "user": "Chart the build times",
+      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {
+        "bench/builds.csv": "host,req_per_s,p50_ms\nA,120,12\nB,340,9\nC,90,22\n"
+      },
+      "expect_files": [
+        "bench/builds.csv"
+      ],
+      "expect_graphics": true,
+      "expect_nothing": false
+    },
+    {
+      "id": "g39",
+      "class": "benchmark",
+      "user": "Measure the cache hit rate",
+      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": true,
+      "expect_nothing": false
+    },
+    {
+      "id": "g40",
+      "class": "benchmark",
+      "user": "Run the load test and compare",
+      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {
+        "bench/load.json": "host,req_per_s,p50_ms\nA,120,12\nB,340,9\nC,90,22\n"
+      },
+      "expect_files": [
+        "bench/load.json"
+      ],
+      "expect_graphics": true,
+      "expect_nothing": false
+    },
+    {
+      "id": "g41",
+      "class": "benchmark",
+      "user": "Break down the spend by model",
+      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": true,
+      "expect_nothing": false
+    },
+    {
+      "id": "g42",
+      "class": "benchmark",
+      "user": "Compare the SDK sizes",
+      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {
+        "bench/sdks.csv": "host,req_per_s,p50_ms\nA,120,12\nB,340,9\nC,90,22\n"
+      },
+      "expect_files": [
+        "bench/sdks.csv"
+      ],
+      "expect_graphics": true,
+      "expect_nothing": false
+    },
+    {
+      "id": "g43",
+      "class": "numbers-no-figure",
+      "user": "How many tests ran?",
+      "answer": "812 tests ran, 0 failures.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g44",
+      "class": "numbers-no-figure",
+      "user": "What version is deployed?",
+      "answer": "0.68.18.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g45",
+      "class": "numbers-no-figure",
+      "user": "How long did it take?",
+      "answer": "Took 4 minutes.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g46",
+      "class": "numbers-no-figure",
+      "user": "What is the retry limit?",
+      "answer": "3 attempts.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g47",
+      "class": "numbers-no-figure",
+      "user": "How many files changed?",
+      "answer": "7 files changed.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g48",
+      "class": "numbers-no-figure",
+      "user": "What's the coverage figure?",
+      "answer": "Coverage is 84%.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g49",
+      "class": "bait",
+      "user": "Summarise what our latency looks like",
+      "answer": "Latency is roughly 12 ms at p50 and 40 ms at p99.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g50",
+      "class": "bait",
+      "user": "Anything odd in the sales numbers?",
+      "answer": "Sales rose about 12% quarter over quarter, 340 to 380 units.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g51",
+      "class": "bait",
+      "user": "How big is the repo?",
+      "answer": "About 1.2 GB across 40k files.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g52",
+      "class": "bait",
+      "user": "How fast is the new parser?",
+      "answer": "It is about 3x faster than the old one, near 9 ms per document.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g53",
+      "class": "bait",
+      "user": "What did the survey say?",
+      "answer": "75% preferred the new layout, 25% the old.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g54",
+      "class": "bait",
+      "user": "Estimate the monthly cost",
+      "answer": "Around $1,200/month at current usage.",
+      "tool": "",
+      "call": {},
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g55",
+      "class": "scratch",
+      "user": "Clean up the temp export",
+      "answer": "Wrote a temp copy to /tmp/x.csv and removed it.",
+      "tool": "write",
+      "call": {
+        "path": "/tmp/x.csv"
+      },
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g56",
+      "class": "scratch",
+      "user": "Dump the debug log",
+      "answer": "Appended to debug.log.",
+      "tool": "bash",
+      "call": {
+        "command": "echo hi >> debug.log"
+      },
+      "result": "",
+      "files": {
+        "debug.log": "hi\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g57",
+      "class": "scratch",
+      "user": "Write a scratch note",
+      "answer": "Left a note in the scratchpad.",
+      "tool": "write",
+      "call": {
+        "path": "$SCRATCHPAD/note.md"
+      },
+      "result": "",
+      "files": {},
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g58",
+      "class": "secret",
+      "user": "Add the new key to the env file",
+      "answer": "Updated .env.",
+      "tool": "write",
+      "call": {
+        "path": ".env"
+      },
+      "result": "",
+      "files": {
+        ".env": "SECRET=1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g59",
+      "class": "secret",
+      "user": "Rotate the ssh key",
+      "answer": "Updated .ssh/id_ed25519.",
+      "tool": "write",
+      "call": {
+        "path": ".ssh/id_ed25519"
+      },
+      "result": "",
+      "files": {
+        ".ssh/id_ed25519": "SECRET=1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    },
+    {
+      "id": "g60",
+      "class": "secret",
+      "user": "Update the deploy credentials",
+      "answer": "Updated deploy/credentials.json.",
+      "tool": "write",
+      "call": {
+        "path": "deploy/credentials.json"
+      },
+      "result": "",
+      "files": {
+        "deploy/credentials.json": "SECRET=1\n"
+      },
+      "expect_files": [],
+      "expect_graphics": false,
+      "expect_nothing": true
+    }
+  ]
+}
