@@ -375,6 +375,60 @@ async def test_cache_expiry_reprobes(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_force_refresh_bypasses_a_warm_cache_and_replaces_it(tmp_path, monkeypatch) -> None:
+    """A user-driven re-check must not be served the cache it is asking about.
+
+    The cache keeps a hint cheap (one probe per window); it is the WRONG
+    answer to the click that just changed the account's state, which is why
+    ``desktop_quota``'s forced re-read (``refresh`` past the floor) passes
+    ``force_refresh`` — R1-X1, the "I verified" flow. The fresh result must
+    also REPLACE the cache, or every later plain read would keep the old
+    answer for the rest of the window.
+    """
+    store = _oauth_store(tmp_path)
+    calls: list[str] = []
+    grants = ["pending", "claimed"]
+
+    async def probe(token: str):
+        calls.append(token)
+        return _verification(signup_grant=grants[min(len(calls) - 1, 1)])
+
+    monkeypatch.setattr(rr, "_probe_verification_async", probe)
+
+    warm = await rr.get_recovery_facts(store=store)
+    assert warm.verification is not None and warm.verification.signup_grant == "pending"
+
+    # A plain read serves the warm cache — that is the cache's job.
+    plain = await rr.get_recovery_facts(store=store)
+    assert plain == warm and calls == ["tok-1"]
+
+    # The forced read bypasses it and sees the changed state...
+    forced = await rr.get_recovery_facts(store=store, force_refresh=True)
+    assert forced.verification is not None and forced.verification.signup_grant == "claimed"
+    assert calls == ["tok-1", "tok-1"]
+    # ...and refreshes the cache for every reader after it.
+    assert await rr.get_recovery_facts(store=store) == forced
+
+
+def test_the_sync_twin_force_refreshes_too(tmp_path, monkeypatch) -> None:
+    """The twins share one cache: a divergence here would be a trap."""
+    store = _oauth_store(tmp_path)
+    calls: list[str] = []
+
+    def probe(token: str):
+        calls.append(token)
+        return _verification(signup_grant="pending" if len(calls) == 1 else "claimed")
+
+    monkeypatch.setattr(rr, "_probe_verification_sync", probe)
+
+    warm = rr.get_recovery_facts_sync(store=store)
+    assert warm.verification is not None and warm.verification.signup_grant == "pending"
+    forced = rr.get_recovery_facts_sync(store=store, force_refresh=True)
+    assert forced.verification is not None and forced.verification.signup_grant == "claimed"
+    assert calls == ["tok-1", "tok-1"]
+
+
+@pytest.mark.asyncio
 async def test_probe_failure_is_swallowed_and_degrades_to_the_generic_line(
     tmp_path, monkeypatch
 ) -> None:

@@ -25,7 +25,8 @@ HOW THE EVIDENCE IS GATHERED. Cache-first with one bounded refresh:
   far too slow for a banner on session open, and the cross-process lease
   inside ``fetch_usage`` keeps N sessions from fanning out at once anyway.
   A forced refresh is additionally floored (``REFRESH_FLOOR_MS``) so a
-  focus-refetch loop cannot spend a provider's per-IP budget.
+  focus-refetch loop cannot spend a provider's per-IP budget; the Radient
+  facts probe below re-checks under the same gate.
 - A timed-out or failed refresh falls back to whatever the cache holds; the
   verdict's own freshness rule (``quota_notice.report_is_fresh``, mirrored
   here) then decides whether it may say anything (usually it may not, and
@@ -36,10 +37,14 @@ THE FREE-MODEL RULE reads the pair's row from the CACHED LISTING first
 ``entry_for``'s registry answer as the fallback: an aggregator ships no static
 rows, so the listing is the only place a quoted ``0.0/0.0`` can come from.
 
-THE RADIENT SENTENCE is fetched from the shared ``radient_recovery``
-machinery ONLY once the verdict says ``depleted`` for Radient (its /me probe
-is cached for 180 s, but a healthy user must not pay it), so no Radient
-string is authored here.
+THE RADIENT SENTENCE AND CLASSIFICATION are fetched from the shared
+``radient_recovery`` machinery ONLY once the verdict says ``depleted`` for
+Radient (its /me probe is cached for 180 s, but a healthy user must not pay
+it), and they are what turns that verdict into ``unverified`` — verify
+first, with the resend affordance when the stored credential can call it.
+A user-driven re-check that gets through ``REFRESH_FLOOR_MS`` forces the
+probe past its cache, because "I verified" must not re-serve the
+pre-verification state (R1-X1). No Radient string is authored here.
 
 The controller comes from ``get_desktop_auth`` and is closed in ``finally``;
 every store read stays on the loop thread, for the sqlite thread-affinity
@@ -62,7 +67,7 @@ from local_operator.providers.quota_notice import (
     evaluate_quota_notice,
     report_is_fresh,
 )
-from local_operator.providers.radient_recovery import get_recovery_facts, recovery_line
+from local_operator.providers.radient_recovery import RecoveryFacts, get_recovery_facts
 from local_operator.providers.registry import credential_provider_id
 from local_operator.providers.usage import UsageReport
 from local_operator.server.desktop import require_desktop
@@ -93,7 +98,10 @@ REFRESH_FLOOR_MS = 15_000
 
 
 class QuotaActionResponse(BaseModel):
-    """One call to action. ``resend_verification`` is reserved (Radient round)."""
+    """One call to action. ``resend_verification`` is performed through the
+    ``signup.resend`` operation of ``POST /v1/desktop/radient`` (the renderer
+    never holds a Radient bearer), and is offered only to an account whose
+    stored credential can call it — see ``_resend_available``."""
 
     id: Literal["open_url", "resend_verification", "refresh"]
     label: str
@@ -223,7 +231,12 @@ async def quota_notice(
         reports: list[UsageReport] = controller.cached_usage_reports(resolved)
         source: Literal["cached", "live"] = "cached"
         now_ms = _now_ms()
-        if _needs_live(reports, now_ms) or (refresh and not _refresh_floor_blocks(reports, now_ms)):
+        # One reading of the user's "re-check now": ``refresh`` past the floor
+        # (round-1 m4 bounds a focus loop). Hoisted because the Radient facts
+        # probe below re-checks under the SAME gate (R1-X1) rather than
+        # serving its own 180 s cache to the click that changed the account.
+        forced = refresh and not _refresh_floor_blocks(reports, now_ms)
+        if _needs_live(reports, now_ms) or forced:
             attempted_at = _now_ms()
             try:
                 live = await asyncio.wait_for(
@@ -254,23 +267,30 @@ async def quota_notice(
             api_key_present=api_key_present,
             entry=entry,
             now_ms=now_ms,
-            radient_line=None,
+            radient_facts=None,
+            resend_available=False,
         )
         if verdict.state == "depleted" and credential_provider_id(resolved) == "radient":
             # The /me probe runs AFTER the verdict (round-1 m3): only a
-            # depleted Radient notice ever renders the sentence, so a healthy
-            # user must not pay a probe — or wait behind one — for a body they
-            # will never see. The probe is cache-fronted (180 s) and a timeout
-            # leaves the module's neutral rendering to stand in.
-            radient_line: str | None = None
+            # depleted Radient notice renders the sentence AND the
+            # verification classification, so a healthy user must not pay a
+            # probe — or wait behind one — for a body they will never see.
+            # A user-driven re-check that got through the floor ALSO bypasses
+            # the probe's own 180 s cache (R1-X1): after "I verified" the
+            # account's state has just changed, and re-serving the cached
+            # "unverified" would be the one answer the person who changed it
+            # must not get. A timed-out or failed probe leaves the module's
+            # neutral rendering to stand in.
+            radient_facts: RecoveryFacts | None = None
             try:
-                facts = await asyncio.wait_for(
-                    get_recovery_facts(store=auth.store), timeout=LIVE_REFRESH_BOUND_S
+                radient_facts = await asyncio.wait_for(
+                    get_recovery_facts(store=auth.store, force_refresh=forced),
+                    timeout=LIVE_REFRESH_BOUND_S,
                 )
-                radient_line = recovery_line(facts)
             except Exception:  # noqa: BLE001 — the module's neutral text stands in
-                radient_line = None
-            if radient_line is not None:
+                radient_facts = None
+            if radient_facts is not None:
+                resend_available = await _resend_available(auth)
                 verdict = evaluate_quota_notice(
                     provider=resolved,
                     model=model_id,
@@ -279,11 +299,35 @@ async def quota_notice(
                     api_key_present=api_key_present,
                     entry=entry,
                     now_ms=now_ms,
-                    radient_line=radient_line,
+                    radient_facts=radient_facts,
+                    resend_available=resend_available,
                 )
         return reply(_response(verdict, provider=resolved, source=source, checked_at_ms=now_ms))
     finally:
         controller.close()
+
+
+async def _resend_available(auth: DesktopAuth) -> bool:
+    """Whether the bearer the proxy WILL spend can call ``POST /auth/signup/resend``.
+
+    That route sits behind the agent-server's JWT-ONLY middleware
+    (``JWTAuthMiddleware``: anything that does not parse as an HMAC JWT gets
+    401 "invalid or expired token"), so a Radient API key can never resend; the
+    affordance degrades to the verification-page link for it. The question asked
+    is "which credential does ``signup.resend`` send", answered by the SAME
+    store cascade ``desktop_radient.radient_bearer`` uses (``get_oauth_access``,
+    ``read_only`` so a banner never moves session stickiness) rather than "does
+    an OAuth row exist": an account holding both could otherwise be offered a
+    button whose request goes out under its API key. An unreadable store answers
+    False — offer less, never a button that may not work. (An API-key-only
+    Radient account has no usage fetcher at all, so it reaches this only
+    alongside an OAuth login.)
+    """
+    try:
+        access = await auth.store.get_oauth_access("radient", read_only=True)
+    except Exception:  # noqa: BLE001 — an unreadable store cannot vouch for a JWT
+        return False
+    return access is not None and access.kind == "oauth"
 
 
 async def _api_key_present(controller, provider: str) -> bool:
