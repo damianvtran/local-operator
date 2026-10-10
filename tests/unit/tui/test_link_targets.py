@@ -569,8 +569,10 @@ def test_hyperlink_support_is_detected_per_terminal() -> None:
     # Never claimed under a multiplexer: tmux/screen do not forward OSC 8
     # without passthrough bookkeeping this deliberately does not attempt.
     assert is_hyperlinked({"TERM_PROGRAM": "ghostty", "TMUX": "/tmp/t,1,0"}) is False
-    # An unrecognised terminal takes the plain-text path rather than a guess.
+    # An unrecognised terminal takes the plain-text path rather than a guess —
+    # including the dumb case, the terminal that genuinely cannot render a link.
     assert is_hyperlinked({"TERM": "xterm-256color"}) is False
+    assert is_hyperlinked({"TERM": "dumb"}) is False
     assert is_hyperlinked({"TERM_PROGRAM": "Apple_Terminal"}) is False
     # The override cuts both ways (the kill switch and the capture-script pin).
     forced_off = {"LOCAL_OPERATOR_HYPERLINKS": "0", "GHOSTTY_RESOURCES_DIR": "/x"}

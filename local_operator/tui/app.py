@@ -56284,8 +56284,10 @@ class OperatorApp(App[None]):
         elif block is None:
             answer = self._supplement_answer_block(anchor)
             if answer is None:
-                # The answer row is not on screen (not in the rendered bound);
-                # a later projection re-reads and mounts it then.
+                # The answer row is not on screen (not in the rendered bound):
+                # the held row mounts when the answer's page does — the
+                # projection read re-arms for a live anchor whose block is not
+                # mounted (see `_request_supplement_reads`).
                 return
             width = 0
             try:
@@ -56463,7 +56465,16 @@ class OperatorApp(App[None]):
             anchor = str(getattr(block, "completion_anchor_id", "") or "")
             if not anchor or anchor in self._supplement_read:
                 continue
-            if anchor in self._supplement_live or anchor in self._supplement_read_inflight:
+            if anchor in self._supplement_read_inflight:
+                continue
+            # A live anchor is skipped only while its own block is mounted:
+            # that is the case its beat path owns end to end (the terminal
+            # beat asks this same read, below its mount branch). A live anchor
+            # with NO block fell out of that path — the beat landed while its
+            # answer was outside the rendered bound, so `_apply_supplement`
+            # returned before the read was asked — and this pass is the one
+            # that re-arms it when the answer's page mounts.
+            if anchor in self._supplement_live and anchor in self._supplement_blocks:
                 continue
             anchors.append(anchor)
         if not anchors:
