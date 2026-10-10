@@ -2676,3 +2676,42 @@ def test_the_two_viewport_meta_copies_agree_and_match_the_runtime_constant() -> 
     # keyboard opens, which the --lo-vvh pin depends on; initial-scale=1 keeps the
     # default reading size. The wide mode is the only thing allowed to leave them.
     assert "width=device-width" in shell and "initial-scale=1" in shell
+
+
+def test_durable_projection_carries_supplement_rows_per_anchor(tmp_path, monkeypatch) -> None:
+    """The cold-open half of the sibling map (memo §3.1 row 18): custom rows are
+    invisible to ``fold_history`` (messages only), so the durable fold collects
+    them itself -- newest version per anchor, replay-safe -- and the rebuild
+    copies the map onto the projection an old app build ignores."""
+    import asyncio
+
+    from local_operator.mobile.daemon import _durable_projection
+    from local_operator.session.transcript import Transcript
+    from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+    cfg = tmp_path / "config"
+    root_dir = cfg / "sessions" / "root-session"
+    root_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    def row(anchor: str, version: int, state: str) -> dict:
+        return {
+            "anchor": anchor,
+            "job": "3f9c1a7e5b20",
+            "version": version,
+            "state": state,
+            "files": [],
+            "components": [],
+            "at": 1791000000.0 + version,
+        }
+
+    transcript = Transcript(root_dir)
+    asyncio.run(transcript.append_custom(SUPPLEMENT_CUSTOM_TYPE, row("a" * 32, 1, "decided")))
+    asyncio.run(transcript.append_custom(SUPPLEMENT_CUSTOM_TYPE, row("a" * 32, 2, "done")))
+    asyncio.run(transcript.append_custom(SUPPLEMENT_CUSTOM_TYPE, row("b" * 32, 1, "queued")))
+
+    projection = _durable_projection("root-session")
+    assert projection is not None
+    assert projection.supplements["a" * 32]["version"] == 2
+    assert projection.supplements["a" * 32]["state"] == "done"
+    assert projection.supplements["b" * 32]["state"] == "queued"

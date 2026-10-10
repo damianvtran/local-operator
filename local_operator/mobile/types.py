@@ -1106,6 +1106,14 @@ class SessionProjection:
     context_is_estimate: bool | None = None
     version: int = 0  # projection epoch; the phone drops stale repaints
     attention: dict[str, Any] = field(default_factory=dict)
+    #: Turn supplements (memo §2.7/§3.1 row 18; probe P5's fallback): the newest
+    #: beat per anchor, as a SIBLING MAP rather than a new ``kind`` in
+    #: ``transcript``. A projection is ONE snapshot fanned to every subscriber, so
+    #: a per-viewer ``kind`` is not expressible here; an unknown entry kind is
+    #: rendered visibly by older app builds, while an unknown sibling key is
+    #: ignored by them (loose JSON, tolerantly rebuilt). New clients render the
+    #: blocks from this map; the wire name matches the journal's anchor key.
+    supplements: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)

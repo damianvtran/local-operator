@@ -1686,6 +1686,11 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
     # fold_history reads messages without mutating them, so the cached list
     # can be shared; the fold builds its own TranscriptEntry rows.
     fold.fold_history(state.history)
+    #: Turn supplements (memo §3.1 row 18): the durable rows are CUSTOM entries,
+    #: which fold_history (messages only) never sees, so the sibling map is
+    #: copied from the durable fold's own per-anchor collection. Old app builds
+    #: ignore the key; new ones render the settled blocks on a cold open.
+    projection.supplements = {anchor: dict(row) for anchor, row in state.supplements.items()}
 
     # The persisted roster is the restart-safe ownership record for child
     # routes. Rebuilding from it keeps old session projections useful without
