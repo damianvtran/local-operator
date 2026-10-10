@@ -1376,15 +1376,21 @@ def test_a_dump_armed_after_the_turn_began_is_not_its_evidence(
 def test_a_boot_record_carries_the_spawn_chain_and_old_rows_stay_readable(
     tmp_path: Path,
 ) -> None:
-    """2026-10-09: the chain rides the boot record too — a clean exit keeps it.
+    """2026-10-09/D1: the chain rides the boot record — with its recorded liveness.
 
-    The signal receipt carries liveness because it is written AT arrival; the
-    boot record carries only the facts recorded at spawn, and an older row
-    without the key parses to ``None`` rather than failing or inventing one.
+    The boot record is the artifact attribution readers prefer, so each entry's
+    liveness as recorded at spawn (``alive_at_spawn``) travels through both the
+    JSON file and ``from_json`` unchanged; the arrival reading is added only
+    when a signal actually lands (the receipt). An older row without the key
+    parses to ``None`` rather than failing or inventing one.
     """
     chain = [
-        {"pid": 5, "argv0": "lop exec"},
-        {"pid": 9, "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator"},
+        {"pid": 5, "argv0": "lop exec", "alive_at_spawn": True},
+        {
+            "pid": 9,
+            "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+            "alive_at_spawn": True,
+        },
     ]
     path = journal.write_boot_record(
         "sess-chain", update.BuildStamp("1.0.0", "abc1234"), root=tmp_path, spawn_chain=chain

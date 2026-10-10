@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import shlex
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,21 @@ from local_operator.macos_disclaim import (
 )
 
 DARWIN_ONLY = pytest.mark.skipif(sys.platform != "darwin", reason="macOS-only mechanism")
+
+
+def _expected_restored_bits() -> int:
+    """The ``POSIX_SPAWN_SETSIGDEF`` mask Popen's ``restore_signals`` parity needs.
+
+    CPython's ``_Py_RestoreSignals`` resets SIGPIPE always and SIGXFZ/SIGXFSZ
+    where the platform defines them; Darwin's ``sigset_t`` is a 32-bit mask with
+    bit ``signal - 1``.
+    """
+    bits = 0
+    for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+        signum = getattr(signal, name, None)
+        if signum is not None:
+            bits |= 1 << (signum - 1)
+    return bits
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +111,10 @@ class _FakeLibc:
         self.calls.append(("setdisclaim", bool(disclaim)))
         return 0
 
+    def posix_spawnattr_setsigdefault(self, attr: Any, sigset: Any) -> int:
+        self.calls.append(("setsigdefault", sigset._obj.value))
+        return 0
+
     def posix_spawn(
         self,
         pid_ref: Any,
@@ -135,8 +155,9 @@ def test_posix_spawn_shape_maps_stdio_and_disclaims(
         )
     assert isinstance(proc, DisclaimedProcess)
     assert proc.pid == 4242
-    assert ("setflags", 0x0400 | 0x4000) in fake.calls
+    assert ("setflags", 0x0400 | 0x4000 | 0x0004) in fake.calls
     assert ("setdisclaim", True) in fake.calls
+    assert ("setsigdefault", _expected_restored_bits()) in fake.calls
     assert ("addopen", 0, b"/dev/null", os.O_RDWR) in fake.calls
     assert ("adddup2", handle_fd, 1) in fake.calls
     assert ("adddup2", 1, 2) in fake.calls
@@ -333,18 +354,24 @@ def test_chain_facts_from_env_and_prepend_and_walk(monkeypatch: pytest.MonkeyPat
     assert facts == [{"pid": 5, "argv0": "ancestor"}]
     chain = macos_disclaim._chain_for_child()
     assert chain is not None and chain[0]["pid"] == os.getpid()
-    assert {"pid": 5, "argv0": "ancestor"} in chain
+    ancestor = next(entry for entry in chain if entry["pid"] == 5)
+    assert ancestor["argv0"] == "ancestor"
+    assert ancestor["alive_at_spawn"] in (True, False, None)
 
     monkeypatch.delenv(ENV_SPAWN_CHAIN, raising=False)
     monkeypatch.setattr(
         macos_disclaim,
         "_walk_parent_chain",
-        lambda *args, **kwargs: [{"pid": 42, "argv0": "parent"}],
+        lambda *args, **kwargs: [{"pid": 2_147_483_600, "argv0": "parent"}],
     )
     walked = macos_disclaim._chain_for_child()
     assert walked == [
-        {"pid": os.getpid(), "argv0": macos_disclaim._self_entry()["argv0"]},
-        {"pid": 42, "argv0": "parent"},
+        {
+            "pid": os.getpid(),
+            "argv0": macos_disclaim._self_entry()["argv0"],
+            "alive_at_spawn": True,
+        },
+        {"pid": 2_147_483_600, "argv0": "parent", "alive_at_spawn": False},
     ]
 
 
@@ -368,20 +395,213 @@ def test_parse_spawn_chain_accepts_both_spellings_and_refuses_others() -> None:
     assert macos_disclaim.parse_spawn_chain("[1, 2]") is None
 
 
-def test_snapshot_spawn_chain_marks_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_snapshot_spawn_chain_marks_arrival_liveness_and_keeps_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv(
         ENV_SPAWN_CHAIN,
         json.dumps(
             [
-                {"pid": os.getpid(), "argv0": "self"},
-                {"pid": 2_147_483_600, "argv0": "/Applications/X.app/Contents/MacOS/X"},
+                {"pid": os.getpid(), "argv0": "self", "alive_at_spawn": True},
+                {
+                    "pid": 2_147_483_600,
+                    "argv0": "/Applications/X.app/Contents/MacOS/X",
+                    "alive_at_spawn": True,
+                },
             ]
         ),
     )
     snapshot = macos_disclaim.snapshot_spawn_chain()
     assert snapshot is not None
-    assert snapshot[0]["alive"] is True
-    assert snapshot[1]["alive"] is False
+    # The arrival reading is added, the recorded reading is PRESERVED: the
+    # renderer's gate needs both (design round 1, D1).
+    assert snapshot[0]["alive_now"] is True
+    assert snapshot[0]["alive_at_spawn"] is True
+    assert snapshot[1]["alive_now"] is False
+    assert snapshot[1]["alive_at_spawn"] is True
 
     monkeypatch.delenv(ENV_SPAWN_CHAIN, raising=False)
     assert macos_disclaim.snapshot_spawn_chain() is None
+
+
+def test_pid_liveness_delegates_to_procstate_and_validates_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-1: the probe is ``procstate``'s, because ``os.kill(pid, 0)`` KILLS on Windows.
+
+    The delegation is pinned by identity: a fake platform probe on ``procstate``
+    must be what a valid pid reaches, and nothing may reach any probe for an
+    argument that is not a positive int (those answer None directly). If this
+    function ever re-inlines ``os.kill``, the fake is not called and this fails.
+    """
+    from local_operator import procstate
+
+    seen: list[int] = []
+
+    def fake_liveness(pid: int) -> Any:
+        seen.append(pid)
+        return "DELEGATED"
+
+    monkeypatch.setattr(procstate, "pid_liveness", fake_liveness)
+    assert macos_disclaim._pid_liveness(4321) == "DELEGATED"
+    assert seen == [4321]
+    for bad in (True, False, 0, -3, "123", None, 1.5):
+        assert macos_disclaim._pid_liveness(bad) is None
+    assert seen == [4321]
+
+
+def test_recorded_commands_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R1-3: a ``ps`` command column is unbounded (measured 26,921 chars); the
+    recorded chain keeps a bounded prefix per entry, which the ``.app`` readers
+    still match and which stops a secret-bearing command line riding whole into
+    every child's environment and every boot record."""
+    long_command = "x" * 40_000
+    monkeypatch.setattr(macos_disclaim, "_process_table", lambda: {77: (1, long_command)})
+    macos_disclaim._walk_cache.clear()
+    chain = macos_disclaim._walk_parent_chain(77, cap=4)
+    assert [entry["argv0"] for entry in chain] == [long_command[: macos_disclaim.MAX_ENTRY_CHARS]]
+
+
+def test_parse_spawn_chain_bounds_commands_and_preserves_liveness() -> None:
+    raw = json.dumps(
+        [{"pid": 5, "argv0": "y" * 10_000, "alive_at_spawn": True, "alive_now": False}]
+    )
+    assert macos_disclaim.parse_spawn_chain(raw) == [
+        {
+            "pid": 5,
+            "argv0": "y" * macos_disclaim.MAX_ENTRY_CHARS,
+            "alive_at_spawn": True,
+            "alive_now": False,
+        }
+    ]
+    # A reading that is neither a bool nor None is no evidence — normalised to
+    # None, never a reason to drop an otherwise valid entry.
+    assert macos_disclaim.parse_spawn_chain(
+        [{"pid": 5, "argv0": "x", "alive_at_spawn": "yes"}]
+    ) == [{"pid": 5, "argv0": "x", "alive_at_spawn": None}]
+    assert macos_disclaim.parse_spawn_chain([{"pid": 5, "argv0": "x"}]) == [
+        {"pid": 5, "argv0": "x"}
+    ]
+
+
+def test_chain_for_child_records_liveness_at_record_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1: the "was alive earlier" reading is taken when the chain is written.
+
+    Fresh for every member: an inherited reading (taken at the spawner's own
+    spawn) is replaced by a probe at THIS record, because the renderer gates on
+    "alive when the chain was recorded for this child".
+    """
+    monkeypatch.delenv(ENV_SPAWN_CHAIN, raising=False)
+    monkeypatch.setattr(
+        macos_disclaim,
+        "_walk_parent_chain",
+        lambda *args, **kwargs: [{"pid": 2_147_483_600, "argv0": "was-here"}],
+    )
+    chain = macos_disclaim._chain_for_child()
+    assert chain is not None
+    assert chain[0] == {
+        "pid": os.getpid(),
+        "argv0": macos_disclaim._self_entry()["argv0"],
+        "alive_at_spawn": True,
+    }
+    assert chain[1] == {"pid": 2_147_483_600, "argv0": "was-here", "alive_at_spawn": False}
+
+    # An inherited reading that no longer describes reality is replaced by the
+    # fresh probe: this entry names THIS process (alive), recorded as dead.
+    monkeypatch.setenv(
+        ENV_SPAWN_CHAIN,
+        json.dumps([{"pid": os.getpid(), "argv0": "anc", "alive_at_spawn": False}]),
+    )
+    refreshed = macos_disclaim._chain_for_child()
+    assert refreshed is not None
+    assert refreshed[1]["alive_at_spawn"] is True
+
+
+def test_e2big_sheds_the_chain_and_retries_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R1-3: the chain must never fail a spawn the platform would otherwise start."""
+    monkeypatch.setattr(macos_disclaim, "_fallback_reason", lambda: None)
+    attempts: list[dict[str, str]] = []
+
+    def fake_spawn(*args: Any, **kwargs: Any) -> int:
+        attempts.append(dict(kwargs["env"]))
+        if len(attempts) == 1:
+            raise OSError(errno.E2BIG, "too big")
+        return 4242
+
+    monkeypatch.setattr(macos_disclaim, "_spawn_via_posix_spawn", fake_spawn)
+    proc = spawn_disclaimed(["/bin/true"])
+    assert isinstance(proc, DisclaimedProcess) and proc.pid == 4242
+    assert len(attempts) == 2
+    assert ENV_SPAWN_CHAIN in attempts[0] and ENV_SPAWN_CHAIN not in attempts[1]
+
+
+def test_e2big_after_shedding_raises_like_popen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second E2BIG means the caller's env is over the limit — surface it."""
+    monkeypatch.setattr(macos_disclaim, "_fallback_reason", lambda: None)
+    calls: list[int] = []
+
+    def always_too_big(*args: Any, **kwargs: Any) -> int:
+        calls.append(1)
+        raise OSError(errno.E2BIG, "too big")
+
+    monkeypatch.setattr(macos_disclaim, "_spawn_via_posix_spawn", always_too_big)
+    with pytest.raises(OSError) as excinfo:
+        spawn_disclaimed(["/bin/true"])
+    assert excinfo.value.errno == errno.E2BIG
+    assert len(calls) == 2
+
+
+def test_a_disclaimed_child_gets_popens_signal_defaults(tmp_path: Path) -> None:
+    """R1-4: ``restore_signals`` parity, observed on a real child.
+
+    Python ignores SIGPIPE at startup, and an ignored disposition survives a
+    raw ``execve``. A child that has SIGPIPE ignored survives its own
+    ``kill -PIPE`` and keeps going; one with the default dies of it — so ``sh``
+    alone shows which dispositions the spawn restored. The disclaimed child
+    must match ``Popen(restore_signals=True)``; the no-restore control proves
+    the discriminator works in this environment.
+    """
+    if macos_disclaim._fallback_reason() is not None:
+        pytest.skip("responsibility disclaim unavailable on this host")
+    argv = ["/bin/sh", "-c", "kill -PIPE $$; printf SURVIVED"]
+
+    control = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        restore_signals=False,
+    )
+    control_out = control.communicate()[0]
+    if control.returncode != 0 or b"SURVIVED" not in control_out:
+        pytest.skip("the parent does not ignore SIGPIPE here; no discrimination to make")
+
+    reference = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        restore_signals=True,
+    )
+    reference_out = reference.communicate()[0]
+    assert reference.returncode == -signal.SIGPIPE and b"SURVIVED" not in reference_out
+
+    out_path = tmp_path / "sigpipe.txt"
+    with open(out_path, "wb") as handle:
+        proc = spawn_disclaimed(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+        )
+    try:
+        assert isinstance(proc, DisclaimedProcess)
+        assert proc.wait(timeout=30) == -signal.SIGPIPE
+    finally:
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    assert "SURVIVED" not in out_path.read_text()

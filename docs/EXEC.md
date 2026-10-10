@@ -388,17 +388,33 @@ others stay in the receipt's `signals` list with `count` giving the total): a
 later signal a covering deliberate marker explains is a stop somebody asked for.
 
 **Direction without a sender.** An unattributed signal still has one fact a
-target can honestly add: the spawn chain it was born into (recorded by
-`macos_disclaim`, snapshot with per-member liveness at signal time). When the app
-at the ROOT of that chain was already gone at arrival, the rendered reason says
-so — "…; the app that spawned this runtime's chain (pid N,
-/Applications/Local Operator.app/Contents/MacOS/Local Operator) was no longer
-running when the signal arrived". It states exactly what the liveness probe
-measured and never upgrades it to a sender or to "force-quit": on the 2026-10-09
-incident's sweep (macOS killed 6 exec workers 17 ms after a force-quit; the
-targets' receipts could name nobody) this clause is what would have said the app
-was gone at the same moment. Chains are written for spawns made through
+target can honestly add: the spawn chain it was born into, recorded by
+`macos_disclaim` with each member's liveness as recorded at spawn
+(`alive_at_spawn`), and snapshotted with a second, arrival reading (`alive_now`)
+when the signal lands. When the app at the ROOT of that chain was RECORDED ALIVE
+and is GONE at arrival, the rendered reason names it — "…; the app this runtime
+descends from (Local Operator.app, pid N) was running when the runtime started
+and was no longer running when the signal arrived". Both halves are probed, and
+the clause is silent unless both exist (a member already gone when the chain
+was recorded, or a probe that could not be made, renders nothing), so it says
+"this runtime outlived the app" — never "the app caused this signal", never
+"force-quit", and never a sender. It also cannot say when the app exited: the
+two readings are the limit. On the 2026-10-09 incident's sweep (macOS killed 6
+exec workers 17 ms after a force-quit; the targets' receipts could name nobody)
+this is what would have shown the app the workers descended from alive at their
+start and gone at the signal. Chains are written for spawns made through
 `macos_disclaim`; where none was recorded, the sentence is unchanged.
+
+**The disclaim's cost, disclosed: TCC grants.** Detaching runtimes from the
+app's macOS responsibility chain also ends their inheritance of the app's TCC
+grants — a disclaimed runtime, and everything it spawns, no longer borrows the
+app's Files & Folders / Full Disk access (Screen Recording and AppleEvents
+automation are in the same inheritance class). On a host where the operator
+granted those to the app, the runtime's own interpreter identity needs its own
+grant before protected-folder work inside a disclaimed runtime works. The trade
+is deliberate: the requirement is that killing the UI never kills sessions, and
+a session swept with the UI is the worse failure; the grant is a one-time,
+per-host decision.
 
 **Artifacts** (all best-effort; a failed write never changes a stop):
 
@@ -406,16 +422,17 @@ was gone at the same moment. Chains are written for spawns made through
   signal, written at arrival. v1 schema: `{"v":1,"kind":"runtime","session_id",
   "pid","started_at","signals":[{"name","number","at","in_flight","action":
   "drain"|"stop"|"repeat-absorbed","sender":{"state":"unavailable",...},
-  "spawn_chain":[{"pid","argv0","alive"}...],"stop_marker":null|{...},"sanction":
+  "spawn_chain":[{"pid","argv0","alive_at_spawn","alive_now"}...],"stop_marker":null|{...},"sanction":
   "none"|"marker"}],"count","receiver":
   {"uid","euid","gid","ppid","pgid","argv0"},"platform"}`. `sanction` is decided
   at write time: `marker` iff a `runtime-stop.json` for this exact run, staged no
   more than `PAIR_WINDOW_S` before the signal and never after, was on disk when it
   arrived; otherwise `none` — nobody staged a stop. `spawn_chain` is present only
   when the runtime was spawned with a recorded chain (absent stays absent; old
-  receipts parse without it) and `alive` is a liveness reading taken at arrival —
-  `false` is proven gone, `true` is proven live, and a probe that could not be made
-  is omitted rather than guessed. `receiver.ppid` is the
+  receipts parse without it); each entry's `alive_at_spawn` is the liveness
+  recorded when the chain was written for this spawn, and `alive_now` the liveness
+  probed at arrival — `false` is proven gone, `true` is proven live, `null` a probe
+  that could not be made, and a reading absent from the entry was never recorded. `receiver.ppid` is the
   receiver's parent (lineage), not the sender. Never removed by a runtime; a new
   run (different pid/`started_at`) replaces it.
 * `<config>/logs/stop-sweeps.jsonl` — one `begin` and one `end` row per
