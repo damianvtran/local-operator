@@ -4666,7 +4666,11 @@ def _content_row_text(row: Any, verb: str) -> str:
         title = title[:15] + "…"
     entries = f"{row.entries} entr{'y' if row.entries == 1 else 'ies'}"
     tail = f"{row.reason}; {entries}"
-    if row.rescue_bundle:
+    bundles = getattr(row, "rescue_bundles", ())
+    if len(bundles) > 1:
+        names = ", ".join(os.path.basename(path) for path in bundles)
+        tail += f"; rescue bundles {names}"
+    elif row.rescue_bundle:
         tail += f"; rescue bundle {os.path.basename(row.rescue_bundle)}"
     elif row.method == "worktree-remove":
         tail += "; worktree remove"
@@ -5055,6 +5059,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 now=moment,
                 budget_s=UNBOUNDED,
                 only=[c.session for c in delegated_preview.removed],
+                content_only=[row.session for row in delegated_preview.content],
             )
             if delegated_rows or content_rows
             else DelegatedResult()
