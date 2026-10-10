@@ -371,6 +371,10 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_definitions",
         "net_readiness",
         "net_mcp_defs",
+        # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md
+        # §8.2). Slow by registration below: the handler may run a real install
+        # inside its own bounded deadline.
+        "net_update",
     }
 )
 
@@ -389,6 +393,10 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "definitions_sync",
         "peer_readiness",
         "mcp_defs_sync",
+        # The single-peer update's local half — a viewer asking ITS OWN relay to
+        # ask a peer (the ``peer_*`` boundary rule; the peer-scope half is
+        # ``net_update``).
+        "peer_update",
     }
 )
 
@@ -406,6 +414,9 @@ SLICE_MODULES: tuple[str, ...] = (
     # registers a tick step there), so it is installed after that module but
     # starts no thread of its own.
     "local_operator.network.mcpdefs",
+    # S1 of the mesh rolling updates: the ``update`` capability's op halves. It
+    # starts no thread of its own (the S3 rollout driver is a different slice).
+    "local_operator.network.meshupdate",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
