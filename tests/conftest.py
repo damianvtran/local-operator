@@ -90,6 +90,15 @@ _AMBIENT_VARS = (
     # (``test_ask_queue_e2e.py``'s autouse pin, ``test_ask_gate_e2e.py``'s
     # kill-switch cell), which is where that reason is written down.
     "LOP_ASK_GATE",
+    # The quiet turn's kill switch (``tools/builtin.no_reply_enabled``, read
+    # once at import from ``LOP_NO_REPLY``). Same ESCAPE-HATCH class as the two
+    # above: silence is the shipped default, and an operator or a QA rig that
+    # exported a kill value would silently unmount ``no_reply`` for every cell
+    # in ``test_no_reply_tool.py``, ``test_attention_notify.py`` and the e2e
+    # pair — green cells pinning a door nobody advertised, with the refusal
+    # paths untested. The kill-switch cell sets the resolved constant through
+    # ``monkeypatch`` explicitly, which is where that reason is written down.
+    "LOP_NO_REPLY",
     # The soft query budget's escape hatch (``tools/query_budget.ALLOW_ENV``), the
     # same ESCAPE-HATCH class and scrubbed for the same reason: an inherited value
     # would waive the stop every cell in ``test_query_budget.py`` asserts. Read off
