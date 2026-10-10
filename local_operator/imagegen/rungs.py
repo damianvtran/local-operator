@@ -451,6 +451,33 @@ def _pick_radient_model(payload: dict[str, Any], requested: str | None) -> str:
     )
 
 
+def _radient_failure(payload: dict[str, Any], *, status: str = "") -> APIError | None:
+    """The platform's failure vocabulary on a status or result answer, else ``None``.
+
+    The hub NEVER emits a FAILED/ERROR status word: a failed generation settles as
+    status ``COMPLETED`` carrying ``error``/``error_type`` (agent-server
+    ``settledStatusResult`` and the result-side R1-2 branch; docs/MEDIA-PROVIDERS.md
+    section 5.5, hold H9 keeps it that way). Switch on ``error_type``, never prose; a
+    value outside the frozen vocabulary classifies as an upstream failure.
+    """
+    error_type = payload.get("error_type")
+    message = payload.get("error")
+    has_type = isinstance(error_type, str) and bool(error_type)
+    has_message = isinstance(message, str) and bool(message)
+    if not (has_type or has_message or status in ("FAILED", "ERROR")):
+        return None
+    code = error_type if has_type and error_type in RADIENT_ERROR_TYPES else "upstream"
+    return APIError(
+        (
+            message
+            if isinstance(message, str) and message
+            else "Radient reported the generation as FAILED."
+        ),
+        status_code=None,
+        code=code,
+    )
+
+
 def _radient_unit_price(payload: dict[str, Any], model_id: str) -> float | None:
     """The listed unit price for ``model_id``, when the row carries one.
 
@@ -645,6 +672,11 @@ async def run_radient(
             )
             status = str(status_payload.get("status") or "").strip().upper()
             elapsed = int(time.monotonic() - started)
+            # Classify BEFORE treating COMPLETED as terminal: a failure settles
+            # as COMPLETED carrying error/error_type (see _radient_failure).
+            failure = _radient_failure(status_payload, status=status)
+            if failure is not None:
+                raise failure
             if status == "COMPLETED":
                 # Prefer the settled figure over the quote: only ``settled``
                 # on the terminal status payload makes ``cost_usd`` a charge.
@@ -662,25 +694,6 @@ async def run_radient(
                     "Radient reported the generation as CANCELLED.",
                     status_code=None,
                     code="cancelled",
-                )
-            if status in ("FAILED", "ERROR"):
-                # Switch on error_type, never on prose. Anything outside the
-                # frozen vocabulary classifies as an upstream failure.
-                error_type = status_payload.get("error_type")
-                code = (
-                    error_type
-                    if isinstance(error_type, str) and error_type in RADIENT_ERROR_TYPES
-                    else "upstream"
-                )
-                message = status_payload.get("error")
-                raise APIError(
-                    (
-                        message
-                        if isinstance(message, str) and message
-                        else "Radient reported the generation as FAILED."
-                    ),
-                    status_code=None,
-                    code=code,
                 )
             queue_position = _num(status_payload.get("queue_position"))
             queued = status == "IN_QUEUE"
@@ -725,6 +738,9 @@ async def run_radient(
         # downloads so a cancellation mid-download reads "none" rather than
         # firing an ALREADY_COMPLETED round-trip.
         handle.clear()
+        failure = _radient_failure(result_payload)
+        if failure is not None:
+            raise failure
         assets = await _download_rows(
             http,
             _asset_rows(result_payload),
