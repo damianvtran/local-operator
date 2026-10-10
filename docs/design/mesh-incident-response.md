@@ -651,7 +651,7 @@ emission points.
 | `panic_undelivered` | one peer's deadline/attempt failed | `{outcome}` — `unacked \| failed` |
 | `panic_broadcast_result` | the fan-out finished | `{sent, acked, unacked, failed, duration_ms}` |
 | `member_role_changed` | a role is edited | `{role_before, role_after}` |
-| `credential_placement_credential_placement_declared` | an owner declares ownership or changes holders | `{key, kind, scope?, replicate}` |
+| `credential_placement_declared` | an owner declares ownership or changes holders | `{key, kind, scope?, replicate}` |
 | `credential_grant` | a grant was served | `{key, credential_kind, refreshed, grant_id, token_ttl_s, latency_ms, act, sub}` |
 | `credential_grant_refused` | a grant was refused | `{key, cause}` |
 | `credential_refresh` | the **owner** POSTed to the IdP | `{key, credential_kind, duration_ms, ok, act}` |
