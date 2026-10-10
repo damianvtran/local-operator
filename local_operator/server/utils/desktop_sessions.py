@@ -4846,7 +4846,7 @@ class DesktopSessionBridge:
         projection's cold facts change and the last chance to restate anything
         the owner's deltas left standing, so the honest replacement is
         published BEFORE the engage attempt and independently of it — see the
-        honesty note in the body.
+        honesty note in the comment below.
         """
         # THE HONEST PROJECTION FIRST, AND IT IS NOT THE ENGAGE'S TO DECLINE
         # (2026-10-10 incident). The facade has already corrected its canonical
