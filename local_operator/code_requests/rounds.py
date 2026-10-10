@@ -37,8 +37,8 @@ CONSTRAINTS.
   reported verbatim from the ``Reviewer:`` field and no independence claim is
   derived from it.
 * **Bounded work.** Fields are scanned in the first :data:`FIELD_SCAN_LINES` lines
-  and every regex is linear. Fixture bodies are a few KB; a huge comment costs one
-  pass, not a backtracking blowup.
+  (the verdict alone also past them) and every regex is linear. Fixture bodies are a
+  few KB; a huge comment costs one pass, not a backtracking blowup.
 """
 
 from __future__ import annotations
@@ -79,6 +79,8 @@ MIN_SHA_PREFIX = 7
 
 #: Fields are read from the top of the comment. Real ones put them in the first
 #: six lines; 40 leaves room for a preamble without scanning a whole review body.
+#: The ``Verdict`` is the one field also read past this window (see
+#: ``_scan_fields``): a long review closes with it.
 FIELD_SCAN_LINES = 40
 
 _DASH = "\u2014\u2013\\-:"
@@ -584,6 +586,21 @@ def _scan_fields(lines: Sequence[str]) -> dict[str, str]:
             if following.strip():
                 fields.setdefault("verdict", following.strip())
             break
+    if "verdict" not in fields:
+        # A LABELLED verdict past the field window: the closing summary of a long
+        # review. ``damianvtran/local-operator#2112``'s round-4 agent review keeps
+        # ``**Verdict: `clean` — … TERMINAL …**`` on line 44 of 46, and the bounded
+        # scan above read that whole round as ``unstated`` even from the FULL body
+        # (so parsing before the size trim was necessary but not sufficient). Only
+        # the verdict is rescued: ``Reviewer``/``Scope``/``Head`` stay window-bound
+        # because a review quotes its own prompt further down, and a quoted
+        # ``Scope:`` there would move the reviewed head. The classifier reads only
+        # a recognised leading token, so a quoted line cannot invent a verdict.
+        for line in lines[FIELD_SCAN_LINES:]:
+            match = _FIELD.match(line.strip())
+            if match is not None and match.group("name").lower() == "verdict":
+                fields["verdict"] = match.group("value").strip()
+                break
     if "verdict" not in fields:
         # No ``Verdict:`` label: a standalone bold verdict paragraph is the third
         # real spelling (``**Clean — merge-ready.**``). Only the recognised leading
