@@ -14,9 +14,11 @@ picture and the amendment's rules are about how each one sits under the answer:
     populated              files + the "N more" row, with HTML components on the
                            row that must NOT appear (skipped, no placeholder).
     files-only             ≤ 2 files and no components: the one-line arm.
-    loading                the `decided` beat: the callouts and the preparing
-                           line with its shimmering lead.
-    failed                 the failure line, with callouts above it.
+    loading                the `decided` beat: the known files (one here, so
+                           the one-liner arm) and the preparing line with its
+                           shimmering lead.
+    failed                 the quiet failure line: nothing landed, so no
+                           callouts ride it.
     empty                  a `done` row with nothing on it: no block, no
                            reserved space.
 
@@ -39,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -112,19 +115,67 @@ _FULL_ROW = {
     "error": "",
 }
 
+#: The files-only finish's journaled row: the two files and nothing else — the
+#: disclosure keys exist only when the featured list (≤ ``maxFeatured``, 4)
+#: did not carry the whole set.
+_FILES_ONLY_ROW = {
+    "anchor": ANCHOR,
+    "job": "3f9c1a5e5b20",
+    "version": 1,
+    "state": "done",
+    "files": [_file("reports/latency.md"), _file("data/bench.csv", 913)],
+    "components": [],
+    "error": "",
+}
+
+#: A failed finish whose generated blocks never landed (a refusal, not a
+#: bound): the failure row alone — no files, so no callouts ride it.
+_FAILED_ROW = {
+    "anchor": ANCHOR,
+    "job": "3f9c1a5e5b20",
+    "version": 1,
+    "state": "failed",
+    "files": [],
+    "components": [],
+    "error": "model refused",
+}
+
+#: What each shape's read serves: the SHAPE'S OWN journaled row, never another
+#: shape's. ``plain``/``loading``/``empty`` have no settled row to serve
+#: (nothing ran, the job is still in its running beat, or the finish journaled
+#: nothing), so their read answer is the empty mapping — the truth a real owner
+#: would answer for such an anchor.
+_SHAPE_ROWS: dict[str, dict[str, object]] = {
+    "populated": _FULL_ROW,
+    "files-only": _FILES_ONLY_ROW,
+    "failed": _FAILED_ROW,
+}
+
 
 class Owner(FakeSession):
-    """A fake owner that HONOURS the supplement read op, so the shot drives the
-    same beat-then-upgrade-read path a real runtime answers."""
+    """A fake owner that answers the supplement read with the SHAPE's own row.
+
+    The read is a REAL path the beats drive (the terminal beat's upgrade read
+    in ``_apply_supplement``), so it has to answer like the journal would for
+    the state being captured: an owner that answered the populated row for
+    every anchor repainted ``files-only`` and ``failed`` into the populated
+    picture before capture — one picture standing in for three claimed states
+    (round-1 review R1).
+    """
+
+    def __init__(self, shape: str) -> None:
+        super().__init__()
+        self._shape = shape
 
     async def supplements_for(self, anchors) -> dict:  # type: ignore[no-untyped-def]
-        if ANCHOR in {str(anchor) for anchor in anchors}:
-            return {ANCHOR: dict(_FULL_ROW)}
-        return {}
+        row = _SHAPE_ROWS.get(self._shape)
+        if row is None or ANCHOR not in {str(anchor) for anchor in anchors}:
+            return {}
+        return {ANCHOR: dict(row)}
 
 
-async def _factory_owner():
-    return Owner()
+async def _factory_owner(owner: Owner):
+    return owner
 
 
 def _seed(app: OperatorApp, shape: str) -> None:
@@ -132,7 +183,7 @@ def _seed(app: OperatorApp, shape: str) -> None:
     app._append_block(_answer(ANSWER))
 
 
-def _event(shape: str, **extra: object) -> SupplementProgress:
+def _event(shape: str, **extra: Any) -> SupplementProgress:
     job = "3f9c1a5e5b20"
     if shape == "loading":
         return SupplementProgress(
@@ -186,9 +237,23 @@ async def main() -> None:
     shape = sys.argv[3] if len(sys.argv) > 3 else "plain"
     theme = sys.argv[4] if len(sys.argv) > 4 else "dark"
 
-    app = OperatorApp(lambda: _factory_owner())
+    owner = Owner(shape)
+    app = OperatorApp(lambda: _factory_owner(owner))
     async with app.run_test(size=size) as pilot:
-        await pilot.pause()
+        # BEFORE seeding, wait for the session's boot to land. `_adopt_session`
+        # replays through `_project_settled_rows`, which ends in the lazy
+        # supplement read; seeding first let that read see the seeded answer
+        # and mount a journaled row before the shape's own beat — a race that
+        # painted `plain` as a populated block and `loading` with the read's
+        # disclosure rows on some runs (round-1 review R1). Adoption is
+        # synchronous end to end, so once the session is adopted the boot's
+        # read request has already run.
+        for _ in range(200):
+            await pilot.pause()
+            if app._session is owner:
+                break
+        else:
+            raise SystemExit("the session was never adopted")
         _seed(app, shape)
         await pilot.pause()
         if theme != "dark":
@@ -196,8 +261,22 @@ async def main() -> None:
             await pilot.pause()
         if shape != "plain":
             app.post_message(_event(shape))
+            # Wait for the beat's own read round-trip instead of racing it: a
+            # terminal beat asks one and the shape's owner answers it, and a
+            # frame captured mid-flight would show the pre-upgrade block while
+            # claiming the upgraded state.
+            for _ in range(200):
+                await pilot.pause()
+                if ANCHOR in app._supplement_live and not app._supplement_read_inflight:
+                    break
+            else:
+                raise SystemExit(f"{shape}: the beat was never processed")
             await pilot.pause()
-            await pilot.pause()
+            if _SHAPE_ROWS.get(shape) is not None and ANCHOR not in app._supplement_read:
+                raise SystemExit(
+                    f"{shape}: the read did not land — the frame would show a "
+                    "state its own journaled row never reached"
+                )
         save_capture(app, out)
         blocks = app._transcript_view().blocks()
         print(

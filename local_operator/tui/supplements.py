@@ -5,10 +5,6 @@ for the same reason: the whole vocabulary of the feature has exactly one
 definition per surface, so a wire rename or a copy change is a one-line edit
 here and no renderer changes. What lives here:
 
-- :func:`state_word` — the supplement lifecycle mapped onto the FROZEN
-  image-gen vocabulary through :func:`local_operator.tui.imagegen.imagegen_state_word`.
-  The memo settles the mapping ("``decided`` meaning 'files known, graphics
-  queued', which paints as ``queued``") and this is where it is spelled once.
 - :func:`preparing_line` — the loading line under the answer, whose lead is
   ``imagegen.progress_graphic`` (the shimmering canvas, settings-gated by the
   same machinery as every other animated surface). The memo's copy table shows
@@ -51,7 +47,6 @@ __all__ = [
     "more_text",
     "preparing_line",
     "state_rank",
-    "state_word",
 ]
 
 #: The fixed display copy (memo §2.8, round-1 design D7/D10). One spelling per
@@ -102,36 +97,6 @@ def display_text(value: object) -> str:
     if not isinstance(value, str):
         return ""
     return " ".join(strip_control_sequences(value).split())
-
-
-def state_word(state: object) -> str | None:
-    """The frozen image-gen word ``state`` paints as, or ``None``.
-
-    ``decided`` is "files known, graphics queued" and paints as ``queued``
-    (memo §2.8); ``done``/``failed``/``cancelled`` are the settled arms of the
-    same vocabulary and map through their image-gen spellings, so the two
-    surfaces cannot drift on what "running" or "cancelled" means. ``skipped``
-    and unknown words answer ``None`` ("nothing renders" is the caller's rule,
-    and it is stated at the call site in the block).
-    """
-    card_state = {
-        "decided": "queued",
-        "queued": "queued",
-        "running": "running",
-        "cancelling": "cancelling",
-        "done": "success",
-        "failed": "error",
-        "cancelled": "interrupted",
-    }.get(str(state))
-    if card_state is None:
-        return None
-    if card_state == "cancelling":
-        # ``cancelling`` is a LIVE PROVIDER word, not a card state (imagegen's
-        # own vocabulary): the card shows it through its ``running`` arm, so it
-        # is asked for on the provider path rather than as a card state — which
-        # is the only spelling ``imagegen_state_word`` answers it to.
-        return imagegen_mod.imagegen_state_word("running", "cancelling")
-    return imagegen_mod.imagegen_state_word(card_state)
 
 
 def preparing_line(time_ms: float | None = None) -> Text:

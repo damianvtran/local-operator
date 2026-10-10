@@ -1,8 +1,8 @@
 """The turn-supplements TUI surface (memo §2.7/§2.8/§3.2 T1–T5).
 
 Three layers, in one file because they are one surface: the pure mapping
-helpers (copy, state words, row formatting, ``display_text``), the block
-widget as a builder (no app), and the app seams that mount it — the live
+helpers (copy, row formatting, ``display_text``), the block widget as a
+builder (no app), and the app seams that mount it — the live
 ``supplement_progress`` beat, the cold lazy read, ``/highlights``, the
 settings rows and a live theme switch. Layout claims that need the real
 ``local_operator.tcss`` are driven through ``OperatorApp`` + pilot, the same
@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.style import Style
+from rich.text import Text
 
 from local_operator.tui import supplements as supplement_mod
 from local_operator.tui.app import OperatorApp
@@ -81,19 +83,6 @@ def test_display_text_strips_controls_and_collapses_whitespace() -> None:
     assert supplement_mod.display_text(7) == ""
 
 
-def test_state_word_is_the_imagegen_vocabulary() -> None:
-    # `decided` paints as queued (memo §2.8); the settled arms map through the
-    # same function the image-gen card uses, so the two surfaces cannot drift.
-    assert supplement_mod.state_word("decided") == "queued"
-    assert supplement_mod.state_word("queued") == "queued"
-    assert supplement_mod.state_word("running") == "running"
-    assert supplement_mod.state_word("cancelling") == "cancelling"
-    assert supplement_mod.state_word("done") == "done"
-    assert supplement_mod.state_word("cancelled") == "cancelled"
-    assert supplement_mod.state_word("failed") == "failed"
-    assert supplement_mod.state_word("skipped") is None
-
-
 def test_row_helpers_match_the_copy_table() -> None:
     assert supplement_mod.files_summary_line(["a.md"]) == "1 file: a.md"
     assert supplement_mod.files_summary_line(["a.md", "b.csv"]) == "2 files: a.md, b.csv"
@@ -116,7 +105,7 @@ def test_row_helpers_match_the_copy_table() -> None:
 
 def test_block_files_only_is_the_one_line() -> None:
     block = _block(_rows([_file("reports/q3.md"), _file("data/bench.csv")]))
-    assert block.renderable.plain == "  2 files: q3.md, bench.csv"
+    assert _painted(block).plain == "  2 files: q3.md, bench.csv"
 
 
 def test_block_rows_carry_label_path_size_and_the_more_row() -> None:
@@ -128,7 +117,7 @@ def test_block_rows_carry_label_path_size_and_the_more_row() -> None:
     )
     block = _block(details)
     assert block.disposition() == "block"
-    assert block.renderable.plain.splitlines() == [
+    assert _painted(block).plain.splitlines() == [
         "  q3.md  reports/q3.md  4 KB",
         "  bench.csv  data/bench.csv  4 KB",
         "  3 more files",
@@ -147,7 +136,7 @@ def test_block_more_row_expands_in_place() -> None:
     block = _block(details)
     assert block._more_line == 1
     block.expand_more()
-    assert block.renderable.plain.splitlines() == [
+    assert _painted(block).plain.splitlines() == [
         "  q3.md  reports/q3.md  4 KB",
         "  q4.md  reports/q4.md",
         "  q5.md  reports/q5.md",
@@ -157,7 +146,7 @@ def test_block_more_row_expands_in_place() -> None:
     narrow = _block(details)
     narrow._expanded = True
     narrow._rebuild(width=40)
-    assert all(len(line) <= 40 for line in narrow.renderable.plain.splitlines())
+    assert all(len(line) <= 40 for line in _painted(narrow).plain.splitlines())
 
 
 def test_block_skips_html_components_with_no_placeholder() -> None:
@@ -171,13 +160,13 @@ def test_block_skips_html_components_with_no_placeholder() -> None:
             ],
         )
     )
-    plain = block.renderable.plain
+    plain = _painted(block).plain
     assert plain.splitlines() == ["  q3.md  reports/q3.md  4 KB"]
     assert "latency chart" not in plain and "bench grid" not in plain
     # ...and a row whose ONLY contents are HTML components renders no block at
     # all (the app removes it; the builder's own answer is empty text).
     empty = _block(_rows([], components=[{"attachment": "d" * 32, "mime": "text/html"}]))
-    assert empty.renderable.plain == ""
+    assert _painted(empty).plain == ""
 
 
 def test_block_preparing_line_leads_with_the_shimmer_canvas() -> None:
@@ -186,7 +175,7 @@ def test_block_preparing_line_leads_with_the_shimmer_canvas() -> None:
         job_live=True,
     )
     assert block.disposition() == "files_preparing"
-    lines = block.renderable.plain.splitlines()
+    lines = _painted(block).plain.splitlines()
     assert lines[0] == "  1 file: q3.md"
     assert lines[1].endswith(" Preparing highlights…")
     # The lead is `progress_graphic(None)`, not a literal glyph.
@@ -198,13 +187,13 @@ def test_block_preparing_line_leads_with_the_shimmer_canvas() -> None:
 def test_block_cancelled_and_failed_lines() -> None:
     cancelled = _block(_rows([_file("reports/q3.md")], state="cancelled"))
     assert cancelled.disposition() == "files_cancelled_retry"
-    assert cancelled.renderable.plain.splitlines() == [
+    assert _painted(cancelled).plain.splitlines() == [
         "  1 file: q3.md",
         "  Highlights cancelled",
     ]
     failed = _block(_rows([], state="failed"))
     assert failed.disposition() == "failed_retry"
-    assert failed.renderable.plain == "  Couldn't prepare highlights"
+    assert _painted(failed).plain == "  Couldn't prepare highlights"
     # A cold non-terminal row is the stale-row rule, NOT the preparing line.
     cold = _block(_rows([_file("reports/q3.md")], state="decided"), job_live=False)
     assert cold.disposition() == "files_cancelled_retry"
@@ -216,7 +205,7 @@ def test_block_superseded_and_dismissed_render_nothing() -> None:
         details.update(extra)
         block = _block(details)
         assert block.disposition() == "nothing"
-        assert block.renderable.plain == ""
+        assert _painted(block).plain == ""
 
 
 def test_block_links_only_files_the_affordance_admits(tmp_path: Path) -> None:
@@ -233,14 +222,20 @@ def test_block_links_only_files_the_affordance_admits(tmp_path: Path) -> None:
         files_more=0,
     )
     linked = _block(details, cwd=str(tmp_path), hyperlinks=True)
-    uris = [span.style.link for span in linked.renderable.spans if span.style and span.style.link]
+    uris = [
+        span.style.link
+        for span in _painted(linked).spans
+        if isinstance(span.style, Style) and span.style.link
+    ]
     assert uris and all(uri.startswith("file://") for uri in uris)
     assert any("q3.md" in uri for uri in uris)
     # The missing file paints as plain text: no link span names it.
     assert not any("missing.md" in uri for uri in uris)
     # And with the terminal not known to render links, nothing carries one.
     plain = _block(details, cwd=str(tmp_path), hyperlinks=False)
-    assert not [span for span in plain.renderable.spans if span.style and span.style.link]
+    assert not [
+        span for span in _painted(plain).spans if isinstance(span.style, Style) and span.style.link
+    ]
 
 
 def test_more_row_click_maps_to_its_painted_line() -> None:
@@ -307,6 +302,21 @@ def _supplement_blocks(app: OperatorApp) -> list[SupplementBlock]:
     ]
 
 
+def _painted(block: SupplementBlock) -> Text:
+    """The block's painted ``Text``.
+
+    ``Widget.renderable`` is typed as the whole ``RenderableType`` union, and
+    every assertion in this file rests on a supplement block painting a
+    ``Text`` (``_build`` returns one). Asserting it here means a block that
+    started returning something else fails HERE and says so, rather than four
+    tests down on a missing attribute — the same shape as
+    ``test_user_block``'s helper.
+    """
+    renderable = block.renderable
+    assert isinstance(renderable, Text)
+    return renderable
+
+
 @pytest.mark.asyncio
 async def test_the_live_beat_mounts_under_its_answer_and_swaps_in_place() -> None:
     session = FakeSession()
@@ -321,9 +331,9 @@ async def test_the_live_beat_mounts_under_its_answer_and_swaps_in_place() -> Non
         mounted = _supplement_blocks(app)
         assert len(mounted) == 1
         block = mounted[0]
-        lines = block.renderable.plain.splitlines()
+        lines = _painted(block).plain.splitlines()
         assert lines[0] == "  1 file: q3.md"
-        assert block.renderable.plain.splitlines()[1].endswith("Preparing highlights…")
+        assert _painted(block).plain.splitlines()[1].endswith("Preparing highlights…")
         # Directly under the answer, by position.
         blocks = app._transcript_view().blocks()
         assert blocks[blocks.index(answer) + 1] is block
@@ -333,7 +343,7 @@ async def test_the_live_beat_mounts_under_its_answer_and_swaps_in_place() -> Non
         app.post_message(SupplementProgress(ANCHOR, JOB, 1, "done", files=files, components=[]))
         await pilot.pause()
         assert _supplement_blocks(app) == [block]
-        assert block.renderable.plain == "  1 file: q3.md"
+        assert _painted(block).plain == "  1 file: q3.md"
 
 
 @pytest.mark.asyncio
@@ -403,9 +413,57 @@ async def test_the_cold_read_mounts_a_journaled_row_once() -> None:
             if _supplement_blocks(app):
                 break
         assert len(_supplement_blocks(app)) == 1, session.reads
-        assert _supplement_blocks(app)[0].renderable.plain == "  1 file: q3.md"
+        assert _painted(_supplement_blocks(app)[0]).plain == "  1 file: q3.md"
         assert session.reads and session.reads[0] == [ANCHOR]
         # The anchor that a read answered for is not asked twice.
+        app._request_supplement_reads()
+        await pilot.pause()
+        assert session.reads == [[ANCHOR]]
+
+
+@pytest.mark.asyncio
+async def test_a_beat_for_an_unmounted_answer_re_arms_at_the_mount() -> None:
+    """The deferral the early return promises is delivered by the projection.
+
+    A beat can land while its answer is outside the rendered bound: the row is
+    held, no block mounts, and the terminal beat's own read sits below that
+    early return, so it never asks. When the answer's page mounts, the
+    projection read must re-arm for the live, blockless anchor — scoping the
+    live-skip to anchors with a MOUNTED block is what makes the early return's
+    promise ("a later projection re-reads and mounts it then") true.
+    """
+
+    class Readable(FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads: list[list[str]] = []
+
+        async def supplements_for(self, anchors: list[str]) -> dict[str, dict[str, Any]]:
+            self.reads.append(list(anchors))
+            return {anchor: _rows([_file("reports/q3.md")], state="done") for anchor in anchors}
+
+    session = Readable()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 32)) as pilot:
+        await _boot(app, pilot, session)
+        # The beat lands with no answer mounted: the row is held, no block, and
+        # the beat path's read is never asked (the early return sits above it).
+        app.post_message(SupplementProgress(ANCHOR, JOB, 1, "done", files=[_file("reports/q3.md")]))
+        for _ in range(5):
+            await pilot.pause()
+        assert _supplement_blocks(app) == []
+        assert session.reads == []
+        # The answer's page mounts and the next projection asks; the read
+        # mounts the held row under it, and is not asked again.
+        _mount_answer(app, ANCHOR)
+        app._request_supplement_reads()
+        for _ in range(20):
+            await pilot.pause()
+            if _supplement_blocks(app):
+                break
+        assert len(_supplement_blocks(app)) == 1, session.reads
+        assert _painted(_supplement_blocks(app)[0]).plain == "  1 file: q3.md"
+        assert session.reads == [[ANCHOR]]
         app._request_supplement_reads()
         await pilot.pause()
         assert session.reads == [[ANCHOR]]
@@ -429,7 +487,7 @@ async def test_a_live_beat_wins_over_a_stale_read() -> None:
             await pilot.pause()
         # The settled row stands: the read (a non-terminal row, cold) never
         # repaints it back to the stale-cancelled line.
-        assert _supplement_blocks(app)[0].renderable.plain == "  1 file: q3.md"
+        assert _painted(_supplement_blocks(app)[0]).plain == "  1 file: q3.md"
 
 
 @pytest.mark.asyncio
@@ -475,10 +533,10 @@ async def test_a_terminal_beat_upgrades_itself_with_the_full_row() -> None:
         )
         for _ in range(20):
             await pilot.pause()
-            if "3 more files" in _supplement_blocks(app)[0].renderable.plain:
+            if "3 more files" in _painted(_supplement_blocks(app)[0]).plain:
                 break
         assert session.reads, "the terminal beat never asked for its row"
-        plain = _supplement_blocks(app)[0].renderable.plain
+        plain = _painted(_supplement_blocks(app)[0]).plain
         assert "3 more files" in plain, plain
         # The HTML component is still skipped, placeholder-free.
         assert "chart" not in plain
@@ -582,9 +640,12 @@ async def test_settings_shows_the_highlights_section(
             "supplements.timeoutS",
         ):
             assert key in keys, f"{key} missing from /settings"
-        assert keys["supplements.enabled"].setting.default is True
-        assert keys["supplements.graphics"].setting.default is False
-        assert keys["supplements.maxCostUsd"].setting.default == 1.00
+        enabled = keys["supplements.enabled"].setting
+        assert enabled is not None and enabled.default is True
+        graphics = keys["supplements.graphics"].setting
+        assert graphics is not None and graphics.default is False
+        cost = keys["supplements.maxCostUsd"].setting
+        assert cost is not None and cost.default == 1.00
         # The section is scoped to new sessions, like `monitor` beside it.
         from local_operator import settings_io
 
@@ -610,8 +671,8 @@ async def test_a_live_theme_switch_re_inks_the_block() -> None:
             colors = sorted(
                 {
                     span.style.color.get_truecolor().hex
-                    for span in block.renderable.spans
-                    if span.style and span.style.color
+                    for span in _painted(block).spans
+                    if isinstance(span.style, Style) and span.style.color
                 }
             )
             assert colors, "the block resolved no tokens"
