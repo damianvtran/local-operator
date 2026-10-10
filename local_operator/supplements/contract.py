@@ -214,7 +214,8 @@ def reader_disposition(row: Mapping[str, Any], *, job_live: bool) -> ReaderDispo
     if row.get("error") == SUPERSEDED_ERROR or row.get("dismissed") or state == "skipped":
         return "nothing"
     if state == "done":
-        # A finish with nothing to show renders nothing: no header, no reserved frame.
+        # A finish with nothing to show renders nothing at all: no line, no reserved frame
+        # (the block never draws a header — memo §2.8, 2026-10-10 amendment).
         return (
             "block"
             if (row.get("files") or row.get("components") or row.get("images"))
