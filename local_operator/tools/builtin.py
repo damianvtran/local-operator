@@ -9676,6 +9676,9 @@ async def execute_edit(
     is_scratchpad = _has_scratchpad_scheme(url)
     where = f"{url} -> {path}" if is_scratchpad else str(path)
     text = f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied."
+    introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
+    if introduced:
+        text = f"{text}\n{_marker_introduced_note(introduced)}"
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
     return _text(
         tool_call_id,
@@ -9873,7 +9876,13 @@ def _edit_file_result_locked(
     if current != original:
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
-    return total_replacements, _diff_details(str(path), original, current)
+    details = _diff_details(str(path), original, current)
+    introduced = _marker_introduced(original, current)
+    if introduced:
+        # Carried in ``details`` (the file tools' existing structured channel) so the
+        # thread function keeps its return shape; ``execute_edit`` turns it into the note.
+        details[_MARKER_INTRODUCED_KEY] = introduced
+    return total_replacements, details
 
 
 def build_edit_tool() -> AgentTool:
@@ -9952,6 +9961,11 @@ def _line_delta(before: str, after: str) -> tuple[int, int]:
 #: ledger, not the screen.
 _DIFF_DETAILS_CAP_LINES = 200
 
+#: Scratch key on the edit/write ``details`` dict carrying the marker-introduction count
+#: from the worker thread to the coroutine that words the receipt. Popped before the
+#: result is built, so it never reaches the persisted details or a renderer.
+_MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
+
 
 def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     """The write/edit tool-result details: line counts + a rendered unified diff.
@@ -9976,6 +9990,47 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     if len(diff) > _DIFF_DETAILS_CAP_LINES:
         diff = diff[:_DIFF_DETAILS_CAP_LINES] + ["…"]
     return {"path": str(path), "added": added, "removed": removed, "diff": diff}
+
+
+def _marker_introduced(before: str, after: str) -> int:
+    """How many MORE redaction markers ``after`` holds than ``before`` did.
+
+    **Why this exists (2026-10-09, session ``565245718d90``).** ``edit`` and ``write``
+    write exactly the bytes they are handed, and that is an invariant, not a gap: the
+    harness must never alter what a tool writes. But the model only ever SEES the masked
+    form of a symbol the credential shapes misjudged (tool results, and its own earlier
+    calls, which history stores scrubbed), so a model that copies what it saw hands the
+    writer the MARKER and the writer faithfully puts it in source. The shape rule that
+    manufactured those markers is fixed at the source; this is the net under it for the
+    next misjudgement, and the only layer that can see both halves: the file before, and
+    the text about to replace it.
+
+    A COUNT comparison, not a membership test, because a file may legitimately contain
+    the marker already (this module's own tests, a transcript fixture, documentation of
+    the redactor) and an edit that merely leaves it in place, or removes one, introduced
+    nothing. The result is advisory only: the caller appends a note and never refuses or
+    rewrites, because a document that is ABOUT the marker is a legitimate write.
+    """
+    return max(0, after.count(REDACTION_MARKER) - before.count(REDACTION_MARKER))
+
+
+def _marker_introduced_note(count: int) -> str:
+    """The line appended to an edit/write receipt when it put the marker into a file.
+
+    Phrased for the model that wrote it: it cannot tell the mask from source text, which
+    is the whole defect. It is told what the string is, that the intended text is
+    unknown to the harness, and what to do; nothing is claimed about WHICH symbol it was
+    because the harness cannot know (the real text is exactly what the mask hid).
+    """
+    return (
+        f"Note: this write put {count} redaction marker(s) ({REDACTION_MARKER}) into the file. "
+        "That string is the harness's mask for text it hid from your view (a secret-looking "
+        "value or identifier), not source: the hidden original was never visible to you. If "
+        "you meant to write the original text, the file now holds the mask instead; recover "
+        "the real text from another source (git diff, the original file, a different "
+        "spelling) and edit it back. If the marker is intentional (documentation of the "
+        "redactor, a fixture), ignore this note."
+    )
 
 
 @_guard("write")
@@ -10050,6 +10105,9 @@ async def execute_write(
         " — kept for this session (survives restarts)" if is_scratchpad and not existed else ""
     )
     text = f"{verb} {where} ({len(params.content)} chars){lifetime}."
+    introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
+    if introduced:
+        text = f"{text}\n{_marker_introduced_note(introduced)}"
     # Appended, never substituted: the nudge rides the receipt the caller already
     # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
@@ -10085,7 +10143,11 @@ def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str,
             previous = ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    return existed, _diff_details(str(path), previous, content)
+    details = _diff_details(str(path), previous, content)
+    introduced = _marker_introduced(previous, content)
+    if introduced:
+        details[_MARKER_INTRODUCED_KEY] = introduced
+    return existed, details
 
 
 def build_write_tool() -> AgentTool:
