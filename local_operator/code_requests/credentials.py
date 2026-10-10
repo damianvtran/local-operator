@@ -87,7 +87,7 @@ _GLAB_FALLBACK_BIN_DIRS: tuple[str, ...] = ("/opt/homebrew/bin", "/usr/local/bin
 #: in ``TOKEN`` (case-insensitive). WHY: ``gh auth token --hostname H`` and
 #: ``glab config get token --host H`` echo the corresponding env variable for
 #: ANY H, so an unstripped child would make an unknown host look signed-in
-#: (measured: ``GITLAB_TOKEN=[redacted] glab config get token --host
+#: (measured: ``GITLAB_TOKEN=… glab config get token --host
 #: evil.example`` prints the token). A deny-list of known family names is how
 #: the round-1 list missed ``OAUTH_TOKEN`` — one of glab's documented env
 #: precedence names — and leaked a token to any ``--host`` a URL named (review

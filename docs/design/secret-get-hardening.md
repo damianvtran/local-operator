@@ -1407,8 +1407,8 @@ module under test: <worktree>/local_operator/tools/builtin.py
   RAW-BYTE LEAK: False
 
 [single-line, value then newline] value is 28 bytes
-  chunks=[[redacted], b'\n']
-  [redacted]\n'
+  chunks=[b'out: [redacted]', b'\n']
+  released=b'out: [redacted]\n'
   RAW-BYTE LEAK: False
 ```
 
