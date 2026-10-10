@@ -122,6 +122,29 @@ def test_the_desktop_document_route_keeps_the_digest_gate(tmp_path, monkeypatch)
     assert response.status_code == 422
 
 
+def test_the_desktop_document_route_carries_the_policy_on_errors(tmp_path, monkeypatch) -> None:
+    """D5's pair rides the family's error responses too (#2134 R4).
+
+    The ladder's 404 and the digest gate's 422 both carry ``nosniff`` +
+    ``no-store``, verbatim like the 200 (the unauthorised response is pinned in the
+    bearer test below).
+    """
+    _session(tmp_path)
+    client, headers = _desktop_client(tmp_path, monkeypatch)
+    with client:
+        missing = client.get(
+            f"/v1/desktop/sessions/{SESSION}/supplements/{DIGEST}/document", headers=headers
+        )
+        non_digest = client.get(
+            "/v1/desktop/sessions/abc/supplements/not-a-digest/document", headers=headers
+        )
+    assert missing.status_code == 404
+    assert non_digest.status_code == 422
+    for response in (missing, non_digest):
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["cache-control"] == "no-store"
+
+
 def test_the_desktop_document_route_has_no_caller_supplied_path(tmp_path, monkeypatch) -> None:
     """There is no path parameter to supply, and a smuggled one changes nothing: the
     document served is the digest's, the same as the clean request."""
@@ -145,3 +168,6 @@ def test_the_desktop_document_route_is_behind_the_bearer(tmp_path, monkeypatch) 
     with client:
         response = client.get(f"/v1/desktop/sessions/abc/supplements/{DIGEST}/document")
     assert response.status_code in (401, 403)
+    # The family policy rides the unauthorised response too (#2134 R4, D5).
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"] == "no-store"

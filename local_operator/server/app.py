@@ -1002,6 +1002,47 @@ async def static_response_policy(request: Request, call_next):
     return response
 
 
+def is_desktop_supplement_path(path: str) -> bool:
+    """Whether ``path`` is in the desktop supplement read family.
+
+    The family today is the document route
+    (``/v1/desktop/sessions/{session_id}/supplements/{digest}/document``,
+    ``routes/desktop_sessions.py``) and the match is on the session's whole
+    ``/supplements/`` namespace, so a future read route added beside it is
+    covered without a second policy site. A named predicate rather than an
+    inline condition in the middleware below, so the family's scope is stated
+    once.
+    """
+    prefix = "/v1/desktop/sessions/"
+    if not path.startswith(prefix):
+        return False
+    session, sep, _rest = path[len(prefix) :].partition("/supplements/")
+    return bool(sep) and bool(session) and "/" not in session
+
+
+@app.middleware("http")
+async def desktop_supplement_response_policy(request: Request, call_next):
+    """The executing-document family's response policy: ``nosniff`` + ``no-store``.
+
+    WHY A MIDDLEWARE AND NOT PER-HANDLER HEADERS. The pair has to ride the error
+    responses too -- the ladder's 404, the digest gate's 422 and the bearer
+    dependency's 401 never pass through the handler that sets the pair on its
+    200 -- and #2134 R4 is the lesson that a policy attached only to the success
+    path is silently absent where it matters. Registered LAST, so it is
+    OUTERMOST and observes every response this family can produce. D5
+    (``docs/design/file-serving-and-surface-convergence.md``) names the pair for
+    this family: ``nosniff`` on a JSON reply, ``no-store`` for bearer-gated
+    session documents (``managed_desktop_boundary`` already applies that half to
+    everything under ``/v1/desktop/``; this adds the other).
+    """
+    if not is_desktop_supplement_path(request.url.path):
+        return await call_next(request)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 # Include routers from the routes modules
 
 # /health

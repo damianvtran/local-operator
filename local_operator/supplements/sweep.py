@@ -223,16 +223,22 @@ def _session_transcripts(sessions_dir: Path) -> Iterable[Path]:
 def referenced_digests(
     sessions_dir: Path,
     *,
-    since: float,
     budget_bytes: int = MAX_SCAN_BYTES,
 ) -> tuple[set[str], int, int, str]:
-    """Every digest referenced by any session transcript written at/after ``since``.
+    """Every digest referenced by ANY session transcript.
 
     Returns ``(digests, sessions_scanned, bytes_scanned, problem)``. The scan is
-    narrowed by ``since``: a transcript whose last write predates a candidate's
-    ``mtime`` cannot contain a reference to it -- a reference row is appended no
-    earlier than the blob it names -- so those files are skipped, which is what
-    keeps the pass small on an install with years of sessions.
+    deliberately NOT narrowed by transcript mtime. It once was -- a transcript last
+    written before a candidate's mtime was skipped, on the theory that a reference
+    is appended no earlier than the blob it names -- and that theory is FALSE for
+    this feature's own rows: supplement rows are appended with
+    ``preserve_mtime=True``, so the restored mtime is pinned back to the session's
+    last real write, which predates the blob (``_store`` runs first), and a
+    steer/restart can append a reference arbitrarily long after that write. A
+    skipped referencing transcript is exactly how the pass deletes a REFERENCED
+    blob -- silent data loss, reproduced in round-1 review R1. Completeness is the
+    write-safety contract; the pass stays bounded by the scan budget below, which
+    fails closed.
 
     ``problem`` is non-empty when the scan could NOT be trusted: a transcript
     that is not readable, or a budget overrun. Callers must treat a non-empty
@@ -253,8 +259,6 @@ def referenced_digests(
             continue
         except OSError:
             problems.append(f"stat:{transcript}")
-            continue
-        if stat.st_mtime < since:
             continue
         if scanned_bytes + stat.st_size > budget_bytes:
             problems.append("budget")
@@ -305,11 +309,12 @@ def store_sweep(
         if not candidates:
             return report
         # Verify against EVERY session first; only a complete, trusted scan may
-        # delete. ``since`` is the OLDEST candidate's mtime: any transcript last
-        # written before it cannot reference any candidate.
-        oldest = candidates[0].mtime
+        # delete. The scan is deliberately NOT narrowed by transcript mtime --
+        # ``referenced_digests``' docstring records why that ordering cannot be
+        # relied on (preserve_mtime appends; round-1 review R1). The scan budget
+        # is what bounds the pass instead, and it fails closed.
         referenced, sessions, scanned, problem = referenced_digests(
-            root / _SESSIONS_DIRNAME, since=oldest, budget_bytes=max_scan_bytes
+            root / _SESSIONS_DIRNAME, budget_bytes=max_scan_bytes
         )
         report.scanned_sessions = sessions
         report.scanned_bytes = scanned

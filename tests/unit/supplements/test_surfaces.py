@@ -183,6 +183,9 @@ def test_the_relay_routes_are_behind_the_gate(path: str) -> None:
     response = client.get(path)
     assert response.status_code == 401
     assert response.json()["error"] == "authentication required"
+    # The family's response policy rides the refusals too (#2134 R4, D5): nosniff + no-store.
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"] == "no-store"
 
 
 # --- the relay routes, against real store bytes and a real journal ----------------------
@@ -343,6 +346,48 @@ def test_the_relay_document_route_is_digest_only(tmp_path, monkeypatch) -> None:
     ).status_code in (404, 400)
 
 
+def test_the_relay_document_route_authorises_by_supplement_rows_only(tmp_path, monkeypatch) -> None:
+    """§2.7's letter (round-1 review R4): the reference must be in a ``supplement_v1`` row.
+
+    Sync's byte grammar also matches ``"attachment"`` references on OTHER rows --
+    message media carries the same key today -- and a future text-mime producer must not
+    become servable through this door. A digest named only by a message row does not
+    authorise, even though the blob resolves in this store.
+    """
+    cfg = _relay_config(tmp_path, monkeypatch)
+    digest = _blob(cfg)
+    _journal(
+        cfg,
+        RELAY_SESSION,
+        [
+            {
+                "id": "m" * 32,
+                "ts": 1791000000.0,
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "blocks": [{"type": "image", "attachment": digest, "mime_type": "image/png"}],
+                },
+            }
+        ],
+    )
+    client, _daemon = _daemon_relay()
+    response = client.get(f"/api/sessions/{RELAY_SESSION}/supplements/{digest}/document")
+    assert response.status_code == 404, "a non-supplement reference must not authorise this door"
+
+
+def test_the_relay_document_route_carries_the_policy_on_errors(tmp_path, monkeypatch) -> None:
+    """D5's pair rides the refusals too (#2134 R4): the 404 carries nosniff + no-store."""
+    cfg = _relay_config(tmp_path, monkeypatch)
+    digest = _blob(cfg)
+    _journal(cfg, RELAY_SESSION, [_row()])  # a row, but it names nothing
+    client, _daemon = _daemon_relay()
+    response = client.get(f"/api/sessions/{RELAY_SESSION}/supplements/{digest}/document")
+    assert response.status_code == 404
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"] == "no-store"
+
+
 def _file_row(path: str) -> dict[str, Any]:
     return _row(
         files=[
@@ -397,6 +442,23 @@ def test_the_relay_file_route_refuses_everything_but_recorded_indices(
     )
 
 
+def test_the_relay_file_route_carries_the_policy_on_errors(tmp_path, monkeypatch) -> None:
+    """D5's pair rides the 400/404 refusals too (#2134 R4)."""
+    cfg = _relay_config(tmp_path, monkeypatch)
+    work = tmp_path / "Work"
+    (work / "reports").mkdir(parents=True)
+    (work / "reports" / "q3.md").write_text("x", encoding="utf-8")
+    _journal(cfg, RELAY_SESSION, [_file_row("reports/q3.md")])
+    client, daemon = _daemon_relay()
+    _live(daemon, RELAY_SESSION, str(work))
+    base = f"/api/sessions/{RELAY_SESSION}/supplements/{RELAY_JOB}/file"
+    for url, status in ((f"{base}?i=abc", 400), (f"{base}?i=7", 404)):
+        response = client.get(url)
+        assert response.status_code == status
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["cache-control"] == "no-store"
+
+
 def test_the_relay_file_route_reapplies_the_denylist(tmp_path, monkeypatch) -> None:
     """A row is data, not authority: even a tampered row naming a credential file is
     refused by the denylist re-applied at read time (memo §4.3)."""
@@ -419,6 +481,8 @@ def test_the_relay_file_route_refuses_a_relative_path_without_a_live_record(
     client, _daemon = _daemon_relay()
     response = client.get(f"/api/sessions/{RELAY_SESSION}/supplements/{RELAY_JOB}/file?i=0")
     assert response.status_code == 409, "no cwd to vouch for -> refuse, never guess"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_the_relay_file_route_serves_a_home_relative_path_without_a_live_record(
@@ -477,6 +541,8 @@ def test_the_relay_file_route_caps_the_file_size(tmp_path, monkeypatch) -> None:
     _live(daemon, RELAY_SESSION, str(work))
     response = client.get(f"/api/sessions/{RELAY_SESSION}/supplements/{RELAY_JOB}/file?i=0")
     assert response.status_code == 413
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"] == "no-store"
 
 
 @pytest.mark.parametrize(
