@@ -9,9 +9,13 @@ spends. The manager's sign-off (design §14.5, v1 KEY-FIRST): this rung runs
 when the earlier rungs refuse or are absent — an existing user's path must not
 change, and the key rung supports seeds this one cannot.
 
-**Funding and honesty**: quota-funded — no cash figure exists, so
-``cost_usd`` stays ``None`` and the result carries
-``cost_source="subscription"``; the guide states the 3-5x quota burn.
+**Funding and honesty**: quota-funded — no cash charge exists, so
+``cost_source="subscription"`` and the guide states the 3-5x quota burn. The
+operator's wave-2 cost rule still wants a comparable number, so ``cost_usd``
+carries the API-EQUIVALENT price (see :data:`OPENAI_SUB_API_EQUIVALENT_USD`)
+labelled ``billing_basis="subscription-api-equivalent"`` with its provenance on
+``cost_provenance`` - never a charge, never a rate table (design D8 stands:
+one provenance-labelled constant for THIS rung, not a general price lookup).
 NOT available on the Free plan (the backend refuses it; that surfaces as a
 rung failure and fails forward).
 
@@ -94,6 +98,37 @@ OPENAI_SUB_FALLBACK_MODEL = "gpt-6-astra"
 #: image tool (reviewer round 1, F2; see docs/design/image-providers.md
 #: § Evidence tiers); the live probe settles it.
 OPENAI_SUB_INSTRUCTIONS = "Generate the image the user asks for."
+
+#: API-EQUIVALENT price of one subscription-funded image, USD. NOT a charge:
+#: the plan quota funds the call and no cash moves; this is what the same
+#: render would list at on OpenAI's API, so subscription and keyed spend are
+#: comparable (the convention inference cost follows: list price, labelled).
+#:
+#: Source: OpenAI "Image generation" guide, per-image output table for
+#: ``gpt-image-2`` at 1024x1024 / ``medium`` = $0.053
+#: (https://developers.openai.com/api/docs/guides/image-generation.md),
+#: cross-checked against https://developers.openai.com/api/docs/pricing.md
+#: (``gpt-image-2`` image output $30.00/1M tokens), both fetched 2026-10-09.
+#: ``gpt-image-2`` is the model the Codex docs name for the built-in tool
+#: (docs/design/image-providers.md row 4); the host model in the request body
+#: is the chat model, not the image model.
+#:
+#: ASSUMPTION (the call underdetermines the price): this rung sends
+#: ``{"type": "image_generation"}`` with NO ``size``/``quality``, so the
+#: backend picks them (documented default ``auto``, which "depends on the
+#: generated image" and has no fixed price). The figure is therefore the
+#: documented medium-quality square price, a mid-range point (low $0.006 ..
+#: high $0.211 at 1024x1024); it excludes the host model's own token usage
+#: that a Responses-API call also bills. Treat it as an order-of-magnitude
+#: equivalent, not a per-image measurement. Revisit if the rung starts pinning
+#: size/quality or the backend returns usage.
+OPENAI_SUB_API_EQUIVALENT_USD = 0.053
+OPENAI_SUB_API_EQUIVALENT_PROVENANCE = (
+    "API-equivalent, not billed: OpenAI published gpt-image-2 price at 1024x1024 "
+    "medium (developers.openai.com/api/docs/guides/image-generation, fetched "
+    "2026-10-09); size/quality are not pinned on this route so the medium square "
+    "price is assumed; excludes host-model tokens"
+)
 
 
 def _default_host_model() -> str:
@@ -337,4 +372,14 @@ async def run_openai_sub(
         # the payload (cache_media sniffs dims), matching the images API's
         # b64 form.
         assets.append(MediaAsset(data=data, content_type="image/png", source_url=""))
-    return RungResult(assets=assets, model=model_id, cost_source="subscription")
+    return RungResult(
+        assets=assets,
+        model=model_id,
+        # ``cost_source`` keeps its meaning (quota-funded); the amount is the
+        # labelled API-equivalent, per image delivered (the route requests one;
+        # n > 1 is skipped above, so this is 1x unless the stream yields more).
+        cost_usd=OPENAI_SUB_API_EQUIVALENT_USD * len(assets),
+        cost_source="subscription",
+        billing_basis="subscription-api-equivalent",
+        cost_provenance=OPENAI_SUB_API_EQUIVALENT_PROVENANCE,
+    )
