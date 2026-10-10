@@ -48,16 +48,31 @@ nothing" rather than taking the splash down — the same contract
 
 from __future__ import annotations
 
+import asyncio
+import importlib
+import logging
+import sys
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-# ``providers.quota_notice`` (the verdict) is imported at the READ below, not
-# here: it pulls in the provider stack — httpx with it — and the startup path
-# must reach the first frame without httpx
-# (``tests/unit/test_import_graph.py`` pins it, ~88 ms / 16.5 MB). Same
-# deferred-import pattern this module already uses for the registry and
-# recovery reads.
+logger = logging.getLogger(__name__)
+
+#: The verdict module this file defers, by name — read, prewarmed, and tested
+#: through this one string rather than three spellings of it.
+_VERDICT_MODULE = "local_operator.providers.quota_notice"
+
+#: True from the moment the boot prewarm (``prewarm_verdict``) starts its
+#: import until it finishes. While it is set, the READ skips rather than wait
+#: on the import lock; see ``quota_notice_line``.
+_prewarm_started = False
+
+# ``providers.quota_notice`` (the verdict) is NOT imported here: it pulls in
+# the provider stack — httpx with it — and the startup path must reach the
+# first frame without httpx (``tests/unit/test_import_graph.py`` pins it,
+# ~88 ms / 16.5 MB). The app loads it ONCE at boot in a thread
+# (``prewarm_verdict`` below, called by ``OperatorApp``); the read keeps a
+# synchronous import as the fallback for callers no prewarm covers.
 
 if TYPE_CHECKING:  # pragma: no cover - import weight guard, not a behaviour
     from local_operator.providers.controller import CatalogueEntry
@@ -82,6 +97,34 @@ class QuotaNoticeLine:
     url: str | None = None
 
 
+def _load_verdict_module() -> None:
+    """The verdict import itself, one name a test can record the thread of."""
+    importlib.import_module(_VERDICT_MODULE)
+
+
+async def prewarm_verdict() -> bool:
+    """Load the verdict module in a THREAD, once, for the splash's later read.
+
+    WHY. ``quota_notice_line`` defers its verdict import (the module must stay
+    off the startup import path — ``test_import_graph``), and the deferred exec
+    is hundreds of milliseconds cold. Awaiting it from the first splash
+    snapshot would pay that on the loop, mid-paint; the app calls this once at
+    boot instead (``OperatorApp._prewarm_quota_notice``), so by the time a
+    refresh runs, the read is a dict lookup. Returns whether the module
+    loaded; a failure clears the in-flight flag so a later read may retry the
+    import itself rather than the row dying to one transient import error.
+    """
+    global _prewarm_started
+    _prewarm_started = True
+    try:
+        await asyncio.to_thread(_load_verdict_module)
+    except Exception:  # noqa: BLE001 — a prewarm must never hurt; the read degrades
+        logger.debug("quota verdict prewarm failed", exc_info=True)
+        _prewarm_started = False
+        return False
+    return True
+
+
 def quota_notice_line(
     session: Any | None,
     providers: Any | None,
@@ -103,7 +146,29 @@ def quota_notice_line(
     URL extraction above).
     """
     try:
-        from local_operator.providers.quota_notice import evaluate_quota_notice
+        module = sys.modules.get(_VERDICT_MODULE)
+        if module is not None:
+            evaluate_quota_notice = getattr(module, "evaluate_quota_notice", None)
+            if evaluate_quota_notice is None:
+                # Mid-import in another thread (modules land in sys.modules
+                # before their exec finishes): the attribute appears with the
+                # completed import; this refresh shows nothing, the prewarm's
+                # completion refresh sees it.
+                return None
+        elif _prewarm_started:
+            # The boot prewarm is importing it right now. SKIP this refresh
+            # rather than wait on the import lock — a splash paint must never
+            # block the loop on a module exec (the deferral above exists to
+            # keep this module's exec off the critical path; the prewarm
+            # thread pays it once instead). `prewarm_verdict`'s completion
+            # refreshes the splash, so the row lands one refresh later
+            # instead of stalling this one.
+            return None
+        else:
+            # Fallback for callers no prewarm covers: nothing is in flight, so
+            # import where we stand — the deferral's point is that the STARTUP
+            # path is free of this, not that this call can never pay it.
+            from local_operator.providers.quota_notice import evaluate_quota_notice
 
         spec = getattr(session, "model", None)
         provider = str(getattr(spec, "provider", "") or "")

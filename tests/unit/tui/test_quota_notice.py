@@ -24,6 +24,8 @@ must render the SAME fixtures these tests pin rather than a drifting copy.
 from __future__ import annotations
 
 import dataclasses
+import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,6 +58,7 @@ from local_operator.providers.radient_recovery import (
 )
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.providers.usage_cache import USAGE_REPORT_TTL_MS, UsageCacheStore
+from local_operator.tui import quota_notice as tui_quota
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
 from local_operator.tui.widgets.welcome import (
@@ -505,6 +508,50 @@ def test_a_cold_cache_with_a_stored_credential_still_never_probes(
 
 
 @pytest.mark.asyncio
+async def test_the_prewarm_imports_the_verdict_off_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boot prewarm pays the verdict import in a THREAD, once (round 4).
+
+    The read must never pay it on the loop, and the module must not load at
+    import time either (``test_import_graph``) — the prewarm is where both
+    rules are satisfied: the loop awaits, the import runs beside it.
+    """
+    calls: list[str] = []
+    threads: list[str] = []
+
+    def fake_loader() -> None:
+        calls.append(tui_quota._VERDICT_MODULE)
+        threads.append(threading.current_thread().name)
+
+    monkeypatch.setattr(tui_quota, "_load_verdict_module", fake_loader)
+    assert await tui_quota.prewarm_verdict() is True
+    assert calls == [tui_quota._VERDICT_MODULE]
+    assert threads and threads[0] != threading.main_thread().name, "must be off the loop"
+
+    def broken() -> None:
+        raise ImportError("no verdict for you")
+
+    monkeypatch.setattr(tui_quota, "_load_verdict_module", broken)
+    assert await tui_quota.prewarm_verdict() is False
+    assert tui_quota._prewarm_started is False, "a failed prewarm lets the read retry"
+
+
+def test_the_read_skips_while_the_prewarm_is_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No refresh may block the loop on the verdict's import lock (round 4).
+
+    With the module absent and the boot prewarm importing it, the read answers
+    "nothing yet" — and never touches the import machinery: the completion
+    refresh is what lands the row.
+    """
+    monkeypatch.delitem(sys.modules, tui_quota._VERDICT_MODULE, raising=False)
+    monkeypatch.setattr(tui_quota, "_prewarm_started", True)
+    controller = QuotaController(reports=[_report("deepseek", _balance_limit(0.0))])
+    assert quota_notice_line(QuotaSession(), controller, now_ms=NOW_MS) is None
+    assert tui_quota._VERDICT_MODULE not in sys.modules, "the read must not import here"
+
+
+@pytest.mark.asyncio
 async def test_verified_radient_facts_shift_the_copy_to_the_topup_sentence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -866,6 +913,27 @@ def test_session_welcome_info_degrades_when_the_quota_read_fails() -> None:
     # A facade with no quota surface at all (an embedding host) is silence too.
     assert session_welcome_info(QuotaSession(), FakeProviders(missing={})).quota_notice is None
     assert session_welcome_info(None, QuotaController()).quota_notice is None
+
+
+@pytest.mark.asyncio
+async def test_the_app_starts_the_quota_prewarm_at_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prewarm is wired to the boot, not left to the first read (round 4)."""
+    started: list[int] = []
+
+    async def fake_prewarm() -> bool:
+        started.append(1)
+        return False
+
+    monkeypatch.setattr("local_operator.tui.app.prewarm_verdict", fake_prewarm)
+    app = _make_app(QuotaSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            if started:
+                break
+            await pilot.pause(0.05)
+    assert started, "the boot must start the prewarm"
 
 
 @pytest.mark.asyncio
