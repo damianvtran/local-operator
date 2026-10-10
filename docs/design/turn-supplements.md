@@ -356,7 +356,8 @@ Reasons:
   "decision": {"vendor": "radient", "files_p": {...}, "graphics_p": 0.83, "skipped": null},
   "instruction": "make it a table",            // steer text that produced this version
   "model": "anthropic/claude-…", "turns": 2, "tokens_in": 9120, "tokens_out": 2210,
-  "cost_usd": 0.0123, "error": "", "at": 1791...
+  "cost_usd": 0.0123, "error": "", "at": 1791...,
+  "detail": ["bound:cost cap: $0.0410 of $0.05 reached before repair"]  // generator notes: bound records live HERE, never in "error" on a done row (round-1 review R4/R7)
 }
 ```
 
@@ -470,7 +471,12 @@ process, the same redaction boundary classification-layer §6 requires for outbo
   (operator directive, 2026-10-10). The units contract is unchanged: the cap is only checked
   between turns, never a per-turn figure with a third turn added (round-1 review R3;
   round-2 R2-6).
-Any bound firing → `state=failed`, `error="bound:<name>"`, with valid blocks so far kept.
+Any bound firing ends the job. With NO block kept the row is `state=failed`,
+`error="bound:<name>"`; when valid blocks so far exist they are KEPT, the row is
+`state="done"` -- the only state the frozen reader paints as a settled block -- and the bound
+is recorded in the row's `detail` list (round-1 review R4/R7: the original "failed with the
+blocks kept" was unpaintable under the frozen reader rule, so the record moved rather than
+the rule). The turn cap and the per-turn token cap record the same way when they touch a job.
 
 **Fail-open.** Every exception → `failed`, a debug log, and no notice. A generator failure is
 never surfaced as an error in the transcript; the indicator settles to a quiet "Couldn't

@@ -118,6 +118,47 @@ _STATIC_SKIP_RE: Final = re.compile(r"<(script|style|data)\b.*?</\1\s*>", re.DOT
 _VIEWBOX_RE: Final = re.compile(r"viewBox\s*=\s*\"[^\"]*\"", re.I)
 _STYLE_ATTR_RE: Final = re.compile(r"style\s*=\s*\"[^\"]*\"", re.I)
 
+#: Attribute VALUES that are structural/geometry, never displayed claims (§4.2's own
+#: ``viewBox``/style carve-out, applied to the rendered-values scan; round-1 review R3).
+#: A raw DOM/SVG component draws WITH these numbers -- a ``viewBox``, a path's ``d``, a
+#: polyline's ``points``, a ``transform``, coordinates, sizes, stroke geometry -- and the
+#: blessed raw-SVG path (App. A: "no fixed widths, use viewBox SVG") must not be refused
+#: for them. Deliberately NAME-keyed: anything not listed (``aria-label``, ``title``, ...)
+#: stays scanned, because those attributes carry text a user can read. The list is the
+#: markup vocabulary the prelude and the fixtures build charts with.
+_STRUCTURAL_ATTRS: Final[frozenset[str]] = frozenset(
+    {
+        "viewbox",
+        "d",
+        "points",
+        "transform",
+        "x",
+        "y",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "cx",
+        "cy",
+        "r",
+        "rx",
+        "ry",
+        "width",
+        "height",
+        "stroke-width",
+        "stroke-dasharray",
+        "stroke-dashoffset",
+        "opacity",
+        "fill-opacity",
+        "stroke-opacity",
+        "style",
+    }
+)
+#: One quoted attribute pair, either quote style: ``name="…"`` or ``name='…'``.
+_ATTR_PAIR_RE: Final = re.compile(
+    r"(?P<name>[a-zA-Z:-]+)\s*=\s*(?P<quote>[\"'])(?P<value>.*?)(?P=quote)"
+)
+
 _VOID: Final[frozenset[str]] = frozenset(
     {
         "area",
@@ -405,6 +446,18 @@ def _check_data(data: Mapping[str, Any], evidence: _EvidenceIndex) -> tuple[list
     return errors, units
 
 
+def _blank_structural(match: re.Match[str]) -> str:
+    """Blank one structural attribute pair, leave every other attribute as written.
+
+    The ``re.sub`` callback for :data:`_ATTR_PAIR_RE`: a value whose attribute NAME is in
+    :data:`_STRUCTURAL_ATTRS` is layout and is removed from the scanned text; everything
+    else survives to be matched by :data:`_STATIC_NUMBER_RE` (round-1 review R3).
+    """
+    if match.group("name").lower() not in _STRUCTURAL_ATTRS:
+        return match.group(0)
+    return " "
+
+
 def _check_static_numbers(body: str, data: Mapping[str, Any], units: set[str]) -> list[str]:
     """Every number PRINTED in static markup must be reproducible from the component's data.
 
@@ -414,6 +467,13 @@ def _check_static_numbers(body: str, data: Mapping[str, Any], units: set[str]) -
     (:mod:`local_operator.supplements.fmt`) at DEFAULT precision plus the units the data
     carries, because static text has no place to put a ``digits`` option -- a baked-in rounded
     literal is exactly the failure this catches (memo §2.10, round-1 D4).
+
+    Structural attribute values are BLANKED before the scan (round-1 review R3): ``viewBox``,
+    a path's ``d``, ``points``, ``transform``, coordinates, sizes and stroke geometry are
+    layout the component draws WITH, not claims about data -- the same carve-out §4.2 already
+    gives ``viewBox``/style in the literal scan -- while element TEXT and data-bearing
+    attributes (``aria-label`` and friends) keep being validated, because those are what a
+    user can actually read.
     """
     allowed: set[str] = set()
     for dataset in data.values() if isinstance(data, Mapping) else []:
@@ -431,6 +491,9 @@ def _check_static_numbers(body: str, data: Mapping[str, Any], units: set[str]) -
                     allowed.add(fmt_mod.fmt(number, unit=unit))
     errors: list[str] = []
     text = _STATIC_SKIP_RE.sub(" ", body)
+    # Blank the structural attributes' values (see _STRUCTURAL_ATTRS) before matching, the
+    # same shape _check_scan uses for viewBox/style: layout numbers are not displayed values.
+    text = _ATTR_PAIR_RE.sub(_blank_structural, text)
     for match in _STATIC_NUMBER_RE.finditer(text):
         printed = match.group(0).strip()
         number = _numeric(match.group("num"))

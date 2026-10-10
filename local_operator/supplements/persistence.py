@@ -105,9 +105,7 @@ def build_details(
     return details  # type: ignore[return-value]
 
 
-def next_version(
-    details: Mapping[str, Any], *, state: str, error: str = ""
-) -> SupplementDetails:
+def next_version(details: Mapping[str, Any], *, state: str, error: str = "") -> SupplementDetails:
     """The follow-on row for the same ``anchor`` and ``job``: ``version + 1``, new state.
 
     Everything else is carried verbatim -- older versions stay in the journal as an audit trail

@@ -8,9 +8,10 @@ INSIDE the fork on purpose:
 * nothing here may enter the session's own system prompt, tool list or context. A turn's
   request must stay byte-identical whether or not supplements are on (the parity test in
   ``tests/unit/supplements``), and the model-facing footprint statement (§10) is "zero";
-* the fork request is ``isolated`` with ``tools=[]``, so its prefix-cache shape matches the
-  ask-gate precedent (§2.6): the session's system blocks and tools are untouched, and this
-  text rides as the fork's own system block.
+* the fork request is ``isolated`` with ``tools=[]`` and its own single system block -- the
+  ``_errand_request`` shape (§2.5), NOT the ask gate's: the gate rides the turn's warm prefix
+  by design (the session's system blocks and live tools), while this fork shares no prefix
+  with the session, and on a different model there is none to share.
 
 VERBATIM AND PINNED. The text is the memo's Appendix A, character for character (the
 implicit concatenation below exists only to keep lines inside the 100-column lint budget;

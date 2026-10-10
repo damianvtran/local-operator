@@ -275,3 +275,186 @@ async def test_the_fork_answering_NONE_writes_one_terminal_row_with_no_component
         assert session.transcript.latest_custom(SUPPLEMENT_CUSTOM_TYPE)["state"] == "done"
     finally:
         await handle.dispose()
+
+
+LYING_BLOCK = BLOCK.replace('["us-east",120],["us-west",98.5]', '["us-east",120],["us-west",7000]')
+
+
+async def test_cancel_for_a_settled_job_never_touches_a_newer_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 REPRO-1: a cancel naming a SETTLED job answers "already finished".
+
+    It must not cut the newer job that is running, and it must not rewrite the settled
+    row (the pre-fix behaviour: newer job killed, its own row left non-terminal, and the
+    settled row's state done -> cancelled).
+    """
+    session = _make_session(tmp_path / "sessions" / "settled-cancel", tmp_path)
+    handle = await _handle(session, tmp_path)
+    stub = StubRunner(handle._supplements, answers=[BLOCK])
+    stub.install(monkeypatch)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_complete(request: Any) -> tuple[str, Any]:
+        started.set()
+        await release.wait()
+        return BLOCK, _Usage()
+
+    try:
+        handle._supplements._render("anchor-old", _decision(), DATASETS, "u", "a", _settings())
+        await _drain(handle)
+        settled = _rows(session.transcript)
+        assert [row["state"] for row in settled] == ["decided", "done"]
+        old_job = settled[0]["job"]
+
+        # A NEWER job starts and blocks mid-flight.
+        monkeypatch.setattr(handle._supplements, "_complete", blocking_complete)
+        handle._supplements._render("anchor-new", _decision(), DATASETS, "u", "a", _settings())
+        await asyncio.wait_for(started.wait(), timeout=10)
+        new_job = next(
+            row["job"] for row in _rows(session.transcript) if row["anchor"] == "anchor-new"
+        )
+
+        assert await handle._supplements.cancel_job("anchor-old", old_job) == "already finished"
+        # The newer job is still running...
+        assert handle._supplements.running
+        assert handle._supplements.is_live(new_job)
+        # ...and the settled pair is untouched: still two rows, newest still ``done``.
+        old_rows = [row for row in _rows(session.transcript) if row["anchor"] == "anchor-old"]
+        assert [row["state"] for row in old_rows] == ["decided", "done"], old_rows
+
+        release.set()
+        await _drain(handle)
+        new_rows = [row for row in _rows(session.transcript) if row["anchor"] == "anchor-new"]
+        assert [row["state"] for row in new_rows] == ["decided", "done"], new_rows
+    finally:
+        release.set()
+        await handle.dispose()
+
+
+async def test_steer_on_an_older_anchor_queues_behind_the_running_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 REPRO-3 + memo §2.9: a steer on an older anchor waits, depth 1.
+
+    The newer job must NOT be cut; when it settles, the older anchor's version + 1 runs
+    with the instruction (the pre-fix behaviour: newer job cut, the old anchor's next
+    version started immediately).
+    """
+    session = _make_session(tmp_path / "sessions" / "queued-steer", tmp_path)
+    handle = await _handle(session, tmp_path)
+    stub = StubRunner(handle._supplements, answers=[BLOCK])
+    stub.install(monkeypatch)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[Any] = []
+
+    async def complete(request: Any) -> tuple[str, Any]:
+        calls.append(request)
+        if len(calls) == 1:
+            started.set()
+            await release.wait()
+        return BLOCK, _Usage()
+
+    try:
+        handle._supplements._render("anchor-old", _decision(), DATASETS, "u", "a", _settings())
+        await _drain(handle)
+        old_job = _rows(session.transcript)[0]["job"]
+
+        monkeypatch.setattr(handle._supplements, "_complete", complete)
+        handle._supplements._render("anchor-new", _decision(), DATASETS, "u", "a", _settings())
+        await asyncio.wait_for(started.wait(), timeout=10)
+
+        assert (
+            await handle._supplements.steer_job("anchor-old", old_job, "make it a table")
+            == "steering"
+        )
+        # The newer job was not cut and the old anchor gained no row yet: it is QUEUED.
+        assert handle._supplements.running
+        old_rows = [row for row in _rows(session.transcript) if row["anchor"] == "anchor-old"]
+        assert [row["state"] for row in old_rows] == ["decided", "done"], old_rows
+
+        release.set()
+        await _drain(handle)
+        # Queued behind the newer job: once it settles, version + 1 runs for the older anchor.
+        old_rows = [row for row in _rows(session.transcript) if row["anchor"] == "anchor-old"]
+        assert [row["version"] for row in old_rows] == [1, 2, 3, 4], old_rows
+        assert old_rows[-1]["state"] == "done"
+        assert old_rows[-1]["instruction"] == "make it a table"
+        new_rows = [row for row in _rows(session.transcript) if row["anchor"] == "anchor-new"]
+        assert [row["state"] for row in new_rows] == ["decided", "done"], new_rows
+    finally:
+        release.set()
+        await handle.dispose()
+
+
+async def test_a_graphics_job_reports_live_while_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2: ``is_live`` -- the runtime's half of the reader rule -- must be True mid-job.
+
+    C1a left the ``_live_jobs`` registry as the C1b seam; the graphics path never added to
+    it, so the answer was False for exactly the long-lived jobs the rule exists for.
+    """
+    session = _make_session(tmp_path / "sessions" / "live", tmp_path)
+    handle = await _handle(session, tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def complete(request: Any) -> tuple[str, Any]:
+        started.set()
+        await release.wait()
+        return BLOCK, _Usage()
+
+    monkeypatch.setattr(handle._supplements, "_complete", complete)
+    try:
+        handle._supplements._render("anchor-live", _decision(), DATASETS, "u", "a", _settings())
+        await asyncio.wait_for(started.wait(), timeout=10)
+        job = _rows(session.transcript)[0]["job"]
+        assert handle._supplements.is_live(job) is True, "a running job must read live"
+        release.set()
+        await _drain(handle)
+        assert handle._supplements.is_live(job) is False, "a settled job must not read live"
+    finally:
+        release.set()
+        await handle.dispose()
+
+
+async def test_the_wall_clock_bound_keeps_the_blocks_that_already_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4, the report's repro: timeoutS=1; turn 1 passes one block (and asks to repair
+    one), turn 2 hangs, the bound fires -- and the accepted block must SURVIVE on the row.
+
+    Pre-fix the row was ``failed`` / ``bound:time`` with no components: the ``wait_for``
+    cancelled the attempt and the accepted blocks lived only in its locals.
+    """
+    session = _make_session(tmp_path / "sessions" / "bound-time", tmp_path)
+    handle = await _handle(session, tmp_path)
+    calls: list[Any] = []
+
+    async def complete(request: Any) -> tuple[str, Any]:
+        calls.append(request)
+        if len(calls) == 1:
+            return BLOCK + "\n" + LYING_BLOCK, _Usage()
+        # The repair turn never answers: the wall clock ends it. (The raise keeps the
+        # declared return type honest; reaching it would mean the bound did not fire.)
+        await asyncio.Event().wait()
+        raise AssertionError("the wall clock must cut this turn before it answers")
+
+    monkeypatch.setattr(handle._supplements, "_complete", complete)
+    settings = policy.SupplementSettings.from_values({"supplements": {"timeoutS": 1}})
+    assert settings.timeout_s == 1
+    try:
+        handle._supplements._render("anchor-bound", _decision(), DATASETS, "u", "a", settings)
+        await _drain(handle)
+        rows = _rows(session.transcript)
+        assert [row["state"] for row in rows] == ["decided", "done"], rows
+        done = rows[-1]
+        assert done["components"], "the accepted block was lost to the bound"
+        assert any("bound:time" in line for line in done.get("detail", [])), done
+        assert done.get("error", "") == "", "a kept row must not read as a failure"
+        assert reader_disposition(done, job_live=False) == "block"
+    finally:
+        await handle.dispose()
