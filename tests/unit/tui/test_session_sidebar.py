@@ -110,6 +110,13 @@ async def _await_first_attach(app: OperatorApp, pilot) -> None:
     every later boot in the same process binds in one, which is why it passes
     alone and in warm runs.
 
+    The helper is general, not specific to that test: every test in this file
+    whose assertions depend on the bound session — its id (a ranking or
+    sidebar row that must show ``sess``) or the session object (patching
+    ``type(app._session)``, or a premise that the create attached over it) —
+    takes it in place of the first bare ``pilot.pause()``, or reproduces the
+    same late bind on a cold shard with a different symptom.
+
     There is no handle to await: the worker is created inline in ``on_mount`` and
     the app publishes no "session attached" event, so this polls the state the
     test depends on, bounded by pause COUNT (a turn count survives contention a
@@ -524,7 +531,7 @@ async def test_closed_list_switch_reads_a_fresh_ranking():
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         await pilot.press("ctrl+b")
         await pilot.pause()
         assert app._sidebar_timer is not None
@@ -564,7 +571,7 @@ async def test_switch_burst_in_one_event_batch_steps_once_per_press():
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         await pilot.press("ctrl+b")
         await pilot.pause()
         assert app._sidebar_timer is not None
@@ -595,7 +602,7 @@ async def test_switch_burst_with_a_drain_between_presses_still_steps_once_each()
     """The separated shape keeps working — intent is set on both paths."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         await pilot.press("ctrl+b")
         await pilot.pause()
         assert app._sidebar_timer is not None
@@ -5218,7 +5225,7 @@ async def test_creating_a_remote_session_reveals_the_row_it_opens(
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         entries = [*_cold_rows(), CatalogEntry(_peer_row(MINTED_PEER_SESSION))]
         sidebar = await _sidebar_with(pilot, app, entries)
         sidebar.focus()
