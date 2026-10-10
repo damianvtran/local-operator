@@ -21,6 +21,16 @@ picture and the amendment's rules are about how each one sits under the answer:
                            callouts ride it.
     empty                  a `done` row with nothing on it: no block, no
                            reserved space.
+    expanded               the populated row AFTER a pilot click on its "N more"
+                           row: the stored paths revealed in place. The click
+                           is driven through the real pilot hit test, so the
+                           frame is the disclosure a user gets, not a
+                           hand-expanded build.
+    narrow-long            the overflow case (design round 1, D1): a long-path
+                           file row captured at a NARROW size (pass `60x20` —
+                           lane 56, where the row overflows and the fit must
+                           keep its indent and file NAME while ellipsizing the
+                           path); at the default size the same row fits whole.
 
 ``THEME`` is `dark` (default) or `light`; the block must re-ink with the ramp,
 which is only checkable as a pair of frames.
@@ -140,6 +150,25 @@ _FAILED_ROW = {
     "error": "model refused",
 }
 
+#: The overflow case's journaled row (design round 1, D1): a 52-char path whose
+#: first row is 83 cells wide, so a 60-column terminal's lane (56) cannot hold
+#: it and the frame shows exactly where the fit truncated.
+_NARROW_ROW = {
+    "anchor": ANCHOR,
+    "job": "3f9c1a5e5b20",
+    "version": 1,
+    "state": "done",
+    "files": [
+        _file("reports/experiments/2026-10-09/summary-of-results.md"),
+        _file("data/bench.csv", 913),
+        _file("reports/q3.md", 2048),
+    ],
+    "files_more": 3,
+    "more": ["data/raw.csv", "reports/appendix.md", "data/summary.json"],
+    "components": [],
+    "error": "",
+}
+
 #: What each shape's read serves: the SHAPE'S OWN journaled row, never another
 #: shape's. ``plain``/``loading``/``empty`` have no settled row to serve
 #: (nothing ran, the job is still in its running beat, or the finish journaled
@@ -147,8 +176,10 @@ _FAILED_ROW = {
 #: would answer for such an anchor.
 _SHAPE_ROWS: dict[str, dict[str, object]] = {
     "populated": _FULL_ROW,
+    "expanded": _FULL_ROW,
     "files-only": _FILES_ONLY_ROW,
     "failed": _FAILED_ROW,
+    "narrow-long": _NARROW_ROW,
 }
 
 
@@ -202,6 +233,18 @@ def _event(shape: str, **extra: Any) -> SupplementProgress:
             1,
             "done",
             files=[_file("reports/latency.md"), _file("data/bench.csv", 913)],
+        )
+    if shape == "narrow-long":
+        return SupplementProgress(
+            ANCHOR,
+            job,
+            1,
+            "done",
+            files=[
+                _file("reports/experiments/2026-10-09/summary-of-results.md"),
+                _file("data/bench.csv", 913),
+                _file("reports/q3.md", 2048),
+            ],
         )
     if shape == "image":
         # Kept as a refusal rather than a silent fallback: this shape became
@@ -277,6 +320,20 @@ async def main() -> None:
                     f"{shape}: the read did not land — the frame would show a "
                     "state its own journaled row never reached"
                 )
+            if shape == "expanded":
+                # The block's one disclosure, driven the way a user drives it:
+                # a click on the painted "N more" line, through the pilot's hit
+                # test rather than calling `expand_more()` directly. The guard
+                # keeps the frame honest — a capture that did not expand is an
+                # error, not a picture of the collapsed state under this name.
+                block = app._supplement_blocks.get(ANCHOR)
+                if block is None or block._more_line is None:
+                    raise SystemExit("expanded: the disclosure row never painted")
+                padding = block.styles.padding.top if block.styles.padding else 0
+                delivered = await pilot.click(block, offset=(4, padding + block._more_line))
+                await pilot.pause()
+                if not delivered or not block._expanded:
+                    raise SystemExit("expanded: the pilot click never revealed the rest")
         save_capture(app, out)
         blocks = app._transcript_view().blocks()
         print(
