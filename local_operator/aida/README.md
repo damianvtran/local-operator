@@ -102,6 +102,8 @@ staff gets muted, taking the actionable ones with it:
   raised in a rolling 24 h, counted in `aida/onboarding.json` under `banners`;
 - trigger check-ins stay quiet — they ask her to ACT (message the linked
   sessions), not to report, so the sentinel rule does not describe them;
+- a turn that ends with `no_reply` publishes nothing: no banner, no unread
+  mark;
 - `display.notifications` and `LOCAL_OPERATOR_NO_NOTIFICATIONS` apply exactly
   as for every other banner, and per-run/automation homes (a `lop exec` run,
   agent-runtime-svc's per-run `HOME`) never raise one at all.

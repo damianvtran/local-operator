@@ -752,7 +752,7 @@ def test_system_md_teaches_wake_vs_monitor_and_the_no_action_norm() -> None:
     flat = " ".join(text.split())
     assert "`monitor` watches a read-only call for changes" in flat
     assert "reports only deltas" in flat
-    assert "finds nothing needing action is complete" in flat
+    assert "needing no reply or action: call `no_reply` and write nothing" in flat
 
 
 def test_system_md_cues_on_demand_tool_references() -> None:

@@ -76,6 +76,11 @@ rather than matched. Those words name a delegation (`task(agent='<role>')`) or a
 once landed on a session whose *title* simply contained "manager". The refusal
 names the teams that define the role and asks for a `pid`/`session`.
 
+Don't send a message that is only an acknowledgement or a status with no ask;
+say 'reply needed' if you need one — the receiver may stay silent (`no_reply`).
+End a peer turn that needs no reply with `no_reply`; assistant text is not sent
+back to the sender, so a bare acknowledgement reaches nobody.
+
 ### Worked examples
 
 A non-urgent hand-off the peer folds into whatever it does next — it stays
