@@ -1,7 +1,7 @@
 # Mesh rolling updates — primary-driven, idle-gated, one node at a time
 
-Status: **design, pre-implementation**; trigger half: `mesh-update-propagation.md`
-(@ `ff97ee6996`). Verified against `origin/main` @ `1f0a1b909` (v0.67.16), 2026-10-05.
+Status: **design, pre-implementation**. Verified against `origin/main` @
+`1f0a1b909` (v0.67.16), 2026-10-05.
 
 This document hangs off `mesh-network.md` (the spine). It consumes, by name:
 
@@ -16,8 +16,8 @@ This document hangs off `mesh-network.md` (the spine). It consumes, by name:
   places that already say "this peer is behind", whose remedy this design makes
   executable.
 - The operator's own local discipline, `~/tools/lop-fleet-update/docs/README.md`
-  — snapshot → wait for no session busy → install → wait for runtimes to leave
-  → re-engage; never force. Section 4 ports it onto the member.
+  — snapshot → wait for no session busy → install → wait for runtimes to leave →
+  re-engage; never force. Section 4 ports it onto the member. **Trigger half:** `mesh-update-propagation.md`.
 
 One sentence of intent, from the operator (2026-10-05): *"if the primary host
 updates, it will also trigger an update across the mesh in the same safe,
@@ -304,7 +304,8 @@ complete/idle and then updates them"* (2026-10-05) — IS the authority for a pr
 decision to propagate its own completed update. His decisions on this note's open questions
 are recorded (PR thread, 2026-10-05: roll after the update settles, with the `--no-roll`
 escape; published releases from each device's own channel; re-engage displaced sessions);
-§9 items 1–3 are answered by that record; items 4–6 remain the implementation's to settle.
+§9's items are annotated in place below (settled: §9.1–§9.3 by that record, §9.5–§9.6 by the trigger
+note; superseded: §9.4, whose tuning is drill data); the trigger note's own §9 names what remains for implementation.
 
 **What is deliberately NOT decided here: transitive or network-wide grants.**
 The grant is per direction and per member. There is no "follow whoever
@@ -323,14 +324,16 @@ a per-network policy.**
   (`~/.local/bin/lop-update`), and the TUI's `/update`. "Primary" in the
   operator's words is this: the device you actually update; nothing in the
   schema changes, and any member that its peers have granted may be an origin.
-- **Policy.** `network.rollout_on_update`: `auto` | `ask` | `off`, defaulted in
-  the config file's existing `network:` section (beside `keepalive_s`,
-  `link_idle_s`). `auto` = roll after the local update settles (the operator's
-  request, and the default); `ask` = the same, one confirmation; `off` = the
-  manual verb only. `lop update --no-roll` overrides for one run. Rationale for
-  the default: the operator's act — running the update — is already the
-  explicit decision about *this build*; the members' standing consents are the
-  gate that matters, and a member without the grant is never touched.
+- **Policy.** `network.rollout_on_update`: `auto` | `off` — `ask`, a
+  one-confirmation middle arm, is deferred (`mesh-update-propagation.md` §5; the
+  registry's enum refuses it until a decision adds it) — defaulted in the config
+  file's existing `network:` section (beside `keepalive_s`, `link_idle_s`).
+  `auto` = roll after the local update settles (the operator's request, and the
+  default); `off` = the manual verb only. `lop update --no-roll` overrides for
+  one run. Rationale for the default: the operator's act — running the update —
+  is already the explicit decision about *this build*; the members' standing
+  consents are the gate that matters, and a member without the grant is never
+  touched.
 - **Scope.** For each active network the origin belongs to: the active members,
   minus self, **minus members whose own row refuses `net_update`** — the grant
   is receiver-side and cannot be read, so the origin learns it from the member's
@@ -635,9 +638,11 @@ is where a resume continues.
 
 **6.4 What is audited (both ends, append-only JSONL, existing rotation).**
 
-- Origin: `update_rollout_started`, `update_member_triggered`,
-  `update_member_state`, `update_rollout_done` (one row per semantic change,
-  never per poll — the audit module's cost rule, `audit.py:44/:515-534`).
+- Origin: `update_rollout_started`, `update_member_state`,
+  `update_rollout_done`, plus `update_rollout_suppressed` when the policy
+  stopped a roll (per-trigger events fold into the member's state row —
+  `mesh-update-propagation.md` §6; one row per semantic change, never per poll —
+  the audit module's cost rule, `audit.py:44/:515-534`).
 - Member: `update_requested`, `update_refused` (the §3 map's code),
   `update_started`, `update_completed` / `update_failed`, alongside the
   existing `update_report` machine line the desktop already parses
@@ -691,16 +696,16 @@ the real app.
 
 **7.3 The update's own summary is the operator's first sight of it** — the
 relay-roll comment's rule ("a peer's link drops for a moment — the update's own
-summary is where they learn why", `relay.py:10882-10885`). After `lop update`
-settles:
+summary is where they learn why", `relay.py:10882-10885`). It is written **at
+open** — it names the queued set and the skips known without a call
+(`mesh-update-propagation.md` §3); per-member outcomes then arrive on the peers
+rows and `lop network update --status`. After `lop update` settles:
 
 ```
 updated this device to 0.67.16
-rolling to 3 peers: cloud-node-1, dev-vm-2, gpu-pod-3
-  cloud-node-1  updated (was 0.67.13)
-  dev-vm-2      waiting — 2 sessions busy since 10:02 (will retry)
-  gpu-pod-3     unreachable — will retry on next contact
-2/3 on 0.67.16; `lop network update --resume` to retry the rest
+rolling to 3 peers: cloud-node-1, dev-vm-2, gpu-pod-3 (gpu-pod-4 skipped — pool member)
+outcomes arrive as the pass runs — `lop network update --status` for the record;
+a bare `--resume` re-asks what was parked
 ```
 
 **7.4 The manual verbs.** `lop network update <peer> | --all | --status |
@@ -803,22 +808,25 @@ updating via the relayed terminal carrier (deliberately excluded,
    `--no-roll` to escape, `off` for anyone who wants it; `ask` is deferred to
    `mesh-update-propagation.md` §5. Watch for a drill where an auto-roll on a
    large fleet surprises its operator more than it helps.
-2. **The standing channel: published releases only?** *Recommend yes* — the
-   bound in §2 depends on it. If members must also follow source builds, that
-   is a second, separately-consented channel with a per-device ref allowlist
-   (the member checks the ref against its own policy before fetching); it is a
-   new decision, not a parameter.
-3. **Re-engaging unwatched sessions (step 5).** *Recommend porting the fleet
-   tool's behaviour in full* (re-engage the snapshot; report how many came
-   back), because nothing else performs it and "an unwatched runtime is never
-   looked at". The alternative — leave them dormant until next use — saves
-   processes and loses the verification half; if fleet memory pressure argues
+2. **The standing channel: published releases only? — SETTLED: yes.** Confirmed
+   by the operator (2026-10-05, recorded in §2): the bound in §2 depends on it.
+   If members must also follow source builds, that is a second,
+   separately-consented channel with a per-device ref allowlist (the member
+   checks the ref against its own policy before fetching); it is a new
+   decision, not a parameter.
+3. **Re-engaging unwatched sessions (step 5) — SETTLED: port it in full.**
+   Confirmed by the operator (2026-10-05, recorded in §2): re-engage the
+   snapshot and report how many came back, because nothing else performs it and
+   "an unwatched runtime is never looked at". If fleet memory pressure argues
    against it later, make it a per-member policy, not a silent change.
-4. **Per-member deferral budget.** *Recommend 15 min per member, `--wait` up to
-   30 min*, then defer-and-retry (§4.2). Settled by drill data on how long
-   real turns run on the family's members.
-5. **Order source.** *Recommend the network's member order* from the record's
-   snapshot; a per-network priority list is a later, additive field.
+4. **Per-member deferral budget — SUPERSEDED by skip-then-retry.** No
+   per-member wait: a busy member is parked after the first probe and re-asked
+   on the origin's cadence while the pass continues
+   (`mesh-update-propagation.md` §4; §4.2 above is amended to match). The
+   record's window is the budget; the cadence's length is the drill-data knob.
+5. **Order source — SETTLED: the network's member order** from the record's
+   snapshot (`mesh-update-propagation.md` §3, the `_targets` walk's own order);
+   a per-network priority list is a later, additive field.
 6. **Does the origin's driver belong in the relay or the CLI? — SETTLED: the
    relay alone.** The catch-up hooks need the process that is present at "next
    contact", and a foreground driver dies with its terminal; the CLI reads the

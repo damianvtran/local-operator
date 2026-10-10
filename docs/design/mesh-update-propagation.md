@@ -43,13 +43,15 @@ mesh: `lop update` prints a frozen report line and returns, and `/update` relaun
 6. **Audit (§6) — one durable row naming the authority** when the record opens, one row per
    member state change, one closing row; the member writes its own, naming its own basis.
 
-**What this note changes in RU**, itemised so a reviewer can check each off: (a) RU §3 "minus
-members that do not hold the grant" — the origin learns that from the refusal (§3); (b) RU §3
-policy value `ask` — deferred (§5); (c) RU §4.2 wait-per-member — skip-then-retry (§4);
-(d) RU §9.6 driver — relay only (§4); (e) RU §6.4 — `update_member_triggered` folds into
-`update_member_state`, and `update_rollout_suppressed` is added (§6); (f) RU §7.3 summary —
-at open it names the queued set and the skips known without a call; outcomes arrive on the
-peers rows and `lop network update --status` (§3).
+**What this note changes in RU — each applied in RU's own text in this same PR**,
+itemised so a reviewer can check each off: (a) RU §3 scope — the grant subtraction reads
+"minus members whose own row refuses `net_update`" (§3); (b) RU §3 policy — `ask` marked
+deferred, `auto`/`off` shipped (§5); (c) RU §4.2 and §9.4 — the per-member wait replaced by
+skip-then-retry (§4); (d) RU §9.6 — the relay alone drives (§4); (e) RU §6.4 — per-trigger
+events fold into `update_member_state`, and `update_rollout_suppressed` is added (§6);
+(f) RU §7.3 — the summary is written at open and names the queued set and the skips known
+without a call; outcomes arrive on the peers rows and `lop network update --status` (§3).
+§9.1–§9.3 and §9.5 are annotated settled in RU, per §2.
 
 ```
 primary: lop update, /update         primary relay (mesh-rollout)           member
@@ -107,8 +109,9 @@ primary: lop update, /update         primary relay (mesh-rollout)           memb
   `may_refresh()` (`:2597`) = `is_busy()` plus a warm-window wake; one that keeps declining
   becomes hard-stale after 3 checks or 30 min and leaves at its first idle instant
   (`process.py:300-301`). The fleet tool drains on the registry `busy` bit
-  (`SessionRecord.busy`, `session/runtime/types.py:1325`); where the runtime publishes
-  that bit was not established by name (Q1).
+  (`SessionRecord.busy`, `session/runtime/types.py:1325`), published from
+  `_publish_busy` → `set_busy(self.is_conversationally_active())` (`serving.py:8838`, `:8871`;
+  `server.py:4729` — deliberately the narrow predicate; Q1 resolved).
 - **Not built.** No hit in `local_operator/` or `tests/` at `00940f0cb8`, on any remote ref
   (pickaxe since 2026-10-05), or in the installed v0.68.21 (generation
   `20261010T005620Z-00940f0cb8e1`), for `network.rollout_on_update`,
@@ -194,9 +197,9 @@ unknown installs are refused earlier (`update.py:7122-7128`).
 RU §6.1's shape and write discipline, plus an `authority` object — `{authority:
 "standing_instruction", policy: "auto", via:
 "update", "snapshot" or "tui"}` (`via` names the front end) — and the durable audit row
-(§6), both before the front end returns. The record keeps RU §6.1's `origin` as this
-device's own id and adds `network`, which is what `rollouts/` filenames and the peers-row
-lookup key on. It is a file write because the
+(§6), both before the front end returns. The record keeps RU §6.1's shape as written — `network`
+and `origin` (the latter this device's own id) are the keys `rollouts/` filenames and the
+peers-row lookup use. It is a file write because the
 relay may be mid-restart at that moment (the services tail just rolled it). Opening
 supersedes an older `active` record for the network (RU §6.3). The summary names who is
 queued and who is already skipped; `/update` prints it as a notice.
@@ -280,7 +283,7 @@ relay roll, each runtime is asked to retire (`refresh_if_idle`) and answers by i
 those runtimes keep their intact tree and retire at their next idle instant or on the
 hard-stale bound. The drain gates the install; the runtime's own predicate gates each
 retirement; neither is overridden. Re-engaging displaced sessions is RU §4.2 step 5, as the
-operator decided. (Q1, Q2.)
+operator decided. (Q2.)
 
 *Resumable, by interruption.* The record is the only state. Origin relay restart: the thread
 resumes every `active` record at its first non-terminal member; a `done` member is never
@@ -396,12 +399,15 @@ Mixed versions follow RU §5: `net_update` is never sent to a member lacking the
 
 ## 9. Open questions (verify at implementation), each with my recommendation
 
-1. **Which predicate publishes the registry `busy` bit?** The gate reads `SessionRecord.busy`.
-   *Verify* it is published from `is_conversationally_active()` (`serving.py:1681`), not
-   `is_busy()` (`:1627`). *Recommend* the registry bit for the gate (the measured discipline),
-   with the runtime's own `may_refresh()` gating each retirement; if a member without the
-   generation layout must gate on the inclusive predicate, publish it as a second registry
-   field and leave `busy` alone (the 8-of-8 incident, `serving.py:1697`).
+1. **Which predicate publishes the registry `busy` bit? — RESOLVED at head.**
+   `_publish_busy` (`serving.py:8838`) calls `set_busy(self.is_conversationally_active())`
+   (`:8871`; `set_busy`, `server.py:4729`) — deliberately the narrow predicate, not
+   `is_busy()`, and the code says why (`:8860-8864`). The gate therefore reads exactly the
+   bit the fleet tool drains, while each retirement is still gated by the runtime's own
+   `may_refresh()` = `is_busy()` (`:2597`) — the wide predicate is the layer that must not
+   lose background work. If a member without the generation layout must gate on the wide
+   predicate, publish it as a second registry field and leave `busy` alone (the 8-of-8
+   incident, `serving.py:1697`).
 2. **A read-only idle probe?** `refresh_if_idle` asks *and acts*; no "would you refuse?" probe
    was found. *Recommend* none in v1; add one only if the drill shows the pass retiring
    runtimes the operator would have kept.
