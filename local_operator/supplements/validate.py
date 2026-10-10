@@ -158,6 +158,16 @@ class Rejected:
     title: str
     errors: tuple[str, ...]
 
+    def describe(self) -> str:
+        """One line for the repair message: which block, and why (memo App. A).
+
+        The title is how the fork names the block back to itself -- a repair turn that only
+        listed errors would leave the model guessing which of two charts went wrong -- and the
+        errors are joined with ``; `` so the message stays one line per block.
+        """
+        name = self.title or "(untitled component)"
+        return f"{name}: {'; '.join(self.errors)}"
+
 
 @dataclass(frozen=True)
 class ValidationResult:

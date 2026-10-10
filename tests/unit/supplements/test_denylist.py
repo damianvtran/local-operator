@@ -259,9 +259,7 @@ FOLDED_SEPARATOR_ALLOWED = [
 
 
 @pytest.mark.parametrize(("path", "rule"), FOLDED_SEPARATOR_TABLE)
-def test_a_fold_produced_separator_splits_like_a_real_one(
-    path: str, rule: str, tmp_path
-) -> None:
+def test_a_fold_produced_separator_splits_like_a_real_one(path: str, rule: str, tmp_path) -> None:
     """Agent review round 6 (R6-1): NFKC folds ``／`` onto ``/``, so a multi-component path
     spelled with full-width separators must reach the same structural rule as its plain
     spelling. Spelled ASCII-first (no literal U+FF0F in the source) so a future edit of this
@@ -272,8 +270,6 @@ def test_a_fold_produced_separator_splits_like_a_real_one(
 
 
 @pytest.mark.parametrize("path", FOLDED_SEPARATOR_ALLOWED)
-def test_a_fold_produced_separator_does_not_deny_benign_paths(
-    path: str, tmp_path
-) -> None:
+def test_a_fold_produced_separator_does_not_deny_benign_paths(path: str, tmp_path) -> None:
     """The must-survive controls for the class above."""
     assert is_sensitive(path, cwd=str(tmp_path)) == ""
