@@ -30,15 +30,22 @@ THE LEDGER. The decision is a classification HTTP call, not a provider stream re
 does not pass through the request ledger; its spend is the INFO line
 ``ClassificationService.decide`` already logs. The names are still reserved in ``policy``.
 
+THE EGRESS BOUNDARY. Every string this module hands a vendor -- the two state texts and the
+option text -- passes :func:`_egress` at the point it is composed (memo §4's one-statement
+egress boundary; round-1 security S-R8). What is scrubbed, what survives and why is stated
+on :func:`_egress`.
+
 NOT HERE: the generator, the validator, progress events, the ops -- later lanes.
 """
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Final, Sequence
 
 from local_operator.ansi import sanitize_prompt_line
+from local_operator.redaction_shapes import scrub_shapes
 from local_operator.supplements.candidates import MAX_OFFERED, Candidate
 from local_operator.supplements.evidence import Evidence
 
@@ -117,8 +124,61 @@ def _bound(text: str, limit: int) -> str:
     return text[: max(0, limit - len(marker))] + marker
 
 
+#: An absolute-path occurrence on its way to a vendor: a ``file://`` URI, or a ``/``- or
+#: ``~/``-rooted POSIX path (``candidates._PROSE_PATH``'s own roots). The boundary refuses a
+#: match that is really a URL tail, a fraction or a name (``https://host/x``, ``24/7`` and
+#: ``and/or`` all survive), and the final segment must carry a character, so a bare
+#: separator cannot match.
+_PATH_SPAN: Final = re.compile(r"(?<![\w.:/~-])(?:file://)?~?/(?:[\w.@%+~-]+/)*[\w.@%+~-]+")
+
+
+def _path_base(match: re.Match[str]) -> str:
+    """One matched path -> its base name (a ``file://`` scheme rides with the match)."""
+    path = match.group(0)
+    if path.startswith("file://"):
+        path = path[len("file://") :]
+    return path.rstrip("/").rsplit("/", 1)[-1].rstrip(".")
+
+
+def _egress(text: str) -> str:
+    """The decision payload's egress boundary: every string a vendor receives passes here.
+
+    One call per composition point (the two state builders and the option builder below),
+    because the decision is a paid third-party call that would otherwise carry the
+    operator's final answer and directory layout off the machine on every eligible turn
+    (memo §4's egress statement; round-1 security S-R8). Two passes, in this order:
+
+    * Absolute paths are reduced to their BASE NAME -- the home prefix and every directory
+      component go. The relative directory is the field that would carry a client's or a
+      project's name to the vendor (S-R8), and the memo's minimisation permits neither
+      relative directories nor absolute paths. The base name stays because the decision
+      needs it to judge "is this the deliverable?". A base name is never altered beyond
+      that: the shape pass below masks a credential spelling it recognises, and leaves a
+      spelling its negative corpus pins (a dotted tail like ``pypi-foo.json``) to itself.
+    * The minimised text then passes the project's one credential-shape table
+      (:func:`local_operator.redaction_shapes.scrub_shapes`), the same pass classification
+      §6 requires for outbound state: a credential spelled in the prose, in an intent line
+      or in a base name is masked (never dropped), so the mask, not the value, is what a
+      vendor receives.
+
+    Deliberately NOT scrubbed, so a future fix does not "repair" them into over-masking:
+    relative paths and bare directory names in prose (indistinguishable from ordinary text
+    without taking ``and/or``, ``24/7`` and URLs with them); e-mail addresses in prose --
+    not credentials, and the shape corpus pins ``user@example.com`` as a must-survive
+    negative (an e-mail sitting in a credential POSITION, a password value, is masked as
+    that credential); and the harness-authored instruction and criteria constants.
+    """
+    return scrub_shapes(_PATH_SPAN.sub(_path_base, text))
+
+
 def option_text(candidate: Candidate) -> str:
-    """One option's description: ``name (kind, 4.1 KB) written by write: intent``. No directory."""
+    """One option's description: ``name (kind, 4.1 KB) written by write: intent``. No directory.
+
+    The name and the intent line are the option's two model/user-controlled halves, so the
+    composed text passes the egress scrub: a recognised credential spelling or a path in
+    the intent is masked or reduced, while a benign base name arrives byte-identical (the
+    decision needs it to judge the option).
+    """
     name = sanitize_prompt_line(candidate.name, limit=_OPTION_NAME_CHARS) or "file"
     size = candidate.size_bytes
     shown = (
@@ -128,14 +188,15 @@ def option_text(candidate: Candidate) -> str:
     )
     text = f"{name} ({candidate.kind}, {shown}) {candidate.why}"
     intent = sanitize_prompt_line(candidate.intent, limit=_OPTION_INTENT_CHARS)
-    return f"{text}: {intent}" if intent else text
+    return _egress(f"{text}: {intent}" if intent else text)
 
 
 def option_ids(candidates: Sequence[Candidate]) -> dict[str, Candidate]:
     return {f"f{index + 1}": item for index, item in enumerate(candidates[:MAX_OFFERED])}
 
 
-def files_state(user_text: str, answer_text: str) -> str:
+def _state_text(user_text: str, answer_text: str) -> str:
+    """The bounded request/answer block both states share, BEFORE the egress scrub."""
     return (
         "USER REQUEST:\n"
         + _bound(user_text.strip(), USER_TEXT_CHARS)
@@ -144,12 +205,21 @@ def files_state(user_text: str, answer_text: str) -> str:
     )
 
 
+def files_state(user_text: str, answer_text: str) -> str:
+    """The files state: the bounded texts, scrubbed for egress as they are composed."""
+    return _egress(_state_text(user_text, answer_text))
+
+
 def graphics_state(user_text: str, answer_text: str, evidence: Evidence) -> str:
-    """The graphics state: request, answer, and the evidence SHAPES -- never rows (memo §2.3)."""
+    """The graphics state: request, answer, and the evidence SHAPES -- never rows (memo §2.3).
+
+    The dataset titles ride in the shapes and are turn data too, so the whole composed
+    string passes the same egress scrub.
+    """
     shapes = "\n".join(f"- {d.title}: {d.shape()}" for d in evidence.datasets) or (
         "- numbers inside the answer text"
     )
-    return files_state(user_text, answer_text) + "\n\nDATA SHOWN THIS TURN:\n" + shapes
+    return _egress(_state_text(user_text, answer_text) + "\n\nDATA SHOWN THIS TURN:\n" + shapes)
 
 
 def files_question(options: dict[str, Candidate]) -> Any:

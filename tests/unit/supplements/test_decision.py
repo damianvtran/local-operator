@@ -1,17 +1,22 @@
-"""The decision: the two questions' shapes, the featured-set rule, the overrules, fail-open."""
+"""The decision: the two questions' shapes, the featured-set rule, the overrules, fail-open,
+and the egress scrub every vendor-bound string passes (memo §4; round-1 security S-R8)."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.classification.types import Answer, Question
+from local_operator.classification.vendors import questions_payload
+from local_operator.redaction_shapes import REDACTION_MARKER
 from local_operator.supplements import decision as dec
-from local_operator.supplements.candidates import Candidate
+from local_operator.supplements.candidates import Candidate, prefilter
 from local_operator.supplements.evidence import Dataset, Evidence
+from tests.unit.supplements.support import call
 
 from .conftest import FIXTURES
 
@@ -271,3 +276,101 @@ async def test_a_declined_vendor_with_nothing_featured_is_an_empty_decision() ->
     service = FakeService({"supplement_files": _files_answer("none", {"none": 0.9, "f1": 0.1})})
     out = await _decide(service, [_cand("scratch.md")])
     assert out.empty and out.more == ()
+
+
+# -- the egress boundary (memo §4's egress statement; round-1 security S-R8) ---------------
+
+#: The fixture's credential-shaped string: an issuer-prefixed token, the spelling the shape
+#: table masks. Built from a fixed tail, so nothing here can resemble a live value.
+LEAK_TOKEN = "glpat-" + "AbCdEf12GhIjKl34MnOpQr56"
+
+
+def _vendor_payload(asked: list[tuple[str, Question]]) -> str:
+    """Everything a vendor receives for these asks, as text.
+
+    The state is joined verbatim -- the classification layer adds no scrub of its own, which
+    is what R6 measured -- and the questions go through the same serializer the vendor body
+    uses (``classification.vendors.questions_payload``). Asserting on this string is
+    asserting on the request body's data.
+    """
+    return "\n".join(
+        state + "\n" + json.dumps(questions_payload([question]), sort_keys=True)
+        for state, question in asked
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_vendor_payload_is_scrubbed_before_the_call(tmp_path: Path) -> None:
+    """A real turn through the pre-filter and the decision: what the vendor would receive
+    carries none of the four leak classes -- an absolute path (the tmp root stands in for
+    home), a client directory, a credential shape, an email-valued credential -- while the
+    benign base name still arrives (docs review R6 on #2155; security S-R8)."""
+    target = tmp_path / "clients" / "acme-corp" / "q3-summary.pdf"
+    target.parent.mkdir(parents=True)
+    target.write_text("the Q3 numbers\n" + "x" * 64)
+    items = [call("write", path=str(target), i="Writing it to ~/clients/acme-corp/q3-summary.pdf")]
+    answer_text = (
+        f"Exported the Q3 report to {target}. "
+        f"Rotated the deploy token {LEAK_TOKEN} yesterday. "
+        "SMTP_PASSWORD=ops@example.com is now in the vault."
+    )
+    pre = prefilter(items, answer_text, cwd=str(tmp_path), home=str(tmp_path), want_graphics=False)
+    assert pre.skipped is None and len(pre.candidates) == 1
+    service = FakeService({"supplement_files": _files_answer("f1", {"f1": 1.0})})
+    decision = await dec.decide(
+        service,
+        user_text="export the Q3 numbers",
+        answer_text=answer_text,
+        candidates=pre.candidates,
+        evidence=pre.evidence,
+        want_files=True,
+        want_graphics=False,
+        max_featured=4,
+    )
+    assert [c.name for c in decision.featured] == ["q3-summary.pdf"]
+    payload = _vendor_payload(service.asked)
+    for leak in (str(tmp_path), "acme-corp", LEAK_TOKEN, "ops@example.com"):
+        assert leak not in payload, f"{leak!r} reached the vendor payload"
+    assert "q3-summary.pdf" in payload, "the base name is what the decision judges"
+    assert "Writing it to q3-summary.pdf" in payload, "the intent line is reduced too"
+    assert REDACTION_MARKER in payload, "the credential was masked, not merely missing"
+
+
+def test_option_text_reduces_a_path_in_the_intent_line() -> None:
+    canned = _cand("q3-summary.pdf", intent="Writing it to /Users/damian/clients/acme-corp/q3.pdf")
+    text = dec.option_text(canned)
+    assert "/Users" not in text and "acme-corp" not in text
+    assert text.endswith("Writing it to q3.pdf")
+
+
+def test_both_states_reduce_file_uris_and_tilde_paths() -> None:
+    state = dec.files_state(
+        "see file:///Users/damian/work/notes.md", "and ~/clients/acme-corp/final.csv"
+    )
+    assert "notes.md" in state and "final.csv" in state
+    assert "/Users" not in state and "acme-corp" not in state
+
+
+def test_the_graphics_state_scrubs_the_dataset_titles_it_carries() -> None:
+    dataset = Dataset(
+        "exports to /Users/damian/clients/acme-corp/q3.csv",
+        "answer",
+        ("region", "ms"),
+        (("a", "1"), ("b", "2"), ("c", "3")),
+        3,
+        ("ms",),
+    )
+    state = dec.graphics_state(
+        "u", "a", Evidence(structured=True, datasets=(dataset,), forms=("table",))
+    )
+    assert "acme-corp" not in state and "/Users" not in state
+    assert "q3.csv" in state
+
+
+def test_benign_slashes_urls_and_addresses_survive_byte_identical() -> None:
+    """The over-masking arm: ``and/or``, ``24/7`` and a URL's path must not be taken by
+    the reduction, and a bare address in prose is not a credential -- the shape corpus pins
+    the same negative (``https://user@example.com/profile`` must survive). An address in a
+    credential POSITION is masked, and the payload test above covers that spelling."""
+    benign = "ratio 24/7 and/or km/h; see https://example.com/reports/q3.html; ping ops@example.com"
+    assert benign in dec.files_state(benign, benign)
