@@ -983,6 +983,84 @@ def test_checkpoint_strips_trajectories_and_live_events() -> None:
     assert len(store.state.jobs[0].trajectory) == 50
 
 
+def test_model_access_publishes_and_clears_a_claim() -> None:
+    """The access claim is a canonical field with change detection like any other.
+
+    ``None`` is a CLAIM of its own — "this host makes no statement" — so clearing
+    a stale ``signed_out`` after the store becomes unreadable must publish a
+    frame, not be skipped as a no-op against the absent default.
+    """
+    from local_operator.session.frontend_state import FrontendModelAccess
+
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    claim = FrontendModelAccess(state="signed_out", provider="anthropic", label="Anthropic")
+    update = store.refresh_model_access(claim)
+    assert update is not None
+    assert update.changes["model_access"] == {
+        "state": "signed_out",
+        "provider": "anthropic",
+        "label": "Anthropic",
+    }
+    assert store.state.model_access is not None
+    assert store.state.model_access.state == "signed_out"
+    # A LIVE claim serialises into the wire shape (R2-2): the pop in the state
+    # serializer is scoped to the idle state, not to the field.
+    assert store.state.model_dump(mode="json")["model_access"] == {
+        "state": "signed_out",
+        "provider": "anthropic",
+        "label": "Anthropic",
+    }
+    # The same claim twice is not a frame.
+    assert store.refresh_model_access(claim) is None
+    # Clearing a claim IS a frame: absence is an answer here.
+    cleared = store.refresh_model_access(None)
+    assert cleared is not None
+    # …and the CLEAR frame carries the null EXPLICITLY (R2-1). A snapshot
+    # omits an idle claim (the attach frame's 22 bytes, QA round 1 Q3), so a
+    # follower can only tell "cleared" from "never said" through this change
+    # set — a bare absence on the delta would make the two indistinguishable.
+    assert cleared.changes == {"model_access": None}
+    assert store.state.model_access is None
+    assert "model_access" not in store.state.model_dump(mode="json")
+
+
+def test_the_checkpoint_makes_no_access_claim() -> None:
+    """A claim about THIS host's credential store must not outlive it.
+
+    The checkpoint is reopened on another machine, or after the credentials
+    moved; a durable ``ok`` would be a lie about a store nobody re-read, and a
+    durable ``signed_out`` would keep accusing a host the user has since signed
+    in on. The live state keeps it — that is what serves the current frame —
+    and the publishing host recomputes it on its own edges.
+    """
+    import asyncio
+
+    from local_operator.session.frontend_state import FrontendModelAccess
+
+    state = _state(
+        model_access=FrontendModelAccess(
+            state="signed_out", provider="anthropic", label="Anthropic"
+        )
+    )
+    store = FrontendStateStore(state)
+
+    class _Transcript:
+        def __init__(self) -> None:
+            self.appended: list[tuple[str, dict[str, Any]]] = []
+
+        async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+            self.appended.append((custom_type, payload))
+
+    transcript = _Transcript()
+    asyncio.run(store.checkpoint(transcript))
+    ((_, payload),) = transcript.appended
+    # ABSENT, not null: the serializer drops an idle claim from the wire so the
+    # attach frame does not spend its null (QA round 1, Q3), and absence is the
+    # same "no claim" the durable fold means.
+    assert "model_access" not in payload["state"]
+    assert store.state.model_access is not None
+
+
 def test_queued_custom_steers_project_their_human_text() -> None:
     """The queued-steering snapshot reads ``text``/``content``, which only a
     plain user Message has. A busy-path peer steer and a busy-path wake queue

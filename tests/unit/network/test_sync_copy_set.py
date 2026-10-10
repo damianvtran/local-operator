@@ -414,8 +414,9 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/session/delegated_retention.py": (
         2,
         "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
-        "sweep lock): both sit beside the store at the sessions root, never inside a session "
-        "directory. (``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
+        "sweep lock): the former sits at the sessions root, the latter at the config root; "
+        "neither inside a session directory. (``ROSTER_NAME`` is a session entry, already "
+        "classified by the copy set.)",
     ),
     "local_operator/session_factory.py": (
         2,
@@ -424,8 +425,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/session/archived.py": (1, "the archived-ids list, a store-level record"),
     "local_operator/session/search_index.py": (1, "the search index, a store-level record"),
     "local_operator/session/transcript_index.py": (
-        1,
-        "the transcript index cache directory under the cache root, a store-level record",
+        2,
+        "the transcript index cache directory under the cache root, a store-level record; "
+        "and the tool name whose rows the desktop hides when display.hide_cross_session is "
+        "on, a comparison word rather than a path",
     ),
     "local_operator/session/retention.py": (
         1,
@@ -597,6 +600,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         2,
         "``code_requests``: the derived index under the store root and the scan cache "
         "under ``cache/`` — the ``monitors`` twin, both regenerable from the transcript",
+    ),
+    "local_operator/code_requests/cache.py": (
+        1,
+        "``_DIRTY_DIRNAME`` (``.dirty``): the session dirty-mark directory under "
+        "``<config>/cache/code_requests/`` — cached fetch state, regenerable from the "
+        "transcript and the TTLs, and never an entry of a session directory (the "
+        "``ledger.py`` / ``monitors`` case; review round 1, F5)",
+    ),
+    "local_operator/code_requests/detect.py": (
+        1,
+        "``SELF_TOOL_NAME``: the code-request TOOL's name — an identifier resolved "
+        "through the tool registry (the ``reply_channel``/``action-tool`` "
+        "identifier-not-a-path case), never a file a session directory holds",
     ),
     "local_operator/monitors/state.py": (
         1,
