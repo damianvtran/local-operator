@@ -163,4 +163,10 @@ async def run_openrouter(
             model=model_id,
             cost_usd=cost_usd,
             cost_source="reported" if cost_usd is not None else None,
+            # ``usage.cost`` is the settled per-request cost of an
+            # all-or-nothing billed call (a failure is a 502, unbilled).
+            billing_basis="billed" if cost_usd is not None else None,
+            cost_provenance=(
+                "OpenRouter /images response usage.cost" if cost_usd is not None else None
+            ),
         )

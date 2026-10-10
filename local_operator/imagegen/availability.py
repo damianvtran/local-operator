@@ -328,8 +328,15 @@ async def google_call_key(store: AuthStore, session_id: str | None = None) -> st
     return exported or None
 
 
-async def xai_call_bearer(store: AuthStore, session_id: str | None = None) -> str | None:
-    """The bearer the xAI rung would send: a stored KEY first, then the grant.
+async def xai_call_credential(
+    store: AuthStore, session_id: str | None = None
+) -> tuple[str, str] | None:
+    """The xAI bearer the rung would send plus its CLASS: ``(bearer, kind)``.
+
+    ``kind`` is ``"api_key"`` (a stored key row or an exported
+    ``XAI_API_KEY``) or ``"oauth"`` (the Grok sign-in grant). The class decides
+    the result's ``billing_basis`` - a key is metered cash, a grant is
+    subscription usage - which the bearer string alone cannot say.
 
     Order (reviewer round 1 F4): the API key is the reliable path — xAI tiers
     its OAuth surface and the 403 class is unprobed — so a stored ``api_key``
@@ -346,16 +353,22 @@ async def xai_call_bearer(store: AuthStore, session_id: str | None = None) -> st
         logger.warning("xai credential read failed; trying the grant")
         key = None
     if key:
-        return key
+        return key, "api_key"
     try:
         access = await store.get_oauth_access("xai", session_id)
     except Exception:  # noqa: BLE001 - a probe must never take its caller down
         logger.warning("xai credential read failed; reporting none")
         access = None
     if access is not None and access.kind == "oauth" and access.access_token:
-        return access.access_token
+        return access.access_token, "oauth"
     exported = os.environ.get(XAI_ENV_KEY)
-    return exported or None
+    return (exported, "api_key") if exported else None
+
+
+async def xai_call_bearer(store: AuthStore, session_id: str | None = None) -> str | None:
+    """The bearer the xAI rung would send (see :func:`xai_call_credential`)."""
+    resolved = await xai_call_credential(store, session_id)
+    return resolved[0] if resolved else None
 
 
 # ---------------------------------------------------------------------------
