@@ -566,3 +566,83 @@ def test_an_unquoted_value_outside_the_structural_table_is_still_refused() -> No
     result = validate_output(beside_unquoted_geometry, EVIDENCE)
     assert not result.components, "a fabricated text numeral beside unquoted geometry was accepted"
     assert any("<data> supports" in error for error in result.repair_errors), result.repair_errors
+
+
+# --- a span the parse cannot prove is scanned, not hidden (round-4 review R4-1) ------------
+
+
+def test_a_parity_balanced_quote_skew_cannot_hide_a_fabricated_numeral() -> None:
+    r"""R4-1, the reviewer's reproduction: a quote skew that swallows an element.
+
+    ``x="0 width=640>`` leaves its quote to close at the NEXT tag's own quote, so pairing
+    quotes by proximity blanks ``…<text>7000 ms</text>…`` as one attribute value: the numeral
+    vanished from BOTH scans while the tag stack stayed balanced (``html.parser`` reads the
+    region as one ``rect`` start tag) and the answer was accepted. The walk replaces that
+    pairing: a value the parse cannot prove is an attribute value -- its quote pairing crosses
+    a tag boundary -- leaves the span SCANNABLE, and the fabricated ``7000`` is refused. The
+    single-quote skew is the same shape with the other quote character; it pre-dates the
+    round-3 DOTALL widening (the old regex crossed ``<``/``>`` on one line identically).
+    """
+    data = json.dumps(
+        {
+            "lat": {
+                "title": "Latency (ms)",
+                "columns": ["region", "ms"],
+                "rows": [["us-east", 120], ["us-west", 98.5], ["eu-west", 143]],
+            }
+        }
+    )
+    double = component(
+        data,
+        '<svg viewBox="0 0 640 480"><rect x="0 width=640><text>7000 ms</text>'
+        '<rect y="a" w="q" ></rect></svg>',
+    )
+    result = validate_output(double, EVIDENCE)
+    assert not result.components, "a quote skew hid a fabricated numeral from both scans"
+    assert any("7000" in error for error in result.repair_errors), result.repair_errors
+
+    single = component(
+        data,
+        "<svg viewBox='0 0 640 480'><rect x='0 width=640><text>7000 ms</text>"
+        "<rect y='a' w='q' ></rect></svg>",
+    )
+    result = validate_output(single, EVIDENCE)
+    assert not result.components, "the single-quote skew hid it the same way"
+    assert any("7000" in error for error in result.repair_errors), result.repair_errors
+
+
+def test_an_unprovable_tag_parse_leaves_the_swallowed_number_scannable() -> None:
+    """R4-1's fail-closed direction: no clean parse -> the number is REFUSED by name.
+
+    Two deliberately unparseable shapes. A ``width=7000`` whose quoted ``x`` only closes in
+    the NEXT tag: pre-fix the span is blanked (hiding ``7000``) and the answer ACCEPTED --
+    the walk must refuse and name the numeral it refused to hide. An unterminated quote (no
+    closing quote anywhere) was already refused for well-formedness, but the swallowed
+    ``7000`` was invisible to both scans; after the walk it is refused BY NAME, which is
+    what "scannable" has to mean for this direction.
+    """
+    data = json.dumps(
+        {
+            "lat": {
+                "title": "Latency (ms)",
+                "columns": ["region", "ms"],
+                "rows": [["us-east", 120], ["us-west", 98.5], ["eu-west", 143]],
+            }
+        }
+    )
+    value_swallow = component(
+        data,
+        '<svg viewBox="0 0 640 480"><rect x="0 width=7000><text>98.5 ms</text>'
+        '<rect y="a" w="q" ></rect></svg>',
+    )
+    result = validate_output(value_swallow, EVIDENCE)
+    assert not result.components, "a swallowed value numeral was accepted"
+    assert any("7000" in error for error in result.repair_errors), result.repair_errors
+
+    unterminated = component(
+        data,
+        '<svg viewBox="0 0 640 480"><rect x="0 width=7000><text>98.5 ms</text></svg>',
+    )
+    result = validate_output(unterminated, EVIDENCE)
+    assert not result.components, "an unterminated quote was accepted"
+    assert any("7000" in error for error in result.repair_errors), result.repair_errors

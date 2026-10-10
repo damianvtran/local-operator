@@ -674,6 +674,101 @@ async def test_a_restart_racing_a_paused_cancel_cannot_clobber_the_runner(
         await handle.dispose()
 
 
+# --- the op's own awaits (round-4 review R4-2) ---------------------------------------------
+#
+# A synchronous mutation -- ``on_agent_end``, a decision tail's ``_render``, a dispose
+# ``cancel`` -- can land inside ``_cut_and_restart``'s awaits while the op holds the ops
+# lock. Pre-fix the op resumed, saw the bookkeeping had moved, skipped its settle and still
+# started its version over the new flow, orphaning that flow's task (no op could cut it by
+# ``_task`` any more). Post-fix the request queues behind the flow that owns the
+# bookkeeping -- the sequential shape -- and drains when that flow settles.
+
+
+async def test_a_restart_that_loses_the_bookkeeping_to_a_new_flow_queues_instead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-2 repro: the bookkeeping moves inside the op's journal read; the request queues.
+
+    Probe: pause the op's ``_newest_row`` inside its worker thread, drop a real ``_render``
+    on the loop (the decision tail's mutation: it cancels the cut job and installs its own
+    flow), release, let the op finish. Pre-fix the op starts its version over the render
+    flow -- ``_running`` flips to the restarted job, and a cancel for the render flow's
+    live task answers the neutral "already finished" (the orphaned-task symptom). Post-fix
+    the op queues, ``_running`` stays the render flow's, that flow is still cuttable, and
+    the queued restart drains once it settles.
+    """
+    session = _make_session(tmp_path / "sessions" / "r42", tmp_path)
+    handle = await _handle(session, tmp_path)
+    runner = handle._supplements
+    resolve = generator.DesignModel(MODEL, "session", "test/m")
+    monkeypatch.setattr(runner, "_resolve_model", lambda settings: resolve)
+    started = asyncio.Event()
+    release_job = asyncio.Event()
+
+    async def complete(request: Any) -> tuple[str, Any]:
+        started.set()
+        await release_job.wait()
+        return BLOCK, _Usage()
+
+    monkeypatch.setattr(runner, "_complete", complete)
+    entered = threading.Event()
+    release = threading.Event()
+    original_newest = runner._newest_row
+    holder: dict[str, str] = {}
+
+    def held_newest(anchor: str, *, job: str | None = None) -> Any:
+        if job is not None and job == holder.get("job"):
+            entered.set()
+            assert release.wait(10), "the held journal read was never released"
+        return original_newest(anchor, job=job)
+
+    monkeypatch.setattr(runner, "_newest_row", held_newest)
+    try:
+        runner._render("anchor-r42", _decision(), DATASETS, "u", "a", _settings())
+        await asyncio.wait_for(started.wait(), timeout=10)
+        job = _rows(session.transcript)[0]["job"]
+        holder["job"] = job
+        restart = asyncio.create_task(runner.restart_job("anchor-r42", job))
+        assert await asyncio.to_thread(entered.wait, 10), "the journal read was never held"
+        # The decision tail's mutation, synchronously on the loop, inside the op's read.
+        runner._render("anchor-r42b", _decision(), DATASETS, "u", "a", _settings())
+        held = runner._running
+        assert held is not None and held[0] == "anchor-r42b", held
+        render_job = held[1]
+        release.set()
+        assert await asyncio.wait_for(restart, 10) == "restarting"
+
+        def rows_for(anchor: str) -> list[dict[str, Any]]:
+            return [row for row in _rows(session.transcript) if row["anchor"] == anchor]
+
+        await wait_for(lambda: len(rows_for("anchor-r42b")) == 1, timeout=10)
+        # Post-fix: the request queued behind the flow that owns the bookkeeping...
+        assert runner._running == ("anchor-r42b", render_job)
+        assert runner._pending is not None
+        assert [(row["version"], row["state"]) for row in rows_for("anchor-r42")] == [
+            (1, "decided"),
+        ], rows_for("anchor-r42")
+        # ...and that flow is still cuttable by an op (pre-fix the orphan answered the
+        # neutral "already finished" for a live task).
+        receipt = await asyncio.wait_for(runner.cancel_job("anchor-r42b", render_job), 10)
+        assert receipt == "cancelled"
+        release_job.set()
+        await _drain(handle)
+        assert [(row["version"], row["state"]) for row in rows_for("anchor-r42")] == [
+            (1, "decided"),
+            (2, "decided"),
+            (3, "done"),
+        ], rows_for("anchor-r42")
+        assert [(row["version"], row["state"]) for row in rows_for("anchor-r42b")] == [
+            (1, "decided"),
+            (2, "cancelled"),
+        ], rows_for("anchor-r42b")
+    finally:
+        release.set()
+        release_job.set()
+        await handle.dispose()
+
+
 # --- the in-flight terminal append (round-3 review R3-1) ------------------------------------
 #
 # The three reproductions round 3 ran on all three op sites, pinned: the op is delivered
