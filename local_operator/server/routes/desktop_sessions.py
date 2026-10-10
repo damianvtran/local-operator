@@ -14,7 +14,7 @@ from contextlib import aclosing, asynccontextmanager
 from typing import Annotated, Any, Callable, Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -3624,19 +3624,35 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
 async def supplement_document(session_id: str, digest: AttachmentDigest, request: Request):
     """The assembled HTML document of one stored supplement component, as ``{html}``.
 
-    A C0 STUB: it answers 404 for every well-formed request so the contract (path, digest
-    shape, JSON-not-``text/html`` reply) is frozen and lane C2 can fill it in without a
-    route-table change. The real route (``docs/design/turn-supplements.md`` §2.7) resolves
-    the blob through the attachment store, hands it to
-    ``supplements.document.assemble_document`` and returns ``{html}`` -- JSON, never a
-    navigable ``text/html`` URL, because no host may point a frame at a URL (§4.1) -- with
-    409 ``attachment_on_peer`` passed through for a digest held by another device.
+    The document (``docs/design/turn-supplements.md`` §2.6/§2.7) is assembled by
+    ``supplements.document`` from the component blob this digest names and
+    returned as JSON -- **never** a navigable ``text/html`` URL, because no host
+    may point a frame at a URL (§4.1): the frame mounts these bytes at an opaque
+    origin under the document's own meta CSP. The route is digest-only by
+    construction: there is no caller-supplied path anywhere in the request, and
+    ``digest`` reuses :data:`AttachmentDigest`, the traversal gate of the
+    attachment route beside it (a non-matching path is a 422 before any handler
+    code runs).
 
-    ``digest`` reuses :data:`AttachmentDigest`, the traversal gate of the attachment route
-    beside it: a non-matching path is a 422 before any handler code runs.
+    Response headers are the executing-document family's (file-serving RFC D5):
+    ``X-Content-Type-Options: nosniff`` and ``Cache-Control: no-store``. The
+    digest-addressing would make an ``immutable`` cache semantically safe about
+    the bytes, and it is still the wrong header: ``managed_desktop_boundary``
+    applies ``no-store`` to everything under ``/v1/desktop/`` because these are
+    bearer-gated session documents, and D5 names ``no-store`` for this family
+    explicitly. The frame's own CSP rides INSIDE the document (the tunnel strips
+    response headers; §2.7), so no policy depends on this response's headers --
+    they are belt beside it.
+
+    A digest held by another device is 409 ``attachment_on_peer`` (passed
+    through by the error ladder); a missing or unassemblable blob is an ordinary
+    404, and the frame-level fallback line is what the reader paints (§2.8).
     """
-    raise HTTPException(
-        404, {"code": "supplement_unavailable", "message": "Highlights are not available yet."}
+    async with errors(request):
+        html = await host(request).supplement_document(session_id, digest)
+    return JSONResponse(
+        {"html": html},
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
     )
 
 
@@ -4946,6 +4962,7 @@ async def events(
     frontend_replace: int = Query(default=0, ge=0),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    supplements: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -4963,7 +4980,16 @@ async def events(
             # and the move path then refuses rather than leaving that mounted
             # viewer stale. The flag is retained on the subscription so the
             # fence in ``subscribe`` can refuse a LEGACY mount during a move.
-            sub = bridge.subscribe(frontend_replace=bool(frontend_replace))
+            #
+            # ``supplements=1`` is the same kind of declaration for the
+            # ``supplements-v1`` family (memo §2.7): only a subscriber that
+            # sends it is handed ``supplement_progress`` frames -- live or from
+            # replay -- so an older renderer never meets the family. The rows
+            # themselves are journaled either way; this gates the live carriage,
+            # not the record.
+            sub = bridge.subscribe(
+                frontend_replace=bool(frontend_replace), supplements=bool(supplements)
+            )
         except LegacySubscriberDuringMove as error:
             await context.__aexit__(None, None, None)
             raise HTTPException(409, str(error)) from None
