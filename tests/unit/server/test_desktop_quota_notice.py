@@ -374,9 +374,7 @@ async def test_stale_cache_failed_refresh_is_silent_and_releases_the_lease(
     # ``config_dir()/usage_cache.db`` — the fixture's config dir IS tmp_path.
     cache_db = quota.tmp_path / "usage_cache.db"
     conn = sqlite3.connect(cache_db)
-    row = conn.execute(
-        "SELECT payload FROM usage_reports WHERE provider = 'deepseek'"
-    ).fetchone()
+    row = conn.execute("SELECT payload FROM usage_reports WHERE provider = 'deepseek'").fetchone()
     payload = json.loads(row[0])
     for report in payload:
         report["fetched_at"] -= 10 * 60_000
