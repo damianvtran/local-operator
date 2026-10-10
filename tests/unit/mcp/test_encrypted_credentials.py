@@ -162,8 +162,10 @@ def test_every_split_of_an_escape_before_a_word_keeps_it_masked() -> None:
     boundary rule read the escape's tail (``n``, ``t``, or up to four hex digits of
     ``\\uXXXX``) as an ordinary letter run and left the standalone token — on the
     one sink that runs before a tool result exists. Swept here over EVERY two-way
-    split, every three-way split and a one-byte feed for the three escape shapes,
-    plus a value-length sweep: no arrangement may publish the word unmasked.
+    split, every three-way split and a one-byte feed for the escape shapes and the
+    two backslash-RUN shapes whose pairing decides the boundary (review round 1,
+    R-3 re-checked the run classes on the parity hold), plus a value-length sweep:
+    no arrangement may publish the word unmasked.
     """
     from local_operator.mcp.redaction import StderrRedactor
 
@@ -178,7 +180,13 @@ def test_every_split_of_an_escape_before_a_word_keeps_it_masked() -> None:
             previous = cut
         return out + redactor.feed(b"", final=True)
 
-    for escape in ("\\" + "n", "\\" + "t", "\\" + "u000a"):
+    for escape in (
+        "\\" + "n",
+        "\\" + "t",
+        "\\" + "u000a",
+        "\\" + "\\",
+        "\\" + "\\" + "\\",
+    ):
         payload = '{"msg": "x' + escape + word + ' z"}\n'
         for i in range(1, len(payload)):
             out = joined(payload, (i,))
@@ -197,6 +205,28 @@ def test_every_split_of_an_escape_before_a_word_keeps_it_masked() -> None:
         for i in range(1, len(payload)):
             out = joined(payload, (i,))
             assert word not in out.replace("[redacted]", ""), (length, i, out)
+
+
+def test_a_pure_backslash_stream_stays_bounded() -> None:
+    """A backslash run is counted in one step, never walked one hold at a time.
+
+    Review round 1, R-3: the hold re-entered its helper once per backslash, so a
+    child streaming backslashes with no newline pinned every byte in ``pending``
+    (three 4 KB feeds: released 0/0/0, pending 12288) instead of the class's own
+    bounded holdback (base: released 4088/4096/4096, pending 8). With the parity
+    hold an unpaired backslash still crosses feeds safely, at the documented cost
+    of ONE byte of delay per feed; the run's own length changes nothing else.
+    """
+    from local_operator.mcp.redaction import StderrRedactor
+
+    word = "syn" + "thetic"
+    redactor = StderrRedactor([word])
+    # One byte of delay per feed at most: every release is the chunk minus the
+    # class's holdback (longest value - 1) and the one withheld backslash.
+    assert [len(redactor.feed(b"\\" * 4096)) for _ in range(3)] == [4088, 4096, 4096]
+    assert len(redactor._pending) == 8, len(redactor._pending)
+    # ...and the final flush releases the held tail: the stream is byte-identical.
+    assert redactor.feed(b"", final=True) == "\\" * 8
 
 
 def test_an_oversized_unterminated_line_never_releases_an_escape_fragment(caplog) -> None:
