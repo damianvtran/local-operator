@@ -95,6 +95,8 @@ from tests.unit.secrets.credential_shape_corpus import (
     STORE_ENTRY_NAME,
     TYPE_ANNOTATION_NEGATIVES,
     TYPE_ANNOTATION_POSITIVES,
+    VENDOR_IDENTIFIER_MATRIX,
+    VENDOR_REAL_KEY_POSITIVES,
     Case,
     _compact,
 )
@@ -6217,7 +6219,23 @@ _CORPUS_GRADING_DIGEST = "f1707c1f7bc4b8448998f19e32988b55fdbbb313f76f9ff7ae46de
 #:     of the added spellings, which is the live gap this change closes; under
 #:     this module they are masked whole and contained (``complete`` true,
 #:     ``exposed`` false).
-_CORPUS_GRADING_DIGEST = "515f0e918997e14c9f12710962a6f080d2d81952e02659b6b7277bd2eba3c929"
+#:
+#: MOVED ONCE MORE on 2026-10-09 by the vendor-identifier fix (session ``565245718d90``):
+#:
+#: 13. **The MODULE change moved NOTHING in the corpus as it stood.** The 527 rows the
+#:     constant above covered (313 positives, 214 negatives) were graded under
+#:     ``origin/main``'s module and this one, masked text per row: **zero moved**. The
+#:     change releases only a tail of 8-15 lowercase letters with no separator, and the
+#:     corpus's smallest letters-only POSITIVE is the 16-letter ``pk-`` round-1 repro.
+#:
+#: 14. **The corpus change is the specification:** NINE positives (``VENDOR_REAL_KEY_POSITIVES``:
+#:     realistic mixed-case/digit keys, the 16-letter ceiling, a long unbroken lowercase
+#:     tail, camelCase and digit-carrying identifiers that the rule's bet keeps masking) and
+#:     FIVE negatives (``VENDOR_IDENTIFIER_NEGATIVES``: the reported identifier in a bare,
+#:     ``def``, dotted-call, JSON-key and TypeScript-export position). ``POSITIVE_CASES``
+#:     moves 313 -> 322 and ``NEGATIVE_CASES`` 214 -> 219. The five negatives are MASKED
+#:     under ``origin/main``'s module and released under this one.
+_CORPUS_GRADING_DIGEST = "7fd06391f8d30231ffb2d1b453e0d72f0c95588c00784bf1ad7796e3fc0d67e0"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -8163,3 +8181,38 @@ def test_the_value_side_still_masks_beside_the_name_release(text: str) -> None:
     """The release is scoped to NAMES: the pinned value-side positives keep masking."""
     masked, hits = scrub_shapes_with_hits(text)
     assert masked != text and hits
+
+
+# --- 2026-10-09: a vendor-prefixed single-word identifier is a NAME ----------------------
+
+
+@pytest.mark.parametrize("case", VENDOR_IDENTIFIER_MATRIX, ids=lambda c: c.reason[:48])
+def test_a_vendor_prefixed_identifier_is_not_masked(case: Case) -> None:
+    """Every prefix in both vendor tables, in every source position, stays readable.
+
+    The defect this pins is a FEEDBACK LOOP, not a cosmetic mask: the model copies what
+    it saw into ``edit``/``write`` and the marker lands in source (see
+    ``tests/unit/harness/test_loop_redaction_feedback.py``). Name-agnostic is the claim
+    under test, so it is asserted against EVERY prefix in the tables rather than the one
+    that was reported. FAIL-ON-REVERT: ``_VENDOR_TAIL_IS_ONE_WORD`` in
+    ``_vendor_tail_guard``.
+    """
+    masked, hits = scrub_shapes_with_hits(case.text)
+    assert masked == case.text and not hits, case.reason
+
+
+@pytest.mark.parametrize("case", VENDOR_REAL_KEY_POSITIVES, ids=lambda c: c.reason[:48])
+def test_a_real_vendor_key_still_masks_beside_the_identifier_release(case: Case) -> None:
+    """The release is bounded: case, a digit, or 16+ letters keeps the mask."""
+    masked, hits = scrub_shapes_with_hits(case.text)
+    assert masked != case.text and hits, case.reason
+
+
+def test_the_identifier_release_ceiling_is_exactly_fifteen_letters() -> None:
+    """15 letters release, 16 mask: the boundary as a pair, so a drift reds one side."""
+    at_ceiling = "xai" + "_" + "a" * 15
+    over_ceiling = "xai" + "_" + "a" * 16
+    assert scrub_shapes(at_ceiling) == at_ceiling
+    assert scrub_shapes(over_ceiling) != over_ceiling
+    short = "xai" + "_" + "a" * 7
+    assert scrub_shapes(short) == short, "below the 8 floor: no match"

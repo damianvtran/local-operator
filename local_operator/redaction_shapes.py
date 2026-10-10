@@ -1941,6 +1941,47 @@ def _base64_value_guard(match: Match[str]) -> bool:
 #: closed.
 _VENDOR_TAIL_IS_A_NAME = re.compile(r"[a-z]+(?:[-_/][a-z]+)+(?:=\S*)?")
 
+#: A SINGLE lowercase word of 8-15 letters is a NAME too. Sixteen or more letters is outside
+#: this form and keeps its mask: the corpus pins an ``pk-`` prefix plus sixteen letters,
+#: ``whsec_``/``shpat_`` plus sixteen, and ``npm_``/``sk-`` plus twenty-six.
+#:
+#: **Why the form exists (2026-10-09, session ``565245718d90``).** ``xai_`` plus nine
+#: lowercase letters is an ordinary snake_case identifier (a boolean probe, a
+#: ``def`` name), and ``_VENDOR_TAIL_IS_A_NAME`` only releases tails of TWO or more
+#: words, so a one-word identifier was masked whole. The mask is not cosmetic: a
+#: ``read``/``grep``/``bash`` result shows the model the redaction marker where the
+#: symbol is, and so does the model's own earlier tool call (history is stored and
+#: replayed scrubbed, deliberately), so a model that copies what it saw writes the
+#: MARKER into source and ``edit`` writes exactly the bytes it is handed. The writers
+#: are not at fault; the rule manufactured the text the model then reproduced. #1911
+#: settled the principle (a NAME is not a credential, only a value is); this is the
+#: same principle applied to the one-word spelling.
+#:
+#: **Why a length ceiling, and why it is a probability argument rather than a taste.**
+#: Issuer tails are random base62 (or hex) and every one in the corpus is 20+ characters
+#: (Stripe 24+, GitLab 20, Tavily 32, Hugging Face 34, npm 36, Groq 52, Anthropic 95).
+#: The chance that a random base62 run is lowercase LETTERS ONLY is ``(26/62)**n``:
+#: about 4e-4 at 9 characters, 5e-7 at 16, 1e-8 at 20+. A real credential is therefore
+#: essentially never a short all-lowercase single word, while an English word is exactly
+#: that. 16 is the corpus's own smallest letters-only POSITIVE (the round-1 ``pk-``
+#: repro), so the ceiling releases nothing the corpus asserts is a credential; it is a
+#: data-fit at the margin and is stated as such (a row on each side pins it).
+#:
+#: **Name-agnostic by construction.** Nothing here consults the prefix: the judgement is
+#: on the tail's SHAPE after the prefix is stripped, for both prefix tables. A real
+#: ``xai-``/``sk-``/``gsk_`` key (mixed case, a digit, or 16+ characters) is untouched.
+#:
+#: **Accepted residuals, recorded rather than closed.** (1) A real credential that is
+#: genuinely 8-15 lowercase letters (``sk-`` plus a short English word) is now readable by
+#: this rule. Every such string in this repo and in the sibling checkouts surveyed
+#: (``~/minervaai``, ``~/pergamon-labs``, the omp fork) is a synthetic fixture, and a value
+#: that was REGISTERED (stored secret, env credential, typed into ``secret``) is scrubbed
+#: by value regardless of this shape. (2) An identifier that is one word of 16+ letters,
+#: carries a digit, or is camelCase is still masked: the same "case or a digit makes it a
+#: token" bet #1399 took, with the same feedback-loop risk, now covered by the
+#: marker-introduction note in ``edit``/``write``.
+_VENDOR_TAIL_IS_ONE_WORD = re.compile(r"[a-z]{8,15}(?:=[^=\s]\S*)?")
+
 
 def _vendor_tail_guard(match: Match[str]) -> bool:
     """Reject an issuer-looking prefix followed by an ordinary NAME.
@@ -1969,7 +2010,8 @@ def _vendor_tail_guard(match: Match[str]) -> bool:
             if tail.lower().startswith(prefix.lower()):
                 tail = tail[len(prefix) :]
                 break
-    return not _VENDOR_TAIL_IS_A_NAME.fullmatch(tail.lstrip("_-"))
+    tail = tail.lstrip("_-")
+    return not (_VENDOR_TAIL_IS_A_NAME.fullmatch(tail) or _VENDOR_TAIL_IS_ONE_WORD.fullmatch(tail))
 
 
 #: An ENVIRONMENT-VARIABLE (or secret-store NAME) spelling: capitals, digits and
