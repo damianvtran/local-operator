@@ -2798,6 +2798,18 @@ class LoopConfig(BaseModel):
         default=None, exclude=True
     )
     has_steering_messages: Callable[[], bool] | None = Field(default=None, exclude=True)
+    #: Run-scoped opt-in: drain the steering queue ONCE before this run's first
+    #: event/request, instead of only from the second inner iteration onward.
+    #: Set by a host whose run exists BECAUSE of the queue — a session opening
+    #: a turn for an idle-admitted steer — so the run's first call carries the
+    #: queued message rather than spending an empty warm-up call and delivering
+    #: it on a continuation. A run whose opening drain finds the queue already
+    #: emptied retires BEFORE its first event: no ``agent_start``/``agent_end``
+    #: pair, no provider call (the session documents the same silent settle for
+    #: a dropped turn in ``_drop_pre_aborted_turn``). Off by default, so every
+    #: ordinary turn keeps the historical shape where a steer can never appear
+    #: in its first request (the loop comment carries the full rationale).
+    drain_steering_on_open: bool = False
     #: Asks the host whether a boundary-respecting cancel is pending. Consulted
     #: at the post-tool boundary, where every call in the batch has produced a
     #: paired result and the next model request has not yet been spent — so a
