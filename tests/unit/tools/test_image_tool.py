@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -49,6 +50,7 @@ def _outcome(
     cost_provenance: str | None = None,
     route: ImageRoute = ImageRoute.RADIENT,
     usage_record_id: str | None = None,
+    strength_ignored: bool = False,
 ) -> ImageOutcome:
     if assets is None:
         assets = (
@@ -73,6 +75,7 @@ def _outcome(
         billing_basis=billing_basis,
         cost_provenance=cost_provenance,
         usage_record_id=usage_record_id,
+        strength_ignored=strength_ignored,
     )
 
 
@@ -662,11 +665,12 @@ async def test_a_source_attachment_resolves_through_the_session_store(
 
 @pytest.mark.asyncio
 async def test_a_bad_attachment_digest_is_refused_before_touching_the_store() -> None:
-    result = await image_tool.execute_generate_image(
-        "call-1", {"prompt": "x", "source_attachment": "../etc/passwd"}, None, None, None
-    )
-    assert result.is_error is True
-    assert "32-character hex digest" in result.content[0].text  # type: ignore[union-attr]
+    for bad in ("../etc/passwd", "a" * 32 + "\n", "A" * 32):
+        result = await image_tool.execute_generate_image(
+            "call-1", {"prompt": "x", "source_attachment": bad}, None, None, None
+        )
+        assert result.is_error is True
+        assert "32-character hex digest" in result.content[0].text  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -769,3 +773,98 @@ def test_the_approval_label_skips_edit_incapable_rungs(
 
     assert image_tool._preferred_route_label() == "Radient"
     assert image_tool._preferred_route_label(editing=True) == "FAL"
+
+
+@pytest.mark.asyncio
+async def test_a_rung_side_strength_drop_is_recorded_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FAL's multi-reference editors drop a RECEIVED strength inside the rung
+    (review round 1, D2/R1): the outcome flag must reach details + caption
+    exactly like the route-level case, never a silent drop."""
+    ref = AttachmentStore().put_bytes(PNG_1X1, "image/png")
+    assert ref is not None
+
+    async def fake_cascade(**kwargs):
+        return _outcome(route=ImageRoute.FAL, strength_ignored=True)
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1",
+        {"prompt": "combine", "source_attachment": ref.digest, "strength": 0.6},
+        None,
+        None,
+        None,
+    )
+
+    details = result.details or {}
+    assert details["strength_ignored"] is True
+    assert "Strength 0.6 was ignored" in result.content[0].text  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_the_edit_caption_says_edited_not_generated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref = AttachmentStore().put_bytes(PNG_1X1, "image/png")
+    assert ref is not None
+
+    async def fake_cascade(**kwargs):
+        return _outcome()
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    edited = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "make it night", "source_attachment": ref.digest}, None, None, None
+    )
+    assert edited.content[0].text.startswith("Edited 1 image with")  # type: ignore[union-attr]
+
+    generated = await image_tool.execute_generate_image(
+        "call-2", {"prompt": "a cat"}, None, None, None
+    )
+    generated_text = generated.content[0].text  # type: ignore[union-attr]
+    assert generated_text.startswith("Generated 1 image with")
+
+
+@pytest.mark.asyncio
+async def test_an_edit_with_no_registerable_assets_says_edited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref = AttachmentStore().put_bytes(PNG_1X1, "image/png")
+    assert ref is not None
+
+    async def fake_cascade(**kwargs):
+        return _outcome(
+            (MediaAsset(data=b"", content_type="image/png", source_url="https://img.test/x.png"),)
+        )
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "make it night", "source_attachment": ref.digest}, None, None, None
+    )
+
+    assert result.is_error is True
+    assert result.content[0].text.startswith("Edited 1 image(s) with")  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_the_live_completion_line_says_edit_for_edits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref = AttachmentStore().put_bytes(PNG_1X1, "image/png")
+    assert ref is not None
+    updates: list[Any] = []  # the tool's real progress-update records
+
+    async def fake_cascade(**kwargs):
+        return _outcome()
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    await image_tool.execute_generate_image(
+        "call-1",
+        {"prompt": "make it night", "source_attachment": ref.digest},
+        None,
+        updates.append,
+        None,
+    )
+
+    completed = updates[-1]
+    assert completed.content[0].text == "Edit complete — 1 image(s) via Radient (flux/dev)."

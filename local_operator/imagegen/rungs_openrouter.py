@@ -131,7 +131,16 @@ async def run_openrouter(
                 headers={"Authorization": f"Bearer {key}"},
             )
             rows = models_payload.get("data")
-            rows = rows if isinstance(rows, list) else []
+            if not isinstance(rows, list):
+                # A 200 the client cannot read is "cannot answer", not "the
+                # model is absent": the negative below must stay deterministic
+                # or a mangled list read would masquerade as a capability
+                # fact (review round 1, R4).
+                raise APIError(
+                    "OpenRouter returned a models list in an unexpected shape.",
+                    status_code=None,
+                    code="invalid_response",
+                )
             row = next(
                 (item for item in rows if isinstance(item, dict) and item.get("id") == model_id),
                 None,

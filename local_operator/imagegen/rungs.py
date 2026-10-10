@@ -910,10 +910,14 @@ async def run_fal(
     ``strength`` rides only the ``image_url`` schemas; a count is sent only
     where the schema documents one, and a multi-image request against a route
     without one is a recorded SKIP rather than a silently smaller delivery.
+    A ``strength`` the routed sub-schema has no field for comes back as
+    ``strength_ignored`` on the result — the tool records the drop (details +
+    caption note), never a silent one (review round 1, D2/R1).
     """
     base = base_url.rstrip("/")
     model_path = (model or FAL_DEFAULT_MODEL).strip().strip("/")
     headers = {"Authorization": f"Key {key}", "Content-Type": "application/json"}
+    strength_ignored = False
     async with _client_scope(client) as http:
         body: dict[str, Any] = {"prompt": prompt, "num_images": num_images, "sync_mode": False}
         if source_url is not None:
@@ -927,6 +931,10 @@ async def run_fal(
                         "delivering fewer.",
                         reason_class="unsupported",
                     )
+                # The multi-reference schemas document no strength field
+                # either; flag the drop for the tool's receipt instead of
+                # sending an unverified key (review round 1, D2/R1).
+                strength_ignored = strength is not None
             else:
                 body["image_url"] = source_url
                 if strength is not None:
@@ -1042,7 +1050,12 @@ async def run_fal(
             pause=pause,
             started=started,
         )
-        return RungResult(assets=assets, model=model_path, generation_id=request_id)
+        return RungResult(
+            assets=assets,
+            model=model_path,
+            generation_id=request_id,
+            strength_ignored=strength_ignored,
+        )
 
 
 # ---------------------------------------------------------------------------

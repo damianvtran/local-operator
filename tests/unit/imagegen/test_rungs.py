@@ -818,7 +818,7 @@ async def test_fal_img2img_rides_the_image_to_image_route_with_image_url() -> No
     recorder = _Recorder()
     submit = {"request_id": "req1", "status": "IN_QUEUE"}
     async with _client(_fal_handler(recorder, submit=submit)) as client:
-        await image_rungs.run_fal(
+        result = await image_rungs.run_fal(
             prompt="make it rain",
             key="fk",
             num_images=1,
@@ -838,15 +838,21 @@ async def test_fal_img2img_rides_the_image_to_image_route_with_image_url() -> No
     assert body["image_url"] == "data:image/png;base64,AAAA"
     assert body["strength"] == 0.6
     assert "image_size" not in body, "the img2img route takes no image_size"
+    assert result.strength_ignored is False, "the flux-class schema HONOURS strength"
 
 
 @pytest.mark.asyncio
 async def test_fal_multi_reference_editor_uses_image_urls_and_takes_no_strength() -> None:
-    """A pinned edit-native app keeps ITS schema: ``image_urls``, no strength."""
+    """A pinned edit-native app keeps ITS schema: ``image_urls``, no strength.
+
+    The strength drop is RECORDED on the result (review round 1, D2/R1) —
+    the tool turns it into the details receipt + caption note; nothing about
+    it is silent.
+    """
     recorder = _Recorder()
     submit = {"request_id": "req1", "status": "IN_QUEUE"}
     async with _client(_fal_handler(recorder, submit=submit)) as client:
-        await image_rungs.run_fal(
+        result = await image_rungs.run_fal(
             prompt="combine these",
             key="fk",
             num_images=1,
@@ -866,6 +872,7 @@ async def test_fal_multi_reference_editor_uses_image_urls_and_takes_no_strength(
     assert body["image_urls"] == ["data:image/png;base64,AAAA"]
     assert "image_url" not in body
     assert "strength" not in body, "the multi-reference schema documents no strength field"
+    assert result.strength_ignored is True, "the drop rides the result, never silent"
 
 
 @pytest.mark.asyncio

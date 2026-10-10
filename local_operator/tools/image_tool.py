@@ -435,8 +435,9 @@ def _as_data_uri(raw: bytes, mime_type: str) -> str:
 #: with exactly this many). Validated BEFORE any filesystem touch — the store
 #: builds paths from the digest, so a traversal-shaped string must never
 #: reach it — and the shape keeps the field unmistakably distinct from a
-#: path.
-_DIGEST_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+#: path. ``fullmatch``, not ``match`` with a ``$`` anchor: ``$`` also matches
+#: before a trailing newline, and this gate must be exact.
+_DIGEST_PATTERN = re.compile(r"[0-9a-f]{32}")
 
 
 def _load_source_attachment(digest: str) -> str:
@@ -450,7 +451,7 @@ def _load_source_attachment(digest: str) -> str:
     remembered one — becomes the data URI's type (the same trust rule the
     paste path applies: bytes decide, labels do not).
     """
-    if not _DIGEST_PATTERN.match(digest):
+    if not _DIGEST_PATTERN.fullmatch(digest):
         raise InvalidToolArgumentsError(
             f"source_attachment must be a 32-character hex digest: {digest!r}"
         )
@@ -594,8 +595,11 @@ async def execute_generate_image(
         )
 
     if progress is not None:
+        edit_verb = (
+            "Edit" if (params.source_image_path or params.source_attachment) else "Generation"
+        )
         progress(
-            f"Generation complete — {len(outcome.assets)} image(s) via "
+            f"{edit_verb} complete — {len(outcome.assets)} image(s) via "
             f"{RUNG_LABELS.get(outcome.route, str(outcome.route))} ({outcome.model}).",
             image_rungs.progress_details(
                 stage="completed",
@@ -668,13 +672,18 @@ def _generated_result(
         details["usage_record_id"] = outcome.usage_record_id
     if params.source_attachment:
         details["source_attachment"] = params.source_attachment
+    editing = bool(params.source_image_path or params.source_attachment)
     strength_ignored = False
-    if (params.source_image_path or params.source_attachment) and params.strength is not None:
+    if editing and params.strength is not None:
         details["strength"] = params.strength
-        # A winning rung outside ``STRENGTH_ROUTES`` never receives
-        # ``strength`` (``cascade._run_route`` hands it to two edit paths
-        # only); record the drop instead of leaving it silent (audit §ii.7).
-        strength_ignored = outcome.route not in STRENGTH_ROUTES
+        # Two sources, one receipt: a winning rung outside
+        # ``STRENGTH_ROUTES`` never receives ``strength``
+        # (``cascade._run_route`` hands it to two edit paths only), while
+        # ``outcome.strength_ignored`` covers a drop INSIDE a rung that does
+        # receive it (FAL's multi-reference editors document no strength
+        # field). Either way the drop is recorded, never silent
+        # (audit §ii.7; review round 1, D2/R1).
+        strength_ignored = outcome.route not in STRENGTH_ROUTES or outcome.strength_ignored
         if strength_ignored:
             details["strength_ignored"] = True
     if params.source_image_path:
@@ -689,7 +698,8 @@ def _generated_result(
             content=[
                 TextContent(
                     text=(
-                        f"Generated {len(outcome.assets)} image(s) with {label} "
+                        f"{'Edited' if editing else 'Generated'} {len(outcome.assets)} "
+                        f"image(s) with {label} "
                         f"({outcome.model}) but none {_REGISTER_FAILED_NOTE} "
                         f"(sources: {', '.join(failed)})."
                     )
@@ -707,7 +717,8 @@ def _generated_result(
     )
     cost_text = f" Cost ${outcome.cost_usd:g}." if outcome.cost_usd is not None else ""
     caption = (
-        f"Generated {len(blocks)} {noun} with {label} ({outcome.model}), "
+        f"{'Edited' if editing else 'Generated'} {len(blocks)} {noun} with {label} "
+        f"({outcome.model}), "
         f"{_dimensions_text(outcome.assets, params.image_size)}{seed_text} — "
         f"attached to the session (digest {', '.join(digests)}).{cost_text}{strength_text}"
     )
