@@ -162,6 +162,21 @@ class TestRatchet:
         saved = json.loads((tree / "i18n" / "baseline.json").read_text(encoding="utf-8"))
         assert saved["enforced"] == ["local_operator/old.py"]
 
+    def test_malformed_enforced_fails_closed(self, tree, i18n_check) -> None:
+        # Round-4 m1: a hand-edited, present-but-NON-list `enforced` used to
+        # become [] (silently un-enforcing everything); it must fall back to
+        # DEFAULT_ENFORCED, while a deliberate [] stays a real state.
+        assert i18n_check.main(["--init"]) == 0
+        _write(tree, {"local_operator/i18n/x.py": 'print("prose")\n'})
+        path = tree / "i18n" / "baseline.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["enforced"] = []  # deliberate: nothing enforced -> advisory only
+        path.write_text(json.dumps(data), encoding="utf-8")
+        assert i18n_check.main([]) == 0
+        data["enforced"] = "local_operator/i18n/"  # a hand-edit mistake
+        path.write_text(json.dumps(data), encoding="utf-8")
+        assert i18n_check.main([]) == 1
+
     def test_allowlisted_file_is_exempt(self, tree, i18n_check) -> None:
         _write(
             tree,
@@ -202,8 +217,10 @@ class TestRatchet:
         assert i18n_check.main([]) == 0
 
     def test_the_enforced_scope_itself_is_finding_free(self, i18n_check) -> None:
-        # The scope M0 activates (the i18n package + its tooling) must stay
-        # literal-clean: no advisories hiding inside the blocking area.
+        # The scope M0 activates (the i18n package + its tooling) must carry no
+        # RATCHET FINDINGS — every file at or below its ceiling. Not "zero
+        # literals": the frozen developer-diagnostic prints in scripts/i18n/
+        # are legitimate ceilings; what fails is growth, and this pins none.
         baseline = i18n_check.load_baseline(i18n_check.BASELINE)
         entries = i18n_check.load_allowlist(i18n_check.ALLOWLIST)
         scanned = i18n_check.scan_tree(i18n_check.REPO)
