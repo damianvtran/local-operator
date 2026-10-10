@@ -38,6 +38,26 @@ do not translate into `en`.
   only inside code-ish enumerations like `(a, b, ...)`); em dash " — " with
   spaces.
 
+## Product-name policy
+
+- Source locale: kept-English is everything, by definition — en copy is the
+  reference spelling for every term another guide records as kept-English.
+- The classes that never translate anywhere are glossary §1's ("Local
+  Operator", `lop`, tool names, `--flags`, config keys, paths, identifiers).
+
+## Plurals
+
+- Categories: `one` (1) / `other` (0, 2, …). Example:
+  `{count, plural, one {# session} other {# sessions}}`
+- Never hand-roll `count == 1 else` at a call site — every count goes
+  through a plural message; `#` renders the formatted number.
+
+## Numbers, dates, digits
+
+- Never hand-written — the formatter renders "1,234.5", and dates
+  "Oct 10, 2026"; 12-hour clock with AM/PM ("2:30 PM").
+- Digits: Latin.
+
 ## Punctuation
 
 - Full stops end sentences; no full stop on labels or fragments.

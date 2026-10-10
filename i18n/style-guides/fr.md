@@ -43,8 +43,9 @@ for `fr`; when this file and a habit disagree, this file wins.
 
 ## Plurals
 
-- Categories: `one` (0 and 1 — "0 session"), `many` (≥ 10⁶ — "1 000 000 de
-  sessions"), `other`. `few` is not a French category — never use it.
+- Categories: `one` (0 and 1 — "0 session"), `many` (exact multiples of 10⁶
+  only — "1 000 000 de sessions"; 1 500 000 → `other`), `other`. `few` is
+  not a French category — never use it.
 - Example: `{count, plural, one {# session} many {# de sessions} other {# sessions}}`
 - `#` renders the formatted number; never pre-format inside the branch.
 

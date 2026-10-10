@@ -59,7 +59,7 @@ translators and the auditor.
 
 ## Punctuation & typography
 
-- Quotes: «ёлочки» in prose, „лапки" nested inside them.
+- Quotes: «ёлочки» in prose, „лапки“ nested inside them.
 - Em dash " — " with spaces; ellipsis …; no typographic spacing before
   : ; ! ? (unlike French).
 - Code spans, flags, paths stay byte-identical — Latin, undeclined.
