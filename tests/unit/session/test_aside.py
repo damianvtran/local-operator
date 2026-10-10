@@ -143,11 +143,13 @@ async def test_complete_aside_sends_the_live_context_and_no_tools(tmp_path) -> N
     request = stream.requests[-1]
     assert request.system_blocks == ["stable", "goal: x"]
     assert [m.text for m in request.messages] == ["port it", "why?"]
-    # Tools mirror the session's live set (the working turn's prefix) exactly —
+    # Tools mirror what the TURN publishes (the working turn's prefix) exactly —
     # this is the whole point: the aside must send what the turn sends. The
     # session augments the caller's tools with its own built-ins (task, hub,
-    # ...), so assert identity with the live set rather than the literal input.
-    assert request.tools == session._context.tools
+    # ...), so assert identity with the published array rather than the literal
+    # input — and it is the PUBLISHABLE inventory, not ``context.tools``: the
+    # latter keeps the deferred schemas (``no_reply``) that the wire withholds.
+    assert request.tools == session._publishable(session._tools)
     assert {"bash", "read"} <= {t.name for t in request.tools}
     # And it still cannot call any of them.
     assert request.tool_choice == "none"
@@ -280,7 +282,9 @@ async def test_complete_aside_retries_a_bare_tool_call_without_tools(tmp_path) -
     assert deltas == ["because."]
     assert len(stream.requests) == 2
     first, retry = stream.requests
-    assert first.tools == session._context.tools and first.tool_choice == "none"
+    # As in the cell above: the first request's tools are the publishable
+    # inventory (deferred schemas withheld); the retry drops tools entirely.
+    assert first.tools == session._publishable(session._tools) and first.tool_choice == "none"
     assert retry.tools == [] and retry.tool_choice == "none"
     # The retry is the same request plus the correction at its tail.
     assert retry.messages[:-2] == first.messages
