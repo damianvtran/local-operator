@@ -12,8 +12,9 @@ from local_operator.i18n import catalogues
 
 
 def test_shipped_wire_namespaces_exist() -> None:
-    # M0 ships the six `wire.*` namespace STUBS (RFC §5): the files exist so
-    # later slices populate them; being empty is the correct current state.
+    # M0 shipped the six `wire.*` namespace files as STUBS; slices populate
+    # them one namespace per PR (RFC §5). `wire.settings` is populated by S1;
+    # the rest stay empty until their own slices land.
     assert catalogues.locales() == ("en",)
     assert catalogues.namespaces("en") == (
         "wire.errors",
@@ -23,8 +24,13 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.settings",
         "wire.slash",
     )
+    populated = {"wire.settings"}
     for namespace in catalogues.namespaces("en"):
-        assert catalogues.load_catalogue("en", namespace) == {}
+        messages = catalogues.load_catalogue("en", namespace)
+        if namespace in populated:
+            assert messages, f"{namespace} is populated by its slice"
+        else:
+            assert messages == {}, f"{namespace} is still a stub"
 
 
 def test_hash_is_over_file_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

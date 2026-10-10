@@ -6,3 +6,2993 @@ shape RFC §2.4 proved: a mistyped key or kwarg fails pyright.
 """
 
 from __future__ import annotations
+
+from ..messages import Msg
+
+
+def agents_description() -> Msg:
+    return Msg("wire.settings.agents.description", {})
+
+
+def agents_title() -> Msg:
+    return Msg("wire.settings.agents.title", {})
+
+
+def agents_auto_update_seeds_choice_false_description() -> Msg:
+    return Msg("wire.settings.agents_auto_update_seeds.choice.false.description", {})
+
+
+def agents_auto_update_seeds_choice_true_description() -> Msg:
+    return Msg("wire.settings.agents_auto_update_seeds.choice.true.description", {})
+
+
+def agents_auto_update_seeds_help() -> Msg:
+    return Msg("wire.settings.agents_auto_update_seeds.help", {})
+
+
+def agents_auto_update_seeds_label() -> Msg:
+    return Msg("wire.settings.agents_auto_update_seeds.label", {})
+
+
+def aida_description() -> Msg:
+    return Msg("wire.settings.aida.description", {})
+
+
+def aida_title() -> Msg:
+    return Msg("wire.settings.aida.title", {})
+
+
+def aida_cadence_at_help() -> Msg:
+    return Msg("wire.settings.aida_cadence_at.help", {})
+
+
+def aida_cadence_at_label() -> Msg:
+    return Msg("wire.settings.aida_cadence_at.label", {})
+
+
+def aida_cadence_at_placeholder() -> Msg:
+    return Msg("wire.settings.aida_cadence_at.placeholder", {})
+
+
+def aida_cadence_max_extra_per_day_help() -> Msg:
+    return Msg("wire.settings.aida_cadence_max_extra_per_day.help", {})
+
+
+def aida_cadence_max_extra_per_day_label() -> Msg:
+    return Msg("wire.settings.aida_cadence_max_extra_per_day.label", {})
+
+
+def aida_cadence_min_gap_minutes_help() -> Msg:
+    return Msg("wire.settings.aida_cadence_min_gap_minutes.help", {})
+
+
+def aida_cadence_min_gap_minutes_label() -> Msg:
+    return Msg("wire.settings.aida_cadence_min_gap_minutes.label", {})
+
+
+def aida_cadence_paused_choice_false_description() -> Msg:
+    return Msg("wire.settings.aida_cadence_paused.choice.false.description", {})
+
+
+def aida_cadence_paused_choice_true_description() -> Msg:
+    return Msg("wire.settings.aida_cadence_paused.choice.true.description", {})
+
+
+def aida_cadence_paused_help() -> Msg:
+    return Msg("wire.settings.aida_cadence_paused.help", {})
+
+
+def aida_cadence_paused_label() -> Msg:
+    return Msg("wire.settings.aida_cadence_paused.label", {})
+
+
+def aida_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.aida_enabled.choice.false.description", {})
+
+
+def aida_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.aida_enabled.choice.true.description", {})
+
+
+def aida_enabled_help() -> Msg:
+    return Msg("wire.settings.aida_enabled.help", {})
+
+
+def aida_enabled_label() -> Msg:
+    return Msg("wire.settings.aida_enabled.label", {})
+
+
+def aida_name_help() -> Msg:
+    return Msg("wire.settings.aida_name.help", {})
+
+
+def aida_name_label() -> Msg:
+    return Msg("wire.settings.aida_name.label", {})
+
+
+def aida_name_placeholder() -> Msg:
+    return Msg("wire.settings.aida_name.placeholder", {})
+
+
+def aida_onboarding_nudge_days_help() -> Msg:
+    return Msg("wire.settings.aida_onboarding_nudge_days.help", {})
+
+
+def aida_onboarding_nudge_days_label() -> Msg:
+    return Msg("wire.settings.aida_onboarding_nudge_days.label", {})
+
+
+def appearance_description() -> Msg:
+    return Msg("wire.settings.appearance.description", {})
+
+
+def appearance_title() -> Msg:
+    return Msg("wire.settings.appearance.title", {})
+
+
+def approvals_description() -> Msg:
+    return Msg("wire.settings.approvals.description", {})
+
+
+def approvals_title() -> Msg:
+    return Msg("wire.settings.approvals.title", {})
+
+
+def auto_save_conversation_choice_false_description() -> Msg:
+    return Msg("wire.settings.auto_save_conversation.choice.false.description", {})
+
+
+def auto_save_conversation_choice_true_description() -> Msg:
+    return Msg("wire.settings.auto_save_conversation.choice.true.description", {})
+
+
+def auto_save_conversation_help() -> Msg:
+    return Msg("wire.settings.auto_save_conversation.help", {})
+
+
+def auto_save_conversation_label() -> Msg:
+    return Msg("wire.settings.auto_save_conversation.label", {})
+
+
+def bash_memory_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.bash_memory_enabled.choice.false.description", {})
+
+
+def bash_memory_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.bash_memory_enabled.choice.true.description", {})
+
+
+def bash_memory_enabled_help() -> Msg:
+    return Msg("wire.settings.bash_memory_enabled.help", {})
+
+
+def bash_memory_enabled_label() -> Msg:
+    return Msg("wire.settings.bash_memory_enabled.label", {})
+
+
+def bash_memory_limit_mb_help() -> Msg:
+    return Msg("wire.settings.bash_memory_limit_mb.help", {})
+
+
+def bash_memory_limit_mb_label() -> Msg:
+    return Msg("wire.settings.bash_memory_limit_mb.label", {})
+
+
+def bash_memory_mode_choice_auto_description() -> Msg:
+    return Msg("wire.settings.bash_memory_mode.choice.auto.description", {})
+
+
+def bash_memory_mode_choice_auto_label() -> Msg:
+    return Msg("wire.settings.bash_memory_mode.choice.auto.label", {})
+
+
+def bash_memory_mode_choice_manual_description() -> Msg:
+    return Msg("wire.settings.bash_memory_mode.choice.manual.description", {})
+
+
+def bash_memory_mode_choice_manual_label() -> Msg:
+    return Msg("wire.settings.bash_memory_mode.choice.manual.label", {})
+
+
+def bash_memory_mode_help() -> Msg:
+    return Msg("wire.settings.bash_memory_mode.help", {})
+
+
+def bash_memory_mode_label() -> Msg:
+    return Msg("wire.settings.bash_memory_mode.label", {})
+
+
+def bash_memory_soft_fraction_help() -> Msg:
+    return Msg("wire.settings.bash_memory_soft_fraction.help", {})
+
+
+def bash_memory_soft_fraction_label() -> Msg:
+    return Msg("wire.settings.bash_memory_soft_fraction.label", {})
+
+
+def bash_query_budget_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.bash_query_budget_enabled.choice.false.description", {})
+
+
+def bash_query_budget_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.bash_query_budget_enabled.choice.true.description", {})
+
+
+def bash_query_budget_enabled_help() -> Msg:
+    return Msg("wire.settings.bash_query_budget_enabled.help", {})
+
+
+def bash_query_budget_enabled_label() -> Msg:
+    return Msg("wire.settings.bash_query_budget_enabled.label", {})
+
+
+def bash_query_budget_seconds_help() -> Msg:
+    return Msg("wire.settings.bash_query_budget_seconds.help", {})
+
+
+def bash_query_budget_seconds_label() -> Msg:
+    return Msg("wire.settings.bash_query_budget_seconds.label", {})
+
+
+def bash_query_budget_stop_choice_false_description() -> Msg:
+    return Msg("wire.settings.bash_query_budget_stop.choice.false.description", {})
+
+
+def bash_query_budget_stop_choice_true_description() -> Msg:
+    return Msg("wire.settings.bash_query_budget_stop.choice.true.description", {})
+
+
+def bash_query_budget_stop_help() -> Msg:
+    return Msg("wire.settings.bash_query_budget_stop.help", {})
+
+
+def bash_query_budget_stop_label() -> Msg:
+    return Msg("wire.settings.bash_query_budget_stop.label", {})
+
+
+def bash_shell_help() -> Msg:
+    return Msg("wire.settings.bash_shell.help", {})
+
+
+def bash_shell_help_windows() -> Msg:
+    return Msg("wire.settings.bash_shell.help.windows", {})
+
+
+def bash_shell_label() -> Msg:
+    return Msg("wire.settings.bash_shell.label", {})
+
+
+def bool_off() -> Msg:
+    return Msg("wire.settings.bool.off", {})
+
+
+def bool_on() -> Msg:
+    return Msg("wire.settings.bool.on", {})
+
+
+def classification_description() -> Msg:
+    return Msg("wire.settings.classification.description", {})
+
+
+def classification_title() -> Msg:
+    return Msg("wire.settings.classification.title", {})
+
+
+def classification_auto_choice_false_description() -> Msg:
+    return Msg("wire.settings.classification_auto.choice.false.description", {})
+
+
+def classification_auto_choice_true_description() -> Msg:
+    return Msg("wire.settings.classification_auto.choice.true.description", {})
+
+
+def classification_auto_help() -> Msg:
+    return Msg("wire.settings.classification_auto.help", {})
+
+
+def classification_auto_label() -> Msg:
+    return Msg("wire.settings.classification_auto.label", {})
+
+
+def classification_maxcandidates_help() -> Msg:
+    return Msg("wire.settings.classification_maxcandidates.help", {})
+
+
+def classification_maxcandidates_label() -> Msg:
+    return Msg("wire.settings.classification_maxcandidates.label", {})
+
+
+def classification_maxrecommendations_help() -> Msg:
+    return Msg("wire.settings.classification_maxrecommendations.help", {})
+
+
+def classification_maxrecommendations_label() -> Msg:
+    return Msg("wire.settings.classification_maxrecommendations.label", {})
+
+
+def classification_maxstatechars_help() -> Msg:
+    return Msg("wire.settings.classification_maxstatechars.help", {})
+
+
+def classification_maxstatechars_label() -> Msg:
+    return Msg("wire.settings.classification_maxstatechars.label", {})
+
+
+def classification_model_help() -> Msg:
+    return Msg("wire.settings.classification_model.help", {})
+
+
+def classification_model_label() -> Msg:
+    return Msg("wire.settings.classification_model.label", {})
+
+
+def classification_notice_help() -> Msg:
+    return Msg("wire.settings.classification_notice.help", {})
+
+
+def classification_notice_label() -> Msg:
+    return Msg("wire.settings.classification_notice.label", {})
+
+
+def classification_timeoutms_help() -> Msg:
+    return Msg("wire.settings.classification_timeoutms.help", {})
+
+
+def classification_timeoutms_label() -> Msg:
+    return Msg("wire.settings.classification_timeoutms.label", {})
+
+
+def classification_vendor_choice_auto_description() -> Msg:
+    return Msg("wire.settings.classification_vendor.choice.auto.description", {})
+
+
+def classification_vendor_choice_auto_label() -> Msg:
+    return Msg("wire.settings.classification_vendor.choice.auto.label", {})
+
+
+def classification_vendor_choice_openrouter_description() -> Msg:
+    return Msg("wire.settings.classification_vendor.choice.openrouter.description", {})
+
+
+def classification_vendor_choice_openrouter_label() -> Msg:
+    return Msg("wire.settings.classification_vendor.choice.openrouter.label", {})
+
+
+def classification_vendor_choice_radient_description() -> Msg:
+    return Msg("wire.settings.classification_vendor.choice.radient.description", {})
+
+
+def classification_vendor_choice_radient_label() -> Msg:
+    return Msg("wire.settings.classification_vendor.choice.radient.label", {})
+
+
+def classification_vendor_choice_typesafe_description() -> Msg:
+    return Msg("wire.settings.classification_vendor.choice.typesafe.description", {})
+
+
+def classification_vendor_choice_typesafe_label() -> Msg:
+    return Msg("wire.settings.classification_vendor.choice.typesafe.label", {})
+
+
+def classification_vendor_help() -> Msg:
+    return Msg("wire.settings.classification_vendor.help", {})
+
+
+def classification_vendor_label() -> Msg:
+    return Msg("wire.settings.classification_vendor.label", {})
+
+
+def classification_waitms_help() -> Msg:
+    return Msg("wire.settings.classification_waitms.help", {})
+
+
+def classification_waitms_label() -> Msg:
+    return Msg("wire.settings.classification_waitms.label", {})
+
+
+def compaction_description() -> Msg:
+    return Msg("wire.settings.compaction.description", {})
+
+
+def compaction_title() -> Msg:
+    return Msg("wire.settings.compaction.title", {})
+
+
+def compaction_auto_continue_choice_false_description() -> Msg:
+    return Msg("wire.settings.compaction_auto_continue.choice.false.description", {})
+
+
+def compaction_auto_continue_choice_true_description() -> Msg:
+    return Msg("wire.settings.compaction_auto_continue.choice.true.description", {})
+
+
+def compaction_auto_continue_help() -> Msg:
+    return Msg("wire.settings.compaction_auto_continue.help", {})
+
+
+def compaction_auto_continue_label() -> Msg:
+    return Msg("wire.settings.compaction_auto_continue.label", {})
+
+
+def compaction_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.compaction_enabled.choice.false.description", {})
+
+
+def compaction_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.compaction_enabled.choice.true.description", {})
+
+
+def compaction_enabled_help() -> Msg:
+    return Msg("wire.settings.compaction_enabled.help", {})
+
+
+def compaction_enabled_label() -> Msg:
+    return Msg("wire.settings.compaction_enabled.label", {})
+
+
+def compaction_keep_recent_tokens_help() -> Msg:
+    return Msg("wire.settings.compaction_keep_recent_tokens.help", {})
+
+
+def compaction_keep_recent_tokens_label() -> Msg:
+    return Msg("wire.settings.compaction_keep_recent_tokens.label", {})
+
+
+def compaction_mid_turn_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.compaction_mid_turn_enabled.choice.false.description", {})
+
+
+def compaction_mid_turn_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.compaction_mid_turn_enabled.choice.true.description", {})
+
+
+def compaction_mid_turn_enabled_help() -> Msg:
+    return Msg("wire.settings.compaction_mid_turn_enabled.help", {})
+
+
+def compaction_mid_turn_enabled_label() -> Msg:
+    return Msg("wire.settings.compaction_mid_turn_enabled.label", {})
+
+
+def compaction_strategy_choice_auto_description() -> Msg:
+    return Msg("wire.settings.compaction_strategy.choice.auto.description", {})
+
+
+def compaction_strategy_choice_auto_label() -> Msg:
+    return Msg("wire.settings.compaction_strategy.choice.auto.label", {})
+
+
+def compaction_strategy_choice_context_full_description() -> Msg:
+    return Msg("wire.settings.compaction_strategy.choice.context_full.description", {})
+
+
+def compaction_strategy_choice_context_full_label() -> Msg:
+    return Msg("wire.settings.compaction_strategy.choice.context_full.label", {})
+
+
+def compaction_strategy_choice_off_description() -> Msg:
+    return Msg("wire.settings.compaction_strategy.choice.off.description", {})
+
+
+def compaction_strategy_choice_off_label() -> Msg:
+    return Msg("wire.settings.compaction_strategy.choice.off.label", {})
+
+
+def compaction_strategy_choice_snapcompact_description() -> Msg:
+    return Msg("wire.settings.compaction_strategy.choice.snapcompact.description", {})
+
+
+def compaction_strategy_choice_snapcompact_label() -> Msg:
+    return Msg("wire.settings.compaction_strategy.choice.snapcompact.label", {})
+
+
+def compaction_strategy_help() -> Msg:
+    return Msg("wire.settings.compaction_strategy.help", {})
+
+
+def compaction_strategy_label() -> Msg:
+    return Msg("wire.settings.compaction_strategy.label", {})
+
+
+def compaction_threshold_percent_help() -> Msg:
+    return Msg("wire.settings.compaction_threshold_percent.help", {})
+
+
+def compaction_threshold_percent_label() -> Msg:
+    return Msg("wire.settings.compaction_threshold_percent.label", {})
+
+
+def compaction_threshold_tokens_help() -> Msg:
+    return Msg("wire.settings.compaction_threshold_tokens.help", {})
+
+
+def compaction_threshold_tokens_label() -> Msg:
+    return Msg("wire.settings.compaction_threshold_tokens.label", {})
+
+
+def compaction_wire_bytes_budget_help() -> Msg:
+    return Msg("wire.settings.compaction_wire_bytes_budget.help", {})
+
+
+def compaction_wire_bytes_budget_label() -> Msg:
+    return Msg("wire.settings.compaction_wire_bytes_budget.label", {})
+
+
+def compaction_wire_bytes_trigger_help() -> Msg:
+    return Msg("wire.settings.compaction_wire_bytes_trigger.help", {})
+
+
+def compaction_wire_bytes_trigger_label() -> Msg:
+    return Msg("wire.settings.compaction_wire_bytes_trigger.label", {})
+
+
+def conversation_length_help() -> Msg:
+    return Msg("wire.settings.conversation_length.help", {})
+
+
+def conversation_length_label() -> Msg:
+    return Msg("wire.settings.conversation_length.label", {})
+
+
+def desktop_description() -> Msg:
+    return Msg("wire.settings.desktop.description", {})
+
+
+def desktop_title() -> Msg:
+    return Msg("wire.settings.desktop.title", {})
+
+
+def desktop_launch_command_help() -> Msg:
+    return Msg("wire.settings.desktop_launch_command.help", {})
+
+
+def desktop_launch_command_label() -> Msg:
+    return Msg("wire.settings.desktop_launch_command.label", {})
+
+
+def desktop_launch_command_placeholder() -> Msg:
+    return Msg("wire.settings.desktop_launch_command.placeholder", {})
+
+
+def detail_length_help() -> Msg:
+    return Msg("wire.settings.detail_length.help", {})
+
+
+def detail_length_label() -> Msg:
+    return Msg("wire.settings.detail_length.label", {})
+
+
+def display_comfortable_rows_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_comfortable_rows.choice.false.description", {})
+
+
+def display_comfortable_rows_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_comfortable_rows.choice.true.description", {})
+
+
+def display_comfortable_rows_help() -> Msg:
+    return Msg("wire.settings.display_comfortable_rows.help", {})
+
+
+def display_comfortable_rows_label() -> Msg:
+    return Msg("wire.settings.display_comfortable_rows.label", {})
+
+
+def display_composer_band_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_composer_band.choice.false.description", {})
+
+
+def display_composer_band_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_composer_band.choice.true.description", {})
+
+
+def display_composer_band_help() -> Msg:
+    return Msg("wire.settings.display_composer_band.help", {})
+
+
+def display_composer_band_label() -> Msg:
+    return Msg("wire.settings.display_composer_band.label", {})
+
+
+def display_composer_chevron_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_composer_chevron.choice.false.description", {})
+
+
+def display_composer_chevron_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_composer_chevron.choice.true.description", {})
+
+
+def display_composer_chevron_help() -> Msg:
+    return Msg("wire.settings.display_composer_chevron.help", {})
+
+
+def display_composer_chevron_label() -> Msg:
+    return Msg("wire.settings.display_composer_chevron.label", {})
+
+
+def display_composer_context_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_composer_context.choice.false.description", {})
+
+
+def display_composer_context_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_composer_context.choice.true.description", {})
+
+
+def display_composer_context_help() -> Msg:
+    return Msg("wire.settings.display_composer_context.help", {})
+
+
+def display_composer_context_label() -> Msg:
+    return Msg("wire.settings.display_composer_context.label", {})
+
+
+def display_composer_cost_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_composer_cost.choice.false.description", {})
+
+
+def display_composer_cost_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_composer_cost.choice.true.description", {})
+
+
+def display_composer_cost_help() -> Msg:
+    return Msg("wire.settings.display_composer_cost.help", {})
+
+
+def display_composer_cost_label() -> Msg:
+    return Msg("wire.settings.display_composer_cost.label", {})
+
+
+def display_composer_cwd_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_composer_cwd.choice.false.description", {})
+
+
+def display_composer_cwd_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_composer_cwd.choice.true.description", {})
+
+
+def display_composer_cwd_help() -> Msg:
+    return Msg("wire.settings.display_composer_cwd.help", {})
+
+
+def display_composer_cwd_label() -> Msg:
+    return Msg("wire.settings.display_composer_cwd.label", {})
+
+
+def display_composer_duration_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_composer_duration.choice.false.description", {})
+
+
+def display_composer_duration_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_composer_duration.choice.true.description", {})
+
+
+def display_composer_duration_help() -> Msg:
+    return Msg("wire.settings.display_composer_duration.help", {})
+
+
+def display_composer_duration_label() -> Msg:
+    return Msg("wire.settings.display_composer_duration.label", {})
+
+
+def display_composer_model_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_composer_model.choice.false.description", {})
+
+
+def display_composer_model_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_composer_model.choice.true.description", {})
+
+
+def display_composer_model_help() -> Msg:
+    return Msg("wire.settings.display_composer_model.help", {})
+
+
+def display_composer_model_label() -> Msg:
+    return Msg("wire.settings.display_composer_model.label", {})
+
+
+def display_composer_rate_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_composer_rate.choice.false.description", {})
+
+
+def display_composer_rate_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_composer_rate.choice.true.description", {})
+
+
+def display_composer_rate_help() -> Msg:
+    return Msg("wire.settings.display_composer_rate.help", {})
+
+
+def display_composer_rate_label() -> Msg:
+    return Msg("wire.settings.display_composer_rate.label", {})
+
+
+def display_dock_choice_full_description() -> Msg:
+    return Msg("wire.settings.display_dock.choice.full.description", {})
+
+
+def display_dock_choice_full_label() -> Msg:
+    return Msg("wire.settings.display_dock.choice.full.label", {})
+
+
+def display_dock_choice_hidden_description() -> Msg:
+    return Msg("wire.settings.display_dock.choice.hidden.description", {})
+
+
+def display_dock_choice_hidden_label() -> Msg:
+    return Msg("wire.settings.display_dock.choice.hidden.label", {})
+
+
+def display_dock_choice_summary_description() -> Msg:
+    return Msg("wire.settings.display_dock.choice.summary.description", {})
+
+
+def display_dock_choice_summary_label() -> Msg:
+    return Msg("wire.settings.display_dock.choice.summary.label", {})
+
+
+def display_dock_help() -> Msg:
+    return Msg("wire.settings.display_dock.help", {})
+
+
+def display_dock_label() -> Msg:
+    return Msg("wire.settings.display_dock.label", {})
+
+
+def display_heading_markers_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_heading_markers.choice.false.description", {})
+
+
+def display_heading_markers_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_heading_markers.choice.true.description", {})
+
+
+def display_heading_markers_help() -> Msg:
+    return Msg("wire.settings.display_heading_markers.help", {})
+
+
+def display_heading_markers_label() -> Msg:
+    return Msg("wire.settings.display_heading_markers.label", {})
+
+
+def display_hide_cross_session_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_hide_cross_session.choice.false.description", {})
+
+
+def display_hide_cross_session_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_hide_cross_session.choice.true.description", {})
+
+
+def display_hide_cross_session_help() -> Msg:
+    return Msg("wire.settings.display_hide_cross_session.help", {})
+
+
+def display_hide_cross_session_label() -> Msg:
+    return Msg("wire.settings.display_hide_cross_session.label", {})
+
+
+def display_images_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_images.choice.false.description", {})
+
+
+def display_images_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_images.choice.true.description", {})
+
+
+def display_images_help() -> Msg:
+    return Msg("wire.settings.display_images.help", {})
+
+
+def display_images_label() -> Msg:
+    return Msg("wire.settings.display_images.label", {})
+
+
+def display_narration_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_narration.choice.false.description", {})
+
+
+def display_narration_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_narration.choice.true.description", {})
+
+
+def display_narration_help() -> Msg:
+    return Msg("wire.settings.display_narration.help", {})
+
+
+def display_narration_label() -> Msg:
+    return Msg("wire.settings.display_narration.label", {})
+
+
+def display_nerd_icons_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_nerd_icons.choice.false.description", {})
+
+
+def display_nerd_icons_choice_false_label() -> Msg:
+    return Msg("wire.settings.display_nerd_icons.choice.false.label", {})
+
+
+def display_nerd_icons_choice_none_description() -> Msg:
+    return Msg("wire.settings.display_nerd_icons.choice.none.description", {})
+
+
+def display_nerd_icons_choice_none_label() -> Msg:
+    return Msg("wire.settings.display_nerd_icons.choice.none.label", {})
+
+
+def display_nerd_icons_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_nerd_icons.choice.true.description", {})
+
+
+def display_nerd_icons_choice_true_label() -> Msg:
+    return Msg("wire.settings.display_nerd_icons.choice.true.label", {})
+
+
+def display_nerd_icons_help() -> Msg:
+    return Msg("wire.settings.display_nerd_icons.help", {})
+
+
+def display_nerd_icons_label() -> Msg:
+    return Msg("wire.settings.display_nerd_icons.label", {})
+
+
+def display_notification_session_name_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_notification_session_name.choice.false.description", {})
+
+
+def display_notification_session_name_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_notification_session_name.choice.true.description", {})
+
+
+def display_notification_session_name_help() -> Msg:
+    return Msg("wire.settings.display_notification_session_name.help", {})
+
+
+def display_notification_session_name_label() -> Msg:
+    return Msg("wire.settings.display_notification_session_name.label", {})
+
+
+def display_notifications_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_notifications.choice.false.description", {})
+
+
+def display_notifications_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_notifications.choice.true.description", {})
+
+
+def display_notifications_help() -> Msg:
+    return Msg("wire.settings.display_notifications.help", {})
+
+
+def display_notifications_label() -> Msg:
+    return Msg("wire.settings.display_notifications.label", {})
+
+
+def display_rail_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_rail.choice.false.description", {})
+
+
+def display_rail_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_rail.choice.true.description", {})
+
+
+def display_rail_help() -> Msg:
+    return Msg("wire.settings.display_rail.help", {})
+
+
+def display_rail_label() -> Msg:
+    return Msg("wire.settings.display_rail.label", {})
+
+
+def display_reasoning_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_reasoning.choice.false.description", {})
+
+
+def display_reasoning_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_reasoning.choice.true.description", {})
+
+
+def display_reasoning_help() -> Msg:
+    return Msg("wire.settings.display_reasoning.help", {})
+
+
+def display_reasoning_label() -> Msg:
+    return Msg("wire.settings.display_reasoning.label", {})
+
+
+def display_shimmer_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_shimmer.choice.false.description", {})
+
+
+def display_shimmer_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_shimmer.choice.true.description", {})
+
+
+def display_shimmer_help() -> Msg:
+    return Msg("wire.settings.display_shimmer.help", {})
+
+
+def display_shimmer_label() -> Msg:
+    return Msg("wire.settings.display_shimmer.label", {})
+
+
+def display_terminal_title_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_terminal_title.choice.false.description", {})
+
+
+def display_terminal_title_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_terminal_title.choice.true.description", {})
+
+
+def display_terminal_title_help() -> Msg:
+    return Msg("wire.settings.display_terminal_title.help", {})
+
+
+def display_terminal_title_label() -> Msg:
+    return Msg("wire.settings.display_terminal_title.label", {})
+
+
+def display_time_format_choice_12h_description() -> Msg:
+    return Msg("wire.settings.display_time_format.choice.12h.description", {})
+
+
+def display_time_format_choice_12h_label() -> Msg:
+    return Msg("wire.settings.display_time_format.choice.12h.label", {})
+
+
+def display_time_format_choice_24h_description() -> Msg:
+    return Msg("wire.settings.display_time_format.choice.24h.description", {})
+
+
+def display_time_format_choice_24h_label() -> Msg:
+    return Msg("wire.settings.display_time_format.choice.24h.label", {})
+
+
+def display_time_format_help() -> Msg:
+    return Msg("wire.settings.display_time_format.help", {})
+
+
+def display_time_format_label() -> Msg:
+    return Msg("wire.settings.display_time_format.label", {})
+
+
+def display_turn_answer_rail_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_turn_answer_rail.choice.false.description", {})
+
+
+def display_turn_answer_rail_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_turn_answer_rail.choice.true.description", {})
+
+
+def display_turn_answer_rail_help() -> Msg:
+    return Msg("wire.settings.display_turn_answer_rail.help", {})
+
+
+def display_turn_answer_rail_label() -> Msg:
+    return Msg("wire.settings.display_turn_answer_rail.label", {})
+
+
+def failover_description() -> Msg:
+    return Msg("wire.settings.failover.description", {})
+
+
+def failover_title() -> Msg:
+    return Msg("wire.settings.failover.title", {})
+
+
+def fork_description() -> Msg:
+    return Msg("wire.settings.fork.description", {})
+
+
+def fork_title() -> Msg:
+    return Msg("wire.settings.fork.title", {})
+
+
+def fork_cmux_placement_choice_surface_description() -> Msg:
+    return Msg("wire.settings.fork_cmux_placement.choice.surface.description", {})
+
+
+def fork_cmux_placement_choice_surface_label() -> Msg:
+    return Msg("wire.settings.fork_cmux_placement.choice.surface.label", {})
+
+
+def fork_cmux_placement_choice_workspace_description() -> Msg:
+    return Msg("wire.settings.fork_cmux_placement.choice.workspace.description", {})
+
+
+def fork_cmux_placement_choice_workspace_label() -> Msg:
+    return Msg("wire.settings.fork_cmux_placement.choice.workspace.label", {})
+
+
+def fork_cmux_placement_help() -> Msg:
+    return Msg("wire.settings.fork_cmux_placement.help", {})
+
+
+def fork_cmux_placement_label() -> Msg:
+    return Msg("wire.settings.fork_cmux_placement.label", {})
+
+
+def fork_mode_choice_switch_description() -> Msg:
+    return Msg("wire.settings.fork_mode.choice.switch.description", {})
+
+
+def fork_mode_choice_switch_label() -> Msg:
+    return Msg("wire.settings.fork_mode.choice.switch.label", {})
+
+
+def fork_mode_choice_window_description() -> Msg:
+    return Msg("wire.settings.fork_mode.choice.window.description", {})
+
+
+def fork_mode_choice_window_label() -> Msg:
+    return Msg("wire.settings.fork_mode.choice.window.label", {})
+
+
+def fork_mode_help() -> Msg:
+    return Msg("wire.settings.fork_mode.help", {})
+
+
+def fork_mode_label() -> Msg:
+    return Msg("wire.settings.fork_mode.label", {})
+
+
+def hooks_description() -> Msg:
+    return Msg("wire.settings.hooks.description", {})
+
+
+def hooks_title() -> Msg:
+    return Msg("wire.settings.hooks.title", {})
+
+
+def hooks_forward_claude_help() -> Msg:
+    return Msg("wire.settings.hooks_forward_claude.help", {})
+
+
+def hooks_forward_claude_label() -> Msg:
+    return Msg("wire.settings.hooks_forward_claude.label", {})
+
+
+def hooks_forward_codex_help() -> Msg:
+    return Msg("wire.settings.hooks_forward_codex.help", {})
+
+
+def hooks_forward_codex_label() -> Msg:
+    return Msg("wire.settings.hooks_forward_codex.label", {})
+
+
+def hooks_native_help() -> Msg:
+    return Msg("wire.settings.hooks_native.help", {})
+
+
+def hooks_native_label() -> Msg:
+    return Msg("wire.settings.hooks_native.label", {})
+
+
+def hosting_help() -> Msg:
+    return Msg("wire.settings.hosting.help", {})
+
+
+def hosting_label() -> Msg:
+    return Msg("wire.settings.hosting.label", {})
+
+
+def hub_description() -> Msg:
+    return Msg("wire.settings.hub.description", {})
+
+
+def hub_title() -> Msg:
+    return Msg("wire.settings.hub.title", {})
+
+
+def hub_auto_update_agents_choice_false_description() -> Msg:
+    return Msg("wire.settings.hub_auto_update_agents.choice.false.description", {})
+
+
+def hub_auto_update_agents_choice_true_description() -> Msg:
+    return Msg("wire.settings.hub_auto_update_agents.choice.true.description", {})
+
+
+def hub_auto_update_agents_help() -> Msg:
+    return Msg("wire.settings.hub_auto_update_agents.help", {})
+
+
+def hub_auto_update_agents_label() -> Msg:
+    return Msg("wire.settings.hub_auto_update_agents.label", {})
+
+
+def hub_auto_update_teams_choice_false_description() -> Msg:
+    return Msg("wire.settings.hub_auto_update_teams.choice.false.description", {})
+
+
+def hub_auto_update_teams_choice_true_description() -> Msg:
+    return Msg("wire.settings.hub_auto_update_teams.choice.true.description", {})
+
+
+def hub_auto_update_teams_help() -> Msg:
+    return Msg("wire.settings.hub_auto_update_teams.help", {})
+
+
+def hub_auto_update_teams_label() -> Msg:
+    return Msg("wire.settings.hub_auto_update_teams.label", {})
+
+
+def hub_check_interval_min_help() -> Msg:
+    return Msg("wire.settings.hub_check_interval_min.help", {})
+
+
+def hub_check_interval_min_label() -> Msg:
+    return Msg("wire.settings.hub_check_interval_min.label", {})
+
+
+def hub_merge_model_help() -> Msg:
+    return Msg("wire.settings.hub_merge_model.help", {})
+
+
+def hub_merge_model_label() -> Msg:
+    return Msg("wire.settings.hub_merge_model.label", {})
+
+
+def hub_merge_model_placeholder() -> Msg:
+    return Msg("wire.settings.hub_merge_model.placeholder", {})
+
+
+def keymap_description() -> Msg:
+    return Msg("wire.settings.keymap.description", {})
+
+
+def keymap_title() -> Msg:
+    return Msg("wire.settings.keymap.title", {})
+
+
+def language_help() -> Msg:
+    return Msg("wire.settings.language.help", {})
+
+
+def language_label() -> Msg:
+    return Msg("wire.settings.language.label", {})
+
+
+def local_providers_base_url_help() -> Msg:
+    return Msg("wire.settings.local_providers.base_url.help", {})
+
+
+def local_providers_base_url_label(*, name: str) -> Msg:
+    return Msg("wire.settings.local_providers.base_url.label", {"name": name})
+
+
+def local_providers_description() -> Msg:
+    return Msg("wire.settings.local_providers.description", {})
+
+
+def local_providers_models_help() -> Msg:
+    return Msg("wire.settings.local_providers.models.help", {})
+
+
+def local_providers_models_label(*, name: str) -> Msg:
+    return Msg("wire.settings.local_providers.models.label", {"name": name})
+
+
+def local_providers_title() -> Msg:
+    return Msg("wire.settings.local_providers.title", {})
+
+
+def max_learnings_history_help() -> Msg:
+    return Msg("wire.settings.max_learnings_history.help", {})
+
+
+def max_learnings_history_label() -> Msg:
+    return Msg("wire.settings.max_learnings_history.label", {})
+
+
+def memory_guard_description() -> Msg:
+    return Msg("wire.settings.memory_guard.description", {})
+
+
+def memory_guard_title() -> Msg:
+    return Msg("wire.settings.memory_guard.title", {})
+
+
+def model_description() -> Msg:
+    return Msg("wire.settings.model.description", {})
+
+
+def model_title() -> Msg:
+    return Msg("wire.settings.model.title", {})
+
+
+def model_effort_choice_high_description() -> Msg:
+    return Msg("wire.settings.model_effort.choice.high.description", {})
+
+
+def model_effort_choice_low_description() -> Msg:
+    return Msg("wire.settings.model_effort.choice.low.description", {})
+
+
+def model_effort_choice_max_description() -> Msg:
+    return Msg("wire.settings.model_effort.choice.max.description", {})
+
+
+def model_effort_choice_medium_description() -> Msg:
+    return Msg("wire.settings.model_effort.choice.medium.description", {})
+
+
+def model_effort_choice_minimal_description() -> Msg:
+    return Msg("wire.settings.model_effort.choice.minimal.description", {})
+
+
+def model_effort_choice_none_description() -> Msg:
+    return Msg("wire.settings.model_effort.choice.none.description", {})
+
+
+def model_effort_choice_unset_description() -> Msg:
+    return Msg("wire.settings.model_effort.choice.unset.description", {})
+
+
+def model_effort_choice_unset_label() -> Msg:
+    return Msg("wire.settings.model_effort.choice.unset.label", {})
+
+
+def model_effort_choice_xhigh_description() -> Msg:
+    return Msg("wire.settings.model_effort.choice.xhigh.description", {})
+
+
+def model_effort_help() -> Msg:
+    return Msg("wire.settings.model_effort.help", {})
+
+
+def model_effort_label() -> Msg:
+    return Msg("wire.settings.model_effort.label", {})
+
+
+def model_name_help() -> Msg:
+    return Msg("wire.settings.model_name.help", {})
+
+
+def model_name_label() -> Msg:
+    return Msg("wire.settings.model_name.label", {})
+
+
+def monitor_description() -> Msg:
+    return Msg("wire.settings.monitor.description", {})
+
+
+def monitor_title() -> Msg:
+    return Msg("wire.settings.monitor.title", {})
+
+
+def monitor_classifymaxchars_help() -> Msg:
+    return Msg("wire.settings.monitor_classifymaxchars.help", {})
+
+
+def monitor_classifymaxchars_label() -> Msg:
+    return Msg("wire.settings.monitor_classifymaxchars.label", {})
+
+
+def monitor_defaultintervals_help() -> Msg:
+    return Msg("wire.settings.monitor_defaultintervals.help", {})
+
+
+def monitor_defaultintervals_label() -> Msg:
+    return Msg("wire.settings.monitor_defaultintervals.label", {})
+
+
+def monitor_deltamaxchars_help() -> Msg:
+    return Msg("wire.settings.monitor_deltamaxchars.help", {})
+
+
+def monitor_deltamaxchars_label() -> Msg:
+    return Msg("wire.settings.monitor_deltamaxchars.label", {})
+
+
+def monitor_maxconsecutivefailures_help() -> Msg:
+    return Msg("wire.settings.monitor_maxconsecutivefailures.help", {})
+
+
+def monitor_maxconsecutivefailures_label() -> Msg:
+    return Msg("wire.settings.monitor_maxconsecutivefailures.label", {})
+
+
+def monitor_maxdeliveriesperhour_help() -> Msg:
+    return Msg("wire.settings.monitor_maxdeliveriesperhour.help", {})
+
+
+def monitor_maxdeliveriesperhour_label() -> Msg:
+    return Msg("wire.settings.monitor_maxdeliveriesperhour.label", {})
+
+
+def monitor_maxdeltalines_help() -> Msg:
+    return Msg("wire.settings.monitor_maxdeltalines.help", {})
+
+
+def monitor_maxdeltalines_label() -> Msg:
+    return Msg("wire.settings.monitor_maxdeltalines.label", {})
+
+
+def monitor_maxmonitors_help() -> Msg:
+    return Msg("wire.settings.monitor_maxmonitors.help", {})
+
+
+def monitor_maxmonitors_label() -> Msg:
+    return Msg("wire.settings.monitor_maxmonitors.label", {})
+
+
+def monitor_normalizetimestamps_choice_false_description() -> Msg:
+    return Msg("wire.settings.monitor_normalizetimestamps.choice.false.description", {})
+
+
+def monitor_normalizetimestamps_choice_true_description() -> Msg:
+    return Msg("wire.settings.monitor_normalizetimestamps.choice.true.description", {})
+
+
+def monitor_normalizetimestamps_help() -> Msg:
+    return Msg("wire.settings.monitor_normalizetimestamps.help", {})
+
+
+def monitor_normalizetimestamps_label() -> Msg:
+    return Msg("wire.settings.monitor_normalizetimestamps.label", {})
+
+
+def monitor_runtimeoutms_help() -> Msg:
+    return Msg("wire.settings.monitor_runtimeoutms.help", {})
+
+
+def monitor_runtimeoutms_label() -> Msg:
+    return Msg("wire.settings.monitor_runtimeoutms.label", {})
+
+
+def monitor_snapshotmaxchars_help() -> Msg:
+    return Msg("wire.settings.monitor_snapshotmaxchars.help", {})
+
+
+def monitor_snapshotmaxchars_label() -> Msg:
+    return Msg("wire.settings.monitor_snapshotmaxchars.label", {})
+
+
+def network_description() -> Msg:
+    return Msg("wire.settings.network.description", {})
+
+
+def network_title() -> Msg:
+    return Msg("wire.settings.network.title", {})
+
+
+def network_advertise_hosts_help() -> Msg:
+    return Msg("wire.settings.network_advertise_hosts.help", {})
+
+
+def network_advertise_hosts_label() -> Msg:
+    return Msg("wire.settings.network_advertise_hosts.label", {})
+
+
+def network_advertise_hosts_placeholder() -> Msg:
+    return Msg("wire.settings.network_advertise_hosts.placeholder", {})
+
+
+def network_audit_generations_help() -> Msg:
+    return Msg("wire.settings.network_audit_generations.help", {})
+
+
+def network_audit_generations_label() -> Msg:
+    return Msg("wire.settings.network_audit_generations.label", {})
+
+
+def network_audit_max_age_days_help() -> Msg:
+    return Msg("wire.settings.network_audit_max_age_days.help", {})
+
+
+def network_audit_max_age_days_label() -> Msg:
+    return Msg("wire.settings.network_audit_max_age_days.label", {})
+
+
+def network_audit_max_bytes_help() -> Msg:
+    return Msg("wire.settings.network_audit_max_bytes.help", {})
+
+
+def network_audit_max_bytes_label() -> Msg:
+    return Msg("wire.settings.network_audit_max_bytes.label", {})
+
+
+def network_credentials_github_repositories_help() -> Msg:
+    return Msg("wire.settings.network_credentials_github_repositories.help", {})
+
+
+def network_credentials_github_repositories_label() -> Msg:
+    return Msg("wire.settings.network_credentials_github_repositories.label", {})
+
+
+def network_credentials_github_repositories_placeholder() -> Msg:
+    return Msg("wire.settings.network_credentials_github_repositories.placeholder", {})
+
+
+def network_credentials_grant_ttl_s_help() -> Msg:
+    return Msg("wire.settings.network_credentials_grant_ttl_s.help", {})
+
+
+def network_credentials_grant_ttl_s_label() -> Msg:
+    return Msg("wire.settings.network_credentials_grant_ttl_s.label", {})
+
+
+def network_listen_address_help() -> Msg:
+    return Msg("wire.settings.network_listen_address.help", {})
+
+
+def network_listen_address_label() -> Msg:
+    return Msg("wire.settings.network_listen_address.label", {})
+
+
+def network_max_handshakes_help() -> Msg:
+    return Msg("wire.settings.network_max_handshakes.help", {})
+
+
+def network_max_handshakes_label() -> Msg:
+    return Msg("wire.settings.network_max_handshakes.label", {})
+
+
+def network_port_help() -> Msg:
+    return Msg("wire.settings.network_port.help", {})
+
+
+def network_port_label() -> Msg:
+    return Msg("wire.settings.network_port.label", {})
+
+
+def network_sync_debounce_s_help() -> Msg:
+    return Msg("wire.settings.network_sync_debounce_s.help", {})
+
+
+def network_sync_debounce_s_label() -> Msg:
+    return Msg("wire.settings.network_sync_debounce_s.label", {})
+
+
+def network_sync_tick_s_help() -> Msg:
+    return Msg("wire.settings.network_sync_tick_s.help", {})
+
+
+def network_sync_tick_s_label() -> Msg:
+    return Msg("wire.settings.network_sync_tick_s.label", {})
+
+
+def openrouter_description() -> Msg:
+    return Msg("wire.settings.openrouter.description", {})
+
+
+def openrouter_title() -> Msg:
+    return Msg("wire.settings.openrouter.title", {})
+
+
+def proactive_description() -> Msg:
+    return Msg("wire.settings.proactive.description", {})
+
+
+def proactive_title() -> Msg:
+    return Msg("wire.settings.proactive.title", {})
+
+
+def proactive_patience_backoff_help() -> Msg:
+    return Msg("wire.settings.proactive_patience_backoff.help", {})
+
+
+def proactive_patience_backoff_label() -> Msg:
+    return Msg("wire.settings.proactive_patience_backoff.label", {})
+
+
+def proactive_patience_default_ms_help() -> Msg:
+    return Msg("wire.settings.proactive_patience_default_ms.help", {})
+
+
+def proactive_patience_default_ms_label() -> Msg:
+    return Msg("wire.settings.proactive_patience_default_ms.label", {})
+
+
+def proactive_patience_episode_ttl_ms_help() -> Msg:
+    return Msg("wire.settings.proactive_patience_episode_ttl_ms.help", {})
+
+
+def proactive_patience_episode_ttl_ms_label() -> Msg:
+    return Msg("wire.settings.proactive_patience_episode_ttl_ms.label", {})
+
+
+def proactive_patience_max_attempts_help() -> Msg:
+    return Msg("wire.settings.proactive_patience_max_attempts.help", {})
+
+
+def proactive_patience_max_attempts_label() -> Msg:
+    return Msg("wire.settings.proactive_patience_max_attempts.label", {})
+
+
+def proactive_patience_max_pending_help() -> Msg:
+    return Msg("wire.settings.proactive_patience_max_pending.help", {})
+
+
+def proactive_patience_max_pending_label() -> Msg:
+    return Msg("wire.settings.proactive_patience_max_pending.label", {})
+
+
+def projects_description() -> Msg:
+    return Msg("wire.settings.projects.description", {})
+
+
+def projects_title() -> Msg:
+    return Msg("wire.settings.projects.title", {})
+
+
+def projects_stale_after_hours_help() -> Msg:
+    return Msg("wire.settings.projects_stale_after_hours.help", {})
+
+
+def projects_stale_after_hours_label() -> Msg:
+    return Msg("wire.settings.projects_stale_after_hours.label", {})
+
+
+def providers_description() -> Msg:
+    return Msg("wire.settings.providers.description", {})
+
+
+def providers_title() -> Msg:
+    return Msg("wire.settings.providers.title", {})
+
+
+def providers_anthropic_cache_ttl_1h_min_context_tokens_help() -> Msg:
+    return Msg("wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help", {})
+
+
+def providers_anthropic_cache_ttl_1h_min_context_tokens_label() -> Msg:
+    return Msg("wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label", {})
+
+
+def providers_openai_api_choice_chat_completions_description() -> Msg:
+    return Msg("wire.settings.providers_openai_api.choice.chat_completions.description", {})
+
+
+def providers_openai_api_choice_chat_completions_label() -> Msg:
+    return Msg("wire.settings.providers_openai_api.choice.chat_completions.label", {})
+
+
+def providers_openai_api_choice_responses_description() -> Msg:
+    return Msg("wire.settings.providers_openai_api.choice.responses.description", {})
+
+
+def providers_openai_api_choice_responses_label() -> Msg:
+    return Msg("wire.settings.providers_openai_api.choice.responses.label", {})
+
+
+def providers_openai_api_help() -> Msg:
+    return Msg("wire.settings.providers_openai_api.help", {})
+
+
+def providers_openai_api_label() -> Msg:
+    return Msg("wire.settings.providers_openai_api.label", {})
+
+
+def providers_openai_use_max_context_window_help() -> Msg:
+    return Msg("wire.settings.providers_openai_use_max_context_window.help", {})
+
+
+def providers_openai_use_max_context_window_label() -> Msg:
+    return Msg("wire.settings.providers_openai_use_max_context_window.label", {})
+
+
+def providers_openrouter_allow_fallbacks_choice_false_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_allow_fallbacks.choice.false.description", {})
+
+
+def providers_openrouter_allow_fallbacks_choice_false_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_allow_fallbacks.choice.false.label", {})
+
+
+def providers_openrouter_allow_fallbacks_choice_unset_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_allow_fallbacks.choice.unset.description", {})
+
+
+def providers_openrouter_allow_fallbacks_choice_unset_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label", {})
+
+
+def providers_openrouter_allow_fallbacks_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_allow_fallbacks.help", {})
+
+
+def providers_openrouter_allow_fallbacks_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_allow_fallbacks.label", {})
+
+
+def providers_openrouter_data_collection_choice_allow_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_data_collection.choice.allow.description", {})
+
+
+def providers_openrouter_data_collection_choice_allow_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_data_collection.choice.allow.label", {})
+
+
+def providers_openrouter_data_collection_choice_deny_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_data_collection.choice.deny.description", {})
+
+
+def providers_openrouter_data_collection_choice_deny_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_data_collection.choice.deny.label", {})
+
+
+def providers_openrouter_data_collection_choice_unset_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_data_collection.choice.unset.description", {})
+
+
+def providers_openrouter_data_collection_choice_unset_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_data_collection.choice.unset.label", {})
+
+
+def providers_openrouter_data_collection_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_data_collection.help", {})
+
+
+def providers_openrouter_data_collection_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_data_collection.label", {})
+
+
+def providers_openrouter_enforce_distillable_text_choice_true_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description", {})
+
+
+def providers_openrouter_enforce_distillable_text_choice_true_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label", {})
+
+
+def providers_openrouter_enforce_distillable_text_choice_unset_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.description", {})
+
+
+def providers_openrouter_enforce_distillable_text_choice_unset_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label", {})
+
+
+def providers_openrouter_enforce_distillable_text_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_enforce_distillable_text.help", {})
+
+
+def providers_openrouter_enforce_distillable_text_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_enforce_distillable_text.label", {})
+
+
+def providers_openrouter_ignore_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_ignore.help", {})
+
+
+def providers_openrouter_ignore_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_ignore.label", {})
+
+
+def providers_openrouter_ignore_placeholder() -> Msg:
+    return Msg("wire.settings.providers_openrouter_ignore.placeholder", {})
+
+
+def providers_openrouter_max_price_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_max_price.help", {})
+
+
+def providers_openrouter_max_price_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_max_price.label", {})
+
+
+def providers_openrouter_max_price_placeholder() -> Msg:
+    return Msg("wire.settings.providers_openrouter_max_price.placeholder", {})
+
+
+def providers_openrouter_only_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_only.help", {})
+
+
+def providers_openrouter_only_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_only.label", {})
+
+
+def providers_openrouter_only_placeholder() -> Msg:
+    return Msg("wire.settings.providers_openrouter_only.placeholder", {})
+
+
+def providers_openrouter_order_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_order.help", {})
+
+
+def providers_openrouter_order_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_order.label", {})
+
+
+def providers_openrouter_order_placeholder() -> Msg:
+    return Msg("wire.settings.providers_openrouter_order.placeholder", {})
+
+
+def providers_openrouter_order_warning() -> Msg:
+    return Msg("wire.settings.providers_openrouter_order.warning", {})
+
+
+def providers_openrouter_preferred_max_latency_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_preferred_max_latency.help", {})
+
+
+def providers_openrouter_preferred_max_latency_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_preferred_max_latency.label", {})
+
+
+def providers_openrouter_preferred_min_throughput_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_preferred_min_throughput.help", {})
+
+
+def providers_openrouter_preferred_min_throughput_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_preferred_min_throughput.label", {})
+
+
+def providers_openrouter_provider_affinity_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_provider_affinity.help", {})
+
+
+def providers_openrouter_provider_affinity_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_provider_affinity.label", {})
+
+
+def providers_openrouter_quantizations_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_quantizations.help", {})
+
+
+def providers_openrouter_quantizations_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_quantizations.label", {})
+
+
+def providers_openrouter_quantizations_placeholder() -> Msg:
+    return Msg("wire.settings.providers_openrouter_quantizations.placeholder", {})
+
+
+def providers_openrouter_require_parameters_choice_true_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_require_parameters.choice.true.description", {})
+
+
+def providers_openrouter_require_parameters_choice_true_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_require_parameters.choice.true.label", {})
+
+
+def providers_openrouter_require_parameters_choice_unset_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_require_parameters.choice.unset.description", {})
+
+
+def providers_openrouter_require_parameters_choice_unset_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_require_parameters.choice.unset.label", {})
+
+
+def providers_openrouter_require_parameters_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_require_parameters.help", {})
+
+
+def providers_openrouter_require_parameters_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_require_parameters.label", {})
+
+
+def providers_openrouter_sort_choice_latency_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_sort.choice.latency.description", {})
+
+
+def providers_openrouter_sort_choice_latency_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_sort.choice.latency.label", {})
+
+
+def providers_openrouter_sort_choice_price_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_sort.choice.price.description", {})
+
+
+def providers_openrouter_sort_choice_price_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_sort.choice.price.label", {})
+
+
+def providers_openrouter_sort_choice_throughput_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_sort.choice.throughput.description", {})
+
+
+def providers_openrouter_sort_choice_throughput_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_sort.choice.throughput.label", {})
+
+
+def providers_openrouter_sort_choice_unset_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_sort.choice.unset.description", {})
+
+
+def providers_openrouter_sort_choice_unset_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_sort.choice.unset.label", {})
+
+
+def providers_openrouter_sort_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_sort.help", {})
+
+
+def providers_openrouter_sort_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_sort.label", {})
+
+
+def providers_openrouter_zdr_choice_true_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_zdr.choice.true.description", {})
+
+
+def providers_openrouter_zdr_choice_true_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_zdr.choice.true.label", {})
+
+
+def providers_openrouter_zdr_choice_unset_description() -> Msg:
+    return Msg("wire.settings.providers_openrouter_zdr.choice.unset.description", {})
+
+
+def providers_openrouter_zdr_choice_unset_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_zdr.choice.unset.label", {})
+
+
+def providers_openrouter_zdr_help() -> Msg:
+    return Msg("wire.settings.providers_openrouter_zdr.help", {})
+
+
+def providers_openrouter_zdr_label() -> Msg:
+    return Msg("wire.settings.providers_openrouter_zdr.label", {})
+
+
+def query_budget_description() -> Msg:
+    return Msg("wire.settings.query_budget.description", {})
+
+
+def query_budget_title() -> Msg:
+    return Msg("wire.settings.query_budget.title", {})
+
+
+def retired_description() -> Msg:
+    return Msg("wire.settings.retired.description", {})
+
+
+def retired_title() -> Msg:
+    return Msg("wire.settings.retired.title", {})
+
+
+def retry_basedelayms_help() -> Msg:
+    return Msg("wire.settings.retry_basedelayms.help", {})
+
+
+def retry_basedelayms_label() -> Msg:
+    return Msg("wire.settings.retry_basedelayms.label", {})
+
+
+def retry_connectivitybackoffcapms_help() -> Msg:
+    return Msg("wire.settings.retry_connectivitybackoffcapms.help", {})
+
+
+def retry_connectivitybackoffcapms_label() -> Msg:
+    return Msg("wire.settings.retry_connectivitybackoffcapms.label", {})
+
+
+def retry_connectivitymaxretries_help() -> Msg:
+    return Msg("wire.settings.retry_connectivitymaxretries.help", {})
+
+
+def retry_connectivitymaxretries_label() -> Msg:
+    return Msg("wire.settings.retry_connectivitymaxretries.label", {})
+
+
+def retry_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.retry_enabled.choice.false.description", {})
+
+
+def retry_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.retry_enabled.choice.true.description", {})
+
+
+def retry_enabled_help() -> Msg:
+    return Msg("wire.settings.retry_enabled.help", {})
+
+
+def retry_enabled_label() -> Msg:
+    return Msg("wire.settings.retry_enabled.label", {})
+
+
+def retry_fallbackchains_help() -> Msg:
+    return Msg("wire.settings.retry_fallbackchains.help", {})
+
+
+def retry_fallbackchains_label() -> Msg:
+    return Msg("wire.settings.retry_fallbackchains.label", {})
+
+
+def retry_maxretries_help() -> Msg:
+    return Msg("wire.settings.retry_maxretries.help", {})
+
+
+def retry_maxretries_label() -> Msg:
+    return Msg("wire.settings.retry_maxretries.label", {})
+
+
+def retry_modelfallback_choice_false_description() -> Msg:
+    return Msg("wire.settings.retry_modelfallback.choice.false.description", {})
+
+
+def retry_modelfallback_choice_true_description() -> Msg:
+    return Msg("wire.settings.retry_modelfallback.choice.true.description", {})
+
+
+def retry_modelfallback_help() -> Msg:
+    return Msg("wire.settings.retry_modelfallback.help", {})
+
+
+def retry_modelfallback_label() -> Msg:
+    return Msg("wire.settings.retry_modelfallback.label", {})
+
+
+def retry_pinnedfallback_choice_cross_family_description() -> Msg:
+    return Msg("wire.settings.retry_pinnedfallback.choice.cross_family.description", {})
+
+
+def retry_pinnedfallback_choice_cross_family_label() -> Msg:
+    return Msg("wire.settings.retry_pinnedfallback.choice.cross_family.label", {})
+
+
+def retry_pinnedfallback_choice_same_family_description() -> Msg:
+    return Msg("wire.settings.retry_pinnedfallback.choice.same_family.description", {})
+
+
+def retry_pinnedfallback_choice_same_family_label() -> Msg:
+    return Msg("wire.settings.retry_pinnedfallback.choice.same_family.label", {})
+
+
+def retry_pinnedfallback_help() -> Msg:
+    return Msg("wire.settings.retry_pinnedfallback.help", {})
+
+
+def retry_pinnedfallback_label() -> Msg:
+    return Msg("wire.settings.retry_pinnedfallback.label", {})
+
+
+def retry_usageawareaccountpick_choice_false_description() -> Msg:
+    return Msg("wire.settings.retry_usageawareaccountpick.choice.false.description", {})
+
+
+def retry_usageawareaccountpick_choice_true_description() -> Msg:
+    return Msg("wire.settings.retry_usageawareaccountpick.choice.true.description", {})
+
+
+def retry_usageawareaccountpick_help() -> Msg:
+    return Msg("wire.settings.retry_usageawareaccountpick.help", {})
+
+
+def retry_usageawareaccountpick_label() -> Msg:
+    return Msg("wire.settings.retry_usageawareaccountpick.label", {})
+
+
+def retry_usageawarefallback_choice_false_description() -> Msg:
+    return Msg("wire.settings.retry_usageawarefallback.choice.false.description", {})
+
+
+def retry_usageawarefallback_choice_true_description() -> Msg:
+    return Msg("wire.settings.retry_usageawarefallback.choice.true.description", {})
+
+
+def retry_usageawarefallback_help() -> Msg:
+    return Msg("wire.settings.retry_usageawarefallback.help", {})
+
+
+def retry_usageawarefallback_label() -> Msg:
+    return Msg("wire.settings.retry_usageawarefallback.label", {})
+
+
+def retry_usagereservepercent_help() -> Msg:
+    return Msg("wire.settings.retry_usagereservepercent.help", {})
+
+
+def retry_usagereservepercent_label() -> Msg:
+    return Msg("wire.settings.retry_usagereservepercent.label", {})
+
+
+def runtime_description() -> Msg:
+    return Msg("wire.settings.runtime.description", {})
+
+
+def runtime_title() -> Msg:
+    return Msg("wire.settings.runtime.title", {})
+
+
+def runtime_background_on_resume_choice_false_description() -> Msg:
+    return Msg("wire.settings.runtime_background_on_resume.choice.false.description", {})
+
+
+def runtime_background_on_resume_choice_true_description() -> Msg:
+    return Msg("wire.settings.runtime_background_on_resume.choice.true.description", {})
+
+
+def runtime_background_on_resume_help() -> Msg:
+    return Msg("wire.settings.runtime_background_on_resume.help", {})
+
+
+def runtime_background_on_resume_label() -> Msg:
+    return Msg("wire.settings.runtime_background_on_resume.label", {})
+
+
+def runtime_keep_alive_max_help() -> Msg:
+    return Msg("wire.settings.runtime_keep_alive_max.help", {})
+
+
+def runtime_keep_alive_max_label() -> Msg:
+    return Msg("wire.settings.runtime_keep_alive_max.label", {})
+
+
+def runtime_keep_alive_seconds_help() -> Msg:
+    return Msg("wire.settings.runtime_keep_alive_seconds.help", {})
+
+
+def runtime_keep_alive_seconds_label() -> Msg:
+    return Msg("wire.settings.runtime_keep_alive_seconds.label", {})
+
+
+def runtime_unattended_gate_timeout_help() -> Msg:
+    return Msg("wire.settings.runtime_unattended_gate_timeout.help", {})
+
+
+def runtime_unattended_gate_timeout_label() -> Msg:
+    return Msg("wire.settings.runtime_unattended_gate_timeout.label", {})
+
+
+def send_journal_unconfirmed_help() -> Msg:
+    return Msg("wire.settings.send_journal_unconfirmed.help", {})
+
+
+def send_journal_unconfirmed_label() -> Msg:
+    return Msg("wire.settings.send_journal_unconfirmed.label", {})
+
+
+def session_description() -> Msg:
+    return Msg("wire.settings.session.description", {})
+
+
+def session_title() -> Msg:
+    return Msg("wire.settings.session.title", {})
+
+
+def session_cleanup_description() -> Msg:
+    return Msg("wire.settings.session_cleanup.description", {})
+
+
+def session_cleanup_title() -> Msg:
+    return Msg("wire.settings.session_cleanup.title", {})
+
+
+def session_cleanup_delegated_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.session_cleanup_delegated_enabled.choice.false.description", {})
+
+
+def session_cleanup_delegated_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.session_cleanup_delegated_enabled.choice.true.description", {})
+
+
+def session_cleanup_delegated_enabled_help() -> Msg:
+    return Msg("wire.settings.session_cleanup_delegated_enabled.help", {})
+
+
+def session_cleanup_delegated_enabled_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_delegated_enabled.label", {})
+
+
+def session_cleanup_delegated_max_age_hours_help() -> Msg:
+    return Msg("wire.settings.session_cleanup_delegated_max_age_hours.help", {})
+
+
+def session_cleanup_delegated_max_age_hours_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_delegated_max_age_hours.label", {})
+
+
+def session_cleanup_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.session_cleanup_enabled.choice.false.description", {})
+
+
+def session_cleanup_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.session_cleanup_enabled.choice.true.description", {})
+
+
+def session_cleanup_enabled_help() -> Msg:
+    return Msg("wire.settings.session_cleanup_enabled.help", {})
+
+
+def session_cleanup_enabled_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_enabled.label", {})
+
+
+def session_cleanup_max_inactive_days_help() -> Msg:
+    return Msg("wire.settings.session_cleanup_max_inactive_days.help", {})
+
+
+def session_cleanup_max_inactive_days_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_max_inactive_days.label", {})
+
+
+def session_cleanup_max_sessions_help() -> Msg:
+    return Msg("wire.settings.session_cleanup_max_sessions.help", {})
+
+
+def session_cleanup_max_sessions_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_max_sessions.label", {})
+
+
+def session_cleanup_max_total_bytes_help() -> Msg:
+    return Msg("wire.settings.session_cleanup_max_total_bytes.help", {})
+
+
+def session_cleanup_max_total_bytes_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_max_total_bytes.label", {})
+
+
+def session_cleanup_remove_empty_choice_false_description() -> Msg:
+    return Msg("wire.settings.session_cleanup_remove_empty.choice.false.description", {})
+
+
+def session_cleanup_remove_empty_choice_true_description() -> Msg:
+    return Msg("wire.settings.session_cleanup_remove_empty.choice.true.description", {})
+
+
+def session_cleanup_remove_empty_help() -> Msg:
+    return Msg("wire.settings.session_cleanup_remove_empty.help", {})
+
+
+def session_cleanup_remove_empty_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_remove_empty.label", {})
+
+
+def session_delegated_description() -> Msg:
+    return Msg("wire.settings.session_delegated.description", {})
+
+
+def session_delegated_title() -> Msg:
+    return Msg("wire.settings.session_delegated.title", {})
+
+
+def shell_environment_description() -> Msg:
+    return Msg("wire.settings.shell_environment.description", {})
+
+
+def shell_environment_title() -> Msg:
+    return Msg("wire.settings.shell_environment.title", {})
+
+
+def shell_environment_exclude_help() -> Msg:
+    return Msg("wire.settings.shell_environment_exclude.help", {})
+
+
+def shell_environment_exclude_label() -> Msg:
+    return Msg("wire.settings.shell_environment_exclude.label", {})
+
+
+def shell_environment_exclude_placeholder() -> Msg:
+    return Msg("wire.settings.shell_environment_exclude.placeholder", {})
+
+
+def shell_environment_inherit_help() -> Msg:
+    return Msg("wire.settings.shell_environment_inherit.help", {})
+
+
+def shell_environment_inherit_label() -> Msg:
+    return Msg("wire.settings.shell_environment_inherit.label", {})
+
+
+def shell_environment_inherit_placeholder() -> Msg:
+    return Msg("wire.settings.shell_environment_inherit.placeholder", {})
+
+
+def shell_environment_mode_choice_allowlist_description() -> Msg:
+    return Msg("wire.settings.shell_environment_mode.choice.allowlist.description", {})
+
+
+def shell_environment_mode_choice_allowlist_label() -> Msg:
+    return Msg("wire.settings.shell_environment_mode.choice.allowlist.label", {})
+
+
+def shell_environment_mode_choice_inherit_description() -> Msg:
+    return Msg("wire.settings.shell_environment_mode.choice.inherit.description", {})
+
+
+def shell_environment_mode_choice_inherit_label() -> Msg:
+    return Msg("wire.settings.shell_environment_mode.choice.inherit.label", {})
+
+
+def shell_environment_mode_help() -> Msg:
+    return Msg("wire.settings.shell_environment_mode.help", {})
+
+
+def shell_environment_mode_label() -> Msg:
+    return Msg("wire.settings.shell_environment_mode.label", {})
+
+
+def speech_description() -> Msg:
+    return Msg("wire.settings.speech.description", {})
+
+
+def speech_title() -> Msg:
+    return Msg("wire.settings.speech.title", {})
+
+
+def speech_voice_accent_help() -> Msg:
+    return Msg("wire.settings.speech_voice_accent.help", {})
+
+
+def speech_voice_accent_label() -> Msg:
+    return Msg("wire.settings.speech_voice_accent.label", {})
+
+
+def speech_voice_expressiveness_choice_high_description() -> Msg:
+    return Msg("wire.settings.speech_voice_expressiveness.choice.high.description", {})
+
+
+def speech_voice_expressiveness_choice_high_label() -> Msg:
+    return Msg("wire.settings.speech_voice_expressiveness.choice.high.label", {})
+
+
+def speech_voice_expressiveness_choice_low_description() -> Msg:
+    return Msg("wire.settings.speech_voice_expressiveness.choice.low.description", {})
+
+
+def speech_voice_expressiveness_choice_low_label() -> Msg:
+    return Msg("wire.settings.speech_voice_expressiveness.choice.low.label", {})
+
+
+def speech_voice_expressiveness_choice_medium_description() -> Msg:
+    return Msg("wire.settings.speech_voice_expressiveness.choice.medium.description", {})
+
+
+def speech_voice_expressiveness_choice_medium_label() -> Msg:
+    return Msg("wire.settings.speech_voice_expressiveness.choice.medium.label", {})
+
+
+def speech_voice_expressiveness_help() -> Msg:
+    return Msg("wire.settings.speech_voice_expressiveness.help", {})
+
+
+def speech_voice_expressiveness_label() -> Msg:
+    return Msg("wire.settings.speech_voice_expressiveness.label", {})
+
+
+def speech_voice_gender_choice_auto_description() -> Msg:
+    return Msg("wire.settings.speech_voice_gender.choice.auto.description", {})
+
+
+def speech_voice_gender_choice_auto_label() -> Msg:
+    return Msg("wire.settings.speech_voice_gender.choice.auto.label", {})
+
+
+def speech_voice_gender_choice_female_description() -> Msg:
+    return Msg("wire.settings.speech_voice_gender.choice.female.description", {})
+
+
+def speech_voice_gender_choice_female_label() -> Msg:
+    return Msg("wire.settings.speech_voice_gender.choice.female.label", {})
+
+
+def speech_voice_gender_choice_male_description() -> Msg:
+    return Msg("wire.settings.speech_voice_gender.choice.male.description", {})
+
+
+def speech_voice_gender_choice_male_label() -> Msg:
+    return Msg("wire.settings.speech_voice_gender.choice.male.label", {})
+
+
+def speech_voice_gender_help() -> Msg:
+    return Msg("wire.settings.speech_voice_gender.help", {})
+
+
+def speech_voice_gender_label() -> Msg:
+    return Msg("wire.settings.speech_voice_gender.label", {})
+
+
+def speech_voice_instructions_help() -> Msg:
+    return Msg("wire.settings.speech_voice_instructions.help", {})
+
+
+def speech_voice_instructions_label() -> Msg:
+    return Msg("wire.settings.speech_voice_instructions.label", {})
+
+
+def speech_voice_language_help() -> Msg:
+    return Msg("wire.settings.speech_voice_language.help", {})
+
+
+def speech_voice_language_label() -> Msg:
+    return Msg("wire.settings.speech_voice_language.label", {})
+
+
+def speech_voice_pace_help() -> Msg:
+    return Msg("wire.settings.speech_voice_pace.help", {})
+
+
+def speech_voice_pace_label() -> Msg:
+    return Msg("wire.settings.speech_voice_pace.label", {})
+
+
+def speech_voice_tone_choice_authoritative_description() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.choice.authoritative.description", {})
+
+
+def speech_voice_tone_choice_authoritative_label() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.choice.authoritative.label", {})
+
+
+def speech_voice_tone_choice_bright_description() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.choice.bright.description", {})
+
+
+def speech_voice_tone_choice_bright_label() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.choice.bright.label", {})
+
+
+def speech_voice_tone_choice_calm_description() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.choice.calm.description", {})
+
+
+def speech_voice_tone_choice_calm_label() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.choice.calm.label", {})
+
+
+def speech_voice_tone_choice_neutral_description() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.choice.neutral.description", {})
+
+
+def speech_voice_tone_choice_neutral_label() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.choice.neutral.label", {})
+
+
+def speech_voice_tone_choice_warm_description() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.choice.warm.description", {})
+
+
+def speech_voice_tone_choice_warm_label() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.choice.warm.label", {})
+
+
+def speech_voice_tone_help() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.help", {})
+
+
+def speech_voice_tone_label() -> Msg:
+    return Msg("wire.settings.speech_voice_tone.label", {})
+
+
+def static_description() -> Msg:
+    return Msg("wire.settings.static.description", {})
+
+
+def static_title() -> Msg:
+    return Msg("wire.settings.static.title", {})
+
+
+def static_roots_help() -> Msg:
+    return Msg("wire.settings.static_roots.help", {})
+
+
+def static_roots_label() -> Msg:
+    return Msg("wire.settings.static_roots.label", {})
+
+
+def static_roots_placeholder() -> Msg:
+    return Msg("wire.settings.static_roots.placeholder", {})
+
+
+def static_roots_warning() -> Msg:
+    return Msg("wire.settings.static_roots.warning", {})
+
+
+def subagents_description() -> Msg:
+    return Msg("wire.settings.subagents.description", {})
+
+
+def subagents_title() -> Msg:
+    return Msg("wire.settings.subagents.title", {})
+
+
+def subagents_max_running_help() -> Msg:
+    return Msg("wire.settings.subagents_max_running.help", {})
+
+
+def subagents_max_running_label() -> Msg:
+    return Msg("wire.settings.subagents_max_running.label", {})
+
+
+def subagents_max_team_depth_help() -> Msg:
+    return Msg("wire.settings.subagents_max_team_depth.help", {})
+
+
+def subagents_max_team_depth_label() -> Msg:
+    return Msg("wire.settings.subagents_max_team_depth.label", {})
+
+
+def subagents_model_choice_choice_model_description() -> Msg:
+    return Msg("wire.settings.subagents_model_choice.choice.model.description", {})
+
+
+def subagents_model_choice_choice_model_label() -> Msg:
+    return Msg("wire.settings.subagents_model_choice.choice.model.label", {})
+
+
+def subagents_model_choice_choice_operator_description() -> Msg:
+    return Msg("wire.settings.subagents_model_choice.choice.operator.description", {})
+
+
+def subagents_model_choice_choice_operator_label() -> Msg:
+    return Msg("wire.settings.subagents_model_choice.choice.operator.label", {})
+
+
+def subagents_model_choice_help() -> Msg:
+    return Msg("wire.settings.subagents_model_choice.help", {})
+
+
+def subagents_model_choice_label() -> Msg:
+    return Msg("wire.settings.subagents_model_choice.label", {})
+
+
+def subagents_models_hi_help() -> Msg:
+    return Msg("wire.settings.subagents_models_hi.help", {})
+
+
+def subagents_models_hi_label() -> Msg:
+    return Msg("wire.settings.subagents_models_hi.label", {})
+
+
+def subagents_models_lo_help() -> Msg:
+    return Msg("wire.settings.subagents_models_lo.help", {})
+
+
+def subagents_models_lo_label() -> Msg:
+    return Msg("wire.settings.subagents_models_lo.label", {})
+
+
+def subagents_models_med_help() -> Msg:
+    return Msg("wire.settings.subagents_models_med.help", {})
+
+
+def subagents_models_med_label() -> Msg:
+    return Msg("wire.settings.subagents_models_med.label", {})
+
+
+def subagents_slim_child_knowledge_choice_false_description() -> Msg:
+    return Msg("wire.settings.subagents_slim_child_knowledge.choice.false.description", {})
+
+
+def subagents_slim_child_knowledge_choice_true_description() -> Msg:
+    return Msg("wire.settings.subagents_slim_child_knowledge.choice.true.description", {})
+
+
+def subagents_slim_child_knowledge_help() -> Msg:
+    return Msg("wire.settings.subagents_slim_child_knowledge.help", {})
+
+
+def subagents_slim_child_knowledge_label() -> Msg:
+    return Msg("wire.settings.subagents_slim_child_knowledge.label", {})
+
+
+def supplements_description() -> Msg:
+    return Msg("wire.settings.supplements.description", {})
+
+
+def supplements_title() -> Msg:
+    return Msg("wire.settings.supplements.title", {})
+
+
+def supplements_denyprefixes_help() -> Msg:
+    return Msg("wire.settings.supplements_denyprefixes.help", {})
+
+
+def supplements_denyprefixes_label() -> Msg:
+    return Msg("wire.settings.supplements_denyprefixes.label", {})
+
+
+def supplements_denyprefixes_placeholder() -> Msg:
+    return Msg("wire.settings.supplements_denyprefixes.placeholder", {})
+
+
+def supplements_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.supplements_enabled.choice.false.description", {})
+
+
+def supplements_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.supplements_enabled.choice.true.description", {})
+
+
+def supplements_enabled_help() -> Msg:
+    return Msg("wire.settings.supplements_enabled.help", {})
+
+
+def supplements_enabled_label() -> Msg:
+    return Msg("wire.settings.supplements_enabled.label", {})
+
+
+def supplements_files_choice_false_description() -> Msg:
+    return Msg("wire.settings.supplements_files.choice.false.description", {})
+
+
+def supplements_files_choice_true_description() -> Msg:
+    return Msg("wire.settings.supplements_files.choice.true.description", {})
+
+
+def supplements_files_help() -> Msg:
+    return Msg("wire.settings.supplements_files.help", {})
+
+
+def supplements_files_label() -> Msg:
+    return Msg("wire.settings.supplements_files.label", {})
+
+
+def supplements_graphics_choice_false_description() -> Msg:
+    return Msg("wire.settings.supplements_graphics.choice.false.description", {})
+
+
+def supplements_graphics_choice_true_description() -> Msg:
+    return Msg("wire.settings.supplements_graphics.choice.true.description", {})
+
+
+def supplements_graphics_help() -> Msg:
+    return Msg("wire.settings.supplements_graphics.help", {})
+
+
+def supplements_graphics_label() -> Msg:
+    return Msg("wire.settings.supplements_graphics.label", {})
+
+
+def supplements_maxcostusd_help() -> Msg:
+    return Msg("wire.settings.supplements_maxcostusd.help", {})
+
+
+def supplements_maxcostusd_label() -> Msg:
+    return Msg("wire.settings.supplements_maxcostusd.label", {})
+
+
+def supplements_maxfeatured_help() -> Msg:
+    return Msg("wire.settings.supplements_maxfeatured.help", {})
+
+
+def supplements_maxfeatured_label() -> Msg:
+    return Msg("wire.settings.supplements_maxfeatured.label", {})
+
+
+def supplements_maxoutputtokens_help() -> Msg:
+    return Msg("wire.settings.supplements_maxoutputtokens.help", {})
+
+
+def supplements_maxoutputtokens_label() -> Msg:
+    return Msg("wire.settings.supplements_maxoutputtokens.label", {})
+
+
+def supplements_maxturns_help() -> Msg:
+    return Msg("wire.settings.supplements_maxturns.help", {})
+
+
+def supplements_maxturns_label() -> Msg:
+    return Msg("wire.settings.supplements_maxturns.label", {})
+
+
+def supplements_model_help() -> Msg:
+    return Msg("wire.settings.supplements_model.help", {})
+
+
+def supplements_model_label() -> Msg:
+    return Msg("wire.settings.supplements_model.label", {})
+
+
+def supplements_timeouts_help() -> Msg:
+    return Msg("wire.settings.supplements_timeouts.help", {})
+
+
+def supplements_timeouts_label() -> Msg:
+    return Msg("wire.settings.supplements_timeouts.label", {})
+
+
+def tool_approval_mode_choice_ask_description() -> Msg:
+    return Msg("wire.settings.tool_approval_mode.choice.ask.description", {})
+
+
+def tool_approval_mode_choice_ask_label() -> Msg:
+    return Msg("wire.settings.tool_approval_mode.choice.ask.label", {})
+
+
+def tool_approval_mode_choice_auto_description() -> Msg:
+    return Msg("wire.settings.tool_approval_mode.choice.auto.description", {})
+
+
+def tool_approval_mode_choice_auto_label() -> Msg:
+    return Msg("wire.settings.tool_approval_mode.choice.auto.label", {})
+
+
+def tool_approval_mode_help() -> Msg:
+    return Msg("wire.settings.tool_approval_mode.help", {})
+
+
+def tool_approval_mode_label() -> Msg:
+    return Msg("wire.settings.tool_approval_mode.label", {})
+
+
+def tools_description() -> Msg:
+    return Msg("wire.settings.tools.description", {})
+
+
+def tools_title() -> Msg:
+    return Msg("wire.settings.tools.title", {})
+
+
+def tools_defer_help() -> Msg:
+    return Msg("wire.settings.tools_defer.help", {})
+
+
+def tools_defer_label() -> Msg:
+    return Msg("wire.settings.tools_defer.label", {})
+
+
+def tools_search_interception_block_help() -> Msg:
+    return Msg("wire.settings.tools_search_interception_block.help", {})
+
+
+def tools_search_interception_block_label() -> Msg:
+    return Msg("wire.settings.tools_search_interception_block.label", {})
+
+
+def tools_search_interception_enabled_help() -> Msg:
+    return Msg("wire.settings.tools_search_interception_enabled.help", {})
+
+
+def tools_search_interception_enabled_label() -> Msg:
+    return Msg("wire.settings.tools_search_interception_enabled.label", {})
+
+
+def tools_search_interception_rg_excludes_help() -> Msg:
+    return Msg("wire.settings.tools_search_interception_rg_excludes.help", {})
+
+
+def tools_search_interception_rg_excludes_label() -> Msg:
+    return Msg("wire.settings.tools_search_interception_rg_excludes.label", {})
+
+
+def tui_sidebar_position_choice_left_description() -> Msg:
+    return Msg("wire.settings.tui_sidebar_position.choice.left.description", {})
+
+
+def tui_sidebar_position_choice_left_label() -> Msg:
+    return Msg("wire.settings.tui_sidebar_position.choice.left.label", {})
+
+
+def tui_sidebar_position_choice_right_description() -> Msg:
+    return Msg("wire.settings.tui_sidebar_position.choice.right.description", {})
+
+
+def tui_sidebar_position_choice_right_label() -> Msg:
+    return Msg("wire.settings.tui_sidebar_position.choice.right.label", {})
+
+
+def tui_sidebar_position_help() -> Msg:
+    return Msg("wire.settings.tui_sidebar_position.help", {})
+
+
+def tui_sidebar_position_label() -> Msg:
+    return Msg("wire.settings.tui_sidebar_position.label", {})
+
+
+def tui_sidebar_show_subagents_choice_false_description() -> Msg:
+    return Msg("wire.settings.tui_sidebar_show_subagents.choice.false.description", {})
+
+
+def tui_sidebar_show_subagents_choice_true_description() -> Msg:
+    return Msg("wire.settings.tui_sidebar_show_subagents.choice.true.description", {})
+
+
+def tui_sidebar_show_subagents_help() -> Msg:
+    return Msg("wire.settings.tui_sidebar_show_subagents.help", {})
+
+
+def tui_sidebar_show_subagents_label() -> Msg:
+    return Msg("wire.settings.tui_sidebar_show_subagents.label", {})
+
+
+def tui_sidebar_visible_choice_false_description() -> Msg:
+    return Msg("wire.settings.tui_sidebar_visible.choice.false.description", {})
+
+
+def tui_sidebar_visible_choice_true_description() -> Msg:
+    return Msg("wire.settings.tui_sidebar_visible.choice.true.description", {})
+
+
+def tui_sidebar_visible_help() -> Msg:
+    return Msg("wire.settings.tui_sidebar_visible.help", {})
+
+
+def tui_sidebar_visible_label() -> Msg:
+    return Msg("wire.settings.tui_sidebar_visible.label", {})
+
+
+def tui_theme_help() -> Msg:
+    return Msg("wire.settings.tui_theme.help", {})
+
+
+def tui_theme_label() -> Msg:
+    return Msg("wire.settings.tui_theme.label", {})
+
+
+def wakes_description() -> Msg:
+    return Msg("wire.settings.wakes.description", {})
+
+
+def wakes_title() -> Msg:
+    return Msg("wire.settings.wakes.title", {})
+
+
+def wakes_triggers_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.wakes_triggers_enabled.choice.false.description", {})
+
+
+def wakes_triggers_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.wakes_triggers_enabled.choice.true.description", {})
+
+
+def wakes_triggers_enabled_help() -> Msg:
+    return Msg("wire.settings.wakes_triggers_enabled.help", {})
+
+
+def wakes_triggers_enabled_label() -> Msg:
+    return Msg("wire.settings.wakes_triggers_enabled.label", {})
+
+
+def wakes_triggers_max_per_day_help() -> Msg:
+    return Msg("wire.settings.wakes_triggers_max_per_day.help", {})
+
+
+def wakes_triggers_max_per_day_label() -> Msg:
+    return Msg("wire.settings.wakes_triggers_max_per_day.label", {})
+
+
+def wakes_triggers_min_gap_minutes_help() -> Msg:
+    return Msg("wire.settings.wakes_triggers_min_gap_minutes.help", {})
+
+
+def wakes_triggers_min_gap_minutes_label() -> Msg:
+    return Msg("wire.settings.wakes_triggers_min_gap_minutes.label", {})
+
+
+def wakes_triggers_project_staleness_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.wakes_triggers_project_staleness_enabled.choice.false.description", {})
+
+
+def wakes_triggers_project_staleness_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.wakes_triggers_project_staleness_enabled.choice.true.description", {})
+
+
+def wakes_triggers_project_staleness_enabled_help() -> Msg:
+    return Msg("wire.settings.wakes_triggers_project_staleness_enabled.help", {})
+
+
+def wakes_triggers_project_staleness_enabled_label() -> Msg:
+    return Msg("wire.settings.wakes_triggers_project_staleness_enabled.label", {})
+
+
+def web_fetch_description() -> Msg:
+    return Msg("wire.settings.web_fetch.description", {})
+
+
+def web_fetch_title() -> Msg:
+    return Msg("wire.settings.web_fetch.title", {})
+
+
+def web_fetch_allow_private_choice_false_description() -> Msg:
+    return Msg("wire.settings.web_fetch_allow_private.choice.false.description", {})
+
+
+def web_fetch_allow_private_choice_true_description() -> Msg:
+    return Msg("wire.settings.web_fetch_allow_private.choice.true.description", {})
+
+
+def web_fetch_allow_private_help() -> Msg:
+    return Msg("wire.settings.web_fetch_allow_private.help", {})
+
+
+def web_fetch_allow_private_label() -> Msg:
+    return Msg("wire.settings.web_fetch_allow_private.label", {})
+
+
+def web_fetch_blocked_retry_choice_false_description() -> Msg:
+    return Msg("wire.settings.web_fetch_blocked_retry.choice.false.description", {})
+
+
+def web_fetch_blocked_retry_choice_true_description() -> Msg:
+    return Msg("wire.settings.web_fetch_blocked_retry.choice.true.description", {})
+
+
+def web_fetch_blocked_retry_help() -> Msg:
+    return Msg("wire.settings.web_fetch_blocked_retry.help", {})
+
+
+def web_fetch_blocked_retry_label() -> Msg:
+    return Msg("wire.settings.web_fetch_blocked_retry.label", {})
+
+
+def web_fetch_cache_ttl_seconds_help() -> Msg:
+    return Msg("wire.settings.web_fetch_cache_ttl_seconds.help", {})
+
+
+def web_fetch_cache_ttl_seconds_label() -> Msg:
+    return Msg("wire.settings.web_fetch_cache_ttl_seconds.label", {})
+
+
+def web_fetch_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.web_fetch_enabled.choice.false.description", {})
+
+
+def web_fetch_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.web_fetch_enabled.choice.true.description", {})
+
+
+def web_fetch_enabled_help() -> Msg:
+    return Msg("wire.settings.web_fetch_enabled.help", {})
+
+
+def web_fetch_enabled_label() -> Msg:
+    return Msg("wire.settings.web_fetch_enabled.label", {})
+
+
+def web_fetch_enrich_choice_false_description() -> Msg:
+    return Msg("wire.settings.web_fetch_enrich.choice.false.description", {})
+
+
+def web_fetch_enrich_choice_true_description() -> Msg:
+    return Msg("wire.settings.web_fetch_enrich.choice.true.description", {})
+
+
+def web_fetch_enrich_help() -> Msg:
+    return Msg("wire.settings.web_fetch_enrich.help", {})
+
+
+def web_fetch_enrich_label() -> Msg:
+    return Msg("wire.settings.web_fetch_enrich.label", {})
+
+
+def web_fetch_max_attempts_help() -> Msg:
+    return Msg("wire.settings.web_fetch_max_attempts.help", {})
+
+
+def web_fetch_max_attempts_label() -> Msg:
+    return Msg("wire.settings.web_fetch_max_attempts.label", {})
+
+
+def web_fetch_max_bytes_help() -> Msg:
+    return Msg("wire.settings.web_fetch_max_bytes.help", {})
+
+
+def web_fetch_max_bytes_label() -> Msg:
+    return Msg("wire.settings.web_fetch_max_bytes.label", {})
+
+
+def web_fetch_max_redirects_help() -> Msg:
+    return Msg("wire.settings.web_fetch_max_redirects.help", {})
+
+
+def web_fetch_max_redirects_label() -> Msg:
+    return Msg("wire.settings.web_fetch_max_redirects.label", {})
+
+
+def web_fetch_render_backend_choice_auto_description() -> Msg:
+    return Msg("wire.settings.web_fetch_render_backend.choice.auto.description", {})
+
+
+def web_fetch_render_backend_choice_auto_label() -> Msg:
+    return Msg("wire.settings.web_fetch_render_backend.choice.auto.label", {})
+
+
+def web_fetch_render_backend_choice_stdlib_description() -> Msg:
+    return Msg("wire.settings.web_fetch_render_backend.choice.stdlib.description", {})
+
+
+def web_fetch_render_backend_choice_stdlib_label() -> Msg:
+    return Msg("wire.settings.web_fetch_render_backend.choice.stdlib.label", {})
+
+
+def web_fetch_render_backend_help() -> Msg:
+    return Msg("wire.settings.web_fetch_render_backend.help", {})
+
+
+def web_fetch_render_backend_label() -> Msg:
+    return Msg("wire.settings.web_fetch_render_backend.label", {})
+
+
+def web_fetch_timeout_seconds_help() -> Msg:
+    return Msg("wire.settings.web_fetch_timeout_seconds.help", {})
+
+
+def web_fetch_timeout_seconds_label() -> Msg:
+    return Msg("wire.settings.web_fetch_timeout_seconds.label", {})
+
+
+def web_search_description() -> Msg:
+    return Msg("wire.settings.web_search.description", {})
+
+
+def web_search_title() -> Msg:
+    return Msg("wire.settings.web_search.title", {})
+
+
+def web_search_deepseek_evidence_help() -> Msg:
+    return Msg("wire.settings.web_search_deepseek_evidence.help", {})
+
+
+def web_search_deepseek_evidence_label() -> Msg:
+    return Msg("wire.settings.web_search_deepseek_evidence.label", {})
+
+
+def web_search_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.web_search_enabled.choice.false.description", {})
+
+
+def web_search_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.web_search_enabled.choice.true.description", {})
+
+
+def web_search_enabled_help() -> Msg:
+    return Msg("wire.settings.web_search_enabled.help", {})
+
+
+def web_search_enabled_label() -> Msg:
+    return Msg("wire.settings.web_search_enabled.label", {})
+
+
+def web_search_excluded_providers_help() -> Msg:
+    return Msg("wire.settings.web_search_excluded_providers.help", {})
+
+
+def web_search_excluded_providers_label() -> Msg:
+    return Msg("wire.settings.web_search_excluded_providers.label", {})
+
+
+def web_search_providers_help() -> Msg:
+    return Msg("wire.settings.web_search_providers.help", {})
+
+
+def web_search_providers_label() -> Msg:
+    return Msg("wire.settings.web_search_providers.label", {})
+
+
+def web_search_read_enabled_help() -> Msg:
+    return Msg("wire.settings.web_search_read_enabled.help", {})
+
+
+def web_search_read_enabled_label() -> Msg:
+    return Msg("wire.settings.web_search_read_enabled.label", {})
+
+
+def web_search_searxng_endpoint_help() -> Msg:
+    return Msg("wire.settings.web_search_searxng_endpoint.help", {})
+
+
+def web_search_searxng_endpoint_label() -> Msg:
+    return Msg("wire.settings.web_search_searxng_endpoint.label", {})
+
+
+def web_search_strategy_choice_ordered_description() -> Msg:
+    return Msg("wire.settings.web_search_strategy.choice.ordered.description", {})
+
+
+def web_search_strategy_choice_ordered_label() -> Msg:
+    return Msg("wire.settings.web_search_strategy.choice.ordered.label", {})
+
+
+def web_search_strategy_choice_round_robin_description() -> Msg:
+    return Msg("wire.settings.web_search_strategy.choice.round_robin.description", {})
+
+
+def web_search_strategy_choice_round_robin_label() -> Msg:
+    return Msg("wire.settings.web_search_strategy.choice.round_robin.label", {})
+
+
+def web_search_strategy_help() -> Msg:
+    return Msg("wire.settings.web_search_strategy.help", {})
+
+
+def web_search_strategy_label() -> Msg:
+    return Msg("wire.settings.web_search_strategy.label", {})
+
+
+def web_search_timeout_seconds_help() -> Msg:
+    return Msg("wire.settings.web_search_timeout_seconds.help", {})
+
+
+def web_search_timeout_seconds_label() -> Msg:
+    return Msg("wire.settings.web_search_timeout_seconds.label", {})
+
+
+def web_tools_description() -> Msg:
+    return Msg("wire.settings.web_tools.description", {})
+
+
+def web_tools_title() -> Msg:
+    return Msg("wire.settings.web_tools.title", {})
