@@ -1141,7 +1141,19 @@ async def test_key_save_on_an_empty_config_sets_the_suggested_default(desktop):
 
 
 async def test_key_save_leaves_an_existing_working_choice_alone(desktop):
+    """An ACCESSIBLE choice stays: only a STRANDED default is replaced.
+
+    The credential is seeded first, because that is what makes the choice
+    "working" — before this feature, "registry-known" was the whole test, so this
+    fixture (a hosting with nothing behind it) WAS the stranded case.
+    """
     client, app = desktop
+    # Touch a host-dependent route first: the host (and its store) is built
+    # lazily by the first request that needs it, exactly as in production.
+    await client.get("/v1/auth/providers")
+    app.state.desktop_auth.store.upsert_credential(
+        "anthropic", {"type": "oauth", "access": "at", "refresh": "rt"}
+    )
     app.state.config_manager.set_config_value("hosting", "anthropic")
     app.state.config_manager.set_config_value("model_name", "claude-sonnet-5")
     response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-second"})
@@ -1150,6 +1162,31 @@ async def test_key_save_leaves_an_existing_working_choice_alone(desktop):
     on_disk = ConfigManager(app.state.config_manager.config_dir)
     assert on_disk.get_config_value("hosting") == "anthropic"
     assert on_disk.get_config_value("model_name") == "claude-sonnet-5"
+
+
+async def test_key_save_replaces_a_stranded_default(desktop):
+    """The bug this feature exists for: a signed-out hosting must not outrank a key.
+
+    ``anthropic`` is a real provider with NO credential on this machine — the
+    user removed the sign-in, or signed in on another device. Saving a deepseek
+    key used to leave ``anthropic/claude-sonnet-5`` in place (registry membership
+    was the whole test), so every launch failed on a provider this user cannot
+    reach while a working key sat unused. Both halves are replaced, and the
+    receipt names both providers so the change is not silent.
+    """
+    client, app = desktop
+    app.state.config_manager.set_config_value("hosting", "anthropic")
+    app.state.config_manager.set_config_value("model_name", "claude-sonnet-5")
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-strand"})
+    assert response.status_code == 200, response.text
+    applied = response.json()["result"]["defaults_applied"]
+    assert applied["hosting"] == "deepseek" and applied["model"] == "deepseek-flash"
+    assert applied["receipt"] == (
+        "Default moved to deepseek/deepseek-flash — not signed in to anthropic."
+    )
+    on_disk = ConfigManager(app.state.config_manager.config_dir)
+    assert on_disk.get_config_value("hosting") == "deepseek"
+    assert on_disk.get_config_value("model_name") == "deepseek-flash"
 
 
 async def test_key_save_fills_an_empty_model_for_the_configured_provider(desktop):
@@ -1166,8 +1203,20 @@ async def test_key_save_fills_an_empty_model_for_the_configured_provider(desktop
 
 async def test_key_save_reads_config_written_elsewhere_since_boot(desktop):
     """The server's manager is re-read: a hosting chosen by the TUI after this
-    server booted must not be treated as empty (and then overwritten)."""
+    server booted must not be treated as empty (and then overwritten).
+
+    The chosen hosting carries a credential, or the stranded-default rule would
+    (correctly) replace it and the re-read could not be told apart from a stale
+    read: without that credential a manager that never re-read and one that did
+    both end up writing deepseek, which is exactly what this test must not
+    accept.
+    """
     client, app = desktop
+    # See the sibling test: the host is built by the first request that needs it.
+    await client.get("/v1/auth/providers")
+    app.state.desktop_auth.store.upsert_credential(
+        "anthropic", {"type": "oauth", "access": "at", "refresh": "rt"}
+    )
     ConfigManager(app.state.config_manager.config_dir).set_config_value("hosting", "anthropic")
     response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-elsewhere"})
     assert response.json()["result"]["defaults_applied"] is None

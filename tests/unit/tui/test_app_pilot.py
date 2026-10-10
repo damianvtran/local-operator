@@ -14803,3 +14803,425 @@ async def test_the_connected_receipt_survives_the_post_setup_rebuild(
     # Her conversation's transcript does NOT carry it: a notice row here would
     # be the first thing above her greeting.
     assert "Connected" not in transcript_text, transcript_text
+
+
+class _RehomableSession(FakeSession):
+    """A session whose model this test can move and read back."""
+
+    def __init__(self, label: str = "radient/auto") -> None:
+        super().__init__()
+        self._label = label
+        self.switched: list[Any] = []
+
+    @property
+    def model_label(self) -> str:
+        return self._label
+
+    @property
+    def model(self) -> Any:
+        from local_operator.harness.types import ModelSpec
+
+        provider, _, model_id = self._label.partition("/")
+        return ModelSpec(provider=provider, model_id=model_id)
+
+    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+        self.switched.append(model)
+        self._label = f"{model.provider}/{model.model_id}"
+
+
+def _credentialed_controller(*providers: str) -> FakeProviderController:
+    """The app's provider controller with exactly ``providers`` signed in."""
+    controller = FakeProviderController()
+    known = set(providers)
+
+    def _has(provider: str) -> bool:
+        return provider in known
+
+    controller.has_any_credential = _has  # type: ignore[method-assign]
+    return controller
+
+
+@pytest.mark.asyncio
+async def test_a_login_rehomes_the_session_it_stranded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The reported bug, both halves, through the TUI's own methods.
+
+    Signing in to a working provider must repair BOTH the config default (which
+    the shared planner now does) and the conversation itself — a session's
+    ``selected_model`` outranks config, so without the second half the user
+    would keep staring at a chat pinned to a provider whose credential is gone.
+    The switch goes through the real ``/model`` dispatch, exactly as a typed
+    selector does.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    session = _RehomableSession()
+    app = OperatorApp(
+        lambda: _factory(session), provider_controller=_credentialed_controller("deepseek")
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        receipt = app._apply_login_defaults("deepseek")
+        rehome = app._rehome_stranded_session("deepseek")
+        for _ in range(6):
+            await pilot.pause()
+
+    assert receipt == ("Default moved to deepseek/deepseek-flash — not signed in to radient.")
+    assert ConfigManager(tmp_path).get_config_value("hosting") == "deepseek"
+    assert rehome == "Switched to deepseek/deepseek-flash — not signed in to radient."
+    assert [(spec.provider, spec.model_id) for spec in session.switched] == [
+        ("deepseek", "deepseek-flash")
+    ]
+    assert session.model_label == "deepseek/deepseek-flash"
+
+
+@pytest.mark.asyncio
+async def test_a_login_leaves_an_accessible_session_and_a_busy_one_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two of the four guards, at the TUI's own seam.
+
+    A session on an accessible model is never touched (the user chose it, and it
+    runs), and a BUSY one is left until the turn finishes — the model in force
+    decides the NEXT request, so switching mid-turn buys nothing and interrupts
+    something.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "deepseek")
+    seed.set_config_value("model_name", "deepseek-flash")
+
+    signed_in = _RehomableSession(label="deepseek/deepseek-flash")
+    app = OperatorApp(
+        lambda: _factory(signed_in), provider_controller=_credentialed_controller("deepseek")
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._rehome_stranded_session("deepseek") is None
+    assert signed_in.switched == []
+
+    busy = _RehomableSession()
+    busy.streaming = True
+    app = OperatorApp(
+        lambda: _factory(busy), provider_controller=_credentialed_controller("deepseek")
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # The refusal is SPOKEN (U1) and the repair is armed for the turn end
+        # rather than evaporating: the session keeps its model for now.
+        assert app._rehome_stranded_session("deepseek") == (
+            "This conversation stays on radient/auto until the turn ends — "
+            "/model switches it now."
+        )
+        assert app._rehome_pending is not None
+        busy.streaming = False
+        # The ONE turn exit drains the deferral: _finalize_turn calls this, and
+        # the test drives the seam directly because a pilot cannot end a real
+        # turn without a runtime.
+        app._settle_deferred_rehome()
+        for _ in range(6):
+            await pilot.pause()
+    assert busy.switched, "the deferred repair completes at the turn end"
+    assert busy.model_label == "deepseek/deepseek-flash"
+    assert app._rehome_pending is None
+
+
+@pytest.mark.asyncio
+async def test_the_deferred_rehome_closes_out_when_it_can_no_longer_land(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-2 U3/D5/Q1: the close-out is reachable, and the arm does not linger.
+
+    A deferred repair whose target credential vanishes before the turn ends
+    used to leave `_rehome_pending` set across every later turn end, silently —
+    the promise "until the turn ends" neither kept nor withdrawn, and a stale
+    arm that could move the session on a much later, unrelated turn end once the
+    credential came back. Now the failed retry says the still-on sentence and
+    clears the arm; a restored credential thereafter moves nothing without a
+    fresh login.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    # A mutable credential set: the fake's `has_any_credential` closure reads it,
+    # so the test can sign a provider out between the login and the turn end.
+    credentialed = {"deepseek"}
+    controller = FakeProviderController()
+
+    def _has(provider: str) -> bool:
+        return provider in credentialed
+
+    controller.has_any_credential = _has  # type: ignore[method-assign]
+
+    session = _RehomableSession()
+    session.streaming = True
+    app = OperatorApp(lambda: _factory(session), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._apply_login_defaults("deepseek")
+        assert app._rehome_stranded_session("deepseek") == (
+            "This conversation stays on radient/auto until the turn ends — "
+            "/model switches it now."
+        )
+        assert app._rehome_pending is not None
+
+        # deepseek's credential disappears before the turn ends.
+        credentialed.discard("deepseek")
+        session.streaming = False
+        app._settle_deferred_rehome()
+        for _ in range(6):
+            await pilot.pause()
+        text = _transcript_text(app)
+
+    assert session.model_label == "radient/auto", "nothing moved"
+    assert app._rehome_pending is None, "the arm does not survive a failed retry"
+    assert (
+        "This conversation is still on radient/auto — /model switches it when you are ready."
+        in text
+    )
+
+    # The credential coming back does NOT resurrect the repair: a later turn end
+    # has nothing armed, so the session is not moved on an old authorization.
+    credentialed.add("deepseek")
+    app._settle_deferred_rehome()
+    assert session.switched == []
+    assert app._rehome_pending is None
+
+
+@pytest.mark.asyncio
+async def test_the_gate_is_re_applied_when_the_tui_retry_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-3 MINOR-1, TUI half: a second login before the turn end takes the authority away.
+
+    The docstrings lean on "the gate runs on every attempt, retry included".
+    Mutating the TUI gate to `not from_pending and not is_first_provider_login`
+    used to leave all 21 TUI tests green; with this test that mutation moves the
+    session and fails.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    credentialed = {"deepseek"}
+    controller = FakeProviderController()
+
+    def _has(provider: str) -> bool:
+        return provider in credentialed
+
+    controller.has_any_credential = _has  # type: ignore[method-assign]
+
+    session = _RehomableSession()
+    session.streaming = True
+    app = OperatorApp(lambda: _factory(session), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._apply_login_defaults("deepseek")
+        assert app._rehome_stranded_session("deepseek") == (
+            "This conversation stays on radient/auto until the turn ends — "
+            "/model switches it now."
+        )
+        assert app._rehome_pending is not None
+
+        # A second provider signs in before the turn ends: this is no longer
+        # the first provider login, so the deferred move must NOT happen.
+        credentialed.add("openrouter")
+        session.streaming = False
+        app._settle_deferred_rehome()
+        for _ in range(6):
+            await pilot.pause()
+        text = _transcript_text(app)
+
+    assert session.switched == [], "a non-first login must not move the conversation"
+    assert session.model_label == "radient/auto"
+    assert app._rehome_pending is None
+    assert (
+        "This conversation is still on radient/auto — /model switches it when you are ready."
+        in text
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_non_first_login_never_arms_the_bind_edge_queue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-2 Q3: the queue is armed only after the first-login rule passes.
+
+    The `session is None` branch used to set `_rehome_await_bind` before the
+    gate ran, so an unbound Nth login left a provider string waiting for the
+    bind edge. The drain re-ran the gate and moved nothing, but a stale string
+    is one credential change away from a surprise — the arm now waits for the
+    same gate every other path does.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    session = _RehomableSession()
+    app = OperatorApp(
+        lambda: _factory(session),
+        provider_controller=_credentialed_controller("deepseek", "openrouter"),
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._bind_viewer(None)
+        assert app._rehome_stranded_session("openrouter") is None
+        assert app._rehome_await_bind is None, "a non-first login must not queue"
+
+
+@pytest.mark.asyncio
+async def test_only_the_first_provider_login_rehomes_a_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The operator refinement: a later login must never re-point a conversation.
+
+    A stranded default and an idle, stranded session are present — everything
+    the repair used to act on — but this user can already run turns on another
+    provider, so this login is "add a second provider to switch models with",
+    and no conversation may be moved for it. Radient counts the same way: a
+    prior Radient/web sign-in makes a later OpenAI login non-first.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "deepseek")
+    seed.set_config_value("model_name", "deepseek-flash")
+
+    session = _RehomableSession()  # pinned to radient/auto, idle, stranded
+    app = OperatorApp(
+        lambda: _factory(session),
+        provider_controller=_credentialed_controller("deepseek", "openrouter"),
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._rehome_stranded_session("deepseek") is None
+    assert session.switched == [], "an Nth provider login moves nothing"
+
+    # A prior RADIENT/web sign-in, spelled through the fake registry the same way
+    # the real one carries it: it counts as a credentialed chat provider, so the
+    # OpenAI login that follows it is not this user's first.
+    radient_user = _RehomableSession()
+    controller = _credentialed_controller("radient")
+    base_logins = controller.login_providers
+    controller.login_providers = lambda: [
+        *base_logins(),
+        _FakeDef("radient", "Radient", None, ("auto",)),
+    ]
+    app = OperatorApp(lambda: _factory(radient_user), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._rehome_stranded_session("openai") is None
+    assert radient_user.switched == []
+
+
+@pytest.mark.asyncio
+async def test_the_login_paints_one_statement_of_the_move(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D1: the sign-in's transcript carries ONE sentence for the switch.
+
+    The composition, not the parts: the dispatch's own receipt
+    (``model: X → Y (this session) · … — /model default saves this for new
+    sessions``) announced the same transition a row after the re-home's notice,
+    and a reader could take the pair as two events. The frame-level check is the
+    point — the design round's finding was that no test ever saw the two rows
+    together.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    session = _RehomableSession()
+    app = OperatorApp(
+        lambda: _factory(session), provider_controller=_credentialed_controller("deepseek")
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await app._login_flow("deepseek")
+        for _ in range(8):
+            await pilot.pause()
+        text = _transcript_text(app)
+
+    assert text.count("Switched to deepseek/deepseek-flash — not signed in to radient.") == 1
+    assert "model: radient/auto → deepseek/deepseek-flash (this session)" not in text
+    assert "/model default saves this for new sessions" not in text
+    assert session.model_label == "deepseek/deepseek-flash"
+
+
+@pytest.mark.asyncio
+async def test_a_rehome_queued_before_the_session_binds_runs_on_the_bind_edge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Q1: a login completing mid-swap must not swallow the repair.
+
+    With no session bound there is no conversation to inspect, and the repair
+    used to return None silently — the flake QA and the design round measured.
+    It now queues and runs on the bind edge (the ONE writer of ``self._session``),
+    which is exactly the state a real login starts from when the app is
+    rebuilding.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    session = _RehomableSession()
+    app = OperatorApp(
+        lambda: _factory(session), provider_controller=_credentialed_controller("deepseek")
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # The config half ran (as it does at every login), so the target is the
+        # new default; the session half is what has to wait for a conversation.
+        app._apply_login_defaults("deepseek")
+        app._bind_viewer(None)  # the mid-swap window: no conversation bound
+        assert app._rehome_stranded_session("deepseek") is None
+        assert app._rehome_await_bind == "deepseek"
+        app._bind_viewer(session)
+        for _ in range(6):
+            await pilot.pause()
+        text = _transcript_text(app)
+
+    assert session.model_label == "deepseek/deepseek-flash"
+    assert app._rehome_await_bind is None
+    assert "Switched to deepseek/deepseek-flash — not signed in to radient." in text

@@ -1061,6 +1061,42 @@ def test_the_checkpoint_makes_no_access_claim() -> None:
     assert store.state.model_access is not None
 
 
+def test_the_claim_builder_is_one_spelling_of_the_mapping() -> None:
+    """``model_access_claim`` is the ONE answer both publishing hosts use.
+
+    Pinned on the four inputs that decide it: a usable provider, a signed-out
+    one, an unknown provider (label falls back to the id rather than inventing
+    a name), and the two "cannot tell" inputs — a selectorless session and an
+    unreadable store — which must answer ``None`` (no claim) and never
+    ``signed_out``, an accusation nobody established.
+    """
+    from local_operator.session.frontend_state import model_access_claim
+
+    ok = model_access_claim("deepseek/deepseek-flash", {"deepseek"})
+    assert ok is not None and (ok.state, ok.provider, ok.label) == (
+        "ok",
+        "deepseek",
+        "DeepSeek",
+    )
+
+    out = model_access_claim("anthropic/claude-opus-5-5", {"deepseek"})
+    # The label is the REGISTRY's own name, verbatim: the band and the TUI's
+    # sentence then describe one provider with one word ("Anthropic (Claude
+    # Pro/Max)" here, the sign-in route's own name), and neither surface
+    # invents a shortened form the other does not use.
+    assert out is not None and (out.state, out.provider, out.label) == (
+        "signed_out",
+        "anthropic",
+        "Anthropic (Claude Pro/Max)",
+    )
+
+    unknown = model_access_claim("not-a-provider/x", {"deepseek"})
+    assert unknown is not None and unknown.label == "not-a-provider"
+
+    assert model_access_claim(None, {"deepseek"}) is None
+    assert model_access_claim("deepseek/deepseek-flash", None) is None
+
+
 def test_queued_custom_steers_project_their_human_text() -> None:
     """The queued-steering snapshot reads ``text``/``content``, which only a
     plain user Message has. A busy-path peer steer and a busy-path wake queue

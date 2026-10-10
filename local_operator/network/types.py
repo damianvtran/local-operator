@@ -690,6 +690,13 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     "ask_dismiss": "prompt",
     "set_model": "prompt",
     "set_effort": "prompt",
+    # A sign-in moving a session off a model it can no longer run. It lands on the
+    # SAME capability as ``set_model``, the local verb with the identical effect:
+    # anyone who may choose this session's model may also repair it onto the
+    # default the user just made reachable, and the owner re-checks every term
+    # (selection unchanged, idle, old provider still stranded, new one accessible)
+    # before applying anything.
+    "rehome_if_current": "prompt",
     "new_conversation": "prompt",
     "complete_aside": "prompt",
     "peer_message": "prompt",
