@@ -60,10 +60,11 @@ see ``incidents.render_signal_receipt_detail``.
 WHAT THE DISCLAIM COSTS: TCC GRANTS (agent review round 1, R1-2). Severing the
 responsibility chain also severs TCC-grant INHERITANCE. A disclaimed runtime —
 and everything it spawns — no longer borrows the spawning app's grants (Files &
-Folders / Full Disk for protected folders; Screen Recording and AppleEvents
-automation sit in the same inheritance class), so on a host where the grant
-lives on the app identity, the runtime's own interpreter needs its own grant
-before protected-folder work works from inside a disclaimed runtime. Measured
+Folders / Full Disk for protected folders — the class measured here; Screen
+Recording and AppleEvents automation were NOT measured, because a probe would
+prompt on the operator's screen, and may or may not behave the same), so on a
+host where the grant lives on the app identity, an interpreter without its own
+grant can lose protected-folder access inside a disclaimed runtime. Measured
 on this host as a controlled A/B (same parent and spawn shape, only the
 disclaim toggled): an unbranded interpreter's read of ``~/Desktop`` was denied
 under the disclaim where the same spawn without it read fine; the product's own
@@ -108,6 +109,26 @@ MAX_CHAIN = 8
 #: bounds what one chain adds to an environment (≤ ``MAX_CHAIN`` × this) and
 #: what a command line can leak into the artifacts.
 MAX_ENTRY_CHARS = 256
+
+#: Appended when a recorded command is cut to ``MAX_ENTRY_CHARS`` so a reader
+#: of the boot record can tell "the command ended here" from "the record
+#: ended here" (agent review round 2, R2-N3). The marker is INSIDE the budget:
+#: a bounded entry is never longer than ``MAX_ENTRY_CHARS``.
+_TRUNCATION_MARK = "…"
+
+#: Largest pid a POSIX ``pid_t`` (a signed 32-bit int on every supported
+#: platform) can hold. A larger int in a recorded chain is corruption, and
+#: handing it to ``os.kill`` raises ``OverflowError`` rather than ``OSError``.
+_PID_MAX = 2**31 - 1
+
+
+def _bound_command(command: object) -> str:
+    """``command`` as a string no longer than ``MAX_ENTRY_CHARS``, marked when cut."""
+    text = str(command or "")
+    if len(text) <= MAX_ENTRY_CHARS:
+        return text
+    return text[: MAX_ENTRY_CHARS - len(_TRUNCATION_MARK)] + _TRUNCATION_MARK
+
 
 #: ``POSIX_SPAWN_SETSID`` / ``POSIX_SPAWN_CLOEXEC_DEFAULT`` / ``POSIX_SPAWN_SETSIGDEF``
 #: from XNU's spawn.h — present in the SDK via ``sys/spawn.h`` (``spawn.h``
@@ -313,7 +334,7 @@ def parse_spawn_chain(raw: object) -> list[dict[str, Any]] | None:
         argv0 = item.get("argv0")
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
             continue
-        entry: dict[str, Any] = {"pid": pid, "argv0": str(argv0 or "")[:MAX_ENTRY_CHARS]}
+        entry: dict[str, Any] = {"pid": pid, "argv0": _bound_command(argv0)}
         for key in ("alive_at_spawn", "alive_now"):
             if key in item:
                 value = item.get(key)
@@ -346,7 +367,7 @@ def _self_entry() -> dict[str, Any]:
         argv0 = os.path.basename(sys.argv[0] or "") or sys.executable
     except Exception:  # noqa: BLE001
         argv0 = sys.executable or ""
-    return {"pid": os.getpid(), "argv0": argv0[:MAX_ENTRY_CHARS]}
+    return {"pid": os.getpid(), "argv0": _bound_command(argv0)}
 
 
 def _process_table() -> dict[int, tuple[int, str]]:
@@ -427,7 +448,7 @@ def _walk_parent_chain(start_ppid: int, *, cap: int) -> list[dict[str, Any]]:
             if info is None:
                 break
             ppid, command = info
-            chain.append({"pid": pid, "argv0": command[:MAX_ENTRY_CHARS]})
+            chain.append({"pid": pid, "argv0": _bound_command(command)})
             pid = ppid
     _walk_cache[key] = chain
     return chain
@@ -457,7 +478,13 @@ def _chain_for_child() -> list[dict[str, Any]] | None:
             chain.extend(inherited)
         else:
             chain.extend(_walk_parent_chain(os.getppid(), cap=MAX_CHAIN - 1))
-        chain = chain[:MAX_CHAIN]
+        # COPY each entry before annotating: the ppid-walk entries are the
+        # memoised dicts in ``_walk_cache`` (this process's lineage, which
+        # must stay a pure record of ancestry), and concurrent spawns from the
+        # launch threads would otherwise write their readings into the same
+        # objects between one thread's probe and its ``json.dumps`` (agent
+        # review round 2, R2-3).
+        chain = [dict(entry) for entry in chain[:MAX_CHAIN]]
         for entry in chain:
             entry["alive_at_spawn"] = _pid_liveness(entry.get("pid"))
         return chain
@@ -494,11 +521,13 @@ def _pid_liveness(pid: object) -> bool | None:
     there is. ``procstate`` owns the win32 ``OpenProcess`` branch for exactly
     that reason; this module must not re-implement the trap. ``None`` stays the
     fail-closed value — the renderer says nothing it cannot attest — and a pid
-    that is not a positive int never reaches any platform probe. Imported
+    that is not a positive int a ``pid_t`` can hold never reaches any platform
+    probe (an int past 2**31-1 would raise ``OverflowError`` out of ``os.kill``
+    instead of reading as unknown; agent review round 2, R2-N2). Imported
     lazily (as ``_fallback_popen`` does) so importing this module stays
     stdlib-only for the signal path.
     """
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or pid > _PID_MAX:
         return None
     from local_operator.procstate import pid_liveness
 
@@ -797,93 +826,91 @@ def spawn_disclaimed(
     """
     executable = executable if executable is not None else str(argv[0])
     child_env = _env_with_chain(env)
-    reason = _fallback_reason()
-    if reason is not None:
-        _log_fallback(reason)
-        return _fallback_popen(
-            argv,
-            executable=executable,
-            cwd=cwd,
-            env=child_env,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            pass_fds=pass_fds,
-            close_fds=close_fds,
-        )
-    try:
-        pid = _spawn_via_posix_spawn(
-            argv,
-            executable=executable,
-            cwd=cwd,
-            env=child_env,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            pass_fds=pass_fds,
-            close_fds=close_fds,
-        )
-    except SpawnUnsupportedError as exc:
-        _log_fallback(str(exc))
-        return _fallback_popen(
-            argv,
-            executable=executable,
-            cwd=cwd,
-            env=child_env,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            pass_fds=pass_fds,
-            close_fds=close_fds,
-        )
-    except OSError as exc:
-        if exc.errno == errno.E2BIG and ENV_SPAWN_CHAIN in child_env:
-            # THE CHAIN MUST NEVER FAIL A SPAWN THAT WOULD OTHERWISE START
-            # (agent review round 1, R1-3). E2BIG means the environment
-            # crossed the kernel's ARG_MAX; the chain this module added is the
-            # only part of it we own, so shed exactly that and try once more.
-            # A second E2BIG then means the caller's own environment is over
-            # the limit — the same failure ``Popen`` would have raised — and
-            # propagates from the retry. Entries are bounded
-            # (``MAX_ENTRY_CHARS``), so this path takes a pathological
-            # environment, not a long command line; it is logged because the
-            # child loses its recorded lineage.
-            logger.warning(
-                "spawn chain dropped: environment over ARG_MAX (E2BIG) "
-                "without shedding %s; retrying without it",
-                ENV_SPAWN_CHAIN,
-            )
-            child_env = {key: value for key, value in child_env.items() if key != ENV_SPAWN_CHAIN}
-            pid = _spawn_via_posix_spawn(
-                argv,
-                executable=executable,
-                cwd=cwd,
-                env=child_env,
-                stdin=stdin,
-                stdout=stdout,
-                stderr=stderr,
-                pass_fds=pass_fds,
-                close_fds=close_fds,
-            )
-        elif exc.errno in _ATTRIBUTE_ERRNOS:
-            # The attributes were refused, not the program: an OS change.
-            _log_fallback(f"posix_spawn refused the spawn flags (errno {exc.errno})")
+
+    def start(spawn_env: Mapping[str, str]) -> Any:
+        """One complete spawn decision (disclaimed path, or its fallback) for ``spawn_env``."""
+        reason = _fallback_reason()
+        if reason is not None:
+            _log_fallback(reason)
             return _fallback_popen(
                 argv,
                 executable=executable,
                 cwd=cwd,
-                env=child_env,
+                env=spawn_env,
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
                 pass_fds=pass_fds,
                 close_fds=close_fds,
             )
-        elif exc.errno == 2:  # ENOENT — match Popen's exception class
-            raise FileNotFoundError(exc.errno, exc.strerror, str(argv[0])) from exc
-        else:
+        try:
+            pid = _spawn_via_posix_spawn(
+                argv,
+                executable=executable,
+                cwd=cwd,
+                env=spawn_env,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                pass_fds=pass_fds,
+                close_fds=close_fds,
+            )
+        except SpawnUnsupportedError as exc:
+            _log_fallback(str(exc))
+            return _fallback_popen(
+                argv,
+                executable=executable,
+                cwd=cwd,
+                env=spawn_env,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                pass_fds=pass_fds,
+                close_fds=close_fds,
+            )
+        except OSError as exc:
+            if exc.errno in _ATTRIBUTE_ERRNOS:
+                # The attributes were refused, not the program: an OS change.
+                _log_fallback(f"posix_spawn refused the spawn flags (errno {exc.errno})")
+                return _fallback_popen(
+                    argv,
+                    executable=executable,
+                    cwd=cwd,
+                    env=spawn_env,
+                    stdin=stdin,
+                    stdout=stdout,
+                    stderr=stderr,
+                    pass_fds=pass_fds,
+                    close_fds=close_fds,
+                )
+            if exc.errno == errno.ENOENT:  # match Popen's exception class
+                raise FileNotFoundError(exc.errno, exc.strerror, str(argv[0])) from exc
             raise
-    return DisclaimedProcess(pid, list(argv))
+        return DisclaimedProcess(pid, list(argv))
+
+    try:
+        return start(child_env)
+    except OSError as exc:
+        if exc.errno != errno.E2BIG or ENV_SPAWN_CHAIN not in child_env:
+            raise
+        # THE CHAIN MUST NEVER FAIL A SPAWN THAT WOULD OTHERWISE START (agent
+        # review rounds 1 and 2, R1-3 / R2-1). E2BIG means the environment
+        # crossed the kernel's ARG_MAX; the chain this module added is the
+        # only part of it we own, so shed exactly that and try once more. The
+        # shed wraps BOTH the posix_spawn path and the Popen fallback: the
+        # fallback receives the same chain-bearing env, and a caller env a few
+        # KB under the limit fails there too (reproduced in round 2). A second
+        # E2BIG then means the caller's own environment is over the limit — the
+        # same failure ``Popen`` would have raised — and propagates from the
+        # retry. Entries are bounded (``MAX_ENTRY_CHARS``), so this path takes
+        # a pathological environment, not a long command line; it is logged
+        # because the child loses its recorded lineage.
+        logger.warning(
+            "spawn chain dropped: environment over ARG_MAX (E2BIG); retrying without %s",
+            ENV_SPAWN_CHAIN,
+        )
+        shed_env = {key: value for key, value in child_env.items() if key != ENV_SPAWN_CHAIN}
+        return start(shed_env)
 
 
 def _fallback_popen(

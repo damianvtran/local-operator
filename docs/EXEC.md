@@ -394,12 +394,13 @@ target can honestly add: the spawn chain it was born into, recorded by
 when the signal lands. When the app at the ROOT of that chain was RECORDED ALIVE
 and is GONE at arrival, the rendered reason names it — "…; the app this runtime
 descends from (Local Operator.app, pid N) was running when the runtime started
-and was no longer running when the signal arrived". Both halves are probed, and
+and was no longer running when the signal arrived (when it exited is not recorded)". Both halves are probed, and
 the clause is silent unless both exist (a member already gone when the chain
 was recorded, or a probe that could not be made, renders nothing), so it says
 "this runtime outlived the app" — never "the app caused this signal", never
-"force-quit", and never a sender. It also cannot say when the app exited: the
-two readings are the limit. On the 2026-10-09 incident's sweep (macOS killed 6
+"force-quit", and never a sender. It also cannot say when the app exited — the
+two readings are the limit, and the sentence says so in its last words, because
+an app that quit a second ago and one that quit a week ago render the same. On the 2026-10-09 incident's sweep (macOS killed 6
 exec workers 17 ms after a force-quit; the targets' receipts could name nobody)
 this is what would have shown the app the workers descended from alive at their
 start and gone at the signal. Chains are written for spawns made through
@@ -408,13 +409,16 @@ start and gone at the signal. Chains are written for spawns made through
 **The disclaim's cost, disclosed: TCC grants.** Detaching runtimes from the
 app's macOS responsibility chain also ends their inheritance of the app's TCC
 grants — a disclaimed runtime, and everything it spawns, no longer borrows the
-app's Files & Folders / Full Disk access (Screen Recording and AppleEvents
-automation are in the same inheritance class). On a host where the operator
-granted those to the app, the runtime's own interpreter identity needs its own
-grant before protected-folder work inside a disclaimed runtime works. The trade
-is deliberate: the requirement is that killing the UI never kills sessions, and
-a session swept with the UI is the worse failure; the grant is a one-time,
-per-host decision.
+app's Files & Folders / Full Disk access (measured). Screen Recording and
+AppleEvents automation were not measured — a probe would prompt on the
+operator's screen — and may or may not behave the same. On a host where the
+operator granted Files & Folders / Full Disk to the app, an interpreter without
+its own grant can lose protected-folder access inside a disclaimed runtime: in
+the controlled A/B an unbranded interpreter was denied while the product's own
+branded interpreter binaries kept access, a per-binary property rather than a
+guarantee. The trade is deliberate: the requirement is that killing the UI
+never kills sessions, and a session swept with the UI is the worse failure; the
+grant is a one-time, per-host decision.
 
 **Artifacts** (all best-effort; a failed write never changes a stop):
 

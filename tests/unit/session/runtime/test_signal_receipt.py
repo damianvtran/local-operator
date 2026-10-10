@@ -314,6 +314,7 @@ def test_an_unattributed_verdict_names_a_gone_app_ancestor(
     assert (
         "the app this runtime descends from (Local Operator.app, pid 2147483600)"
         " was running when the runtime started and was no longer running when the signal arrived"
+        " (when it exited is not recorded)"
     ) in detail
     # The recorded command line is persisted nowhere the reader sees it (D3).
     assert "/Applications/" not in detail

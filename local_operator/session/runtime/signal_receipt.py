@@ -29,9 +29,10 @@ carries each member's liveness as recorded at spawn (``alive_at_spawn``), and
 this module adds a second, arrival reading (``alive_now``) when a signal lands.
 When the app at the root of that chain was RECORDED ALIVE and is GONE at
 arrival, the renderer says exactly that — the app was running when the runtime
-started and was no longer running when the signal arrived (2026-10-09
-incident) — and says nothing when the readings do not conspire, so the clause
-cannot read as the cause of a signal or as a named sender.
+started and was no longer running when the signal arrived, with the limit
+stated in the sentence itself ("when it exited is not recorded") — and says
+nothing when the readings do not conspire, so the clause cannot read as the
+cause of a signal or as a named sender.
 
 PAIRING IS DECIDED AT WRITE TIME. The marker is staged BEFORE the signal by
 contract (control's "marker first, then the signal"), so it is on disk at receipt
