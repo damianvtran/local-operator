@@ -4943,6 +4943,14 @@ class ServingSessionHandle(SessionHandle):
             if not from_pending:
                 self._emit_notice(rehome_deferred_notice(current), "info")
             return REHOME_BUSY_REPLY
+        if self._disposing:
+            # The LAST check before the set, and the third window (round-4 Q1):
+            # a dispose landing while THIS retry was parked on the credential
+            # read. The schedule and spawn guards cannot see it — the read
+            # yielded the loop after they ran — and without this the set and
+            # its notice would land on a handle that is going away, breaking
+            # "retiring work begins no new work" at the one moment it still can.
+            return "kept: the runtime is retiring"
         await self.set_model_effort(provider, model_id, None)
         # The answer comes from the read-back, never from the switch's own
         # receipt: ``set_model`` assigns the spec before its journal writes and
