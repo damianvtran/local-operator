@@ -2042,7 +2042,14 @@ async def test_the_turn_end_checkpoint_does_not_grow_with_the_conversation() -> 
         def __init__(self) -> None:
             self.rows: list[int] = []
 
-        async def append_custom(self, _custom_type: str, details: dict[str, Any]) -> None:
+        async def append_custom(
+            self, _custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False
+        ) -> None:
+            # ``preserve_mtime`` mirrors the real writer: ``checkpoint`` forwards
+            # the bookkeeping request (the closing row passes it), so a double
+            # without the keyword fails on the parameter rather than on the size
+            # this test is about.
+            assert preserve_mtime is False, "a turn-end checkpoint is not bookkeeping-exempt"
             self.rows.append(len(json.dumps(details).encode()))
 
     store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
