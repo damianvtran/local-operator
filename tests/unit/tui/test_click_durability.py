@@ -588,3 +588,25 @@ async def test_the_tui_schedules_click_preparation_off_the_loop(
     assert len(ran_on) == 1
     assert ran_on[0] is not threading.main_thread(), "the compile ran on the event loop"
     await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------------------
+# Wiring: the preparation is actually reachable from the attended surfaces
+# ---------------------------------------------------------------------------
+
+
+def test_both_attended_boot_paths_call_the_preparation() -> None:
+    """A helper nobody calls fixes nothing.
+
+    Source-level on purpose: booting the real TUI or the server lifespan here
+    would start a Textual app / a daemon to prove one call site. These two
+    functions are the boot hooks the module docstrings name, and a refactor that
+    drops the call must trip this rather than silently re-cold the first banner.
+    """
+    import inspect
+
+    from local_operator import tui
+    from local_operator.server import app as server_app
+
+    assert "_schedule_click_preparation(app)" in inspect.getsource(tui.run_tui)
+    assert "prepare_for_clicks" in inspect.getsource(server_app.lifespan)
