@@ -42495,8 +42495,18 @@ class OperatorApp(App[None]):
             # state the clause was added to teach (one unusable provider), so
             # `1 need sign-in` was the commonest reading of the line.
             needs = "needs" if withheld == 1 else "need"
+            # DROPPABLE CLAUSES, deliberately (UX review round 2, U4): the
+            # agreement fix added one cell and the DASH-CHAIN form overflowed
+            # the footer in the miss states, where the picker prepends its own
+            # clause — `no matching models · showing all — 1 needs sign-in —
+            # /model --all hid…`, cut mid-word. The picker drops TRAILING
+            # clauses at the app's ` · ` seam before it ever cuts one, so the
+            # sentence is written as three clauses and degrades by dropping,
+            # never by truncating. Measured at 110x30, 90x24 and the 60x20
+            # floor (no-match, partial-keyword and settled states): no miss
+            # renders an ellipsis at any of them.
             return rows, (
-                f"showing all — {withheld} {needs} sign-in — /model --all hides" if withheld else ""
+                f"showing all · {withheld} {needs} sign-in · /model --all hides" if withheld else ""
             )
         # The `--all` clause is a TRAILING clause on purpose (design review
         # round 1, D1): `_fit_clauses` drops trailing clauses before it

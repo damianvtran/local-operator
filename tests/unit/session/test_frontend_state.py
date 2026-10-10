@@ -1003,12 +1003,25 @@ def test_model_access_publishes_and_clears_a_claim() -> None:
     }
     assert store.state.model_access is not None
     assert store.state.model_access.state == "signed_out"
+    # A LIVE claim serialises into the wire shape (R2-2): the pop in the state
+    # serializer is scoped to the idle state, not to the field.
+    assert store.state.model_dump(mode="json")["model_access"] == {
+        "state": "signed_out",
+        "provider": "anthropic",
+        "label": "Anthropic",
+    }
     # The same claim twice is not a frame.
     assert store.refresh_model_access(claim) is None
     # Clearing a claim IS a frame: absence is an answer here.
     cleared = store.refresh_model_access(None)
     assert cleared is not None
+    # …and the CLEAR frame carries the null EXPLICITLY (R2-1). A snapshot
+    # omits an idle claim (the attach frame's 22 bytes, QA round 1 Q3), so a
+    # follower can only tell "cleared" from "never said" through this change
+    # set — a bare absence on the delta would make the two indistinguishable.
+    assert cleared.changes == {"model_access": None}
     assert store.state.model_access is None
+    assert "model_access" not in store.state.model_dump(mode="json")
 
 
 def test_the_checkpoint_makes_no_access_claim() -> None:

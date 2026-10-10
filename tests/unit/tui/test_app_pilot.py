@@ -8827,7 +8827,7 @@ async def test_model_all_reveals_the_rows_the_filter_hides() -> None:
         "anthropic/claude-opus-5",
     }, offered
     assert "login required" in plain, plain
-    assert "showing all — 1 needs sign-in — /model --all hides" in plain, plain
+    assert "showing all · 1 needs sign-in · /model --all hides" in plain, plain
     # The dim is the claim that the row cannot be run, and it is asserted
     # rather than assumed: the block above says a user reading a lit row would
     # take it for a choice.
@@ -8892,10 +8892,44 @@ async def test_the_show_all_list_is_painted_whole_not_at_the_fallback_width() ->
 
     assert "openrouter/deepseek/deepseek-chat" in painted.plain, painted.plain
     assert "anthropic/claude-opus-5" in painted.plain, painted.plain
-    assert "showing all — 1 needs sign-in — /model --all hides" in painted.plain, painted.plain
+    assert "showing all · 1 needs sign-in · /model --all hides" in painted.plain, painted.plain
     assert all(
         len(line) == width for line in painted.plain.splitlines()
     ), "a row was painted at a width other than the widget's"
+
+
+@pytest.mark.asyncio
+async def test_the_show_all_miss_footer_drops_a_clause_never_cuts_mid_word() -> None:
+    """U4 (UX review round 2): the agreement fix pushed the show-all miss footer
+    one cell past the card at 110x30 and 90x24, and the fitter cut mid-word
+    (``/model --all hid…``).
+
+    The note is three droppable clauses now, so the miss states reshape by
+    DROPPING one, never by truncating: no ellipsis in any of them at the two
+    card-capped sizes or the 60x20 floor. Both miss variants are driven because
+    they carry different prefixes — ``no matching models`` (18 cells) and the
+    partial-keyword row (32), which is the tighter budget and the one whose
+    keyword invitation must survive.
+    """
+    ctrl = _AccessController()
+    for size in ((110, 30), (90, 24), (60, 20)):
+        app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            picker = await _open_model_picker(app, pilot)
+            await _type_model_argument(app, pilot, "--all")
+            await pilot.press("z", "z", "z")
+            await pilot.pause()
+            no_match = picker.render_text(picker.size.width).plain.splitlines()[-2].strip()
+            await pilot.press("backspace", "backspace", "backspace")
+            await pilot.pause()
+            await pilot.press("minus")
+            await pilot.pause()
+            partial = picker.render_text(picker.size.width).plain.splitlines()[-2].strip()
+        assert "…" not in no_match, f"{size}: the miss footer was cut: {no_match!r}"
+        assert "no matching models · showing all · 1 needs sign-in" in no_match, no_match
+        assert "…" not in partial, f"{size}: the partial footer was cut: {partial!r}"
+        assert "--all is a command — keep typing · showing all" in partial, partial
 
 
 @pytest.mark.asyncio
