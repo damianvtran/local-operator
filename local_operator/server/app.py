@@ -964,8 +964,11 @@ async def static_response_policy(request: Request, call_next):
     admitted allowlist -- and with NO allowlist installed (the app-managed
     default) for every origin, which is the case the echo was exploitable in. A
     page can still *cause* a request (an ``<img>`` needs no grant); it can no
-    longer *read* the answer, and the root allowlist
-    (``utils/static_roots.py``) bounds what it could have caused.
+    longer *read* the answer, and what bounds what it could have caused is now
+    the connection's posture (``static_roots.connection_mode`` -- unclamped
+    serving only on loopback-accepted sockets), the Host check below, and this
+    middleware's response policy, not a served-root allowlist (which survives
+    only as the rooted fallback; RFC §3).
 
     THE HOST CHECK is the one thing here that is not about headers: a DNS-rebinding
     page is same-origin with the daemon, so no CORS decision reaches it (review R8).
