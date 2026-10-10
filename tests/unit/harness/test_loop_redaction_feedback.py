@@ -47,6 +47,7 @@ from local_operator.harness.types import (
     StreamTextDelta,
     StreamToolCallDelta,
     ToolCall,
+    ToolExecutionEndEvent,
 )
 from local_operator.redaction_shapes import REDACTION_MARKER, scrub_secrets
 from local_operator.tools.builtin import (
@@ -584,10 +585,11 @@ class TestDisplayStillMasksSecrets:
         assert value not in json.dumps(stored.arguments), "history copy of the call"
         assert target.read_text() == f"copy {value}\n", "the DISK write is the original bytes"
 
-        # The persisted transcript, MESSAGE CONTENT and CALL ARGUMENTS. The write's
-        # ``details.diff`` is a separate channel with its own rule and is deliberately not
-        # asserted here: see the PR's "Not addressed" (it is the executor's own record of
-        # the bytes it wrote, and the discriminator for this very defect).
+        # The persisted transcript, MESSAGE CONTENT, CALL ARGUMENTS and — since the
+        # follow-up fix this test now pins — the result's ``provider_payload``.
+        # ``details.diff`` quotes the bytes the write put on disk, so it takes the
+        # same mask as the result text; the disk stays the original either way
+        # (asserted above) and is the only surface that must.
         transcript = Transcript(tmp_path / "session")
         for message in end.messages:
             await transcript.append_message(message)
@@ -595,13 +597,9 @@ class TestDisplayStillMasksSecrets:
             json.loads(line)
             for line in (tmp_path / "session" / "transcript.jsonl").read_text().splitlines()
         ]
-        persisted = json.dumps(
-            [
-                {k: v for k, v in row.get("payload", {}).items() if k != "provider_payload"}
-                for row in rows
-            ]
-        )
-        assert value not in persisted, "persisted transcript (content + call arguments)"
+        persisted = json.dumps(rows)
+        assert value not in persisted, "persisted transcript (content + args + details)"
+        assert REDACTION_MARKER in persisted, "premise: the mask replaced it somewhere"
 
 
 class TestDisplayMasksARegisteredPlainWordAsAToken:
@@ -645,7 +643,10 @@ class TestDisplayMasksARegisteredPlainWordAsAToken:
         # The DISK write is still the original bytes (display never alters a writer's input).
         assert target.read_text() == content
 
-        # The persisted transcript: message content and call arguments.
+        # The persisted transcript, now including the result's ``provider_payload``:
+        # the write's ``details.diff`` quotes the bytes on disk and takes the same
+        # mask as the result text (the follow-up fix; the disk is asserted above
+        # and stays the original).
         transcript = Transcript(tmp_path / "session")
         for message in end.messages:
             await transcript.append_message(message)
@@ -653,12 +654,7 @@ class TestDisplayMasksARegisteredPlainWordAsAToken:
             json.loads(line)
             for line in (tmp_path / "session" / "transcript.jsonl").read_text().splitlines()
         ]
-        persisted = json.dumps(
-            [
-                {k: v for k, v in row.get("payload", {}).items() if k != "provider_payload"}
-                for row in rows
-            ]
-        )
+        persisted = json.dumps(rows)
         assert f"{PLAIN_WORD} and" not in persisted, "the standalone word reached the transcript"
         assert f"{REDACTION_MARKER} and {EMBEDDED_WORD}" in persisted, persisted
 
@@ -758,8 +754,9 @@ class TestEscapedWordFormsStayMaskedThroughRawArguments:
         assert PLAIN_WORD not in _replayable_tool_arguments_json(stored), escape_label
         assert PLAIN_WORD not in json.dumps(_replayable_tool_arguments(stored)), escape_label
 
-        # The persisted transcript row, minus ``provider_payload`` (the executor's own
-        # record of the bytes it wrote — a separately-noted channel, not this one).
+        # The persisted transcript row, including ``provider_payload``: the diff in
+        # ``details`` quotes the raw argument text the content spells, so it takes
+        # the same mask as everything else the row stores.
         transcript = Transcript(tmp_path / "session")
         for message in end.messages:
             await transcript.append_message(message)
@@ -767,12 +764,7 @@ class TestEscapedWordFormsStayMaskedThroughRawArguments:
             json.loads(line)
             for line in (tmp_path / "session" / "transcript.jsonl").read_text().splitlines()
         ]
-        persisted = json.dumps(
-            [
-                {k: v for k, v in row.get("payload", {}).items() if k != "provider_payload"}
-                for row in rows
-            ]
-        )
+        persisted = json.dumps(rows)
         assert PLAIN_WORD not in persisted, escape_label
         assert REDACTION_MARKER in persisted, escape_label
 
@@ -811,6 +803,229 @@ class TestEscapedWordFormsStayMaskedThroughRawArguments:
         assert json.loads(raw)["content"] == (
             f"my_{REDACTION_MARKER}\n\\{REDACTION_MARKER}\n{EMBEDDED_WORD}\n"
         )
+
+
+# --- DETAILS: written content is quoted in provider_payload, so it takes the same mask ----
+
+
+#: The key this section writes through the tools. Assembled from parts like every
+#: credential in this file, and REGISTERED BY VALUE so the mask is deterministic
+#: rather than at the mercy of a shape table.
+DETAILS_KEY = "sk-" + "followup" + "Qz9Xk2Lm5Np8" + "Rt4Yw7"
+
+
+def _store_that_scrubs_details_key(tmp_path: Path) -> Any:
+    """A real ``VariableStore`` with the key registered the way production does."""
+    from local_operator.variables import VariableStore
+
+    store = VariableStore(cwd=str(tmp_path))
+    assert store.register_redaction(DETAILS_KEY)
+    assert DETAILS_KEY not in store.redact(DETAILS_KEY), "premise: the value scrub is live"
+    return store
+
+
+class TestWrittenContentInDetailsTakesTheResultMask:
+    """``details['diff']`` quotes the bytes a write/edit put on disk, so it is masked.
+
+    ``Message.tool_result`` lifts ``ToolResult.details`` into
+    ``provider_payload['details']`` — persisted in the transcript row and read by the
+    settled tool card, the mobile projection and every replay. The result TEXT was
+    masked at the loop's redaction seam and the diff was not, so a real key written
+    through ``write`` stayed quoted there (PR #2140 follow-up, Aida-directed). These
+    tests pin the new rule from both sides: the STORED copy carries the mask, and the
+    WRITE ITSELF is untouched — the disk bytes are the caller's exactly, and the
+    executor's own result (what the live event carries) still describes them.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_key_written_through_write_is_masked_in_details_and_exact_on_disk(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.session.transcript import Transcript
+
+        store = _store_that_scrubs_details_key(tmp_path)
+        src = tmp_path / "seed.txt"
+        src.write_text("seed\n")
+        target = tmp_path / "out.txt"
+        content = f"token = {DETAILS_KEY}\n"
+        model = _MechanicalModel(
+            src, lambda seen: ("write", {"path": str(target), "content": content})
+        )
+        events = await _drive(model, redact=lambda text: store.redact_with_report(text)[0])
+
+        end = events[-1]
+        assert isinstance(end, AgentEndEvent)
+        row = _results(events)[-1]
+        details = (row.provider_payload or {}).get("details") or {}
+        diff = details.get("diff") or []
+        assert diff, "premise: the write produced a diff"
+        joined = "\n".join(str(line) for line in diff)
+        assert DETAILS_KEY not in joined, "the written key is quoted in details.diff"
+        assert REDACTION_MARKER in joined, "premise: the scrub replaced it, not dropped it"
+        # Counters stay numbers for the UI's +N/-N badge.
+        assert details.get("added") == 1 and details.get("removed") == 0, details
+        # The result TEXT and the history copy of the call were already masked.
+        assert DETAILS_KEY not in _result_text(row)
+        assert DETAILS_KEY not in json.dumps(row.provider_payload)
+        # ...and the ENFORCER of the rule, both ways: the disk holds the caller's
+        # bytes exactly (which is also the proof the executor received the original
+        # argument — the receipt reports the ORIGINAL length), while the executor's
+        # own result, the one the live event carries, still describes those bytes.
+        assert target.read_bytes() == content.encode()
+        assert f"({len(content)} chars)" in _result_text(row)
+        executor = [event for event in events if isinstance(event, ToolExecutionEndEvent)][-1]
+        assert DETAILS_KEY in "\n".join(
+            executor.result.details["diff"]
+        ), "the executor's own record must describe the bytes it wrote"
+
+        transcript = Transcript(tmp_path / "session")
+        for message in end.messages:
+            await transcript.append_message(message)
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "session" / "transcript.jsonl").read_text().splitlines()
+        ]
+        persisted = json.dumps(rows)
+        assert DETAILS_KEY not in persisted, "the key reached the persisted transcript"
+        assert REDACTION_MARKER in persisted, "premise: the mask is persisted"
+
+    @pytest.mark.asyncio
+    async def test_a_key_edited_into_a_file_is_masked_in_details_and_exact_on_disk(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.session.transcript import Transcript
+
+        store = _store_that_scrubs_details_key(tmp_path)
+        target = tmp_path / "config.env"
+        target.write_text("FEATURE = 1\n")
+        edited = f"FEATURE = 1\ntoken = {DETAILS_KEY}\n"
+        model = _MechanicalModel(
+            target,
+            lambda seen: (
+                "edit",
+                {"path": str(target), "old_text": "FEATURE = 1\n", "new_text": edited},
+            ),
+        )
+        events = await _drive(model, redact=lambda text: store.redact_with_report(text)[0])
+
+        end = events[-1]
+        assert isinstance(end, AgentEndEvent)
+        row = _results(events)[-1]
+        details = (row.provider_payload or {}).get("details") or {}
+        joined = "\n".join(str(line) for line in details.get("diff") or [])
+        assert DETAILS_KEY not in joined, "the edited-in key is quoted in details.diff"
+        assert REDACTION_MARKER in joined, "premise: the scrub replaced it, not dropped it"
+        assert details.get("added") == 1 and details.get("removed") == 0, details
+        # The edit landed the caller's bytes exactly, mask nowhere on disk.
+        assert target.read_bytes() == edited.encode()
+
+        transcript = Transcript(tmp_path / "session")
+        for message in end.messages:
+            await transcript.append_message(message)
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "session" / "transcript.jsonl").read_text().splitlines()
+        ]
+        assert DETAILS_KEY not in json.dumps(rows)
+
+    @pytest.mark.asyncio
+    async def test_a_write_with_nothing_to_mask_keeps_the_diff_verbatim(
+        self, tmp_path: Path
+    ) -> None:
+        """The negative arm: the seam must not rewrite what it has no reason to."""
+        from local_operator.tools.builtin import _diff_details
+        from local_operator.variables import VariableStore
+
+        store = VariableStore(cwd=str(tmp_path))
+        assert store.register_redaction("unrelated" + "-value-0001")
+        src = tmp_path / "seed.txt"
+        src.write_text("seed\n")
+        target = tmp_path / "plain.txt"
+        content = "alpha\nbeta\n"
+        model = _MechanicalModel(
+            src, lambda seen: ("write", {"path": str(target), "content": content})
+        )
+        events = await _drive(model, redact=lambda text: store.redact_with_report(text)[0])
+
+        details = (_results(events)[-1].provider_payload or {}).get("details") or {}
+        # Byte-for-byte the difflib output — structure, counts and lines all intact.
+        assert details == _diff_details(str(target), "", content), details
+
+    @pytest.mark.asyncio
+    async def test_a_write_dispatched_through_the_eval_bridge_carries_masked_details(
+        self, tmp_path: Path
+    ) -> None:
+        """The nested bridge: eval-driven calls cross into arbitrary Python WITH details.
+
+        ``dispatch_tool`` is the one seam every eval-driven call crosses, its contract
+        is "the same text policy used for native history", and the nested result is
+        handed back as a JSON dump that INCLUDES ``details`` — so the diff of a write
+        driven from an eval cell must arrive masked, exactly like the stored message's
+        copy, while the write on disk stays the caller's bytes.
+        """
+        from local_operator.harness.types import AgentTool, TextContent, ToolResult
+
+        store = _store_that_scrubs_details_key(tmp_path)
+        target = tmp_path / "from_eval.txt"
+        content = f"token = {DETAILS_KEY}\n"
+        captured: dict[str, Any] = {}
+
+        async def execute(
+            tool_call_id: str, args: dict[str, Any], signal: Any, on_update: Any, context: Any
+        ) -> ToolResult:
+            captured["nested"] = await context.dispatch_tool(
+                "write", {"path": str(target), "content": content}
+            )
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name="eval",
+                content=[TextContent(text="nested dispatch done")],
+            )
+
+        requests: list[ChatRequest] = []
+
+        def stream_fn(request: ChatRequest, signal: Any):
+            requests.append(request)
+            turn: list[Any] = (
+                [
+                    StreamToolCallDelta(index=0, id="e1", name="eval", argument_delta="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ]
+                if len(requests) == 1
+                else [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]
+            )
+
+            async def gen():
+                for event in turn:
+                    yield event
+
+            return gen()
+
+        context = LoopContext(
+            tools=[
+                AgentTool(
+                    name="eval",
+                    parameters={"type": "object", "properties": {}},
+                    execute=execute,
+                ),
+                build_write_tool(),
+            ]
+        )
+        config = LoopConfig(
+            model=MODEL,
+            convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+            stream_fn=stream_fn,
+            redact_tool_result=lambda text: store.redact_with_report(text)[0],
+        )
+        async for _event in AgentLoop().run([Message.user("go")], context, config, None):
+            pass
+
+        nested = captured["nested"]
+        details = nested.get("details") or {}
+        joined = "\n".join(str(line) for line in details.get("diff") or [])
+        assert DETAILS_KEY not in json.dumps(nested), "the key crossed back into Python"
+        assert REDACTION_MARKER in joined, "premise: the scrub replaced it, not dropped it"
+        assert target.read_bytes() == content.encode(), "the write itself stays byte-exact"
 
 
 # --- RAW ARGUMENTS: the JSON string is judged with the same line boundaries ----------------
