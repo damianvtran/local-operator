@@ -1077,8 +1077,8 @@ def _spawn_standby(
     """
     from local_operator import procname
     from local_operator.interpreter import SAFE_PATH_FLAG
+    from local_operator.macos_disclaim import spawn_disclaimed
     from local_operator.paths import CONFIG_DIR_ENV
-    from local_operator.procstate import detached_popen_kwargs
 
     console_end, child_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     child_fd = child_end.fileno()
@@ -1102,7 +1102,13 @@ def _spawn_standby(
     else:
         argv0, executable = procname.spawn_identity(label, id="--------")
     try:
-        proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        proc = spawn_disclaimed(
+            # A warm is a session runtime one adoption away, so it must carry
+            # the same disclaim the launched runtime does: a force-quit of the
+            # desktop app must not be able to sweep the spare that another
+            # session is about to adopt (2026-10-09). The helper owns
+            # detachment and close_fds; ``pass_fds`` keeps the socketpair end
+            # (and only it) open in the child.
             [argv0, SAFE_PATH_FLAG, "-m", STANDBY_MODULE, STANDBY_FD_FLAG, str(child_fd)],
             executable=executable,
             env=env,
@@ -1115,7 +1121,6 @@ def _spawn_standby(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             pass_fds=(child_fd,),
-            **detached_popen_kwargs(),
         )
     except BaseException:
         # A failed spawn must not leak either end of the socketpair.
@@ -1980,10 +1985,16 @@ def _write_adoption_boot_record(env: dict[str, Any]) -> None:
         return
     try:
         from local_operator import update
+        from local_operator.macos_disclaim import spawn_chain_facts
         from local_operator.session.runtime.journal import write_boot_record
 
         build = update.installed_build(os.environ.get("LOP_BUILD_PREFIX") or None)
-        write_boot_record(session_id, build, cwd=str(env.get("LOP_MOBILE_CHILD_CWD") or ""))
+        write_boot_record(
+            session_id,
+            build,
+            cwd=str(env.get("LOP_MOBILE_CHILD_CWD") or ""),
+            spawn_chain=spawn_chain_facts(),
+        )
     except Exception:  # noqa: BLE001 — instrumentation, never a boot gate
         logger.debug("adopted runtime could not write its boot record", exc_info=True)
 

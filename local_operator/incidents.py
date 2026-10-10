@@ -708,7 +708,7 @@ def involuntary_kill_detail(
 
 
 def render_signal_receipt_detail(
-    *, signal_name: str = "", at: object = None, count: int = 1
+    *, signal_name: str = "", at: object = None, count: int = 1, spawn_chain: object = None
 ) -> str:
     """The parenthetical a runtime's OWN signal receipt gives a ``runtime-shutdown`` reason.
 
@@ -738,6 +738,20 @@ def render_signal_receipt_detail(
     ONE COUNT, JOINED THE SAME WAY AS THE REST: "received 3 times, last at …"
     rather than a comma-appended second clause, which read as a continuation of
     "nobody asked for a stop" (design round 1, D5).
+
+    THE SPAWN-CHAIN CLAUSE (2026-10-09). ``spawn_chain`` is the receipt's
+    snapshot of the lineage the runtime was born into, each member with a
+    liveness reading taken at arrival (:mod:`local_operator.macos_disclaim`).
+    When — and only when — a member that is an app-bundle main executable
+    (``.app/Contents/MacOS/…``, the shape an app instance's process has) reads
+    GONE, the sentence names it: the app at the root of this runtime's chain
+    was no longer running when the signal arrived. That is stated as the fact
+    the probe measured — "no longer running" — and NOT as "force-quit" or as
+    "the sender": the runtime's receipt cannot observe who signalled (see
+    :mod:`local_operator.session.runtime.signal_receipt`), and claiming an act
+    it cannot attest would be the guess this module exists to refuse. Old
+    receipts without the field, and signals whose chain has no gone app
+    ancestor, render exactly as before.
     """
     name = signal_name or "a termination signal"
     times = f" {count} times, last" if count > 1 else ""
@@ -746,8 +760,37 @@ def render_signal_receipt_detail(
         when = " at " + time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(float(at)))
     return (
         f" ({KILL_UNATTRIBUTED}, {name} received{times}{when} from an unidentified sender;"
-        " nobody asked for a stop)"
+        f" nobody asked for a stop{_spawn_chain_clause(spawn_chain)})"
     )
+
+
+def _spawn_chain_clause(spawn_chain: object) -> str:
+    """The gone-app-ancestor aside for a receipt that recorded a spawn chain, or "".
+
+    Strict on every axis, because the clause is persisted: a list of dicts, a
+    member whose ``alive`` is exactly ``False`` (a probe that could not be made
+    is ``None`` and never renders), a positive pid, and a recorded command
+    under an app bundle. Outermost first — the app at the ROOT of the chain is
+    the interesting one — and nothing is said when none matches.
+    """
+    if not isinstance(spawn_chain, list):
+        return ""
+    for entry in reversed(spawn_chain):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("alive") is not False:
+            continue
+        pid = entry.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            continue
+        argv0 = str(entry.get("argv0") or "")
+        if ".app/Contents/MacOS/" not in argv0:
+            continue
+        return (
+            f"; the app that spawned this runtime's chain (pid {pid}, {argv0})"
+            " was no longer running when the signal arrived"
+        )
+    return ""
 
 
 def is_cut_off_cause(cause: str) -> bool:

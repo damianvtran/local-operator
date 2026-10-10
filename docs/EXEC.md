@@ -387,17 +387,35 @@ received several signals, the **latest** one decides the classification (the
 others stay in the receipt's `signals` list with `count` giving the total): a
 later signal a covering deliberate marker explains is a stop somebody asked for.
 
+**Direction without a sender.** An unattributed signal still has one fact a
+target can honestly add: the spawn chain it was born into (recorded by
+`macos_disclaim`, snapshot with per-member liveness at signal time). When the app
+at the ROOT of that chain was already gone at arrival, the rendered reason says
+so — "…; the app that spawned this runtime's chain (pid N,
+/Applications/Local Operator.app/Contents/MacOS/Local Operator) was no longer
+running when the signal arrived". It states exactly what the liveness probe
+measured and never upgrades it to a sender or to "force-quit": on the 2026-10-09
+incident's sweep (macOS killed 6 exec workers 17 ms after a force-quit; the
+targets' receipts could name nobody) this clause is what would have said the app
+was gone at the same moment. Chains are written for spawns made through
+`macos_disclaim`; where none was recorded, the sentence is unchanged.
+
 **Artifacts** (all best-effort; a failed write never changes a stop):
 
 * `<session dir>/runtime-signal.json` — a *runtime's* receipt of a termination
   signal, written at arrival. v1 schema: `{"v":1,"kind":"runtime","session_id",
   "pid","started_at","signals":[{"name","number","at","in_flight","action":
   "drain"|"stop"|"repeat-absorbed","sender":{"state":"unavailable",...},
-  "stop_marker":null|{...},"sanction":"none"|"marker"}],"count","receiver":
+  "spawn_chain":[{"pid","argv0","alive"}...],"stop_marker":null|{...},"sanction":
+  "none"|"marker"}],"count","receiver":
   {"uid","euid","gid","ppid","pgid","argv0"},"platform"}`. `sanction` is decided
   at write time: `marker` iff a `runtime-stop.json` for this exact run, staged no
   more than `PAIR_WINDOW_S` before the signal and never after, was on disk when it
-  arrived; otherwise `none` — nobody staged a stop. `receiver.ppid` is the
+  arrived; otherwise `none` — nobody staged a stop. `spawn_chain` is present only
+  when the runtime was spawned with a recorded chain (absent stays absent; old
+  receipts parse without it) and `alive` is a liveness reading taken at arrival —
+  `false` is proven gone, `true` is proven live, and a probe that could not be made
+  is omitted rather than guessed. `receiver.ppid` is the
   receiver's parent (lineage), not the sender. Never removed by a runtime; a new
   run (different pid/`started_at`) replaces it.
 * `<config>/logs/stop-sweeps.jsonl` — one `begin` and one `end` row per

@@ -75,7 +75,7 @@ from local_operator.harness.approval import (
     remember_operator_cap,
 )
 from local_operator.interpreter import SAFE_PATH_FLAG
-from local_operator.procstate import detached_popen_kwargs
+from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.session.runtime.types import ENGAGED_ENV, RUNTIME_MODULE
 
 logger = logging.getLogger(__name__)
@@ -595,7 +595,7 @@ def _spawn_runtime(
             procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
         )
     try:
-        process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        process = spawn_disclaimed(
             # TWO INDEPENDENT PROPERTIES ON ONE SPAWN, both required.
             # ``SAFE_PATH_FLAG`` supplies import isolation: this spawn passes
             # no ``cwd=``, so the child inherits the viewer's directory, and
@@ -632,31 +632,21 @@ def _spawn_runtime(
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=subprocess.STDOUT,
-            # The capture file is opened "wb", and `text=False` keeps the
-            # Popen's own generic at `bytes` where the runtime's readers expect
-            # it. (Default is False; stated because the platform kwargs below
-            # are spread from a map the analyzer cannot see through.)
-            text=False,
-            # Detachment is platform-spelled: `start_new_session=True` is a
-            # POSIX-only flag that Windows accepts and ignores, so the runtime
-            # this spawns would keep the viewer's console and die with a Ctrl-C
-            # or a console close — the opposite of the owned, attachable runtime
-            # this function exists to leave behind. See
-            # procstate.detached_popen_kwargs.
+            # DETACHMENT AND THE macOS RESPONSIBILITY DISCLAIM BOTH COME FROM
+            # ``spawn_disclaimed``: it keeps ``detached_popen_kwargs``' job on
+            # this call (own session/group on POSIX, no inherited console on
+            # Windows) and additionally leaves the runtime out of the
+            # responsibility chain this process inherited, so a force-quit of
+            # the desktop app at the root of that chain cannot sweep the
+            # runtime (2026-10-09 incident). Where the platform lacks the
+            # lever it falls back to the old ``Popen`` shape verbatim.
             #
-            # KEPT BESIDE THE HANDOFF'S FILE-DESCRIPTOR KWARGS (merge of
-            # ``origin/main``): the two answer different questions and neither
-            # replaces the other — detachment is about which CONSOLE and process
-            # group the child joins, while ``pass_fds``/``close_fds`` are about
-            # which DESCRIPTOR it inherits. ``detached_popen_kwargs`` sets no
-            # ``close_fds`` (POSIX: ``start_new_session``; Windows:
-            # ``creationflags``), so there is no duplicate keyword here.
-            **detached_popen_kwargs(),
             # ``pass_fds``/``close_fds`` come from the handoff: POSIX passes
-            # exactly the one descriptor and keeps ``close_fds=True`` (the
-            # hardening this file already relied on); Windows cannot use
-            # ``pass_fds`` at all, so it passes an inheritable handle and turns
-            # ``close_fds`` off. The runtime reports which boundary it got.
+            # exactly the one descriptor (kept open in the child) and keeps
+            # ``close_fds=True`` (the hardening this file already relied on);
+            # Windows cannot use ``pass_fds`` at all, so it passes an
+            # inheritable handle and turns ``close_fds`` off. The runtime
+            # reports which boundary it got.
             pass_fds=handoff.pass_fds,
             close_fds=handoff.close_fds,
         )
