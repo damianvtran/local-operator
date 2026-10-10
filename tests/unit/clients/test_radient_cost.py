@@ -134,3 +134,21 @@ def test_spend_kwargs_and_record_conversion() -> None:
     assert record.record_id == "tts:req-1"
     assert record.billing_basis == "not_tracked"
     assert record.amount_micro is None
+
+
+def test_non_finite_amounts_read_as_absent() -> None:
+    """MINOR 1: ``NaN``/``Infinity`` parse as Decimals and RAISE on int().
+
+    The adapter's contract is "absent → None"; a server that sends a
+    non-finite amount must land on that contract rather than throwing out of a
+    tool call.
+    """
+    assert micro_from_amount("NaN") is None
+    assert micro_from_amount("Infinity") is None
+    assert micro_from_amount(float("nan")) is None
+    assert micro_from_amount(float("inf")) is None
+    assert cost_from_payload({"cost": {"v": 1, "amount_usd": "NaN"}}) == RadientCost(
+        amount_micro=None,
+        basis="not_tracked",
+        version=1,
+    )

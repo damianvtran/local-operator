@@ -32,7 +32,7 @@ the record's own leaf module, so a PR-3 route can import it cheaply.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -187,10 +187,15 @@ def micro_from_amount(value: Any) -> int | None:
             amount = Decimal(value)
         else:
             amount = Decimal(str(float(value)))
-    except (InvalidOperation, ValueError, TypeError):
+        if not amount.is_finite():
+            # ``"NaN"``/``"Infinity"`` parse as ``Decimal``s and RAISE on
+            # ``int()``: a non-finite amount is not a figure, so it reads as
+            # absent rather than taking the caller down (review round 1,
+            # MINOR 1 — the same rule ``usd_to_micro`` already keeps).
+            return None
+        return int((amount * 1_000_000).to_integral_value(rounding="ROUND_HALF_UP"))
+    except (InvalidOperation, ValueError, TypeError, ArithmeticError):
         return None
-    micro = int((amount * 1_000_000).to_integral_value(rounding="ROUND_HALF_UP"))
-    return micro
 
 
 def cost_from_payload(payload: Any) -> RadientCost | None:
@@ -218,16 +223,25 @@ def cost_from_headers(headers: Any) -> RadientCost | None:
     if headers is None:
         return None
     items: list[tuple[str, str]] = []
+
+    def _collect(source: Iterable[Any]) -> None:
+        for pair in source:
+            if isinstance(pair, Sequence) and not isinstance(pair, str) and len(pair) == 2:
+                items.append((str(pair[0]), str(pair[1])))
+
     lookup = getattr(headers, "items", None)
     if callable(lookup):
         try:
-            items = [(str(name), str(value)) for name, value in lookup()]
+            # Explicit ``Any``: ``lookup`` came off a value typed ``Any``, and
+            # pyright infers a call on it as ``object``, which then cannot be
+            # iterated (review round 1, M3).
+            found_items: Any = lookup()
         except Exception:  # noqa: BLE001 — an unreadable header block is "absent"
             return None
-    elif isinstance(headers, Sequence):
-        for pair in headers:
-            if isinstance(pair, Sequence) and len(pair) == 2:
-                items.append((str(pair[0]), str(pair[1])))
+        if isinstance(found_items, Iterable):
+            _collect(list(found_items))
+    elif isinstance(headers, Iterable):
+        _collect(headers)
     if not items:
         return None
     found: dict[str, str] = {}

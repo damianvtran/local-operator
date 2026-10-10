@@ -529,14 +529,18 @@ async def execute_generate_image(
         _record_image_channel(
             context,
             route=str(exc.attempts[-1].route if exc.attempts else ""),
-            model="",
+            # The cancel handle already holds what a SUBMIT established, and a
+            # walk that got past submit and then failed still has it: recording
+            # it lets a failed row be reconciled with the server's own usage
+            # record later (QA round 1, Q7).
+            model=str(handle.model or ""),
             units=int(params.num_images),
             amount_usd=None,
             cost_source=None,
             billing_basis=None,
             cost_provenance=None,
             status="failed",
-            request_id="",
+            request_id=str(handle.request_id or ""),
             # Documented presumption (design §4.1): an unreported failure with
             # no charge claim is audited as failed/None and does NOT degrade
             # the knowledge — a failed row with no figure is not an unstated
@@ -610,10 +614,13 @@ def _record_image_channel(
     ``cost_usd`` (and, additively, ``cost_source``/``billing_basis``/
     ``cost_provenance``), and this consumes those labels — any of them absent
     yields ``amount=None`` or the conservative ``estimated`` rather than a
-    guessed charge. Radient's generate-time figure is a QUOTE (estimated);
-    the rung upgrades to the settled ``billed`` figure when it observes one,
-    and the fold's rev machinery carries that upgrade without this site ever
-    seeing both.
+    guessed charge. Radient's generate-time figure is a QUOTE, so a record
+    emitted here is ``estimated`` at ``rev=0``; the settle observation that
+    would bump it to ``billed`` at ``rev=1`` is a wave-2 follow-up (PR #2141's
+    rung change plus a settle poll), and until then a cancelled or quoted row
+    stays ``partial`` on purpose — the fold and the analytics delta that carry
+    the upgrade are already proven, the emitter is what is missing (review
+    round 1, MINOR 4).
 
     Never raises and never blocks a generation: the callback is one bounded
     enqueue on the session's side (``Session.record_channel_spend``), and a

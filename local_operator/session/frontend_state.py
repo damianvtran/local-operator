@@ -1116,7 +1116,11 @@ class FrontendSpendChannelRow(BaseModel):
     provider: str = ""
     model: str = ""
     label: str = ""
-    units: float = 0.0
+    #: ``None`` means NO unit count was recorded (a legacy row recovered
+    #: without one) — the same refusal of a fabricated zero the money fields
+    #: keep, and the panel omits its units note rather than printing ``0``
+    #: (QA round 1, Q6).
+    units: float | None = None
     unit: str = ""
     amount_micro: int | None = None
     knowledge: CostKnowledge = CostKnowledge.UNKNOWN
@@ -1162,9 +1166,13 @@ class FrontendSpendChannels(BaseModel):
     total_micro: int = 0
     knowledge: CostKnowledge = CostKnowledge.UNKNOWN
     #: Money per billing basis: ``billed``/``subscription_api_equivalent``/
-    #: ``estimated`` are micro-USD SUMS, ``not_tracked_calls`` is a COUNT of
-    #: records with no trackable money basis. Subscription dollars stay in
-    #: their own bucket — never added into ``billed``.
+    #: ``estimated`` are micro-USD SUMS, ``basis_not_recorded`` is the money
+    #: whose basis is unknown (this session's own inference plus the children
+    #: bundle), and ``not_tracked_calls`` is a COUNT of rows whose amount could
+    #: not be stated at all. The three money buckets plus
+    #: ``basis_not_recorded`` equal ``total_micro`` — the buckets reconcile
+    #: rather than describing a subset (design round 1, D1). Subscription
+    #: dollars stay in their own bucket — never added into ``billed``.
     by_basis: dict[str, int] = Field(default_factory=dict)
     rows: list[FrontendSpendChannelRow] = Field(default_factory=list)
     children: FrontendSpendChildren = Field(default_factory=FrontendSpendChildren)
@@ -6488,8 +6496,30 @@ class FrontendStateStore:
         registry — but its turn-end checkpoint is unconditional, so the store
         MUST begin from the richest durable state or a single headless turn
         would persist a bare checkpoint over the TUI's spend/duration/title.
+
+        The restored ``spend_channels`` is REBUILT from the session's journal
+        fold rather than trusted from the checkpoint. The checkpoint is written
+        at turn end, so anything that landed after it — the common shape being
+        a quote→settled upgrade observed between turns — is in the journal and
+        the fold but NOT in the checkpointed object; publishing the stale copy
+        made a headless resume disagree with the live owner by exactly that
+        delta (QA round 1, Q1: checkpoint 63000, fold 71000). The fold is
+        already materialised on the session at construction, so this is one
+        pure re-derivation, not a disk read. A pre-feature checkpoint has no
+        object at all, and this lands the fold's object (``tracked=false``,
+        partial) where ``None`` used to sit.
         """
-        return cls(cls._restored_state(session))
+        state = cls._restored_state(session)
+        ledger = {
+            "subagent_cost": state.subagent_cost,
+            "subagent_cost_knowledge": state.subagent_cost_knowledge,
+        }
+        payload = _spend_channels_payload(
+            session, ledger, state.child_costs, getattr(session, "spend", None)
+        )
+        if payload is not None:
+            state = state.model_copy(update={"spend_channels": payload})
+        return cls(state)
 
     @staticmethod
     def _restored_state(session: Any) -> FrontendSessionState:
@@ -6984,11 +7014,20 @@ class FrontendStateStore:
         has no accumulator to speak for it (a pre-ledger session). That fallback
         is today's behaviour, kept exactly: a session with no record must not
         silently lose its ``≥``, and it must not lose the money either.
+
+        The channel object is republished HERE too (see ``_channels_change``):
+        this is the adopt seam AND the off-loop re-price's landing point, and a
+        published total that lags the fold by a settled delta is the surface
+        disagreement the whole feature removes (review round 1, M1).
         """
         restore = getattr(session, "restored_usage", None)
         usage = restore() if callable(restore) else None
         if not isinstance(usage, Usage):
-            return None
+            # Still republish the channels: a session with no restored usage
+            # can hold channel money, and adopt is the only seam it is
+            # guaranteed to pass (QA round 1, Q1).
+            change = self._channels_change(session)
+            return self.mutate(**change) if change else None
         state = self._state
         changes: dict[str, Any] = {
             "last_usage": _usage_with_decode_window(usage),
@@ -7009,7 +7048,41 @@ class FrontendStateStore:
             # ``$—`` branch reachable here instead of an unreachable zero.
             changes["cumulative_parent_cost"] = spend.published_usd()
             changes["cost_knowledge"] = spend.knowledge()
+        changes.update(self._channels_change(session))
         return self.mutate(**changes)
+
+    def _channels_change(
+        self,
+        session: Any,
+        *,
+        ledger: Mapping[str, Any] | None = None,
+        child_costs: Mapping[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """``{"spend_channels": payload}`` for a refresh's change set, or ``{}``.
+
+        EVERY writer that moves money must merge this. The published object is
+        what the band and the panels render, so a writer that updates the
+        cumulative figure or the children ledger WITHOUT republishing the
+        channels object leaves the surfaces disagreeing by exactly that delta —
+        the defect this project exists to remove (review round 1, M1: the
+        re-price, the aside accrual and the 50 ms child refresh each moved money
+        the published total never saw). ``{}`` when this host publishes no
+        ledger, in which case the field keeps whatever it had.
+
+        ``ledger``/``child_costs`` are the caller's FRESH reads when it has
+        them; the state's current values are the fallback, so a writer that
+        does not rescan jobs still republishes against the best figures known.
+        """
+        state = self._state
+        if ledger is None:
+            ledger = {
+                "subagent_cost": state.subagent_cost,
+                "subagent_cost_knowledge": state.subagent_cost_knowledge,
+            }
+        if child_costs is None:
+            child_costs = state.child_costs
+        payload = _spend_channels_payload(session, ledger, child_costs, self._spend_of(session))
+        return {"spend_channels": payload} if payload is not None else {}
 
     def refresh_spend_channels(self, session: Any) -> FrontendUpdate | None:
         """Publish the session's channel ledger, ALONE and cheaply.
@@ -7074,6 +7147,10 @@ class FrontendStateStore:
                     list(state.usage_components) + list(usage.cost_components or [usage])
                 ),
             )
+        # Inference money moved: republish the channels object beside it, or the
+        # band (which reads the published total) never sees the accrual
+        # (review round 1, M1).
+        changes.update(self._channels_change(session))
         return self.mutate(**changes)
 
     def refresh_jobs(self, session: Any) -> FrontendUpdate | None:
@@ -7092,7 +7169,16 @@ class FrontendStateStore:
         selected = getattr(session, "model", None)
         for job in jobs:
             _carry_child_cost(child_costs, job, default_model_label=_label(selected))
-        update = self.mutate(jobs=jobs, child_costs=child_costs, **_ledger_cost(session))
+        ledger = _ledger_cost(session)
+        update = self.mutate(
+            jobs=jobs,
+            child_costs=child_costs,
+            **ledger,
+            # Live child spend moves the published total on this same cadence;
+            # without this the band reads a stale object until the next turn
+            # event while the ledger itself has already moved (review M1).
+            **(self._channels_change(session, ledger=ledger, child_costs=child_costs)),
+        )
         # After the reducer has decided, so the memo hands back the object the
         # state actually holds -- see :meth:`_TrajectoryWindows.adopt_from`.
         self._trajectory_windows.adopt_from(self._state.jobs)
@@ -8146,10 +8232,19 @@ def _spend_channels_payload(
     must keep its legacy rendering rather than paint a zero. The object itself
     is built by :func:`local_operator.session.channel_spend.combine`, the one
     place that sums, so every reader agrees to the micro-USD.
+
+    ``child_records`` carries the LIVE children's channel records (design
+    §5.1): they land in the children block of the total, never in ``rows``,
+    and the fold's ``record_id`` rule is what makes a tree count each record
+    once (QA round 1, Q2).
     """
     fold = getattr(session, "channels", None)
     if fold is None or not hasattr(fold, "rows"):
         return None
+    child_fold = getattr(session, "_child_channel_spend", None)
+    child_records = (
+        child_fold.rows() if child_fold is not None and hasattr(child_fold, "rows") else ()
+    )
     inference = InferenceSnapshot(
         micro=int(getattr(spend, "micro", 0) or 0),
         calls=int(getattr(spend, "calls", 0) or 0),
@@ -8162,7 +8257,10 @@ def _spend_channels_payload(
             fold.rows(),
             inference=inference,
             children=_children_snapshot(ledger, child_costs),
-            tracked=bool(getattr(session, "channels_started", False)),
+            child_records=child_records,
+            tracked=bool(
+                getattr(session, "channels_tracked", getattr(session, "channels_started", False))
+            ),
             lost=bool(getattr(session, "channels_lost", False)),
         )
     except Exception:  # noqa: BLE001 — a publish must never break a refresh

@@ -2369,6 +2369,20 @@ class Transcript:
         back to ``legacy:<entry id>`` when the provider returned no id. Running
         the backfill twice therefore lands the same ids, and the fold (plus the
         Session's append guard) makes the second run a no-op.
+
+        TWO DOCUMENTED LIMITS of recovering from a pre-feature journal, both
+        visible in the rows it emits rather than silently wrong:
+
+        - A base-code image row's ``details`` carried only ``cost_usd`` (the
+          wave-2 ``cost_source``/``billing_basis``/``cost_provenance`` labels
+          arrive with PR #2141), so a recovered ``openai-sub`` image reads
+          ``estimated``/``none`` rather than ``subscription_api_equivalent``:
+          the figure is real, its basis is the best label available for a row
+          that never recorded one.
+        - The details carry no asset count (the caption prose is not parsed),
+          so a recovered image row states NO unit count rather than a zero —
+          the wire row reports ``units: None`` and the panel omits the note
+          (QA round 1, Q6: ``$0.053   0 images`` was a fabricated zero).
         """
         rows: list[dict[str, Any]] = []
         for entry in self._entries:
@@ -2404,6 +2418,13 @@ class Transcript:
                         "detail": "backfilled from the tool row's own cost details",
                     }
                 )
+            # ONLY a real image tool row, matched on the tool name rather than
+            # on "has a provider and a cost_usd key": any OTHER tool that
+            # reports a per-call cost would otherwise be misfiled as an image
+            # (review round 1, MINOR 2 — a `classify` row with a cost became an
+            # image record).
+            if entry.payload.get("tool_name") != "generate_image":
+                continue
             if str(details.get("provider") or "") and "cost_usd" in details:
                 amount = usd_to_micro(details.get("cost_usd"))
                 if amount is None:
@@ -2426,11 +2447,12 @@ class Transcript:
                         "channel": "image",
                         "provider": str(details.get("provider") or ""),
                         "model": str(details.get("model") or ""),
-                        # The legacy details carry no asset count, so the units
-                        # stay 0 rather than guessing: the money is the fact,
-                        # and an invented count would be a second, wrong one.
+                        # The legacy details carry no asset count (see the
+                        # docstring): NO count and no unit spelling, so the
+                        # wire row reports units unknown (None) rather than a
+                        # zero beside a real dollar figure.
                         "units": 0,
-                        "unit": "images",
+                        "unit": "",
                         "amount_micro": amount,
                         "billing_basis": basis,
                         "cost_source": source,

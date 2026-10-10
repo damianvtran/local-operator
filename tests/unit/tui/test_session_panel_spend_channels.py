@@ -1,12 +1,15 @@
-"""The /session "Spend by channel" section: published object only, no local sums.
+"""The /session "Spend by channel" table: published object only, aligned columns.
 
-The section is the panel half of the one rule this feature exists to establish:
-every surface renders the object the backend publishes, and ``None`` (an old
-backend) draws the legacy search block instead of an invented channel view.
+Round 1's design review drove this file's shape: the section is a TABLE with a
+fixed right-aligned money column and its basis tag read per row (D1/D4), an
+unknown total prints ``$—`` rather than a fabricated zero (D2), an untracked
+session states its scope in plain words and carries the lower-bound mark (D3),
+and a row with no recorded unit count prints no count at all (Q6).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from local_operator.session.channel_spend import (
@@ -25,7 +28,9 @@ from local_operator.tui.widgets.session_panel import (
 from tests.unit.tui.test_session_panel import runtime
 
 
-def payload(*, tracked: bool = True) -> FrontendSpendChannels:
+def payload(
+    *, tracked: bool = True, children: ChildrenSnapshot | None = None
+) -> FrontendSpendChannels:
     records = [
         ChannelSpendRecord(
             record_id="image:a",
@@ -50,6 +55,19 @@ def payload(*, tracked: bool = True) -> FrontendSpendChannels:
             amount_micro=None,
             status="ok",
         ),
+        ChannelSpendRecord(
+            # A legacy row recovered without a unit count: QA round 1, Q6.
+            record_id="image:legacy",
+            channel="image",
+            provider="openai-sub",
+            model="gpt-image-2",
+            units=0,
+            unit="",
+            amount_micro=53000,
+            billing_basis="estimated",
+            cost_source="catalogue",
+            status="ok",
+        ),
     ]
     snapshot = combine(
         fold_records(records).rows(),
@@ -68,37 +86,118 @@ def payload(*, tracked: bool = True) -> FrontendSpendChannels:
                 }
             },
         ),
-        children=ChildrenSnapshot(),
+        children=children or ChildrenSnapshot(),
         tracked=tracked,
         lost=False,
     )
     return FrontendSpendChannels.model_validate(snapshot)
 
 
-def rendered(runtime_diag: SessionDiagnostics) -> str:
-    body = _Body(width=100)
+def rendered(runtime_diag: SessionDiagnostics, width: int = 100) -> str:
+    body = _Body(width=width)
     assert _draw_spend_channels(body, runtime_diag) is True
     return body.to_text().plain
 
 
-def test_section_renders_the_published_rows_total_and_basis() -> None:
+def test_section_renders_the_published_table() -> None:
     text = rendered(replace(runtime(), spend_channels=payload()))
     assert "Spend by channel" in text
-    # The total is the published one (inference + channels), marked partial by
-    # the TTS row's unknown amount — never a locally re-summed figure.
-    assert "$0.961 +" in text
-    assert "knowledge: partial" in text
+    # Inference is its own row with the model identity and its own basis tag:
+    # the money is stated, its billing BASIS is the missing part.
     assert "inference · anthropic/claude-sonnet-5-5" in text
-    assert "$0.900" in text
-    assert "image · radient/gpt-image-2" in text and "$0.061" in text
+    assert "$0.900" in text and "basis not recorded · 10 calls" in text
+    # The billed image carries its tag beside its money, and a plan/estimated
+    # recovery row reads as estimated — no "sub-equiv" shorthand anywhere.
+    assert "$0.061" in text and "billed · 1 image" in text
+    legacy_line = next(line for line in text.splitlines() if "openai-sub" in line)
+    assert "$0.053" in legacy_line and "estimated" in legacy_line, legacy_line
+    # The unsized tts row prints $— and a reason, and never a fabricated zero.
     assert "tts · radient/elevenlabs" in text and "$—" in text
-    assert "By basis: billed $0.061 · 2 not tracked" in text, (
-        # Two units: the TTS row's unstated amount, and inference itself — its
-        # route→basis mapping (billed vs subscription) is a PR-3 item, so its
-        # money is in the total and the row, but it cannot be attributed to a
-        # basis bucket yet and the count SAYS so rather than hiding it.
-        "the basis line must account for the money it cannot bucket"
+    assert "price not stated · 420 chars" in text
+    # The Total carries the lower-bound mark and the app's own legend words.
+    assert "$1.01+" in text, text  # mark attached, dim: 61000+53000+900000 micros
+    assert "+ lower bound" in text
+    # The basis footer reconciles: the buckets plus the count account for the
+    # whole total, with no count sitting inside a dollar sentence.
+    assert "By basis:" in text
+    assert "billed $0.061" in text
+    assert "basis not recorded $0.900" in text
+    assert "1 call with no price recorded" in text
+    # No internal vocabulary.
+    assert "knowledge:" not in text
+    assert "sub-equiv" not in text
+    assert "not_tracked" not in text
+
+
+def test_unknown_total_prints_the_unknown_cell_not_zero() -> None:
+    """D2: an unstateable total is ``$—``; only a real zero may print $0.0000."""
+    only_unsized = [
+        ChannelSpendRecord(
+            record_id="tts:x",
+            channel="tts",
+            provider="radient",
+            model="elevenlabs",
+            units=12,
+            unit="chars",
+            amount_micro=None,
+            status="ok",
+        )
+    ]
+    snapshot = combine(
+        fold_records(only_unsized).rows(),
+        inference=InferenceSnapshot(),
+        children=ChildrenSnapshot(),
+        tracked=True,
+        lost=False,
     )
+    text = rendered(
+        replace(runtime(), spend_channels=FrontendSpendChannels.model_validate(snapshot))
+    )
+    assert "$0.0000" not in text, text
+    assert "$—" in text
+
+
+def test_untracked_session_states_its_scope_and_marks_the_total() -> None:
+    """D3: the notice names the missing channels; the total is a lower bound."""
+    text = rendered(replace(runtime(), spend_channels=payload(tracked=False)))
+    assert "wasn't recorded for this conversation" in text
+    assert "Channels not tracked" not in text
+    assert "+ lower bound" in text, "an untracked total can never read as exact"
+    assert "knowledge: exact" not in text
+
+
+def test_row_without_a_unit_count_prints_no_count() -> None:
+    """Q6: ``$0.053   0 images`` was a fabricated zero; the note is omitted."""
+    text = rendered(replace(runtime(), spend_channels=payload()))
+    assert not re.search(r"\b0 (images|chars|reads|searches|calls)\b", text), text
+    line = next(line for line in text.splitlines() if "openai-sub" in line)
+    assert "$0.053" in line and "images" not in line, line
+
+
+def test_money_column_is_aligned_across_rows() -> None:
+    """D4: every money cell ends at one column; the Total's included."""
+    text = rendered(replace(runtime(), spend_channels=payload()))
+    lines = [line for line in text.splitlines() if "$" in line and not line.startswith("By basis")]
+    ends = set()
+    for line in lines:
+        start = line.rfind("$")
+        ends.add(start + len(line[start:].split(" ")[0]))
+    assert len(ends) == 1, f"ragged money column: {sorted(ends)} in {lines}"
+
+
+def test_children_get_their_own_row_when_they_carry_money() -> None:
+    """D7b: the children total is a row, in the user's words, not a footer."""
+    text = rendered(
+        replace(
+            runtime(),
+            spend_channels=payload(
+                children=ChildrenSnapshot(total_micro=210000, knowledge="floor")
+            ),
+        )
+    )
+    assert "subagents · included in total" in text
+    assert "$0.210" in text
+    assert "floor knowledge" not in text
 
 
 def test_section_sheds_without_a_published_object() -> None:
@@ -107,7 +206,40 @@ def test_section_sheds_without_a_published_object() -> None:
     assert body.to_text().plain.strip() == "", "no published object means no section"
 
 
-def test_untracked_session_says_so_and_keeps_its_rows() -> None:
-    text = rendered(replace(runtime(), spend_channels=payload(tracked=False)))
-    assert "Channels not tracked for this conversation" in text
-    assert "image · radient/gpt-image-2" in text, "recovered rows still render"
+def test_notes_shed_whole_at_narrow_widths() -> None:
+    """D6: at 80 cells the long basis tag sheds rather than cropping mid-word."""
+    text = rendered(
+        replace(
+            runtime(),
+            spend_channels=FrontendSpendChannels.model_validate(
+                combine(
+                    fold_records(
+                        [
+                            ChannelSpendRecord(
+                                record_id="image:sub",
+                                channel="image",
+                                provider="openai-sub",
+                                model="gpt-image-2-very-long-id",
+                                units=1,
+                                unit="images",
+                                amount_micro=53000,
+                                billing_basis="subscription_api_equivalent",
+                                cost_source="catalogue",
+                                status="ok",
+                            )
+                        ]
+                    ).rows(),
+                    inference=InferenceSnapshot(),
+                    children=ChildrenSnapshot(),
+                    tracked=True,
+                    lost=False,
+                )
+            ),
+        ),
+        width=80,
+    )
+    for line in text.splitlines():
+        assert not line.endswith("("), line
+        # A crop is a line that cuts the parenthetical mid-word; the full
+        # spelling is fine wherever it appears whole.
+        assert "(API price" not in line or "(API price)" in line, line

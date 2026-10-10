@@ -54,6 +54,17 @@ Additive on `session_spend`-era state (`extra="allow"` keeps old readers
 tolerant). Absent/`null` = "this build does not publish it"; a UI then renders
 its legacy inference-only view. Gate new UI on `features.cost_channels >= 1`.
 
+Changed in the round-1 remediation, both additive to the v1 shape:
+- `by_basis.basis_not_recorded` is the money whose BASIS is unknown (the
+  session's own inference plus the children bundle); the three money
+  buckets plus this one equal `total_micro`. `not_tracked_calls` counts
+  rows whose amount could not be stated at all.
+- A row's `units` may be `null` when no unit count was recorded (a legacy
+  row recovered without one) — render nothing rather than `0`.
+- `tracked: false` implies `knowledge` is at most `partial`: an untracked
+  total can never be exact. `children` includes channel records relayed
+  from live child sessions.
+
 ```json
 {
   "version": 1,
@@ -64,7 +75,8 @@ its legacy inference-only view. Gate new UI on `features.cost_channels >= 1`.
     "billed": 53000,
     "subscription_api_equivalent": 53000,
     "estimated": 10000,
-    "not_tracked_calls": 2
+    "basis_not_recorded": 900000,
+    "not_tracked_calls": 1
   },
   "rows": [
     {
@@ -115,13 +127,13 @@ its legacy inference-only view. Gate new UI on `features.cost_channels >= 1`.
       ]
     },
     {
-      "channel": "read",
-      "provider": "deepseek:read",
+      "channel": "search",
+      "provider": "tavily",
       "model": "",
       "label": "",
       "units": 1.0,
-      "unit": "reads",
-      "amount_micro": 2000,
+      "unit": "searches",
+      "amount_micro": 8000,
       "knowledge": "exact",
       "basis": [
         "estimated"
@@ -131,13 +143,13 @@ its legacy inference-only view. Gate new UI on `features.cost_channels >= 1`.
       ]
     },
     {
-      "channel": "search",
-      "provider": "tavily",
+      "channel": "read",
+      "provider": "deepseek:read",
       "model": "",
       "label": "",
       "units": 1.0,
-      "unit": "searches",
-      "amount_micro": 8000,
+      "unit": "reads",
+      "amount_micro": 2000,
       "knowledge": "exact",
       "basis": [
         "estimated"
