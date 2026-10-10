@@ -27,20 +27,24 @@ def test_shipped_wire_namespaces_exist() -> None:
     # M0 shipped the six `wire.*` namespace files as STUBS (RFC §5): the files
     # exist so later slices populate them. `wire.slash` was populated by the S2
     # extraction slice and `wire.settings` by S1; the rest stay empty until
-    # their own slices land.
+    # their own slices land. The TUI wave writes `tui.*` files instead — the
+    # first (`tui.welcome`, T1) is checked by PRESENCE here and by content in
+    # its own slice test, so this list does not churn per TUI slice.
     assert catalogues.locales() == ("en",)
-    assert catalogues.namespaces("en") == (
+    assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.exec",
         "wire.incidents",
         "wire.notices",
         "wire.settings",
         "wire.slash",
-    )
+    }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
+    assert "tui.welcome" in catalogues.namespaces("en")
+    assert catalogues.load_catalogue("en", "tui.welcome") != {}
 
 
 def test_hash_is_over_file_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
