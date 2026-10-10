@@ -307,6 +307,16 @@ async def execute_web_read(
         except Exception as error:
             return _result(tool_call_id, f"Search before read failed: {error}", error=True)
         SEARCH_SPEND.record(session_id, response.provider, response.cost)
+        # The same figure into the channel ledger every surface reads (see
+        # ``web_search/tool.py``; ``SEARCH_SPEND`` is now a read model only).
+        from local_operator.session.channel_spend import emit_web_spend
+
+        emit_web_spend(
+            getattr(context, "record_channel_spend", None),
+            channel="search",
+            provider=response.provider,
+            usd=response.cost.usd if response.cost else None,
+        )
         PAGE_CONTEXTS.attach(session_id, response.page_context_id)
         page_context = PAGE_CONTEXTS.for_session(session_id)
 
@@ -385,6 +395,16 @@ async def execute_web_read(
                 None,
                 kind="read",
             )
+            # The channel ledger gets the SAME unpriced row, so the two ledgers
+            # cannot disagree about a suspected charge.
+            from local_operator.session.channel_spend import emit_web_spend
+
+            emit_web_spend(
+                getattr(context, "record_channel_spend", None),
+                channel="read",
+                provider=READ_LEDGER_PROVIDER,
+                usd=None,
+            )
             return _result(tool_call_id, "Web read aborted.", error=True)
         except Exception as error:
             return _result(tool_call_id, f"Web read failed: {error}", error=True)
@@ -415,6 +435,15 @@ async def execute_web_read(
     # which is the opposite of why the key carries a ``:read`` suffix at all.
     entry = SEARCH_SPEND.record(session_id, READ_LEDGER_PROVIDER, cost, searches=1, kind="read")
     session_totals = SEARCH_SPEND.session(session_id)
+    # ... and the channel ledger, the one every surface reads.
+    from local_operator.session.channel_spend import emit_web_spend
+
+    emit_web_spend(
+        getattr(context, "record_channel_spend", None),
+        channel="read",
+        provider=READ_LEDGER_PROVIDER,
+        usd=cost.usd if cost else None,
+    )
 
     refused = answer.strip().upper().startswith(NOT_IN_PAGES)
     known = set(page_context.urls)

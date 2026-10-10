@@ -268,6 +268,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "(beside ``exec-jobs.jsonl``), history about a SWEEP, never a file in a session",
     ),
     "local_operator/config.py": (1, "``config.yml``, the store's configuration file"),
+    "local_operator/clients/radient_cost.py": (
+        1,
+        "``HEADER_PREFIX`` (``x-radient-cost-``) prefixes an HTTP RESPONSE header "
+        "name: the adapter reads the media server's cost block off the wire, and "
+        "nothing in this module is an entry of a session directory",
+    ),
     # ``STORE_DIRNAME``/``_SESSIONS_DIRNAME`` are the store ROOT's name and the
     # conversations subtree under it, not entries inside a session: they are the
     # names ``paths.py`` declares for the same directories (see the entry above),
