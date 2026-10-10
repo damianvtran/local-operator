@@ -36,7 +36,7 @@ from __future__ import annotations
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Sequence, cast
+from typing import Any, Sequence, cast
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -64,6 +64,7 @@ from local_operator.tui.costs import (
     combined_spend,
     cost_label,
     cost_note_rungs,
+    format_usd,
     format_usd_exact,
 )
 from local_operator.tui.widgets.analytics_panel import (
@@ -187,6 +188,14 @@ class SessionDiagnostics:
     #: folded into ``Est. cost`` for that reason: the two are separately truthful
     #: and a merged row could state neither.
     search_spend: SearchSpendSnapshot | None = None
+    #: The PUBLISHED ``spend_channels`` object (an old runtime has none). When
+    #: present it REPLACES the search block above: one object the backend
+    #: computes, which the band, this screen, the phone and the Electron strip
+    #: all render, so no surface sums locally (design §5.1). Typed ``Any``
+    #: because it is a wire object this panel renders defensively (``getattr``
+    #: with defaults) rather than a model it should hard-depend on; ``None``
+    #: keeps the legacy block, which is what an old backend gets.
+    spend_channels: Any | None = None
 
     @classmethod
     def capture(cls, session: SessionProtocol) -> SessionDiagnostics:
@@ -913,18 +922,164 @@ def build_session_report(
     return body.to_text()
 
 
-def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
-    """This session's search spend, as its own attributed block.
+def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
+    """The published per-channel spend block, when the backend publishes one.
 
-    Drawn from the RUNTIME snapshot rather than from ``report``, so it survives
-    a frame whose ledger read failed or found nothing: it is not in that ledger
-    (see :class:`SessionDiagnostics.search_spend`), and a session that spent
-    money on retrieval must not read as free because a different read broke.
+    Returns True when it drew the section. Read ONLY from the object the
+    backend publishes (``spend_channels``): the point of publishing it is that
+    no surface sums locally, so this screen renders the same total and the
+    same marks the band and the phone do (design §5.1). A row's
+    ``amount_micro`` of ``None`` means the money could not be stated and
+    renders ``$—``, never ``$0``; a ``partial``/``floor`` row keeps the panels'
+    dim ``+``.
 
-    Nothing at all is drawn when the session has no searches, which is the
-    ordinary case for most sessions, and matches the screen's rule of shedding a
-    row whose only content is the absence of a problem.
+    Sheds entirely (returning False, so the caller draws the legacy search
+    block) when the host publishes nothing, or when there is no money and no
+    rows: the screen drops a section whose only content is the absence of a
+    problem.
     """
+    published = runtime.spend_channels
+    if published is None:
+        return False
+    rows = [_row_mapping(row) for row in list(getattr(published, "rows", None) or [])]
+    total_micro = _as_micro(getattr(published, "total_micro", None))
+    if not rows and not total_micro:
+        return False
+
+    body.header("Spend by channel", "this session · all sources")
+    knowledge = str(getattr(published, "knowledge", "unknown"))
+    total_text = format_usd(total_micro) if total_micro is not None else UNKNOWN_COST_CELL
+    if knowledge in {"partial", "floor"} and total_micro:
+        total_text += " +"
+    body.kv("Total", total_text, note="knowledge: " + knowledge)
+    if not bool(getattr(published, "tracked", False)):
+        body.note(
+            "Channels not tracked for this conversation: the total covers model turns "
+            "only, and channel spend from before tracking cannot be recovered in full."
+        )
+    for row in rows:
+        name = _channel_row_label(row)
+        amount = _as_micro(row.get("amount_micro"))
+        amount_text = format_usd(amount) if amount is not None else UNKNOWN_COST_CELL
+        if amount is not None and str(row.get("knowledge") or "") in {"partial", "floor"}:
+            amount_text += " +"
+        units = row.get("units")
+        unit = str(row.get("unit") or "")
+        note = f"{units:g} {unit}".strip() if isinstance(units, (int, float)) else unit
+        _channel_row(body, name, amount_text, note, dim_value=amount is None)
+    basis = getattr(published, "by_basis", None)
+    if isinstance(basis, dict):
+        parts: list[str] = []
+        for key, label in (
+            ("billed", "billed"),
+            ("subscription_api_equivalent", "sub-equiv"),
+            ("estimated", "est"),
+        ):
+            value = _as_micro(basis.get(key))
+            if value:
+                parts.append(f"{label} {format_usd(value)}")
+        not_tracked = basis.get("not_tracked_calls")
+        if isinstance(not_tracked, int) and not_tracked:
+            parts.append(f"{not_tracked} not tracked")
+        if parts:
+            body.note("By basis: " + " · ".join(parts))
+    children = getattr(published, "children", None)
+    child_micro = _as_micro(getattr(children, "total_micro", None))
+    if child_micro:
+        child_knowledge = str(getattr(children, "knowledge", ""))
+        body.note(f"Children: {format_usd(child_micro)} ({child_knowledge} knowledge)")
+    return True
+
+
+def _channel_row(body: _Body, name: str, value: str, note: str, *, dim_value: bool) -> None:
+    """A channel row: like ``_Body.kv``, but a LONG name cannot eat the value.
+
+    ``_Body.kv`` pads the name to a fixed 22-cell column and simply runs on when
+    the name is longer — and a channel identity like
+    ``inference · anthropic/claude-sonnet-5-5`` is far longer, so the captured
+    frame rendered ``…sonnet-5-5$0.780`` with no gap between the label and its
+    money. This keeps the same column for names that fit it, and otherwise
+    guarantees a two-space gap by truncating the NAME (never the value) to
+    whatever the frame leaves after the money and its note.
+    """
+    row = Text()
+    note_text = note if (note and body.width >= _NOTE_MIN) else ""
+    if 2 + len(name) <= 24:
+        row.append(f"  {name:<22}", style=semantic_style("dim"))
+    else:
+        reserve = len(value) + 4 + (len(note_text) + 2 if note_text else 0)
+        budget = max(12, body.width - reserve - 2)
+        shown = name if len(name) <= budget else name[: max(1, budget - 1)] + "…"
+        row.append(f"  {shown}  ", style=semantic_style("dim"))
+    row.append(
+        f"{value:<{_VALUE_CELL}}",
+        style=semantic_style("dim" if dim_value else "fg"),
+    )
+    if note_text:
+        row.append(f"  {note_text}", style=semantic_style("dim"))
+    row.truncate(body.width, overflow="crop")
+    body.lines.append(row)
+
+
+def _row_mapping(row: Any) -> dict[str, Any]:
+    """One published row as a plain mapping, whatever shape it arrived in.
+
+    The panel receives the object over the frontend-state wire (a JSON dict) or
+    straight from the model (a pydantic instance); both must render the same,
+    so the conversion lives here rather than at each field read.
+    """
+    if isinstance(row, dict):
+        return row
+    dump = getattr(row, "model_dump", None)
+    if callable(dump):
+        value = dump(mode="json")
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _as_micro(value: Any) -> int | None:
+    """``value`` as integer micro-USD, or ``None`` when no figure was stated.
+
+    ``None`` here means the wire stated no amount — the same fact the backend's
+    ``amount_micro: None`` carries — and the renderer shows ``$—`` rather than a
+    confident ``$0.0000``. ``bool`` is rejected on purpose (``True`` is an
+    ``int`` in Python and must not render as one micro-dollar).
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _channel_row_label(row: dict[str, Any]) -> str:
+    """The row's display name: channel, and the serving identity when stated."""
+    channel = str(row.get("channel") or "other")
+    label = str(row.get("label") or "")
+    if channel == "inference":
+        return f"inference · {label}" if label else "inference"
+    ident = "/".join(
+        part for part in (str(row.get("provider") or ""), str(row.get("model") or "")) if part
+    )
+    return f"{channel} · {ident}" if ident else channel
+
+
+def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
+    """This session's retrieval spend, as its own attributed block.
+
+    PREFERS the published ``spend_channels`` object when the backend has one:
+    then this screen renders the same object the band and every other surface
+    render, and the search money arrives inside it (the legacy block below is
+    drawn only when there is no published object, i.e. an old backend or a
+    reduced host). Either way the section survives a frame whose ledger read
+    failed: it is not in that ledger, and a session that spent money on
+    retrieval must not read as free because a different read broke.
+
+    Nothing at all is drawn when the session has no retrieval spend, which is
+    the ordinary case for most sessions, and matches the screen's rule of
+    shedding a row whose only content is the absence of a problem.
+    """
+    if _draw_spend_channels(body, runtime):
+        return
     snapshot = runtime.search_spend
     # ``count``, not ``searches``: a conversation whose only retrieval spend is
     # READS has money to show, and guarding on searches drew nothing here while

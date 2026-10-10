@@ -476,6 +476,23 @@ async def execute_generate_image(
             # branch renders it as "already finished" off this pair (Q7).
             details["error"] = _CANCEL_CONFLICT_SENTENCE
             details["error_type"] = "media_already_completed"
+        _record_image_channel(
+            context,
+            route=str(handle.provider or ""),
+            model=str(handle.model or ""),
+            units=int(params.num_images),
+            amount_usd=None,
+            cost_source=None,
+            billing_basis=None,
+            cost_provenance=None,
+            status="cancelled",
+            request_id=str(handle.request_id or ""),
+            detail=(
+                "cancelled after the generation completed; no settled figure was observed"
+                if receipt == "already_completed"
+                else "cancelled before settlement was observed; the job may still be charged"
+            ),
+        )
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name="generate_image",
@@ -491,8 +508,41 @@ async def execute_generate_image(
         _emit_cancel_stage(progress, handle, "cancelling", "Cancelling the generation…")
         receipt = await image_rungs.best_effort_cancel(handle)
         _emit_cancel_stage(progress, handle, "cancelled", _cancel_receipt(receipt))
+        # Same record as the signal path above: a cancelled job may still be
+        # charged, so an unsettled cancel stays amount=None and the total
+        # degrades to partial until a later poll settles it (design §4.1).
+        _record_image_channel(
+            context,
+            route=str(handle.provider or ""),
+            model=str(handle.model or ""),
+            units=int(params.num_images),
+            amount_usd=None,
+            cost_source=None,
+            billing_basis=None,
+            cost_provenance=None,
+            status="cancelled",
+            request_id=str(handle.request_id or ""),
+            detail="cancelled by the loop; the job may still be charged",
+        )
         raise
     except ImageGenerationUnavailable as exc:
+        _record_image_channel(
+            context,
+            route=str(exc.attempts[-1].route if exc.attempts else ""),
+            model="",
+            units=int(params.num_images),
+            amount_usd=None,
+            cost_source=None,
+            billing_basis=None,
+            cost_provenance=None,
+            status="failed",
+            request_id="",
+            # Documented presumption (design §4.1): an unreported failure with
+            # no charge claim is audited as failed/None and does NOT degrade
+            # the knowledge — a failed row with no figure is not an unstated
+            # amount, it is evidence of nothing charged.
+            detail="walk exhausted with no charged figure reported; presumed unbilled",
+        )
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name="generate_image",
@@ -520,7 +570,95 @@ async def execute_generate_image(
             ),
         )
 
-    return _generated_result(tool_call_id, params, outcome, handle)
+    result = _generated_result(tool_call_id, params, outcome, handle)
+    _record_image_channel(
+        context,
+        route=str(outcome.route),
+        model=str(outcome.model or ""),
+        units=len(outcome.assets) or int(params.num_images),
+        amount_usd=outcome.cost_usd,
+        # ``getattr`` on the three additive labels: a build that predates the
+        # wave-2 amendment carries ``cost_usd`` alone, and the adapter must
+        # consume what is there rather than demand a field a deployed runtime
+        # does not have.
+        cost_source=getattr(outcome, "cost_source", None),
+        billing_basis=getattr(outcome, "billing_basis", None),
+        cost_provenance=getattr(outcome, "cost_provenance", None),
+        status="ok",
+        request_id=str(outcome.generation_id or ""),
+    )
+    return result
+
+
+def _record_image_channel(
+    context: ToolContext | None,
+    *,
+    route: str,
+    model: str,
+    units: int,
+    amount_usd: Any,
+    cost_source: Any,
+    billing_basis: Any,
+    cost_provenance: Any,
+    status: str,
+    request_id: str,
+    detail: str = "",
+) -> None:
+    """Hand ONE generation's money to the channel ledger, best-effort.
+
+    The emission half of the design's image row: wave-2 already reports
+    ``cost_usd`` (and, additively, ``cost_source``/``billing_basis``/
+    ``cost_provenance``), and this consumes those labels — any of them absent
+    yields ``amount=None`` or the conservative ``estimated`` rather than a
+    guessed charge. Radient's generate-time figure is a QUOTE (estimated);
+    the rung upgrades to the settled ``billed`` figure when it observes one,
+    and the fold's rev machinery carries that upgrade without this site ever
+    seeing both.
+
+    Never raises and never blocks a generation: the callback is one bounded
+    enqueue on the session's side (``Session.record_channel_spend``), and a
+    host with no ledger leaves the callback ``None`` — the documented
+    "channels not tracked here" case, which skips QUIETLY.
+    """
+    callback = getattr(context, "record_channel_spend", None) if context is not None else None
+    if not callable(callback):
+        return
+    try:
+        from local_operator.session.channel_spend import (
+            ChannelSpendRecord,
+            map_image_cost_labels,
+            new_record_id,
+            now_ms,
+            usd_to_micro,
+        )
+
+        basis, source, price_version = map_image_cost_labels(
+            route=route,
+            cost_source=cost_source,
+            billing_basis=billing_basis,
+            cost_provenance=cost_provenance,
+            has_amount=amount_usd is not None,
+        )
+        callback(
+            ChannelSpendRecord(
+                record_id=new_record_id("image", request_id),
+                ts_ms=now_ms(),
+                channel="image",
+                provider=route,
+                model=model,
+                units=float(units),
+                unit="images",
+                amount_micro=usd_to_micro(amount_usd),
+                billing_basis=basis,
+                cost_source=source,
+                price_version=price_version,
+                status=status,
+                request_id=request_id,
+                detail=detail,
+            )
+        )
+    except Exception:  # noqa: BLE001 — a lost spend row is not a failed generation
+        logger.debug("image channel-spend emission failed", exc_info=True)
 
 
 def _generated_result(

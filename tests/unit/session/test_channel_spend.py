@@ -520,3 +520,77 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
 def test_custom_type_literal_is_pinned() -> None:
     """The transcript type is a compatibility surface; a rename is a migration."""
     assert CHANNEL_SPEND_CUSTOM_TYPE == "session_channel_spend.v1"
+
+
+# -- SessionSpend.by_identity (the additive inference split) -----------------
+
+
+def test_by_identity_splits_accruals_and_survives_a_round_trip() -> None:
+    from local_operator.session.spend import SessionSpend
+
+    spend = SessionSpend()
+    spend.accrue(1_000_000, {"provider": "anthropic", "model_id": "claude"})
+    spend.accrue(500_000, {"provider": "anthropic", "model_id": "claude"})
+    spend.accrue(None, {"provider": "deepseek", "model_id": "r1"})
+    assert spend.by_identity["anthropic/claude"] == {
+        "provider": "anthropic",
+        "model_id": "claude",
+        "micro": 1_500_000,
+        "calls": 2,
+        "unpriced": 0,
+    }
+    assert spend.by_identity["deepseek/r1"]["unpriced"] == 1
+    assert spend.micro == 1_500_000 and spend.calls == 3 and spend.unpriced_calls == 1
+
+    recalled = SessionSpend.from_details(spend.to_details())
+    assert recalled is not None and recalled.by_identity == spend.by_identity
+
+
+def test_by_identity_caps_named_entries_and_folds_the_rest_into_other() -> None:
+    from local_operator.session.spend import IDENTITY_CAP, SessionSpend
+
+    spend = SessionSpend()
+    for index in range(IDENTITY_CAP + 3):
+        spend.accrue(1000, {"provider": "p", "model_id": f"m{index}"})
+    named = [key for key in spend.by_identity if key != "other"]
+    assert len(named) == IDENTITY_CAP
+    assert spend.by_identity["other"]["calls"] == 3
+    assert sum(entry["micro"] for entry in spend.by_identity.values()) == spend.micro
+
+
+def test_by_identity_moves_with_a_correction() -> None:
+    from local_operator.session.spend import SessionSpend
+
+    spend = SessionSpend()
+    index = spend.accrue(1000, {"provider": "p", "model_id": "m"})
+    assert spend.correct(index, 5000) == 4000
+    assert spend.by_identity["p/m"]["micro"] == 5000
+    index = spend.accrue(None, {"provider": "p", "model_id": "m"})
+    assert spend.correct(index, 2000) == 2000
+    assert spend.by_identity["p/m"] == {
+        "provider": "p",
+        "model_id": "m",
+        "micro": 7000,
+        "calls": 2,
+        "unpriced": 0,
+    }
+
+
+def test_from_details_accepts_a_row_without_by_identity() -> None:
+    """An old ``session_spend.v1`` row reads as no breakdown, not as an error."""
+    from local_operator.session.spend import SessionSpend
+
+    old = {
+        "version": 1,
+        "micro": 2000000,
+        "calls": 4,
+        "priced_calls": 4,
+        "unpriced_calls": 0,
+        "floor": False,
+        "rebuilt": False,
+        "writer": "1:1",
+    }
+    recalled = SessionSpend.from_details(old)
+    assert recalled is not None
+    assert recalled.micro == 2_000_000
+    assert recalled.by_identity == {}

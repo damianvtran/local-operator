@@ -5196,6 +5196,14 @@ class OperatorApp(App[None]):
         #: This session's OWN spend, accumulated per turn. The number the band
         #: shows is this plus every child's — see :meth:`_spend_total`.
         self._total_cost = 0.0
+        #: The LAST published ``spend_channels`` object this app applied (see
+        #: ``_apply_frontend_state``), or ``None`` when the runtime does not
+        #: publish one. When present it is the AUTHORITY for the band's money
+        #: (total and marks) and for ``/session``'s channel section: one number
+        #: computed in one place, so the band, the panel, the phone and the
+        #: Electron strip cannot disagree (design §5.1). ``None`` keeps every
+        #: reader on its legacy path, which is what an old runtime gets.
+        self._spend_channels_state: Any | None = None
         #: Delegated spend, keyed by job id and holding the LAST cost observed
         #: for that child. A dict rather than a running sum because a child's
         #: figure grows while it works, so each tick has to replace its entry
@@ -12345,6 +12353,7 @@ class OperatorApp(App[None]):
             "value",
             "unknown",
         )
+        self._spend_channels_state = getattr(state, "spend_channels", None)
         if cost is not None:
             self._total_cost = float(getattr(state, "cumulative_parent_cost", 0.0) or 0.0)
             self._subagent_costs = self._frontend_child_costs(state)
@@ -12402,20 +12411,7 @@ class OperatorApp(App[None]):
             context_tokens=getattr(state, "context_tokens", None),
             context_is_estimate=getattr(state, "context_is_estimate", None),
             context_window=getattr(state, "context_window", None),
-            cost=(
-                self._spend_text((cost or 0.0) + search_usd)
-                if cost is not None
-                else (
-                    # Model money unpriceable, search money real: the cell can
-                    # only show the half it knows, so it carries the band's
-                    # floor mark (``≥``). Showing a partial figure as if it were
-                    # the total is the lie
-                    # ``_spend_text``'s docstring calls the more expensive one.
-                    self._spend_text(search_usd, floor=True)
-                    if search_usd
-                    else (UNKNOWN_COST_CELL if billed_unknown else None)
-                )
-            ),
+            cost=self._band_cost_cell(cost, search_usd, billed_unknown),
             # A local opener label is DISPLAY state until a generated title is
             # accepted. Canonical snapshots correctly keep their persisted title
             # empty during that interval, but must not turn "empty in storage"
@@ -44932,6 +44928,11 @@ class OperatorApp(App[None]):
             # read inside ``capture`` -- the panel then renders it even on a
             # frame whose ledger read failed.
             search_spend=self._session_search_spend(),
+            # The published channel object, attached on the same pass as the
+            # band's floor mark: it is the one source the section renders, and
+            # ``None`` (an old runtime) makes the panel draw the legacy search
+            # block instead.
+            spend_channels=self._spend_channels_state,
         )
         # Own a visible, cancellable surface before starting IO. A late disk
         # result must update this surface, never push over a user's new draft.
@@ -53706,7 +53707,19 @@ class OperatorApp(App[None]):
         spend = self._spend_total() if total is None else total
         if not spend:
             return ""
-        is_floor = self._spend_is_floor or self._search_spend_is_floor() if floor is None else floor
+        published = self._spend_channels_state if total is None else None
+        if published is not None:
+            # The marks are the BACKEND's knowledge, not a re-derivation: a
+            # partial or floor total is a lower bound on every surface, and
+            # ``exact`` is the only state that may print an unmarked figure.
+            is_floor = str(getattr(published, "knowledge", "unknown")) in {
+                "floor",
+                "partial",
+            }
+        else:
+            is_floor = (
+                self._spend_is_floor or self._search_spend_is_floor() if floor is None else floor
+            )
         return f"{RESTORED_COST_PREFIX if is_floor else ''}{format_cost(spend)}"
 
     @staticmethod
@@ -53718,6 +53731,39 @@ class OperatorApp(App[None]):
             cost = getattr(state, "subagent_cost", None)
             return {"owner-ledger": cost} if cost is not None else {}
         return dict(getattr(state, "child_costs", {}) or {})
+
+    def _band_cost_cell(self, cost: Any, search_usd: float, billed_unknown: bool) -> str | None:
+        """The band's money cell: the published total when there is one.
+
+        The published ``spend_channels`` object spans this session's inference,
+        its channels AND its children, computed in ONE backend place — so when
+        it is present the cell is its ``total_micro`` with marks from its
+        ``knowledge``, rather than the local model+search sum this path used
+        before. Two sums is how the band and the other surfaces came to
+        disagree (design §5.1).
+
+        ``None`` (no published object — an old runtime, or a store that has not
+        republished yet) keeps the legacy arithmetic VERBATIM, including the
+        ``$—`` for billed-but-unpriceable money and the floor mark on a
+        search-only figure. ``knowledge == "unknown"`` on the published object
+        means "nothing is stateable", which renders exactly as the legacy
+        unpriceable case does: ``$—`` when there was billed activity, nothing at
+        all when there was none (the band's zero policy).
+        """
+        published = self._spend_channels_state
+        if published is not None:
+            if str(getattr(published, "knowledge", "unknown")) == "unknown":
+                return UNKNOWN_COST_CELL if billed_unknown else None
+            return self._spend_text() or None
+        if cost is not None:
+            return self._spend_text((cost or 0.0) + search_usd)
+        if search_usd:
+            # Model money unpriceable, search money real: the cell can only
+            # show the half it knows, so it carries the band's floor mark
+            # (``≥``). Showing a partial figure as if it were the total is the
+            # lie ``_spend_text``'s docstring calls the more expensive one.
+            return self._spend_text(search_usd, floor=True)
+        return UNKNOWN_COST_CELL if billed_unknown else None
 
     def _spend_total(self) -> float:
         """Everything this session has spent: its own turns, its children's, and
@@ -53752,7 +53798,17 @@ class OperatorApp(App[None]):
         ledger keys by the session that asked, a child's id is its own, and no
         parent-to-child map for it exists here. ``/analytics``' process-wide total
         is where a tree's search spend is complete; see ``_process_search_spend``.
+
+        THE PUBLISHED OBJECT WINS when the runtime has one: its
+        ``total_micro`` already spans this session's inference, its channels
+        AND its children, computed in one backend place, so the band simply
+        renders it rather than summing locally. A runtime that publishes
+        nothing (an old build, a reduced host) keeps the legacy sum below
+        verbatim.
         """
+        published = self._spend_channels_state
+        if published is not None:
+            return float(getattr(published, "total_micro", 0) or 0) / 1_000_000.0
         return (
             self._total_cost + sum(self._subagent_costs.values()) + self._session_search_spend().usd
         )
