@@ -1416,6 +1416,13 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
    feeding errors into turn 2). Not in v1, because it would need a browser engine in the
    runtime.
 9. Unifying the UI's `mentioned-files.ts` with core `supplements/candidates.py`.
+10. **F9 — the prelude's table title (`div.ttl`).** The vendored prelude
+    (`local_operator/supplements/prelude/prelude.src.js`) still renders the `div.ttl` table
+    title, which contradicts §2.8's no-chrome rule; it is the prelude/engine lane's fix, and it
+    must strip `.ttl`, rebuild the minified pair per `prelude/BUILD.md`, regenerate the prelude
+    fixture(s) and the Appendix C spike reference (its size figures and rendered shot), and bump
+    `PRELUDE_VERSION` so served documents re-derive. **Re-measure the size budget after the
+    strip** — Appendix C's figure is a measured artifact, not a target to assume.
 
 ---
 
@@ -1584,6 +1591,9 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
   `measure.py` which re-derives every size figure) — exists in the architect
   scratchpad and is attached to the C0 PR as the starting point; the round-1 remediation
   **and the round-2 label-layout fix** are folded in.
+- **No-chrome status:** the "no title line" claims below are target state, not the pair's
+  current output — the pair still draws the `div.ttl` table title, as does the spike's rendered
+  shot; §8 F9.
 - **Size:** 2,044 B CSS + 8,180 B JS raw (minified build, esbuild 0.28.2); **4,538 B gzip** for
   both (`cat` the pair through `gzip -9` — one method for the budget, the guard's cost and every
   figure here). Budget: **≤ 11 KB raw / ≤ 4.5 KB gzip**, enforced by a unit test — 1,040 B and
