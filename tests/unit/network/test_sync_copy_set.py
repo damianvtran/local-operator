@@ -267,6 +267,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "
         "(beside ``exec-jobs.jsonl``), history about a SWEEP, never a file in a session",
     ),
+    "local_operator/server/utils/local_tokens.py": (
+        1,
+        "``GENERATION_FILENAME`` (``generation``): the per-boot counter beside the serve "
+        "records under ``<config>/run/serve`` — machine-local boot state a receiving "
+        "device must mint its own, never inherit; not an entry of a session directory",
+    ),
     "local_operator/config.py": (1, "``config.yml``, the store's configuration file"),
     "local_operator/clients/radient_cost.py": (
         1,

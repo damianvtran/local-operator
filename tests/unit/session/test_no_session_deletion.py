@@ -365,6 +365,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "server does not leave a lease behind and does not delete a live "
         "sibling's",
     ),
+    # The local surface keys' per-boot generation counter
+    # (`local_operator/server/utils/local_tokens.py`): one FILE at
+    # `<config>/run/serve/generation`, beside the serve records the registry
+    # publishes. The writer is a local copy of the staged-write shape for
+    # `network/identity.py`'s stated reason -- the shared helper is private to
+    # the session runtime's module, and this one keeps the boot path from
+    # depending on the session plane -- which is exactly why it carries
+    # argued rows here: every path it touches is that one sibling of the
+    # records the counter belongs to, a FILE never a directory, and never
+    # anything under sessions/.
+    (
+        "local_operator/server/utils/local_tokens.py::_write_staged",
+        "os.replace",
+        "Atomic replacement of the generation FILE at <config>/run/serve/generation, "
+        "beside the serve records; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/server/utils/local_tokens.py::_write_staged",
+        "os.unlink",
+        "Removes only its own `.generation.*.tmp` file after a failed replacement",
+    ),
     (
         "local_operator/server/utils/desktop_presence.py::"
         "DesktopDeliveryPublisher._prune_dead_records",
