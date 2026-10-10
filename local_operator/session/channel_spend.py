@@ -314,6 +314,12 @@ class ChannelSpendRecord:
         """
         if self.amount_micro is None and self.billing_basis != BASIS_NOT_TRACKED:
             object.__setattr__(self, "billing_basis", BASIS_NOT_TRACKED)
+        if not math.isfinite(float(self.units)):
+            # A non-finite count cannot be summed, serialised (``Infinity`` is
+            # not JSON) or rendered; it reads as NO count, which is exactly what
+            # ``units == 0`` with an empty unit already means. Every constructor
+            # path is covered here, so no emitter has to remember (review m3).
+            object.__setattr__(self, "units", 0.0)
 
     def analytics_row(self) -> tuple[Any, ...]:
         """The recorder queue's primitive row for this record.
@@ -397,6 +403,11 @@ class ChannelSpendRecord:
             return None
         if isinstance(ts_ms, bool) or not isinstance(ts_ms, int | float) or ts_ms < 0:
             return None
+        # ``float('nan')`` passes both the type and the ``< 0`` test and then
+        # RAISES in ``int()``; infinity raises too. A non-finite timestamp is a
+        # corrupt row, and a corrupt row reads as "no record" (review m3).
+        if isinstance(ts_ms, float) and not math.isfinite(ts_ms):
+            return None
         amount = details.get("amount_micro")
         if amount is not None:
             if isinstance(amount, bool) or not isinstance(amount, int | float):
@@ -409,6 +420,11 @@ class ChannelSpendRecord:
             amount = int(amount)
         units = details.get("units", 0.0)
         if isinstance(units, bool) or not isinstance(units, int | float):
+            return None
+        if isinstance(units, float) and not math.isfinite(units):
+            # Infinity would ride the wire as a bare ``Infinity`` token (invalid
+            # JSON) and overflow every sum it joins; a non-finite count is not a
+            # count (review m3).
             return None
         basis = normalise_basis(details.get("billing_basis")) or BASIS_NOT_TRACKED
         source = str(details.get("cost_source", "") or "")
@@ -527,6 +543,10 @@ class ChildrenSnapshot:
 
     total_micro: int = 0
     knowledge: str = "exact"
+    #: Wire-visible reason for a degraded ``knowledge`` — the resumed-parent
+    #: case: children that ran in an earlier process are not re-readable, so
+    #: the block may not present their spend as fully accounted (review m4/Q9).
+    reason: str = ""
 
 
 def _inference_rows(inference: InferenceSnapshot) -> list[dict[str, Any]]:
@@ -757,9 +777,14 @@ def combine(
       with no money at all also lands here rather than claiming an exact zero.
     - ``partial``: some money is known and some is not — an unreported
       successful call, an unsettled cancel, an unpriced model call, a child
-      ledger with unknowns, or channel rows on a session with no ``start``
-      marker (recovered history: we have what we have and cannot know what we
-      missed).
+      ledger with unknowns, or channel rows recovered from a session with no
+      ``start`` marker (we have what we have and cannot know what we missed).
+      Note the LAST clause's shape: a marker-less session degrades only when
+      the journal actually CARRIES recovered channel rows (or a lost-money
+      row). A pre-feature session with no recovered rows is not marked: its
+      figure is the best evidence there is, and the operator's continuity
+      tests (cold and in-process must spell one journal identically) settled
+      that reading over degrading most of the store (review round 2, M-4).
     - ``floor``: rows were POSITIVELY reported lost (``lost_money_rows``) or a
       component's own knowledge is a floor.
     - ``exact``: everything that spent money has a stated figure.
@@ -787,13 +812,16 @@ def combine(
         children_knowledge = "partial"
     inference_unstated = inference.knowledge == "unknown" and inference.calls > 0
     inference_partial = inference.knowledge == "partial"
-    untracked_with_rows = not tracked
+    # DEGRADATION NEEDS EVIDENCE (see the docstring): marker-less sessions that
+    # carry recovered rows (or a lost-money row) are lower bounds; a marker-less
+    # session with no channel evidence at all keeps its own figure.
+    untracked_with_evidence = not tracked and (bool(records) or lost)
 
     partial = bool(
         unstated_records
         or inference_unstated
         or inference_partial
-        or untracked_with_rows
+        or untracked_with_evidence
         or children_knowledge == "partial"
         or children_knowledge == "unknown"
     )
@@ -828,15 +856,29 @@ def combine(
         # number is (design §5.1).
         "not_tracked_calls": 0,
     }
+    record_not_tracked_micro = 0
     for record in records:
         if record.status == STATUS_FAILED and record.amount_micro is None:
             continue  # documented presumption: an unreported failure was not charged
-        basis = record.billing_basis if record.billing_basis in by_basis else BASIS_NOT_TRACKED
-        if record.amount_micro is None or basis == BASIS_NOT_TRACKED:
+        if record.amount_micro is None:
+            # No stated amount: the money is 0 by definition and only the COUNT
+            # is stateable.
             by_basis["not_tracked_calls"] += 1
             continue
-        by_basis[basis] += int(record.amount_micro)
-    by_basis[NOT_TRACKED_MICRO] = max(0, int(inference.micro)) + max(0, children_total_micro)
+        if record.billing_basis == BASIS_NOT_TRACKED:
+            # A STATED amount whose basis is not tracked (a TTS/STT server
+            # object with an amount and no basis, a journal row from before
+            # PR-3): its money must still land in a bucket or the buckets stop
+            # summing to the total (review m1 / QA Q10). It belongs to
+            # ``not_tracked_micro`` — the same bucket the inference remainder
+            # uses — not to ``not_tracked_calls``, which counts rows with NO
+            # amount.
+            record_not_tracked_micro += int(record.amount_micro)
+            continue
+        by_basis[record.billing_basis] += int(record.amount_micro)
+    by_basis[NOT_TRACKED_MICRO] = (
+        max(0, int(inference.micro)) + max(0, children_total_micro) + record_not_tracked_micro
+    )
 
     rows = _inference_rows(inference) + _channel_rows(records)
     return {
@@ -849,6 +891,10 @@ def combine(
         "children": {
             "total_micro": int(children_total_micro),
             "knowledge": children_knowledge,
+            # The user-facing reason when the children block cannot vouch for
+            # itself (a resumed parent whose earlier children are not
+            # re-readable — review m4/Q9). Absent when there is nothing to say.
+            **({"reason": children.reason} if children.reason else {}),
         },
     }
 
@@ -893,10 +939,21 @@ def emit_web_spend(callback: Any, *, channel: str, provider: str, usd: float | N
 
 
 def records_from_details(rows: Sequence[Mapping[str, Any]]) -> list[ChannelSpendRecord]:
-    """Fold a transcript reader's ``details`` rows into records, dropping junk."""
+    """Fold a transcript reader's ``details`` rows into records, dropping junk.
+
+    PER ROW, deliberately: the caller (``Session.__init__``) also guards the
+    whole call, and a whole-call guard alone loses every GOOD row beside one
+    corrupt one — measured in review round 2 (m3): one ``NaN`` timestamp beside
+    a healthy 8,000 µ$ row published ``total 0``. A row that cannot be recalled
+    is skipped; its neighbours are not.
+    """
     out: list[ChannelSpendRecord] = []
     for row in rows:
-        record = ChannelSpendRecord.from_details(row)
+        try:
+            record = ChannelSpendRecord.from_details(row)
+        except Exception:  # noqa: BLE001 — a corrupt row is "no record"
+            logger.debug("channel record row skipped", exc_info=True)
+            continue
         if record is not None:
             out.append(record)
     return out

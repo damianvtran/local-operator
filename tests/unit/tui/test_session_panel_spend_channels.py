@@ -177,12 +177,65 @@ def test_row_without_a_unit_count_prints_no_count() -> None:
 def test_money_column_is_aligned_across_rows() -> None:
     """D4: every money cell ends at one column; the Total's included."""
     text = rendered(replace(runtime(), spend_channels=payload()))
-    lines = [line for line in text.splitlines() if "$" in line and not line.startswith("By basis")]
+    # ``strip``: the footer's first line is indented like the rows now (design
+    # round 2, D2-1), so a bare prefix check would let it into the money-column
+    # set it is not part of.
+    lines = [
+        line
+        for line in text.splitlines()
+        if "$" in line and not line.strip().startswith("By basis")
+    ]
     ends = set()
     for line in lines:
         start = line.rfind("$")
         ends.add(start + len(line[start:].split(" ")[0]))
     assert len(ends) == 1, f"ragged money column: {sorted(ends)} in {lines}"
+
+
+def test_the_capped_aggregate_row_is_named_and_marked_not_itemised() -> None:
+    """D2-3: the wire cap's ``other channels (N)`` row may not render as ``other``.
+
+    The row carries the grouped rows' money and the worst knowledge; a bare
+    "other" hid the count, the money's provenance and the fact that anything
+    was grouped. The label comes from the wire; the note says the rest.
+    """
+    snapshot = payload().model_dump(mode="json")
+    snapshot["rows"] = list(snapshot["rows"]) + [
+        {
+            "channel": "other",
+            "provider": "",
+            "model": "",
+            "label": "other channels (4)",
+            "units": None,
+            "unit": "",
+            "amount_micro": 1234,
+            "knowledge": "partial",
+            "basis": [],
+            "price_versions": [],
+        }
+    ]
+    text = rendered(
+        replace(runtime(), spend_channels=FrontendSpendChannels.model_validate(snapshot))
+    )
+    line = next(line for line in text.splitlines() if "other channels" in line)
+    assert "not itemised" in line, line
+
+
+def test_short_rungs_keep_the_disclosures_at_the_canonical_80() -> None:
+    """D2-2: 12 cells of note budget must not erase the Total's legend or a tag.
+
+    The budget at an 80-column TERMINAL is 12 cells (the card's content width
+    lands in the 62–78 band, ``_spend_note_budget``), which fits neither
+    "+ lower bound" (13) nor "basis not recorded" (19); before round 2 the
+    ladder fell through to the unit count and the biggest rows said "10 calls"
+    with no basis, and the mark had no legend at all at the width where it
+    needs one most.
+    """
+    text = rendered(replace(runtime(), spend_channels=payload()), width=65)
+    total = next(line for line in text.splitlines() if "Total" in line)
+    assert "lower bound" in total, total
+    inference = next(line for line in text.splitlines() if "inference ·" in line)
+    assert inference.rstrip().endswith("unrecorded"), inference
 
 
 def test_children_get_their_own_row_when_they_carry_money() -> None:

@@ -1141,6 +1141,20 @@ class FrontendSpendChildren(BaseModel):
 
     total_micro: int = 0
     knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+    #: Wire-visible reason for a degraded ``knowledge``: a resumed parent whose
+    #: earlier children's channel journals are not re-readable says so here
+    #: rather than presenting an undercount as exact (review m4/Q9). ``None``
+    #: (absent on the wire), never an empty string: a producer with nothing to
+    #: say must not grow every frame by a key, the same shape ``asks_truncated``
+    #: uses on the state model above.
+    reason: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_reason(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload = handler(self)
+        if self.reason is None:
+            payload.pop("reason", None)
+        return payload
 
 
 class FrontendSpendChannels(BaseModel):
@@ -4164,8 +4178,22 @@ def _cap_spend_channel_rows_in_place(channels: Any) -> None:
     rows = channels.get("rows")
     if not isinstance(rows, list) or len(rows) <= SPEND_CHANNEL_ROW_CAP:
         return
-    kept = rows[:SPEND_CHANNEL_ROW_CAP]
-    dropped = [row for row in rows[SPEND_CHANNEL_ROW_CAP:] if isinstance(row, dict)]
+    # NAMED CHANNELS WIN THE BUDGET. Rows arrive in display order with the
+    # inference split first — up to ``IDENTITY_CAP`` (32) rows of ONE channel —
+    # so a plain "first twelve" cap would let inference filler push every
+    # image/tts/stt/search row into the aggregate and the panel could not name
+    # a single metered channel (review round 2, m2). Selection is
+    # deterministic: every non-inference row keeps its place up to the cap
+    # (wire order among those), inference rows take what is left; anything
+    # still over is the aggregate. The final list preserves wire order, so the
+    # table's hierarchy is unchanged.
+    named = [row for row in rows if row.get("channel") != "inference"]
+    inference = [row for row in rows if row.get("channel") == "inference"]
+    kept_named = named[:SPEND_CHANNEL_ROW_CAP]
+    kept_inference = inference[: max(0, SPEND_CHANNEL_ROW_CAP - len(kept_named))]
+    kept_ids = {id(row) for row in kept_named} | {id(row) for row in kept_inference}
+    kept = [row for row in rows if id(row) in kept_ids]
+    dropped = [row for row in rows if id(row) not in kept_ids and isinstance(row, dict)]
     stated = [
         int(row["amount_micro"])
         for row in dropped
@@ -8303,7 +8331,10 @@ def _ledger_cost(session: Any) -> dict[str, Any]:
 
 
 def _children_snapshot(
-    ledger: Mapping[str, Any], child_costs: Mapping[str, float]
+    ledger: Mapping[str, Any],
+    child_costs: Mapping[str, float],
+    *,
+    predates_process: bool = False,
 ) -> ChildrenSnapshot:
     """The children contribution to the published total, in micro-USD.
 
@@ -8314,20 +8345,35 @@ def _children_snapshot(
     (their sum is a true LOWER bound — only priced rows are in the map, so a
     child the price resolver could not size is missing from it), and a session
     with no children at all is a stated zero.
+
+    ``predates_process`` is the resumed-parent case (review round 2, m4/Q9): the
+    session carries job rows from an EARLIER process, whose children's channel
+    records were relayed to that process and are not re-readable here. The
+    children block then degrades to ``partial`` with a stated reason — an
+    undercount must never be presented as exact, and the full re-scan of
+    descendant journals is deferred to the follow-up (PR-thread note).
     """
     knowledge = ledger.get("subagent_cost_knowledge")
     if knowledge is not None:
         cost = ledger.get("subagent_cost")
-        return ChildrenSnapshot(
+        snapshot = ChildrenSnapshot(
             total_micro=_usd_to_micro(cost),
             knowledge=str(knowledge),
         )
-    if child_costs:
-        return ChildrenSnapshot(
+    elif child_costs:
+        snapshot = ChildrenSnapshot(
             total_micro=_usd_to_micro(sum(float(value) for value in child_costs.values())),
             knowledge="floor",
         )
-    return ChildrenSnapshot(total_micro=0, knowledge="exact")
+    else:
+        snapshot = ChildrenSnapshot(total_micro=0, knowledge="exact")
+    if predates_process and snapshot.knowledge in ("exact", "unknown"):
+        return ChildrenSnapshot(
+            total_micro=snapshot.total_micro,
+            knowledge="partial",
+            reason="subagent spend from earlier processes is not re-readable here",
+        )
+    return snapshot
 
 
 def _usd_to_micro(value: Any) -> int:
@@ -8375,7 +8421,11 @@ def _spend_channels_payload(
         payload = combine(
             fold.rows(),
             inference=inference,
-            children=_children_snapshot(ledger, child_costs),
+            children=_children_snapshot(
+                ledger,
+                child_costs,
+                predates_process=bool(getattr(session, "_child_channels_predate_process", False)),
+            ),
             child_records=child_records,
             tracked=bool(
                 getattr(session, "channels_tracked", getattr(session, "channels_started", False))

@@ -1000,13 +1000,15 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
         return False
 
     body.header("Spend by channel", "this session · all sources")
-    if not tracked:
+    if not tracked and knowledge != "exact":
         # Plain words, the user's own three channels, and no internal
         # vocabulary: round 1 measured "Channels not tracked … cannot be
         # recovered in full" reading as a claim about partial recovery while
-        # the total beside it said `exact` (design round 1, D3). The total now
-        # carries the lower-bound mark, and this sentence names what may be
-        # missing instead.
+        # the total beside it said `exact` (design round 1, D3). The notice now
+        # appears only when something is actually MISSING — degradation needs
+        # evidence (see ``combine``): a marker-less session with no recovered
+        # channel rows reads like any other, which is what the cold/in-process
+        # continuity tests require (review round 2, M-4).
         body.note(
             "Image, speech and search spend wasn't recorded for this conversation, "
             "so the total may be missing it."
@@ -1052,13 +1054,16 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
             if amount is not None and str(row.get("knowledge") or "") in {"partial", "floor"}
             else ""
         )
+        notes = list(_row_note_candidates(row))
+        if str(row.get("channel") or "") == "other":
+            notes.append("not itemised")
         _spend_row(
             body,
             _channel_row_label(row),
             money,
             mark=row_mark,
             dim_money=amount is None,
-            notes=tuple(_row_note_candidates(row)),
+            notes=tuple(notes),
         )
     _draw_spend_basis(body, published)
     return True
@@ -1136,7 +1141,10 @@ def _spend_row(
     if mark:
         row.append(mark, style=semantic_style("dim"))
     if note_text:
-        row.append(f"  {note_text}", style=semantic_style("dim"))
+        # MUTED, not dim: the tag is the disclosure the whole section exists
+        # for, and dim measures 3.43:1 on the card (below AA) where muted
+        # measures 6.51:1 (design round 2, D2-4).
+        row.append(f"  {note_text}", style=semantic_style("muted"))
     row.truncate(body.width, overflow="crop")
     body.lines.append(row)
 
@@ -1158,6 +1166,10 @@ _SPEND_MARK_RUNGS = (
     "+ lower bound (some spend has no stated price)",
     "+ lower bound · some spend unpriced",
     "+ lower bound",
+    # The shortest rung the canonical 80-column card can afford (12 cells —
+    # review round 2, D2-2): without it the Total's mark had NO explanation at
+    # 80 cols, which is the width where a legend matters most.
+    "lower bound",
 )
 
 
@@ -1204,7 +1216,11 @@ _TAG_RUNGS: dict[str, tuple[str, ...]] = {
     "plan-covered (API price)": ("plan-covered (API price)", "plan-covered"),
     "estimated": ("estimated", "est."),
     "price not stated": ("price not stated", "not stated"),
-    "basis not recorded": ("basis not recorded", "basis unstated"),
+    # Shortest rung last and it fits the 80-column card's 12-cell note budget:
+    # the ladder prefers a TAG over the unit count when only one fits (review
+    # round 2, D2-2 — the biggest rows, both inference, showed "10 calls" and
+    # nothing about their basis at the canonical width).
+    "basis not recorded": ("basis not recorded", "basis unrecorded", "unrecorded"),
 }
 
 
@@ -1273,7 +1289,12 @@ def _draw_spend_basis(body: _Body, published: Any) -> None:
     basis = getattr(published, "by_basis", None)
     if not isinstance(basis, dict):
         return
-    segments: list[tuple[str, str]] = []
+    # Each bucket is ONE wrapping unit (label + figure, separator attached at
+    # the FRONT of the next unit): round 2 measured the old segment-wise wrap
+    # orphaning the biggest bucket's figure onto the next line ("… · basis not
+    # recorded" / "$1.11 · …") and starting continuations with a bare "·"
+    # (design round 2, D2-1). The first line is indented like the table rows.
+    units: list[tuple[str, str]] = []  # (label, figure) — figure "" for a clause
     for key, label in (
         (BASIS_BILLED, "billed"),
         (BASIS_SUBSCRIPTION, "plan-covered (API price)"),
@@ -1283,30 +1304,33 @@ def _draw_spend_basis(body: _Body, published: Any) -> None:
         value = _as_micro(basis.get(key))
         if not value:
             continue
-        if segments:
-            segments.append((" · ", "dim"))
-        segments.append((f"{label} ", "dim"))
-        segments.append((format_usd(value), "fg"))
+        units.append((label, format_usd(value)))
     count = basis.get("not_tracked_calls")
     if isinstance(count, int) and count and not isinstance(count, bool):
         noun = "call" if count == 1 else "calls"
-        prefix = " · " if segments else ""
-        segments.append((f"{prefix}{count} {noun} with no price recorded", "dim"))
-    if not segments:
+        units.append((f"{count} {noun} with no price recorded", ""))
+    if not units:
         return
-    line = Text()
-    line.append("By basis:  ", style=semantic_style("dim"))
-    used = len("By basis:  ")
-    for text, style in segments:
-        if used + len(text) > body.width and used > len("By basis:  "):
+    prefix = "  By basis:  "
+    cont = " " * len(prefix)
+    line = Text(prefix, style=semantic_style("muted"))
+    used = len(prefix)
+    for index, (label, figure) in enumerate(units):
+        separator = " · " if index else ""
+        span = len(separator) + len(label) + (1 + len(figure) if figure else 0)
+        if index and used + span > body.width:
+            # The separator falls with the wrap so a continuation never starts
+            # on a bare "·" (design round 2, D2-1).
             body.lines.append(line)
-            line = Text()
-            line.append("  ", style=semantic_style("dim"))
-            used = 2
-            if text == " · ":
-                continue
-        line.append(text, style=semantic_style(style))
-        used += len(text)
+            line = Text(cont, style=semantic_style("muted"))
+            used = len(cont)
+            separator = ""
+            span = len(label) + (1 + len(figure) if figure else 0)
+        line.append(separator + label, style=semantic_style("muted"))
+        used += len(separator) + len(label)
+        if figure:
+            line.append(" " + figure, style=semantic_style("fg"))
+            used += 1 + len(figure)
     body.lines.append(line)
 
 
@@ -1346,6 +1370,11 @@ def _channel_row_label(row: dict[str, Any]) -> str:
     label = str(row.get("label") or "")
     if channel == "inference":
         return f"inference · {label}" if label else "inference"
+    if channel == "other" and label:
+        # The wire cap's aggregate row says how much it grouped ("other
+        # channels (5)"); rendering it as bare "other" hid both the count and
+        # the fact that anything was grouped (design round 2, D2-3).
+        return label
     ident = "/".join(
         part for part in (str(row.get("provider") or ""), str(row.get("model") or "")) if part
     )

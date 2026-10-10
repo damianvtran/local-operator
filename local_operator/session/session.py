@@ -3551,6 +3551,12 @@ class Session:
         #: ``channels_tracked`` is derived from it; see that property
         #: (review round 1, M2).
         self._channels_origin = self._classify_channels_origin(transcript)
+        #: True when this session resumed over a DURABLE roster that predates
+        #: this process: those children's channel records were relayed to a
+        #: previous process and are not re-readable here, so the published
+        #: children block degrades with a stated reason rather than presenting
+        #: their spend as fully accounted (review round 2, m4/Q9).
+        self._child_channels_predate_process = self._checkpoint_has_child_rows(transcript)
         #: True only when the journal POSITIVELY reports a lost money row (the
         #: same ``lost_money_rows`` rule ``SessionSpend`` uses), which the
         #: combiner turns into the floor mark. Read once here, not per paint.
@@ -11044,25 +11050,88 @@ class Session:
     # -- channel spend -------------------------------------------------------
 
     @staticmethod
+    def _checkpoint_has_child_rows(transcript: Any) -> bool:
+        """Whether the durable frontend checkpoint carries any child rows.
+
+        The signal for "this session has children that ran in an EARLIER
+        process": the checkpoint is written at turn end and carries the job
+        roster, so a resumed session can see that descendants exist without
+        being able to read their channel journals (a child's journal is not the
+        parent's to re-scan on the publish path). An unreadable checkpoint
+        reads as "no evidence" — the same rule the origin probe uses — and the
+        cost is one dict walk over an in-memory entry list.
+        """
+        from local_operator.session.frontend_state import (
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        )
+
+        try:
+            checkpoint = transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+        except Exception:  # noqa: BLE001 — an unreadable checkpoint is no evidence
+            logger.debug("channel children probe failed", exc_info=True)
+            return False
+        if not isinstance(checkpoint, Mapping):
+            return False
+        state = checkpoint.get("state")
+        if not isinstance(state, Mapping):
+            return False
+        jobs = state.get("jobs")
+        return bool(jobs) if isinstance(jobs, list) else False
+
+    @staticmethod
     def _classify_channels_origin(transcript: Any) -> str:
         """``"marked" | "fresh" | "legacy"`` — how channel recording began.
 
-        "fresh" requires an EMPTY transcript at construction, and that is the
-        whole test: no entries means there was nothing to miss, while entries
-        without a ``start`` marker mean recording began after activity this
-        build never saw (review round 1, M2). The distinction decides whether a
-        live record may write the marker: it may for "fresh" (the session has
-        nothing prior to excuse) and never for "legacy" (the marker would claim
-        the missing history was watched).
+        "fresh" means NO entry that records actual work: bookkeeping rows (the
+        spend record, MCP cards, checkpoints — ``transcript.is_bookkeeping_entry``)
+        and identity rows (a session's name, Aida's birth record) are records
+        ABOUT the session, and a journal holding only those was still born
+        under this build's eyes. The first version tested ``entries() == []``,
+        which made Aida's bootstrapped first session read "channels not tracked"
+        forever (review round 2, M-5: its ``conversation_name``/``aida_session``
+        rows are written before the Session exists).
+
+        "legacy" means real activity exists with no ``start`` marker: whether
+        that history is DEGRADED is a second question — :func:`combine` marks a
+        lower bound only when recovered channel rows (or a lost-money row)
+        actually exist — while the marker itself may never be written for a
+        "legacy" journal (it would claim the missing history was watched).
         """
         if transcript.channel_spend_tracked():
             return "marked"
         try:
-            if not transcript.entries():
-                return "fresh"
+            entries = transcript.entries()
         except Exception:  # noqa: BLE001 — an unreadable journal is not fresh
             logger.debug("channel origin probe failed; treating as legacy", exc_info=True)
-        return "legacy"
+            return "legacy"
+        for entry in entries:
+            if Session._entry_counts_as_channel_activity(entry):
+                return "legacy"
+        return "fresh"
+
+    @staticmethod
+    def _entry_counts_as_channel_activity(entry: Any) -> bool:
+        """Whether ONE journal entry is evidence the session actually did work.
+
+        Custom rows are never activity for this purpose. Everything the harness
+        writes as a custom row — the session's name (``conversation_name``) and
+        Aida's birth record (``aida_session``) that M-5 measured, spend records,
+        model switches, goal and attention state, checkpoints — is ABOUT the
+        session or its runtime, and none of it can carry channel spend. Real
+        work lives in message rows (user/assistant/tool), which is exactly what
+        the marker's absence would have missed. The rule is deliberately stated
+        on the SHAPE (any custom row) rather than on a list of the two types
+        that were measured, so the next bootstrap row cannot reintroduce the
+        same false legacy.
+        """
+        from local_operator.session.transcript import is_bookkeeping_entry
+
+        if is_bookkeeping_entry(entry):
+            return False
+        payload = entry.payload if isinstance(entry.payload, Mapping) else {}
+        if payload.get("custom_type"):
+            return False
+        return True
 
     @property
     def channels_tracked(self) -> bool:
@@ -11105,6 +11174,16 @@ class Session:
         # Q2 — a child's image was invisible on the parent's band for the rest
         # of the turn).
         self._publish_channel_spend()
+        grandparent = self._parent_session
+        if grandparent is not None:
+            # TRANSITIVE: a grandchild's record reached this session's children
+            # block but not the root's (review round 2, m4). The relay only
+            # ever flows upward and the self-relay guard above stops a loop, so
+            # forwarding one hop here is enough for the chain.
+            try:
+                grandparent._absorb_child_channel_spend(record)
+            except Exception:  # noqa: BLE001 — a relay defect is not a failed turn
+                logger.debug("grandchild channel relay failed", exc_info=True)
 
     def record_channel_spend(
         self, record: ChannelSpendRecord, *, write_marker: bool = True
@@ -11220,6 +11299,29 @@ class Session:
         # "surfaces never disagree" outranks "publish only durable state").
         self._publish_channel_spend()
 
+    def _schedule_channel_start_marker_if_fresh(self) -> None:
+        """Schedule the one-time channel ``start`` marker for a fresh session.
+
+        Called from :meth:`_persist_new_messages` (the first durable
+        non-bookkeeping append) and from the first channel record; NEVER from
+        construction or adopt, because writing a row at either would
+        materialise a ``defer_materialise`` transcript the host may abandon
+        (review round 2, M-1 — an immediate quit left a ``transcript.jsonl``
+        behind). Guarded so the two callers cannot double-append.
+        """
+        if self._channels_origin != "fresh" or self.channels_started:
+            return
+        if self._channel_start_scheduled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop: the next append-capable process classifies afresh
+        self._channel_start_scheduled = True
+        task = loop.create_task(self._write_channel_start_marker())
+        self._channel_tasks.add(task)
+        task.add_done_callback(self._channel_tasks.discard)
+
     async def _write_channel_start_marker(self) -> None:
         """Append the one-time channel ``start`` marker; never raises.
 
@@ -11289,15 +11391,10 @@ class Session:
             return  # no loop: the fold still serves this process's reads
         self._channel_backfill_started = True
         if self._channels_origin == "fresh":
-            # Nothing to recover, but the conversation needs its start marker
-            # durable BEFORE it mutates: a fresh session adopted here, chatted
-            # with and resumed later must not come back reading "channels not
-            # tracked" merely because no channel event had happened yet
-            # (review round 1, M2).
-            self._channel_start_scheduled = True
-            task = loop.create_task(self._write_channel_start_marker())
-            self._channel_tasks.add(task)
-            task.add_done_callback(self._channel_tasks.discard)
+            # Nothing to recover and no marker to force: the marker rides the
+            # first message or the first channel record (see
+            # ``_persist_new_messages``), so a speculative transcript that is
+            # never appended to never materialises (review round 2, M-1).
             return
         task = loop.create_task(self._rebuild_channels())
         self._channel_tasks.add(task)
@@ -17256,6 +17353,16 @@ class Session:
             self._attention_run_produced = any(
                 _arms_attention_run_output(message) for message in fresh
             )
+        if fresh:
+            # FIRST REAL APPEND -> the channel ``start`` marker. A session whose
+            # first durable non-bookkeeping append is a real message is a
+            # session born under this build, which is exactly the claim the
+            # marker makes; a transcript that never materialises (a speculative
+            # runtime the host abandons) must stay empty, which is why the
+            # marker is not written at construction or adopt (review round 2,
+            # M-1). Bookkeeping rows do not trigger it: a boot that writes a
+            # name or an MCP card has not had a conversation yet.
+            self._schedule_channel_start_marker_if_fresh()
         # This list is a paired prefix at mid-turn gates and a closed run at
         # settlement. One durable commit preserves the same admission/fork
         # boundary while avoiding an fsync for every already-paired result.
