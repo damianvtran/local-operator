@@ -1825,6 +1825,17 @@ TERMINAL_GATE_TIMEOUT_S = 30.0
 #: measures actual laid-out rows and reserves a viewport above the reader.
 RESUME_RENDER_MESSAGES = 80
 
+#: How long a resume render may keep its follower pinned to the tail, in seconds.
+#:
+#: The real release is the FILL's own completion (`_release_resume_tail_hold`,
+#: called from `_fill_resume_attempt`), because that is when the render window
+#: stops growing. This bound exists only so a render that never concludes — a
+#: fill parked behind user input, a view whose callbacks stop arriving — cannot
+#: pin the reader to the tail for the life of the session; past it the view
+#: behaves as it always did and later extent changes are carried by
+#: `_size_updated`.
+RESUME_RENDER_TAIL_HOLD_S = 5.0
+
 #: How often a completion poller with no observed focus edge may re-ask the host
 #: whether this terminal is in the foreground.
 #:
@@ -5630,6 +5641,10 @@ class OperatorApp(App[None]):
         #: adopt it. Never a second live card: the ladder takes this reference
         #: back out of ``self._approval`` and re-registers the SAME object.
         self._prearmed_approval: ApprovalPrompt | None = None
+        #: ``(view, timer)`` while a resume render holds its follower at the tail
+        #: across every layout pass the fill causes — see
+        #: :meth:`_hold_tail_through_resume_render`.
+        self._resume_tail_hold: tuple[Any, Any] | None = None
         #: The composer's text as of the last Changed event, so a buffer that
         #: went empty can be told apart from one the app emptied. See
         #: `on_text_area_changed`.
@@ -8189,6 +8204,19 @@ class OperatorApp(App[None]):
         # The narrow accessor, never `frontend_state`: its clone was measured at
         # ~30 ms of a 135 ms cold frame, and this runs on every delta.
         if getattr(session, "pending_gate", None) is None:
+            # A SPECULATIVE CARD WHOSE QUESTION IS GONE LEAVES WITH IT. Same
+            # finding as the adoption mismatch above, reached by the other
+            # route: the pre-arm mounted a card in the reveal's frame, and the
+            # session's gate has since been answered or cleared. Only the
+            # PRE-ARMED card is touched here — the ladder owns every other
+            # card's lifetime, and taking one of those down is not this hook's
+            # decision to make.
+            prearmed = self._prearmed_approval
+            if prearmed is not None:
+                self._unmount_prompt(prearmed)
+                self._prearmed_approval = None
+                if self._approval is prearmed:
+                    self._approval = None
             return
         if (
             self._sidebar_navigation.requested_id
@@ -9639,6 +9667,24 @@ class OperatorApp(App[None]):
             # section, so the reveal's own frame already excludes its rows
             # (`_prearm_known_gate`; the ladder adopts the card when it runs).
             self._prearm_known_gate(source)
+            # RESERVE THE CARD'S ROWS IN THE FRAME THAT REVEALS THEM. Mounting
+            # the card is not the same as taking its rows out of the transcript:
+            # a widget authors its own height during a layout pass, and the pass
+            # that resolved the transcript's `1fr` ran before this mount. The
+            # compositor then paints the transcript at its pre-card height with
+            # the card's rows pushed below it — measured at 160x45: transcript
+            # region `1/38`, prompt host at `y=39` (15 rows on a 45-row screen,
+            # i.e. clipped), settling to `1/23` a display later with the scroll
+            # moving 93 -> 108 by exactly the card's height. That one frame is
+            # review round 1's F2, QA round 1's Q2 and design round 1's D1/D4.
+            #
+            # The SAME SPELLING as the resume's pre-reveal settle, for the same
+            # reason: `_refresh_layout()` ends in `_compositor_refresh()`, i.e.
+            # it PAINTS, and a frame painted here would be a half-arranged one —
+            # so the paint is suppressed and only the layout (the heights, the
+            # reservation) is taken. This commit may not await; the call is
+            # synchronous by construction.
+            self._settle_dock_rows_before_reveal()
             # IMMEDIATELY AFTER the adopt, and never before it. `_adopt_session`
             # is the single place a source becomes current: it has just moved
             # `self._interaction` to the incoming source and lifted ITS mute, so
@@ -13669,10 +13715,15 @@ class OperatorApp(App[None]):
         # window, mounted before the first paint, so the block list, the extent
         # and the scrollbar the reader sees are final in the frame that arrives:
         # no backfill page, no second state. The operator's target for this
-        # project is exactly that ("the first paint IS the final layout"), and
-        # measured over this bench's fixtures the launch's second state WAS this
-        # split — its other deltas are chrome (the status band's attach line and
-        # the scrollbar thumb), reported separately.
+        # project is exactly that ("the first paint IS the final layout"). The
+        # jump this removed is not load-dependent; the STATE count is. Re-measured
+        # by review round 1 at fleet load (~50): the jump is 337/76/250/153 -> 0 on
+        # S2/S3/S5/S6, and 2 states survive on S2/S3 (1-2 on S5/S6) because the
+        # FILL below re-cuts the visible window after the first paint — a content
+        # replacement, not the chrome (status band, scrollbar thumb) this comment
+        # used to call it. At matched load the same code paints 1/1 (QA round 1:
+        # 9/9 opens at load 13-21). Both numbers belong in any claim about this
+        # path.
         #
         # THIS REPLACES A VIEWPORT-FIRST SPLIT (B-F3), which painted one
         # screenful and mounted the rest of the window as one page after that
@@ -13684,15 +13735,18 @@ class OperatorApp(App[None]):
         # was not slower (3 opens/arm, interleaved). On a 2,000-message session
         # the split was introduced on the back of 93-147 ms vs 34 ms of render
         # CPU, i.e. the same shape of number at a larger row count; if a future
-        # measurement shows a real first-paint cost, the mitigation is a
-        # row-count threshold on this projection, NOT a second painted frame —
-        # the split cannot come back without giving up the target.
+        # measurement shows a real first-paint cost, the mitigation is SIZING
+        # THIS PROJECTION BY PROJECTED ROWS rather than by the message budget —
+        # a message count is a proxy these shapes routinely miss, and this file's
+        # own note says what the count is for (F6, review round 1). What it is
+        # NOT is a second painted frame: the split cannot come back without
+        # giving up the target.
         #
         # The height top-up below STAYS, and answers a different question: a
         # message budget is a PROXY for height, and whether the first frame can
         # be scrolled at all is about ROWS, which only the laid-out widgets can
         # answer.
-        self._hold_tail_for_reveal(self._transcript_view())
+        self._hold_tail_through_resume_render(self._transcript_view())
         self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
         # Marked active BEFORE the first attempt is scheduled, not inside it:
         # the frames between this mount and that callback are the earliest ones
@@ -13700,6 +13754,46 @@ class OperatorApp(App[None]):
         # attempts.
         self._start_resume_fill()
         return
+
+    def _hold_tail_through_resume_render(self, view: TranscriptView | None) -> None:
+        """Hold a following view at its tail for the WHOLE resume render.
+
+        WHY NOT ``_hold_tail_for_reveal``. That one releases on the next refresh,
+        which was right while a resume was one projection plus one backfill page:
+        one geometry change, one frame to protect. The render now projects the
+        whole window in one call and then the FILL tops it up across several
+        attempts, each of which mounts rows and re-lays-out the transcript. A
+        hold released after the first refresh therefore does not hold through
+        that render at all, and the frames between attempts are painted at the
+        previous extent: review round 1 measured 4 of 8 runs of
+        `tests/unit/tui/test_resume_render.py`'s [200] cell painting a frame off
+        the tail at fleet load, against 0 of 8 on the base (F3).
+
+        Released by the fill's completion — the moment the window stops growing —
+        with ``RESUME_RENDER_TAIL_HOLD_S`` as the bound for a render that never
+        concludes. A view that is not following is never touched: a restored
+        scroll anchor must not be overridden.
+        """
+        if view is None or not view.is_following_tail:
+            return
+        self._release_resume_tail_hold()
+        view.hold_tail_through_layout(True)
+        timer = self.set_timer(RESUME_RENDER_TAIL_HOLD_S, self._release_resume_tail_hold)
+        self._resume_tail_hold = (view, timer)
+
+    def _release_resume_tail_hold(self) -> None:
+        """Hand a held follower back the ordinary release-on-next-frame rule."""
+        held = self._resume_tail_hold
+        if held is None:
+            return
+        self._resume_tail_hold = None
+        view, timer = held
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:  # noqa: BLE001 — a fired timer is already done
+                pass
+        view.hold_tail_through_layout(False)
 
     @staticmethod
     def _hold_tail_for_reveal(view: TranscriptView | None) -> None:
@@ -13716,7 +13810,9 @@ class OperatorApp(App[None]):
           extra visual state per switch);
         * a short resume, which fills in one go and would otherwise place its
           first frame at scroll 0 and move to the tail a frame later (the long
-          case already holds through its backfill page).
+          render is held across every pass by
+          ``_hold_tail_through_resume_render`` — a different tool for a different
+          job: this one protects ONE frame, that one protects a whole render).
 
         ``TranscriptView.hold_tail_through_layout`` is the pre-placement seam,
         and the release is scheduled for the refresh after, because a hold that
@@ -13955,6 +14051,7 @@ class OperatorApp(App[None]):
                 return
             if self._sidebar_navigation.generation != generation:
                 self._resume_fill_active = False
+                self._release_resume_tail_hold()
                 self._reconcile_head_notice()
                 return
             if self._resume_fill_active:
@@ -13975,6 +14072,7 @@ class OperatorApp(App[None]):
             # the fill down and restating the row from the geometry that
             # actually exists is the honest answer.
             self._resume_fill_active = False
+            self._release_resume_tail_hold()
             self._reconcile_head_notice()
 
     def _fill_resume_until_scrollable(
@@ -13992,6 +14090,7 @@ class OperatorApp(App[None]):
             self._fill_resume_attempt(_attempt, target=target)
         except BaseException:
             self._resume_fill_active = False
+            self._release_resume_tail_hold()
             raise
 
     def _fill_resume_attempt(self, _attempt: int, *, target: float | None = None) -> None:
@@ -14013,6 +14112,9 @@ class OperatorApp(App[None]):
         goal = max(viewport + prefix, target or 0)
         if view.parent is None or not viewport or self._resume_paging or view.scroll_y >= goal:
             self._resume_fill_active = False
+            # The window stops growing HERE, so the render's own tail hold ends
+            # with it (F3). Every other exit from the fill releases it too.
+            self._release_resume_tail_hold()
             self._reconcile_head_notice()
             return
         source = self._interaction
@@ -25858,6 +25960,19 @@ class OperatorApp(App[None]):
             self._prearmed_approval = None
             self._approval = None
         else:
+            # THE SPECULATIVE CARD COMES DOWN WITH ITS BINDING. The pre-arm
+            # exists so the reveal's frame can carry a gate the app already
+            # holds; when the gate it was built for is no longer the session's
+            # gate, the card on screen is asking a question nobody will answer —
+            # `_latch_source_approval_answer` drops an answer whose binding has
+            # moved — and the serialization loop below would park the REAL gate
+            # behind it (F4, round 1). Unmounting it here restores "one live
+            # card" for the loop that follows.
+            if prearmed is not None:
+                self._unmount_prompt(prearmed)
+                self._prearmed_approval = None
+                if self._approval is prearmed:
+                    self._approval = None
             prearmed = None
         while self._approval is not None and not self._approval.answered:
             await self._approval.wait()
@@ -27880,6 +27995,21 @@ class OperatorApp(App[None]):
         prompt.gate_question = (tool_name, description)
         self._restore_gate_draft(source, prompt)
         return prompt
+
+    def _settle_dock_rows_before_reveal(self) -> None:
+        """Author the dock's rows before the reveal paints — see the caller.
+
+        Kept as its own method rather than inlined so the one dangerous part (a
+        layout pass that would otherwise paint mid-commit) has one home, next to
+        the same suppression the resume path already uses.
+        """
+        screen = self.screen
+        paint = screen._compositor_refresh
+        screen._compositor_refresh = _suppress_intermediate_paint
+        try:
+            screen._refresh_layout()
+        finally:
+            screen._compositor_refresh = paint
 
     def _prearm_known_gate(self, source: SessionInteraction) -> None:
         """Mount a gate the app ALREADY has in hand IN the frame that reveals its conversation.

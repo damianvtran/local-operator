@@ -54,6 +54,25 @@ def _app() -> OperatorApp:
     return OperatorApp(lambda: _factory(FakeSession()))
 
 
+def _prompt_host_sample(app: OperatorApp) -> dict[str, float]:
+    """Where the dock's prompt host is, in the frame being sampled.
+
+    F2/Q2/D4 are all about the host's rows: the card is a dock child, so its
+    height comes out of the transcript's, and a frame drawn before the host has
+    authored that height puts the card's own rows off-screen. `outer_size` and
+    `region` are both recorded because the finding was about the difference.
+    """
+    try:
+        host = app.query_one("#prompt-host")
+        return {
+            "host_y": float(host.region.y),
+            "host_h": float(host.region.height),
+            "screen_h": float(app.size.height),
+        }
+    except Exception:  # noqa: BLE001 — no host yet is not a state
+        return {"host_y": -1.0, "host_h": -1.0, "screen_h": float(app.size.height)}
+
+
 def _frame_samples(app: OperatorApp, session=None) -> list[dict[str, float]]:
     """Install a per-display sampler: the state of every painted frame.
 
@@ -74,6 +93,12 @@ def _frame_samples(app: OperatorApp, session=None) -> list[dict[str, float]]:
                     "extent": float(view.max_scroll_y),
                     "blocks": float(len(view.blocks())),
                     "height": float(view.outer_size.height),
+                    # The transcript's OWN region, which is what the reader's rows
+                    # are clipped to: `outer_size` is the widget's size and can
+                    # differ from its region for a frame, which is exactly the
+                    # distinction F2 (round 1) asked this sampler to keep.
+                    "region": float(view.region.height),
+                    **_prompt_host_sample(app),
                     # "target": painted with THAT conversation in front of
                     # the reader (a switch's samples begin on the outgoing one,
                     # whose reader is wherever they were); "parked": the incoming
@@ -381,15 +406,20 @@ async def test_a_saved_position_is_not_dragged_to_the_tail_by_the_reveal(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_short_resume_holds_the_tail_for_its_first_frame(tmp_path) -> None:
-    """The LAUNCH call site, pinned by a spy.
+async def test_a_short_resume_holds_the_tail_for_its_whole_render(tmp_path) -> None:
+    """The LAUNCH call site, pinned on the HOLD rather than on a call.
 
-    The reveal helper has two callers and each needs its own pin: the switch
-    commit is covered by the saved-position test above, and this is the resume's
-    short branch — a conversation whose whole history fits the render window, so
-    the viewport-first split (which holds through its backfill page) does not
-    apply and the first frame would otherwise be placed at scroll 0 and moved to
-    the tail a frame later. Without the call this fails on the assertion.
+    The reveal helpers have two callers and each needs its own pin: the switch
+    commit is covered by the saved-position test above, and this is the resume —
+    a conversation whose history fits the render window, where the first frame
+    would otherwise be placed at scroll 0 and moved to the tail a frame later.
+
+    BEHAVIOUR, not the call: review round 1's F3 showed the resume's frames
+    leaving the tail because the hold was released after one refresh while the
+    fill still had mounts to make, and a spy on the helper cannot see that. So
+    this asserts what the reader gets — every painted frame on the tail from the
+    render onward — plus the two ends of the hold itself: armed when the render
+    puts its rows up, released once the fill has nothing left to add.
     """
     async with _viewer(tmp_path, "short") as viewer:
         session = viewer
@@ -404,58 +434,24 @@ async def test_a_short_resume_holds_the_tail_for_its_first_frame(tmp_path) -> No
                 if app._session is not None:
                     break
 
-            calls: list[object] = []
-            real = OperatorApp._hold_tail_for_reveal
-
-            def spy(target):  # noqa: ANN001
-                calls.append(target)
-                return real(target)
-
-            OperatorApp._hold_tail_for_reveal = staticmethod(spy)  # type: ignore[method-assign]
-            try:
-                app._render_resumed_history(session)
-                for _ in range(4):
-                    await pilot.pause()
-            finally:
-                # `staticmethod`: the helper IS a staticmethod, and a plain
-                # reassignment would rebind it as an instance method, so the
-                # next production call would pass ``self`` as the view.
-                OperatorApp._hold_tail_for_reveal = staticmethod(  # type: ignore[method-assign]
-                    real
-                )
-
-            assert calls, "the resume's first frame was not held to the tail"
-
-
-def test_the_tail_history_notice_takes_the_width_the_prepare_named() -> None:
-    """F5, pinned on what ``prepare`` BUILDS rather than on the class (R2-F2).
-
-    The twins disagreeing about how a block learns its width is the seam this
-    exists to close, and the first version of this pin could not see it: it
-    constructed ``HistoryPageNotice`` itself, so it passed with
-    ``session_presentation.py``'s OWN construction reverted — a pin that survives
-    the revert of the line it names is not a pin. This one seeds the pending tail
-    the projection is handed and measures the notice THAT call built.
-
-    No height consequence at today's widths (the copy is 30 cells: one row at 80
-    and at 142) — the point is the seam, exactly as F5 was answered in round 1.
-    """
-    from local_operator.tui.session_presentation import (
-        HistoryPageNotice,
-        PreparedReplay,
-    )
-
-    prose = " ".join(f"ZEBRA word{index:02} alpha beta gamma delta epsilon" for index in range(40))
-    replay = PreparedReplay()
-    replay._resume_pending_tail = [_assistant_message(prose)]
-    replay.prepare([_assistant_message(prose)], bound=1, fold_width=126)
-    notices = [block for block in replay.blocks if isinstance(block, HistoryPageNotice)]
-    assert notices, "the prepare built no tail notice to measure"
-    named = notices[0].fold_width(0)
-    assert named == 126, (
-        "the tail notice was built at its own default, not at the width the caller named",
-        named,
-    )
+            samples = _frame_samples(app)
+            start = len(samples)
+            app._render_resumed_history(session)
+            view = app._transcript_view()
+            assert view._hold_tail_placement, (
+                "the resume put its rows up without holding the tail: the first frame is "
+                "placed at scroll 0 and moved a frame later"
+            )
+            for _ in range(8):
+                await pilot.pause()
+            assert not _off_tail(samples, after=start), (
+                f"a painted frame left the tail during the render: "
+                f"{_off_tail(samples, after=start)}"
+            )
+            assert not view._hold_tail_placement, (
+                "the render's hold outlived the render: a later extent change would drag a "
+                "reader who has scrolled away"
+            )
 
 
 @pytest.mark.asyncio
@@ -734,6 +730,15 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
                             "target": 1.0 if target == alpha.session_id else 0.0,
                             "blocks": float(len(view.blocks())),
                             "height": float(view.outer_size.height),
+                            # The transscript's OWN region and the dock's host: a
+                            # card is a dock child, so its rows come out of the
+                            # transcript's region, and a frame drawn before the host
+                            # has authored that height pushes the card's own rows off
+                            # the screen (F2/Q2/D4).
+                            "region": float(view.region.height),
+                            "host_y": float(host.region.y),
+                            "host_h": float(host.region.height),
+                            "screen_h": float(app.size.height),
                             "prompt": float(bool(host.display and host.children)),
                         }
                     )
@@ -781,10 +786,41 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
         "the transcript's height on a LATER frame",
         content[:4],
     )
-    # The transcript's own height is NOT asserted here: whether the dock's new
-    # rows and the reveal coalesce into one layout pass depends on the frame
-    # (measured coalescing at 160x45 in the bench probe, one pass apart in this
-    # smaller pilot, which is why this assertion was removed rather than
-    # tightened). What this test pins is the part that is this change's: the card
-    # exists before the frame that carries it, so the rows in that frame were
-    # laid out with it.
+    # THE CARD'S ROWS ARE RESERVED IN THAT SAME FRAME (`arrange`-time settle, see
+    # `OperatorApp._settle_dock_rows_before_reveal`), so the transcript's own
+    # region is the settled one immediately and the host sits inside the screen.
+    # Before the reservation, measured at this size: region 38, host y=39 with 15
+    # rows on a 45-row screen (clipped), settling to 23 at +147 ms with the scroll
+    # moving by exactly the card's height — review round 1's F2, QA's Q2, design's
+    # D4. `region`, not `outer_size`: the reviewer's point, and it is the region the
+    # reader's rows are clipped to.
+    settled = content[-1]
+    assert first["region"] == settled["region"], (
+        "the transcript's region was not the settled one in the frame that carries "
+        "the card: the dock's rows were not reserved",
+        first["region"],
+        settled["region"],
+        content[:4],
+    )
+    assert first["host_y"] + first["host_h"] <= first["screen_h"] + 0.5, (
+        "the card itself was pushed off the screen by its own late reservation",
+        first["host_y"],
+        first["host_h"],
+        first["screen_h"],
+    )
+    # WHAT THIS PINS, and what it does not. The pin is the commit's own claim: the
+    # card exists BEFORE the frame that carries it, so the reveal is not followed
+    # by a second state that takes the card's rows out of the transcript.
+    #
+    # RESIDUAL (F2, review round 1), measured with a display-attributed sampler at
+    # this same 160x45: in the frame that carries the card the transcript's own
+    # region is still the pre-dock one — region `y=1 h=38`, the prompt host pushed
+    # to `y=39` with 15 rows on a 45-row screen, i.e. the card is CLIPPED there —
+    # and the settled `1/23` + host `24/15` lands one display later (147 ms, with
+    # the scroll moving 93 -> 108, the card's own height). So the earlier comment
+    # here ("one layout pass apart in this smaller pilot") was wrong twice over:
+    # this pilot IS 160x45, and the reason the equality was removed is not
+    # coalescing but that the dock's rows are not subtracted from the transcript's
+    # region in that frame. Making the reveal reserve the dock's rows before the
+    # commit (the same lever the PR names for the live case) is the fix; until it
+    # lands, this residual is named rather than asserted away.
