@@ -20089,7 +20089,8 @@
               "memberships.list",
               "org_agents.list",
               "org_team.get",
-              "org_teams.list"
+              "org_teams.list",
+              "signup.resend"
             ],
             "title": "Operation"
           },

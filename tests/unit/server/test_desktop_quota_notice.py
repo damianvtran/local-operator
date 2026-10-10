@@ -593,12 +593,157 @@ async def test_radient_body_comes_from_the_shared_recovery_builder(quota: Harnes
         ),
     )
     result = await quota.notice(provider="radient", model="radient/auto")
-    assert result["state"] == "depleted"
+    # A pending grant behind an empty balance: verify first (PR2's state), with
+    # the OAuth row making the resend button available.
+    assert result["state"] == "unverified"
     assert result["kind"] == "radient"
     assert result["body"] == rr.recovery_line(expected_facts)
-    assert result["actions"][0]["id"] == "open_url"
-    assert result["actions"][0]["url"] == "https://console.radienthq.com/dashboard/billing"
-    assert result["actions"][-1]["id"] == "refresh"
+    assert [a["id"] for a in result["actions"]] == [
+        "open_url",
+        "resend_verification",
+        "refresh",
+    ]
+    assert result["actions"][0]["url"] == rr.CLAIM_URL
+    assert "r@example.com" not in str(result)
+
+
+async def test_radient_api_key_only_has_no_usage_evidence_so_no_notice(quota: Harness) -> None:
+    """Radient's usage fetcher has no API-key route (``_FETCHERS["radient"]``), so
+    an API-key-only account never produces a report and the notice stays silent
+    rather than guessing. Pins the finding that makes the resend question moot for
+    it: the button is only ever reachable with an OAuth login."""
+    quota.store.upsert_credential("radient", {"type": "api_key", "key": "rk-test"})
+    result = await quota.notice(provider="radient", model="radient/auto")
+    assert result["state"] == "unknown"
+    assert result["actions"] == []
+
+
+async def test_radient_oauth_plus_api_key_resend_follows_the_spent_credential(
+    quota: Harness,
+) -> None:
+    """With both credentials, resend is offered only if the cascade's pick (the
+    one ``signup.resend`` would send) is the JWT; if the key is picked, the
+    affordance degrades to the link."""
+    from local_operator.providers.auth_store import OAuthAccess
+
+    quota.store.upsert_credential("radient", {"type": "oauth", "access": "tok-r", "refresh": "r"})
+    quota.store.upsert_credential("radient", {"type": "api_key", "key": "rk-test"})
+
+    async def probe(token: str):
+        return rr.VerificationFacts(email_verified=False, signup_grant="expired")
+
+    async def fetch_radient(client, access_token):
+        return _balance_report("radient", 0.0)
+
+    quota.monkeypatch.setattr(rr, "_probe_verification_async", probe)
+    _stub(quota.monkeypatch, "fetch_radient_balance", fetch_radient)
+
+    def picking(kind: str):
+        async def get_oauth_access(provider, *args, **kwargs):
+            return OAuthAccess(
+                access_token="x", kind=kind, credential_id=None  # type: ignore[call-arg]
+            )
+
+        return get_oauth_access
+
+    quota.monkeypatch.setattr(quota.store, "get_oauth_access", picking("api_key"))
+    result = await quota.notice(provider="radient", model="radient/auto", refresh=True)
+    assert result["state"] == "unverified"
+    assert [a["id"] for a in result["actions"]] == ["open_url", "refresh"]
+
+    quota.monkeypatch.setattr(quota.store, "get_oauth_access", picking("oauth"))
+    result = await quota.notice(provider="radient", model="radient/auto", refresh=True)
+    assert [a["id"] for a in result["actions"]] == ["open_url", "resend_verification", "refresh"]
+
+
+async def test_radient_verified_empty_account_is_a_topup(quota: Harness) -> None:
+    quota.store.upsert_credential("radient", {"type": "oauth", "access": "tok-r", "refresh": "r"})
+
+    async def probe(token: str):
+        return rr.VerificationFacts(email_verified=True, signup_grant="claimed")
+
+    async def fetch_radient(client, access_token):
+        return _balance_report("radient", 0.0)
+
+    quota.monkeypatch.setattr(rr, "_probe_verification_async", probe)
+    _stub(quota.monkeypatch, "fetch_radient_balance", fetch_radient)
+    result = await quota.notice(provider="radient", model="radient/auto")
+    assert result["state"] == "depleted"
+    assert [a["id"] for a in result["actions"]] == ["open_url", "refresh"]
+
+
+async def test_verified_just_now_forced_recheck_bypasses_the_facts_cache(quota: Harness) -> None:
+    """R1-X1: after "I verified", the user's forced re-check must not re-serve
+    the cached pre-verification facts — the /me probe caches for 180 s, longer
+    than the whole interaction.
+
+    The forced re-read is the same gate the usage refresh takes
+    (``REFRESH_FLOOR_MS``), so the click that gets through re-probes BOTH
+    layers; ``_age_cache_row`` simulates the seconds a real verification trip
+    to the inbox costs.
+    """
+    quota.store.upsert_credential("radient", {"type": "oauth", "access": "tok-r", "refresh": "r"})
+    answers = {"grant": "pending"}
+    calls: list[str] = []
+
+    async def probe(token: str):
+        calls.append(token)
+        return rr.VerificationFacts(email_verified=False, signup_grant=answers["grant"])
+
+    async def fetch_radient(client, access_token):
+        return _balance_report("radient", 0.0)
+
+    quota.monkeypatch.setattr(rr, "_probe_verification_async", probe)
+    _stub(quota.monkeypatch, "fetch_radient_balance", fetch_radient)
+
+    first = await quota.notice(provider="radient", model="radient/auto", refresh=True)
+    assert first["state"] == "unverified"
+
+    # The user verifies in the console; the probe would now say so. A plain
+    # read still serves the cached facts — the cache is the point.
+    answers["grant"] = "claimed"
+    cached = await quota.notice(provider="radient", model="radient/auto")
+    assert cached["state"] == "unverified"
+    assert len(calls) == 1
+
+    # The user's own "I verified" click, past the floor, re-probes: the notice
+    # flips to the top-up remedy instead of re-serving "verify your email".
+    _age_cache_row(quota.tmp_path, "radient", desktop_quota.REFRESH_FLOOR_MS + 5_000)
+    forced = await quota.notice(provider="radient", model="radient/auto", refresh=True)
+    assert forced["state"] == "depleted"
+    assert [a["id"] for a in forced["actions"]] == ["open_url", "refresh"]
+    assert len(calls) == 2
+
+
+async def test_a_recheck_inside_the_refresh_floor_answers_from_cache(quota: Harness) -> None:
+    """Inside the floor even a forced re-check serves the cache — deliberately.
+
+    One gate bounds what a click may spend (round-1 m4: a focus loop must not
+    probe per focus), so a click seconds after the last fetch is answered by
+    what that fetch found; the state cannot have moved in seconds, and the
+    next click past the floor re-probes. This pins the bound so nobody
+    "fixes" it into an unfenced /me loop.
+    """
+    quota.store.upsert_credential("radient", {"type": "oauth", "access": "tok-r", "refresh": "r"})
+    calls: list[str] = []
+
+    async def probe(token: str):
+        calls.append(token)
+        return rr.VerificationFacts(email_verified=False, signup_grant="pending")
+
+    async def fetch_radient(client, access_token):
+        return _balance_report("radient", 0.0)
+
+    quota.monkeypatch.setattr(rr, "_probe_verification_async", probe)
+    _stub(quota.monkeypatch, "fetch_radient_balance", fetch_radient)
+
+    first = await quota.notice(provider="radient", model="radient/auto")
+    assert first["state"] == "unverified"
+    assert len(calls) == 1
+
+    immediate = await quota.notice(provider="radient", model="radient/auto", refresh=True)
+    assert immediate["state"] == "unverified"
+    assert len(calls) == 1, "inside the floor the click must not re-probe"
 
 
 async def test_forced_refresh_failure_keeps_the_cached_row(quota: Harness) -> None:
