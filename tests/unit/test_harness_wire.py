@@ -275,6 +275,12 @@ _FIELD_EXAMPLES: dict[str, Any] = {
     "label": "l",
     "status": "ok",
     "progress": "50%",
+    # ``SupplementProgressEvent`` (turn supplements, lane C0): the anchor is a final
+    # assistant message id, ``job`` a 12-hex job id, ``state`` from its vocabulary.
+    "anchor": "m1",
+    "job": "3f9c1a7e5b20",
+    "version": 1,
+    "state": "queued",
 }
 
 
