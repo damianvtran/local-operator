@@ -151,6 +151,33 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Drops both derived files for one session id, on that session's own deletion",
     ),
+    # -- the code-request FETCH cache (1b): same derived-store argument as the
+    # ledger entries above. Every path here is built from ``fetch_dir()``
+    # (``<config>/cache/code_requests``) plus a sanitized host segment and a
+    # quoted-filename stem; no caller string can contribute a separator, and the
+    # files are cached fetch state, regenerable by the next refresh pass — a
+    # deleted entry is one conditional request away from being rebuilt.
+    (
+        "local_operator/code_requests/cache.py::_write_json",
+        "os.replace",
+        "Atomic pid-temp replace of one <config>/cache/code_requests/<host>/<file>.json",
+    ),
+    (
+        "local_operator/code_requests/cache.py::drop_entry",
+        "<path>.unlink",
+        "Drops one cached ref entry (memory + this file) on an explicit drop",
+    ),
+    (
+        "local_operator/code_requests/cache.py::clear_dirty",
+        "<path>.unlink",
+        "Drops one session's dirty marks once its fetch pass consumed them",
+        2,
+    ),
+    (
+        "local_operator/code_requests/cache.py::sweep",
+        "<path>.unlink",
+        "Drops entries untouched for SWEEP_AGE_S — the derived-store age sweep",
+    ),
     (
         "local_operator/operator/devices.py::clear_pairing",
         "<path>.unlink",

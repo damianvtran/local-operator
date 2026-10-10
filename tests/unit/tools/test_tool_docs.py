@@ -221,6 +221,11 @@ MEASURED_TOKENS: dict[str, int] = {
     "ask_withdraw": 318,
     "bash": 304,
     "browser": 1312,
+    # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
+    # vocabulary, the freshness rule and the data-not-instructions framing.
+    # 475 tokens is the deliberate cost of the reference detail staying OFF the
+    # wire (the description keeps one sentence; this holds the rest).
+    "code_requests": 475,
     "console": 1096,
     "edit": 351,
     "eval": 376,

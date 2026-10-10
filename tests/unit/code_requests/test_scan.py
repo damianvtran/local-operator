@@ -320,3 +320,34 @@ def test_an_enterprise_url_in_a_peer_message_uses_the_scan_context():
     # With no way to know the host, the same message says so instead of guessing.
     blind = scan_rows(rows, EMPTY).rows[0]
     assert blind.ref.full is False and blind.ref.reason
+
+
+def test_the_code_requests_tools_own_output_is_never_a_mention() -> None:
+    """QA round 1, Q6: the tool prints row keys by design; re-parsing them
+    seeded a phantom tool-only row for a ref the session never saw."""
+    text = "1 code request(s) tracked in this session:\n- gitlab.com/g/p!57 [acted] · open"
+    call = {"id": "c1", "name": "code_requests", "arguments": {"op": "list"}}
+    rows = [
+        _assistant("list the tracked requests", calls=[call]),
+        {
+            "id": "t1",
+            "ts": 2.0,
+            "type": "message",
+            "payload": {
+                "kind": "message",
+                "role": "tool",
+                "tool_name": "code_requests",
+                "tool_call_id": "c1",
+                "content": [{"text": text}],
+            },
+        },
+    ]
+    result = scan_rows(rows, EMPTY)
+    assert result.tool_only_rows == [] and result.tool_output_only == 0
+
+    # Control: the SAME text in a bash result is a tool-output mention — the
+    # exclusion is by provenance, not by the text's shape.
+    control_payload = dict(rows[1]["payload"])
+    control_payload["tool_name"] = "bash"
+    control = scan_rows([{**rows[1], "payload": control_payload}], EMPTY)
+    assert control.tool_output_only == 1

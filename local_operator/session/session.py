@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import inspect
 import json
 import logging
@@ -9960,6 +9961,28 @@ class Session:
         from local_operator.session_factory import _tool_roster_rows
 
         hooks.tool_roster = _tool_roster_rows(self._tools)
+        # The code-requests recommendation's ledger probe rides the same attach
+        # point (it is session-owned state the factory's construction-time object
+        # cannot read): a CALLABLE because the answer moves — the first open
+        # during the session flips it, and the trigger must see that on the next
+        # message rather than on the next session.
+        hooks.code_requests_ledger = self._code_requests_ledger_nonempty
+
+    def _code_requests_ledger_nonempty(self) -> bool:
+        """Whether this session's derived code-request index has any rows.
+
+        The deterministic recommendation trigger's second arm (design §F):
+        review/CI vocabulary only fires when this returns True. One small JSON
+        read, and only on a message whose text already matched the vocabulary.
+        Never raises (a hooks probe must not break a prompt build).
+        """
+        try:
+            from local_operator.code_requests import ledger
+
+            entry = ledger.read_index(self._config_dir, self._session_id)
+            return bool(entry and entry.get("rows"))
+        except Exception:  # noqa: BLE001 - a probe never breaks a prompt build
+            return False
 
     def _wire_tools(self) -> list[AgentTool]:
         """The tools array to advertise to the provider NOW — at most once a turn.
@@ -13753,6 +13776,11 @@ class Session:
             # replayable cut target; re-appending those would resurrect
             # messages after the compaction entry that superseded them.
             await self._persist_new_messages(new_messages)
+            # A turn just ended — one of the design's code-request refetch
+            # moments (§D.5). The run may have pushed, commented or merged;
+            # the mark makes the next look revalidate regardless of TTL, and
+            # costs one stat for a session with no tracked rows.
+            await self._mark_code_requests_dirty()
 
             # The SECOND fork drain point, and it is not redundant with the one
             # in ``_on_turn_end``. That hook fires only when the loop will
@@ -14176,7 +14204,7 @@ class Session:
 
     async def _run_post_tool_hooks(
         self, tool_name: str, args: Mapping[str, Any], call_id: str, result: ToolResult
-    ) -> list[str]:
+    ) -> list[Any]:
         """Run the operator's native and forwarded ``PostToolUse`` hooks for one call.
 
         A child reports ``agent_id``/``agent_type`` exactly as a Claude Code
@@ -14187,18 +14215,21 @@ class Session:
         # CODE-REQUEST DETECTION rides this seam rather than a hook of its own, and it
         # is deliberately independent of the operator's hooks: the interesting fact is
         # "this call created PR #1904", which must be recorded whether or not a hook is
-        # configured. It writes one small ledger row and returns no notes, so the tool
-        # result the model sees is byte-identical to what it would have been; a detector
-        # failure is swallowed exactly as the forwarded hooks' is (AGENTS.md: a hook
-        # must never break a turn).
+        # configured. It writes one small ledger row and, since PR1b, returns the
+        # session's OWN tracked note (tagged ``code-requests``, never mislabelled as a
+        # forwarded hook event) plus an acted-event dirty mark for the fetch service; a
+        # detector failure is swallowed exactly as the forwarded hooks' is (AGENTS.md: a
+        # hook must never break a turn).
         #
         # CHEAPEST TESTS FIRST, because this runs for EVERY tool result of EVERY session:
         # ``could_matter`` is a handful of substring checks, while the two loads below are
         # worker-thread hops that read the operator's gh/glab/tea config and the MCP server
         # list. Gating first means an ordinary ``ls`` costs the substring scan and nothing
         # else — review round 1 (F4) caught the loads running ahead of the gate, which put
-        # two executor hops on the hottest path in the runtime.
-        await self._detect_code_requests(tool_name, args, call_id, result)
+        # two executor hops on the hottest path in the runtime. PR1b adds one thing on top:
+        # the call returns the session's OWN tracked/acted notes, appended below with their
+        # ``code-requests`` tag.
+        code_request_notes = await self._detect_code_requests(tool_name, args, call_id, result)
 
         is_child = self._job_id is not None
         transcript_path: str | None = None
@@ -14214,7 +14245,7 @@ class Session:
             agent_id=self._job_id if is_child else None,
             agent_type=(self._agent_type or "task") if is_child else None,
         )
-        return await run_post_tool_hooks(
+        notes = await run_post_tool_hooks(
             identity,
             tool_name=tool_name,
             args=args,
@@ -14223,25 +14254,38 @@ class Session:
             is_error=result.is_error,
             duration_s=result.duration_s,
         )
+        if code_request_notes:
+            # The session's own notes ride the same list; each carries its tag.
+            notes = [*notes, *code_request_notes]
+        return notes
 
     async def _detect_code_requests(
         self, tool_name: str, args: Mapping[str, Any], call_id: str, result: ToolResult
-    ) -> None:
-        """Record any code request this tool result proves the session opened or acted on.
+    ) -> list[Any]:
+        """Record any code request this tool result proves, and build its tracked note.
 
         The detection itself (``code_requests/hook.py``) owns every rule; this method is
         the session's half: what it may write, and where it must NOT intrude. Nothing is
         written for a session without a transcript directory (a speculative runtime), and
         a failure is a debug line rather than a warning, because an unknown session id or
         a read-only directory is not an operator-visible fault.
+
+        Returns the notes to append to the tool result (PR1b): one tagged line per
+        ``opened``/``acted`` detection — and for a ``monitor``/``wake`` ARM call whose
+        arguments name a ref, the same tracked line, because "tell me when round 2
+        lands" is exactly the moment the tool becomes worth knowing about. An
+        ``acted`` event ALSO marks the row dirty (the fetch service consumes the mark
+        on its next pass): the session's own comment/push/merge/post is the one
+        eagerness the polling-free design allows.
         """
+        notes: list[Any] = []
         try:
             if self._transcript.directory is None:
-                return
+                return notes
             from local_operator.code_requests import hook as code_requests_hook
 
             if not code_requests_hook.could_matter(tool_name, args, result.text):
-                return
+                return notes
             context = await code_requests_hook.load_context_async(self._cwd)
             servers = await asyncio.to_thread(code_requests_hook.load_mcp_servers, self._cwd)
             detections = code_requests_hook.classify(
@@ -14257,8 +14301,154 @@ class Session:
                 await code_requests_hook.record_detections(
                     self, detections, tool=tool_name, call_id=call_id
                 )
+            notes = await asyncio.to_thread(
+                self._code_request_notes,
+                detections,
+                tool_name,
+                args,
+                context,
+                asyncio.get_running_loop(),
+            )
         except Exception:  # noqa: BLE001 - bookkeeping never breaks a turn
             logger.debug("code-request detection skipped", exc_info=True)
+        return notes
+
+    def _code_request_notes(
+        self,
+        detections: Any,
+        tool_name: str,
+        args: Mapping[str, Any],
+        context: Any,
+        loop: Any = None,
+    ) -> list[Any]:
+        """The tracked one-liners for one tool result, plus its dirty marks (blocking).
+
+        Runs on a worker thread: it reads the fetch cache (small JSON files) and
+        writes the dirty mark. Both are local I/O, but this sits on the tool-result
+        path, so it stays off the event loop like the detection's own file reads.
+        ``loop`` is the caller's event loop (passed because a worker thread has
+        none): the ACTED kick below is handed back to it.
+        """
+        from local_operator.code_requests import cache as code_requests_cache
+        from local_operator.code_requests import service as code_requests_service
+        from local_operator.code_requests.detect import KIND_ACTED, KIND_OPENED
+        from local_operator.code_requests.refs import iter_refs
+        from local_operator.hook_forwarding import TaggedNote
+
+        notes: list[Any] = []
+        acted_keys: list[str] = []
+        merged_keys: set[str] = set()
+        drafts: list[tuple[Any, str]] = []
+        for detection in detections or ():
+            ref = getattr(detection, "ref", None)
+            if ref is None:
+                continue
+            kind = getattr(detection, "kind", "")
+            act = getattr(detection, "act", None)
+            if kind == KIND_ACTED and ref.key:
+                acted_keys.append(ref.key)
+                if act == "merge":
+                    merged_keys.add(ref.key)
+            if kind not in (KIND_OPENED, KIND_ACTED):
+                continue
+            drafts.append((ref, self._tracked_line(ref, act)))
+        if not detections and tool_name in ("monitor", "wake"):
+            # "tell me when round 2 lands on #1904" arms a watch rather than acting:
+            # the SAME tracked line, keyed off the refs in the arm's arguments.
+            blob = " ".join(str(value) for value in args.values() if isinstance(value, str))
+            for ref in iter_refs(blob, context):
+                drafts.append(
+                    (
+                        ref,
+                        f"Tracked: {self._ref_handle(ref)} (armed with {tool_name}). "
+                        "code_requests show for review rounds and CI.",
+                    )
+                )
+                if len(drafts) >= 3:
+                    break
+        if acted_keys:
+            code_requests_cache.mark_dirty(self._config_dir, self._session_id, keys=acted_keys)
+            # THE MARK ALONE IS NOT ENOUGH (QA round 2, Q12). It only lets a
+            # READER revalidate, and with no client-triggered read after an
+            # acted event the feed never moves — the pane was poll-bound
+            # (measured: zero frames over 75 s). Kick a pass for the ACTED
+            # keys here, on the caller's loop: the forge answer then moves
+            # the index revision, and the feed frame follows without a GET.
+            # Scoped to the keys so the rest of the session keeps its TTLs;
+            # best-effort — a kick never breaks the turn.
+            if loop is not None:
+                try:
+                    from local_operator.code_requests import (
+                        ledger as code_requests_ledger,
+                    )
+
+                    entry = code_requests_ledger.read_index(self._config_dir, self._session_id)
+                    rows = (entry or {}).get("rows") or []
+                    loop.call_soon_threadsafe(
+                        functools.partial(
+                            code_requests_service.schedule_session_refresh,
+                            self._config_dir,
+                            self._session_id,
+                            rows,
+                            keys=list(acted_keys),
+                            # The seam has no cached read to fall back on: a
+                            # kick that joins an in-flight pass must still be
+                            # served (review round 3, N6).
+                            chain=True,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - see above
+                    logger.debug("could not schedule a code-request refresh", exc_info=True)
+        for ref, text in drafts:
+            # A merge note carries the row's round freshness when the cache
+            # already knows it (design §F): "agent review r2 clean, fresh on
+            # 9d29452". Advisory only — a missing cache entry just omits it.
+            if getattr(ref, "key", "") in merged_keys:
+                entry = code_requests_cache.read_entry(self._config_dir, ref)
+                head_sha = ""
+                summary = (entry or {}).get("summary")
+                if isinstance(summary, Mapping):
+                    head_sha = str(summary.get("head_sha") or "")
+                fragment = code_requests_service.lane_freshness_note(entry, head_sha)
+                if fragment:
+                    text = text + f" Latest: {fragment}."
+            notes.append(TaggedNote("code-requests", text))
+        return notes
+
+    @staticmethod
+    def _ref_handle(ref: Any) -> str:
+        """``#1904``/``!57`` — the short handle a note uses (the forge's own spelling)."""
+        sep = "!" if getattr(ref, "forge", "") == "gitlab" else "#"
+        return f"{sep}{getattr(ref, 'number', '')}"
+
+    async def _mark_code_requests_dirty(self) -> None:
+        """Mark this session's code-request rows dirty (design §D.5).
+
+        Callers are the moments a refetch becomes worth it without a poll: the
+        end of a turn, and a wake/monitor delivery into the session. The mark
+        fetches nothing — it tells the fetch service the next look may
+        revalidate regardless of TTL. Best-effort; a failed mark costs
+        nothing, and a session with no tracked rows is a no-op inside.
+        """
+        try:
+            from local_operator.code_requests import cache as code_requests_cache
+
+            await asyncio.to_thread(
+                code_requests_cache.mark_dirty,
+                self._config_dir,
+                self._session_id,
+                all_rows=True,
+            )
+        except Exception:  # noqa: BLE001 - a mark never breaks a turn or delivery
+            logger.debug("could not mark code-request rows dirty", exc_info=True)
+
+    def _tracked_line(self, ref: Any, act: str | None) -> str:
+        """One tracked note line: what happened, then where to look next."""
+        what = act or "opened"
+        return (
+            f"Tracked: {self._ref_handle(ref)} ({what}). "
+            "code_requests show for review rounds and CI."
+        )
 
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
@@ -19934,6 +20124,11 @@ class Session:
         # broken wake cannot become a hot loop), so it must still count as a
         # fire for the purpose of "when did this last go off".
         self._wake_fired_since_persist = True
+        # The code-request refetch rule (§D.5) hangs its wake half HERE rather
+        # than in the delivery methods: this trampoline sees every fire,
+        # including the ones the resume catch-up folds into one message (which
+        # never reach ``_deliver_wake`` at all).
+        await self._mark_code_requests_dirty()
         await self._wake_deliver_hook(due)
 
     async def _purge_removed_wakes(self, removed: Sequence[WakeSchedule]) -> None:
@@ -21535,6 +21730,9 @@ class Session:
         this one's schedule list; the load-time filter and the supervisor skip
         cover the other two paths.
         """
+        # A delivery into the session is one of the design's refetch moments
+        # (§D.5): the context moved, and the operator may look next.
+        await self._mark_code_requests_dirty()
         from local_operator.wakes.store import is_ask_timeout_row, is_patience_row
 
         if is_ask_timeout_row(due.schedule):
@@ -21920,6 +22118,9 @@ class Session:
         delta budget (§9.1).
         """
         text = format_monitor_delivery_text(delivery)
+        # A delivery into the session is one of the design's refetch moments
+        # (§D.5); the monitor's own finding may even be about a tracked row.
+        await self._mark_code_requests_dirty()
         busy = self._is_streaming
         if busy:
             text = self._append_busy_resume_note(text, kind="monitor")

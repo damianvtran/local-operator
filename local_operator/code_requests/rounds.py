@@ -236,9 +236,57 @@ class ReviewPass:
             value = getattr(self, name)
             if value:
                 payload[name] = value
+        if self.created_at:
+            # Carried so per-piece stored parses can be re-ordered into ONE
+            # union by the same key ``merge_comments`` sorts on (N2); the
+            # parser's own ordering contract is created_at, so the replay can
+            # reproduce it exactly.
+            payload["created_at"] = self.created_at
         if self.remediation:
             payload["remediation"] = [item.to_payload() for item in self.remediation]
         return payload
+
+    @staticmethod
+    def from_payload(raw: object) -> "ReviewPass | None":
+        """Reconstruct one pass from :meth:`to_payload` — a fetch-time parse, replayed.
+
+        The service parses comment bodies ONCE, at fetch time, from the full
+        text and stores the result; a later rebuild that did not refetch the
+        comments re-reads this payload instead of re-parsing bodies the size
+        bound has since truncated (cross-round finding X1: a verdict past the
+        4 KiB cap used to degrade to ``unstated`` on the next 304)."""
+        if not isinstance(raw, Mapping):
+            return None
+        lane = str(raw.get("lane") or "")
+        kind = str(raw.get("kind") or "")
+        if not lane or not kind:
+            return None
+        remediation = tuple(
+            Remediation(
+                finding=str(item.get("finding") or ""),
+                disposition=str(item.get("disposition") or ""),
+                sha=str(item["sha"]) if item.get("sha") else None,
+                verbatim=str(item.get("verbatim") or ""),
+            )
+            for item in raw.get("remediation") or ()
+            if isinstance(item, Mapping)
+        )
+        round_value = raw.get("round")
+        sequence_value = raw.get("sequence")
+        return ReviewPass(
+            lane=lane,
+            kind=kind,
+            round=int(round_value) if isinstance(round_value, (int, float)) else None,
+            qualifier=str(raw.get("qualifier") or ""),
+            sequence=int(sequence_value) if isinstance(sequence_value, (int, float)) else 0,
+            reviewer=str(raw.get("reviewer") or ""),
+            reviewed_head=str(raw["reviewed_head"]) if raw.get("reviewed_head") else None,
+            verdict=str(raw.get("verdict") or ""),
+            verdict_class=str(raw.get("verdict_class") or STATE_UNSTATED),
+            remediation=remediation,
+            comment_id=str(raw.get("comment_id") or ""),
+            created_at=str(raw.get("created_at") or ""),
+        )
 
 
 @dataclass(frozen=True)
@@ -295,6 +343,39 @@ class RoundReport:
 
     def lane_passes(self, lane: str) -> list[ReviewPass]:
         return [item for item in self.passes if item.lane == lane]
+
+    @classmethod
+    def from_payload(cls, raw: object) -> "RoundReport | None":
+        """Reconstruct a report from ``{passes, ignored}`` — see ``ReviewPass.from_payload``."""
+        if not isinstance(raw, Mapping):
+            return None
+        passes = [ReviewPass.from_payload(item) for item in raw.get("passes") or ()]
+        return cls(
+            passes=[item for item in passes if item is not None],
+            ignored=[str(item) for item in raw.get("ignored") or ()],
+        )
+
+    @classmethod
+    def combine(cls, groups: "Iterable[Sequence[ReviewPass]]") -> "RoundReport":
+        """Merge per-piece pass groups into the report a one-shot parse would give.
+
+        ``parse``'s order contract is ``created_at`` (the adapter's own
+        ``merge_comments`` sort), and the stored passes carry it, so sorting
+        the union by ``(created_at, comment_id)`` and re-numbering reproduces
+        the exact one-shot result. This is what lets a fetcher keep ONE stored
+        parse per comment PIECE: the piece that answered 304 replays its
+        full-body passes while only the refetched piece is re-parsed (review
+        round 2, N2).
+        """
+        flat = [item for group in groups for item in group]
+        flat.sort(key=lambda item: (item.created_at, item.comment_id))
+        counters: dict[tuple[str, int | None, str], int] = {}
+        passes: list[ReviewPass] = []
+        for item in flat:
+            key = (item.lane, item.round, item.kind)
+            counters[key] = counters.get(key, 0) + 1
+            passes.append(_with_sequence(item, counters[key]))
+        return cls(passes=passes)
 
     def states(self, head_sha: str | None = None, *, is_open: bool = True) -> list[LaneState]:
         """One :class:`LaneState` per lane that has a comment (plus ``agent`` on an open PR).
