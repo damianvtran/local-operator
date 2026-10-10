@@ -877,9 +877,9 @@ class TestWrittenContentInDetailsTakesTheResultMask:
         # ``or {}``/``or []`` so the Optional ``details`` is never subscripted
         # directly (pyright reportOptionalSubscript; CI type-check).
         executor_diff = (executor.result.details or {}).get("diff") or []
-        assert DETAILS_KEY in "\n".join(executor_diff), (
-            "the executor's own record must describe the bytes it wrote"
-        )
+        assert DETAILS_KEY in "\n".join(
+            executor_diff
+        ), "the executor's own record must describe the bytes it wrote"
 
         transcript = Transcript(tmp_path / "session")
         for message in end.messages:
