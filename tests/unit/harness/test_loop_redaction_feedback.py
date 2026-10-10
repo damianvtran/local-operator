@@ -874,9 +874,12 @@ class TestWrittenContentInDetailsTakesTheResultMask:
         assert target.read_bytes() == content.encode()
         assert f"({len(content)} chars)" in _result_text(row)
         executor = [event for event in events if isinstance(event, ToolExecutionEndEvent)][-1]
-        assert DETAILS_KEY in "\n".join(
-            executor.result.details["diff"]
-        ), "the executor's own record must describe the bytes it wrote"
+        # ``or {}``/``or []`` so the Optional ``details`` is never subscripted
+        # directly (pyright reportOptionalSubscript; CI type-check).
+        executor_diff = (executor.result.details or {}).get("diff") or []
+        assert DETAILS_KEY in "\n".join(executor_diff), (
+            "the executor's own record must describe the bytes it wrote"
+        )
 
         transcript = Transcript(tmp_path / "session")
         for message in end.messages:
@@ -1047,12 +1050,14 @@ class TestWrittenContentInDetailsTakesTheResultMask:
         out = await AgentLoop._redact_details(
             {"diff": [f"a {DETAILS_KEY}", 7, f"b {DETAILS_KEY}"]}, redact, "write", None
         )
+        assert out is not None, "a details mapping in, a details mapping back"
         assert out["diff"][1] == 7
         assert out["diff"][0] == f"a {REDACTION_MARKER}"
         assert out["diff"][2] == f"b {REDACTION_MARKER}"
         out = await AgentLoop._redact_details(
             {"diff": (f"a {DETAILS_KEY}", None, f"b {DETAILS_KEY}")}, redact, "write", None
         )
+        assert out is not None, "a details mapping in, a details mapping back"
         assert out["diff"][1] is None
         assert out["diff"][0] == f"a {REDACTION_MARKER}"
         assert out["diff"][2] == f"b {REDACTION_MARKER}"
