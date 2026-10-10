@@ -23274,9 +23274,17 @@ class Session:
         # ``i`` keeps it: the helper decides, not this call site.
         call_arguments = monitor_call_arguments(tool, spec.arguments)
         signal = AbortSignal()
-        context = self._build_tool_context()
+        # The check's own context: the captured cwd plus the UNATTENDED mark.
+        # ``monitor_check`` routes a cancellation away from the steering
+        # detach and into a kill+raise (see bash's cancel handler): no steer
+        # may interrupt a check, and a detached command would outlive the
+        # check with no consumer while its "job … steering interrupted"
+        # notice became the call's RESULT — which the scheduler would then
+        # record as the check's output (m28's poisoned baseline, 2026-10-10).
+        update: dict[str, Any] = {"monitor_check": True}
         if spec.cwd:
-            context = context.model_copy(update={"cwd": spec.cwd})
+            update["cwd"] = spec.cwd
+        context = self._build_tool_context().model_copy(update=update)
         timeout_s = self._monitors.settings.run_timeout_ms / 1000.0
         try:
             result = await asyncio.wait_for(
@@ -23314,6 +23322,27 @@ class Session:
                     "kind": "unavailable",
                 }
             return {"error": text or "the tool returned an error"}
+        # A result that says its call was handed to a BACKGROUND JOB is not
+        # output, and no monitor can watch a process that outlives the check.
+        # The unattended mark above normally prevents this shape, so reaching
+        # it means the spec itself asked for the rehome (``background: true``,
+        # armed before that gate existed) or a future tool rehomed the
+        # call anyway. Cancel the escaped job — nothing will ever consume it —
+        # and fail the tick: this shape is deterministic per spec, so the
+        # monitor disables instead of re-running a call that will rehome
+        # identically.
+        details = getattr(result, "details", None)
+        if isinstance(details, Mapping) and details.get("backgrounded"):
+            job_id = str(details.get("job_id") or "")
+            if job_id and self.jobs is not None:
+                with contextlib.suppress(Exception):
+                    await self.jobs.cancel(job_id)
+            return {
+                "error": (
+                    "the check's call was handed to a background job and left no " "output to watch"
+                ),
+                "kind": "fatal",
+            }
         return {"text": result.text, "error": None}
 
     def _mcp_call_lost_its_server(self, name: str) -> bool:
