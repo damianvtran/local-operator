@@ -476,11 +476,13 @@ LINK_CRYPTO_KINDS = frozenset({"auth", "sequence", "parse", "limit"})
 # reflects compressibility; that is the CRIME/BREACH class, and it needs an
 # attacker who both observes record lengths and can inject chosen text into the
 # same record as a secret. Mesh links are between mutually authenticated members
-# and no op co-mingles a member-chosen string with a credential — and the one
-# frame class that carries credential VALUES (``net_broker``, request and reply)
-# is excluded outright (:data:`NEVER_COMPRESS_OPS`, :class:`UncompressedFrame`),
-# so the residual leak is the compressibility of session/catalogue content that
-# the receiving member is already authorised to read.
+# and no op co-mingles a member-chosen string with a credential — and every
+# frame class that carries SECRET material — credential VALUES (``net_broker``)
+# and epoch secrets (``net_epoch``, ``net_panic``, ``net_reconcile``,
+# ``net_pair_result``) — is excluded outright (:data:`NEVER_COMPRESS_OPS`,
+# :class:`UncompressedFrame`), so the residual leak is the compressibility of
+# session/catalogue content that the receiving member is already authorised to
+# read.
 
 #: First plaintext byte of a compressed record (see above for why 0x01).
 COMPRESSED_MARKER = b"\x01"
@@ -498,11 +500,26 @@ COMPRESS_MIN_BYTES = 2048
 #: 3 is the knee. (zlib releases the GIL on buffers this size.)
 COMPRESS_LEVEL = 3
 
-#: Ops that are never compressed, as REQUESTS: the credential broker's frames
-#: carry secret values (``net_broker`` copy) and a compressed length would
-#: otherwise expose their compressibility. Replies are acks with no op of their
-#: own, so the relay marks them with :class:`UncompressedFrame` instead.
-NEVER_COMPRESS_OPS: frozenset[str] = frozenset({"net_broker"})
+#: Ops whose frames are never compressed: the classes carrying SECRET material,
+#: where the compressed length would publish its compressibility (the CRIME/
+#: BREACH class the note above describes).
+#:
+#: * ``net_broker`` — credential VALUES (a ``copy`` answer);
+#: * ``net_epoch`` / ``net_panic`` — a rotation hands the NEW EPOCH SECRET to
+#:   each member (``epoch_frame`` / ``panic_frame``): 2.4 KB of highly
+#:   compressible JSON, above the threshold, so the exclusion does real work;
+#: * ``net_reconcile`` — the catch-up reply re-hands that same secret;
+#: * ``net_pair_result`` — the admitted joiner's epoch secret, sealed by the
+#:   pairing listener OUTSIDE the relay's reply shaper, so it has to be named
+#:   HERE for ``seal``'s own op check to see it.
+#:
+#: Read as OPS, not only requests: replies are acks with no op of their own, so
+#: the relay marks those with :class:`UncompressedFrame` from the GRANTED action
+#: (``relay._run_handler``), which covers the broker and reconcile replies once
+#: their op name is in this set.
+NEVER_COMPRESS_OPS: frozenset[str] = frozenset(
+    {"net_broker", "net_epoch", "net_panic", "net_reconcile", "net_pair_result"}
+)
 
 
 class UncompressedFrame(dict[str, Any]):

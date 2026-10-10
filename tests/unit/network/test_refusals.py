@@ -1404,10 +1404,17 @@ def test_a_handlers_refusal_crosses_the_link_carrying_its_code(root: Path) -> No
     }
 
 
-def test_a_broker_reply_is_marked_so_the_codec_never_compresses_it(root: Path) -> None:
-    """A `net_broker` ack can carry a credential VALUE and has no op of its own for
-    ``seal`` to key on, so ``_run_handler`` marks it; every other op's reply stays a
-    plain dict (wire.py "Record compression")."""
+@pytest.mark.parametrize("op", sorted(wire.NEVER_COMPRESS_OPS))
+def test_secret_bearing_replies_are_marked_so_the_codec_never_compresses_them(
+    root: Path, op: str
+) -> None:
+    """EVERY op in ``NEVER_COMPRESS_OPS`` marks its REPLY, not just its requests.
+
+    An ack has no op of its own for ``seal`` to key on, and the replies that carry
+    secret material are the broker's ``copy`` answer, the epoch-rotation answers and
+    the reconcile catch-up — a compressed record length would publish the secret's
+    compressibility (wire.py "Record compression"; agent review round 1, R1-1).
+    """
     from argparse import Namespace
 
     server = relay.RelayServer(
@@ -1418,16 +1425,51 @@ def test_a_broker_reply_is_marked_so_the_codec_never_compresses_it(root: Path) -
     def _handler(_link: object, _frame: dict[str, object]) -> dict[str, object]:
         return {"value": "s3cret"}
 
-    broker = server._run_handler(  # noqa: SLF001 — the one place a handler's reply is shaped
-        link, {"op": "net_broker", "req": 4}, _handler, types.Granted(action="net_broker")
+    reply = server._run_handler(  # noqa: SLF001 — the one place a handler's reply is shaped
+        link, {"op": op, "req": 4}, _handler, types.Granted(action=op)
     )
-    other = server._run_handler(  # noqa: SLF001
+    assert isinstance(reply, wire.UncompressedFrame), op
+    assert reply == {"op": "ack", "req": 4, "detail": {"value": "s3cret"}}
+
+    def _silent(_link: object, _frame: dict[str, object]) -> None:
+        return None
+
+    # THE EMPTY ACK GOES THROUGH THE SAME WRAP (agent review round 1, R1-2): the
+    # ``result is None`` early return used to be the one path that skipped the
+    # marker, so this pins that it no longer is.
+    empty = server._run_handler(  # noqa: SLF001
+        link, {"op": op, "req": 6}, _silent, types.Granted(action=op)
+    )
+    assert isinstance(empty, wire.UncompressedFrame), op
+    assert empty == {"op": "ack", "req": 6, "detail": ""}
+
+
+def test_ordinary_replies_are_not_marked(root: Path) -> None:
+    """The wrap is a membership test, not a blanket: an op outside the set leaves as
+    a plain dict — and its empty ack does too."""
+    from argparse import Namespace
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    link: Any = Namespace(device_id="d_" + "c" * 32, network_id="n_test", epoch=1)
+
+    def _handler(_link: object, _frame: dict[str, object]) -> dict[str, object]:
+        return {"value": "s3cret"}
+
+    def _silent(_link: object, _frame: dict[str, object]) -> None:
+        return None
+
+    reply = server._run_handler(  # noqa: SLF001
         link, {"op": "net_catalog", "req": 5}, _handler, types.Granted(action="net_catalog")
     )
-    assert isinstance(broker, wire.UncompressedFrame)
-    assert broker == {"op": "ack", "req": 4, "detail": {"value": "s3cret"}}
-    assert not isinstance(other, wire.UncompressedFrame)
-    assert other == {"op": "ack", "req": 5, "detail": {"value": "s3cret"}}
+    empty = server._run_handler(  # noqa: SLF001
+        link, {"op": "net_catalog", "req": 6}, _silent, types.Granted(action="net_catalog")
+    )
+    assert not isinstance(reply, wire.UncompressedFrame)
+    assert reply == {"op": "ack", "req": 5, "detail": {"value": "s3cret"}}
+    assert not isinstance(empty, wire.UncompressedFrame)
+    assert empty == {"op": "ack", "req": 6, "detail": ""}
 
 
 @pytest.mark.parametrize(
