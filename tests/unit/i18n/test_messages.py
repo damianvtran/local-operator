@@ -22,6 +22,21 @@ def fixture_catalogues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
                 "wire.errors.count": "{n, number} items",
                 "wire.errors.when": "on {d, date}",
                 "wire.errors.broken": "{unclosed",
+                "wire.errors.retry.exhausted": "Retries exhausted after {n} attempts.",
+                "wire.errors.auth.legacy_note": "Legacy login note.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "en" / "wire.errors.auth.json").write_text(
+        json.dumps({"wire.errors.auth.login_failed": "Login failed for {user}."}),
+        encoding="utf-8",
+    )
+    (root / "en" / "wire.settings.json").write_text(
+        json.dumps(
+            {
+                "wire.settings.model.title": "Model",
+                "wire.settings.display_composer_cost.label": "Composer cost",
             }
         ),
         encoding="utf-8",
@@ -108,3 +123,40 @@ def test_msg_carries_code_and_params(fixture_catalogues: None) -> None:
         "text": "Model x is unavailable.",
     }
     assert messages.msg("wire.errors.model_unavailable", model="x") == message
+
+
+def test_deep_codes_resolve_via_the_file_that_defines_them(fixture_catalogues: None) -> None:
+    # §2.2 keys carry <area>.<element>[.<state>] after the namespace, so
+    # resolution must be file-derived: "wire.errors.retry.exhausted" belongs
+    # to namespace "wire.errors", not to "wire.errors.retry" — string
+    # arithmetic resolved the wrong file for this shape and degraded the code.
+    got = messages.envelope("wire.errors.retry.exhausted", {"n": 3})
+    assert got["text"] == "Retries exhausted after 3 attempts."
+
+
+def test_slice_shaped_keys_resolve_through_their_namespace(fixture_catalogues: None) -> None:
+    # The S1 `wire.settings` key shapes: <area>.<element> and
+    # <area>.<element>.<state> after the namespace.
+    assert messages.render("wire.settings.model.title", {}) == "Model"
+    assert messages.render("wire.settings.display_composer_cost.label", {}) == "Composer cost"
+
+
+def test_nested_namespace_addresses_its_own_file(fixture_catalogues: None) -> None:
+    got = messages.envelope("wire.errors.auth.login_failed", {"user": "d"})
+    assert got["text"] == "Login failed for d."
+
+
+def test_a_deeper_file_does_not_shadow_a_key_in_the_shallower_one(
+    fixture_catalogues: None,
+) -> None:
+    # "wire.errors.auth.legacy_note" is DEFINED by wire.errors.json while
+    # wire.errors.auth.json exists beside it: the resolver must skip the
+    # deeper file that does not define the key, not address it because its
+    # name matches a prefix.
+    got = messages.envelope("wire.errors.auth.legacy_note", {})
+    assert got["text"] == "Legacy login note."
+
+
+def test_unknown_deep_code_still_degrades(fixture_catalogues: None) -> None:
+    got = messages.envelope("wire.errors.auth.no_such_key", {})
+    assert got["text"] == "wire.errors.auth.no_such_key"
