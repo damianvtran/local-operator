@@ -50,14 +50,18 @@ failed, and the HTML is untrusted on every surface.
 | C | Restraint, never delay or fail, security, honesty, persistence outside model context, model/cost, config, lanes | §2.3–§2.11, §4, §5, §6 |
 
 **The names.**
-- User-facing: **"Highlights"**. The row header reads "Highlights" (files plus graphics); the
-  loading line reads "Preparing highlights…". The operator's own wording, "generating
-  supporting graphics", is the fallback if design prefers it.
-- Two conditions ride the name (round-1 design review D6): (a) the settled row always names its
-  contents — counts and names (`2 files · 1 graphic`), never the bare word; (b) no new
-  text-selection copy in the same window says "highlight", so the two senses cannot drift.
-- "Highlights" stays the umbrella for the block; the files half reads as "Files" or as the
-  contents themselves, never as "supporting graphics".
+- User-facing: **"Highlights"** — settings, docs and the ledger's word for the block. **The
+  block itself renders with no header, label or title chrome on any surface**: no section
+  heading, no "Highlights" label, no separator labelled as such, no badge or chip announcing
+  the block. It appears seamlessly directly under the final answer's text, and the reader
+  takes the relationship from position; spacing and rhythm, never a label, carry the seam
+  (operator directive, 2026-10-10 — supersedes round-1 D6(a)'s naming line). The loading line
+  reads "Preparing highlights…"; the operator's own wording, "generating supporting graphics",
+  is the fallback if design prefers it.
+- No new text-selection copy in the same window says "highlight", so the two senses cannot
+  drift (round-1 design review D6(b)).
+- "Highlights" stays the umbrella for the block; the files half appears as the file rows
+  themselves — the contents name themselves — never under a "supporting graphics" label.
 - Code name: keep **`supplement`**. Code reads `supplement`, `SupplementJob`, `supplement_v1`.
   The reason is that "supplement" names what the thing is to the turn (something attached
   after it), while "highlights" names what it is to the reader. Code needs the first and UI
@@ -458,11 +462,13 @@ process, the same redaction boundary classification-layer §6 requires for outbo
 - `TIMEOUT_S` 90 s wall for the whole job;
 - `MAX_OUTPUT_TOKENS` 6000 per turn;
 - `MAX_COMPONENTS` 3;
-- `MAX_JOB_COST_USD` 0.20, a soft cap checked between turns against the ledger-priced
-  snapshot. §5.3's envelope is **per job** (≈ $0.04-0.08 for the whole job, repair turn
-  included), so 0.20 = **2 × the $0.08 high end of that per-job envelope + $0.04 of headroom**.
-  It is not a per-turn figure with a third turn added, which is how the round-1 wording could
-  be read (round-1 review R3; round-2 R2-6).
+- `MAX_JOB_COST_USD` 1.00, a soft cap checked between turns against the ledger-priced
+  snapshot. It is sized to cover roughly one Opus-class turn, where the old 0.20 was derived
+  from §5.3's measured **per-job** envelope (≈ $0.04-0.08 for the whole job at Sonnet-class,
+  repair turn included) — the envelope stays a measurement; nothing derives from it now
+  (operator directive, 2026-10-10). The units contract is unchanged: the cap is only checked
+  between turns, never a per-turn figure with a third turn added (round-1 review R3;
+  round-2 R2-6).
 Any bound firing → `state=failed`, `error="bound:<name>"`, with valid blocks so far kept.
 
 **Fail-open.** Every exception → `failed`, a debug log, and no notice. A generator failure is
@@ -681,12 +687,13 @@ known, graphics queued" (which paints as `queued`).
 
 Steer and cancel render as a **pair** — `Adjust…` · `Cancel`, one `text-meta`/`ink-dim` line — never one hover-only while the other persists; on touch surfaces both are visible, tap targets ≥ 44 px (D10).
 
-**Block anatomy (round-1 design D1).**
-- Files-only with ≤ 2 files and no components: **one line, no header** — the contents themselves (`2 files: report.md, bench.csv`), never the bare word "Highlights" (§0).
-- Otherwise: the header line ("Highlights", always with counts and names), up to `MAX_FEATURED` file rows, the "N more" affordance — **expand in place, bounded at the stored ≤ 20** — then components.
+**Block anatomy (round-1 design D1; header rule amended 2026-10-10).**
+- **No header, label or title — on any surface (TUI, UI, relay, native).** The block starts directly with its content, seamlessly under the answer's text; spacing and rhythm alone carry the seam (§0). No section heading, no "Highlights" label, no separator labelled as such, no badge or chip.
+- Files-only with ≤ 2 files and no components: **one line** — the contents themselves (`2 files: report.md, bench.csv`), never the bare word "Highlights".
+- Otherwise: up to `MAX_FEATURED` file rows, the "N more" affordance — **expand in place, bounded at the stored ≤ 20** — then components, with no header line before them.
 - **Aggregate frame budget:** frames mount automatically only within a cumulative `min(480 px, 40 vh)` of block height; anything beyond (MAX_COMPONENTS is 3) sits behind one disclosure (`Show all N graphics`) that expands in place on an explicit user action. Each frame still answers to its own [120, 480] clamp (§2.11).
-- **Condensed turns:** the block condenses with its turn — one line, **no frames mounted while condensed** — and restores on expand (§2.11). A `done` row with zero components and zero files renders **nothing** (no header, no reserved frame space); a files-only finish reserves no frame space.
-- **Captions, one place (D13):** the helper prints the component title and unit inside the document (D2, App. A); the host chrome renders exactly one `Source: …` line (§2.10); a model-supplied in-document `caption` is suppressed where it would restate the source. The reserved box carries the title as its label while the document loads.
+- **Condensed turns:** the block condenses with its turn — one line, **no frames mounted while condensed** — and restores on expand (§2.11). A `done` row with zero components and zero files renders **nothing** (no reserved frame space); a files-only finish reserves no frame space.
+- **Captions, one place (D13):** the helper draws no title line — the component's `title` is its name for tooling and accessibility, never visible chrome; the document prints only the data labelling it needs (axis labels, units, series names, column headers, value labels; D2, App. A). The host chrome renders exactly one `Source: …` line (§2.10); a model-supplied in-document `caption` is suppressed where it would restate the source or echo the question. The reserved box holds its space while the document loads and draws no title.
 - `branding.md` §7 (one quiet line, not a card, UI `branding.md:837-896` *(scout)*): the
   indicator is a line. The settled block is content, not chrome; the frame stays borderless
   and transparent (Appendix B).
@@ -808,7 +815,7 @@ default constant beside its consumer and a `_consumer_defaults` entry (`AGENTS.m
 | `supplements.maxTurns` | int / `2` | 1..4 |
 | `supplements.maxOutputTokens` | int / `6000` | per generator turn |
 | `supplements.timeoutS` | int / `90` | whole job |
-| `supplements.maxCostUsd` | float / `0.20` | soft per-job cap — 2 × the measured **per-job** high end ($0.08) plus $0.04 of headroom, so a job inside its envelope is never stopped mid-repair; §5.3, round-1 R3/round-2 R2-6 |
+| `supplements.maxCostUsd` | float / `1.00` | soft per-job cap, checked between turns — sized to cover roughly one Opus-class turn; deliberately **not** derived from §5.3's measured Sonnet-class envelope ($0.04-0.08/job); round-1 R3/round-2 R2-6, operator directive 2026-10-10 |
 | `supplements.maxFeatured` | int / `4` | the "N more" threshold |
 | `supplements.denyPrefixes` | list[str] / `[]` | paths under these prefixes are never candidate files — the adoption knob for a machine holding customer data (round-1 S-R8) |
 
@@ -1239,9 +1246,11 @@ explicitly. A one-line opt-in for "files I edited" is not in v1.
   - decision ≈ $0.0001/eligible turn (the classification layer's documented range);
   - generator ≈ 9-15k input + 1-2.5k output tokens/job, so at Sonnet-class list prices
     ≈ $0.04-0.08/job.
-  - This is why `maxCostUsd` defaults to **0.20** — 2 × the $0.08 high end of the per-job
-    envelope plus $0.04 of headroom, both figures per job (round-1 R3; round-2 R2-6) — and the
-    open question Q1 exists.
+  - The envelope stays the measurement, not the derivation: `maxCostUsd` defaults to **1.00**,
+    sized to cover roughly one Opus-class turn so a strong model's job is not stopped at its
+    first between-turns check (operator directive, 2026-10-10; the units — checked between
+    turns, never a per-turn figure — sat in round-1 R3; round-2 R2-6). The open question Q1
+    exists.
 
 ### 5.4 QA matrix (qa-tester, per lane, real app)
 
@@ -1259,7 +1268,7 @@ Visual evidence is required for every UI-bearing lane (AGENTS.md "Visual validat
 means before/after frames, the brand themes plus 2 others, and a frame mid-theme-switch.
 
 **Added captures (round-1 design D9), per UI-bearing lane, in addition to the matrix above:**
-- loading (the reserved box, title as its label); empty (a done row renders nothing; files-only
+- loading (the reserved box holds space — no title drawn, §2.8); empty (a done row renders nothing; files-only
   reserves no frame space); error (the frame-level fallback line + the failed line); supersede
   (the line disappears; no Retry);
 - populated extremes: 4 files + "N more" collapsed and expanded; 3 frames against the
@@ -1407,6 +1416,13 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
    feeding errors into turn 2). Not in v1, because it would need a browser engine in the
    runtime.
 9. Unifying the UI's `mentioned-files.ts` with core `supplements/candidates.py`.
+10. **F9 — the prelude's table title (`div.ttl`).** The vendored prelude
+    (`local_operator/supplements/prelude/prelude.src.js`) still renders the `div.ttl` table
+    title, which contradicts §2.8's no-chrome rule; it is the prelude/engine lane's fix, and it
+    must strip `.ttl`, rebuild the minified pair per `prelude/BUILD.md`, regenerate the prelude
+    fixture(s) and the Appendix C spike reference (its size figures and rendered shot), and bump
+    `PRELUDE_VERSION` so served documents re-derive. **Re-measure the size budget after the
+    strip** — Appendix C's figure is a measured artifact, not a target to assume.
 
 ---
 
@@ -1459,7 +1475,7 @@ bounded scan of the run's messages (target ≤ 5 ms, measured in C1's evidence).
 
 | # | Question | Recommendation |
 |---|---|---|
-| Q1 | **Default-on for graphics, and the per-job cap.** Files are free; graphics cost ≈ $0.04-0.08 per generated job at Sonnet-class (estimate, §5.3), and only on eligible turns that pass the decision. | `supplements.enabled=true`, `files=true`, **`graphics=true` once a renderer ships** (§6), `maxCostUsd=0.20` (2 × the per-job envelope high end + $0.04 headroom; R3, units per R2-6 — the cap is only checked between turns). Add a daily cap only if the dogfood week shows > $1/day. |
+| Q1 | **Default-on for graphics, and the per-job cap.** Files are free; graphics cost ≈ $0.04-0.08 per generated job at Sonnet-class (estimate, §5.3), and only on eligible turns that pass the decision. | `supplements.enabled=true`, `files=true`, **`graphics=true` once a renderer ships** (§6), `maxCostUsd=1.00` (sized to cover roughly one Opus-class turn, not derived from the $0.04-0.08 Sonnet-class envelope estimate; R3, units per R2-6 — the cap is only checked between turns). Add a daily cap only if the dogfood week shows > $1/day. |
 | Q2 | **Which model "auto" prefers** when several design-capable models are logged in (the ladder order in §2.5). | Sonnet-class first: the best measured HTML/SVG quality per dollar in prior design work. Revisit with the §5.3 arms. |
 | Q3 | **The user-facing name.** | "Highlights" (§0). The alternative is "Supporting graphics" if the files half should stay unnamed. |
 | Q4 | **Should answering a queued ask make the follow-up answer eligible?** The answer is the operator's input, but it replies to the agent's question. | No in v1 (precision). Revisit if the dogfood week shows missed charts after ask answers. |
@@ -1490,15 +1506,16 @@ HONESTY (hard rules)
 
 PICK THE FORM
 - Compare categories: bar (horizontal when labels are long or >6 bars). Change over time: line. Part of whole with ≤5 parts: stacked bar, never pie/donut. Distribution: histogram-style bar. Exact lookup, >12 rows or mixed units: table. Flow/steps: simple ordered list or small SVG diagram.
-- One idea per component. Lead with the answer's main point in a short title (sentence case, no trailing period); pass it as `title` — the helper prints it visibly. Keep category labels ≤ 12 characters (this is a guide for the writing, not a render rule: the helper thins labels by width and truncates one only when its slot cannot hold it, keeping the full text in the tooltip).
+- One idea per component. Name it in a short `title` (sentence case, no trailing period) for tooling and accessibility — the title is **never drawn** (no visible title line). Keep category labels ≤ 12 characters (this is a guide for the writing, not a render rule: the helper thins labels by width and truncates one only when its slot cannot hold it, keeping the full text in the tooltip).
 - Axis/columns name the quantity AND unit ("Latency (ms)"). Start bar axes at zero. Sort bars by value unless order is meaningful.
 - ≤6 series. Colour never carries meaning alone: label series directly or use LO.line's dash patterns and the legend.
 - Dense data → table with right-aligned tabular numerals (LO.table does this).
 
 LOOK
 - The host injects the stylesheet and theme; do not set colours, fonts or backgrounds except via var(--lo-*) and LO.color(i). Background stays transparent; no borders, cards or shadows around the component; use spacing and var(--lo-hairline) rules.
+- **Body-only.** No title line, header, badge or caption chrome, and nothing that restates the answer or echoes the question — start with the data. Spacing and rhythm carry the component's own structure and the seam with the answer above; nothing is announced.
 - Body text 13px; captions 12px var(--lo-ink-muted); axis text 12px. Must work from the 220px canvas-open column to 900px wide: no fixed widths, use viewBox SVG (LO helpers redraw on width changes).
-- Pass `title` and `unit`: the helper prints both visibly (a title line; the unit on the top axis tick). An unlabelled chart is a rendering bug.
+- Pass `title` and `unit` always: the title names the component (never drawn); the unit prints on the top axis tick. Draw only the labelling the data needs — axis labels, units, series names, column headers, value labels — an unlabelled chart is a rendering bug.
 - Keep height content-sized, under ~480px; split rather than scroll.
 - No animation, transitions, or external fonts. Values stay readable without hover — tooltips are enhancement only (relay/native have no hover). **Accepted loss (round-2 D2-4):** where a label is still truncated on a no-hover surface, the full text is unreachable there — the axis titles and the data's own precision carry the meaning, and the fixture set (App. C) shows the worst case rather than assuming it away.
 
@@ -1574,6 +1591,9 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
   `measure.py` which re-derives every size figure) — exists in the architect
   scratchpad and is attached to the C0 PR as the starting point; the round-1 remediation
   **and the round-2 label-layout fix** are folded in.
+- **No-chrome status:** the "no title line" claims below are target state, not the pair's
+  current output — the pair still draws the `div.ttl` table title, as does the spike's rendered
+  shot; §8 F9.
 - **Size:** 2,044 B CSS + 8,180 B JS raw (minified build, esbuild 0.28.2); **4,538 B gzip** for
   both (`cat` the pair through `gzip -9` — one method for the budget, the guard's cost and every
   figure here). Budget: **≤ 11 KB raw / ≤ 4.5 KB gzip**, enforced by a unit test — 1,040 B and
@@ -1583,8 +1603,8 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
 - It provides:
   - `LO.data` (frozen, from `<script type="application/json" id="lo-data">`);
   - `LO.ds/col/fmt/color/el/onTheme/onSize`;
-  - `LO.table` (right-aligned tabular numerals, horizontal scroll at 320 px, title line,
-    source-precision cells);
+  - `LO.table` (right-aligned tabular numerals, horizontal scroll at 320 px, source-precision
+    cells — no title line, body-only §2.8);
   - `LO.bar` (vertical/horizontal, grouped, zero baseline, direct value labels at source
     precision, category-label step-thinning, truncate-only-when-the-slot-requires-it with the
     full text in a `<title>`, unit on the top axis tick);
@@ -1617,8 +1637,9 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
     cannot be named — and the receiving side does **not** rest on it: the parent validates
     `event.source`, the per-frame nonce (never carried in the URL), and drops messages from
     any frame whose navigation counter moved (round-1 S-R4);
-  - the rendered fixture shows the title line and the unit (D2), the **unit-swap pair** on
-    identical data (`req/s` → the top tick no longer clips; D2-1) and the six-long-category
+  - the rendered fixture shows the axis labelling and the unit on the top axis tick, no title
+    line (D2; body-only, §2.8), the **unit-swap pair** on identical data (`req/s` → the top
+    tick no longer clips; D2-1) and the six-long-category
     collision fixture at 300 and 220 px (D2-2) — labels truncated only where the slot requires
     it (D2-4) — plus source-precision values (D4) at 620 px;
     `isSecureContext`/`RTCPeerConnection` are

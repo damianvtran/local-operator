@@ -5,7 +5,7 @@ description: What the Highlights block under an answer is — the file callouts 
 
 # Highlights
 
-After a turn that produced something real — a file, a block of numbers — Local Operator can add a short **Highlights** block under the final answer: callouts for the files the turn made, and a small generated graphic when the numbers justify one. It appears only under a real user turn (never for wakes, monitors, peer messages or `lop exec`), always after the answer, and never in the model's context: the block sits in the transcript beside the answer, not in it.
+After a turn that produced something real — a file, a block of numbers — Local Operator can add a short **Highlights** block under the final answer: callouts for the files the turn made, and a small generated graphic when the numbers justify one. The block draws no heading or label — no title, badge or separator announces it — and appears seamlessly directly under the answer's text: its position, not any caption, tells the reader it belongs to the turn. It is added only under a real user turn (never for wakes, monitors, peer messages or `lop exec`), always after the answer, and never in the model's context: the block sits in the transcript beside the answer, not in it.
 
 **Nothing paints it yet.** The decision and the row ship first: an eligible turn journals a `supplement_v1` row, readable by tooling and API consumers (the session log, a history read), but no surface renders a Highlights block at this head — the TUI, UI, relay and native renderers are their own lanes, so until one of them lands a correct turn still shows nothing anywhere, whatever the settings say.
 
@@ -37,7 +37,7 @@ In the file every key is `values.supplements.<key>`; the CLI spells it `suppleme
 | `maxTurns` | `2` | generator turns per job (1–4) |
 | `maxOutputTokens` | `6000` | output budget per generator turn |
 | `timeoutS` | `90` | whole-job wall clock |
-| `maxCostUsd` | `0.20` | soft per-job spend cap |
+| `maxCostUsd` | `1.00` | soft per-job spend cap, checked between turns |
 | `maxFeatured` | `4` | files shown before "N more" folds the rest |
 | `denyPrefixes` | `[]` | folders never listed or sent |
 
@@ -50,7 +50,7 @@ In the file every key is `values.supplements.<key>`; the CLI spells it `suppleme
 
 ## Cost
 
-The decision is one small classification call per question — one for the files, plus a second, concurrent one once graphics are on (`decide_many`, one call for both, is a follow-up). Each is logged with its cost in the session log. A generator job is bounded by `supplements.maxCostUsd` (default `$0.20`; the design's per-job envelope is $0.04–0.08) and its spend is recorded under a `supplement_render` purpose, so `/session`'s by-purpose rows can show it.
+The decision is one small classification call per question — one for the files, plus a second, concurrent one once graphics are on (`decide_many`, one call for both, is a follow-up). Each is logged with its cost in the session log. A generator job is bounded by `supplements.maxCostUsd` (default `$1.00` — a soft between-turns cap sized to cover roughly one Opus-class turn, deliberately not derived from the measured Sonnet-class envelope of $0.04–0.08 per job) and its spend is recorded under a `supplement_render` purpose, so `/session`'s by-purpose rows can show it.
 
 ## Troubleshooting
 
