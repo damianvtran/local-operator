@@ -222,6 +222,46 @@ Screens, following branding.md §7's agent-output hierarchy:
   diff counts, tap to expand/collapse args+output+diff; todos panel;
   subagents panel with tap-to-drill into a subagent's transcript and a
   back-to-parent crumb; approval/ask cards pinned above the composer.
+
+  The view's FIRST FRAME IS THE FINAL LAYOUT: with no projection yet the screen
+  paints the header row, the transcript's box and the composer's box (an inert
+  `ComposerFrame` drawn from the composer's own class strings), so the
+  projection's arrival is a content fill and not a full-layout swap. The
+  composer is deliberately not live there — there is no session to send to and
+  a control that silently drops a typed sentence is worse than a reserved box.
+
+  Older history is paged in as the reader scrolls: the transcript asks for the
+  rows below the oldest row it HOLDS, and the daemon answers from the JOURNAL,
+  in journal order — the rows a compaction dropped included, which the fold's
+  replay no longer reaches. That last part is the difference between "the phone
+  shows a bounded tail window" and "the phone shows a bounded tail window of a
+  conversation whose beginning it can never reach": with four compactions in
+  one fixture journal, 639 of its 3,348 lines were reachable before and all of
+  them are now.
+
+  **One row is served once, at its journal position.** A cursor page never comes
+  from the fold's render, because the render's order is not the journal's: it
+  opens with the compaction marker and re-injects the latest compaction's
+  `preserved_user_turns` UNDER THEIR ORIGINAL ROW IDS, and those same rows sit
+  in the journal below the cut. Paging the render therefore served rows twice
+  and, when a cursor landed on one of them, answered a page around the render's
+  head plus a refill from the compaction boundary — rows the client already
+  held, so `has_more` stayed true and the walk cycled. That is the ordinary
+  shape rather than a corner: 60 of the 60 largest journals on the reference
+  host carry preserved turns (median 13, max 446). The desktop has always
+  answered this question from the journal, and the two surfaces agree row for
+  row because both fold it with the same fold.
+
+  Two consequences worth naming. A page is folded together with the NEWER rows
+  that answer its own calls (a tool result's row is the call's row, so nothing
+  extra is served), because the fold pairs a call with its result by looking the
+  call up in what it has already walked — folded alone, the calls at a page's
+  edge would paint `interrupted` however long ago they returned. And when the
+  fold that produced the daemon's cached state did not read the journal from its
+  first row (a bounded suffix read), the archive rebuilds the prune map from the
+  journal before serving anything: a prune marker sits ABOVE the row it blanks,
+  so a map covering only the fold's window would page the output the live fold
+  had already hidden.
 - **Composer** — the TUI composer, mobilized: multiline auto-growing field,
   model label + effort as tappable chips (opens the model sheet / effort
   rungs), typing `/` opens the slash-command sheet with fuzzy filtering and

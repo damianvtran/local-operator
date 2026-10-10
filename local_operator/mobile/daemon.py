@@ -1634,6 +1634,20 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
     the bytes appended since. The projection object itself is rebuilt on
     every call (callers mutate and fence it), so what is cached is the fold,
     not the projection.
+
+    THE OPEN-FRAME SEAM (first-paint lanes T2/T3). This function is where the
+    phone's first frame is assembled: the fold's replay, then
+    ``ProjectionFold.fold_history``, then ``_cap_tail``. The desktop's
+    ``open_frame: 1`` page builder (``docs/DESKTOP_API.md``,
+    ``local_operator/session/open_frame.py``; docs-only at the time of
+    writing) serves the same question — the rows a surface paints, with the
+    turn facts and the bookkeeping stripped — so the day it lands, THIS is the
+    call to replace: the run facts would come from the server instead of being
+    re-derived here, and the phone would negotiate on the ``open_frame`` key
+    the relay already lifts from ``server/features.py``. Nothing here depends
+    on that landing: the fold's own boundary (``DurableFoldState.keep_start_id``)
+    is the anchor a bounded-suffix fold needs, so lane T3 can bound this read
+    without touching the shape above it.
     """
     from local_operator.mobile.projection import (
         SUBAGENT_ERROR_CHARS,
@@ -2500,6 +2514,39 @@ async def _engage_and_publish(
     return detail
 
 
+def _journal_page(
+    directory: Path,
+    state: Any,
+    *,
+    before: str,
+    limit: int,
+) -> tuple[list[Any], bool]:
+    """The journal's rows immediately older than ``before``, or an honest end.
+
+    The reader behind every cursor page (see :func:`_history_page` for why the
+    cursor pages the journal rather than the render). ``None`` from the reader
+    means the cursor names no journal row at all — a row from a transcript that
+    was replaced under the client, or an id narrowed wrongly — and the client
+    then treats the answer as end-of-history rather than looping on the same
+    rows.
+
+    ``prunes_complete`` is the fold state's own fact (see
+    ``DurableFoldState.scan_from_bof``): with a whole-journal fold its prune map
+    is the file's own, and with a bounded suffix fold it is not, in which case
+    the reader rebuilds the map before serving anything.
+    """
+    from local_operator.mobile.durable import journal_rows_older_than
+
+    rows = journal_rows_older_than(
+        directory,
+        state.prunes,
+        before_id=before,
+        limit=limit,
+        prunes_complete=bool(getattr(state, "scan_from_bof", True)),
+    )
+    return rows if rows is not None else ([], False)
+
+
 def _history_page(
     session_id: str, before: str | None, limit: int, *, durable_only: bool = True
 ) -> tuple[list[Any], bool]:
@@ -2511,6 +2558,30 @@ def _history_page(
     tail since — not the whole-file re-parse every page used to pay. Runs off
     the event loop (``asyncio.to_thread`` at the call site): even the cached
     path touches disk and the fold is not loop-safe work.
+
+    TWO SOURCES, CHOSEN BY THE QUESTION. Without a cursor this is the newest
+    page a surface shows on open, so it comes from the render. With one it comes
+    from the JOURNAL (:func:`_journal_page`) — and that split is what makes the
+    phone's history complete and loop-free.
+
+    WHY NOT THE RENDER, for a cursor page. Paging it alone stopped a phone
+    reader at the last compaction — measured on the S6 fixture, 640 of 3,348
+    journal rows were reachable and the rest were evidence of a conversation the
+    phone could not show — and it also served rows twice. The render's order is
+    not the journal's: it opens with the compaction marker and re-injects the
+    latest compaction's ``preserved_user_turns`` UNDER THEIR ORIGINAL ROW IDS,
+    and those same rows sit in the journal below the cut. A cursor that lands on
+    one of them therefore answers a page around the render's head plus a refill
+    from the compaction boundary — rows the client already holds — so
+    ``has_more`` stays true and the walk cycles (measured: 117,020 mounted rows
+    holding 408 distinct ids). 60 of the 60 largest journals on this host carry
+    preserved turns, so that is the ordinary shape, not a corner.
+
+    The desktop has always answered this question from the journal, and the rows
+    agree because both surfaces fold them with the same fold
+    (``fold_messages_to_entries``); the marker id fix in :mod:`.durable` is what
+    makes the row identities match. One row is served once, at its journal
+    position, in journal order.
     """
     if durable_only:
         directory = _durable_user_session_dir(session_id)
@@ -2529,7 +2600,6 @@ def _history_page(
         return [], False
     try:
         state = _durable_fold_cache().load(directory)
-        entries = state.render
     except FileNotFoundError:
         return [], False
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
@@ -2537,20 +2607,13 @@ def _history_page(
         return [], False
 
     if before:
-        # A ``before`` that resolves to nothing means the client's anchor was
-        # pruned (a compaction between scrolls). Serving the newest page then
-        # would duplicate the client's live window — return empty and let the
-        # client treat it as end-of-history rather than loop on the same rows.
-        anchor = next((i for i, e in enumerate(entries) if e.id == before), None)
-        if anchor is None:
-            return [], False
-        cut = anchor
-    else:
-        cut = len(entries)
-    older = entries[:cut]
-    page = older[-limit:] if len(older) > limit else older
-    has_more = len(older) > len(page)
-    return page, has_more
+        # Every cursor page comes from the journal: the render's order is not the
+        # journal's, and its head re-serves rows whose originals sit below the
+        # cut. See this function's docstring for the measurement.
+        return _journal_page(directory, state, before=before, limit=limit)
+    entries = state.render
+    page = entries[-limit:] if len(entries) > limit else list(entries)
+    return page, len(entries) > len(page)
 
 
 def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[bytes, str] | None:

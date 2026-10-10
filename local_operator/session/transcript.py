@@ -1501,6 +1501,16 @@ class ReplaySuffix:
     checkpoint_order: dict[str, int] = field(default_factory=dict)
     #: Bytes actually read, for the caller's own evidence; not a contract.
     bytes_read: int = 0
+    #: Did the backward walk reach the file's FIRST chunk — the one holding the
+    #: journal's opening row? THIS is the caller's fact for "the window is the
+    #: whole journal", and it is deliberately not derived from :attr:`bytes_read`
+    #: or from a stat: the walk stops early when it finds its stopping row, and
+    #: only the pair with ``chunk_start == 0`` means the file's first row was in
+    #: hand. A span compared against a caller's earlier ``st_size`` part company
+    #: with the truth as soon as the file grows between the stat and this read's
+    #: own EOF — a window that stopped short can then look like a full read,
+    #: which is the unsafe direction for every consumer of "I saw everything".
+    reached_bof: bool = False
 
 
 def read_replay_suffix(
@@ -1560,7 +1570,11 @@ def read_replay_suffix(
         # answers the same way rather than turning "nothing yet" into an
         # error the whole-file parse never raised.
         return ReplaySuffix(
-            entries=(), through_present=through_id is None, checkpoint=None, bytes_read=0
+            entries=(),
+            through_present=through_id is None,
+            checkpoint=None,
+            bytes_read=0,
+            reached_bof=False,
         )
     # Normalise the request ONCE, so every stop/collect site below reads the
     # same tuple: an empty request means "no custom rows wanted" (the cheapest
@@ -1602,6 +1616,7 @@ def read_replay_suffix(
     cursor_reached = through_id is None
     parsed: list[TranscriptEntry] = []  # newest first while reading backward
     bytes_read = 0
+    reached_bof = False
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
         # EOF as the handle saw it. Re-stat'ing after the close would measure a
@@ -1653,7 +1668,14 @@ def read_replay_suffix(
                         # NEWEST row: its meeting index is what orders it against
                         # another type's newest row.
                         checkpoint_order[custom_type] = met
+            # The walker's last pair is ``chunk_start == 0``: reaching it means
+            # the file's leading fragment was consumed, which is the only way this
+            # read can claim the whole journal. ``reached_bof`` is read from the
+            # SAME expression the stop below turns on, so the two cannot drift —
+            # an inner-loop stop added later would otherwise leave the flag
+            # describing a chunk whose tail was skipped.
             at_start = chunk_start == 0
+            reached_bof = at_start
             boundary_seen = compaction is not None and (
                 first_kept_id is None or first_kept_id in seen_ids
             )
@@ -1674,6 +1696,7 @@ def read_replay_suffix(
         checkpoints=checkpoints,
         checkpoint_order=checkpoint_order,
         bytes_read=bytes_read,
+        reached_bof=reached_bof,
     )
 
 

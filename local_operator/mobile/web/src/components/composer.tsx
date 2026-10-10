@@ -381,6 +381,121 @@ const SENDING_HINT = `${CONNECTING_STATUS} — send again when this one lands.`;
    viewports and font fallbacks too. The product name is carried by the app
    shell (document title, header mark). */
 const COMPOSER_PLACEHOLDER = "Message…";
+
+/* THE CLUSTER'S BOX, IN ONE PLACE. The composer is the biggest thing on this
+   screen that arrives with the projection, and the conversation's first frame
+   has to reserve exactly the room it will take (first-paint lane T2): the
+   screen paints `<ComposerFrame>` before the projection lands, and a reserved
+   box that does not match the real one is a layout shift with extra steps.
+   Sharing the class strings is what makes the match structural rather than a
+   pair of numbers someone keeps in step by hand — the frame and the composer
+   cannot disagree about the shell, the input row, the field or the control size. */
+const COMPOSER_SHELL =
+	"flex flex-col gap-1.5 px-3 pt-1.5 pb-[max(env(safe-area-inset-bottom),0.5rem)]";
+const COMPOSER_CWD_ROW = "flex min-w-0 flex-1 items-center px-0.5";
+const COMPOSER_INPUT_ROW = "flex items-end gap-2";
+const COMPOSER_FIELD_BOX =
+	"flex min-w-0 flex-1 items-end rounded-md border bg-elevated px-3 py-2";
+const COMPOSER_FIELD =
+	"lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none placeholder:text-ink-muted";
+const COMPOSER_ROUND = "flex size-11 shrink-0 items-center justify-center rounded-full";
+/* The model/effort chips row, which is BELOW the field. It is easy to miss as
+   part of the box and it is 44 px of it: a reserve without it left the field
+   59 px lower than the real one, which is exactly the shift this whole frame
+   exists to prevent (measured before it was added: field rect
+   [64, 812, 262, 24] against the settled [77, 753, 236, 24]). */
+const COMPOSER_CHIP_ROW = "flex items-center gap-2 px-0.5";
+const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center font-mono text-mono-sm text-ink-dim";
+
+/** The composer's box, empty, for the frames before a session's projection.
+
+    WHY IT EXISTS. `SessionScreen` used to paint a header and one status
+    sentence until the projection arrived, then mount the whole column in a
+    single commit: the composer, the working line and the transcript all
+    appeared at once, and everything below the header MOVED. The reserved frame
+    keeps the column's geometry fixed so that arrival is a content fill.
+
+    INERT ON PURPOSE, and it is not a second composer: there is no draft, no
+    send, no attachment path and no data to act on yet, so `disabled` on the
+    field is the honest state and a live field here would be a control that
+    silently drops what the reader types. Nothing inside is focusable, and the
+    whole box is `aria-hidden` — a screen reader gets the status line in the
+    transcript area instead of an unlabelled row of dead controls.
+
+    THE HEIGHT FLOOR UNDER THE FIELD is the working-directory chip's own 44 px
+    (`ui/chip.tsx`), rendered as a plain reserve: the chip itself is a control
+    that opens the directory sheet, and a dead button in a frame that is gone
+    in ~50 ms is worse than a gap of the same size. The model/effort row BELOW
+    the field is reserved the same way and for the same reason — it, too, is
+    44 px the settled composer has and this one must hold.
+
+    The field's own box is shared with the real composer through
+    `COMPOSER_FIELD_BOX`: the settled field sits inside a bordered container
+    (`px-3 py-2`), which is 24 px of width and 16 px of height the reserve
+    would otherwise be missing. */
+/* The attach disc's paperclip, drawn so it needs no icon font — ONE definition,
+   shared by the settled composer and by its reserved frame, because design
+   review round 1 (D1) measured the swap moving three glyphs and a placeholder
+   into place when all four are static and knowable before any data arrives. The
+   reserve is the settled empty composer or it is a different composer. */
+function PaperclipGlyph() {
+	return (
+		<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+			<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+		</svg>
+	);
+}
+
+export function ComposerFrame() {
+	return (
+		<div className={COMPOSER_SHELL} aria-hidden>
+			<div className={COMPOSER_CWD_ROW}>
+				<div className="min-h-11" />
+			</div>
+			<div className={COMPOSER_INPUT_ROW}>
+				{/* The settled empty composer's own three glyphs and placeholder, in
+				   their DISABLED styling: the attach disc at `opacity-50`, the field
+				   empty with `Message…`, the send disc `bg-sunken`
+				   /`text-ink-disabled`. Design review round 1 (D1) measured the gap
+				   this closes: the reserve read as "ring + outline" with the
+				   right-hand control invisible (the sunken disc sits at 1.05:1
+				   against the canvas) and then three glyphs and a placeholder
+				   popped in at the reveal. */}
+				<span
+					className={cn(
+						COMPOSER_ROUND,
+						"border border-control text-ink-muted opacity-50",
+					)}
+				>
+					<PaperclipGlyph />
+				</span>
+				<div className={cn(COMPOSER_FIELD_BOX, "border-control")}>
+					<textarea
+						disabled
+						rows={1}
+						aria-hidden
+						tabIndex={-1}
+						placeholder={COMPOSER_PLACEHOLDER}
+						className={COMPOSER_FIELD}
+					/>
+				</div>
+				<span
+					className={cn(
+						COMPOSER_ROUND,
+						"bg-sunken text-ink-disabled",
+					)}
+				>
+					<span aria-hidden>↑</span>
+				</span>
+			</div>
+			<div className={COMPOSER_CHIP_ROW}>
+				<span className={cn(COMPOSER_CHIP, "flex-1")} />
+				<span className={COMPOSER_CHIP} />
+			</div>
+		</div>
+	);
+}
+
 /* The dictation outcome lines (U2/U3/D2), rendered in the same polite status
    row the live states use. DICTATION_ADDED is the completion announcement:
    focus is deliberately NOT returned to the field with it — a programmatic
@@ -1107,7 +1222,7 @@ export function Composer({
 	};
 
 	return (
-		<div className="flex flex-col gap-1.5 px-3 pt-1.5 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
+		<div className={COMPOSER_SHELL}>
 			{showResume && !projection.streaming && !disabled ? (
 				<button
 					type="button"
@@ -1247,7 +1362,7 @@ export function Composer({
 			    (rather than beside the send controls) so it never competes with them
 			    for width on a narrow phone, and so the row it opens is where a reader
 			    already looks when asking "where is this session working?". */}
-			<div className="flex min-w-0 flex-1 items-center px-0.5">
+			<div className={COMPOSER_CWD_ROW}>
 				<WorkingDirectoryChip
 					sessionId={pid}
 					cwd={shownCwd}
@@ -1256,7 +1371,7 @@ export function Composer({
 			</div>
 
 			<div
-				className="flex items-end gap-2"
+				className={COMPOSER_INPUT_ROW}
 				onDragOver={(e) => {
 					e.preventDefault();
 					if (!disabled) setDragOver(true);
@@ -1281,12 +1396,12 @@ export function Composer({
 					onClick={() => fileInputRef.current?.click()}
 					disabled={disabled}
 					aria-label="attach image"
-					className="flex size-11 shrink-0 items-center justify-center rounded-full border border-control text-ink-muted active:bg-elevated disabled:opacity-50"
+					className={cn(
+						COMPOSER_ROUND,
+						"border border-control text-ink-muted active:bg-elevated disabled:opacity-50",
+					)}
 				>
-					{/* paperclip, drawn so it needs no icon font */}
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-						<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-					</svg>
+					<PaperclipGlyph />
 				</button>
 				{/* The voice mic: same 44px round control as attach/send/stop, left
 				    cluster beside attach. Visible iff the daemon advertised an available
@@ -1327,7 +1442,7 @@ export function Composer({
 				) : null}
 				<div
 					className={cn(
-						"flex min-w-0 flex-1 items-end rounded-md border bg-elevated px-3 py-2",
+						COMPOSER_FIELD_BOX,
 						dragOver ? "border-accent" : "border-control",
 					)}
 				>
@@ -1354,7 +1469,7 @@ export function Composer({
 								void send(text);
 							}
 						}}
-						className="lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none placeholder:text-ink-muted"
+						className={COMPOSER_FIELD}
 					/>
 				</div>
 
@@ -1380,7 +1495,7 @@ export function Composer({
 				</button>
 			</div>
 
-			<div className="flex items-center gap-2 px-0.5">
+			<div className={COMPOSER_CHIP_ROW}>
 				{projection.queued_count > 0 ? (
 					<span className="font-mono text-mono-sm text-ink-dim">
 						{projection.queued_count} queued
@@ -1396,7 +1511,7 @@ export function Composer({
 				<button
 					type="button"
 					onClick={onOpenModels}
-					className="flex min-h-11 min-w-11 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
+					className={cn(COMPOSER_CHIP, "active:text-ink-muted")}
 				>
 					<span className="truncate">{projection.model_label || "model"}</span>
 				</button>
@@ -1404,7 +1519,7 @@ export function Composer({
 					<button
 						type="button"
 						onClick={onOpenEffort}
-						className="flex min-h-11 min-w-11 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
+						className={cn(COMPOSER_CHIP, "active:text-ink-muted")}
 					>
 						{projection.effort || "effort"}
 					</button>
