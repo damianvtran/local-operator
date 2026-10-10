@@ -824,6 +824,16 @@ def spawn_disclaimed(
     ``procstate.detached_popen_kwargs()``) whenever the platform lacks the
     lever, and it is logged (see :func:`_log_fallback`). Never silent.
     """
+    # TWO SPELLINGS OF "THE IMAGE", AND THE DIFFERENCE IS A CONTRACT. posix_spawn
+    # has no "default image" and needs a concrete path, so it gets ``argv[0]``
+    # when the caller named none. ``Popen`` DOES have one: ``executable=None``
+    # means "run argv[0]", and the naming ladder (``procname.spawn_identity``)
+    # hands back ``None`` precisely to say "no label applied, the interpreter
+    # stays unlabelled" — ``tests/unit/test_spawn_naming_fallback.py`` pins that
+    # at every spawn site. Collapsing both to a string here made the fallback
+    # path pass the bare interpreter as an explicit ``executable=``, which that
+    # contract forbids, so the fallback keeps the caller's own value verbatim.
+    popen_executable = executable
     executable = executable if executable is not None else str(argv[0])
     child_env = _env_with_chain(env)
 
@@ -834,7 +844,7 @@ def spawn_disclaimed(
             _log_fallback(reason)
             return _fallback_popen(
                 argv,
-                executable=executable,
+                executable=popen_executable,
                 cwd=cwd,
                 env=spawn_env,
                 stdin=stdin,
@@ -859,7 +869,7 @@ def spawn_disclaimed(
             _log_fallback(str(exc))
             return _fallback_popen(
                 argv,
-                executable=executable,
+                executable=popen_executable,
                 cwd=cwd,
                 env=spawn_env,
                 stdin=stdin,
@@ -874,7 +884,7 @@ def spawn_disclaimed(
                 _log_fallback(f"posix_spawn refused the spawn flags (errno {exc.errno})")
                 return _fallback_popen(
                     argv,
-                    executable=executable,
+                    executable=popen_executable,
                     cwd=cwd,
                     env=spawn_env,
                     stdin=stdin,
@@ -916,7 +926,7 @@ def spawn_disclaimed(
 def _fallback_popen(
     argv: Sequence[str],
     *,
-    executable: str,
+    executable: str | None,
     cwd: str | None,
     env: Mapping[str, str],
     stdin: Any,

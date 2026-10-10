@@ -93,6 +93,24 @@ def branded_image(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: Path(sys.executable))
 
 
+@pytest.fixture
+def popen_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route ``macos_disclaim.spawn_disclaimed`` through its ``Popen`` fallback.
+
+    The long-lived spawns now go through ``spawn_disclaimed``, which on macOS
+    uses ``posix_spawn`` and never reaches ``subprocess.Popen`` — so a test that
+    patches ``Popen`` to read ``argv``/``executable=`` would, on a Mac, record
+    the helper's own ``ps`` probe instead and really launch the child. Forcing
+    the fallback makes the ``Popen`` seam the one every host exercises (it is
+    already the only path on Linux/CI), which is the path whose ``executable=``
+    contract these tests pin. The ``posix_spawn`` path's own image handling is
+    covered in ``test_macos_disclaim.py``.
+    """
+    from local_operator import macos_disclaim
+
+    monkeypatch.setattr(macos_disclaim, "_fallback_reason", lambda: "forced for the test")
+
+
 def test_spawn_identity_applies_no_label_without_an_image(no_branded_image) -> None:
     """The heart of the change, stated once for every caller below."""
     argv0, executable = procname.spawn_identity(procname.LABEL_SESSION_ANON, id="rung2")
@@ -230,7 +248,7 @@ def test_proc_spawn_detached_still_leaves_other_binaries_alone(
 
 
 def test_spawn_runtime_leaves_the_interpreter_unlabelled(
-    no_branded_image, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    popen_fallback, no_branded_image, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The viewer's detached runtime — the spawn ``launch.py`` owns."""
     from local_operator.interpreter import SAFE_PATH_FLAG
@@ -260,7 +278,7 @@ def test_spawn_runtime_leaves_the_interpreter_unlabelled(
 
 
 def test_spawn_runtime_labels_when_the_image_exists(
-    branded_image, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    popen_fallback, branded_image, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from local_operator.interpreter import SAFE_PATH_FLAG
     from local_operator.session.runtime import launch as launch_module
@@ -287,7 +305,7 @@ def test_spawn_runtime_labels_when_the_image_exists(
 
 
 def test_exec_background_leaves_the_interpreter_unlabelled(
-    no_branded_image, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    popen_fallback, no_branded_image, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from local_operator import exec_mode
 
