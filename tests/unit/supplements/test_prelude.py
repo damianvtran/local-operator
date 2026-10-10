@@ -40,11 +40,15 @@ GZIP_CAP = 4608
 
 #: The pinned pair. Change these ONLY with a rebuilt pair, a bumped PRELUDE_VERSION and the
 #: size table in prelude/BUILD.md. The sizes are the numbers the PR reports.
-PINNED_CSS_BYTES = 2044
-PINNED_JS_BYTES = 8202
-PINNED_GZIP_BYTES = 4607
-PINNED_DIGEST = "84545fe0244dc3ee4cb2b285bb55435d0f32926902769e448e3c4a6c3924aa36"
-PINNED_VERSION = 1
+#:
+#: PRELUDE_VERSION 2 (memo §8 F9): the `div.ttl` table title and its stylesheet rule were
+#: stripped -- the component is body-only (§2.8, operator directive 2026-10-10) -- which is
+#: what moved CSS 2,044 -> 2,008 B, JS 8,202 -> 8,047 B and gzip 4,607 -> 4,562 B.
+PINNED_CSS_BYTES = 2008
+PINNED_JS_BYTES = 8047
+PINNED_GZIP_BYTES = 4562
+PINNED_DIGEST = "c5024e1f77e5e9d7435f0f89a79d0b0e041aa245970f92f1abd1d980f4d1237f"
+PINNED_VERSION = 2
 
 
 @pytest.fixture
@@ -369,3 +373,43 @@ def test_the_script_inside_the_assembled_document_is_the_one_that_echoes_the_non
     by_type = {p["t"]: p for p in posts}
     assert "n" not in by_type["ready"]
     assert [by_type[t]["n"] for t in ("pong", "resize", "error")] == ["host-minted"] * 3
+
+
+@needs_node
+def test_the_component_draws_no_title_anywhere(tmp_path: Path) -> None:
+    """F9 (memo §8) + §2.8's no-chrome rule: a component is body-only, so the table must not
+    draw its dataset title.
+
+    This is the before/after discriminator for the `div.ttl` strip: `prelude.src.js` used to
+    prepend `o.title || data.title` as a visible `div.ttl`, and the drawn nodes are inspected
+    here rather than the source, so re-adding a title line by any route (helper, markup, a new
+    class name that the CSS still styles) fails. The labelling the DATA needs stays: the
+    column headers are asserted present, so the test cannot pass by drawing nothing.
+    """
+    title = "Latency by region (ms)"
+    out = _run(
+        {
+            "data": {
+                "lat": {
+                    "title": title,
+                    "columns": ["region", "ms"],
+                    "rows": [["us-east", 120], ["eu-west", 143], ["ap-south", 211.25]],
+                }
+            },
+            "steps": [
+                theme("n"),
+                {"draw": 'LO.table(document.getElementById("c"), "lat")'},
+            ],
+        },
+        tmp_path,
+    )
+    nodes = out["nodes"]
+    assert [n for n in nodes if n["cls"] == "ttl"] == [], "a title node class is drawn"
+    assert title not in " ".join(n["text"] for n in nodes), "the dataset title is drawn"
+    drawn = " ".join(n["text"] for n in nodes)
+    for header in ("region", "ms"):
+        assert header in drawn, f"column header {header!r} is not drawn"
+    # The table is drawn INSIDE the figure; the only child the figure may hold is the scroll
+    # wrap, never a title line before it.
+    figure = next(n for n in nodes if n["tag"] == "figure")
+    assert figure["text"] == ""
