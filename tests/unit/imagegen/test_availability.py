@@ -404,3 +404,27 @@ async def test_the_openrouter_async_twin_agrees_with_the_sync_probe(
     store.upsert_credential("openrouter", {"type": "api_key", "source": "login", "key": "ork"})
     assert availability.openrouter_key(config_root) == "ork"
     assert await availability.openrouter_call_key(store) == "ork"
+
+
+@pytest.mark.asyncio
+async def test_the_xai_credential_reports_its_class_for_the_billing_basis(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The class (key vs Grok sign-in) is what decides billed vs
+    # subscription-api-equivalent downstream; the bearer alone cannot say.
+    monkeypatch.setenv("XAI_API_KEY", "exported")
+    assert await availability.xai_call_credential(store) == ("exported", "api_key")
+
+    store.upsert_credential(
+        "xai",
+        {"type": "oauth", "refresh": "r", "access": "grant", "expires": 4_000_000_000_000},
+    )
+    assert await availability.xai_call_credential(store) == ("grant", "oauth")
+
+    store.upsert_credential("xai", {"type": "api_key", "source": "login", "key": "xk"})
+    assert await availability.xai_call_credential(store) == ("xk", "api_key")
+
+
+@pytest.mark.asyncio
+async def test_the_xai_credential_is_none_without_any_credential(store: AuthStore) -> None:
+    assert await availability.xai_call_credential(store) is None

@@ -101,6 +101,8 @@ async def test_the_call_shape_and_the_reported_cost() -> None:
     # rides cost_usd under design D8.
     assert result.cost_usd == pytest.approx(0.04)
     assert result.cost_source == "reported"
+    assert result.billing_basis == "billed"
+    assert result.cost_provenance == "OpenRouter /images response usage.cost"
 
     request = recorder.requests[0]
     assert request.method == "POST"
@@ -149,6 +151,8 @@ async def test_a_missing_usage_leaves_the_cost_unset() -> None:
 
     assert result.cost_usd is None
     assert result.cost_source is None
+    assert result.billing_basis is None
+    assert result.cost_provenance is None
 
 
 @pytest.mark.asyncio

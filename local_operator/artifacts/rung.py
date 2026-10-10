@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Optional
 
-from local_operator.artifacts import CostSource, MediaAsset
+from local_operator.artifacts import BillingBasis, CostSource, MediaAsset
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pydantic import SecretStr
@@ -143,3 +143,7 @@ class RungResult:
     #: none (most providers bill silently).
     cost_usd: float | None = None
     cost_source: CostSource | None = None
+    #: Money meaning of ``cost_usd`` and its provenance (additive beside
+    #: ``cost_source``, which keeps its meaning). ``None`` with no amount.
+    billing_basis: BillingBasis | None = None
+    cost_provenance: str | None = None

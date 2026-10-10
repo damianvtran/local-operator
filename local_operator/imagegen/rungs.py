@@ -47,6 +47,7 @@ from typing import Any
 import httpx
 from pydantic import SecretStr
 
+from local_operator.artifacts import BillingBasis
 from local_operator.artifacts.progress import ProgressFn, emit_progress
 from local_operator.artifacts.progress import (
     progress_details as _generic_progress_details,
@@ -610,7 +611,21 @@ async def run_radient(
         handle.model = model_id
         handle.base_url = base
         handle.credential = SecretStr(credential)
+        # SUBMIT-time figure: agent-server's ``POST /tools/media/generate``
+        # answers the QUOTED price (``cost_usd``/``units``/``unit``) - no
+        # charge exists yet at submit. The SETTLED figure arrives on
+        # ``GET /tools/media/status`` at the first terminal observation
+        # (``settled: true``; zero for a failed generation) and equals the
+        # usage record/ledger. Source of record: agent-server
+        # ``internal/responses/media.go`` MediaStatusResponse +
+        # ``services/media_service.go`` settledStatusResult (read 2026-10-09).
         cost_usd = _as_float(generate.get("cost_usd"))
+        cost_basis: BillingBasis | None = "estimated" if cost_usd is not None else None
+        cost_provenance = (
+            "Radient POST /tools/media/generate cost_usd (submit-time quote, not a settled charge)"
+            if cost_usd is not None
+            else None
+        )
 
         started = time.monotonic()
         while True:
@@ -631,6 +646,16 @@ async def run_radient(
             status = str(status_payload.get("status") or "").strip().upper()
             elapsed = int(time.monotonic() - started)
             if status == "COMPLETED":
+                # Prefer the settled figure over the quote: only ``settled``
+                # on the terminal status payload makes ``cost_usd`` a charge.
+                settled_cost = _as_float(status_payload.get("cost_usd"))
+                if status_payload.get("settled") is True and settled_cost is not None:
+                    cost_usd = settled_cost
+                    cost_basis = "billed"
+                    cost_provenance = (
+                        "Radient GET /tools/media/status cost_usd (settled: true; "
+                        "equals the usage record and ledger)"
+                    )
                 break
             if status == "CANCELLED":
                 raise APIError(
@@ -710,7 +735,13 @@ async def run_radient(
             started=started,
         )
         return RungResult(
-            assets=assets, model=model_id, generation_id=request_id, cost_usd=cost_usd
+            assets=assets,
+            model=model_id,
+            generation_id=request_id,
+            cost_usd=cost_usd,
+            cost_source="reported" if cost_usd is not None else None,
+            billing_basis=cost_basis,
+            cost_provenance=cost_provenance,
         )
 
 

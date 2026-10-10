@@ -1,0 +1,13 @@
+{
+  "type": "supplement_progress",
+  "anchor": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+  "job": "3f9c1a7e5b20",
+  "version": 2,
+  "state": "running",
+  "stage": "repairing",
+  "elapsed_s": 31.0,
+  "files": [],
+  "components": [],
+  "error": "",
+  "error_type": ""
+}
