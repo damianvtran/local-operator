@@ -22,3 +22,9 @@ committed bytes drift from `build.py`.
 
 `documents/*` embed the vendored prelude, so they change whenever the prelude does
 (`PRELUDE_VERSION` bump + regenerate).
+
+Lane C1a adds `golden/turns.json`: 60 labelled turns (user message, final answer, tool call and
+result, a file tree to materialise) used by `tests/unit/supplements/test_golden_set.py` to
+measure the spam rate, the pre-filter absorption and the graphics gate (design §5.2). It is
+HAND-AUTHORED data, not generated -- `build.py` does not own it, and the drift test globs only
+the generated directories.

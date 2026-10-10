@@ -106,6 +106,12 @@ _AMBIENT_VARS = (
     # paths untested. The kill-switch cell sets the resolved constant through
     # ``monkeypatch`` explicitly, which is where that reason is written down.
     "LOP_NO_REPLY",
+    # The turn-supplement kill switch (``supplements/policy.SUPPLEMENTS``, read from
+    # ``LOP_SUPPLEMENTS``). The same ESCAPE-HATCH class as the ask gate: the feature is the
+    # shipped default, and an inherited kill value would silently move every cell that
+    # drives it onto the "nothing happens" arm while asserting the one nobody runs. Cells
+    # that mean "off" set it through ``monkeypatch`` explicitly.
+    "LOP_SUPPLEMENTS",
     # The soft query budget's escape hatch (``tools/query_budget.ALLOW_ENV``), the
     # same ESCAPE-HATCH class and scrubbed for the same reason: an inherited value
     # would waive the stop every cell in ``test_query_budget.py`` asserts. Read off
