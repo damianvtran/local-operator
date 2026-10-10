@@ -33,7 +33,9 @@ spellings name the same KIND of file to a reader while comparing unequal: the fu
 the denied spelling, as do canonical decompositions. QA round 1 reproduced ``.ｅｎｖ``
 reaching the vendor payload as an offered basename under the casefold-only comparison.
 Every rule INPUT and the settings/env-derived roots compared in :func:`_under` go through
-the one fold (:func:`_fold`), so no equivalence class is split across two comparisons.
+the one fold (:func:`_fold`), so no equivalence class is split across two comparisons --
+and, since round 6's R6-1, the path is folded BEFORE it is split into components, so a
+fold-produced separator (``／``, U+FF0F) splits like a real one.
 """
 
 import fnmatch
@@ -216,8 +218,17 @@ def _rule_for(path: str, roots: list[tuple[str, str]]) -> str:
         if _under(path, root):
             return rule
     names, suffixes, prefixes, parts, patterns = _composed()
-    pure = PurePosixPath(path.replace(os.sep, "/"))
-    components = [_fold(part) for part in pure.parts if part not in ("/", "")]
+    # FOLD FIRST, THEN SPLIT (agent review round 6, R6-1). The whole path is folded before
+    # ``PurePosixPath`` sees it, because NFKC maps exactly one codepoint -- U+FF0F, the
+    # full-width solidus ``／`` -- onto ``/``: a spelling like ``．ｓｓｈ／config`` split first
+    # and folded per component arrives as the SINGLE component ``.ssh/config``, which is in no
+    # table and matches no pattern, so the structural rules (component, sequence, dir+file)
+    # never got a chance to see ``.ssh``. Folding first means a fold-produced separator is a
+    # separator to the splitter too. Every other comparison in this module already reads
+    # folded input (``_under``, ``_composed``, the literal tables, which are fold-stable), so
+    # this removes the one place where the fold ran too late.
+    pure = PurePosixPath(_fold(path.replace(os.sep, "/")))
+    components = [part for part in pure.parts if part not in ("/", "")]
     if not components:
         return ""
     name = components[-1]
