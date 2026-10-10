@@ -12421,6 +12421,7 @@ class OperatorApp(App[None]):
         mcp_servers = list(getattr(state, "mcp_servers", []) or [])
         task_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "task"]
         bash_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "bash"]
+        video_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "video"]
         # Search spend rides the band cell here too. This path renders the
         # STORE's cumulative model cost rather than `_spend_total()` (which
         # already folds search spend in), so without this the canonical
@@ -12469,7 +12470,13 @@ class OperatorApp(App[None]):
             # is the hidden dock's only liveness cue, so a follower's band must
             # not go silent where the owner's would not (round 1, U2).
             subagents=sum(1 for j in task_jobs if j.status == "running"),
-            jobs=sum(1 for j in bash_jobs if j.status == "running" and not j.queued),
+            # Video rides the same rung here as the owner's band's
+            # `_job_count("bash") + _job_count("video")`, so the two cannot
+            # disagree about one session (the parity rule this block already
+            # states for `subagents`).
+            jobs=sum(
+                1 for j in (*bash_jobs, *video_jobs) if j.status == "running" and not j.queued
+            ),
             mcp=McpStatus(
                 configured=len(mcp_servers),
                 connected=sum(1 for server in mcp_servers if server.status == "connected"),
@@ -33994,7 +34001,12 @@ class OperatorApp(App[None]):
     def _poll_subagents(self) -> None:
         """Repaint the counter segments only when a running count changes."""
         agents = self._job_count("task")
-        jobs = self._job_count("bash")
+        # The jobs rung carries the video family too (§5.4's post-turn row): a
+        # video generation is a detached job whose card settles with the
+        # submit receipt (R5), so between submit and completion THIS counter is
+        # its only live presence — one number on the existing rung, never a
+        # second band row. Same predicate shape as `bash` (running, not queued).
+        jobs = self._job_count("bash") + self._job_count("video")
         # Delegated spend BEFORE the equality gate, because it moves on ticks
         # where the counts do not: a single child working for two minutes holds
         # `agents` at 1 the whole time while its bill climbs, so gating the
