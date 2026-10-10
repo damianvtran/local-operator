@@ -52,8 +52,14 @@ def _state(scheduler: Any, session: Any | None) -> str:
 async def drain_checks(scheduler: Any, session: Any | None = None) -> None:
     """Await every in-flight check (and, given a session, its spawned turns).
 
-    Loops until a pass finds nothing pending, so a check that a finished check
-    caused (a deferred monitor taking the freed semaphore slot) is awaited too.
+    Loops until a pass finds nothing pending, so a check whose task lands
+    while the drain is running is awaited too. A check parked on the
+    semaphore is in that set -- its task exists from the pump, and the drain
+    awaits it as it takes the slot the finishing check frees. A due entry the
+    pump DEFERRED at pump time (no task created -- the semaphore was closed
+    when it came due) is NOT covered: it starts on a later, timer-driven
+    pump, armed no sooner than ``MIN_ARM_MS`` after the freeing check
+    (agent review round 1 narrowed this sentence).
     With ``session``, the background tasks the delivery spawned
     (``_send_monitor_message`` -> ``_spawn_background``) are drained as well, so
     the test ends with no delivery work still racing ``dispose``.
