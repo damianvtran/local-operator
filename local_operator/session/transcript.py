@@ -77,6 +77,7 @@ from local_operator.session.runtime.engagement import (  # noqa: F401
     durable_conversation_path,
 )
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
+from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
 
 if TYPE_CHECKING:
     from local_operator.session.history_window import _DisplayWindowCache
@@ -159,6 +160,25 @@ ENTRY_PRUNE = "prune"
 #: ``preserve_mtime=True``, and announcing an account change is never work a
 #: turn carried. Its own note in ``harness/message_types.py`` states the
 #: operator-facing surface.
+#:
+#: ``frontend_state_checkpoint_v1`` is here for the CLOSING checkpoint a runtime
+#: leaves at teardown (``Session._write_closing_checkpoint``). That row is the
+#: tail anchor the next cold open reads its compaction boundary and its status
+#: from, and writing it must not restamp a conversation the user finished hours
+#: ago as freshly worked — the same rule the spend ledger follows one line up.
+#: The type is RESTATED as a literal here rather than imported, because the
+#: constant lives in ``frontend_state``, whose import graph reaches the TUI, and
+#: ``_COLLAPSIBLE_CUSTOM_TYPES`` above already restates it for the same reason;
+#: ``tests/unit/session/test_transcript.py`` pins the two spellings together.
+#:
+#: ONE CONSEQUENCE, named because it is a behaviour change rather than a
+#: tidy-up: ``is_bookkeeping_entry`` is also what decides whether a session
+#: holds "a conversation" (``is_pristine``, ``transcript_is_bookkeeping_only``),
+#: so a journal whose only rows are checkpoints now reads as pristine. That is
+#: the honest answer — a checkpoint is a record ABOUT the session; it carries no
+#: turn the user would recognise — and it is reachable only for a runtime that
+#: ended a turn without persisting a message, since every ordinary turn writes
+#: its own message rows in the same pass.
 BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         SESSION_INCIDENT_MESSAGE_TYPE,
@@ -167,6 +187,11 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
+        "frontend_state_checkpoint_v1",
+        # A turn supplement lands AFTER the turn settled (memo §2.4 "Activity clock"):
+        # re-ranking a session as freshly worked because a callout arrived would reorder
+        # the sidebar for nothing. The writer passes ``preserve_mtime=True``.
+        SUPPLEMENT_CUSTOM_TYPE,
     }
 )
 
@@ -1240,6 +1265,117 @@ def read_transcript_page(
     return TranscriptPage(entries=rows, has_more=len(retained) > limit)
 
 
+#: How far back from a needle hit the reader will look for that row's opening
+#: newline. Bounded by the writer's own batching — the largest row measured on
+#: the real store is a 0.9 MB checkpoint — so 4 MiB is an order of magnitude of
+#: headroom, and a candidate whose start is further back is reported UNVERIFIABLE
+#: rather than absent. The safe direction: the caller falls back to the walk.
+_CUSTOM_NEEDLE_LOOKBACK_BYTES = 4 << 20
+
+#: Chunk the needle scan reads at a time, shared with the line walker so the two
+#: readers of one file pay the same syscall shape.
+_CUSTOM_NEEDLE_CHUNK_BYTES = _BACKWARD_CHUNK_BYTES
+
+
+def find_row_for_custom_type(
+    directory: str | Path, custom_type: str
+) -> tuple[int, TranscriptEntry] | None:
+    """The newest CUSTOM row of ``custom_type``, found by BYTES, with its offset.
+
+    Returns ``(offset, entry)`` for the row's first byte, or ``None``. This is the
+    fast path :func:`read_latest_custom_entry` and the durable fold's roster
+    fallback both use, and it is a SCAN, not a parse: it walks the file's chunks
+    backward looking for the bytes every row of this type carries, and JSON-decodes
+    only the candidate rows it finds. Measured on the real store's 118 MB journal:
+    66 ms to scan the whole file, against 457 ms for the parse walk's answer.
+
+    THE NEEDLE IS EXACT FOR THIS FORMAT, which is what makes that safe rather than
+    optimistic: ``TranscriptEntry.to_json`` has serialized with compact separators
+    since the format was introduced (5cf2814a4f), so a row of this type contains
+    ``"custom_type":"<type>"`` verbatim — the same assumption
+    :func:`_cursor_needle` already makes for row ids. A type whose ESCAPED spelling
+    differs from its literal one (a quote, a backslash, a control character) cannot
+    be searched for by bytes at all, and answers ``None`` without reading, which is
+    why the callers keep their parse walk as the authority for that case.
+
+    ``None`` therefore means "no row of this type, spelled the way this format
+    spells it" — and a caller that needs the stronger claim (a journal written by
+    something that re-serialized it) uses the walk, exactly as
+    :func:`read_latest_custom_entry` documents.
+    """
+    encoded = json.dumps(custom_type)
+    if encoded != f'"{custom_type}"':
+        return None
+    needle = b'"custom_type":' + encoded.encode("utf-8")
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return None
+    with handle:
+        handle.seek(0, os.SEEK_END)
+        end_of_file = handle.tell()
+        overlap = len(needle) - 1
+        position = end_of_file
+        while position > 0:
+            start = max(0, position - _CUSTOM_NEEDLE_CHUNK_BYTES)
+            read_start = max(0, start - overlap)
+            handle.seek(read_start)
+            buf = handle.read(position - read_start)
+            index = buf.rfind(needle)
+            while index != -1:
+                offset = read_start + index
+                located = _row_at_offset(handle, offset)
+                if located is not None:
+                    row_offset, entry = located
+                    if (
+                        entry.type == ENTRY_CUSTOM
+                        and str(entry.payload.get("custom_type", "")) == custom_type
+                    ):
+                        return row_offset, entry
+                index = buf.rfind(needle, 0, index)
+            position = start
+    return None
+
+
+def _row_at_offset(handle: Any, offset: int) -> tuple[int, TranscriptEntry] | None:
+    """The complete row containing byte ``offset``, with its first byte offset.
+
+    ``None`` when the row's start is further back than
+    :data:`_CUSTOM_NEEDLE_LOOKBACK_BYTES` (an unverifiable candidate, not an
+    absence) or when the row does not parse.
+    """
+    block = 64 << 10
+    position = offset
+    while True:
+        start = max(0, position - block)
+        handle.seek(start)
+        window = handle.read(position - start)
+        # THE LAST newline before the hit, not the first: the row's first byte is
+        # the one after the newline that TERMINATES the row above it, and the
+        # leftmost newline in this window is some earlier row's terminator — a
+        # mistake that slices the wrong row and answers a whole-journal question
+        # with an older row (measured: it made ``_latest_entry_id`` return the
+        # previous snapshot, which the monitors' post-append guard correctly
+        # refused as "the conversation changed while your change was applied").
+        boundary = window.rfind(b"\n")
+        if boundary >= 0:
+            row_start = start + boundary + 1
+            break
+        if start == 0:
+            row_start = 0
+            break
+        if offset - start > _CUSTOM_NEEDLE_LOOKBACK_BYTES:
+            return None
+        position = start
+    handle.seek(row_start)
+    raw = handle.readline()
+    entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+    if entry is None:
+        return None
+    return row_start, entry
+
+
 def read_latest_custom_entry(directory: str | Path, custom_type: str) -> TranscriptEntry | None:
     """Newest custom row of ``custom_type``, without parsing the journal above it.
 
@@ -1300,6 +1436,9 @@ def read_latest_custom_entry(directory: str | Path, custom_type: str) -> Transcr
     ``tests/unit/session/test_transcript.py::test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises``
     so the sentence cannot drift away from the behaviour.
     """
+    located = find_row_for_custom_type(directory, custom_type)
+    if located is not None:
+        return located[1]
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
         return None
@@ -1362,6 +1501,16 @@ class ReplaySuffix:
     checkpoint_order: dict[str, int] = field(default_factory=dict)
     #: Bytes actually read, for the caller's own evidence; not a contract.
     bytes_read: int = 0
+    #: Did the backward walk reach the file's FIRST chunk — the one holding the
+    #: journal's opening row? THIS is the caller's fact for "the window is the
+    #: whole journal", and it is deliberately not derived from :attr:`bytes_read`
+    #: or from a stat: the walk stops early when it finds its stopping row, and
+    #: only the pair with ``chunk_start == 0`` means the file's first row was in
+    #: hand. A span compared against a caller's earlier ``st_size`` part company
+    #: with the truth as soon as the file grows between the stat and this read's
+    #: own EOF — a window that stopped short can then look like a full read,
+    #: which is the unsafe direction for every consumer of "I saw everything".
+    reached_bof: bool = False
 
 
 def read_replay_suffix(
@@ -1421,7 +1570,11 @@ def read_replay_suffix(
         # answers the same way rather than turning "nothing yet" into an
         # error the whole-file parse never raised.
         return ReplaySuffix(
-            entries=(), through_present=through_id is None, checkpoint=None, bytes_read=0
+            entries=(),
+            through_present=through_id is None,
+            checkpoint=None,
+            bytes_read=0,
+            reached_bof=False,
         )
     # Normalise the request ONCE, so every stop/collect site below reads the
     # same tuple: an empty request means "no custom rows wanted" (the cheapest
@@ -1437,6 +1590,23 @@ def read_replay_suffix(
         else tuple(opportunistic_types or ())
     )
     collectible = wanted + opportunistic
+    # A REQUIRED TYPE MAY ALREADY BE PROVEN ABSENT (``session.tail_anchor``).
+    # Without the proof, "this journal has no checkpoint row anywhere" is a
+    # whole-file fact, so the walk below is a scan to BOF — 570-650 ms of CPU on a
+    # 35 MB checkpointless journal, once per fresh process, and the one cost the
+    # replay cache in ``attached`` cannot remove. The sidecar is written by the
+    # pre-warm job (see ``index_prewarm``), never by a reader, and it is believed
+    # only after validation against THIS journal version (inode, a file that has
+    # not shrunk, and a scan of the bytes appended since the record). What it
+    # relaxes is one requirement of the stop condition below; the compaction
+    # boundary is still required, so a proven-absent checkpoint can never cut a
+    # journal short of the replay's own boundary.
+    proven_absent: set[str] = set()
+    if wanted:
+        from local_operator.session.tail_anchor import ANCHOR_CUSTOM_TYPE, proves_absent
+
+        if ANCHOR_CUSTOM_TYPE in wanted and proves_absent(path.parent):
+            proven_absent.add(ANCHOR_CUSTOM_TYPE)
     checkpoints: dict[str, dict[str, Any]] = {}
     checkpoint_order: dict[str, int] = {}
     met = 0  # 1-based: the scan walks newest-first, so lower means newer
@@ -1446,6 +1616,7 @@ def read_replay_suffix(
     cursor_reached = through_id is None
     parsed: list[TranscriptEntry] = []  # newest first while reading backward
     bytes_read = 0
+    reached_bof = False
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
         # EOF as the handle saw it. Re-stat'ing after the close would measure a
@@ -1497,12 +1668,19 @@ def read_replay_suffix(
                         # NEWEST row: its meeting index is what orders it against
                         # another type's newest row.
                         checkpoint_order[custom_type] = met
+            # The walker's last pair is ``chunk_start == 0``: reaching it means
+            # the file's leading fragment was consumed, which is the only way this
+            # read can claim the whole journal. ``reached_bof`` is read from the
+            # SAME expression the stop below turns on, so the two cannot drift —
+            # an inner-loop stop added later would otherwise leave the flag
+            # describing a chunk whose tail was skipped.
             at_start = chunk_start == 0
+            reached_bof = at_start
             boundary_seen = compaction is not None and (
                 first_kept_id is None or first_kept_id in seen_ids
             )
             cursor_seen = through_id is None or through_id in seen_ids
-            checkpoint_seen = all(name in checkpoints for name in wanted)
+            checkpoint_seen = all(name in checkpoints or name in proven_absent for name in wanted)
             if at_start or (boundary_seen and cursor_seen and checkpoint_seen):
                 break
             # A journal with no compaction has no boundary to stop at: keep
@@ -1518,6 +1696,7 @@ def read_replay_suffix(
         checkpoints=checkpoints,
         checkpoint_order=checkpoint_order,
         bytes_read=bytes_read,
+        reached_bof=reached_bof,
     )
 
 

@@ -27,7 +27,7 @@ import { resumeSession, setSessionPin } from "../api";
 import { AskDock } from "../components/ask-dock";
 import { AsksSheet } from "../components/asks-sheet";
 import { ModelSheet } from "../components/model-sheet";
-import { Composer } from "../components/composer";
+import { Composer, ComposerFrame } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
 import { WideViewButton } from "../components/wide-view-button";
 import { PendingCard } from "../components/pending-card";
@@ -766,29 +766,63 @@ export function SessionScreen({
 		};
 	}, []);
 
+	/* THE RESERVED FRAME (first-paint lane T2: finding F8).
+
+	   The projection arrives over SSE, so the first frames of a cold open have
+	   no session data at all. This branch used to paint a header and one centred
+	   sentence, then mount the header, the transcript, the working line and the
+	   composer in a single commit when the projection landed — a full-layout
+	   swap in which the composer APPEARED rather than being filled. Reserve the
+	   column instead: the same header row, the same transcript box (`flex-1`,
+	   holding a status line instead of rows) and the composer's box
+	   (`<ComposerFrame>`, drawn from the composer's own class strings). What lands
+	   is then content in boxes that were already there, and nothing below the
+	   header moves.
+
+	   WHAT IS DELIBERATELY NOT HERE: a title, a glance row, asks, panels or a
+	   live composer. Every one of those reads the projection, and rendering them
+	   from a fabricated stand-in would put a fiction behind the same branches
+	   real data flows through — the honest empty state is a reserved box. The
+	   header row's height comes from its 44 px control, so an empty title slot
+	   occupies exactly the room the conversation's name will.
+
+	   AND NOT THE STATE LADDER EITHER, which looks like an omission and is not:
+	   the frame's own sentence already reports the link, and with no data on
+	   screen a "showing the last synced view" strip would be noise about noise
+	   (`session-view.health.test.tsx` pins that decision — U11). Nothing can be
+	   "synced" yet, so the ladder keeps its existing rule: it speaks once there
+	   is something to have fallen back from. */
 	if (!projection) {
 		return (
 			<div
 				ref={rootRef}
 				className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden"
 			>
-				<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
-					<button
-						type="button"
-						onClick={() => navigate("/")}
-						aria-label="back to sessions"
-						className={cn(HEADER_CONTROL, "text-ink-muted")}
-					>
-						‹
-					</button>
-				</header>
-				<div className="flex flex-1 items-center justify-center">
+				<div className="relative">
+					<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
+						<button
+							type="button"
+							onClick={() => navigate("/")}
+							aria-label="back to sessions"
+							className={cn(HEADER_CONTROL, "text-ink-muted")}
+						>
+							‹
+						</button>
+						{/* The title's own slot, empty: `truncate` + `flex-1` in a row whose
+						    height is set by the control beside it. */}
+						<span className="min-w-0 flex-1 truncate text-body-sm font-medium" />
+					</header>
+				</div>
+				{/* THE TRANSCRIPT BOX. `min-h-0 flex-1` is the whole contract: it is the
+				    space `<Transcript>` will fill, so rows arriving take room that was
+				    already theirs. The sentence inside is the reader's only signal that
+				    the wait is a wait — it leaves with the first row. */}
+				<div className="flex min-h-0 flex-1 flex-col items-center justify-center px-3">
 					<p className="text-body-sm text-ink-dim">
-						{connected
-							? "waiting for projection…"
-							: "connecting to session…"}
+						{connected ? "waiting for projection…" : "connecting to session…"}
 					</p>
 				</div>
+				<ComposerFrame />
 			</div>
 		);
 	}

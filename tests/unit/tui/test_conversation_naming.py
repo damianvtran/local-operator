@@ -35,7 +35,6 @@ from typing import Any
 
 import pytest
 
-from local_operator import slash_commands as slash_module
 from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 from local_operator.harness.types import Message, TextContent
 from local_operator.incidents import format_model_switch_message
@@ -1478,7 +1477,10 @@ def test_every_advertised_surface_teaches_the_same_spelling() -> None:
     * the `/help` row is pinned by EXACT equality, so a reword fails here;
     * the picker row is pinned on the row it builds;
     * the three runtime notices are one census of the canonical invocation, so
-      adding a surface or reverting one to the bare word moves a number.
+      adding a surface or reverting one to the bare word moves a number. The
+      registry's share is counted from its RESOLVED descriptions — its English
+      moved to the ``wire.slash`` catalogue in the S2 extraction, so a count of
+      that file's source would read zero by construction.
 
     What this still cannot see, stated rather than assumed: a fifth surface
     teaching the capability in words that avoid the canonical clause entirely
@@ -1492,7 +1494,6 @@ def test_every_advertised_surface_teaches_the_same_spelling() -> None:
 
     app_source = Path(app_module.__file__).read_text(encoding="utf-8")
     serving_source = Path(serving_module.__file__).read_text(encoding="utf-8")
-    slash_source = Path(slash_module.__file__).read_text(encoding="utf-8")
 
     # The picker teaches the ARGUMENT rather than the invocation — the command
     # name is already in the buffer when the row is offered — so it is the one
@@ -1502,14 +1503,21 @@ def test_every_advertised_surface_teaches_the_same_spelling() -> None:
     assert 'name="--refresh",' in app_source
     assert 'aliases=("refresh",),' in app_source
 
-    # One entry per surface that teaches the INVOCATION. A reword that keeps
-    # `--refresh`, a revert to the bare word, or a new surface all move these
-    # numbers, so the agreement is counted rather than asserted at itself.
-    census = {
-        "slash_commands.py": slash_source.count("/title --refresh"),
-        "app.py": app_source.count("/title --refresh"),
-        "serving.py": serving_source.count("/title --refresh"),
+    # One entry per surface that teaches the INVOCATION, each resolved WHERE
+    # ITS COPY LIVES: the registry's descriptions are catalogue-backed since the
+    # S2 `wire.slash` extraction — its source no longer holds the English — so
+    # that entry counts what the registry SAYS; `app.py` and `serving.py` still
+    # carry their copy in-source. A future slice that extracts one of them
+    # points its entry at the new home (one line here) instead of losing the
+    # number. A reword that keeps `--refresh`, a revert to the bare word, or a
+    # new surface all move these numbers, so the agreement is counted rather
+    # than asserted at itself.
+    surfaces = {
+        "slash_commands.py": "".join(c.description for c in SLASH_COMMANDS),
+        "app.py": app_source,
+        "serving.py": serving_source,
     }
+    census = {name: text.count("/title --refresh") for name, text in surfaces.items()}
     assert census == {"slash_commands.py": 1, "app.py": 2, "serving.py": 1}, census
 
 

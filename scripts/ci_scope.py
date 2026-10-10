@@ -110,6 +110,11 @@ CAT_MANIFEST = "manifest"
 CAT_DEPS_LOCK = "deps_lock"
 CAT_GATE_CONFIG = "gate_config"
 CAT_DOCS = "docs"
+#: The root `i18n/` tree: translation ledger, ratchet baseline, allowlist,
+#: style guides (RFC §2.2 — repo artifacts, not shipped). LIVE for the Python
+#: jobs because the `i18n` check reads them; a locale-only diff must run the
+#: gates that read catalogues (RFC §2.7 scope-awareness).
+CAT_I18N = "i18n"
 CAT_OTHER = "other"
 
 CATEGORIES = (
@@ -124,6 +129,7 @@ CATEGORIES = (
     CAT_DEPS_LOCK,
     CAT_GATE_CONFIG,
     CAT_DOCS,
+    CAT_I18N,
     CAT_OTHER,
 )
 
@@ -326,6 +332,11 @@ def category_of(path: str) -> str:
         return CAT_DEPS_LOCK
     if p in GATE_CONFIG_PATHS:
         return CAT_GATE_CONFIG
+    if p == "i18n" or p.startswith("i18n/"):
+        # NOT inert: the i18n CI job and the checker read this tree, and a
+        # ledger/baseline change without a regeneration or a re-check is
+        # exactly what those gates exist to catch.
+        return CAT_I18N
     if p.startswith("docs/"):
         return CAT_DOCS if not p.endswith((".py", ".pyi")) else CAT_OTHER
     if ROOT_MARKDOWN_RE.match(p):
@@ -350,6 +361,7 @@ FLAGS = (
     "audit",
     "cli",
     "server",
+    "i18n",
 )
 
 #: job id in `ci.yml` -> the flags that gate it. Every flag here must be one of
@@ -366,6 +378,7 @@ JOB_FLAGS: dict[str, tuple[str, ...]] = {
     "tui-e2e": ("tui",),
     "cli-sanity": ("cli",),
     "server-sanity": ("server",),
+    "i18n": ("i18n",),
 }
 
 #: Jobs that take no scope flag, each with the reason. Everything in `ci.yml`
@@ -482,6 +495,13 @@ JOB_COMMANDS: dict[str, tuple[str, ...]] = {
     # is deliberately not wired into `--run`: see `scripts/xplat/README.md`.
     "xplat-probe-linux": (".venv/bin/python scripts/xplat_probe.py",),
     "xplat-probe-windows": (".venv/bin/python scripts/xplat_probe.py",),
+    # The i18n gate: regenerate-and-diff plus the ratchet/parity checker. Both
+    # are stdlib-only (and the generator additionally needs the runner's
+    # Node), which is why this job is the cheapest real gate in the workflow.
+    "i18n": (
+        ".venv/bin/python scripts/i18n/generate.py --check",
+        ".venv/bin/python scripts/i18n/check.py",
+    ),
 }
 
 #: Jobs in `JOB_FLAGS` that deliberately have no local command, each with the
@@ -694,6 +714,10 @@ FLAG_REASONS: dict[str, str] = {
         "streaming-contract script cli-sanity executes"
     ),
     "server": "same predicate as `cli`",
+    "i18n": (
+        "a package, manifest or lockfile path (the ratchet scans the package; a "
+        "manifest can change what ships), the root i18n/ tree, or scripts/i18n/"
+    ),
 }
 
 
@@ -833,6 +857,18 @@ def flags_for(
     budget = bool(cats & {CAT_PYTHON, CAT_MANIFEST, CAT_DEPS_LOCK}) or bool(
         path_set & BUDGET_SCRIPTS
     )
+    # The i18n job reads the catalogue tree, its generated tables, the
+    # generator/checker, and the root artifacts — and its ratchet scans EVERY
+    # `local_operator/**/*.py` for new literals. So the predicates that must
+    # disarm nothing arm it too: a package change can add a literal the ratchet
+    # counts, a manifest/lockfile edit can change what ships or installs, and
+    # CAT_I18N covers the root `i18n/` tree; the `scripts/i18n/` prefix catches
+    # the job's OWN code (classified SCRIPTS, so no category above sees it).
+    i18n = (
+        bool(cats & {CAT_PYTHON, CAT_MANIFEST, CAT_DEPS_LOCK})
+        or CAT_I18N in cats
+        or any(p.startswith("scripts/i18n/") for p in path_set)
+    )
     return {
         "lint": live,
         "types": live,
@@ -844,6 +880,7 @@ def flags_for(
         "audit": audit,
         "cli": cli,
         "server": cli,
+        "i18n": i18n,
     }
 
 
