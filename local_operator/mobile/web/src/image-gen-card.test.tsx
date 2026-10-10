@@ -14,11 +14,15 @@
 //
 //   * the card mounts for `generate_image` and ONLY for it — every other
 //     tool keeps its plain one-line row;
-//   * `running` carries the tile, an indeterminate bar by default and the
-//     determinate branch only on a carried fraction;
+//   * `running` carries the tile and the cancel control, and the bar draws
+//     ONLY against a fraction the feed carried — a fraction-less card draws
+//     no bar (the desktop's D2 ruling, mirrored: the tile's sweep is the
+//     one indefinite motion);
 //   * Cancel rides `{op:"abort"}` (the composer's own turn-interrupt path)
-//     and the card holds "cancelling…" until the SETTLE — never painting
-//     "cancelled" off the press;
+//     from BOTH live states — queued and running — and the card holds
+//     "cancelling…" until the SETTLE — never painting "cancelled" off the
+//     press, and never growing a generating body (tile or bar) for a call
+//     that never generated (the desktop's F3 rule, mirrored);
 //   * the restart/steer slots exist but are wired by no caller, so the app's
 //     own render shows neither control.
 import {
@@ -99,11 +103,19 @@ describe("the transcript branch", () => {
 });
 
 describe("queued", () => {
-	it("states queued, and the queue position only when the feed carries one", () => {
+	it("states queued, the queue position only when carried, and offers cancel", () => {
 		const { container } = render(
 			<Transcript pid="9" entries={[entry({ tool_state: "queued" })]} />,
 		);
 		expect(cardOf(container).textContent).toContain("queued");
+		/* The queued card is a LIVE card (wave-2 conformance): the SAME
+		   cancel control the running body offers — the TUI's hint, the
+		   desktop card and the native app all stop a queued call. */
+		expect(screen.getByRole("button", { name: "cancel" })).toBeTruthy();
+		/* And it shows no generating furniture of its own: nothing has
+		   generated yet. */
+		expect(container.querySelector(".lo-gen-tile")).toBeNull();
+		expect(screen.queryByRole("progressbar")).toBeNull();
 		cleanup();
 
 		const { container: withPosition } = render(
@@ -114,18 +126,21 @@ describe("queued", () => {
 				]}
 			/>,
 		);
-		expect(cardOf(withPosition).textContent).toContain("queued · position 2");
+		/* The D3 meaning: the carried number counts requests AHEAD of this
+		   one; "position 2" read as an off-by-one position. */
+		expect(cardOf(withPosition).textContent).toContain("queued · 2 ahead");
 	});
 });
 
 describe("running", () => {
-	it("carries the tile, the indeterminate bar and the cancel control", () => {
+	it("carries the tile and the cancel control; no fraction, no bar (D2)", () => {
 		const { container } = render(<Transcript pid="9" entries={[entry({})]} />);
 		expect(cardOf(container).querySelector(".lo-gen-tile")).toBeTruthy();
-		const bar = screen.getByRole("progressbar");
-		/* No fraction carried means NO fraction announced — the bar is
-		   indeterminate, not a 0%. */
-		expect(bar.getAttribute("aria-valuenow")).toBeNull();
+		/* A fraction-less card draws NO bar (the desktop's D2 ruling,
+		   mirrored): the tile's sweep is the one indefinite motion, and
+		   nothing may state a number the feed did not carry — not even an
+		   unquantified one. */
+		expect(screen.queryByRole("progressbar")).toBeNull();
 		expect(screen.getByRole("button", { name: "cancel" })).toBeTruthy();
 	});
 
@@ -295,13 +310,20 @@ describe("settled states", () => {
 
 describe("cancel gating", () => {
 	it("cancel rides the turn-interrupt path and holds 'cancelling' until the settle", async () => {
-		const { rerender } = render(<Transcript pid="9" entries={[entry({})]} />);
+		const { container, rerender } = render(
+			<Transcript pid="9" entries={[entry({})]} />,
+		);
 		fireEvent.click(screen.getByRole("button", { name: "cancel" }));
 		expect(vi.mocked(sendCommand)).toHaveBeenCalledWith("9", { op: "abort" });
 		await screen.findByText("cancelling…");
 		/* The hold carries the harness hook the capture rig's geometry dump
 		   reads (review round 1, F3). */
 		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
+		/* The hold replaced a RUNNING card, so the body stays (F3): the tile
+		   remains while the stop is in flight — and with no fraction
+		   carried, no bar rides along (D2). */
+		expect(container.querySelector(".lo-gen-tile")).toBeTruthy();
+		expect(screen.queryByRole("progressbar")).toBeNull();
 		/* Not pressable twice, and never painted "cancelled" off the press. */
 		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
 
@@ -316,6 +338,42 @@ describe("cancel gating", () => {
 		   press. No wire path does that today; this pins the invariant. */
 		rerender(<Transcript pid="9" entries={[entry({})]} />);
 		expect(screen.queryByText("cancelling…")).toBeNull();
+		expect(screen.getByRole("button", { name: "cancel" })).toBeTruthy();
+	});
+
+	it("a queued press holds without a phantom generating body (F3)", async () => {
+		/* The queued card never generated, so its hold renders the state
+		   line ALONE: growing the tile and/or the bar for it is the exact
+		   defect the desktop's F3 rule names, and the relay shipped it —
+		   every `cancelling` view painted the generating body. */
+		const { container } = render(
+			<Transcript
+				pid="9"
+				entries={[
+					entry({ tool_state: "queued", details: liveDetails({ queue_position: 2 }) }),
+				]}
+			/>,
+		);
+		fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+		expect(vi.mocked(sendCommand)).toHaveBeenCalledWith("9", { op: "abort" });
+		await screen.findByText("cancelling…");
+		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
+		expect(container.querySelector(".lo-gen-tile")).toBeNull();
+		expect(screen.queryByRole("progressbar")).toBeNull();
+		/* Pressable ONCE: the hold replaced the control, so a double-tap has
+		   nothing to press — the same guard the running case has. */
+		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
+	});
+
+	it("a refused abort puts the queued control back", async () => {
+		vi.mocked(sendCommand).mockRejectedValueOnce(
+			new Error("session not connected"),
+		);
+		render(<Transcript pid="9" entries={[entry({ tool_state: "queued" })]} />);
+		fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+		await waitFor(() =>
+			expect(screen.queryByText("cancelling…")).toBeNull(),
+		);
 		expect(screen.getByRole("button", { name: "cancel" })).toBeTruthy();
 	});
 
@@ -338,7 +396,7 @@ describe("the canonical stage word", () => {
 		   this one arrives only from the feed (`stage: "cancelling"`) and
 		   must render the same hold — no press, no cancel control to press
 		   twice. */
-		render(
+		const { container } = render(
 			<Transcript
 				pid="9"
 				entries={[
@@ -352,6 +410,33 @@ describe("the canonical stage word", () => {
 		expect(screen.getByText("cancelling…")).toBeTruthy();
 		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
 		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
+		/* The row was RUNNING when the wire's hold arrived — the frame no
+		   longer carries the stage it replaced, and the row's own word is
+		   the F3 fact — so the body stays; the bar does not, because no
+		   fraction was carried (D2). */
+		expect(container.querySelector(".lo-gen-tile")).toBeTruthy();
+		expect(screen.queryByRole("progressbar")).toBeNull();
+	});
+
+	it("a wire hold for a call that never started shows no generating body (F3)", () => {
+		/* Defensive from the feed side: a `cancelling` interim arriving over
+		   a row whose own word says the call never executed must render the
+		   reduced hold — the same guard the queued press gets. */
+		const { container } = render(
+			<Transcript
+				pid="9"
+				entries={[
+					entry({
+						tool_state: "queued",
+						details: liveDetails({ stage: "cancelling" }),
+					}),
+				]}
+			/>,
+		);
+		expect(screen.getByText("cancelling…")).toBeTruthy();
+		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
+		expect(container.querySelector(".lo-gen-tile")).toBeNull();
+		expect(screen.queryByRole("progressbar")).toBeNull();
 	});
 
 	it("the latch holds the interim over the terminal-update window (design D1)", () => {

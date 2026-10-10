@@ -39,10 +39,28 @@
  * (and an in-flight dictation's cancel) already uses — there is no second
  * cancel mechanism for image generation, deliberately: v1's restart/steer
  * story is "interrupt the turn, then a new generate call", so making this
- * control a turn interrupt keeps every cancel on one rail. The restart and
- * steer affordances are SLOTS (optional props) that the transcript does not
- * wire yet — the named surface op is not defined — and are demonstrated in
- * tests only.
+ * control a turn interrupt keeps every cancel on one rail. The control is
+ * offered while the call is UNSETTLED — queued as well as running (wave-2
+ * conformance: the TUI's hint, the desktop card and the native app all stop
+ * a queued call, and the relay's queued card showed no control at all, a
+ * dead end at card level) — and both presses engage the same latch, shed
+ * the control and paint the same hold. The restart and steer affordances
+ * are SLOTS (optional props) that the transcript does not wire yet — the
+ * named surface op is not defined — and are demonstrated in tests only.
+ *
+ * THE GENERATING BODY IS GATED ON A GENERATION HAVING STARTED (the
+ * desktop's F3 rule, mirrored — `view.generating` in the adapter): the
+ * tile, the bar and the log tail render while `running`, and during a
+ * `cancelling` hold only when the state the hold replaced was running. A
+ * hold that replaced the queued card renders the state line alone — it must
+ * not grow the body it never had.
+ *
+ * ONE MOTION PER SURFACE (the desktop's D2 ruling, mirrored). The tile's
+ * sweep is this card's ONE indefinite element; the progress bar draws ONLY
+ * against a fraction the feed carried. The indeterminate full-width bar
+ * that used to sweep beside the tile doubled the rhythm inches away from it
+ * and is gone — a fraction-less row reserves the bar's space so the control
+ * does not move when a number lands.
  *
  * WHAT THIS CARD DOES NOT DO: it does not call the provider, invent a
  * progress number, or add transport. Live fields render only as the feed
@@ -59,6 +77,14 @@ import type { TranscriptEntry } from "../types";
     `text-meta` on the dim ink, the app's receipt voice), except states whose
     body already states more. */
 const STATE_LINE = "text-meta text-ink-dim";
+
+/** The card's cancel control — ONE recipe for BOTH live states (queued and
+    running): the same words, the same danger ink and the same 44px touch
+    floor the running case shipped. A second copy would be a drift hazard,
+    and the two states must not read as two different controls (wave-2
+    conformance). */
+const CANCEL_BUTTON =
+	"flex min-h-11 shrink-0 items-center rounded-sm border border-danger-border px-3 text-body-sm text-danger active:bg-danger-wash";
 
 /** The restart/steer slot buttons. The ask sheet's own secondary-button
     recipe (`ask-card.tsx`), because a settled card's controls are a small
@@ -154,10 +180,20 @@ export function ImageGenCard({
 		}
 	};
 
+	/* THE GENERATING BODY'S GATE (the desktop's F3 rule, mirrored): the tile,
+	   the bar and the log tail render while `running` — a running call had a
+	   generation by definition — and during a `cancelling` hold only when a
+	   generation had started (`view.generating`). A hold that replaced the
+	   queued card draws the reduced line below: neither a tile nor a bar it
+	   never had. */
+	const generatingBody =
+		view.state === "running" ||
+		(view.state === "cancelling" && view.generating);
+
 	return (
 		<div data-testid="image-gen-card" className="min-w-0">
 			<ToolRow entry={rowEntry}>
-				{view.state === "running" || view.state === "cancelling" ? (
+				{generatingBody ? (
 					<div className="flex flex-col items-start gap-2 pt-0.5 pb-1.5 pl-6">
 						{/* The tile: the square the finished picture will land
 						    in (the transcript's own 160px attachment frame), so
@@ -203,22 +239,20 @@ export function ImageGenCard({
 									/>
 								</span>
 							) : (
-								/* The indeterminate branch: an unquantified sweep,
-								   the transcript's own lazy-load bar idiom —
-								   no number is stated because none was carried. */
-								<span
-									role="progressbar"
-									aria-label="generating image"
-									className="lo-loadbar h-0.5 min-w-0 flex-1 overflow-hidden rounded-full bg-sunken"
-								>
-									<span className="lo-loadbar-fill block h-full w-1/2 rounded-full bg-accent" />
-								</span>
+								/* NO FRACTION, NO BAR (the desktop's D2 ruling,
+								   mirrored): the tile's sweep is this card's ONE
+								   indefinite element, and the fraction-less bar
+								   that used to sweep beside it doubled the
+								   rhythm inches away from the tile. The empty slot
+								   reserves the row so the control does not move
+								   when a fraction lands. */
+								<span aria-hidden className="min-w-0 flex-1" />
 							)}
 							{view.state === "running" ? (
 								<button
 									type="button"
 									onClick={() => void cancel()}
-									className="flex min-h-11 shrink-0 items-center rounded-sm border border-danger-border px-3 text-body-sm text-danger active:bg-danger-wash"
+									className={CANCEL_BUTTON}
 								>
 									cancel
 								</button>
@@ -250,6 +284,26 @@ export function ImageGenCard({
 								))}
 							</div>
 						) : null}
+					</div>
+				) : view.state === "cancelling" ? (
+					/* THE REDUCED HOLD (F3): the call never generated, so the
+					   hold renders the state line alone — the queued line's own
+					   register with its one word swapped — and the 44px row
+					   floor holds (design D1: the press must not lift the card's
+					   bottom edge under the thumb that just stopped it; the
+					   vertical padding rides the CONTAINER, the running body's
+					   own composition, so the padded row measures the same with
+					   and without the control the hold replaced). No tile, no
+					   bar: nothing the card never showed. */
+					<div className="w-full pt-0.5 pb-1.5 pl-6">
+						<div className="flex min-h-11 w-full items-center gap-2 pr-1.5">
+							<span
+								data-testid="image-gen-hold"
+								className={`${STATE_LINE} min-w-0 flex-1`}
+							>
+								cancelling…
+							</span>
+						</div>
 					</div>
 				) : view.state === "done" ? (
 					<div className="flex flex-col gap-1.5 pt-0.5 pb-1.5 pl-6">
@@ -321,14 +375,35 @@ export function ImageGenCard({
 						) : null}
 					</div>
 				) : (
-					<p className={`${STATE_LINE} pt-0.5 pb-1.5 pl-6 pr-1.5`}>
-						queued
-						{/* The queue position, ONLY when the feed carries it —
-						    the line stands alone until the relay sends one. */}
-						{view.queuePosition !== null
-							? ` · position ${view.queuePosition}`
-							: ""}
-					</p>
+					/* The queued card is a LIVE card (wave-2 conformance): it
+					   offers the same cancel as the running body — TUI,
+					   desktop and the native app all stop a queued call, and
+					   the relay showed no control, a dead end at card level.
+					   The press engages the same latch (the header's rail
+					   note) and the hold replacing the control IS the
+					   double-press guard. The copy states the D3-ruled
+					   meaning of the carried number: it counts the requests
+					   AHEAD of this one, never the off-by-one reading
+					   "position N" invited. */
+					<div className="w-full pt-0.5 pb-1.5 pl-6">
+						<div className="flex min-h-11 w-full items-center gap-2 pr-1.5">
+							<p className={`${STATE_LINE} min-w-0 flex-1`}>
+								queued
+								{/* The queue position, ONLY when the feed carries it —
+								    the line stands alone until the relay sends one. */}
+								{view.queuePosition !== null
+									? ` · ${view.queuePosition} ahead`
+									: ""}
+							</p>
+							<button
+								type="button"
+								onClick={() => void cancel()}
+								className={CANCEL_BUTTON}
+							>
+								cancel
+							</button>
+						</div>
+					</div>
 				)}
 			</ToolRow>
 		</div>
