@@ -222,6 +222,46 @@ Screens, following branding.md §7's agent-output hierarchy:
   diff counts, tap to expand/collapse args+output+diff; todos panel;
   subagents panel with tap-to-drill into a subagent's transcript and a
   back-to-parent crumb; approval/ask cards pinned above the composer.
+
+  The view's FIRST FRAME IS THE FINAL LAYOUT: with no projection yet the screen
+  paints the header row, the transcript's box and the composer's box (an inert
+  `ComposerFrame` drawn from the composer's own class strings), so the
+  projection's arrival is a content fill and not a full-layout swap. The
+  composer is deliberately not live there — there is no session to send to and
+  a control that silently drops a typed sentence is worse than a reserved box.
+
+  Older history is paged in as the reader scrolls: the transcript asks for the
+  rows below the oldest row it HOLDS, and the daemon answers from the JOURNAL,
+  in journal order — the rows a compaction dropped included, which the fold's
+  replay no longer reaches. That last part is the difference between "the phone
+  shows a bounded tail window" and "the phone shows a bounded tail window of a
+  conversation whose beginning it can never reach": with four compactions in
+  one fixture journal, 639 of its 3,348 lines were reachable before and all of
+  them are now.
+
+  **One row is served once, at its journal position.** A cursor page never comes
+  from the fold's render, because the render's order is not the journal's: it
+  opens with the compaction marker and re-injects the latest compaction's
+  `preserved_user_turns` UNDER THEIR ORIGINAL ROW IDS, and those same rows sit
+  in the journal below the cut. Paging the render therefore served rows twice
+  and, when a cursor landed on one of them, answered a page around the render's
+  head plus a refill from the compaction boundary — rows the client already
+  held, so `has_more` stayed true and the walk cycled. That is the ordinary
+  shape rather than a corner: 60 of the 60 largest journals on the reference
+  host carry preserved turns (median 13, max 446). The desktop has always
+  answered this question from the journal, and the two surfaces agree row for
+  row because both fold it with the same fold.
+
+  Two consequences worth naming. A page is folded together with the NEWER rows
+  that answer its own calls (a tool result's row is the call's row, so nothing
+  extra is served), because the fold pairs a call with its result by looking the
+  call up in what it has already walked — folded alone, the calls at a page's
+  edge would paint `interrupted` however long ago they returned. And when the
+  fold that produced the daemon's cached state did not read the journal from its
+  first row (a bounded suffix read), the archive rebuilds the prune map from the
+  journal before serving anything: a prune marker sits ABOVE the row it blanks,
+  so a map covering only the fold's window would page the output the live fold
+  had already hidden.
 - **Composer** — the TUI composer, mobilized: multiline auto-growing field,
   model label + effort as tappable chips (opens the model sheet / effort
   rungs), typing `/` opens the slash-command sheet with fuzzy filtering and
@@ -292,6 +332,52 @@ is a 404, not a state.
 
 Read-only by design: the naming warm (`sessions.checkpoints.warm`) is a
 desktop-plane spend and is not served on this route.
+
+### The open frame (`open_frame: 1`) — the relay's seam
+
+The desktop open frame (`docs/DESKTOP_API.md`, §"The open frame") is a page
+counted in paintable rows, cut back to the oldest included run's opening user
+row, with non-painted bytes stripped and per-run facts attached. **The phone
+does not serve its first frame from it in this revision, and that is a
+precondition rather than a preference.** The relay's first frame is the
+PROJECTION, and `_durable_projection` folds todos, subagents and asks out of
+rows the strip removes — a fold started from a stripped page would lose derived
+state that no later read can restore, because `/api/sessions/{id}/history`
+cannot bring back a row the fold never carried. The lane that bounds the fold
+(`DurableFoldCache.load` folds from the newest compaction's `first_kept` or a
+tail anchor instead of BOF) lands that precondition.
+
+The seam is `local_operator/session/open_frame.py`: the strip, the row cut and
+the facts join are a pure function of (rows, index facts, limits), with no HTTP
+route and no desktop bridge in it, so `mobile/` can import it the day its fold
+has a bounded suffix to start from. Nothing in this contract changes the
+daemon's routes, the projection's shape or the web UI.
+
+### Highlights (`supplements-v1`) — the relay's seam
+
+Turn supplements ("Highlights") follow the open frame's shape: the owner runtime journals
+a `supplement_v1` row after an eligible turn, and `supplement_progress` events ride the
+job; both reach a viewer only under the two-half `supplements-v1` gate — the owner's
+capability string ANDed with the viewer's own declaration. A relayed viewer declares
+with `auth["supplements"] = true`; `supplements` is a name on `network/dial.AUTH_FIELDS`,
+so the relay forwards it (the entry-times declaration once shipped inert for want of
+exactly this line). A viewer that does not declare receives no event and no projected
+row and paints no unknown kind; the row is journaled either way.
+
+The phone renders none of this yet, and that is the revision's honest state: the
+projection's `supplement` arm, `mobile/web`'s frame and the relay's document/file routes
+belong to the relay lane, which also needs the routes lane. Both relay routes are
+registered today as auth-first 404 stubs
+(`GET /api/sessions/{id}/supplements/{digest}/document` and
+`GET /api/sessions/{id}/supplements/{job}/file?i=<n>`), frozen so the route table and
+the auth ordering cannot drift before their implementation; until then a phone must
+expect the 404 and show nothing.
+
+Row and event shapes (newest version per anchor; the stale-row rule; the live-only
+`running`/`cancelling` states): `docs/DESKTOP_API.md`, §"Turn supplements". Not in this
+release: no image components (documents carry HTML only in v1), no mesh transfer (a
+peer-held file is named but not previewed), the phone app's own WebView frame is
+pending its own lane, and static preview URLs are not yet token-authenticated.
 
 ### The peers' rows — other devices' sessions (`GET /api/sessions?include_peers`)
 

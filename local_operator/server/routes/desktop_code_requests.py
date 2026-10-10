@@ -3,12 +3,13 @@
 Two routes, one question each:
 
 - ``GET  /v1/desktop/sessions/{session_id}/code-requests`` — this session's code
-  requests, from the derived index. ``?include=mentions_tool`` expands the refs the scan
-  collapsed because they appeared only in tool output.
-- ``POST /v1/desktop/sessions/{session_id}/code-requests/refresh`` — the UI's refresh
-  affordance, answered 202. It does no work yet, and its receipt SAYS so (the adapter
-  slice owns fetching); it exists now because a client negotiation is cheaper than a
-  second round of contract work.
+  requests, from the derived index MERGED with the fetch cache (state, lanes,
+  CI). ``?include=mentions_tool`` expands the refs the scan collapsed because
+  they appeared only in tool output.
+- ``POST /v1/desktop/sessions/{session_id}/code-requests/refresh`` — the UI's
+  refresh affordance, answered 202: it rescans the journal here and queues the
+  FETCH half as a background pass (``force`` bypasses TTLs but not a cooling
+  host), whose completion moves the index revision the feed frame carries.
 
 **Why these routes do NOT take a session bridge.** Every other per-session desktop read
 goes through ``host(request).session(...)`` because it needs the session's live state.
@@ -22,13 +23,16 @@ directory and nothing else.
 **GET never blocks on the network**, and in this slice it does not block on the DISK
 either: a journal that has moved since the last scan gets a background refresh started
 (``asyncio.create_task`` over the scanner's own thread hop) while the response carries
-the last known rows and ``scan_state: "refreshing"``. That is what makes a poll cheap:
-one stat, one small JSON read, and a task that is single-flight per session.
+the last known rows and ``scan_state: "refreshing"``. On top of that, eligible rows —
+dirty, past their TTL, or never fetched — schedule ONE single-flight FETCH pass whose
+result reaches the client through the feed frame and the next GET. That is what makes a
+poll cheap: one stat, one small JSON read, and tasks that are single-flight per session.
 
 **What the caller may trust.** ``rows`` is derived, never authoritative: the event rows
-in the transcript are the record, and this file is a projection of them. A deleted index
-heals on the next scan, which is why the route reports ``scan_state`` rather than
-pretending the answer is live.
+in the transcript are the record, this file is a projection of them, and the fetch cache
+is a revalidation of that projection against the forge. A deleted index heals on the
+next scan, which is why the route reports ``scan_state`` rather than pretending the
+answer is live.
 """
 
 from __future__ import annotations
@@ -44,7 +48,8 @@ from fastapi import Path as PathParam
 from fastapi import Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from local_operator.code_requests import ledger
+from local_operator.code_requests import cache as code_requests_cache
+from local_operator.code_requests import ledger, service
 from local_operator.code_requests.hook import load_context_async
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_code_requests import (
@@ -114,17 +119,16 @@ def _revision(entry: Mapping[str, Any] | None) -> int:
 
 
 def _row_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """One index row as the wire model takes it.
+    """One merged row (index facts + fetch overlay) as the wire model takes it.
 
-    The index row is already the scanner's own payload (``scan.Row.to_payload``), so this
-    is a rename rather than a transformation: ``ref`` unfolds into the flat fields a
-    client draws, and the rest passes through under its own names. Unknown keys survive
-    (``extra="allow"``) so a later slice can add one without touching this function.
+    ``raw`` is a :func:`service.view_row` output: the index row's flat ref
+    fields and relations, the folded ``mentions`` list, and — once the fetch
+    cache has data for the ref — ``summary``/``lanes``/``fetched_at``/
+    ``stale``/``refresh_error``. This function folds the mentions into the
+    single ``mention`` object the client draws and otherwise passes fields
+    through; unknown keys survive (``extra="allow"``) so a later slice can
+    add one without touching this function.
     """
-    # ``raw["key"] if isinstance(raw.get(...))`` rather than ``raw.get(key)``: the value's
-    # type then comes from the subscript, so a ``.get`` returning ``Any`` cannot leave the
-    # local looking optional to a type checker for no reason a reader can see.
-    ref: Mapping[str, Any] = raw["ref"] if isinstance(raw.get("ref"), Mapping) else {}
     mentions: list[Any] = raw["mentions"] if isinstance(raw.get("mentions"), list) else []
     sources = [str(item.get("source")) for item in mentions if isinstance(item, Mapping)]
     last_at = None
@@ -147,33 +151,35 @@ def _row_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
                 last_at = value if current is None else max(current, value)
     row: dict[str, Any] = {
         "key": str(raw.get("key") or ""),
-        "url": str(ref.get("url") or ""),
-        "forge": str(ref.get("forge") or ""),
-        "host": str(ref.get("host") or ""),
-        "project": str(ref.get("project") or ""),
-        "number": int(ref.get("number") or 0),
+        "url": str(raw.get("url") or ""),
+        "forge": str(raw.get("forge") or ""),
+        "host": str(raw.get("host") or ""),
+        "project": str(raw.get("project") or ""),
+        "number": int(raw.get("number") or 0),
         "relation": str(raw.get("relation") or "mentioned"),
         "relations": list(raw.get("relations") or []),
         "acted": list(raw.get("acts") or []),
         "mention": {"sources": sources, "count": count, "first_at": first_at, "last_at": last_at},
-        "link_only": True,
+        "link_only": bool(raw.get("link_only", True)),
         "first_at": raw.get("first_at"),
         "last_at": raw.get("last_at"),
     }
-    for key in ("via", "inherited_from", "unknown_reason", "evidence"):
+    for key in (
+        "via",
+        "inherited_from",
+        "unknown_reason",
+        "evidence",
+        "reason",
+        "link_only_hint",
+        "cooling_until",
+        "summary",
+        "lanes",
+        "fetched_at",
+        "stale",
+        "refresh_error",
+    ):
         if raw.get(key) is not None:
             row[key] = raw[key]
-    # ONE ``reason`` on the wire, chosen by precedence: the REF's own note (an unconfirmed
-    # host, a detect-and-link forge) explains why there is no state to draw, and the
-    # scanner's note about how the row was classified ("possibly opened by this call")
-    # explains why the relation is what it is. When both exist the ref's wins — it is the
-    # sentence that answers "why is this row link-only?" — and the scanner's stays on the
-    # row as ``unknown_reason`` for a client that wants both.
-    reason = ref.get("reason")
-    if isinstance(reason, str) and reason:
-        row["reason"] = reason
-    elif isinstance(raw.get("unknown_reason"), str):
-        row["reason"] = raw["unknown_reason"]
     return row
 
 
@@ -190,11 +196,18 @@ def _listing(
     # lookup: an ``isinstance`` guard per field is how one of them eventually forgets.
     entry: Mapping[str, Any] = ledger.read_index(config_dir, session_id) or {}
     rows_raw = entry.get("rows")
-    rows = [
-        CodeRequestRow(**(_row_payload(item)))
-        for item in (rows_raw if isinstance(rows_raw, list) else [])
-        if isinstance(item, Mapping)
-    ]
+    # The merge (index facts + fetch overlay) lives in the service so the route,
+    # the tool and a test all read ONE shape: ``view_rows`` adds the flat ref
+    # fields, the folded fetch fields and the ``link_only`` verdict per row.
+    merged = service.view_rows(
+        config_dir,
+        [
+            item
+            for item in (rows_raw if isinstance(rows_raw, list) else [])
+            if isinstance(item, Mapping)
+        ],
+    )
+    rows = [CodeRequestRow(**(_row_payload(item))) for item in merged]
     collapsed = 0
     truncated = False
     hints: list[dict[str, Any]] = []
@@ -210,11 +223,10 @@ def _listing(
         scan = cached.get("scan") if isinstance(cached, Mapping) else None
         tool_rows = scan.get("tool_only_rows") if isinstance(scan, Mapping) else None
         if isinstance(tool_rows, list):
-            rows.extend(
-                CodeRequestRow(**(_row_payload(item)))
-                for item in tool_rows
-                if isinstance(item, Mapping)
+            merged_tool = service.view_rows(
+                config_dir, [item for item in tool_rows if isinstance(item, Mapping)]
             )
+            rows.extend(CodeRequestRow(**(_row_payload(item))) for item in merged_tool)
     return CodeRequestListing(
         session_id=session_id,
         revision=_revision(entry or None),
@@ -222,7 +234,10 @@ def _listing(
         tool_output_only_count=collapsed,
         tool_output_truncated=truncated,
         hints=hints,
-        cooling={},
+        # The per-host cooling state (design §D.4): a host that answered
+        # 403/429 is shown with the instant its retry lifts. In-process state,
+        # like the rest of the cache's throttles.
+        cooling=code_requests_cache.cooling_map(),
         scan_state=scan_state,
         updated_at=float(entry.get("updated_at") or 0) if entry else None,
     )
@@ -327,7 +342,32 @@ async def code_requests(
         include_tool_mentions=(include or "") == "mentions_tool",
         scan_state=scan_state,
     )
+    # THE FETCH HALF (design §D.6), never awaited: when a row is eligible —
+    # dirty, past its TTL, or never fetched — kick ONE background pass. The
+    # response carries the cached state as it stands; the pass's completion
+    # moves the index's ``updated_at``, which is the feed frame's revision, and
+    # that frame is what makes the client refetch and draw the new data.
+    await _maybe_kick_fetch_refresh(config_dir, session_id)
     return reply(listing.model_dump())
+
+
+async def _maybe_kick_fetch_refresh(config_dir: Path, session_id: str) -> None:
+    """Plan (cheap, off-loop) and schedule one background fetch pass. Never raises.
+
+    The plan reads the dirty marks and one cache entry per row, so it runs on a
+    worker thread; the schedule itself needs the loop that the route is on.
+    """
+    try:
+        entry = await asyncio.to_thread(ledger.read_index, config_dir, session_id)
+        rows = entry.get("rows") if isinstance(entry, Mapping) else None
+        if not isinstance(rows, list) or not rows:
+            return
+        planned = await asyncio.to_thread(service.plan, config_dir, session_id, rows)
+        if not planned.refs:
+            return
+        service.schedule_session_refresh(config_dir, session_id, rows)
+    except Exception:  # noqa: BLE001 - a kick is an optimisation, never a fault
+        logger.debug("could not schedule a code-request fetch refresh", exc_info=True)
 
 
 @router.post(
@@ -336,14 +376,15 @@ async def code_requests(
     status_code=202,
 )
 async def code_requests_refresh(session_id: SessionID, body: RefreshBody, request: Request):
-    """Rescan this session's transcript, and answer 202 with what that did NOT do.
+    """Rescan the transcript, queue a fetch of the rows' remote state, answer 202.
 
-    The scan is real and synchronous-until-scheduled (the work runs on a worker thread);
-    what it cannot do is fetch anything from a forge, because no adapter exists in this
-    slice. So the receipt says exactly that, in ``note``, and the row's ``link_only`` flag
-    is what a client draws from. Reporting a successful "refresh" that only re-read the
-    local journal would be the wrong sentence for the operator, who presses this button
-    expecting the PR's STATE to come back.
+    TWO HALVES, and the receipt is honest about both: the transcript scan runs
+    here (its result is what the next list shows), and the FETCH half — the
+    operator's press is exactly the design's ``POST … refresh`` with
+    ``force`` bypassing TTLs but never cooling — is scheduled as one background
+    pass because this route's contract is that reads never block on the
+    network. Rows without a fetchable host or without a working login stay
+    link-only, and the list says so per row.
     """
     config_dir = _config_dir(request)
     if not _session_exists(config_dir, session_id):
@@ -362,14 +403,30 @@ async def code_requests_refresh(session_id: SessionID, body: RefreshBody, reques
     except Exception:  # noqa: BLE001 - the receipt reports the attempt, never a traceback
         logger.warning("code-request refresh failed for %s", session_id, exc_info=True)
         scanned = False
+    queued = False
+    if scanned:
+        entry = await asyncio.to_thread(ledger.read_index, config_dir, session_id)
+        rows = entry.get("rows") if isinstance(entry, Mapping) else None
+        if isinstance(rows, list) and rows:
+            queued = service.schedule_session_refresh(
+                config_dir,
+                session_id,
+                rows,
+                keys=[key for key in body.keys if key] or None,
+                force=body.force,
+            )
     receipt = CodeRequestRefreshReceipt(
         session_id=session_id,
         accepted=scanned,
         keys=list(body.keys),
         force=body.force,
         note=(
-            "Rescanned the session's own transcript. Fetching a code request's state, "
-            "comments and CI arrives in a later change; every row is link-only until then."
+            "Rescanned the session's transcript and queued a refresh of its code "
+            "requests' state, comments and CI. Rows without a fetchable host or a "
+            "working login stay link-only."
+            if queued
+            else "Rescanned the session's transcript. Nothing was queued for fetching "
+            "(no tracked rows, or a fetch pass is already running)."
         ),
     )
     listed = f"{time.time() - started_at:.3f}s"

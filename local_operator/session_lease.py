@@ -84,8 +84,9 @@ def _pid_state(
 
     **The zombie probe is not free, so the caller decides how often it is
     worth spending.** Signal 0 costs ~1 µs and settles two of the three
-    answers (a live owner, a pid that is simply gone); the proof costs a `ps`
-    fork (2.4-4.6 ms across runs on this host, tracking load) and is therefore
+    answers (a live owner, a pid that is simply gone); the proof costs a
+    platform probe (~90 µs on macOS via ``sysctl``, measured 2026-10-09; see
+    ``procstate._sysctl_samples`` for the ``ps`` fallback's cost) and is therefore
     spent
     only after the cheap probe has already said "live". ``check_zombie=False``
     skips it,

@@ -117,6 +117,7 @@ from local_operator.session.frontend_state import (
     SlashResult,
     sync_wire_payload,
 )
+from local_operator.session.index_prewarm import start_session_warm
 from local_operator.session.remote_open import PeerSessionUnresolved
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
@@ -3142,6 +3143,7 @@ async def snapshot(
     session_id: str,
     request: Request,
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3173,6 +3175,13 @@ async def snapshot(
     # ``allow_draft``: one of the five doors a new-chat pane may hold before a
     # session exists (spec §1.3); a draft answers the cold/empty shape.
     #
+    # ``open_frame=1`` IS THE OTHER ADDITIVE FLAG, and it is on this route for
+    # the same reason ``entry_ts`` is: the snapshot embeds a history page, and a
+    # renderer that paints from the paint-only page must get the same shape from
+    # the snapshot as from ``/history`` — two unit systems for one page is the
+    # defect this capability exists to avoid. See ``docs/DESKTOP_API.md``
+    # §"The open frame".
+    #
     # ``entry_ts=1`` RIDES THIS ROUTE TOO, because the snapshot embeds a history
     # page (``payload.history``) and that page is served by the same reader — so a
     # renderer that declared the vocabulary must get the SAME answer from the
@@ -3183,7 +3192,7 @@ async def snapshot(
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.snapshot(entry_times=bool(entry_ts)))
+        return reply(await bridge.snapshot(entry_times=bool(entry_ts), open_frame=bool(open_frame)))
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -3240,6 +3249,7 @@ async def history(
     after: int | None = Query(default=None, ge=0, le=500),
     limit: int = Query(default=100, ge=1, le=500),
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3251,6 +3261,14 @@ async def history(
     # named with a cursor, counts with no anchor) through ``errors()``, so the
     # request fails the same way whichever door it came through; the numeric
     # bounds here are the wire's (0..500 per side) and fail as the ordinary 422.
+    #
+    # ``open_frame=1`` ASKS FOR THE PAINT-ONLY, RUN-ALIGNED PAGE of
+    # ``docs/DESKTOP_API.md`` §"The open frame" — a page counted in paintable
+    # rows, cut back to a run's opening user row under a hard cap (with an honest
+    # ``head_cut`` when the cap binds), with non-painted bytes stripped and the
+    # per-run facts a collapsed turn's bar needs. It is additive in both
+    # directions: without it every answer is byte-for-byte today's, and this
+    # route's own reading is unchanged.
     #
     # ``entry_ts=1`` IS THE SAME KIND OF ADDITIVE NEGOTIATION as
     # ``frontend_replace`` on ``events`` beside it: it says this renderer can
@@ -3272,6 +3290,7 @@ async def history(
                 after=after,
                 limit=limit,
                 entry_times=bool(entry_ts),
+                open_frame=bool(open_frame),
             )
         )
 
@@ -3598,6 +3617,26 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
         # re-deciding that for itself. `tunnels/gateway.py` sets the same
         # header on this repo's other byte-serving surface.
         headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get("/v1/desktop/sessions/{session_id}/supplements/{digest}/document")
+async def supplement_document(session_id: str, digest: AttachmentDigest, request: Request):
+    """The assembled HTML document of one stored supplement component, as ``{html}``.
+
+    A C0 STUB: it answers 404 for every well-formed request so the contract (path, digest
+    shape, JSON-not-``text/html`` reply) is frozen and lane C2 can fill it in without a
+    route-table change. The real route (``docs/design/turn-supplements.md`` §2.7) resolves
+    the blob through the attachment store, hands it to
+    ``supplements.document.assemble_document`` and returns ``{html}`` -- JSON, never a
+    navigable ``text/html`` URL, because no host may point a frame at a URL (§4.1) -- with
+    409 ``attachment_on_peer`` passed through for a digest held by another device.
+
+    ``digest`` reuses :data:`AttachmentDigest`, the traversal gate of the attachment route
+    beside it: a non-matching path is a 422 before any handler code runs.
+    """
+    raise HTTPException(
+        404, {"code": "supplement_unavailable", "message": "Highlights are not available yet."}
     )
 
 
@@ -4473,6 +4512,21 @@ async def warm(session_id: str, body: Warm, request: Request):
     # feature adds nothing to (spec §0.1/§1.3).
     async with errors(request), host(request).session(session_id, allow_draft=True) as bridge:
         assert bridge.remote is not None
+        # THE INDEX WARM RIDES THIS ROUTE (the per-session warm path), scheduled HERE
+        # rather than before the admission checks (review round 3, F12): above this
+        # line the call can still be refused — an unknown session (404) or a daemon
+        # that has LATCHED against new work (503, ``daemon-retiring``) — and a
+        # retiring daemon must not start a scan on its way out. Fire-and-forget by
+        # contract: ``start_session_warm`` schedules and returns, never raises, and is
+        # never awaited, so the engage below does not wait on a scan and a session
+        # whose index cannot be warmed still opens, paying the scan itself.
+        #
+        # WHAT IT IS WORTH, stated honestly: the desktop UI fires ``sessions.warm``
+        # on the FIRST KEYSTROKE while the manifest read on MOUNT already starts the
+        # same refresh (``checkpoints_view`` -> ``start_refresh``), so the index half
+        # usually JOINS a build that is already running. It is the anchor write the
+        # stacked anchor change adds here that is new work on every open.
+        start_session_warm(store_root(request), session_id)
         return reply({"state": await bridge.warm()})
 
 
@@ -4891,6 +4945,7 @@ async def events(
     after_seq: int = Query(default=0, ge=0),
     frontend_replace: int = Query(default=0, ge=0),
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -4961,7 +5016,13 @@ async def events(
             # silently skipped there. Closing it *inside* the ``try`` is the
             # load-bearing part: the outer ``finally`` below has not run yet.
             async with aclosing(
-                bridge.events(sub, epoch=epoch, after_seq=after_seq, entry_times=bool(entry_ts))
+                bridge.events(
+                    sub,
+                    epoch=epoch,
+                    after_seq=after_seq,
+                    entry_times=bool(entry_ts),
+                    open_frame=bool(open_frame),
+                )
             ) as frames:
                 try:
                     async for frame in frames:

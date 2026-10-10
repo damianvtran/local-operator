@@ -89,6 +89,7 @@ from local_operator.harness.wake_types import WakeSchedule
 # loop on this module's path for every entry point — the same mistake the
 # ``wake_types`` split above records.
 from local_operator.monitors.spec import MonitorSpec
+from local_operator.supplements.contract import SupplementState
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -158,6 +159,14 @@ OUTPUT_LIMIT_ARGUMENTS = "arguments"
 #: did not have while the identical arguments executed fine on the next turn
 #: (review F1 == QA Q1).
 OUTPUT_LIMIT_TURN = "turn"
+
+#: THE QUIET-TURN MARKER (``docs/design/quiet-turns.md`` §4): stamped on the
+#: ``no_reply`` tool's successful result's ``details``, and the single fact the
+#: loop's batch-end check (``_batch_ends_quiet``) and the session's quiet
+#: predicate (``Session._run_ended_quiet``) read. A consumer keys on the
+#: MARKER, never on the result's "Quiet." wording, so a later reword of the
+#: model-facing text cannot change what a reader decides.
+QUIET_TURN_KEY = "__quiet_turn"
 
 
 class InvalidToolArgumentsError(ValueError):
@@ -1598,6 +1607,28 @@ class ToolContext(BaseModel):
     #: tool-side guard around the await is the last line so even a contract
     #: breach cannot lose the ask (design §2.2's failure-semantics table).
     gate_ask: Callable[..., Awaitable[Mapping[str, Any] | None]] | None = None
+    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async, mirroring
+    #: :attr:`gate_ask`: the ``no_reply`` tool awaits it for the run's refusal
+    #: decision, and its presence IS the fact that this session may end a turn
+    #: quietly — ``build_no_reply_tool`` returns ``None`` without it
+    #: (footprint ladder rung 3: the tool is absent, not inert, where a quiet
+    #: end cannot be honoured). The session binds it per turn; ``None`` for a
+    #: subagent child (a parent's ``wait`` reads the child's final text as the
+    #: report), a one-shot/headless host (the final text is the product), a
+    #: session with an output contract (the gate reads a textless end as a
+    #: missing final response), and under the ``LOP_NO_REPLY`` kill switch.
+    #:
+    #: TWO OF THOSE ARE ONLY KNOWABLE AFTER CONSTRUCTION (the contract, the
+    #: one-shot declaration), so those setters also re-filter the MOUNTED
+    #: inventory through ``refresh_tools`` — a door that turns ``None`` under an
+    #: already-advertised tool would fire a refusal once per attempt. Door and
+    #: inventory agree in both directions; see
+    #: ``Session._quiet_end_callable`` and ``Session.set_output_contract``.
+    #:
+    #: TOTAL by contract, like the door pair above: it returns either a refusal
+    #: SENTENCE the model must act on (write text instead) or ``None`` when the
+    #: quiet end is allowed. A refusal is never coerced into a message.
+    quiet_end: Callable[[], Awaitable[str | None]] | None = None
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per
@@ -2539,6 +2570,41 @@ class OutputValidationEvent(AgentEvent[Literal["output_validation"]]):
     exhausted: bool = False
     error: str = ""
     payload_text: str = ""
+
+
+class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
+    """One beat of a turn supplement's ("Highlights") life, AFTER the turn's ``agent_end``.
+
+    Contract frozen by lane C0 of ``docs/design/turn-supplements.md`` (§2.7); nothing
+    emits it yet (the runner is lane C1). A NEW event family rather than a synthetic tool
+    call on purpose: a tool row after the answer would break the UI fold and native
+    condensing, risk ``lop exec --json`` consumers reading it as part of the turn, and
+    inherit turn-interrupt cancel, which is precisely wrong for a background errand.
+
+    ``anchor`` is the final assistant message id the supplement attaches to, so a late
+    event (the next turn already started) still lands on the right answer. ``state`` is
+    the image-gen vocabulary plus ``decided`` ("files known, graphics queued", painted as
+    ``queued``); ``running``/``cancelling`` are LIVE-ONLY and never journaled (see
+    :mod:`local_operator.supplements.contract`). ``files`` rides only ``decided``/``done``
+    and ``components`` only ``done``, in the row's own shapes.
+
+    Additive on a tolerant frame (``AgentEvent`` is ``extra="allow"``), the
+    ``AgentEndEvent.cut_off`` precedent: no ``PROTOCOL_VERSION`` bump. The runtime sends it
+    only to viewers that negotiated ``supplements-v1``.
+    """
+
+    type: Literal["supplement_progress"] = "supplement_progress"
+    anchor: str
+    job: str
+    version: int
+    state: SupplementState
+    #: "deciding" | "generating" | "validating" | "repairing"; "" outside ``running``.
+    stage: str = ""
+    elapsed_s: float = 0.0
+    files: list[dict[str, Any]] = Field(default_factory=list)
+    components: list[dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+    error_type: str = ""
 
 
 EventHandler = Callable[[AgentEvent], Awaitable[None] | None]

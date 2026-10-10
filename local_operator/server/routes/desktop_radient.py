@@ -294,6 +294,18 @@ class RadientRequest(Input):
         "org_agents.list",
         "org_team.get",
         "org_teams.list",
+        # Ask Radient to email a fresh signup-credit claim link to the account's
+        # OWN address (`POST /auth/signup/resend`). ADDITIVE like the org ops: an
+        # older server refuses the unknown operation at validation, so the
+        # renderer's resend button simply is not offered there. It takes no
+        # `payload`/`query` -- the upstream never reads an address from the request
+        # (it reissues to the account's own latest ticket, so a caller cannot
+        # redirect mail) -- and it is a mutation that SENDS MAIL, hence the
+        # mandatory `request_id` and the receipt: a lost response must not turn a
+        # retry into a second email. The upstream route is JWT-only (a Radient API
+        # key is refused with 401), which is why the quota notice only offers the
+        # button to an OAuth-signed-in account (`desktop_quota._resend_available`).
+        "signup.resend",
     ]
     request_id: RequestID | None = None
     tenant_id: Identifier | None = None
@@ -467,6 +479,8 @@ def endpoint(body: RadientRequest) -> tuple[str, str]:
         if not body.account_id:
             raise ValueError("Choose an account")
         return "GET", f"/accounts/{body.account_id}/agents"
+    if op == "signup.resend":
+        return "POST", "/auth/signup/resend"
     if op == "memberships.list":
         # §4.1: the person's own rows; nothing else names them.
         return "GET", "/me/memberships"
@@ -651,6 +665,24 @@ def _org_refusal_code(operation: str, envelope: Any) -> str | None:
     return code if isinstance(code, str) and code in _ORG_REFUSAL_CODES else None
 
 
+#: `signup.resend`'s own refusal vocabulary. `_upstream_refusal` would class the
+#: upstream's 429 as `radient_credential_refused` -- "sign in again" -- when it
+#: means the opposite: the credential WORKED and the account asked for a link
+#: inside the server's cooldown (one per 2 minutes per account, and at most 5
+#: live links per email per day). The remedy there is "check your inbox, try
+#: again shortly", so it gets its own code. 409 (`nothing_to_resend`: already
+#: verified, a disposable domain, or no grant ever issued) is likewise its own
+#: code so it cannot be mistaken for `radient_no_credential`, the other 409 this
+#: transport answers. 401/403 deliberately stay `radient_credential_refused`
+#: (the generic reading), and 503/500 stay `radient_upstream_failed`.
+RESEND_RATE_LIMITED = "signup_resend_rate_limited"
+RESEND_NOTHING_TO_RESEND = "signup_resend_nothing_to_resend"
+_RESEND_REFUSALS = {
+    429: (RESEND_RATE_LIMITED, "A verification email was requested recently"),
+    409: (RESEND_NOTHING_TO_RESEND, "There are no free credits waiting to be claimed"),
+}
+
+
 async def _upstream_refusal_for(operation: str, response: Any, token: str | None) -> HTTPException:
     """One upstream refusal, with the org family's codes preserved.
 
@@ -666,6 +698,12 @@ async def _upstream_refusal_for(operation: str, response: Any, token: str | None
     import json
 
     import httpx
+
+    if operation == "signup.resend" and response.status_code in _RESEND_REFUSALS:
+        code, message = _RESEND_REFUSALS[response.status_code]
+        # Status only: this route's meaning is carried by the code, so the
+        # upstream body (prose the renderer never shows) is not read.
+        return _failure(response.status_code, code, message, upstream_status=response.status_code)
 
     if operation not in ORG_OPERATIONS:
         return _upstream_refusal(response.status_code, upstream_status=response.status_code)

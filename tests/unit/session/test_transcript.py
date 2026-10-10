@@ -2071,20 +2071,27 @@ def test_a_metadata_read_decodes_only_the_rows_above_the_match(tmp_path, monkeyp
     entry = read_latest_custom_entry(directory, "todo_snapshot")
 
     assert entry is not None and entry.id == "the-match"
-    assert decoded <= 5, f"the walk decoded {decoded} rows for a 3-row tail"
-    assert decoded >= 3, "the match and the rows above it must have been decoded"
+    # THE METRIC MOVED WITH THE FAST PATH, the intent did not. This read used to
+    # answer by JSON-decoding every row above the match, which a count pinned
+    # well (``<= 5`` here, 501 in the head case below). It now finds the match by
+    # the bytes every row of that type carries and decodes ONLY the candidate, so
+    # the decode count is 1 whatever the journal's size — and what stays
+    # proportional to the journal is the BYTE SCAN, measured at 66 ms for the
+    # whole 118 MB reference journal against 457 ms for the walk it replaces.
+    # A mutation that reverted to decoding every row fails this bound.
+    assert decoded <= 2, f"the fast path decoded {decoded} rows for a 3-row tail"
 
 
-def test_a_metadata_read_near_the_head_costs_the_journal_and_is_still_correct(
-    tmp_path, monkeypatch
-):
-    """The honest worst case, pinned so it cannot be mistaken for a regression.
+def test_a_metadata_read_near_the_head_is_still_correct_without_parsing_it(tmp_path, monkeypatch):
+    """The honest worst case, re-pinned after the fast path: same answer, no parse.
 
-    A legacy ``subagent_roster`` row written once near byte zero reaches the file
-    start, so that read costs what today's whole-file parse costs — never worse,
-    and it answers correctly rather than reporting a bounded "unknown". This is
-    the case the design refuses to add a ``max_bytes`` knob for: a ceiling here
-    would have to invent an answer for a caller that today always gets one.
+    A legacy ``subagent_roster`` row written once near byte zero is the shape that
+    reaches the file start. The answer is unchanged — the row is found and
+    returned — and the OWNER of that cost changed: it is now the backward byte
+    scan (every chunk of the file is examined for one string) rather than a
+    JSON-decode of all 500 rows above it. The design still refuses a ``max_bytes``
+    knob here for the reason this test originally stated: a ceiling would have to
+    invent an answer for a caller that always gets one.
     """
     directory = tmp_path / "sess"
     directory.mkdir()
@@ -2104,7 +2111,7 @@ def test_a_metadata_read_near_the_head_costs_the_journal_and_is_still_correct(
     entry = read_latest_custom_entry(directory, "subagent_roster")
 
     assert entry is not None and entry.id == "ancient"
-    assert decoded == 501, "the walk must reach the file start to answer honestly"
+    assert decoded <= 2, f"the needle scan parsed {decoded} rows to answer one row"
 
 
 def test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises(tmp_path):

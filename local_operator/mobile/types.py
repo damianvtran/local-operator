@@ -451,6 +451,25 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         sender = frame.get("sender", {})
         if not isinstance(sender, dict):
             raise ValueError("sender must be an object")
+    elif op == "rehome_if_current":
+        # A sign-in moving THIS session off an unreachable model, compare-and-set
+        # style: ``expected`` is the selector the caller believes is selected, and
+        # the owner refuses unless it still is (see
+        # ``ServingSessionHandle.rehome_if_current``). SHAPE only here: whether
+        # the pair is servable, whether the old provider is still stranded and
+        # whether the conversation is idle are all the receiving handle's
+        # questions, because only it can see its own store and its own work.
+        #
+        # A NEW op rather than a ``set_model`` with extra fields, for the reason
+        # ``peer_set_model`` gives above: every runtime already knows ``set_model``
+        # and would apply it unguarded and uninspected, while an unknown op fails
+        # closed — an older runtime answers `unknown op`, which the caller reads
+        # as "this session cannot be re-homed" and reports as zero moved
+        # sessions. Additive; no PROTOCOL_VERSION bump.
+        for name in ("expected", "provider", "model_id"):
+            value = frame.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
     elif op == "peer_set_model":
         # Another local lop session switching THIS one's model (`send model=` /
         # `lop model`). SHAPE only: whether the pair is servable is the
@@ -493,6 +512,11 @@ ControlOp = Literal[
     "cancel",  # {mode?: graceful|immediate}
     "set_model",  # {provider, model_id} — the model sheet's choice
     "set_effort",  # {effort} — one rung from the model's ladder
+    # A sign-in moving a session off a model whose provider has no credential:
+    # {expected, provider, model_id}, applied only if the selection has not moved
+    # and the session is idle. Additive like `peer_set_model` — an old runtime
+    # answers unknown-op and the caller reports zero re-homed sessions.
+    "rehome_if_current",
     "slash",  # {command, args} — execute a TUI slash command
     "complete_aside",  # {turns, aside_instruction?: false} — off-record request
     "new_conversation",  # {} — the TUI's /new

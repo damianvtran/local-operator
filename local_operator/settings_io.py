@@ -54,6 +54,7 @@ import logging
 import math
 import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
@@ -518,6 +519,18 @@ SECTIONS: tuple[Section, ...] = (
         "per message. Off keeps the prompt unchanged.",
     ),
     Section(
+        "supplements",
+        # The user-facing name is "Highlights" (memo §0 "The names").
+        "Highlights",
+        # NEW_SESSIONS: the runner is built once per runtime handle and reads a SNAPSHOT
+        # of this section AT BUILD (docs/design/turn-supplements.md §2.12; the read is in
+        # ``SupplementRunner.__init__``), so an edit lands on the next session. Claiming
+        # LIVE would be a painted lie.
+        Scope.NEW_SESSIONS,
+        "After an answer, point out the files it produced and, when you turn it on, "
+        "draw a chart of numbers it showed. Off by environment: LOP_SUPPLEMENTS=0.",
+    ),
+    Section(
         "monitor",
         "Monitors",
         # NEW_SESSIONS for the classification section's reason: the monitor
@@ -675,6 +688,17 @@ SECTIONS: tuple[Section, ...] = (
         "Desktop app",
         Scope.LIVE,
         "Where a notification click sends you when the desktop app is not running.",
+    ),
+    # The static file routes' served roots (``server/utils/static_roots.py``).
+    # LIVE: the roots are rebuilt from the config on every request, so an edit
+    # lands on the next thumbnail or preview with no restart.
+    Section(
+        "static",
+        "File previews",
+        Scope.LIVE,
+        "Extra directories the local server may serve image, audio, video and HTML "
+        "previews from. The agent home, session folders, uploads and the working "
+        "directories of your agents and running sessions are always included.",
     ),
     # NEW_LAUNCH, honestly: the audit keys are read when the audit WRITER is built,
     # and the writer is built once per relay process (``AuditLog.from_config``);
@@ -1320,6 +1344,38 @@ def _validate_delegated_max_age_hours(value: Any) -> None:
         return
     if not 2 <= value <= 720:
         raise ValueError(f"max_age_hours must be between 2 and 720 (30 days); got {value}")
+
+
+def _validate_static_roots(value: Any) -> None:
+    """``static.roots`` entries are absolute directories that do not contain ``$HOME``.
+
+    Enforced at the write facade so a typo cannot silently widen the file-serving
+    boundary: a relative entry would be resolved against the DAEMON's cwd (the
+    reader drops it, so it would be a root that quietly does nothing), and ``/``,
+    ``/Users`` or ``~/..`` would turn the allowlist back into "anywhere on disk".
+    The ancestor test is the reader's own predicate (``root_refusal``), imported
+    here rather than restated so the two cannot disagree -- the reader applies it
+    to the environment variable too, which never passes through this facade.
+    """
+    if not isinstance(value, list):
+        return
+    # Imported here: the settings registry is imported by every entry point and the
+    # server package is not needed until a value is actually being written.
+    from local_operator.server.utils.static_roots import root_refusal
+
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{item!r} is not a path; each entry must be a directory string")
+        expanded = os.path.expanduser(item.strip())
+        if not os.path.isabs(expanded):
+            raise ValueError(f"{item!r} is not an absolute path (use /abs/path or ~/path)")
+        try:
+            real = Path(os.path.realpath(expanded))
+        except (OSError, RuntimeError, ValueError):
+            raise ValueError(f"{item!r} cannot be resolved to a directory") from None
+        reason = root_refusal(real)
+        if reason is not None:
+            raise ValueError(f"{item!r}: {reason}")
 
 
 def _validate_aida_name(value: Any) -> None:
@@ -3162,6 +3218,142 @@ SETTINGS: tuple[Setting, ...] = (
             "timestamps diff like any text",
         ),
     ),
+    # -- turn supplements ("Highlights") --------------------------------------
+    #
+    # docs/design/turn-supplements.md §2.12. Defaults live beside their consumer in
+    # ``supplements/policy.py``; ``_consumer_defaults()`` in tests/unit/test_settings_io.py
+    # binds the two. ``graphics`` is OFF by default until a surface can render it (§6).
+    Setting(
+        key="supplements.enabled",
+        path=("supplements", "enabled"),
+        section="supplements",
+        label="Highlights",
+        kind=Kind.BOOL,
+        default=True,
+        help="On: an answer can be followed by a line pointing at the files it made.",
+        choices=_bool_choices(
+            "files an answer produced are pointed out under it",
+            "nothing is added under an answer",
+        ),
+    ),
+    Setting(
+        key="supplements.files",
+        path=("supplements", "files"),
+        section="supplements",
+        label="↳ files",
+        kind=Kind.BOOL,
+        default=True,
+        help="Needs Highlights on. Point out reports and exports an answer produced.",
+        choices=_bool_choices("deliverable files are listed", "files are never listed"),
+        gated_by="supplements.enabled",
+    ),
+    Setting(
+        key="supplements.graphics",
+        path=("supplements", "graphics"),
+        section="supplements",
+        label="↳ graphics",
+        kind=Kind.BOOL,
+        default=False,
+        help="Needs Highlights on. Draw a chart when an answer shows numbers. Spends model tokens.",
+        choices=_bool_choices(
+            "a chart may be generated (spends tokens)", "no chart is ever generated"
+        ),
+        gated_by="supplements.enabled",
+    ),
+    Setting(
+        key="supplements.model",
+        path=("supplements", "model"),
+        section="supplements",
+        label="↳ graphics model",
+        kind=Kind.TEXT,
+        default="auto",
+        help="Needs graphics on. auto picks a cheap fast model; session uses this session's.",
+        gated_by="supplements.graphics",
+    ),
+    Setting(
+        key="supplements.maxTurns",
+        path=("supplements", "maxTurns"),
+        section="supplements",
+        label="↳ max turns",
+        kind=Kind.INT,
+        default=2,
+        help="Needs graphics on. Model turns per chart, including one repair.",
+        minimum=1,
+        maximum=4,
+        gated_by="supplements.graphics",
+    ),
+    Setting(
+        key="supplements.maxOutputTokens",
+        path=("supplements", "maxOutputTokens"),
+        section="supplements",
+        label="↳ max output tokens",
+        kind=Kind.INT,
+        default=6000,
+        help="Needs graphics on. Output budget per generator turn.",
+        # Mirrors ``policy.MAX_OUTPUT_TOKENS_BOUNDS``, the reader's accept range: with no
+        # page maximum the registry accepted values ``from_values`` substitutes with the
+        # default (round-1 R4: 2,000,000 came back as 6000). The pair is pinned by
+        # ``test_supplements_registry_bounds_are_honoured_by_the_reader``.
+        minimum=1,
+        maximum=1_000_000,
+        gated_by="supplements.graphics",
+    ),
+    Setting(
+        key="supplements.timeoutS",
+        path=("supplements", "timeoutS"),
+        section="supplements",
+        label="↳ time limit (s)",
+        kind=Kind.INT,
+        default=90,
+        help="Needs Highlights on. Give up on a whole job after this long.",
+        minimum=1,
+        maximum=3600,
+        gated_by="supplements.enabled",
+    ),
+    Setting(
+        key="supplements.maxCostUsd",
+        path=("supplements", "maxCostUsd"),
+        section="supplements",
+        label="↳ cost cap ($)",
+        kind=Kind.FLOAT,
+        default=1.00,
+        help="Needs graphics on. Soft cap on one job's spend.",
+        # ``0`` is a VALID value -- "never spend" -- and the reader honours it as stored
+        # (round-1 R4); the range is only the page's control window, not the reader's
+        # limit (a hand-edited higher cap stays the user's own stated guard). The literal
+        # must equal ``policy.DEFAULT_MAX_COST_USD`` (the defaults-drift test compares
+        # them); $1.00 since the operator directive of 2026-10-10 (was $0.20).
+        minimum=0.0,
+        maximum=100.0,
+        gated_by="supplements.graphics",
+    ),
+    Setting(
+        key="supplements.maxFeatured",
+        path=("supplements", "maxFeatured"),
+        section="supplements",
+        label="↳ files shown",
+        kind=Kind.INT,
+        default=4,
+        help="Needs Highlights on. Files named before the rest fold into 'N more'.",
+        minimum=1,
+        maximum=12,
+        gated_by="supplements.enabled",
+    ),
+    Setting(
+        key="supplements.denyPrefixes",
+        path=("supplements", "denyPrefixes"),
+        section="supplements",
+        label="↳ never list under",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Needs Highlights on. Comma-separated folders whose files are never listed "
+            "or sent to a decision model; use it on a machine holding customer data."
+        ),
+        placeholder="~/clients, ~/Documents/private",
+        empty_unsets=True,
+        gated_by="supplements.enabled",
+    ),
     # -- fork ---------------------------------------------------------------
     #
     # Both paths are genuinely NESTED two-element tuples, not flat dotted keys.
@@ -4016,6 +4208,25 @@ SETTINGS: tuple[Setting, ...] = (
         # every click into a terminal with nothing on screen or in the log
         # saying why. Rejecting it here keeps the user in front of the field.
         validate_value=_validate_desktop_launch_command,
+    ),
+    Setting(
+        key="static.roots",
+        path=("static", "roots"),
+        section="static",
+        label="Extra preview roots",
+        kind=Kind.LIST,
+        default=[],
+        empty_unsets=True,
+        validate_value=_validate_static_roots,
+        # The consequence is the point of the row: every entry WIDENS what an
+        # unauthenticated local caller can trigger a read of.
+        warning="widens what the local server will serve to any local caller",
+        help=(
+            "Empty = only the built-in roots. Comma-separated absolute directories; "
+            "image/audio/video/HTML files inside them can be previewed. Dot-directories "
+            "below a root are never served."
+        ),
+        placeholder="~/Documents, /Volumes/data/reports",
     ),
     # -- network: where peers reach this device -------------------------------
     # THE TRIO THE DESIGN'S OWN TABLE NAMES. mesh-transport-identity.md §10.4 lists

@@ -523,7 +523,19 @@ def detached_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
     """Stub ``detached_notify`` at the module seam the ladder imports from."""
     calls: list[dict[str, str]] = []
 
-    def fake(title: str, body: str, *, session_id: str = "", subtitle: str = "") -> bool:
+    # ``durable_click_s`` mirrors the real signature: her banner (``_aida_duty``)
+    # is the one caller that passes it — the durable click window. A double that
+    # lags the real call fails as a SWALLOWED retry-ladder TypeError (40 s of
+    # 2/8/30 s retries, an empty call list), which is how the actionable cell
+    # below caught this one (round-5 triage on #2132).
+    def fake(
+        title: str,
+        body: str,
+        *,
+        session_id: str = "",
+        subtitle: str = "",
+        durable_click_s: float | None = None,
+    ) -> bool:
         calls.append({"title": title, "body": body, "session_id": session_id})
         return True
 

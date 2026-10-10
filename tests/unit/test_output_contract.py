@@ -505,3 +505,45 @@ def test_decode_output_and_check_agree_on_the_winning_payload() -> None:
 
 def test_formats_tuple_is_the_cli_vocabulary() -> None:
     assert OUTPUT_FORMATS == ("markdown", "json", "yaml", "toml")
+
+
+# ---------------------------------------------------------------------------
+# The quiet-end tool under a contract (docs/design/quiet-turns.md §4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_quiet_end_tool_is_absent_under_an_output_contract(tmp_path) -> None:
+    """The contract gate reads a textless end as a MISSING final response
+    (``loop.py``'s ``final_response_gate``), so ``no_reply`` must not exist in
+    a session that sets one: the session binds ``quiet_end`` to None and the
+    tool's createIf gate follows (rung 3). Not "present but refused" — a
+    refusal would still spend the call, and the model would be asked for a
+    payload its own quiet signal had already declined to produce."""
+    from local_operator.harness.types import StreamEndEvent
+    from local_operator.tools.registry import create_tools
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    try:
+        assert callable(session._quiet_end_callable()), "binds before the contract"
+        assert "no_reply" in {tool.name for tool in session._tools}, "mounted before"
+        session.set_output_contract(OutputContract(format="json"))
+        assert session._quiet_end_callable() is None
+        assert session._build_tool_context().quiet_end is None
+        assert create_tools(session._build_tool_context(), enabled=["no_reply"]) == []
+        # The setter runs AFTER construction (exec_startup/sdk), when the
+        # constructor's merge has already mounted the tool — so it must drop it
+        # from the LIVE inventory, not only null the per-turn door: an
+        # advertised tool whose every call could only refuse is exactly the
+        # "inert" shape the design forbids.
+        assert "no_reply" not in {
+            tool.name for tool in session._tools
+        }, "a contract must drop the mounted tool"
+        # And clearing restores it, because the door reopens: absent and
+        # present must follow the capability in both directions.
+        session.set_output_contract(None)
+        assert callable(session._quiet_end_callable())
+        assert "no_reply" in {tool.name for tool in session._tools}, "clearing restores it"
+    finally:
+        await session.dispose()

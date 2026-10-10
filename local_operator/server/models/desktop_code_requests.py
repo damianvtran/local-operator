@@ -76,6 +76,17 @@ class CodeRequestRow(BaseModel):
     #: Why a row is only a link, when there is something to say (an unconfirmed host, a
     #: script-created URL, a fork's inheritance). Shown verbatim; never a guess.
     reason: str | None = None
+    #: The one-line remedy a UI shows for a link-only row, per FORGE (cross-round
+    #: finding X3): gh/glab with the ``--hostname`` form off the canonical host, and
+    #: NO CLI at all for detect-and-link-only forges ("Link only — this host isn't
+    #: tracked yet."). A client must render this rather than deriving a CLI from
+    #: ``forge`` — the derivation said "gh" for Codeberg (QA round 2, Q11: the field
+    #: existed on the view but never reached the wire until it was listed here).
+    link_only_hint: str | None = None
+    #: Epoch seconds until a cooling host accepts requests again, when the row's host
+    #: is rate-limited: the row is tracked and WILL be fetched, so a reader must see
+    #: the wait rather than an unqualified "Link only" (QA round 2, Q13).
+    cooling_until: float | None = None
     #: ``{job_id,label,agent_role,child_session_id,path}`` when a subagent opened it.
     via: dict[str, Any] | None = None
     #: The parent session id a forked/inherited row came from.
@@ -84,11 +95,14 @@ class CodeRequestRow(BaseModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     first_at: float | None = None
     last_at: float | None = None
-    #: Filled by the adapter slice: ``{state, draft, title, head_sha, ci, updated_at}``.
+    #: Filled by the adapter slice: ``{state, draft, title, head_sha, ci, comments,
+    #: updated_at}`` — ``comments`` is the host's comment count, null when not reported.
     summary: dict[str, Any] | None = None
-    #: Filled by the round parser once comments are fetched.
+    #: The parsed review lanes, once comments have been fetched.
     lanes: list[dict[str, Any]] | None = None
+    #: When the forge last answered with NEW content (a 304 does not move it).
     fetched_at: float | None = None
+    #: True when the last refresh failed and this row keeps older data.
     stale: bool = False
     refresh_error: str | None = None
 
@@ -114,8 +128,10 @@ class CodeRequestListing(BaseModel):
     #: ``git push`` "create a pull request" links: a fact about a BRANCH, kept out of the
     #: rows on purpose (the link names no code request).
     hints: list[dict[str, Any]] = Field(default_factory=list)
-    #: Hosts whose refresh is cooling down, mapped to the instant it lifts. Always empty
-    #: in this slice (nothing fetches yet) and present so 1b does not change the shape.
+    #: Hosts whose refresh is cooling down, mapped to the instant it lifts
+    #: (epoch seconds). ``{}`` when no host is cooling. A cooling host's rows
+    #: keep their last known data and say ``stale``; force-refresh never
+    #: bypasses this (a force must not defeat the host's own rate limit).
     cooling: dict[str, float] = Field(default_factory=dict)
     #: The scan's own state: ``ready`` when the index is current for the journal,
     #: ``refreshing`` when a scan is running for a journal that has moved, ``error`` when
@@ -125,7 +141,13 @@ class CodeRequestListing(BaseModel):
 
 
 class CodeRequestRefreshReceipt(BaseModel):
-    """``POST …/code-requests/refresh`` — a 202 receipt for work that has not happened."""
+    """``POST …/code-requests/refresh`` — a 202 receipt for queued work.
+
+    The scan half ran; the FETCH half is scheduled (reads never block on the
+    network, so the fetch completes behind this receipt and its result arrives
+    through the feed frame + the next GET). ``note`` is the honest sentence
+    about both halves and about rows that cannot be fetched at all.
+    """
 
     model_config = ConfigDict(extra="allow")
 
@@ -133,7 +155,7 @@ class CodeRequestRefreshReceipt(BaseModel):
     accepted: bool
     keys: list[str] = Field(default_factory=list)
     force: bool = False
-    #: What the caller should do instead, in one sentence. This route exists so the UI's
-    #: refresh affordance has a stable address; until the adapter slice lands it does no
-    #: work, and this field is the honest statement of that rather than a silent no-op.
+    #: One sentence about what was done and queued. Written here rather than
+    #: composed by the client so the copy lives beside the behaviour it
+    #: describes.
     note: str = ""

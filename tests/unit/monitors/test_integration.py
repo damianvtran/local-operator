@@ -10,12 +10,13 @@ lines the monitor was told to ignore (and in timestamps) must stay silent.
 
 from __future__ import annotations
 
-import asyncio
+import asyncio  # noqa: F401 — kept for a content-identical merge; main's tests use it
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from local_operator.monitors import store as monitor_store
 from local_operator.monitors.spec import MonitorSpec
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
+from tests.unit.monitors.support import drain_checks
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -193,8 +195,7 @@ async def test_arm_kill_reopen_delivers_one_consolidated_delta(
     watch.write_text("A\nB\nC\nD\nE\n", encoding="utf-8")  # several changes, one gap
     try:
         await reopened._monitors.pump(now_ms=clock[0] + 30_000)
-        for _ in range(30):
-            await asyncio.sleep(0)
+        await drain_checks(reopened._monitors, reopened)
         deltas = [event for event in events if getattr(event, "type", "") == "monitor_delta"]
         assert len(deltas) == 1, "one consolidated delta, never one per missed tick"
         text = deltas[0].text
@@ -206,6 +207,57 @@ async def test_arm_kill_reopen_delivers_one_consolidated_delta(
         assert deltas[0].monitor_id == "m1"
     finally:
         await reopened.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_that_hops_to_a_thread_is_still_awaited(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pin for the CI flake the loop-turn waits caused.
+
+    ``Session._deliver_monitor`` awaits a thread hop (``_mark_code_requests_dirty``)
+    BEFORE it emits the delta, so how many event-loop turns the delivery needs is
+    the host's scheduling, not the code's. This forces the worst case on any
+    machine: the hop takes real time, far more turns than any fixed count would
+    cover. ``drain_checks`` must still see the delta, because it waits on the
+    check task that awaits the delivery, not on a number of turns.
+    """
+
+    async def slow_mark(self: Session) -> None:
+        await asyncio.to_thread(time.sleep, 0.3)
+
+    monkeypatch.setattr(Session, "_mark_code_requests_dirty", slow_mark)
+    watch = tmp_path / "watched.txt"
+    watch.write_text("A\n", encoding="utf-8")
+    session = _session(tmp_path, make_read_tool(watch))
+    clock = [1_756_000_000_000]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    events: list[Any] = []
+
+    async def record(event: Any) -> None:
+        events.append(event)
+
+    session._emit = record  # type: ignore[method-assign]
+    spec = MonitorSpec(
+        id="m1",
+        name="watch",
+        tool="read",
+        arguments={"path": str(watch)},
+        every_ms=60_000,
+        created_at=1,
+    )
+    try:
+        await session.set_monitor_schedules([spec])
+        await session._monitors.pump(now_ms=clock[0] + 5_000)  # baseline
+        await drain_checks(session._monitors, session)
+        clock[0] += 70_000
+        watch.write_text("A\nB\n", encoding="utf-8")  # a pure addition: no gate
+        await session._monitors.pump(now_ms=clock[0] + 5_000)
+        await drain_checks(session._monitors, session)
+        deltas = [event for event in events if getattr(event, "type", "") == "monitor_delta"]
+        assert len(deltas) == 1, "the delivery behind the thread hop must have landed"
+    finally:
+        await session.dispose()
 
 
 @pytest.mark.asyncio
@@ -233,15 +285,13 @@ async def test_a_normalized_quiet_tick_is_silent(tmp_path: Path, config_dir: Pat
     try:
         await session.set_monitor_schedules([spec])
         await session._monitors.pump(now_ms=clock[0] + 5_000)  # baseline
-        for _ in range(20):
-            await asyncio.sleep(0)
+        await drain_checks(session._monitors, session)
 
         # Only ignored lines and the timestamp changed.
         clock[0] += 60_000
         watch.write_text("keep\nnoise 555\nupdated 2026-09-29T09:00:00Z\n", encoding="utf-8")
         await session._monitors.pump(now_ms=clock[0] + 15_000)
-        for _ in range(30):
-            await asyncio.sleep(0)
+        await drain_checks(session._monitors, session)
 
         deltas = [event for event in events if getattr(event, "type", "") == "monitor_delta"]
         assert deltas == [], "normalization must absorb timestamp and ignore-line churn"
@@ -301,16 +351,14 @@ async def test_a_session_gate_suppresses_a_non_material_change(
     try:
         await session.set_monitor_schedules([spec])
         await session._monitors.pump(now_ms=clock[0] + 5_000)  # baseline
-        for _ in range(20):
-            await asyncio.sleep(0)
+        await drain_checks(session._monitors, session)
 
         clock[0] += 70_000  # past the interval plus the scheduler's jitter
         # An EDIT, not an append: a pure addition skips the gate by design
         # (``is_pure_addition``), so only a changed line proves this plumbing.
         watch.write_text("A\nC\n", encoding="utf-8")
         await session._monitors.pump(now_ms=clock[0] + 5_000)
-        for _ in range(30):
-            await asyncio.sleep(0)
+        await drain_checks(session._monitors, session)
 
         deltas = [event for event in events if getattr(event, "type", "") == "monitor_delta"]
         assert deltas == [], "a suppressed change must not reach the conversation"

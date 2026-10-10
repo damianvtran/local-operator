@@ -31,11 +31,14 @@ import pytest
 
 import local_operator.session.runtime.presence as presence_module
 import local_operator.tui.notify as notify_module
+from local_operator.harness.types import AgentEndEvent
 from local_operator.paths import config_dir
 from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.presence import desktop_delivery_present
 from local_operator.session.runtime.serving import ServingSessionHandle
-from tests.e2e.harness import ScriptedStream, build_session
+from local_operator.tools.registry import create_tools
+from tests.e2e.harness import ScriptedStream, build_session, tool_call_turn
+from tests.unit.session.test_session import wait_for
 
 
 @pytest.fixture(autouse=True)
@@ -874,3 +877,90 @@ async def test_a_workstream_the_operator_asked_for_still_announces(
         assert _delivered(session_id, token) is True
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_end_leaves_the_runtime_nothing_to_announce(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """A ``no_reply`` end publishes NO completion row — and rung 4 is the
+    last reader of that fact, so the arm must find nothing, raise no banner
+    and spend no watermark. The session half of the suppression is pinned in
+    ``test_attention_notify``; this pins that the surface the operator
+    actually hears from cannot resurrect it."""
+    import sqlite3
+
+    directory = tmp_path / "sess"
+    directory.mkdir(parents=True, exist_ok=True)
+    stream = ScriptedStream(
+        [tool_call_turn(text="", tool_name="no_reply", tool_call_id="q1", arguments={})]
+    )
+    session = build_session(directory, stream)
+    session.refresh_tools(
+        [*session._tools, *create_tools(session._build_tool_context(), enabled=["no_reply"])]
+    )
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
+    monkeypatch.setattr(handle, "_watching_surfaces", lambda: frozenset())
+    ends: list[Any] = []
+    session.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+    calls, _state = banners
+    try:
+        await session.receive_peer_message(
+            "child reporting in",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 1, "conversation_name": "child"},
+        )
+        # The end event proves the run HAPPENED (the settled flag alone is
+        # True before the spawned turn starts — the race the cut-off suite
+        # avoids by probing transcripts); settled then proves publication ran.
+        await wait_for(lambda: bool(ends))
+        await wait_for(lambda: session._attention_run_settled)
+
+        await asyncio.to_thread(handle._announce_completion)
+        assert calls == [], "a quiet end must not raise a banner"
+
+        session_id = handle._session_id_for_resume()
+        path = config_dir() / "attention.db"
+        count = 0
+        if path.exists():
+            with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM completions WHERE conversation=?",
+                    (f"session/{session_id}",),
+                ).fetchone()[0]
+        assert count == 0, "no completion row exists to announce"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hers", [True, False])
+async def test_only_her_banner_asks_for_a_durable_click(
+    tmp_path: Path, monkeypatch, hers: bool
+) -> None:
+    """Her check-in is answered hours later, so only hers pays for a long-lived
+    click helper / a synchronously-built bundle. Every other session's call must
+    stay the call it was (no keyword), or the cost lands on every banner."""
+    seen: list[dict[str, Any]] = []
+
+    def fake(title: str, body: str, **kwargs: Any) -> bool:
+        seen.append(kwargs)
+        return True
+
+    monkeypatch.setattr(notify_module, "detached_notify", fake)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    session._aida_duty = hers
+    try:
+        await _arm(handle, handle._session_id_for_resume())
+    finally:
+        await session.dispose()
+
+    assert len(seen) == 1, seen
+    if hers:
+        assert seen[0]["durable_click_s"] == notify_module.DURABLE_CLICK_WINDOW_S
+        assert seen[0]["durable_click_s"] > 3600, "must outlive a morning"
+    else:
+        assert "durable_click_s" not in seen[0]

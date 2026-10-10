@@ -109,6 +109,7 @@ from local_operator.harness.types import (
     FAULT_ABORTED,
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
+    QUIET_TURN_KEY,
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
@@ -9676,6 +9677,9 @@ async def execute_edit(
     is_scratchpad = _has_scratchpad_scheme(url)
     where = f"{url} -> {path}" if is_scratchpad else str(path)
     text = f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied."
+    introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
+    if introduced:
+        text = f"{text}\n{_marker_introduced_note(introduced)}"
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
     return _text(
         tool_call_id,
@@ -9873,7 +9877,13 @@ def _edit_file_result_locked(
     if current != original:
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
-    return total_replacements, _diff_details(str(path), original, current)
+    details = _diff_details(str(path), original, current)
+    introduced = _marker_introduced(original, current)
+    if introduced:
+        # Carried in ``details`` (the file tools' existing structured channel) so the
+        # thread function keeps its return shape; ``execute_edit`` turns it into the note.
+        details[_MARKER_INTRODUCED_KEY] = introduced
+    return total_replacements, details
 
 
 def build_edit_tool() -> AgentTool:
@@ -9952,6 +9962,11 @@ def _line_delta(before: str, after: str) -> tuple[int, int]:
 #: ledger, not the screen.
 _DIFF_DETAILS_CAP_LINES = 200
 
+#: Scratch key on the edit/write ``details`` dict carrying the marker-introduction count
+#: from the worker thread to the coroutine that words the receipt. Popped before the
+#: result is built, so it never reaches the persisted details or a renderer.
+_MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
+
 
 def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     """The write/edit tool-result details: line counts + a rendered unified diff.
@@ -9976,6 +9991,50 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     if len(diff) > _DIFF_DETAILS_CAP_LINES:
         diff = diff[:_DIFF_DETAILS_CAP_LINES] + ["…"]
     return {"path": str(path), "added": added, "removed": removed, "diff": diff}
+
+
+def _marker_introduced(before: str, after: str) -> int:
+    """How many MORE redaction markers ``after`` holds than ``before`` did.
+
+    **Why this exists (2026-10-09, session ``565245718d90``).** ``edit`` and ``write``
+    write exactly the bytes they are handed, and that is an invariant, not a gap: the
+    harness must never alter what a tool writes. But the model only ever SEES the masked
+    form of a symbol the credential shapes misjudged (tool results, and its own earlier
+    calls, which history stores scrubbed), so a model that copies what it saw hands the
+    writer the MARKER and the writer faithfully puts it in source. The shape rule that
+    manufactured those markers is fixed at the source; this is the net under it for the
+    next misjudgement, and the only layer that can see both halves: the file before, and
+    the text about to replace it.
+
+    A COUNT comparison, not a membership test, because a file may legitimately contain
+    the marker already (this module's own tests, a transcript fixture, documentation of
+    the redactor) and an edit that merely leaves it in place, or removes one, introduced
+    nothing. The result is advisory only: the caller appends a note and never refuses or
+    rewrites, because a document that is ABOUT the marker is a legitimate write.
+
+    **Net-zero swaps are invisible, by construction.** An edit that removes one marker
+    and adds another (a fixture's legitimate marker replaced by a copied mask) leaves the
+    count unchanged and so says nothing. Telling the two apart needs the positions of the
+    markers, not their number, and the note is an advisory net under the root fix rather
+    than a guarantee; the cheap, stable signal is kept over a fragile one.
+    """
+    return max(0, after.count(REDACTION_MARKER) - before.count(REDACTION_MARKER))
+
+
+def _marker_introduced_note(count: int) -> str:
+    """The line appended to an edit/write receipt when it put the marker into a file.
+
+    Phrased for the model that wrote it: it cannot tell the mask from source text, which
+    is the whole defect. It is told what the string is, that the intended text is
+    unknown to the harness, and what to do; nothing is claimed about WHICH symbol it was
+    because the harness cannot know (the real text is exactly what the mask hid).
+    """
+    return (
+        f"Note: this write put {count} redaction marker(s) ({REDACTION_MARKER}) into the file. "
+        "That string is the harness's mask for text it hid from you, not source: if you meant "
+        "to write the original text, recover it (git diff, the original file) and edit it "
+        "back; if the marker is intentional (docs, a fixture), ignore this note."
+    )
 
 
 @_guard("write")
@@ -10050,6 +10109,9 @@ async def execute_write(
         " — kept for this session (survives restarts)" if is_scratchpad and not existed else ""
     )
     text = f"{verb} {where} ({len(params.content)} chars){lifetime}."
+    introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
+    if introduced:
+        text = f"{text}\n{_marker_introduced_note(introduced)}"
     # Appended, never substituted: the nudge rides the receipt the caller already
     # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
@@ -10085,7 +10147,11 @@ def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str,
             previous = ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    return existed, _diff_details(str(path), previous, content)
+    details = _diff_details(str(path), previous, content)
+    introduced = _marker_introduced(previous, content)
+    if introduced:
+        details[_MARKER_INTRODUCED_KEY] = introduced
+    return existed, details
 
 
 def build_write_tool() -> AgentTool:
@@ -28330,4 +28396,173 @@ async def execute_ask_withdraw(
         "ask_withdraw",
         str(outcome.get("text") or ""),
         details=dict(outcome.get("details") or {}),
+    )
+
+
+# ---------------------------------------------------------------------------
+# no_reply (design docs/design/quiet-turns.md §4)
+# ---------------------------------------------------------------------------
+#
+# Why this tool exists: the prompt has always told the model "a wake or monitor
+# turn that finds nothing needing action ... end it with no reply, and don't
+# notify", but no mechanism existed to perform that act, so models wrote filler
+# text instead — `(no action needed)` was measured 143 times in one week in a
+# single session, 88 of them directly after a tool result. The affirmative act
+# is a TOOL CALL rather than a text sentinel or an empty reply: text streams to
+# every surface before it can be recognised (Hermes needed a stream filter for
+# exactly that), and an empty reply is indistinguishable from the provider
+# glitches this fleet measured (68 ``error``+empty stops in the same scan), so
+# a sentinel would either flash `NO_REPLY` on screen or silence real failures.
+#
+# The result is "Quiet." with ``useless=True`` (the prune pass blanks its
+# content) plus ``QUIET_TURN_KEY`` in ``details`` — the marker the loop's
+# batch-end check and the session's quiet predicate read. ``details`` is never
+# sent to providers, the same carrier as ``OUTPUT_LIMIT_KEY``.
+#
+# Availability (AGENTS.md footprint ladder, rung 3): the builder returns None
+# wherever the session has no quiet-end door (``ToolContext.quiet_end`` — None
+# for subagent children, one-shot hosts, output-contract sessions and under
+# the kill switch; see ``Session._quiet_end_callable``), and the schema is
+# DEFERRED (``tools/deferral.py``) so even the sessions that hold the tool pay
+# no per-request schema cost until it is activated — it has no arguments, so
+# no schema is needed to form its call. Appended at the END of
+# TOOL_BUILDERS/DEFAULT_TOOL_NAMES for the prompt-cache reason the
+# sessions/monitor/ask_withdraw rows state.
+
+#: The kill switch: ``LOP_NO_REPLY=0`` (or false/no/off, case- and
+#: whitespace-insensitively) removes the tool — env only, no config key
+#: (docs/design/quiet-turns.md §10). Same direction and typo discipline as
+#: ``asks/policy.py``'s ``LOP_ASK_GATE`` read, deliberately: only an explicit
+#: off value turns it off, because a typo must not silently unbuild a working
+#: mechanism while looking like a deliberate switch. Read from the environment
+#: ONCE, at import; a test that needs the other mode monkeypatches this
+#: attribute (``builtin.NO_REPLY_ENABLED``) or sets the env var before import.
+NO_REPLY_ENABLED: bool = os.environ.get("LOP_NO_REPLY", "").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def no_reply_enabled() -> bool:
+    """Whether this process may end turns quietly (``LOP_NO_REPLY``, default on).
+
+    The same function-not-attribute convention as ``asks/policy.py``'s
+    ``gate_enabled``, for the same reason: monkeypatching ``NO_REPLY_ENABLED``
+    must take effect on every path at once (the session binding is the only
+    reader).
+    """
+    return NO_REPLY_ENABLED
+
+
+class NoReplyParams(BaseModel):
+    """No fields by design: the call's whole content is its existence.
+
+    A ``reason`` field was considered and rejected (docs §4): a reason can only
+    live in the call's persisted arguments, which are re-billed on every later
+    request, and the trigger row beside the call already says why. The ``i``
+    intent property this schema ends up with is injected by ``create_tools``
+    (``apply_intent_schema``) — not declared here — and the loop lifts it off
+    before validation (``INTENT_FIELD`` pop), so a model-supplied call arrives
+    as ``{}``. ``extra="forbid"`` is what keeps "only the injected ``i`` is
+    accepted" true at the tool boundary: any other key is a validation error
+    rather than a silently ignored field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+#: The description is where the acknowledgement ban lives rather than in
+#: ``system.md`` (review R6): the schema is deferred, so this text is unbilled
+#: until the tool is activated, while the system prompt is paid on EVERY
+#: request of every session — including the children that can never call it.
+_NO_REPLY_DESCRIPTION = (
+    "End this turn silently when a peer message, wake, monitor or job result "
+    "needs no reply and no action. Nothing is shown or notified — never answer "
+    "an acknowledgement with an acknowledgement, and never write filler such "
+    "as '(no action needed)'. Refused if the user asked something or the "
+    "wake/monitor asked to notify."
+)
+
+
+def build_no_reply_tool(context: ToolContext) -> AgentTool | None:
+    """CreateIf builder: present only where the session can END QUIET.
+
+    Gated on the ``quiet_end`` callable ALONE, the one-fact rule
+    ``build_ask_withdraw_tool`` follows with the queue door: its presence IS
+    "this session may end a turn quietly", and the session binds it to ``None``
+    exactly where a quiet end could not be honoured (subagent children whose
+    final text a parent's ``wait`` reads, one-shot/headless hosts whose product
+    IS the final text, output-contract sessions whose gate would read silence
+    as a missing response, and the ``LOP_NO_REPLY=0`` kill switch). Absent, not
+    merely inert, in those sessions — footprint rung 3.
+
+    ``approval_tier="read"`` for the same reason ``todo`` and
+    ``ask_withdraw`` take it: the call touches nothing outside the session's
+    own turn — no writes, no world state — so an approval prompt would put a
+    question in front of the operator about the absence of one. ``exclusive``
+    and ``interruptible=False`` like ``patience``: the call settles the batch's
+    shape (whether the turn ends), so letting it run beside a sibling whose
+    result must still be fed back is exactly the interleaving the loop's
+    LAST-result rule (review R8) rules out.
+    """
+    if getattr(context, "quiet_end", None) is None:
+        return None
+    return AgentTool(
+        name="no_reply",
+        label="No reply",
+        description=_NO_REPLY_DESCRIPTION,
+        parameters=NoReplyParams.model_json_schema(),
+        approval_tier="read",
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_no_reply,
+    )
+
+
+@_guard("no_reply")
+async def execute_no_reply(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """End the turn quietly, or refuse with the sentence the model must act on.
+
+    The refusal decision is the session's own (``quiet_end`` returns the
+    sentence when a person asked this turn, when a user message sits queued but
+    unconsumed, or when the wake/monitor delivery asked to notify —
+    docs/design/quiet-turns.md §4's denylist). A refusal comes back as an
+    ``is_error`` result and NO marker, so the loop does not end the turn and the
+    model writes the text; this method never coerces silence either way.
+    """
+    try:
+        NoReplyParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "no_reply", exc)
+    quiet_end = getattr(context, "quiet_end", None) if context is not None else None
+    if quiet_end is None:
+        # Unreachable through the advertised tool (the builder above refuses to
+        # create it without the door), so this is a host wiring fault and is
+        # reported as one — never as a quiet end, which would tell the model its
+        # turn ended when the loop is still going to ask it for text.
+        return _error(
+            tool_call_id,
+            "no_reply",
+            "this host has no quiet-end door wired into this session — the turn "
+            "is not over; answer in text instead.",
+        )
+    refusal = await quiet_end()
+    if refusal:
+        return _error(tool_call_id, "no_reply", refusal)
+    return _text(
+        tool_call_id,
+        "no_reply",
+        "Quiet.",
+        # ``useless`` so the prune pass blanks the content later; the marker
+        # rides ``details``, which never reaches a provider.
+        useless=True,
+        details={QUIET_TURN_KEY: True},
     )
