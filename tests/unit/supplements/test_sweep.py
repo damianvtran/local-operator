@@ -182,6 +182,75 @@ async def test_an_unreadable_transcript_blocks_deletion(tmp_path: Path) -> None:
     assert (tmp_path / "attachments" / f"{digest}.bin").exists()
 
 
+async def test_a_session_dir_without_traverse_permission_blocks_deletion(tmp_path: Path) -> None:
+    """R2-1 regression: a session dir without ``+x`` must fail strictly closed.
+
+    The directory cannot be traversed, so the transcript inside it is invisible
+    to discovery (``transcript.is_file()`` raises EACCES) and the scan reads as
+    "no references"; a pass that skips it silently then reclaims the blob the
+    transcript still names -- the reviewer's reproduction: mode 0600,
+    transcript intact, ``skipped=''``, blob deleted and unrecoverable. The
+    discovery failure must be counted and abort the deletion phase instead.
+    """
+    if os.geteuid() == 0:  # root traverses any mode; the hazard the test needs cannot exist
+        pytest.skip("running as root: cannot make a directory untraversable via mode bits")
+    digest = _blob(tmp_path, b"<p>invisible</p>", age_s=OLD_AGE_S)
+    session_dir = _journal(tmp_path, "s1", [_row("a" * 32, digest)])
+    os.chmod(session_dir, 0o600)
+    try:
+        report = sweep.store_sweep(tmp_path)
+    finally:
+        os.chmod(session_dir, 0o700)  # let pytest's own cleanup descend again
+    assert report.skipped.startswith("scan:")
+    assert report.deleted == 0 and digest in report.kept
+    assert (tmp_path / "attachments" / f"{digest}.bin").exists()
+
+
+async def test_an_unlistable_sessions_dir_blocks_deletion(tmp_path: Path) -> None:
+    """The other half of R2-1: a discovery source that cannot be listed at all.
+
+    With ``sessions/`` unlistable no reference is readable; before the fix this
+    returned ``[]`` with no problem recorded, so the delete phase ran on the
+    empty set and reclaimed referenced blobs silently.
+    """
+    if os.geteuid() == 0:  # root lists any mode; the hazard the test needs cannot exist
+        pytest.skip("running as root: cannot make a directory unlistable via mode bits")
+    digest = _blob(tmp_path, b"<p>unlistable</p>", age_s=OLD_AGE_S)
+    _journal(tmp_path, "s1", [_row("a" * 32, digest)])
+    sessions = tmp_path / "sessions"
+    os.chmod(sessions, 0o000)
+    try:
+        report = sweep.store_sweep(tmp_path)
+    finally:
+        os.chmod(sessions, 0o700)  # let pytest's own cleanup descend again
+    assert report.skipped.startswith("scan:")
+    assert report.deleted == 0 and digest in report.kept
+    assert (tmp_path / "attachments" / f"{digest}.bin").exists()
+
+
+async def test_a_sessions_dir_without_traverse_permission_blocks_deletion(tmp_path: Path) -> None:
+    """A sessions dir that lists but cannot be traversed is still a discovery fault.
+
+    Mode 0400 lets ``iterdir()`` read the names but ``child.is_dir()`` cannot
+    stat through to any entry (EACCES): the per-session scan cannot be trusted,
+    so the pass must delete nothing. The failure rides the same problems
+    channel as the two tests above.
+    """
+    if os.geteuid() == 0:  # root traverses any mode; the hazard the test needs cannot exist
+        pytest.skip("running as root: cannot make a directory untraversable via mode bits")
+    digest = _blob(tmp_path, b"<p>blind</p>", age_s=OLD_AGE_S)
+    _journal(tmp_path, "s1", [_row("a" * 32, digest)])
+    sessions = tmp_path / "sessions"
+    os.chmod(sessions, 0o400)
+    try:
+        report = sweep.store_sweep(tmp_path)
+    finally:
+        os.chmod(sessions, 0o700)  # let pytest's own cleanup descend again
+    assert report.skipped.startswith("scan:")
+    assert report.deleted == 0 and digest in report.kept
+    assert (tmp_path / "attachments" / f"{digest}.bin").exists()
+
+
 async def test_deletion_is_bounded_per_pass_and_converges(tmp_path: Path) -> None:
     digests = [_blob(tmp_path, f"<p>{i}</p>".encode(), age_s=OLD_AGE_S) for i in range(3)]
     first = sweep.store_sweep(tmp_path, max_deletes=2, max_candidates=2)
