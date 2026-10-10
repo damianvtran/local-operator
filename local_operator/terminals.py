@@ -223,11 +223,16 @@ def is_ssh(env: EnvMap | None = None) -> bool:
     return bool(source.get(SSH_CONNECTION_ENV) or source.get(SSH_TTY_ENV))
 
 
-#: The kill switch / override for OSC 8 hyperlinks (turn-supplements T3):
+#: The user-facing escape hatch for OSC 8 hyperlinks (turn-supplements T3):
 #: ``0/false/no/off`` paints file callouts as plain text even where the
 #: terminal would render a link, and ``1/true/yes/on`` paints them where the
 #: markers do not name the terminal. Anything else detects, the same
-#: read-once-at-paint rule ``LOCAL_OPERATOR_IMAGES`` follows.
+#: read-once-at-paint rule ``LOCAL_OPERATOR_IMAGES`` follows. It chooses
+#: between the two RENDERINGS and nothing else: whether a link is drawn is all
+#: it decides -- the target a drawn link carries is still resolved, and
+#: re-vetted at click time, by ``link_targets.file_affordance`` (the same
+#: predicate both moments share), so the hatch can never change what a path
+#: resolves to, nor make a path the predicate refuses openable.
 HYPERLINKS_ENV = "LOCAL_OPERATOR_HYPERLINKS"
 
 #: VTE-based terminals (GNOME Terminal, Tilix, gnome-console) render OSC 8
