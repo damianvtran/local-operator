@@ -38,19 +38,27 @@ THE HONESTY RULES, each one load-bearing:
   genuinely different products) and, conservatively, on Z.AI (whose two
   routes run the same fetcher — a missed notice there is the accepted cost,
   because a false "empty" costs more than a missed one).
-- Radient's sentence is NOT authored here. ``radient_recovery.recovery_line``
-  owns every Radient string (its remedy depends on account facts this module
-  cannot see), and the caller passes the fetched line in. When none is passed
-  the module's own neutral rendering is used, never a second string set.
+- Radient's sentence is NOT authored here, and neither is its classification.
+  ``radient_recovery.recovery_line`` owns every Radient string and
+  ``radient_recovery.account_state`` owns the verified / unverified /
+  unreadable ladder both it and this module read; the caller passes the
+  probed ``RecoveryFacts`` in. When none is passed the facts are "unreadable"
+  and the neutral sentence stands, never a second string set.
+- The resend button is an offer, not a claim: it appears only for an
+  ``unverified`` account whose stored credential can actually call
+  ``POST /auth/signup/resend`` (``resend_available``; that route accepts a
+  Radient OAuth JWT only — see ``desktop_radient``'s ``signup.resend``), and
+  only for a grant that has a ticket to reissue (``pending`` / ``expired``).
+  Everything else degrades to the verification-page link.
 
 STATE VOCABULARY. ``not_applicable`` (no endpoint, or a free model),
 ``unknown`` (no usable evidence), ``ok`` (evidence says an account can send),
 ``depleted`` (every account's balance/probe is empty — balance providers and
 Radient), ``limit_reached`` (a plan window is spent — subscription
-providers). ``unverified`` is RESERVED for the Radient verification work
-(PR2): it will be produced from the shared ``account_state`` classifier once
-that exists, and PR1 deliberately does not guess it from ``recovery_line``
-text.
+providers). ``unverified`` (Radient only) means the account is empty AND free
+signup credits are waiting behind email verification, so verifying comes
+before any top-up; it is derived from ``radient_recovery.account_state`` and
+never guessed from sentence text.
 """
 
 from __future__ import annotations
@@ -59,7 +67,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Sequence
 
 from local_operator.providers.billing_links import BillingKind, billing_link_for
-from local_operator.providers.radient_recovery import RecoveryFacts, recovery_line
+from local_operator.providers.radient_recovery import (
+    CLAIM_URL,
+    RecoveryFacts,
+    account_state,
+    recovery_line,
+)
 from local_operator.providers.registry import get_provider_definition, provider_brand
 from local_operator.providers.usage import (
     UsageReport,
@@ -135,7 +148,8 @@ def evaluate_quota_notice(
     api_key_present: bool = False,
     entry: CatalogueEntry | None = None,
     now_ms: int,
-    radient_line: str | None = None,
+    radient_facts: RecoveryFacts | None = None,
+    resend_available: bool = False,
 ) -> QuotaVerdict:
     """The one decision. Pure: no network, no store, no clock — pass ``now_ms``.
 
@@ -145,7 +159,9 @@ def evaluate_quota_notice(
     the session is running — the free-model suppression's only input.
     ``expected_identities`` and ``api_key_present`` describe the credential
     set the reports must cover; both default empty so a caller checking a
-    lone API-key provider passes neither.
+    lone API-key provider passes neither. ``radient_facts`` is the probed
+    ``/me`` verification state (Radient only; ``None`` reads as unreadable) and
+    ``resend_available`` says the stored credential can call the resend route.
     """
     primary_link = billing_link_for(provider)
     default_kind: BillingKind = primary_link.kind if primary_link is not None else "none"
@@ -239,6 +255,9 @@ def evaluate_quota_notice(
     resets_at_ms = now_ms + min(resets_after) if resets_after else None
     age_ms = max(0, now_ms - max(report.fetched_at for report in reports))
     state: QuotaState = "limit_reached" if kind == "subscription" else "depleted"
+    facts = radient_facts if radient_facts is not None else RecoveryFacts(signed_in=None)
+    if kind == "radient" and account_state(facts) == "unverified":
+        state = "unverified"
     title, body, actions = _compose(
         state=state,
         kind=kind,
@@ -248,7 +267,8 @@ def evaluate_quota_notice(
         binding_labels=depleted_health[0].binding_labels,
         resets_at_ms=resets_at_ms,
         now_ms=now_ms,
-        radient_line=radient_line,
+        radient_facts=facts,
+        resend_available=resend_available,
     )
     return QuotaVerdict(
         state=state,
@@ -306,17 +326,37 @@ def _compose(
     binding_labels: Sequence[str],
     resets_at_ms: int | None,
     now_ms: int,
-    radient_line: str | None,
+    radient_facts: RecoveryFacts,
+    resend_available: bool,
 ) -> tuple[str, str, tuple[QuotaAction, ...]]:
     """The copy for a warning state. One home for every sentence."""
     definition = get_provider_definition(provider)
     brand = provider_brand(definition) if definition is not None else provider
 
     if kind == "radient":
-        line = radient_line or recovery_line(RecoveryFacts(signed_in=None))
+        # The sentence and the unverified/verified split both come from
+        # radient_recovery; this branch only turns them into buttons.
+        line = recovery_line(radient_facts)
+        verification = radient_facts.verification
+        if state == "unverified" and verification is not None:
+            claim = verification.claim_url or CLAIM_URL
+            actions = [QuotaAction("open_url", "Open verification page", url=claim)]
+            if resend_available and verification.signup_grant in ("pending", "expired"):
+                # ``none`` has no ticket to reissue (the route would answer
+                # 409); ``email_verified: false`` alone proves nothing about one.
+                actions.append(QuotaAction("resend_verification", "Resend verification email"))
+            actions.append(QuotaAction("refresh", "I verified"))
+            return ("Verify your email to claim your free credits", line, tuple(actions))
+        # Verified or unreadable: the remedy is a top-up. A verified payload's
+        # own (https-checked) top-up URL wins over the table's constant.
+        topup = (
+            verification.first_topup.topup_url
+            if verification is not None and verification.first_topup is not None
+            else None
+        ) or link_url
         actions = [QuotaAction("refresh", "I topped up")]
-        if link_url:
-            actions.insert(0, QuotaAction("open_url", "Top up at Radient", url=link_url))
+        if topup:
+            actions.insert(0, QuotaAction("open_url", "Top up at Radient", url=topup))
         return ("No credit left on Radient", line, tuple(actions))
 
     if state == "limit_reached":
