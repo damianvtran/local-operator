@@ -1340,7 +1340,34 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: binds the browser and console gates). The band is normalized to the 55-token
 #: band this file keeps — the diet left 48 tokens above its head, so the
 #: ceiling moves by 7: measured head + 55.
-BUDGET_BILLED_TOKENS = 27_217
+#:
+#: RAISED 27,217 -> 27,270 for the IMAGE-EDITING lane (``feat/imagegen-editing``,
+#: #2157), stated here with the arithmetic because the guard exists to make
+#: this an explicit decision. Same machine, clean arm via ``env -i``, both
+#: trees measured on the merged base (``origin/main`` ca31b74574):
+#:
+#:   base  75,565 chars = ~27,182   (35 tokens of headroom at the old ratchet)
+#:   head  75,659 chars = ~27,215   (this branch)
+#:   delta      +94 chars = ~+34
+#:
+#: Components, each measured: the ``generate_image`` parameter schema carries
+#: one new field — ``source_attachment`` (+91 chars: name, type, the one-line
+#: description and its JSON furniture) — less 19 chars saved by the reworded
+#: ``prompt``/``strength`` descriptions, less the class docstring's detail
+#: trimmed after the first CI reading: a model docstring renders VERBATIM
+#: into the schema's ``description`` and cost ~330 chars on the wire, so it
+#: went back to its one line and the v1 single-source constraint moved into
+#: comments + ``read tool://generate_image`` + the guide (the first head
+#: measured 27,354 = +172; the trim took it to +34). Everything else on the
+#: surface is byte-identical.
+#:
+#: The residual ~+34 is the honest cost of ONE new wire parameter: a field a
+#: model must see to use the feature, with the shortest description that
+#: keeps it clear (docs-first — the guide carries the detail). Hiding it
+#: would re-ship the silent-T2I class this lane exists to kill. The ratchet
+#: moves to the file's 55-token band (measured head + 55) so the next
+#: addition finds it as tight as this one did.
+BUDGET_BILLED_TOKENS = 27_270
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1370,7 +1397,17 @@ BUDGET_BILLED_TOKENS = 27_217
 #: billed the top arm carries, which is the check that the delta is that one
 #: tool and nothing else. Band normalized to the 55-token band; the diet's
 #: child head had 475 of headroom, so the ceiling moves by 66: head + 55.
-BUDGET_CHILD_BILLED_TOKENS = 24_273
+#:
+#: RAISED (with the top arm, same day, same trees) 24,273 -> 24,315: the
+#: child arm carries ``generate_image`` too and moves by the SAME +94 chars
+#: = ~+34 (the check that the delta is that one field and nothing else):
+#:
+#:   base  67,348 chars = ~24,226   (47 tokens of headroom at the old ratchet)
+#:   head  67,442 chars = ~24,260
+#:   delta      +94 chars = ~+34
+#:
+#: Band normalized to the 55-token band, as the top arm's entry states.
+BUDGET_CHILD_BILLED_TOKENS = 24_315
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
