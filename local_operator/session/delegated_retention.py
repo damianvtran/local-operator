@@ -106,13 +106,20 @@ is walked — bounded, symlinks never followed, ``.git`` never matched by shape
     its own. No bundle; the registration is pruned by the removal itself. A
     pointer that is malformed, dangling, names a submodule
     (``.git/modules/``), or a tree the shared repository does not list: KEPT.
-  - ``.git`` DIR (an independent clone): callers continue to the uniqueness
-    logic — no commit of HEAD may be absent from every remote, and the
-    sidebar refs (``refs/heads/*`` and ``refs/stash``) are checked against
-    the same remotes: when every tip is reachable the tree goes as-is, and
-    when any is not, its refnames are rescued into a bundle beside the tree
-    (``reap-rescue-<tree>.bundle``: ``git bundle create`` + ``git bundle
-    verify``) BEFORE the tree may go — any bundle failure keeps the tree.
+  - ``.git`` DIR (an independent clone): a clone whose object store serves
+    registered worktrees is KEPT whole ("has registered worktrees" — a
+    linked worktree's own HEAD lives per-worktree, invisible to the ref
+    walks, so removing the store would leave a worktree this pass may keep an
+    object-less husk). Otherwise no commit of HEAD may be absent from every
+    remote, and the local refs (``refs/heads/*``, ``refs/stash`` and
+    ``refs/tags/*``) are checked against the same remotes: when every tip is
+    reachable the tree goes as-is, and when any is not, its refnames are
+    rescued into a bundle beside the tree (``reap-rescue-<tree>.bundle``:
+    ``git bundle create`` + ``git bundle verify``) BEFORE the tree may go —
+    any bundle failure keeps THAT tree (per-tree: a pad with several
+    reclaimable clones gets one bundle each, and a failed bundle keeps only
+    its own tree). A rescue bundle carries no HEAD (bundles have none):
+    recover a preserved ref with ``git clone -b <branch> <bundle> <dest>``.
   - a ``.git`` SYMLINK: kept (the content layer never follows links).
 
   The "objects also exist in the main repo" shortcut is NOT automated: there
@@ -440,9 +447,15 @@ class ContentRow:
     #: build shapes, stale output) — what the CLI's per-class counts read.
     classes: tuple[str, ...] = ()
     #: The rescue bundle kept beside the pad (an absolute path) and its size,
-    #: when the uniqueness check found refs that live nowhere else.
+    #: when the uniqueness check found refs that live nowhere else. The
+    #: FIRST bundle and the TOTAL bytes of all of them; the list of every
+    #: bundle is :attr:`rescue_bundles`.
     rescue_bundle: str = ""
     rescue_bundle_bytes: int = 0
+    #: Every rescue bundle this pad kept, one per reclaimable clone tree with
+    #: unique refs (review F1 made these per-tree). Empty when none was
+    #: needed; ``rescue_bundle`` mirrors the first for older readers.
+    rescue_bundles: tuple[str, ...] = ()
     #: How the removal was carried out: ``"remove"`` (the guarded pad-level
     #: path), ``"worktree-remove"`` (a linked worktree removed through its
     #: shared repository), or ``"bundle-rescue"`` (an independent clone whose
@@ -755,10 +768,33 @@ def _rescue_bundle_path(root: str, relative: str) -> Path:
 
     A tree's path separators flatten to ``-`` so a nested tree gets a name of
     its own (``r3/qa-frames`` -> ``reap-rescue-r3-qa-frames.bundle``) rather
-    than colliding with a top-level tree that shares its basename.
+    than colliding with a top-level tree that shares its basename. The
+    flattening cannot keep ``a/b`` and ``a-b`` apart, which is what
+    :func:`_unique_rescue_bundle_path` is for.
     """
     flattened = relative.replace(os.sep, "-")
     return Path(root) / f"{RESCUE_BUNDLE_PREFIX}{flattened}{RESCUE_BUNDLE_SUFFIX}"
+
+
+def _unique_rescue_bundle_path(root: str, relative: str, taken: set[str]) -> Path:
+    """A bundle path no other tree of this pad has claimed (review N2).
+
+    ``_rescue_bundle_path`` flattens separators, so ``a/b`` and ``a-b`` map to
+    one name; a pad may carry several reclaimable trees and each needs its own
+    bundle, so the second user of a name takes ``-2`` (then ``-3``...).
+    """
+    base = _rescue_bundle_path(root, relative)
+    if base.name not in taken:
+        taken.add(base.name)
+        return base
+    stem = base.name[: -len(RESCUE_BUNDLE_SUFFIX)]
+    serial = 2
+    while True:
+        candidate = base.with_name(f"{stem}-{serial}{RESCUE_BUNDLE_SUFFIX}")
+        if candidate.name not in taken:
+            taken.add(candidate.name)
+            return candidate
+        serial += 1
 
 
 def _tree_reclaim_decision(repo: Path) -> _TreeDecision:
@@ -771,13 +807,15 @@ def _tree_reclaim_decision(repo: Path) -> _TreeDecision:
     The tree's ``.git`` then decides HOW it may go: a linked worktree is
     removed through its shared repository (no bundle — its refs and objects
     are the shared store's) and only when that repository LISTS this path; an
-    independent clone must additionally have no commit of HEAD on no remote,
-    and its sidebar refs (``refs/heads/*`` and ``refs/stash``) are checked
-    against the same remotes for uniqueness — when any tip is unreachable its
-    refname comes back so the caller rescues it into a bundle BEFORE the tree
-    may go. Dirty, unmerged, no-remote and unresolvable trees all come back as
-    keep — anything that cannot be PROVEN reclaimable is kept, and this
-    function never raises (a repository it cannot inspect is a keep).
+    independent clone that serves registered worktrees is kept whole, and any
+    other clone must additionally have no commit of HEAD on no remote, with
+    its local refs (``refs/heads/*``, ``refs/stash`` and ``refs/tags/*``)
+    checked against the same remotes for uniqueness — when any tip is
+    unreachable its refname comes back so the caller rescues it into a bundle
+    BEFORE the tree may go. Dirty, unmerged, no-remote and unresolvable trees
+    all come back as keep — anything that cannot be PROVEN reclaimable is
+    kept, and this function never raises (a repository it cannot inspect is a
+    keep).
     """
     try:
         return _tree_reclaim_checks(repo)
@@ -833,22 +871,34 @@ def _tree_reclaim_checks(repo: Path) -> _TreeDecision:
         if not _worktree_listed(listed.stdout, repo):
             return _TreeDecision(False, "not registered in the shared repository's worktree list")
         return _TreeDecision(True, worktree=shared)
+    # A clone whose object store SERVES REGISTERED WORKTREES is kept whole: a
+    # linked worktree's own HEAD lives per-worktree (invisible to the ref
+    # walks below), and removing the store would leave a worktree this pass
+    # keeps an object-less husk (fail closed).
+    registrations = _git(path, "worktree", "list", "--porcelain")
+    if registrations.returncode != 0:
+        return _TreeDecision(False, "the worktree registrations cannot be inspected")
+    if sum(1 for line in registrations.stdout.splitlines() if line.startswith("worktree ")) > 1:
+        return _TreeDecision(False, "has registered worktrees")
     on_remote = _git(path, "log", "HEAD", "--not", "--remotes", "--oneline")
     if on_remote.returncode != 0:
         return _TreeDecision(False, "cannot decide whether HEAD is on a remote")
     if on_remote.stdout.strip():
         return _TreeDecision(False, "HEAD carries commits that are on no remote")
-    # The sidebar refs (heads + stash) against the same remotes. The per-tip
-    # question — "is this tip reachable from any remote ref?" — is answered by
-    # ONE ``rev-list --branches [refs/stash] --not --remotes`` walk: the output
-    # is the set of commits no remote ref reaches, and a tip is unique exactly
-    # when it appears there. (``--no-walk`` is NOT usable here: git documents
-    # it as having no effect when a range is given, and ``--not`` IS one —
+    # The local refs (heads + stash + tags) against the same remotes. The
+    # per-tip question — "is this tip reachable from any remote ref?" — is
+    # answered by ONE ``rev-list --branches --tags [refs/stash] --not
+    # --remotes`` walk: the output is the set of commits no remote ref
+    # reaches, and a tip is unique exactly when it appears there. Tags are
+    # durable refs and belong on the positive side: a tag-only commit (the
+    # branch was deleted) is otherwise invisible and the tree would go with no
+    # bundle (review F2). (``--no-walk`` is NOT usable here: git documents it
+    # as having no effect when a range is given, and ``--not`` IS one —
     # verified on git 2.55, the full walk came out anyway.) The walk is still
     # bounded: over :data:`CONTENT_MAX_UNIQUE_COMMITS` the list cannot be
     # proven complete, so the tree is kept (fail closed).
     stash = _git(path, "rev-parse", "-q", "--verify", "refs/stash")
-    refs = ["rev-list", "--max-count", str(CONTENT_MAX_UNIQUE_COMMITS + 1), "--branches"]
+    refs = ["rev-list", "--max-count", str(CONTENT_MAX_UNIQUE_COMMITS + 1), "--branches", "--tags"]
     if stash.returncode == 0 and stash.stdout.strip():
         refs.append("refs/stash")
     refs += ["--not", "--remotes"]
@@ -861,15 +911,36 @@ def _tree_reclaim_checks(repo: Path) -> _TreeDecision:
     if not unique_commits:
         return _TreeDecision(True)
     listing = _git(
-        path, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/stash"
+        path,
+        "for-each-ref",
+        "--format=%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(refname)",
+        "refs/heads",
+        "refs/stash",
+        "refs/tags",
     )
     if listing.returncode != 0:
         return _TreeDecision(False, "cannot list the local refs to rescue")
     wanted = set(unique_commits)
     names: list[str] = []
     for line in listing.stdout.splitlines():
-        object_id, _, refname = line.partition(" ")
-        if refname and object_id in wanted:
+        # NUL-delimited fields: ``%(objectname)``, ``%(objecttype)``, the
+        # peeled object and type (empty for non-tags), ``%(refname)``. A
+        # space-separated format would collapse the empty peeled fields and
+        # make positional parsing ambiguous (measured: a non-tag line came
+        # back two fields, and the tag rescue silently dropped every ref).
+        fields = line.split("\x00")
+        if len(fields) != 5:
+            continue
+        object_id, object_type, peeled, peeled_type, refname = fields
+        if (peeled_type or object_type) != "commit":
+            # An annotated tag's objectname is the TAG object; its commit is
+            # the peeled one (``%(*objectname)``, empty for non-tags), which
+            # is what the commit set can speak for. A ref whose PEELED target
+            # is not a commit (a tag on a blob or tree) is outside the commit
+            # walk's vocabulary — kept, not rescued (fail closed).
+            return _TreeDecision(False, "a local ref points at a non-commit object")
+        tip = peeled or object_id
+        if tip in wanted:
             names.append(refname)
     if not names:
         return _TreeDecision(False, "unique commits exist but no ref names them to rescue")
@@ -951,6 +1022,12 @@ class _PlannedRemoval:
     method: str = "remove"
     #: The shared repository for ``method == "worktree-remove"``.
     shared_repo: Path | None = None
+    #: This tree's OWN rescue bundle: the target path and the refnames that
+    #: live only in it. PER-TREE on purpose (review F1): one pad may carry
+    #: several reclaimable clones, and a bundle is written and verified
+    #: before ITS OWN tree goes — a failure keeps only that tree.
+    bundle_path: Path | None = None
+    bundle_refs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -958,11 +1035,10 @@ class _PadPlan:
     """What the content pass will take from ONE pad, decided but not yet done."""
 
     removals: list[_PlannedRemoval] = field(default_factory=list)
-    #: A rescue bundle to write before the tree it belongs to may go: the tree,
-    #: the target bundle path, and the refnames that live only in that tree.
-    bundle_tree: Path | None = None
-    bundle_path: Path | None = None
-    bundle_refs: list[str] = field(default_factory=list)
+    #: Bundle FILENAMES already planned in this pad, so two trees whose
+    #: flattened names collide (``a/b`` vs ``a-b``) still get one bundle each
+    #: (review N2).
+    bundle_names: set[str] = field(default_factory=set)
     #: Why specific candidates were left — an unmerged tree, a broken gitdir
     #: link, an aborted cap. The caller records these so the dry run shows what
     #: it declined, not only what it took.
@@ -1120,6 +1196,9 @@ def _plan_tree(path: str, root: str, plan: _PadPlan) -> None:
         plan.kept.append(f"{relative}: {decision.keep}")
         return
     stats = _bounded_dir_stats(Path(path))
+    bundle_path: Path | None = None
+    if decision.bundle_refs:
+        bundle_path = _unique_rescue_bundle_path(root, relative, plan.bundle_names)
     plan.removals.append(
         _PlannedRemoval(
             Path(path),
@@ -1127,12 +1206,10 @@ def _plan_tree(path: str, root: str, plan: _PadPlan) -> None:
             *stats,
             method="worktree-remove" if decision.worktree is not None else "remove",
             shared_repo=decision.worktree,
+            bundle_path=bundle_path,
+            bundle_refs=decision.bundle_refs,
         )
     )
-    if decision.bundle_refs:
-        plan.bundle_tree = Path(path)
-        plan.bundle_path = _rescue_bundle_path(root, relative)
-        plan.bundle_refs = decision.bundle_refs
 
 
 @dataclass
@@ -1166,6 +1243,13 @@ def _content_guard(
     """
     if cand.clock >= cutoff:
         return "inside the (widened) window"
+    # Rule 6's re-stat, mirrored (review N1): a session that moved AFTER the
+    # scan is inside the window again — its record stays, and its content is
+    # not this pass's to take (the next pass sees the fresh clock and decides
+    # then).
+    fresh = session_activity_path(os.fspath(cand.path))
+    if fresh is not None and fresh >= cutoff:
+        return "active since the scan"
     if live_resolved is not None:
         try:
             if cand.path.resolve() == live_resolved:
@@ -1203,11 +1287,11 @@ def _reclaim_pad_content(
     ``cleanup.remove_scratchpad_entry`` (the one guarded removal shape) —
     except a linked worktree's, which goes through ``git worktree remove`` in
     its shared repository (its objects are not the pad's to bundle). A rescue
-    bundle is written and verified BEFORE the tree it belongs to is removed;
-    any bundle failure keeps THAT tree (its planned removal is dropped from
-    the plan) and counts an error, while the pad's other planned removals
-    still proceed. A refusal or failure of the git removal keeps that tree and
-    counts an error the same way.
+    bundle is written and verified BEFORE the tree it belongs to is removed,
+    PER TREE: any bundle failure keeps only its own tree (that planned removal
+    is dropped and counted) while the pad's other removals proceed. A refusal
+    or failure of the git removal keeps that tree and counts an error the same
+    way.
     """
     outcome = _ContentOutcome()
     guard = _content_guard(
@@ -1225,33 +1309,27 @@ def _reclaim_pad_content(
     outcome.kept.extend(plan.kept)
     if not plan.removals:
         return outcome
-    bundle_path = ""
-    bundle_bytes = 0
-    if plan.bundle_tree is not None and plan.bundle_path is not None:
-        if dry_run:
-            bundle_path = os.fspath(plan.bundle_path)
-        else:
-            failure = _write_rescue_bundle(plan.bundle_tree, plan.bundle_path, plan.bundle_refs)
-            if failure is not None:
-                outcome.kept.append(f"{os.path.basename(os.fspath(plan.bundle_tree))}: {failure}")
-                outcome.errors += 1
-                logger.warning("session cleanup: %s; keeping the tree", failure)
-                plan.removals = [
-                    removal for removal in plan.removals if removal.path != plan.bundle_tree
-                ]
-            else:
-                bundle_path = os.fspath(plan.bundle_path)
-                try:
-                    bundle_bytes = os.stat(plan.bundle_path).st_size
-                except OSError:  # pragma: no cover — it was just written
-                    bundle_bytes = 0
-    if not plan.removals:
-        return outcome
     taken: list[_PlannedRemoval] = []
+    bundles: list[tuple[str, int]] = []
     for removal in plan.removals:
         if dry_run:
             taken.append(removal)
             continue
+        if removal.bundle_path is not None:
+            # PER-TREE, and before ITS OWN tree may go (review F1): one pad may
+            # carry several reclaimable clones, so a failure here keeps only
+            # its own tree while the pad's other removals proceed.
+            failure = _write_rescue_bundle(removal.path, removal.bundle_path, removal.bundle_refs)
+            if failure is not None:
+                outcome.errors += 1
+                outcome.kept.append(f"{os.path.basename(os.fspath(removal.path))}: {failure}")
+                logger.warning("session cleanup: %s; keeping the tree", failure)
+                continue
+            try:
+                bundle_size = os.stat(removal.bundle_path).st_size
+            except OSError:  # pragma: no cover — it was just written
+                bundle_size = 0
+            bundles.append((os.fspath(removal.bundle_path), bundle_size))
         if removal.method == "worktree-remove" and removal.shared_repo is not None:
             # A LINKED WORKTREE: git removes it, and the pad-level remover is
             # for entries that are the pad's own — this one is the shared
@@ -1289,6 +1367,10 @@ def _reclaim_pad_content(
         for cls in (CONTENT_CLASS_MERGED, CONTENT_CLASS_BUILD, CONTENT_CLASS_STALE)
         if any(removal.cls == cls for removal in taken)
     )
+    planned = [os.fspath(removal.bundle_path) for removal in taken if removal.bundle_path]
+    written = dict(bundles)
+    bundle_list = tuple(planned)
+    bundle_bytes = 0 if dry_run else sum(written.get(path, 0) for path in planned)
     outcome.row = ContentRow(
         session=cand.path.name,
         reason=" + ".join(f"{name} past the window" for name in classes),
@@ -1297,9 +1379,10 @@ def _reclaim_pad_content(
         entries=sum(removal.entries for removal in taken),
         origin=_origin(cand.path),
         classes=classes,
-        method=_taken_method(taken, bundle_path),
-        rescue_bundle=bundle_path,
+        method=_taken_method(taken, bundle_list[0] if bundle_list else ""),
+        rescue_bundle=bundle_list[0] if bundle_list else "",
         rescue_bundle_bytes=bundle_bytes,
+        rescue_bundles=bundle_list,
     )
     return outcome
 
@@ -1337,6 +1420,7 @@ def _content_log_record(row: ContentRow, *, actor: str) -> dict[str, Any]:
     if row.rescue_bundle:
         record["rescue_bundle"] = row.rescue_bundle
         record["rescue_bundle_bytes"] = row.rescue_bundle_bytes
+        record["rescue_bundles"] = list(row.rescue_bundles or (row.rescue_bundle,))
     return record
 
 
@@ -1621,6 +1705,7 @@ def run_delegated_pass(
     removal_pause_s: float | None = None,
     should_stop: Callable[[], bool] | None = None,
     only: Iterable[str] | None = None,
+    content_only: Iterable[str] | None = None,
 ) -> DelegatedResult:
     """One scan-and-remove pass over the DELEGATED class.
 
@@ -1633,10 +1718,12 @@ def run_delegated_pass(
     asks, then applies with the SAME ``now`` and ``only=<previewed names>``, so
     a confirmed removal can never include a session the user was not shown (the
     parent class's ``apply_cleanup`` invariant). Every rule is still
-    re-evaluated at removal. The CONTENT phase is NOT confined by ``only``:
-    its rows are exactly what the preview showed for the sessions that stay,
-    and confining it to the removed names would silently drop the reclaims the
-    operator was shown.
+    re-evaluated at removal. ``content_only`` is the CONTENT phase's own
+    confinement (review F4): the CLI passes the preview's would-reclaim names,
+    so a confirmed content reclaim can never include a pad the operator was not
+    shown — a pad whose guard cleared since the preview is reclaimed on a later
+    pass, and shown then. ``None`` leaves the phase unconfined (startup passes,
+    tests).
     """
     # Resolved at CALL time so the module constants are the tuning surface (a
     # default bound at import would make them inert). ``budget_s=UNBOUNDED`` is
@@ -1847,6 +1934,12 @@ def run_delegated_pass(
     if content_runs:
         removed_names = {row.session for row in result.removed}
         content_pool = [cand for cand in scan.candidates if cand.path.name not in removed_names]
+        if content_only is not None:
+            # The preview's own set (review F4): an apply reclaims from exactly
+            # the pads the operator was shown, never a pad that became eligible
+            # between the preview and the confirmation.
+            wanted_content = set(content_only)
+            content_pool = [cand for cand in content_pool if cand.path.name in wanted_content]
         content_position = 0
         content_failed = 0
         content_in_batch = 0

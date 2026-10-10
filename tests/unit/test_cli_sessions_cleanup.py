@@ -455,3 +455,44 @@ def test_a_worktree_row_says_its_removal_is_a_git_worktree_remove() -> None:
         classes=("stale output",),
     )
     assert "worktree remove" not in _content_row_text(plain, "will reclaim")
+
+
+def test_a_two_bundle_row_lists_both_rescues() -> None:
+    row = dr.ContentRow(
+        session="abcdef123456",
+        reason="merged-clean clone past the window",
+        bytes=2048,
+        entries=6,
+        classes=("merged-clean clone",),
+        rescue_bundle="/pads/reap-rescue-clone-a.bundle",
+        rescue_bundle_bytes=11,
+        rescue_bundles=("/pads/reap-rescue-clone-a.bundle", "/pads/reap-rescue-clone-b.bundle"),
+    )
+    text = _content_row_text(row, "would reclaim")
+    assert "rescue bundles reap-rescue-clone-a.bundle, reap-rescue-clone-b.bundle" in text
+
+
+def test_apply_confines_content_to_the_previewed_pads(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator import cli as cli_module
+
+    pad_x = _content_pad(store, "content-kid-06")
+    big_x = _big_log(pad_x / "desktop-suite.log")
+    grown: list[Path] = []
+    original = cli_module._print_content
+
+    def mutate(delegated: Any, verb: str) -> None:
+        original(delegated, verb)
+        # A pad that becomes eligible AFTER the preview (the preview's own rows
+        # were computed before this runs). The apply must not ride it in.
+        if not grown:
+            pad_y = _content_pad(store, "content-kid-07")
+            grown.append(_big_log(pad_y / "sibling-fail.log"))
+
+    monkeypatch.setattr(cli_module, "_print_content", mutate)
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "reclaimed scratchpad content from 1 session(s)" in out
+    assert not big_x.exists(), "the previewed pad is reclaimed"
+    assert grown and grown[0].exists(), "a pad that became eligible after the preview is not"

@@ -1692,6 +1692,189 @@ def test_evidence_paths_are_never_taken_by_the_shape_arm(root: Path) -> None:
     assert any("docs/evidence/bundle.tar.gz: evidence path" in r for r in reasons)
 
 
+def _head_sha(repo: Path) -> str:
+    """The commit ``repo``'s HEAD points at (for tip-recovery assertions)."""
+    done = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **_GIT},
+        timeout=60,
+    )
+    return done.stdout.strip()
+
+
+def test_two_reclaimable_clones_get_one_bundle_each_and_both_tips_recover(
+    root: Path,
+) -> None:
+    # Review F1: with ONE bundle slot per pad, the second tree's unique refs
+    # were silently dropped and both trees removed. Per-tree bundles make each
+    # tip recoverable from its own bundle, and each tree goes only after ITS
+    # bundle verifies.
+    pad = _kept_pad(root, "two-clones")
+    tips: dict[str, str] = {}
+    for name in ("clone-a", "clone-b"):
+        tree = _merged_tree(pad, name, root)
+        _git(tree, "checkout", "-qb", "stray")
+        (tree / f"{name}.txt").write_text(f"{name}\n")
+        _git(tree, "add", f"{name}.txt")
+        _git(tree, "commit", "-qm", "stray")
+        tips[name] = _head_sha(tree)
+        _git(tree, "checkout", "-q", "main")
+    result = _pass(root)
+    assert not (pad / "clone-a").exists() and not (pad / "clone-b").exists()
+    a = pad / "reap-rescue-clone-a.bundle"
+    b = pad / "reap-rescue-clone-b.bundle"
+    assert a.exists() and b.exists(), sorted(entry.name for entry in pad.iterdir())
+    assert result.errors == 0
+    assert result.content and len(result.content[0].rescue_bundles) == 2
+    for name, bundle in (("clone-a", a), ("clone-b", b)):
+        heads = _git_stdout("bundle", "list-heads", os.fspath(bundle))
+        assert "refs/heads/stray" in heads and tips[name] in heads
+        dest = root / f"recovered-{name}"
+        _git_stdout("clone", "-q", "-b", "stray", os.fspath(bundle), os.fspath(dest))
+        assert (dest / f"{name}.txt").read_text() == f"{name}\n"
+
+
+def test_a_tag_only_unique_commit_is_bundled_before_the_tree_goes(root: Path) -> None:
+    # Review F2: tags are durable refs. A tagged checkpoint whose branch was
+    # deleted was invisible to the walk, and the tree went with no bundle.
+    pad = _kept_pad(root, "tagged")
+    tree = _merged_tree(pad, "clone", root)
+    _git(tree, "checkout", "-qb", "checkpoint")
+    (tree / "keepme.txt").write_text("checkpoint\n")
+    _git(tree, "add", "keepme.txt")
+    _git(tree, "commit", "-qm", "checkpoint")
+    _git(tree, "tag", "keepme")
+    _git(tree, "checkout", "-q", "main")
+    _git(tree, "branch", "-qD", "checkpoint")
+    result = _pass(root)
+    assert not tree.exists()
+    bundle = pad / "reap-rescue-clone.bundle"
+    assert bundle.exists()
+    heads = _git_stdout("bundle", "list-heads", os.fspath(bundle))
+    assert "refs/tags/keepme" in heads
+    dest = root / "tag-recovered"
+    _git_stdout("clone", "-q", "-b", "keepme", os.fspath(bundle), os.fspath(dest))
+    assert (dest / "keepme.txt").read_text() == "checkpoint\n"
+    assert result.errors == 0
+
+
+def test_a_clone_with_registered_worktrees_is_kept_whole(root: Path) -> None:
+    # Review F3: the clone arm ignored worktree registrations, so removing the
+    # store destroyed the worktrees' objects (including a worktree the same
+    # pass kept). Fail closed: keep the clone, touch nothing.
+    pad = _kept_pad(root, "ownerpad")
+    owner = _merged_tree(pad, "owner", root)
+    inside = pad / "inside-wt"
+    outside = root / "worktrees" / "outside-wt"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    for target, label in ((inside, "inside"), (outside, "outside")):
+        _git(owner, "checkout", "-qb", f"tmp-{label}")
+        (owner / f"{label}.txt").write_text(f"{label}\n")
+        _git(owner, "add", f"{label}.txt")
+        _git(owner, "commit", "-qm", label)
+        sha = _head_sha(owner)
+        _git(owner, "checkout", "-q", "main")
+        _git(owner, "branch", "-qD", f"tmp-{label}")
+        _git(owner, "worktree", "add", "--detach", str(target), sha)
+    result = _pass(root)
+    assert owner.exists() and (owner / "a.txt").exists()
+    assert (inside / "inside.txt").exists() and (outside / "outside.txt").exists()
+    kept = [reason for session, reason in result.content_kept if session == "ownerpad"]
+    assert any(reason.startswith("owner: has registered worktrees") for reason in kept), kept
+    assert any(reason.startswith("inside-wt: HEAD is not merged") for reason in kept), kept
+    assert result.content == []
+
+
+def test_content_only_confines_the_phase_to_the_previewed_names(root: Path) -> None:
+    # Review F4: the apply re-runs the pass, so without confinement a pad that
+    # became eligible after the preview would be reclaimed unseen.
+    for name in ("pad-a", "pad-b"):
+        pad = _kept_pad(root, name)
+        _stale_file(pad / "desktop-suite.log")
+    preview = _pass(root, dry_run=True)
+    assert sorted(row.session for row in preview.content) == ["pad-a", "pad-b"]
+    result = _pass(root, content_only=["pad-a"])
+    assert [row.session for row in result.content] == ["pad-a"]
+    assert not (root / "sessions" / "pad-a" / "scratchpad" / "desktop-suite.log").exists()
+    assert (root / "sessions" / "pad-b" / "scratchpad" / "desktop-suite.log").exists()
+
+
+def test_an_entry_cap_abort_keeps_the_pad_and_counts_an_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pad = _kept_pad(root, "capped")
+    log = _stale_file(pad / "desktop-suite.log")
+    for index in range(5):
+        (pad / f"note-{index}.txt").write_text("x\n")
+    monkeypatch.setattr(dr, "CONTENT_MAX_ENTRIES", 3)
+    result = _pass(root)
+    assert log.exists(), "an aborted pad takes nothing"
+    assert result.errors == 1
+    assert any("more than 3 entries" in reason for _, reason in result.content_kept)
+
+
+def test_a_repo_cap_abort_keeps_the_pad_and_counts_an_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pad = _kept_pad(root, "repocap")
+    tree = _merged_tree(pad, "clone", root)
+    _git(tree, "checkout", "-qb", "stray")
+    (tree / "b.txt").write_text("b\n")
+    _git(tree, "add", "b.txt")
+    _git(tree, "commit", "-qm", "two")
+    _git(tree, "checkout", "-q", "main")
+    monkeypatch.setattr(dr, "CONTENT_MAX_REPOS", 0)
+    result = _pass(root)
+    assert tree.exists()
+    assert result.errors == 1
+    assert any("more than 0 git repositories" in reason for _, reason in result.content_kept)
+
+
+def test_an_unreadable_subtree_aborts_the_pad_and_takes_nothing(root: Path) -> None:
+    pad = _kept_pad(root, "lockedpad")
+    log = _stale_file(pad / "desktop-suite.log")
+    locked = pad / "locked-dir"
+    locked.mkdir()
+    (locked / "inner.txt").write_text("x\n")
+    os.chmod(locked, 0)
+    try:
+        result = _pass(root)
+    finally:
+        os.chmod(locked, 0o755)
+    assert log.exists(), "an aborted pad takes nothing"
+    assert result.errors == 1
+    assert any("cannot be read" in reason for _, reason in result.content_kept)
+
+
+def test_a_spent_budget_stops_the_content_loop_between_batches(root: Path) -> None:
+    for name in ("budget-a", "budget-b"):
+        pad = _kept_pad(root, name)
+        _stale_file(pad / "desktop-suite.log")
+    result = _pass(root, batch_size=1, budget_s=0.0)
+    assert [row.session for row in result.content] == ["budget-a"]
+    assert result.content_budget_exhausted is True
+    assert result.content_remaining == 1
+    assert not (root / "sessions" / "budget-a" / "scratchpad" / "desktop-suite.log").exists()
+    assert (root / "sessions" / "budget-b" / "scratchpad" / "desktop-suite.log").exists()
+
+
+def test_the_content_guard_re_stat_mirrors_rule_six(root: Path) -> None:
+    # Review N1: a session that moved AFTER the scan is inside the window
+    # again — the content guard must re-read the clock like the record pass's
+    # rule 6, not trust the scan's snapshot.
+    directory = _mk(root, "moved", origin="subagent", age_h=100)
+    transcript = directory / "transcript.jsonl"
+    os.utime(transcript, (NOW, NOW))
+    cand = dr._Cand(directory, clock=NOW - 100 * HOUR, has_transcript=True)
+    reason = dr._content_guard(
+        cand, config_dir=root, now=NOW, cutoff=NOW - 48 * HOUR, live_resolved=None
+    )
+    assert reason == "active since the scan"
+
+
 def test_content_of_a_young_session_is_never_evaluated(root: Path) -> None:
     young = _mk(root, "young", age_h=1)
     pad = young / "scratchpad"
