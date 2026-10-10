@@ -60,6 +60,10 @@ from typing import TYPE_CHECKING, Any, Callable
 import yaml
 
 from local_operator import keymap as _keymap
+from local_operator.i18n import catalogues as _catalogues
+from local_operator.i18n import runtime as _i18n_runtime
+from local_operator.i18n.keys import wire_settings as _ws
+from local_operator.i18n.messages import Msg as _Msg
 from local_operator.model.effort import EFFORT_ORDER, SUPPORTED_EFFORTS
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
@@ -73,6 +77,36 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
 
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Registry copy: rendered through the i18n runtime
+# ---------------------------------------------------------------------------
+#
+# The registry's user-facing strings live in the `wire.settings` catalogue
+# (RFC §2.2); the module renders them at import through the local runtime.
+# Resolution is PINNED to `en`, and that is not a shortcut: the shipped locale
+# set is en-only while the program ships dark (RFC §9 P1), so a full resolution
+# and this pin agree byte-for-byte today. When the translation waves land, the
+# re-resolution point is this helper (and the clients, which render the served
+# catalogue by key per §2.6).
+#
+# ONE catalogue read at import, not one per message: the registry builds ~740
+# strings and a read-per-string would put ~740 file parses on the CLI's
+# import path. A broken wheel (catalogue missing/invalid) degrades the way
+# `messages.render` does — each string resolves to its own message code —
+# rather than making `lop --help` impossible.
+try:
+    _WIRE_SETTINGS_SOURCES: dict[str, str] = _catalogues.load_catalogue("en", "wire.settings")
+except Exception:  # pragma: no cover - a wheel without the catalogue is broken
+    _WIRE_SETTINGS_SOURCES = {}
+
+
+def _t(message: _Msg) -> str:
+    """The resolved string for a generated `wire.settings` message."""
+    source = _WIRE_SETTINGS_SOURCES.get(message.code)
+    if source is None:
+        return message.code
+    return _i18n_runtime.render_message(source, dict(message.params), "en")
 
 
 class ConfigUnreadableError(Exception):
@@ -315,10 +349,9 @@ SECTIONS: tuple[Section, ...] = (
     # edits, but only an explicit local /model action may select for an owner.
     Section(
         "model",
-        "Model",
+        _t(_ws.model_title()),
         Scope.NEW_SESSIONS,
-        "Provider, model and reasoning effort for new conversations. "
-        "Existing sessions keep their model; /model saved adopts the default here.",
+        _t(_ws.model_description()),
     ),
     # Split out of ``model`` (review round 1, M3). The design left this key in
     # ``model`` and proposed documenting the discrepancy, which was defensible
@@ -342,9 +375,9 @@ SECTIONS: tuple[Section, ...] = (
         # right when this section held one row, but M6 moved the Anthropic
         # cache-TTL key in beside it, so an OpenAI-specific title would now
         # mislabel half the section.
-        "Wire protocol",
+        _t(_ws.providers_title()),
         Scope.LIVE,
-        "How direct provider connections are made: API surface and cache TTL.",
+        _t(_ws.providers_description()),
     ),
     # The OpenRouter chat-completions ``provider`` routing object has its own
     # section rather than living under "Wire protocol" (design round 1, D1):
@@ -359,24 +392,24 @@ SECTIONS: tuple[Section, ...] = (
     # edit lands on the next call — no ``/new``, no relaunch.
     Section(
         "openrouter",
-        "OpenRouter routing",
+        _t(_ws.openrouter_title()),
         Scope.LIVE,
-        "How OpenRouter picks a host; unset = sticky routing.",
+        _t(_ws.openrouter_description()),
     ),
     # LIVE: every ``retry.*`` key routes through ``RetrySettings.from_settings``
     # PER CALL on the mapping ``SessionStreamFn`` holds, and the config watcher
     # rebinds that mapping on every change (``SessionStreamFn.apply_settings``).
     Section(
         "failover",
-        "Failover and retry",
+        _t(_ws.failover_title()),
         Scope.LIVE,
-        "What happens when a provider call fails or a quota runs out.",
+        _t(_ws.failover_description()),
     ),
     Section(
         "appearance",
-        "Appearance",
+        _t(_ws.appearance_title()),
         Scope.LIVE,
-        "Theme and the terminal features the TUI is allowed to use.",
+        _t(_ws.appearance_description()),
     ),
     # Its own section rather than a pair of rows under ``appearance``. Scope
     # does not force the split — ``appearance`` is LIVE too — but the section
@@ -387,10 +420,9 @@ SECTIONS: tuple[Section, ...] = (
     # distraction on half their rows.
     Section(
         "keymap",
-        "Hotkeys",
+        _t(_ws.keymap_title()),
         Scope.LIVE,
-        "Keys for starting and resuming conversations. Press enter on a row, "
-        "then press the key you want.",
+        _t(_ws.keymap_description()),
     ),
     # LIVE — the SCOPE is right (a config write reaches every running session
     # within a poll) and the description below carries the key's one caveat, so
@@ -422,12 +454,9 @@ SECTIONS: tuple[Section, ...] = (
     # the session loosens).
     Section(
         "approvals",
-        "Approvals",
+        _t(_ws.approvals_title()),
         Scope.LIVE,
-        "Whether write and command tools prompt, in every running session. A config "
-        "write tightens every running session at once; loosening one needs a write "
-        "from that session's own process (/approvals auto in it, or a /settings page "
-        "in that process).",
+        _t(_ws.approvals_description()),
     ),
     # NEW_LAUNCH, honestly: ``auto_save_conversation`` is read ONCE by the CLI
     # at process start (``cli.py`` sets ``args.train``) to pick the transcript
@@ -439,12 +468,12 @@ SECTIONS: tuple[Section, ...] = (
     # which nothing did.
     Section(
         "session",
-        "Session storage",
+        _t(_ws.session_title()),
         Scope.NEW_LAUNCH,
         # The scope tag one column away already says "takes effect: new
         # launch", so restating "read once at launch" here said "launch" twice
         # within one row (design round 1, D7).
-        "Autosave. The cleanup policies have their own sections below.",
+        _t(_ws.session_description()),
     ),
     # The two cleanup CLASSES, each its own section so each gets its own header
     # on every surface (the TUI paints the title; the desktop paints the title
@@ -458,10 +487,9 @@ SECTIONS: tuple[Section, ...] = (
     # and never by a ``/new``.
     Section(
         "session_cleanup",
-        "Your conversations",
+        _t(_ws.session_cleanup_title()),
         Scope.NEW_LAUNCH,
-        "Session cleanup for the conversations you started and the workstreams "
-        "in your sidebar. Off by default; nothing here runs until you switch it on.",
+        _t(_ws.session_cleanup_description()),
     ),
     Section(
         "session_delegated",
@@ -470,14 +498,9 @@ SECTIONS: tuple[Section, ...] = (
         # silently lost its "takes effect: new launch" tag (found in the
         # rendered frame). The longer phrase lives in the description (desktop)
         # and in the rows' help (TUI paints no section description).
-        "Delegated work",
+        _t(_ws.session_delegated_title()),
         Scope.NEW_LAUNCH,
-        "Delegated work: subagent and background-session transcripts and their "
-        "scratch folders. "
-        "On by default: they are removed after the age below. Your conversations, "
-        "sidebar workstreams, anything running, waiting on a wake or monitor, "
-        "linked to an open project, still in use by an active parent, or holding "
-        "unpushed or uncommitted git work are kept.",
+        _t(_ws.session_delegated_description()),
     ),
     # LIVE: ``max_running`` is pushed into the running ``AsyncJobManager`` by
     # ``Session._apply_config_change`` (raising it lets the next launch through;
@@ -487,10 +510,9 @@ SECTIONS: tuple[Section, ...] = (
     # tool-argument refusal itself.
     Section(
         "subagents",
-        "Subagents",
+        _t(_ws.subagents_title()),
         Scope.LIVE,
-        "Concurrency cap, child knowledge slimming, who picks a child's model, "
-        "and the model each tier runs on.",
+        _t(_ws.subagents_description()),
     ),
     # NEW_SESSIONS, and the scope is a statement about the CONSUMER: the
     # classification service is built per session (``ClassificationService`` is
@@ -513,33 +535,30 @@ SECTIONS: tuple[Section, ...] = (
         # for (design round 2, D11). The runtime used to have its own message as
         # well ("Suggestion added…"); that line is deleted — the layer is silent
         # in the chat — so the title is now the only name on screen.
-        "Smart hints",
+        _t(_ws.classification_title()),
         Scope.NEW_SESSIONS,
-        "Advisory skills, guides and MCP servers a decision model may suggest "
-        "per message. Off keeps the prompt unchanged.",
+        _t(_ws.classification_description()),
     ),
     Section(
         "supplements",
         # The user-facing name is "Highlights" (memo §0 "The names").
-        "Highlights",
+        _t(_ws.supplements_title()),
         # NEW_SESSIONS: the runner is built once per runtime handle and reads a SNAPSHOT
         # of this section AT BUILD (docs/design/turn-supplements.md §2.12; the read is in
         # ``SupplementRunner.__init__``), so an edit lands on the next session. Claiming
         # LIVE would be a painted lie.
         Scope.NEW_SESSIONS,
-        "After an answer, point out the files it produced and, when you turn it on, "
-        "draw a chart of numbers it showed. Off by environment: LOP_SUPPLEMENTS=0.",
+        _t(_ws.supplements_description()),
     ),
     Section(
         "monitor",
-        "Monitors",
+        _t(_ws.monitor_title()),
         # NEW_SESSIONS for the classification section's reason: the monitor
         # scheduler is built per session and handed a SNAPSHOT of this section
         # (docs/design/monitor-tool.md §16), so an edit lands on the next
         # session start. Claiming LIVE would be a painted lie.
         Scope.NEW_SESSIONS,
-        "Delta-watching monitors: how often they check, how much they keep, "
-        "and when they give up.",
+        _t(_ws.monitor_description()),
     ),
     # Its own section rather than a row under "Session", and the reason is the
     # SCOPE: scope is uniform within a section by construction, "Session" is
@@ -549,7 +568,7 @@ SECTIONS: tuple[Section, ...] = (
     # warns about — split the section.
     Section(
         "runtime",
-        "Runtime",
+        _t(_ws.runtime_title()),
         Scope.LIVE,
         # WHERE THE CAVEAT ON THE TWO WARM-RUNTIME KEYS BELONGS (review round 1,
         # F6): the Scope enum is a statement about the KEYS, and a per-key
@@ -557,24 +576,23 @@ SECTIONS: tuple[Section, ...] = (
         # read. Both are read when a drain window is drawn, so an edit is
         # picked up by the next window — a runtime already inside one keeps
         # the window it drew.
-        "How sessions behave when you leave them. The warm-runtime knobs are "
-        "read when a runtime next draws its window.",
+        _t(_ws.runtime_description()),
     ),
     # LIVE: the session re-coerces its ``CompactionSettings`` on every change,
     # and all three trigger checks read that attribute at check time.
     Section(
         "compaction",
-        "Compaction",
+        _t(_ws.compaction_title()),
         Scope.LIVE,
-        "When the conversation is summarised to reclaim context.",
+        _t(_ws.compaction_description()),
     ),
     # LIVE: ``/fork`` reads these through the config manager at the moment it
     # runs, so an edit takes effect on the very next fork.
     Section(
         "fork",
-        "Fork",
+        _t(_ws.fork_title()),
         Scope.LIVE,
-        "Where /fork opens the branched conversation.",
+        _t(_ws.fork_description()),
     ),
     # The GATE comes first, then the knobs it gates (design review round 1,
     # D3): reading order is the hierarchy the user sees, and putting the
@@ -590,23 +608,23 @@ SECTIONS: tuple[Section, ...] = (
     # and rely on the per-call gate alone.
     Section(
         "web_tools",
-        "Web tools",
+        _t(_ws.web_tools_title()),
         Scope.LIVE,
-        "Whether the search and fetch tools are offered and allowed to run.",
+        _t(_ws.web_tools_description()),
     ),
     # LIVE: both tools build their settings from config on EVERY call
     # (``web_search/tool.py``, ``web_fetch/tool.py``).
     Section(
         "web_search",
-        "Web search",
+        _t(_ws.web_search_title()),
         Scope.LIVE,
-        "Providers and load balancing for the search tool.",
+        _t(_ws.web_search_description()),
     ),
     Section(
         "web_fetch",
-        "Web fetch",
+        _t(_ws.web_fetch_title()),
         Scope.LIVE,
-        "Limits and rendering for the fetch tool.",
+        _t(_ws.web_fetch_description()),
     ),
     # LIVE for the same reason as the two web sections: ``execute_bash`` reads
     # ``bash.shell`` through a fresh ``ConfigManager(config_dir())`` on EVERY
@@ -616,18 +634,18 @@ SECTIONS: tuple[Section, ...] = (
     # this is about how a tool executes, not how sessions behave.
     Section(
         "tools",
-        "Tools",
+        _t(_ws.tools_title()),
         Scope.LIVE,
-        "How the built-in tools execute.",
+        _t(_ws.tools_description()),
     ),
     # LIVE: ``hook_forwarding.native_hooks_enabled`` / ``forwarding_enabled``
     # read these through a fresh ``ConfigManager(config_dir())`` on every
     # finished tool call.
     Section(
         "hooks",
-        "Hooks",
+        _t(_ws.hooks_title()),
         Scope.LIVE,
-        "Run native and forwarded Claude Code / Codex PostToolUse hooks.",
+        _t(_ws.hooks_description()),
     ),
     # LIVE, and its own section, for the reason ``tools`` is LIVE: ``execute_bash``
     # reads these through a fresh ``ConfigManager(config_dir())`` per call, so an
@@ -638,10 +656,9 @@ SECTIONS: tuple[Section, ...] = (
     # agent's own command, never the runtime.
     Section(
         "memory_guard",
-        "Command memory limit",
+        _t(_ws.memory_guard_title()),
         Scope.LIVE,
-        "A per-command RAM ceiling, so one oversized command is killed instead of "
-        "taking the whole device down.",
+        _t(_ws.memory_guard_description()),
     ),
     # Its own section for the reason ``memory_guard`` has one, and LIVE for the
     # same reason: the reader is a fresh ``ConfigManager`` per ``bash`` call. It is
@@ -652,11 +669,9 @@ SECTIONS: tuple[Section, ...] = (
     # too wide).
     Section(
         "query_budget",
-        "Shell query budget",
+        _t(_ws.query_budget_title()),
         Scope.LIVE,
-        "Time budget for a shell query — a grep/find/du walk rather than a build or "
-        "an install: an advisory at 10 s, and a stop at the budget so one search "
-        "cannot spend minutes of a turn.",
+        _t(_ws.query_budget_description()),
     ),
     # Split out of ``tools`` (review round 1, M2), for the reason the module's
     # own history gives for ``providers`` and ``web_tools``: scope is uniform
@@ -665,18 +680,15 @@ SECTIONS: tuple[Section, ...] = (
     # policy the agent's own shell can weaken between two commands.
     Section(
         "shell_environment",
-        "Agent shell",
+        _t(_ws.shell_environment_title()),
         Scope.NEW_LAUNCH,
-        "What a command the agent runs can see. Resolved once per session, so an "
-        "edit here applies at the next launch and cannot weaken a session that is "
-        "already running.",
+        _t(_ws.shell_environment_description()),
     ),
     Section(
         "local_providers",
-        "Local servers",
+        _t(_ws.local_providers_title()),
         Scope.NEW_SESSIONS,
-        "Server endpoints and exact-model metadata. Use /login to connect; "
-        "reselect with /model saved to apply model changes.",
+        _t(_ws.local_providers_description()),
     ),
     # LIVE: the click handler is a FRESH PROCESS every time it runs
     # (``lop resume-click`` is spawned by the notification), so it reads config
@@ -685,20 +697,18 @@ SECTIONS: tuple[Section, ...] = (
     # NEW_SESSIONS like the knobs that gate a session's construction.
     Section(
         "desktop",
-        "Desktop app",
+        _t(_ws.desktop_title()),
         Scope.LIVE,
-        "Where a notification click sends you when the desktop app is not running.",
+        _t(_ws.desktop_description()),
     ),
     # The static file routes' served roots (``server/utils/static_roots.py``).
     # LIVE: the roots are rebuilt from the config on every request, so an edit
     # lands on the next thumbnail or preview with no restart.
     Section(
         "static",
-        "File previews",
+        _t(_ws.static_title()),
         Scope.LIVE,
-        "Extra directories the local server may serve image, audio, video and HTML "
-        "previews from. The agent home, session folders, uploads and the working "
-        "directories of your agents and running sessions are always included.",
+        _t(_ws.static_description()),
     ),
     # NEW_LAUNCH, honestly: the audit keys are read when the audit WRITER is built,
     # and the writer is built once per relay process (``AuditLog.from_config``);
@@ -709,12 +719,9 @@ SECTIONS: tuple[Section, ...] = (
     # lands, not when the user would like it to.
     Section(
         "network",
-        "Mesh network",
+        _t(_ws.network_title()),
         Scope.NEW_LAUNCH,
-        "Where this device listens, what it tells peers to dial, and the bounds for "
-        "`lop network`: audit retention, how many unauthenticated connections the "
-        "relay will hold at once, session-copy cadence and how long a borrowed login "
-        "lives. All take effect when the relay restarts.",
+        _t(_ws.network_description()),
     ),
     # The Aida keys. Scope LIVE, with the caveats stated in the description
     # rather than hidden behind a dishonest label: the pause flag is delivered
@@ -725,12 +732,9 @@ SECTIONS: tuple[Section, ...] = (
     # sentence a user needs before pressing Enter is written there.
     Section(
         "aida",
-        "Aida",
+        _t(_ws.aida_title()),
         Scope.LIVE,
-        "Your chief of staff: her display name, and the proactive cadence — "
-        "when she checks in, how much she may escalate, and the pause switch. "
-        "The name applies everywhere at once; edits are read at her next "
-        "action, and /aida pause|resume act immediately.",
+        _t(_ws.aida_description()),
     ),
     # The hub keys. LIVE is honest here: the update runner re-reads the mapping
     # on every tick (and every interval sleep), so an edit lands within one tick.
@@ -739,12 +743,9 @@ SECTIONS: tuple[Section, ...] = (
     # from merging, so "manual" never means "blind".
     Section(
         "hub",
-        "Agent Hub",
+        _t(_ws.hub_title()),
         Scope.LIVE,
-        "Keep agents and teams you pulled from the Agent Hub current: whether "
-        "updates are merged in automatically, how often the hub is checked, and "
-        "which model resolves a conflict. Your edits and deletions are merged, "
-        "never overwritten.",
+        _t(_ws.hub_description()),
     ),
     # The agents key. NEW_LAUNCH, honestly: its one consumer is the startup
     # seed-update pass, which reads it under the config-migration seam at each
@@ -754,12 +755,9 @@ SECTIONS: tuple[Section, ...] = (
     # split the hub's auto-update switches use.
     Section(
         "agents",
-        "Agents",
+        _t(_ws.agents_title()),
         Scope.NEW_LAUNCH,
-        "Whether installed starter roles (reviewer, coder, aida, ...) update "
-        "themselves to the packaged text at launch when you have not edited "
-        "them. Off = updates are still reported; apply them with 'lop agents "
-        "sync'.",
+        _t(_ws.agents_description()),
     ),
     # The projects store's own knobs. LIVE because the staleness window is
     # resolved at each staleness computation (the badge, the tool rows, the
@@ -768,11 +766,9 @@ SECTIONS: tuple[Section, ...] = (
     # for a running session that is its next listing or turn-end.
     Section(
         "projects",
-        "Projects",
+        _t(_ws.projects_title()),
         Scope.LIVE,
-        "Project records: how long a tracked project may go without a progress "
-        "line before it reads stale and is worth a check-in. Read at the next "
-        "staleness computation.",
+        _t(_ws.projects_description()),
     ),
     # The generic wake-trigger mechanism (``local_operator/wakes/triggers/``).
     # LIVE: the evaluation pass re-reads the published snapshot every ~5
@@ -780,12 +776,9 @@ SECTIONS: tuple[Section, ...] = (
     # next evaluation; nothing here needs a relaunch or a /new.
     Section(
         "wakes",
-        "Wake triggers",
+        _t(_ws.wakes_title()),
         Scope.LIVE,
-        "When a watched condition goes stale, the assistant is woken to check "
-        "in rather than left to wait for the daily cadence: the master switch, "
-        "the per-day budget and spacing, and which sources may fire. Read at "
-        "the next evaluation pass.",
+        _t(_ws.wakes_description()),
     ),
     # The proactive CLASS's own bounds (R29–R38). Scope LIVE is the honest
     # label here for once: every key is read at the moment a patience wait
@@ -793,11 +786,9 @@ SECTIONS: tuple[Section, ...] = (
     # lands on the next wait even in a running session.
     Section(
         "proactive",
-        "Proactive class",
+        _t(_ws.proactive_title()),
         Scope.LIVE,
-        "Bounds for the proactive agent class: how long a hidden patience wait "
-        "defaults to, how it backs off across re-attempts, and when a cycle "
-        "must end. Read at the moment a wait is armed or fires.",
+        _t(_ws.proactive_description()),
     ),
     # The speak-aloud voicing dials (design note §1). One section, LIVE: the
     # descriptor is built per request, so an edit changes the next spoken
@@ -807,18 +798,15 @@ SECTIONS: tuple[Section, ...] = (
     # doing one thing.
     Section(
         "speech",
-        "Speech voicing",
+        _t(_ws.speech_title()),
         Scope.LIVE,
-        "How the assistant sounds when it speaks aloud. The descriptor is sent "
-        "to the hub, which maps it onto whichever voice provider serves; "
-        "fields a provider cannot express degrade with a note rather than "
-        "failing. Read on the next spoken message.",
+        _t(_ws.speech_description()),
     ),
     Section(
         "retired",
-        "Retired",
+        _t(_ws.retired_title()),
         Scope.NEW_LAUNCH,
-        "Keys that are read but no longer do anything.",
+        _t(_ws.retired_description()),
     ),
 )
 
@@ -878,6 +866,13 @@ REJECTION_VALUE_SEP = " — "
 ADVICE_NOT_FOUND = "does not exist; clicks open a terminal. Clear this to discover the app."
 ADVICE_NOT_EXECUTABLE = "not executable; clicks open a terminal. Clear this to discover the app."
 ADVICE_NOT_ON_PATH = "not on PATH; clicks open a terminal. Clear this to discover the app."
+#: RESIDUAL COPY / OWNER (S1 extraction, review round 2): these three constants,
+#: :data:`REJECTION_VALUE_SEP` above and this module's ``raise ValueError``
+#: prose stay LITERAL by decision — they are rejection/envelope copy, invisible
+#: to the ratchet's sinks (concatenation and ``raise`` are its documented blind
+#: spot), and they render as /settings rejection feedback and 4xx details.
+#: Owner: the wire.errors slice (error-envelope migration; RFC §1.2 already
+#: names :func:`split_value_rejection` as a precondition consumer).
 
 #: Whether this process is on Windows, read ONCE as a module constant.
 #:
@@ -1106,7 +1101,7 @@ def _windows_command_is_runnable(executable: str) -> bool:
 
 
 def _bool_choices(on: str, off: str) -> tuple[Choice, ...]:
-    return (Choice(True, "on", on), Choice(False, "off", off))
+    return (Choice(True, _t(_ws.bool_on()), on), Choice(False, _t(_ws.bool_off()), off))
 
 
 @functools.cache
@@ -1189,13 +1184,13 @@ _EFFORT_LEVEL_HELP: dict[str, str] = {
     # named the one row that costs the least, in a picker where the row directly
     # above it is `auto`. A description has one job here — say what the member
     # means — and the ladder's cheapest end is not the place to sell.
-    "none": "reasoning off",
-    "minimal": "the least reasoning the model offers",
-    "low": "light reasoning",
-    "medium": "moderate reasoning",
-    "high": "deep reasoning",
-    "xhigh": "very deep reasoning",
-    "max": "the model's deepest reasoning",
+    "none": _t(_ws.model_effort_choice_none_description()),
+    "minimal": _t(_ws.model_effort_choice_minimal_description()),
+    "low": _t(_ws.model_effort_choice_low_description()),
+    "medium": _t(_ws.model_effort_choice_medium_description()),
+    "high": _t(_ws.model_effort_choice_high_description()),
+    "xhigh": _t(_ws.model_effort_choice_xhigh_description()),
+    "max": _t(_ws.model_effort_choice_max_description()),
 }
 
 
@@ -1217,7 +1212,11 @@ def _effort_choices() -> tuple[Choice, ...]:
     no-model setup state.
     """
     return (
-        Choice("", "auto", "the model's own default"),
+        Choice(
+            "",
+            _t(_ws.model_effort_choice_unset_label()),
+            _t(_ws.model_effort_choice_unset_description()),
+        ),
         *(Choice(level, level, _EFFORT_LEVEL_HELP.get(level, "")) for level in EFFORT_ORDER),
     )
 
@@ -1257,8 +1256,8 @@ def _bash_shell_help(windows: bool) -> str:
     here, and the refusal's install hint is where a user reads the product name.
     """
     if windows:
-        return "Interpreter for the bash tool. Empty: bash on PATH, else Git's bash.exe."
-    return "Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh."
+        return _t(_ws.bash_shell_help_windows())
+    return _t(_ws.bash_shell_help())
 
 
 #: This host's spelling, baked into the row below at import.
@@ -1408,7 +1407,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="hosting",
         path=("hosting",),
         section="model",
-        label="Default provider",
+        label=_t(_ws.hosting_label()),
         kind=Kind.TEXT,
         default="",
         # 72 cells. Every help string on this page has to clear the ~76-cell
@@ -1416,25 +1415,25 @@ SETTINGS: tuple[Setting, ...] = (
         # key path (the thing a user maps a row to the file by) and then the
         # sentence itself is clipped mid-clause with no ellipsis (design round
         # 1, D2). Measure any edit to these four before landing it.
-        help="Provider for new conversations. /model saved adopts it here.",
+        help=_t(_ws.hosting_help()),
         empty_unsets=True,
     ),
     Setting(
         key="model_name",
         path=("model_name",),
         section="model",
-        label="Default model",
+        label=_t(_ws.model_name_label()),
         kind=Kind.TEXT,
         default="",
         # 72 cells — see the note on `hosting` above.
-        help="Model for new conversations. /model saved adopts it here.",
+        help=_t(_ws.model_name_help()),
         empty_unsets=True,
     ),
     Setting(
         key="model_effort",
         path=("model_effort",),
         section="model",
-        label="Default reasoning effort",
+        label=_t(_ws.model_effort_label()),
         kind=Kind.ENUM,
         # "" is the unset member: the stored empty string means "no opinion"
         # (the model's own default), exactly like `providers.openrouter.sort`.
@@ -1450,7 +1449,7 @@ SETTINGS: tuple[Setting, ...] = (
         # model's own default` recovers 4 cells; the clamp sentence the original
         # cut carried is documented in the README and named where it happens, on
         # the `/model default` receipt.
-        help="Effort for new conversations. Unset: the model's default.",
+        help=_t(_ws.model_effort_help()),
         choices=_effort_choices(),
     ),
     # -- providers ----------------------------------------------------------
@@ -1458,25 +1457,30 @@ SETTINGS: tuple[Setting, ...] = (
         key="providers.openai.use_max_context_window",
         path=("providers", "openai", "use_max_context_window"),
         section="providers",
-        label="Use maximum OpenAI context",
+        label=_t(_ws.providers_openai_use_max_context_window_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "Off: provider default. On: supported max. "
-            "Applies next request; compaction unchanged."
-        ),
+        help=(_t(_ws.providers_openai_use_max_context_window_help())),
     ),
     Setting(
         key="providers.openai.api",
         path=("providers", "openai", "api"),
         section="providers",
-        label="OpenAI API surface",
+        label=_t(_ws.providers_openai_api_label()),
         kind=Kind.ENUM,
         default="responses",
-        help="Direct OpenAI GPT-5 calls use the Responses API unless opted out.",
+        help=_t(_ws.providers_openai_api_help()),
         choices=(
-            Choice("responses", "responses", "the public Responses API (default)"),
-            Choice("chat_completions", "chat_completions", "explicit compatibility opt-out"),
+            Choice(
+                "responses",
+                _t(_ws.providers_openai_api_choice_responses_label()),
+                _t(_ws.providers_openai_api_choice_responses_description()),
+            ),
+            Choice(
+                "chat_completions",
+                _t(_ws.providers_openai_api_choice_chat_completions_label()),
+                _t(_ws.providers_openai_api_choice_chat_completions_description()),
+            ),
         ),
     ),
     Setting(
@@ -1489,13 +1493,10 @@ SETTINGS: tuple[Setting, ...] = (
         # Applying it live is harmless (it only affects the next client build),
         # so the honest label is the cheaper of the two fixes.
         section="providers",
-        label="Anthropic 1h cache above (tokens)",
+        label=_t(_ws.providers_anthropic_cache_ttl_1h_min_context_tokens_label()),
         kind=Kind.INT,
         default=150_000,
-        help=(
-            "Context size from which Anthropic requests use the 1-hour prompt-cache "
-            "TTL (2x write cost, survives idle gaps over 5 minutes). 0 disables."
-        ),
+        help=(_t(_ws.providers_anthropic_cache_ttl_1h_min_context_tokens_help())),
         minimum=0,
         maximum=10_000_000,
     ),
@@ -1531,42 +1532,51 @@ SETTINGS: tuple[Setting, ...] = (
         key="providers.openrouter.provider_affinity",
         path=("providers", "openrouter", "provider_affinity"),
         section="openrouter",
-        label="cache affinity",
+        label=_t(_ws.providers_openrouter_provider_affinity_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "Reuses the host that served the previous turn so the prompt cache "
-            "stays warm. Off = OpenRouter's price-weighted load balancing."
-        ),
+        help=(_t(_ws.providers_openrouter_provider_affinity_help())),
     ),
     Setting(
         key="providers.openrouter.sort",
         path=("providers", "openrouter", "sort"),
         section="openrouter",
-        label="routing policy",
+        label=_t(_ws.providers_openrouter_sort_label()),
         kind=Kind.ENUM,
         # "" is the unset member: the schema must know a stored empty string
         # means "no opinion", and the resolver treats it exactly like a missing
         # key. An ENUM member rather than `empty_unsets` so the page can show
         # the three real policies beside "default" as peers to pick between.
         default="",
-        help=(
-            "How OpenRouter ranks hosts for this call. May route away from the "
-            "host holding your warm prompt cache (a cold start on long "
-            "conversations); 'default' sends no preference at all."
-        ),
+        help=(_t(_ws.providers_openrouter_sort_help())),
         choices=(
-            Choice("", "default", "no preference — sticky routing stays on (warmest cache)"),
-            Choice("price", "price", "cheapest host first"),
-            Choice("throughput", "throughput", "highest tokens/sec first"),
-            Choice("latency", "latency", "lowest response latency first"),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_sort_choice_unset_label()),
+                _t(_ws.providers_openrouter_sort_choice_unset_description()),
+            ),
+            Choice(
+                "price",
+                _t(_ws.providers_openrouter_sort_choice_price_label()),
+                _t(_ws.providers_openrouter_sort_choice_price_description()),
+            ),
+            Choice(
+                "throughput",
+                _t(_ws.providers_openrouter_sort_choice_throughput_label()),
+                _t(_ws.providers_openrouter_sort_choice_throughput_description()),
+            ),
+            Choice(
+                "latency",
+                _t(_ws.providers_openrouter_sort_choice_latency_label()),
+                _t(_ws.providers_openrouter_sort_choice_latency_description()),
+            ),
         ),
     ),
     Setting(
         key="providers.openrouter.order",
         path=("providers", "openrouter", "order"),
         section="openrouter",
-        label="host order",
+        label=_t(_ws.providers_openrouter_order_label()),
         kind=Kind.LIST,
         default=[],
         # The consequence LEADS the detail line in the page's danger ink and is
@@ -1574,20 +1584,17 @@ SETTINGS: tuple[Setting, ...] = (
         # `default:` reset clause used to crowd it out exactly when the
         # dangerous value was stored (QA round 1 Q1 / design round 1 D2). The
         # help below stays SOFT faint ink so the two ranks read apart.
-        warning="disables sticky routing — prompt cache goes cold",
+        warning=_t(_ws.providers_openrouter_order_warning()),
         # Empty-first (design round 1, D3): empty is the default that must not
         # be disturbed, so the detail names what empty MEANS before the how-to.
-        help=(
-            "Empty = no opinion (sticky routing stays). Comma-separated host "
-            "slugs tried in this exact order."
-        ),
+        help=(_t(_ws.providers_openrouter_order_help())),
         # OPEN namespace — deliberately no `members`. OpenRouter owns the slug
         # vocabulary and grows it without notice (deepinfra, novita, regional
         # variants like google-vertex/us-east5), so a closed list would reject
         # hosts the upstream docs themselves use. Any non-empty slug token
         # validates; the placeholder seeds the common hosts without gating
         # the write.
-        placeholder="deepseek, groq, mistral, …",
+        placeholder=_t(_ws.providers_openrouter_order_placeholder()),
         # An empty routing order is "no opinion", not a validation error —
         # unlike web_search.providers, nothing breaks with zero entries.
         empty_unsets=True,
@@ -1596,39 +1603,31 @@ SETTINGS: tuple[Setting, ...] = (
         key="providers.openrouter.only",
         path=("providers", "openrouter", "only"),
         section="openrouter",
-        label="allowed hosts",
+        label=_t(_ws.providers_openrouter_only_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            "Empty = no opinion (sticky routing stays). Comma-separated "
-            "allow-list of host slugs; every other host is excluded — a "
-            "forced cold start if the warm host is not on it."
-        ),
+        help=(_t(_ws.providers_openrouter_only_help())),
         # Open namespace, same reason as `order` above.
-        placeholder="deepseek, groq, mistral, …",
+        placeholder=_t(_ws.providers_openrouter_only_placeholder()),
         empty_unsets=True,
     ),
     Setting(
         key="providers.openrouter.ignore",
         path=("providers", "openrouter", "ignore"),
         section="openrouter",
-        label="ignored hosts",
+        label=_t(_ws.providers_openrouter_ignore_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            "Empty = no opinion (sticky routing stays). Comma-separated "
-            "block-list of host slugs to omit (e.g. a host that is failing "
-            "right now) — may cost you the warm prompt cache."
-        ),
+        help=(_t(_ws.providers_openrouter_ignore_help())),
         # Open namespace, same reason as `order` above.
-        placeholder="deepseek, groq, mistral, …",
+        placeholder=_t(_ws.providers_openrouter_ignore_placeholder()),
         empty_unsets=True,
     ),
     Setting(
         key="providers.openrouter.allow_fallbacks",
         path=("providers", "openrouter", "allow_fallbacks"),
         section="openrouter",
-        label="fallbacks",
+        label=_t(_ws.providers_openrouter_allow_fallbacks_label()),
         # ENUM, not BOOL (design round 1, D5/N3): at the wire this is tri-state
         # — OpenRouter's own default is "fall through", the only meaningful
         # override is "fail instead", and the resolver omits the key entirely
@@ -1640,58 +1639,75 @@ SETTINGS: tuple[Setting, ...] = (
         # shows is what `lop config edit` accepts.
         kind=Kind.ENUM,
         default="",
-        help=(
-            "'default' sends nothing (OpenRouter falls through to another "
-            "host when the preferred one fails); 'false' fails rather than "
-            "fall through to a host outside your preferences."
-        ),
+        help=(_t(_ws.providers_openrouter_allow_fallbacks_help())),
         choices=(
-            Choice("", "default", "no preference — OpenRouter's default (fall through)"),
-            Choice("false", "false", "fail rather than fall through"),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_allow_fallbacks_choice_unset_label()),
+                _t(_ws.providers_openrouter_allow_fallbacks_choice_unset_description()),
+            ),
+            Choice(
+                "false",
+                _t(_ws.providers_openrouter_allow_fallbacks_choice_false_label()),
+                _t(_ws.providers_openrouter_allow_fallbacks_choice_false_description()),
+            ),
         ),
     ),
     Setting(
         key="providers.openrouter.require_parameters",
         path=("providers", "openrouter", "require_parameters"),
         section="openrouter",
-        label="require parameters",
+        label=_t(_ws.providers_openrouter_require_parameters_label()),
         # ENUM for the same tri-state reason as `allow_fallbacks`: False in a
         # BOOL read as "parameter dropping is off" while the wire truth is
         # "no preference sent"; "" restores the shared no-opinion `—`.
         kind=Kind.ENUM,
         default="",
-        help=(
-            "'true' restricts to hosts that support every parameter you send "
-            "(tools, structured output); 'default' lets OpenRouter silently "
-            "drop unsupported ones."
-        ),
+        help=(_t(_ws.providers_openrouter_require_parameters_help())),
         choices=(
-            Choice("", "default", "no preference — unsupported parameters may be dropped"),
-            Choice("true", "true", "only hosts that support every parameter"),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_require_parameters_choice_unset_label()),
+                _t(_ws.providers_openrouter_require_parameters_choice_unset_description()),
+            ),
+            Choice(
+                "true",
+                _t(_ws.providers_openrouter_require_parameters_choice_true_label()),
+                _t(_ws.providers_openrouter_require_parameters_choice_true_description()),
+            ),
         ),
     ),
     Setting(
         key="providers.openrouter.data_collection",
         path=("providers", "openrouter", "data_collection"),
         section="openrouter",
-        label="data collection",
+        label=_t(_ws.providers_openrouter_data_collection_label()),
         kind=Kind.ENUM,
         default="",
-        help=(
-            "'deny' excludes hosts that may train on or retain your prompts. "
-            "'default' sends no preference (OpenRouter's default: allow)."
-        ),
+        help=(_t(_ws.providers_openrouter_data_collection_help())),
         choices=(
-            Choice("", "default", "no preference sent"),
-            Choice("allow", "allow", "hosts may collect data"),
-            Choice("deny", "deny", "exclude hosts that collect data"),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_data_collection_choice_unset_label()),
+                _t(_ws.providers_openrouter_data_collection_choice_unset_description()),
+            ),
+            Choice(
+                "allow",
+                _t(_ws.providers_openrouter_data_collection_choice_allow_label()),
+                _t(_ws.providers_openrouter_data_collection_choice_allow_description()),
+            ),
+            Choice(
+                "deny",
+                _t(_ws.providers_openrouter_data_collection_choice_deny_label()),
+                _t(_ws.providers_openrouter_data_collection_choice_deny_description()),
+            ),
         ),
     ),
     Setting(
         key="providers.openrouter.zdr",
         path=("providers", "openrouter", "zdr"),
         section="openrouter",
-        label="zero data retention",
+        label=_t(_ws.providers_openrouter_zdr_label()),
         kind=Kind.ENUM,
         # ENUM, not BOOL (design round 1, D5): the wire key is tri-state —
         # absent means "no preference" (OpenRouter's default stands), `true`
@@ -1699,40 +1715,50 @@ SETTINGS: tuple[Setting, ...] = (
         # A BOOL had to fake the unset state as `off`, which read as "ZDR
         # disabled" beside ENUM rows showing `—` for the same state.
         default="",
-        help="'true': restrict to zero-data-retention endpoints. 'default': nothing sent.",
+        help=_t(_ws.providers_openrouter_zdr_help()),
         choices=(
-            Choice("", "default", "no preference sent"),
-            Choice("true", "true", "zero-data-retention endpoints only"),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_zdr_choice_unset_label()),
+                _t(_ws.providers_openrouter_zdr_choice_unset_description()),
+            ),
+            Choice(
+                "true",
+                _t(_ws.providers_openrouter_zdr_choice_true_label()),
+                _t(_ws.providers_openrouter_zdr_choice_true_description()),
+            ),
         ),
     ),
     Setting(
         key="providers.openrouter.enforce_distillable_text",
         path=("providers", "openrouter", "enforce_distillable_text"),
         section="openrouter",
-        label="distillable text",
+        label=_t(_ws.providers_openrouter_enforce_distillable_text_label()),
         # ENUM for the same tri-state reason as `zdr` directly above.
         kind=Kind.ENUM,
         default="",
-        help=(
-            "'true': restrict to endpoints whose text output may be "
-            "distilled. 'default': nothing sent."
-        ),
+        help=(_t(_ws.providers_openrouter_enforce_distillable_text_help())),
         choices=(
-            Choice("", "default", "no preference sent"),
-            Choice("true", "true", "distillable-text endpoints only"),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_enforce_distillable_text_choice_unset_label()),
+                _t(_ws.providers_openrouter_enforce_distillable_text_choice_unset_description()),
+            ),
+            Choice(
+                "true",
+                _t(_ws.providers_openrouter_enforce_distillable_text_choice_true_label()),
+                _t(_ws.providers_openrouter_enforce_distillable_text_choice_true_description()),
+            ),
         ),
     ),
     Setting(
         key="providers.openrouter.quantizations",
         path=("providers", "openrouter", "quantizations"),
         section="openrouter",
-        label="quantizations",
+        label=_t(_ws.providers_openrouter_quantizations_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            "Empty = no opinion. Comma-separated quantization levels the "
-            "served model may use (e.g. int8, fp8, mxfp4)."
-        ),
+        help=(_t(_ws.providers_openrouter_quantizations_help())),
         # CLOSED here (unlike the host lists): this vocabulary is a documented
         # finite set, not a growing upstream namespace. mxfp4/nvfp4/mxfp8 and
         # `unknown` are in the OpenRouter docs beside the classic levels
@@ -1751,14 +1777,14 @@ SETTINGS: tuple[Setting, ...] = (
             "mxfp8",
             "unknown",
         ),
-        placeholder="int8, fp8, mxfp4, …",
+        placeholder=_t(_ws.providers_openrouter_quantizations_placeholder()),
         empty_unsets=True,
     ),
     Setting(
         key="providers.openrouter.max_price",
         path=("providers", "openrouter", "max_price"),
         section="openrouter",
-        label="max price",
+        label=_t(_ws.providers_openrouter_max_price_label()),
         kind=Kind.TEXT,
         default="",
         # Example-first and short (design round 1, D4): the old prose pushed
@@ -1766,8 +1792,8 @@ SETTINGS: tuple[Setting, ...] = (
         # row the example IS the documentation. The empty editor ghosts the
         # same example; the four accepted field names are enumerated by the
         # validator's own rejection message.
-        help='{"prompt": 1, "completion": 2} — USD / million tokens',
-        placeholder='{"prompt": 1, "completion": 2}',
+        help=_t(_ws.providers_openrouter_max_price_help()),
+        placeholder=_t(_ws.providers_openrouter_max_price_placeholder()),
         empty_unsets=True,
         validate_value=_validate_openrouter_max_price,
     ),
@@ -1775,14 +1801,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="providers.openrouter.preferred_min_throughput",
         path=("providers", "openrouter", "preferred_min_throughput"),
         section="openrouter",
-        label="min throughput (tok/s)",
+        label=_t(_ws.providers_openrouter_preferred_min_throughput_label()),
         kind=Kind.FLOAT,
         default=0.0,
-        help=(
-            "Prefer hosts serving at least this many output tokens/sec "
-            "(p50). 0 sends no preference. A host below the bar is deprioritised, "
-            "which may cost you a warm prompt cache."
-        ),
+        help=(_t(_ws.providers_openrouter_preferred_min_throughput_help())),
         minimum=0.0,
         maximum=100_000.0,
     ),
@@ -1790,14 +1812,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="providers.openrouter.preferred_max_latency",
         path=("providers", "openrouter", "preferred_max_latency"),
         section="openrouter",
-        label="max latency (s)",
+        label=_t(_ws.providers_openrouter_preferred_max_latency_label()),
         kind=Kind.FLOAT,
         default=0.0,
-        help=(
-            "Prefer hosts whose time-to-first-token stays under this many "
-            "seconds (p50). 0 sends no preference. A host above the bar is "
-            "deprioritised, which may cost you a warm prompt cache."
-        ),
+        help=(_t(_ws.providers_openrouter_preferred_max_latency_help())),
         minimum=0.0,
         maximum=600.0,
     ),
@@ -1806,20 +1824,23 @@ SETTINGS: tuple[Setting, ...] = (
         key="retry.enabled",
         path=("retry", "enabled"),
         section="failover",
-        label="Retry failed calls",
+        label=_t(_ws.retry_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Retry a failed provider call before surfacing the error.",
-        choices=_bool_choices("retry with backoff", "fail on the first error"),
+        help=_t(_ws.retry_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.retry_enabled_choice_true_description()),
+            _t(_ws.retry_enabled_choice_false_description()),
+        ),
     ),
     Setting(
         key="retry.maxRetries",
         path=("retry", "maxRetries"),
         section="failover",
-        label="Max retries",
+        label=_t(_ws.retry_maxretries_label()),
         kind=Kind.INT,
         default=10,
-        help="Fast budget against a reachable provider (5xx, timeout).",
+        help=_t(_ws.retry_maxretries_help()),
         minimum=0,
         maximum=100,
     ),
@@ -1827,10 +1848,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="retry.baseDelayMs",
         path=("retry", "baseDelayMs"),
         section="failover",
-        label="Base delay (ms)",
+        label=_t(_ws.retry_basedelayms_label()),
         kind=Kind.INT,
         default=500,
-        help="First backoff step; later attempts grow from it.",
+        help=_t(_ws.retry_basedelayms_help()),
         minimum=0,
         maximum=60_000,
     ),
@@ -1838,10 +1859,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="retry.connectivityMaxRetries",
         path=("retry", "connectivityMaxRetries"),
         section="failover",
-        label="Connectivity retries",
+        label=_t(_ws.retry_connectivitymaxretries_label()),
         kind=Kind.INT,
         default=15,
-        help="Patient budget for a machine that went offline; distinct from max retries.",
+        help=_t(_ws.retry_connectivitymaxretries_help()),
         minimum=0,
         maximum=200,
     ),
@@ -1849,10 +1870,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="retry.connectivityBackoffCapMs",
         path=("retry", "connectivityBackoffCapMs"),
         section="failover",
-        label="Connectivity backoff cap (ms)",
+        label=_t(_ws.retry_connectivitybackoffcapms_label()),
         kind=Kind.INT,
         default=60_000,
-        help="Longest wait between connectivity retries.",
+        help=_t(_ws.retry_connectivitybackoffcapms_help()),
         minimum=1_000,
         maximum=600_000,
     ),
@@ -1860,43 +1881,49 @@ SETTINGS: tuple[Setting, ...] = (
         key="retry.modelFallback",
         path=("retry", "modelFallback"),
         section="failover",
-        label="Model fallback",
+        label=_t(_ws.retry_modelfallback_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Move to the next hop in the cascade when a model keeps failing.",
-        choices=_bool_choices("fall back to the next hop", "stay on the chosen model"),
+        help=_t(_ws.retry_modelfallback_help()),
+        choices=_bool_choices(
+            _t(_ws.retry_modelfallback_choice_true_description()),
+            _t(_ws.retry_modelfallback_choice_false_description()),
+        ),
     ),
     Setting(
         key="retry.usageAwareFallback",
         path=("retry", "usageAwareFallback"),
         section="failover",
-        label="Usage-aware fallback",
+        label=_t(_ws.retry_usageawarefallback_label()),
         kind=Kind.BOOL,
         default=False,
-        help="Switch before a quota runs out. Costs one quota request per user message.",
-        choices=_bool_choices("check quota at message boundaries", "only react to failures"),
+        help=_t(_ws.retry_usageawarefallback_help()),
+        choices=_bool_choices(
+            _t(_ws.retry_usageawarefallback_choice_true_description()),
+            _t(_ws.retry_usageawarefallback_choice_false_description()),
+        ),
     ),
     Setting(
         key="retry.usageAwareAccountPick",
         path=("retry", "usageAwareAccountPick"),
         section="failover",
-        label="Usage-aware account pick",
+        label=_t(_ws.retry_usageawareaccountpick_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "Start new sessions on the same-provider account with the most quota left, "
-            "read from the cached /usage report. Applies to sessions only."
+        help=(_t(_ws.retry_usageawareaccountpick_help())),
+        choices=_bool_choices(
+            _t(_ws.retry_usageawareaccountpick_choice_true_description()),
+            _t(_ws.retry_usageawareaccountpick_choice_false_description()),
         ),
-        choices=_bool_choices("prefer the least-loaded account", "spread by session hash only"),
     ),
     Setting(
         key="retry.usageReservePercent",
         path=("retry", "usageReservePercent"),
         section="failover",
-        label="Usage reserve (%)",
+        label=_t(_ws.retry_usagereservepercent_label()),
         kind=Kind.FLOAT,
         default=10.0,
-        help="Headroom below which an account counts as low; a running session stays on it.",
+        help=_t(_ws.retry_usagereservepercent_help()),
         minimum=0.0,
         maximum=100.0,
     ),
@@ -1904,16 +1931,16 @@ SETTINGS: tuple[Setting, ...] = (
         key="retry.fallbackChains",
         path=("retry", "fallbackChains"),
         section="failover",
-        label="Failover cascade",
+        label=_t(_ws.retry_fallbackchains_label()),
         kind=Kind.CASCADE,
         default={},
-        help="Ordered provider/model hops tried when a call keeps failing.",
+        help=_t(_ws.retry_fallbackchains_help()),
     ),
     Setting(
         key="retry.pinnedFallback",
         path=("retry", "pinnedFallback"),
         section="failover",
-        label="Pinned child fallback",
+        label=_t(_ws.retry_pinnedfallback_label()),
         # ENUM: the value space is two words this module owns, and the runtime
         # degrades any other shape to the default (see `RetrySettings.
         # from_settings`), so the page should offer exactly the two.
@@ -1939,20 +1966,17 @@ SETTINGS: tuple[Setting, ...] = (
         # `(announced)` lives in the help below, which paints in full on the
         # detail line's 93 cells at 100x30, and is the clause the overlong
         # predecessor clipped at every size.
-        help=(
-            "What a pinned child may fall back to: same-family hops only, or "
-            "any vendor (announced)."
-        ),
+        help=(_t(_ws.retry_pinnedfallback_help())),
         choices=(
             Choice(
                 "same-family",
-                "same family only",
-                "same vendor only",
+                _t(_ws.retry_pinnedfallback_choice_same_family_label()),
+                _t(_ws.retry_pinnedfallback_choice_same_family_description()),
             ),
             Choice(
                 "cross-family",
-                "allow cross-vendor",
-                "any vendor",
+                _t(_ws.retry_pinnedfallback_choice_cross_family_label()),
+                _t(_ws.retry_pinnedfallback_choice_cross_family_description()),
             ),
         ),
     ),
@@ -1961,7 +1985,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="tui.theme",
         path=("tui", "theme"),
         section="appearance",
-        label="Theme",
+        label=_t(_ws.tui_theme_label()),
         # ENUM, not TEXT: the value space is closed (the theme registry), so a
         # free-text field let the page accept a theme that does not exist and
         # then display a value the app was not using — `app.py` catches the
@@ -1979,7 +2003,7 @@ SETTINGS: tuple[Setting, ...] = (
         # rather than skipping (review round 1, M1).
         default="dark",
         choices_source=_theme_choices,
-        help="Colour ramp. /theme switches it live with an arrow-key preview.",
+        help=_t(_ws.tui_theme_help()),
         # The one previewing setting. `/theme` already browses with a live
         # arrow-key preview and restores on cancel, so this makes the settings
         # page offer the same affordance through the same live-apply path
@@ -1996,27 +2020,33 @@ SETTINGS: tuple[Setting, ...] = (
         key="display.shimmer",
         path=("display.shimmer",),
         section="appearance",
-        label="Shimmer animation",
+        label=_t(_ws.display_shimmer_label()),
         kind=Kind.BOOL,
         default=True,
-        help="The animated sheen on the working line.",
-        choices=_bool_choices("animate the working line", "static working line"),
+        help=_t(_ws.display_shimmer_help()),
+        choices=_bool_choices(
+            _t(_ws.display_shimmer_choice_true_description()),
+            _t(_ws.display_shimmer_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.narration",
         path=("display.narration",),
         section="appearance",
-        label="Mid-turn narration",
+        label=_t(_ws.display_narration_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Keep the agent's mid-turn narration in the transcript after its tool calls run.",
-        choices=_bool_choices("keep narration", "hide narration once tools run"),
+        help=_t(_ws.display_narration_help()),
+        choices=_bool_choices(
+            _t(_ws.display_narration_choice_true_description()),
+            _t(_ws.display_narration_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.reasoning",
         path=("display.reasoning",),
         section="appearance",
-        label="Live model reasoning",
+        label=_t(_ws.display_reasoning_label()),
         kind=Kind.BOOL,
         default=False,
         # ONE sentence, sized to the field rather than to the argument: the help
@@ -2030,94 +2060,121 @@ SETTINGS: tuple[Setting, ...] = (
         # where it has room. The trigger says the thinking ENDS, not "the answer
         # starts", because `reasoning_end` also drops the block on a turn that
         # goes on to a tool call (round 1, D4).
-        help=(
-            "Show the model's private thinking while it streams; it vanishes "
-            "once the thinking ends."
+        help=(_t(_ws.display_reasoning_help())),
+        choices=_bool_choices(
+            _t(_ws.display_reasoning_choice_true_description()),
+            _t(_ws.display_reasoning_choice_false_description()),
         ),
-        choices=_bool_choices("show live reasoning", "hide reasoning"),
     ),
     Setting(
         key="display.rail",
         path=("display.rail",),
         section="appearance",
-        label="Assistant gutter rail",
+        label=_t(_ws.display_rail_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "A rule marks the ANSWER: the message that ends the turn. "
-            "Mid-turn narration takes no rail."
+        help=(_t(_ws.display_rail_help())),
+        choices=_bool_choices(
+            _t(_ws.display_rail_choice_true_description()),
+            _t(_ws.display_rail_choice_false_description()),
         ),
-        choices=_bool_choices("rail the answer only", "no rail"),
     ),
     Setting(
         # Default changed to False by maintainer
         key="display.comfortable_rows",
         path=("display.comfortable_rows",),
         section="appearance",
-        label="Comfortable action rows",
+        label=_t(_ws.display_comfortable_rows_label()),
         kind=Kind.BOOL,
         default=False,
-        help="Pad tool and prompt rows so they are easier to click.",
-        choices=_bool_choices("padded, easier to click", "compact, more history"),
+        help=_t(_ws.display_comfortable_rows_help()),
+        choices=_bool_choices(
+            _t(_ws.display_comfortable_rows_choice_true_description()),
+            _t(_ws.display_comfortable_rows_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.nerd_icons",
         path=("display.nerd_icons",),
         section="appearance",
-        label="Nerd Font glyphs",
+        label=_t(_ws.display_nerd_icons_label()),
         kind=Kind.ENUM,
         default=None,
-        help="Expanded tool-row icons. Auto reads the terminal emulator's markers.",
+        help=_t(_ws.display_nerd_icons_help()),
         # The tri-state IS the None-vs-bool distinction: `settings_get` returns
         # None only when the key is ABSENT, which is what "auto" reads. So the
         # auto choice must write nothing rather than write a value — handled by
         # `write_setting`, which deletes on a None for a key with no shipped
         # default.
         choices=(
-            Choice(None, "auto", "decide from the terminal emulator"),
-            Choice(True, "on", "force glyphs on"),
-            Choice(False, "off", "force plain icons"),
+            Choice(
+                None,
+                _t(_ws.display_nerd_icons_choice_none_label()),
+                _t(_ws.display_nerd_icons_choice_none_description()),
+            ),
+            Choice(
+                True,
+                _t(_ws.display_nerd_icons_choice_true_label()),
+                _t(_ws.display_nerd_icons_choice_true_description()),
+            ),
+            Choice(
+                False,
+                _t(_ws.display_nerd_icons_choice_false_label()),
+                _t(_ws.display_nerd_icons_choice_false_description()),
+            ),
         ),
     ),
     Setting(
         key="display.heading_markers",
         path=("display.heading_markers",),
         section="appearance",
-        label="Heading markers",
+        label=_t(_ws.display_heading_markers_label()),
         kind=Kind.BOOL,
         default=False,
-        help="Show the literal ### before a heading, as the markdown source writes it.",
-        choices=_bool_choices("show ### markers", "colour and weight only"),
+        help=_t(_ws.display_heading_markers_help()),
+        choices=_bool_choices(
+            _t(_ws.display_heading_markers_choice_true_description()),
+            _t(_ws.display_heading_markers_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.terminal_title",
         path=("display.terminal_title",),
         section="appearance",
-        label="Terminal title",
+        label=_t(_ws.display_terminal_title_label()),
         kind=Kind.BOOL,
         default=True,
-        help="OSC 0 window title carrying the session name and run state.",
-        choices=_bool_choices("set the window title", "leave the title alone"),
+        help=_t(_ws.display_terminal_title_help()),
+        choices=_bool_choices(
+            _t(_ws.display_terminal_title_choice_true_description()),
+            _t(_ws.display_terminal_title_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.images",
         path=("display.images",),
         section="appearance",
-        label="Inline images",
+        label=_t(_ws.display_images_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Screenshots and attachments drawn in the transcript.",
-        choices=_bool_choices("draw images", "text receipts only"),
+        help=_t(_ws.display_images_help()),
+        choices=_bool_choices(
+            _t(_ws.display_images_choice_true_description()),
+            _t(_ws.display_images_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.notifications",
         path=("display.notifications",),
         section="appearance",
-        label="Desktop notifications",
+        label=_t(_ws.display_notifications_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Fires only while the terminal is unfocused.",
-        choices=_bool_choices("notify when unfocused", "never notify"),
+        help=_t(_ws.display_notifications_help()),
+        choices=_bool_choices(
+            _t(_ws.display_notifications_choice_true_description()),
+            _t(_ws.display_notifications_choice_false_description()),
+        ),
     ),
     Setting(
         # The observer path (a background session finishing while you are
@@ -2135,7 +2192,7 @@ SETTINGS: tuple[Setting, ...] = (
         # Fits the row's label column at 100 columns. "Name sessions in
         # notifications" elided to "…notificatio…", losing the one word that
         # says what the row governs.
-        label="Notification session names",
+        label=_t(_ws.display_notification_session_name_label()),
         kind=Kind.BOOL,
         default=True,
         # Leads with the CONSEQUENCE, not the mechanism: the decision being
@@ -2151,15 +2208,15 @@ SETTINGS: tuple[Setting, ...] = (
         # holding the line under the 100-column flake8/black budget; a
         # `noqa: E501` on the joined form is reserved in this repo for
         # unsplittable content (URLs, embedded code), not prose.
-        help=(
-            "A session's name, last line and error causes appear on banners, "
-            "including the lock screen."
-        ),
+        help=(_t(_ws.display_notification_session_name_help())),
         # `off` no longer means "app name only" on every route — a background
         # session with no stored title is titled "A session finished" — so the
         # label names what the user gets rather than a fallback that is now one
         # of two (design round 1, D7, folded into D2).
-        choices=_bool_choices("name the session", "keep names off banners"),
+        choices=_bool_choices(
+            _t(_ws.display_notification_session_name_choice_true_description()),
+            _t(_ws.display_notification_session_name_choice_false_description()),
+        ),
         # Without this the row renders `on` while `display.notifications` is
         # off, describing a banner that cannot fire — the "page states
         # something untrue about its own effect" class (#431). The detail line
@@ -2176,21 +2233,28 @@ SETTINGS: tuple[Setting, ...] = (
         key="display.time_format",
         path=("display.time_format",),
         section="appearance",
-        label="Wake time format",
+        label=_t(_ws.display_time_format_label()),
         kind=Kind.ENUM,
         default="12h",
-        help="Scheduled wake times use your local timezone. Choose a 12- or 24-hour clock.",
+        help=_t(_ws.display_time_format_help()),
         choices=(
-            Choice("12h", "12-hour", "7:52 PM PDT"),
-            Choice("24h", "24-hour", "19:52 PDT"),
+            Choice(
+                "12h",
+                _t(_ws.display_time_format_choice_12h_label()),
+                _t(_ws.display_time_format_choice_12h_description()),
+            ),
+            Choice(
+                "24h",
+                _t(_ws.display_time_format_choice_24h_label()),
+                _t(_ws.display_time_format_choice_24h_description()),
+            ),
         ),
     ),
     Setting(
         key="language",
         path=("language",),
         section="appearance",
-        # i18n: ignore wire.settings slice owns this row's copy (label + help).
-        label="Language",
+        label=_t(_ws.language_label()),
         kind=Kind.ENUM,
         # Literal, not imported: the registry stays off the resolver's import
         # path (the same arrangement as `tui.theme` above), and
@@ -2198,7 +2262,7 @@ SETTINGS: tuple[Setting, ...] = (
         # `i18n.resolve.DEFAULT_LANGUAGE`, which is what stops the two
         # drifting into a page that lies.
         default="auto",
-        help="Interface language. auto follows your operating system, falling back to English.",
+        help=_t(_ws.language_help()),
         # Dynamic: auto plus the locales the translation ledger has passed
         # (RFC §3.1 — unaudited locales are not offered). Widens by
         # regeneration, never by a code change here.
@@ -2215,19 +2279,31 @@ SETTINGS: tuple[Setting, ...] = (
         key="display.dock",
         path=("display.dock",),
         section="appearance",
-        label="Subagent dock",
+        label=_t(_ws.display_dock_label()),
         kind=Kind.ENUM,
         default="full",
-        help="How much room the subagent panel takes when a session starts; ctrl+g cycles it.",
+        help=_t(_ws.display_dock_help()),
         choices=(
             # Parallel descriptions: each names WHAT IS SHOWN and nothing
             # else. `hidden` used to append "; ctrl+g brings it back", which
             # made it the only choice explaining its own exit and left the
             # list reading unevenly — and the help line above already names
             # `ctrl+g` for all three (round 1, D5).
-            Choice("full", "full", "one row per child, newest first"),
-            Choice("summary", "summary", "a one-line count"),
-            Choice("hidden", "hidden", "not shown"),
+            Choice(
+                "full",
+                _t(_ws.display_dock_choice_full_label()),
+                _t(_ws.display_dock_choice_full_description()),
+            ),
+            Choice(
+                "summary",
+                _t(_ws.display_dock_choice_summary_label()),
+                _t(_ws.display_dock_choice_summary_description()),
+            ),
+            Choice(
+                "hidden",
+                _t(_ws.display_dock_choice_hidden_label()),
+                _t(_ws.display_dock_choice_hidden_description()),
+            ),
         ),
     ),
     # Cross-session traffic — the `send` tool's own traces and the inbound
@@ -2255,11 +2331,14 @@ SETTINGS: tuple[Setting, ...] = (
         key="display.hide_cross_session",
         path=("display.hide_cross_session",),
         section="appearance",
-        label="Hide cross-session traffic",
+        label=_t(_ws.display_hide_cross_session_label()),
         kind=Kind.BOOL,
         default=False,  # OFF = today's rendering; see tui/settings.py _DEFAULT_NOTES
-        help="Hide lop send traffic and inbound peer messages from transcripts.",
-        choices=_bool_choices("hide new; reopen to re-read", "show new; reopen to re-read"),
+        help=_t(_ws.display_hide_cross_session_help()),
+        choices=_bool_choices(
+            _t(_ws.display_hide_cross_session_choice_true_description()),
+            _t(_ws.display_hide_cross_session_choice_false_description()),
+        ),
     ),
     # The desktop transcript's answer mark: a thin rule to the left of the row
     # that CLOSES a turn (the `display.rail` idea, for the desktop app). Only
@@ -2275,11 +2354,14 @@ SETTINGS: tuple[Setting, ...] = (
         key="display.turn_answer_rail",
         path=("display.turn_answer_rail",),
         section="appearance",
-        label="Mark the turn answer",
+        label=_t(_ws.display_turn_answer_rail_label()),
         kind=Kind.BOOL,
         default=False,  # opt-in: the rail looked heavy; see tui/settings.py _DEFAULT_NOTES
-        help="Draw a thin rule beside the answer that closes a turn (desktop app).",
-        choices=_bool_choices("rule beside the closing answer", "no rule beside the answer"),
+        help=_t(_ws.display_turn_answer_rail_help()),
+        choices=_bool_choices(
+            _t(_ws.display_turn_answer_rail_choice_true_description()),
+            _t(_ws.display_turn_answer_rail_choice_false_description()),
+        ),
     ),
     # -- the composer widget-visibility family (operator request, 2026-09-27) --
     #
@@ -2299,7 +2381,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="display.composer.band",
         path=("display.composer.band",),
         section="appearance",
-        label="Status band",
+        label=_t(_ws.display_composer_band_label()),
         kind=Kind.BOOL,
         default=True,
         # The disclosure leads, because the tail is the point (design review
@@ -2307,114 +2389,149 @@ SETTINGS: tuple[Setting, ...] = (
         # disarmed-gate `!`, a parked connector, the MCP-failure lamp — and a
         # help that lists the segments first clips that clause off first.
         # Measured 67 cells, which paints whole at both 100 and 80 columns.
-        help="Also the standing alerts. Model, dir, context, cost, rate, elapsed.",
-        choices=_bool_choices("show the band", "hide it"),
+        help=_t(_ws.display_composer_band_help()),
+        choices=_bool_choices(
+            _t(_ws.display_composer_band_choice_true_description()),
+            _t(_ws.display_composer_band_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.chevron",
         path=("display.composer.chevron",),
         section="appearance",
-        label="Prompt chevron",
+        label=_t(_ws.display_composer_chevron_label()),
         kind=Kind.BOOL,
         default=True,
-        help="The prompt mark at the left edge of the input row.",
-        choices=_bool_choices("show the mark", "hide it"),
+        help=_t(_ws.display_composer_chevron_help()),
+        choices=_bool_choices(
+            _t(_ws.display_composer_chevron_choice_true_description()),
+            _t(_ws.display_composer_chevron_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.model",
         path=("display.composer.model",),
         section="appearance",
-        label="Band: model",
+        label=_t(_ws.display_composer_model_label()),
         kind=Kind.BOOL,
         default=True,
-        help="The model-label segment in the status band.",
-        choices=_bool_choices("show the model", "hide it"),
+        help=_t(_ws.display_composer_model_help()),
+        choices=_bool_choices(
+            _t(_ws.display_composer_model_choice_true_description()),
+            _t(_ws.display_composer_model_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.cwd",
         path=("display.composer.cwd",),
         section="appearance",
-        label="Band: working dir",
+        label=_t(_ws.display_composer_cwd_label()),
         kind=Kind.BOOL,
         default=True,
-        help="The working-directory segment in the status band.",
-        choices=_bool_choices("show the directory", "hide it"),
+        help=_t(_ws.display_composer_cwd_help()),
+        choices=_bool_choices(
+            _t(_ws.display_composer_cwd_choice_true_description()),
+            _t(_ws.display_composer_cwd_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.context",
         path=("display.composer.context",),
         section="appearance",
-        label="Band: context",
+        label=_t(_ws.display_composer_context_label()),
         kind=Kind.BOOL,
         default=True,
-        help="The context-usage segment in the status band.",
-        choices=_bool_choices("show context usage", "hide it"),
+        help=_t(_ws.display_composer_context_help()),
+        choices=_bool_choices(
+            _t(_ws.display_composer_context_choice_true_description()),
+            _t(_ws.display_composer_context_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.rate",
         path=("display.composer.rate",),
         section="appearance",
-        label="Band: decode rate",
+        label=_t(_ws.display_composer_rate_label()),
         kind=Kind.BOOL,
         default=True,
-        help="The tok/s segment — the last completed call's throughput.",
-        choices=_bool_choices("show the rate", "hide it"),
+        help=_t(_ws.display_composer_rate_help()),
+        choices=_bool_choices(
+            _t(_ws.display_composer_rate_choice_true_description()),
+            _t(_ws.display_composer_rate_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.cost",
         path=("display.composer.cost",),
         section="appearance",
-        label="Band: session cost",
+        label=_t(_ws.display_composer_cost_label()),
         kind=Kind.BOOL,
         default=True,
-        help="The session-cost segment in the status band.",
-        choices=_bool_choices("show the cost", "hide it"),
+        help=_t(_ws.display_composer_cost_help()),
+        choices=_bool_choices(
+            _t(_ws.display_composer_cost_choice_true_description()),
+            _t(_ws.display_composer_cost_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.duration",
         path=("display.composer.duration",),
         section="appearance",
-        label="Band: elapsed",
+        label=_t(_ws.display_composer_duration_label()),
         kind=Kind.BOOL,
         default=True,
-        help="The elapsed-time segment in the status band.",
-        choices=_bool_choices("show the elapsed time", "hide it"),
+        help=_t(_ws.display_composer_duration_help()),
+        choices=_bool_choices(
+            _t(_ws.display_composer_duration_choice_true_description()),
+            _t(_ws.display_composer_duration_choice_false_description()),
+        ),
     ),
     Setting(
         key="tui.sidebar_visible",
         path=("tui", "sidebar_visible"),
         section="appearance",
-        label="Session sidebar",
+        label=_t(_ws.tui_sidebar_visible_label()),
         kind=Kind.BOOL,
         default=False,
-        help="Active and recent conversations. Ctrl+B toggles the sidebar.",
-        choices=_bool_choices("show the sidebar", "keep the full conversation width"),
+        help=_t(_ws.tui_sidebar_visible_help()),
+        choices=_bool_choices(
+            _t(_ws.tui_sidebar_visible_choice_true_description()),
+            _t(_ws.tui_sidebar_visible_choice_false_description()),
+        ),
     ),
     Setting(
         key="tui.sidebar_position",
         path=("tui", "sidebar_position"),
         section="appearance",
-        label="Sidebar position",
+        label=_t(_ws.tui_sidebar_position_label()),
         kind=Kind.ENUM,
         default="left",
-        help="Which side of the conversation holds the session sidebar.",
+        help=_t(_ws.tui_sidebar_position_help()),
         choices=(
-            Choice("left", "left", "sessions to the left of the conversation"),
-            Choice("right", "right", "sessions to the right of the conversation"),
+            Choice(
+                "left",
+                _t(_ws.tui_sidebar_position_choice_left_label()),
+                _t(_ws.tui_sidebar_position_choice_left_description()),
+            ),
+            Choice(
+                "right",
+                _t(_ws.tui_sidebar_position_choice_right_label()),
+                _t(_ws.tui_sidebar_position_choice_right_description()),
+            ),
         ),
     ),
     Setting(
         key="tui.sidebar_show_subagents",
         path=("tui", "sidebar_show_subagents"),
         section="appearance",
-        label="Sidebar subagent layer",
+        label=_t(_ws.tui_sidebar_show_subagents_label()),
         kind=Kind.BOOL,
         default=False,
-        help=(
-            "List recent subagent runs below your own sessions. "
-            "Ctrl+A toggles the layer while the sidebar has focus."
+        help=(_t(_ws.tui_sidebar_show_subagents_help())),
+        choices=_bool_choices(
+            _t(_ws.tui_sidebar_show_subagents_choice_true_description()),
+            _t(_ws.tui_sidebar_show_subagents_choice_false_description()),
         ),
-        choices=_bool_choices("list recent subagent runs", "show only your own sessions"),
     ),
     # -- hotkeys ------------------------------------------------------------
     # DERIVED from `keymap.KEY_ACTIONS` rather than spelled out, because the
@@ -2447,7 +2564,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="tool_approval_mode",
         path=("tool_approval_mode",),
         section="approvals",
-        label="Tool approval mode",
+        label=_t(_ws.tool_approval_mode_label()),
         kind=Kind.ENUM,
         default="ask",
         # 58 cells, and the number is the LADDER's, not a taste call. The detail
@@ -2469,10 +2586,18 @@ SETTINGS: tuple[Setting, ...] = (
         # (design round 1, D1; agent review round 1, m1). Both must stay true for
         # the embedded pane (whose own page write IS the gate-holding process's
         # write) and for the attached one.
-        help="Loosening needs a write in this session — /approvals auto.",
+        help=_t(_ws.tool_approval_mode_help()),
         choices=(
-            Choice("ask", "ask", "prompt before write/exec tools"),
-            Choice("auto", "auto", "run them without asking"),
+            Choice(
+                "ask",
+                _t(_ws.tool_approval_mode_choice_ask_label()),
+                _t(_ws.tool_approval_mode_choice_ask_description()),
+            ),
+            Choice(
+                "auto",
+                _t(_ws.tool_approval_mode_choice_auto_label()),
+                _t(_ws.tool_approval_mode_choice_auto_description()),
+            ),
         ),
     ),
     # -- session storage ----------------------------------------------------
@@ -2480,11 +2605,14 @@ SETTINGS: tuple[Setting, ...] = (
         key="auto_save_conversation",
         path=("auto_save_conversation",),
         section="session",
-        label="Auto-save conversation",
+        label=_t(_ws.auto_save_conversation_label()),
         kind=Kind.BOOL,
         default=False,
-        help="Headless REPL launches only; the TUI's runtime does not read it.",
-        choices=_bool_choices("save automatically", "save on request"),
+        help=_t(_ws.auto_save_conversation_help()),
+        choices=_bool_choices(
+            _t(_ws.auto_save_conversation_choice_true_description()),
+            _t(_ws.auto_save_conversation_choice_false_description()),
+        ),
     ),
     # -- runtime ------------------------------------------------------------
     Setting(
@@ -2500,13 +2628,13 @@ SETTINGS: tuple[Setting, ...] = (
         key="runtime.background_on_resume",
         path=("runtime", "background_on_resume"),
         section="runtime",
-        label="Keep working after /resume",
+        label=_t(_ws.runtime_background_on_resume_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Leave a running turn working when you switch away from its session.",
+        help=_t(_ws.runtime_background_on_resume_help()),
         choices=_bool_choices(
-            "keep the turn running in the background",
-            "stop the turn when you leave the session",
+            _t(_ws.runtime_background_on_resume_choice_true_description()),
+            _t(_ws.runtime_background_on_resume_choice_false_description()),
         ),
     ),
     Setting(
@@ -2524,10 +2652,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="runtime.keep_alive_seconds",
         path=("runtime", "keep_alive_seconds"),
         section="runtime",
-        label="Keep closed conversations warm (s)",
+        label=_t(_ws.runtime_keep_alive_seconds_label()),
         kind=Kind.INT,
         default=300,
-        help="Re-opening inside this window attaches to the live runtime. 0 keeps nothing warm.",
+        help=_t(_ws.runtime_keep_alive_seconds_help()),
         minimum=0,
         maximum=3600,
     ),
@@ -2535,14 +2663,14 @@ SETTINGS: tuple[Setting, ...] = (
         key="runtime.keep_alive_max",
         path=("runtime", "keep_alive_max"),
         section="runtime",
-        label="Max warm conversations",
+        label=_t(_ws.runtime_keep_alive_max_label()),
         kind=Kind.INT,
         default=4,
         # "THIS INSTALL", not "this machine" (QA round 1, Q-5): the cap is
         # enforced over the registry of the runtime's OWN config root, so two
         # installs on one host hold up to two caps between them. See
         # ``process._keep_alive_candidates``.
-        help="Cap on warm runtimes in this install; the least recently closed exits first.",
+        help=_t(_ws.runtime_keep_alive_max_help()),
         minimum=1,
         maximum=64,
     ),
@@ -2566,26 +2694,23 @@ SETTINGS: tuple[Setting, ...] = (
         key="session.cleanup.enabled",
         path=("session", "cleanup", "enabled"),
         section="session_cleanup",
-        label="Session cleanup",
+        label=_t(_ws.session_cleanup_enabled_label()),
         kind=Kind.BOOL,
         default=False,
-        help=(
-            "Off: nothing is ever removed. "
-            "On: limits below run at launch, sparing the newest 10 + live."
-        ),
+        help=(_t(_ws.session_cleanup_enabled_help())),
         choices=_bool_choices(
-            "limits run at launch; newest 10 + live kept",
-            "nothing is ever removed",
+            _t(_ws.session_cleanup_enabled_choice_true_description()),
+            _t(_ws.session_cleanup_enabled_choice_false_description()),
         ),
     ),
     Setting(
         key="session.cleanup.max_sessions",
         path=("session", "cleanup", "max_sessions"),
         section="session_cleanup",
-        label="↳ max sessions",
+        label=_t(_ws.session_cleanup_max_sessions_label()),
         kind=Kind.INT,
         default=0,
-        help="Needs cleanup on. Keep N newest /resume sessions; 0 = no cap.",
+        help=_t(_ws.session_cleanup_max_sessions_help()),
         minimum=0,
         gated_by="session.cleanup.enabled",
     ),
@@ -2593,10 +2718,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="session.cleanup.max_inactive_days",
         path=("session", "cleanup", "max_inactive_days"),
         section="session_cleanup",
-        label="↳ max inactive days",
+        label=_t(_ws.session_cleanup_max_inactive_days_label()),
         kind=Kind.INT,
         default=0,
-        help="Needs cleanup on. Remove sessions idle this many days; 0 = never.",
+        help=_t(_ws.session_cleanup_max_inactive_days_help()),
         minimum=0,
         gated_by="session.cleanup.enabled",
     ),
@@ -2604,10 +2729,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="session.cleanup.max_total_bytes",
         path=("session", "cleanup", "max_total_bytes"),
         section="session_cleanup",
-        label="↳ max total bytes",
+        label=_t(_ws.session_cleanup_max_total_bytes_label()),
         kind=Kind.INT,
         default=0,
-        help="Needs cleanup on. Trim oldest past this many bytes; 0 = no cap.",
+        help=_t(_ws.session_cleanup_max_total_bytes_help()),
         minimum=0,
         gated_by="session.cleanup.enabled",
     ),
@@ -2615,11 +2740,14 @@ SETTINGS: tuple[Setting, ...] = (
         key="session.cleanup.remove_empty",
         path=("session", "cleanup", "remove_empty"),
         section="session_cleanup",
-        label="↳ remove empty",
+        label=_t(_ws.session_cleanup_remove_empty_label()),
         kind=Kind.BOOL,
         default=False,
-        help="Needs cleanup on. Remove dirs that never got a transcript.",
-        choices=_bool_choices("remove transcript-less directories", "keep them"),
+        help=_t(_ws.session_cleanup_remove_empty_help()),
+        choices=_bool_choices(
+            _t(_ws.session_cleanup_remove_empty_choice_true_description()),
+            _t(_ws.session_cleanup_remove_empty_choice_false_description()),
+        ),
         gated_by="session.cleanup.enabled",
     ),
     # -- delegated-work retention --------------------------------------------
@@ -2632,28 +2760,25 @@ SETTINGS: tuple[Setting, ...] = (
         key="session.cleanup.delegated.enabled",
         path=("session", "cleanup", "delegated", "enabled"),
         section="session_delegated",
-        label="Delegated cleanup",
+        label=_t(_ws.session_cleanup_delegated_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "Remove subagent and background-session transcripts after the age "
-            "below; never your conversations or anything in use."
-        ),
+        help=(_t(_ws.session_cleanup_delegated_enabled_help())),
         choices=_bool_choices(
-            "remove delegated work after the age below",
-            "keep all delegated work",
+            _t(_ws.session_cleanup_delegated_enabled_choice_true_description()),
+            _t(_ws.session_cleanup_delegated_enabled_choice_false_description()),
         ),
     ),
     Setting(
         key="session.cleanup.delegated.max_age_hours",
         path=("session", "cleanup", "delegated", "max_age_hours"),
         section="session_delegated",
-        label="↳ remove after (hours)",
+        label=_t(_ws.session_cleanup_delegated_max_age_hours_label()),
         kind=Kind.INT,
         default=48,
         # The help carries both limits because the page paints help but not
         # min/max, and "2 to 720" is what a user needs to type a valid value.
-        help="Hours idle before removal: 2 to 720 (30 days). Default 48.",
+        help=_t(_ws.session_cleanup_delegated_max_age_hours_help()),
         minimum=2,
         maximum=720,
         unit="hours",
@@ -2664,10 +2789,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="runtime.unattended_gate_timeout",
         path=("runtime", "unattended_gate_timeout"),
         section="runtime",
-        label="Unattended question timeout (h)",
+        label=_t(_ws.runtime_unattended_gate_timeout_label()),
         kind=Kind.INT,
         default=24,
-        help="How long a question waits when you are away. 0 never times out.",
+        help=_t(_ws.runtime_unattended_gate_timeout_help()),
         minimum=0,
         maximum=720,
     ),
@@ -2675,10 +2800,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="subagents.max_running",
         path=("subagents", "max_running"),
         section="subagents",
-        label="Max background jobs",
+        label=_t(_ws.subagents_max_running_label()),
         kind=Kind.INT,
         default=15,
-        help="Ceiling on concurrent subagents and backgrounded bash, which share one pool.",
+        help=_t(_ws.subagents_max_running_help()),
         minimum=1,
         maximum=64,
     ),
@@ -2686,7 +2811,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="subagents.slim_child_knowledge",
         path=("subagents", "slim_child_knowledge"),
         section="subagents",
-        label="Slim child knowledge",
+        label=_t(_ws.subagents_slim_child_knowledge_label()),
         kind=Kind.BOOL,
         # The consumer constant is ``DEFAULT_SLIM_CHILD_KNOWLEDGE`` in
         # ``harness/subagent.py``; ``test_settings_io``'s ``_consumer_defaults``
@@ -2699,14 +2824,17 @@ SETTINGS: tuple[Setting, ...] = (
         # The sentence carries both halves the row must state: what is
         # trimmed, and the invariant — every guide/skill NAME survives, so
         # nothing a child could have read becomes unfindable, only terser.
-        help="Keep skill/guide names; trim descriptions and parent extras.",
-        choices=_bool_choices("keep names, trim the rest", "inherit the parent block as-is"),
+        help=_t(_ws.subagents_slim_child_knowledge_help()),
+        choices=_bool_choices(
+            _t(_ws.subagents_slim_child_knowledge_choice_true_description()),
+            _t(_ws.subagents_slim_child_knowledge_choice_false_description()),
+        ),
     ),
     Setting(
         key="subagents.max_team_depth",
         path=("subagents", "max_team_depth"),
         section="subagents",
-        label="Max nested-team depth",
+        label=_t(_ws.subagents_max_team_depth_label()),
         kind=Kind.INT,
         # Literal, like max_running's: the consumer default is
         # ``harness.subagent.DEFAULT_MAX_TEAM_DEPTH``, and the consumer test
@@ -2715,7 +2843,7 @@ SETTINGS: tuple[Setting, ...] = (
         # ``test_settings_io.test_the_team_depth_maximum_matches_max_org_depth``
         # keeps this literal equal to the constant.
         default=3,
-        help="Deepest launch allowed in a tree that runs a team. 1 is the top's children.",
+        help=_t(_ws.subagents_max_team_depth_help()),
         minimum=1,
         maximum=8,
     ),
@@ -2723,7 +2851,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="subagents.model_choice",
         path=("subagents", "model_choice"),
         section="subagents",
-        label="Who picks a subagent's model",
+        label=_t(_ws.subagents_model_choice_label()),
         kind=Kind.ENUM,
         # The literal, not an import: this module reports defaults for the page
         # and deliberately keeps `local_operator.tools.*` off its own import
@@ -2750,7 +2878,7 @@ SETTINGS: tuple[Setting, ...] = (
         # purpose (a pin is how the incident stayed invisible), so an operator
         # who wants one strong reviewer must be told there is a place to put it
         # — the ROLE's own profile — rather than handed the picker back.
-        help="Who picks a subagent's tier; the operator pins one in its profile.",
+        help=_t(_ws.subagents_model_choice_help()),
         # Both descriptions are sized to the EXPANDED choice row, which is the
         # only place they render, and they are measured on a RENDERED FRAME at
         # 100 columns — the frame, not the row-text painter, because the
@@ -2768,13 +2896,13 @@ SETTINGS: tuple[Setting, ...] = (
         choices=(
             Choice(
                 "operator",
-                "the operator",
-                "inherits the session model",
+                _t(_ws.subagents_model_choice_choice_operator_label()),
+                _t(_ws.subagents_model_choice_choice_operator_description()),
             ),
             Choice(
                 "model",
-                "the model",
-                "may run the subagent on a costlier model",
+                _t(_ws.subagents_model_choice_choice_model_label()),
+                _t(_ws.subagents_model_choice_choice_model_description()),
             ),
         ),
     ),
@@ -2782,7 +2910,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="subagents.models.lo",
         path=("subagents", "models", "lo"),
         section="subagents",
-        label="Subagent model: lo",
+        label=_t(_ws.subagents_models_lo_label()),
         kind=Kind.TEXT,
         default="",
         # Billing, the sentinel, and what empty does are the three facts this
@@ -2836,14 +2964,14 @@ SETTINGS: tuple[Setting, ...] = (
         # VALUE does. The row it pointed at is two above, and is the only one
         # labelled "Who picks a subagent's model". The design round reviewed and
         # signed off this trade.
-        help="Bills at that model's rates; 'default': session; empty removes the tier",
+        help=_t(_ws.subagents_models_lo_help()),
         empty_unsets=True,
     ),
     Setting(
         key="subagents.models.med",
         path=("subagents", "models", "med"),
         section="subagents",
-        label="Subagent model: med",
+        label=_t(_ws.subagents_models_med_label()),
         kind=Kind.TEXT,
         default="",
         # Billing, the sentinel, and what empty does are the three facts this
@@ -2897,14 +3025,14 @@ SETTINGS: tuple[Setting, ...] = (
         # VALUE does. The row it pointed at is two above, and is the only one
         # labelled "Who picks a subagent's model". The design round reviewed and
         # signed off this trade.
-        help="Bills at that model's rates; 'default': session; empty removes the tier",
+        help=_t(_ws.subagents_models_med_help()),
         empty_unsets=True,
     ),
     Setting(
         key="subagents.models.hi",
         path=("subagents", "models", "hi"),
         section="subagents",
-        label="Subagent model: hi",
+        label=_t(_ws.subagents_models_hi_label()),
         kind=Kind.TEXT,
         default="",
         # Billing, the sentinel, and what empty does are the three facts this
@@ -2958,7 +3086,7 @@ SETTINGS: tuple[Setting, ...] = (
         # VALUE does. The row it pointed at is two above, and is the only one
         # labelled "Who picks a subagent's model". The design round reviewed and
         # signed off this trade.
-        help="Bills at that model's rates; 'default': session; empty removes the tier",
+        help=_t(_ws.subagents_models_hi_help()),
         empty_unsets=True,
     ),
     # -- resource classification --------------------------------------------
@@ -2977,7 +3105,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="classification.auto",
         path=("classification", "auto"),
         section="classification",
-        label="Smart hints",
+        label=_t(_ws.classification_auto_label()),
         kind=Kind.BOOL,
         # Default ON since 2026-09-18, matching the package's own `DEFAULT_AUTO`
         # (`classification/service.py`, which records why the flip is worth its
@@ -2991,29 +3119,45 @@ SETTINGS: tuple[Setting, ...] = (
         # label already names the feature, and it now names it in the one term
         # the tips and `guide://classification` use (design round 2, D11).
         default=True,
-        help="On: a decision model may add advisory resources. Off: the prompt is unchanged.",
+        help=_t(_ws.classification_auto_help()),
         choices=_bool_choices(
-            "a decision model may add advisory resources",
-            "the prompt stays exactly as it is",
+            _t(_ws.classification_auto_choice_true_description()),
+            _t(_ws.classification_auto_choice_false_description()),
         ),
     ),
     Setting(
         key="classification.vendor",
         path=("classification", "vendor"),
         section="classification",
-        label="↳ vendor",
+        label=_t(_ws.classification_vendor_label()),
         kind=Kind.ENUM,
         default="auto",
         # `auto` is a real member here rather than the unset spelling
         # `model_effort` uses: the cascade's own default IS "first leg with a
         # usable credential", and storing that as an empty string would leave
         # the page unable to show which of the two the operator chose.
-        help="Needs recommendations on. Pin one leg; auto prefers Radient.",
+        help=_t(_ws.classification_vendor_help()),
         choices=(
-            Choice("auto", "auto", "first leg with a usable credential"),
-            Choice("radient", "radient", "Radient's decision route"),
-            Choice("typesafe", "typesafe", "TypeSafe's Jev endpoint"),
-            Choice("openrouter", "openrouter", "OpenRouter's alpha decisions route"),
+            Choice(
+                "auto",
+                _t(_ws.classification_vendor_choice_auto_label()),
+                _t(_ws.classification_vendor_choice_auto_description()),
+            ),
+            Choice(
+                "radient",
+                _t(_ws.classification_vendor_choice_radient_label()),
+                _t(_ws.classification_vendor_choice_radient_description()),
+            ),
+            Choice(
+                "typesafe",
+                _t(_ws.classification_vendor_choice_typesafe_label()),
+                _t(_ws.classification_vendor_choice_typesafe_description()),
+            ),
+            Choice(
+                "openrouter",
+                _t(_ws.classification_vendor_choice_openrouter_label()),
+                _t(_ws.classification_vendor_choice_openrouter_description()),
+            ),
         ),
         gated_by="classification.auto",
     ),
@@ -3021,10 +3165,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="classification.model",
         path=("classification", "model"),
         section="classification",
-        label="↳ model",
+        label=_t(_ws.classification_model_label()),
         kind=Kind.TEXT,
         default="",
-        help="Needs recommendations on. Vendor model id; empty uses its default.",
+        help=_t(_ws.classification_model_help()),
         empty_unsets=True,
         gated_by="classification.auto",
     ),
@@ -3032,13 +3176,13 @@ SETTINGS: tuple[Setting, ...] = (
         key="classification.timeoutMs",
         path=("classification", "timeoutMs"),
         section="classification",
-        label="↳ deadline (ms)",
+        label=_t(_ws.classification_timeoutms_label()),
         kind=Kind.INT,
         default=1500,
         # 0 is "use the default", not "no deadline": the reader refuses a
         # non-positive value rather than treating it as unlimited, so a hand-edit
         # cannot leave a turn parked on a vendor. The help says so.
-        help="Needs recommendations on. Per-call deadline; 0 uses 1500 ms.",
+        help=_t(_ws.classification_timeoutms_help()),
         minimum=0,
         gated_by="classification.auto",
     ),
@@ -3046,7 +3190,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="classification.waitMs",
         path=("classification", "waitMs"),
         section="classification",
-        label="↳ wait budget (ms)",
+        label=_t(_ws.classification_waitms_label()),
         kind=Kind.INT,
         default=50,
         # The operator's latency budget, in the one number that enforces it: how
@@ -3059,7 +3203,7 @@ SETTINGS: tuple[Setting, ...] = (
         # from the budget by its terms, which is exactly what makes 50 ms
         # achievable while ``timeoutMs`` stays at 1500. 0 is "use the default",
         # like every other number in this section, never "wait forever".
-        help="Needs recommendations on. How long a turn waits; 0 uses 50 ms.",
+        help=_t(_ws.classification_waitms_help()),
         minimum=0,
         gated_by="classification.auto",
     ),
@@ -3067,10 +3211,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="classification.maxStateChars",
         path=("classification", "maxStateChars"),
         section="classification",
-        label="↳ max state chars",
+        label=_t(_ws.classification_maxstatechars_label()),
         kind=Kind.INT,
         default=6000,
-        help="Needs recommendations on. State cap; 0 uses 6000 chars.",
+        help=_t(_ws.classification_maxstatechars_help()),
         minimum=0,
         gated_by="classification.auto",
     ),
@@ -3078,10 +3222,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="classification.maxCandidates",
         path=("classification", "maxCandidates"),
         section="classification",
-        label="↳ max candidates",
+        label=_t(_ws.classification_maxcandidates_label()),
         kind=Kind.INT,
         default=12,
-        help="Needs recommendations on. Candidates per kind; 0 uses 12.",
+        help=_t(_ws.classification_maxcandidates_help()),
         minimum=0,
         gated_by="classification.auto",
     ),
@@ -3089,10 +3233,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="classification.maxRecommendations",
         path=("classification", "maxRecommendations"),
         section="classification",
-        label="↳ max recommendations",
+        label=_t(_ws.classification_maxrecommendations_label()),
         kind=Kind.INT,
         default=3,
-        help="Needs recommendations on. Per-message resources; 0 uses 3.",
+        help=_t(_ws.classification_maxrecommendations_help()),
         minimum=0,
         gated_by="classification.auto",
     ),
@@ -3116,106 +3260,103 @@ SETTINGS: tuple[Setting, ...] = (
         key="monitor.defaultIntervalS",
         path=("monitor", "defaultIntervalS"),
         section="monitor",
-        label="Default interval (s)",
+        label=_t(_ws.monitor_defaultintervals_label()),
         kind=Kind.INT,
         default=60,
-        help="Checks every N seconds when 'every' is omitted; floor 30s.",
+        help=_t(_ws.monitor_defaultintervals_help()),
         minimum=0,
     ),
     Setting(
         key="monitor.maxMonitors",
         path=("monitor", "maxMonitors"),
         section="monitor",
-        label="Max per session",
+        label=_t(_ws.monitor_maxmonitors_label()),
         kind=Kind.INT,
         default=8,
-        help="Refuses arms past N; cancel one first.",
+        help=_t(_ws.monitor_maxmonitors_help()),
         minimum=0,
     ),
     Setting(
         key="monitor.runTimeoutMs",
         path=("monitor", "runTimeoutMs"),
         section="monitor",
-        label="Run timeout (ms)",
+        label=_t(_ws.monitor_runtimeoutms_label()),
         kind=Kind.INT,
         default=120000,
-        help="Per-check deadline; 0 uses 120000 ms.",
+        help=_t(_ws.monitor_runtimeoutms_help()),
         minimum=0,
     ),
     Setting(
         key="monitor.snapshotMaxChars",
         path=("monitor", "snapshotMaxChars"),
         section="monitor",
-        label="Snapshot cap (chars)",
+        label=_t(_ws.monitor_snapshotmaxchars_label()),
         kind=Kind.INT,
         default=32768,
-        help="Stored normalized output; bounds disk and diff input.",
+        help=_t(_ws.monitor_snapshotmaxchars_help()),
         minimum=0,
     ),
     Setting(
         key="monitor.maxDeltaLines",
         path=("monitor", "maxDeltaLines"),
         section="monitor",
-        label="Max delta lines",
+        label=_t(_ws.monitor_maxdeltalines_label()),
         kind=Kind.INT,
         default=12,
-        help="Changed lines summarised per delivery.",
+        help=_t(_ws.monitor_maxdeltalines_help()),
         minimum=0,
     ),
     Setting(
         key="monitor.deltaMaxChars",
         path=("monitor", "deltaMaxChars"),
         section="monitor",
-        label="Delta budget (chars)",
+        label=_t(_ws.monitor_deltamaxchars_label()),
         kind=Kind.INT,
         default=1200,
-        help="Total delta text per delivery message.",
+        help=_t(_ws.monitor_deltamaxchars_help()),
         minimum=0,
     ),
     Setting(
         key="monitor.classifyMaxChars",
         path=("monitor", "classifyMaxChars"),
         section="monitor",
-        label="Classifier state (chars)",
+        label=_t(_ws.monitor_classifymaxchars_label()),
         kind=Kind.INT,
         default=1200,
-        help=(
-            "Bound on the changed lines the materiality check receives "
-            "(the monitor's name and purpose ride along, clipped separately)."
-        ),
+        help=(_t(_ws.monitor_classifymaxchars_help())),
         minimum=0,
     ),
     Setting(
         key="monitor.maxConsecutiveFailures",
         path=("monitor", "maxConsecutiveFailures"),
         section="monitor",
-        label="Disable after failures",
+        label=_t(_ws.monitor_maxconsecutivefailures_label()),
         kind=Kind.INT,
         default=5,
-        help="Consecutive check failures before a monitor is disabled.",
+        help=_t(_ws.monitor_maxconsecutivefailures_help()),
         minimum=0,
     ),
     Setting(
         key="monitor.maxDeliveriesPerHour",
         path=("monitor", "maxDeliveriesPerHour"),
         section="monitor",
-        label="Deliveries per hour",
+        label=_t(_ws.monitor_maxdeliveriesperhour_label()),
         kind=Kind.INT,
         default=12,
-        help="Per monitor; over the cap, changes are held and counted.",
+        help=_t(_ws.monitor_maxdeliveriesperhour_help()),
         minimum=0,
     ),
     Setting(
         key="monitor.normalizeTimestamps",
         path=("monitor", "normalizeTimestamps"),
         section="monitor",
-        label="Ignore timestamp churn",
+        label=_t(_ws.monitor_normalizetimestamps_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Treat timestamps as noise before diffing, so clock fields do not alarm.",
+        help=_t(_ws.monitor_normalizetimestamps_help()),
         choices=_bool_choices(
-            "timestamps do not count as changes",
-            "timestamps diff like any text",
+            _t(_ws.monitor_normalizetimestamps_choice_true_description()),
+            _t(_ws.monitor_normalizetimestamps_choice_false_description()),
         ),
     ),
     # -- turn supplements ("Highlights") --------------------------------------
@@ -3227,36 +3368,40 @@ SETTINGS: tuple[Setting, ...] = (
         key="supplements.enabled",
         path=("supplements", "enabled"),
         section="supplements",
-        label="Highlights",
+        label=_t(_ws.supplements_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help="On: an answer can be followed by a line pointing at the files it made.",
+        help=_t(_ws.supplements_enabled_help()),
         choices=_bool_choices(
-            "files an answer produced are pointed out under it",
-            "nothing is added under an answer",
+            _t(_ws.supplements_enabled_choice_true_description()),
+            _t(_ws.supplements_enabled_choice_false_description()),
         ),
     ),
     Setting(
         key="supplements.files",
         path=("supplements", "files"),
         section="supplements",
-        label="↳ files",
+        label=_t(_ws.supplements_files_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Needs Highlights on. Point out reports and exports an answer produced.",
-        choices=_bool_choices("deliverable files are listed", "files are never listed"),
+        help=_t(_ws.supplements_files_help()),
+        choices=_bool_choices(
+            _t(_ws.supplements_files_choice_true_description()),
+            _t(_ws.supplements_files_choice_false_description()),
+        ),
         gated_by="supplements.enabled",
     ),
     Setting(
         key="supplements.graphics",
         path=("supplements", "graphics"),
         section="supplements",
-        label="↳ graphics",
+        label=_t(_ws.supplements_graphics_label()),
         kind=Kind.BOOL,
         default=False,
-        help="Needs Highlights on. Draw a chart when an answer shows numbers. Spends model tokens.",
+        help=_t(_ws.supplements_graphics_help()),
         choices=_bool_choices(
-            "a chart may be generated (spends tokens)", "no chart is ever generated"
+            _t(_ws.supplements_graphics_choice_true_description()),
+            _t(_ws.supplements_graphics_choice_false_description()),
         ),
         gated_by="supplements.enabled",
     ),
@@ -3264,20 +3409,20 @@ SETTINGS: tuple[Setting, ...] = (
         key="supplements.model",
         path=("supplements", "model"),
         section="supplements",
-        label="↳ graphics model",
+        label=_t(_ws.supplements_model_label()),
         kind=Kind.TEXT,
         default="auto",
-        help="Needs graphics on. auto picks a cheap fast model; session uses this session's.",
+        help=_t(_ws.supplements_model_help()),
         gated_by="supplements.graphics",
     ),
     Setting(
         key="supplements.maxTurns",
         path=("supplements", "maxTurns"),
         section="supplements",
-        label="↳ max turns",
+        label=_t(_ws.supplements_maxturns_label()),
         kind=Kind.INT,
         default=2,
-        help="Needs graphics on. Model turns per chart, including one repair.",
+        help=_t(_ws.supplements_maxturns_help()),
         minimum=1,
         maximum=4,
         gated_by="supplements.graphics",
@@ -3286,10 +3431,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="supplements.maxOutputTokens",
         path=("supplements", "maxOutputTokens"),
         section="supplements",
-        label="↳ max output tokens",
+        label=_t(_ws.supplements_maxoutputtokens_label()),
         kind=Kind.INT,
         default=6000,
-        help="Needs graphics on. Output budget per generator turn.",
+        help=_t(_ws.supplements_maxoutputtokens_help()),
         # Mirrors ``policy.MAX_OUTPUT_TOKENS_BOUNDS``, the reader's accept range: with no
         # page maximum the registry accepted values ``from_values`` substitutes with the
         # default (round-1 R4: 2,000,000 came back as 6000). The pair is pinned by
@@ -3302,10 +3447,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="supplements.timeoutS",
         path=("supplements", "timeoutS"),
         section="supplements",
-        label="↳ time limit (s)",
+        label=_t(_ws.supplements_timeouts_label()),
         kind=Kind.INT,
         default=90,
-        help="Needs Highlights on. Give up on a whole job after this long.",
+        help=_t(_ws.supplements_timeouts_help()),
         minimum=1,
         maximum=3600,
         gated_by="supplements.enabled",
@@ -3314,10 +3459,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="supplements.maxCostUsd",
         path=("supplements", "maxCostUsd"),
         section="supplements",
-        label="↳ cost cap ($)",
+        label=_t(_ws.supplements_maxcostusd_label()),
         kind=Kind.FLOAT,
         default=1.00,
-        help="Needs graphics on. Soft cap on one job's spend.",
+        help=_t(_ws.supplements_maxcostusd_help()),
         # ``0`` is a VALID value -- "never spend" -- and the reader honours it as stored
         # (round-1 R4); the range is only the page's control window, not the reader's
         # limit (a hand-edited higher cap stays the user's own stated guard). The literal
@@ -3331,10 +3476,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="supplements.maxFeatured",
         path=("supplements", "maxFeatured"),
         section="supplements",
-        label="↳ files shown",
+        label=_t(_ws.supplements_maxfeatured_label()),
         kind=Kind.INT,
         default=4,
-        help="Needs Highlights on. Files named before the rest fold into 'N more'.",
+        help=_t(_ws.supplements_maxfeatured_help()),
         minimum=1,
         maximum=12,
         gated_by="supplements.enabled",
@@ -3343,14 +3488,11 @@ SETTINGS: tuple[Setting, ...] = (
         key="supplements.denyPrefixes",
         path=("supplements", "denyPrefixes"),
         section="supplements",
-        label="↳ never list under",
+        label=_t(_ws.supplements_denyprefixes_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            "Needs Highlights on. Comma-separated folders whose files are never listed "
-            "or sent to a decision model; use it on a machine holding customer data."
-        ),
-        placeholder="~/clients, ~/Documents/private",
+        help=(_t(_ws.supplements_denyprefixes_help())),
+        placeholder=_t(_ws.supplements_denyprefixes_placeholder()),
         empty_unsets=True,
         gated_by="supplements.enabled",
     ),
@@ -3365,17 +3507,21 @@ SETTINGS: tuple[Setting, ...] = (
         key="fork.mode",
         path=("fork", "mode"),
         section="fork",
-        label="Where a fork opens",
+        label=_t(_ws.fork_mode_label()),
         kind=Kind.ENUM,
         default="switch",
-        help="Choose where the fork opens; unfinished work stays in the original.",
+        help=_t(_ws.fork_mode_help()),
         choices=(
             Choice(
                 "window",
-                "new window",
-                "open the fork elsewhere; this session keeps running",
+                _t(_ws.fork_mode_choice_window_label()),
+                _t(_ws.fork_mode_choice_window_description()),
             ),
-            Choice("switch", "this terminal", "follow the fork here; return with /resume"),
+            Choice(
+                "switch",
+                _t(_ws.fork_mode_choice_switch_label()),
+                _t(_ws.fork_mode_choice_switch_description()),
+            ),
         ),
     ),
     Setting(
@@ -3386,13 +3532,21 @@ SETTINGS: tuple[Setting, ...] = (
         # of "Where a fork opens" above it, and "placement" is a word that
         # appears nowhere else a user has seen. The help text already phrased it
         # this way; the label was lagging behind it.
-        label="Where it opens under cmux",
+        label=_t(_ws.fork_cmux_placement_label()),
         kind=Kind.ENUM,
         default="workspace",
-        help="Under cmux, whether a fork gets its own workspace or a surface here.",
+        help=_t(_ws.fork_cmux_placement_help()),
         choices=(
-            Choice("workspace", "new workspace", "a sidebar row of its own"),
-            Choice("surface", "new surface", "a tab in the current workspace"),
+            Choice(
+                "workspace",
+                _t(_ws.fork_cmux_placement_choice_workspace_label()),
+                _t(_ws.fork_cmux_placement_choice_workspace_description()),
+            ),
+            Choice(
+                "surface",
+                _t(_ws.fork_cmux_placement_choice_surface_label()),
+                _t(_ws.fork_cmux_placement_choice_surface_description()),
+            ),
         ),
     ),
     # -- compaction ---------------------------------------------------------
@@ -3400,35 +3554,54 @@ SETTINGS: tuple[Setting, ...] = (
         key="compaction.enabled",
         path=("compaction", "enabled"),
         section="compaction",
-        label="Compaction",
+        label=_t(_ws.compaction_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Summarise older history when the context fills.",
-        choices=_bool_choices("compact automatically", "never compact"),
+        help=_t(_ws.compaction_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.compaction_enabled_choice_true_description()),
+            _t(_ws.compaction_enabled_choice_false_description()),
+        ),
     ),
     Setting(
         key="compaction.strategy",
         path=("compaction", "strategy"),
         section="compaction",
-        label="Strategy",
+        label=_t(_ws.compaction_strategy_label()),
         kind=Kind.ENUM,
         default="auto",
-        help="Which mechanism compacts. Auto picks per model.",
+        help=_t(_ws.compaction_strategy_help()),
         choices=(
-            Choice("auto", "auto", "snapcompact for vision models, else context-full"),
-            Choice("context-full", "context-full", "summarise the whole context"),
-            Choice("snapcompact", "snapcompact", "snapshot-based, keeps images out"),
-            Choice("off", "off", "disable the pass"),
+            Choice(
+                "auto",
+                _t(_ws.compaction_strategy_choice_auto_label()),
+                _t(_ws.compaction_strategy_choice_auto_description()),
+            ),
+            Choice(
+                "context-full",
+                _t(_ws.compaction_strategy_choice_context_full_label()),
+                _t(_ws.compaction_strategy_choice_context_full_description()),
+            ),
+            Choice(
+                "snapcompact",
+                _t(_ws.compaction_strategy_choice_snapcompact_label()),
+                _t(_ws.compaction_strategy_choice_snapcompact_description()),
+            ),
+            Choice(
+                "off",
+                _t(_ws.compaction_strategy_choice_off_label()),
+                _t(_ws.compaction_strategy_choice_off_description()),
+            ),
         ),
     ),
     Setting(
         key="compaction.threshold_percent",
         path=("compaction", "threshold_percent"),
         section="compaction",
-        label="Threshold (% of window)",
+        label=_t(_ws.compaction_threshold_percent_label()),
         kind=Kind.FLOAT,
         default=0.80,
-        help="Percentage trigger. 0.80 and 80 both mean 80%.",
+        help=_t(_ws.compaction_threshold_percent_help()),
         minimum=0.0,
         maximum=100.0,
     ),
@@ -3436,44 +3609,50 @@ SETTINGS: tuple[Setting, ...] = (
         key="compaction.threshold_tokens",
         path=("compaction", "threshold_tokens"),
         section="compaction",
-        label="Threshold (tokens)",
+        label=_t(_ws.compaction_threshold_tokens_label()),
         kind=Kind.INT,
         # Literal, not DEFAULT_THRESHOLD_TOKENS: importing local_operator.compaction
         # here drags the whole pass engine into every settings read. A unit test
         # pins this to the constant so the two cannot drift.
         default=400_000,
-        help="Absolute trigger. The smaller of this and the percentage wins.",
+        help=_t(_ws.compaction_threshold_tokens_help()),
         minimum=1,
     ),
     Setting(
         key="compaction.keep_recent_tokens",
         path=("compaction", "keep_recent_tokens"),
         section="compaction",
-        label="Keep recent tokens",
+        label=_t(_ws.compaction_keep_recent_tokens_label()),
         kind=Kind.INT,
         default=20_000,
-        help="Recent history kept verbatim across a pass.",
+        help=_t(_ws.compaction_keep_recent_tokens_help()),
         minimum=0,
     ),
     Setting(
         key="compaction.auto_continue",
         path=("compaction", "auto_continue"),
         section="compaction",
-        label="Continue after compaction",
+        label=_t(_ws.compaction_auto_continue_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Schedule a continuation prompt after a successful post-turn pass.",
-        choices=_bool_choices("continue automatically", "stop after the pass"),
+        help=_t(_ws.compaction_auto_continue_help()),
+        choices=_bool_choices(
+            _t(_ws.compaction_auto_continue_choice_true_description()),
+            _t(_ws.compaction_auto_continue_choice_false_description()),
+        ),
     ),
     Setting(
         key="compaction.mid_turn_enabled",
         path=("compaction", "mid_turn_enabled"),
         section="compaction",
-        label="Mid-turn compaction",
+        label=_t(_ws.compaction_mid_turn_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Allow a pass at safe tool-loop boundaries, not only between turns.",
-        choices=_bool_choices("compact mid-turn", "only between turns"),
+        help=_t(_ws.compaction_mid_turn_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.compaction_mid_turn_enabled_choice_true_description()),
+            _t(_ws.compaction_mid_turn_enabled_choice_false_description()),
+        ),
     ),
     # The two BYTE knobs. They live in this section because they are compaction
     # triggers, but they measure a different thing from every other key here:
@@ -3486,26 +3665,20 @@ SETTINGS: tuple[Setting, ...] = (
         key="compaction.wire_bytes_budget",
         path=("compaction", "wire_bytes_budget"),
         section="compaction",
-        label="Request size limit (bytes)",
+        label=_t(_ws.compaction_wire_bytes_budget_label()),
         kind=Kind.INT,
         default=24_000_000,
-        help=(
-            "Hard ceiling on the request. Older screenshots are dropped from the"
-            " context (never from the transcript) to stay under it. 0 disables."
-        ),
+        help=(_t(_ws.compaction_wire_bytes_budget_help())),
         minimum=0,
     ),
     Setting(
         key="compaction.wire_bytes_trigger",
         path=("compaction", "wire_bytes_trigger"),
         section="compaction",
-        label="Request size trigger (bytes)",
+        label=_t(_ws.compaction_wire_bytes_trigger_label()),
         kind=Kind.INT,
         default=16_000_000,
-        help=(
-            "Compact once the request passes this size, so a screenshot-heavy"
-            " session summarises early instead of dropping frames. 0 disables."
-        ),
+        help=(_t(_ws.compaction_wire_bytes_trigger_help())),
         minimum=0,
     ),
     # -- web search ---------------------------------------------------------
@@ -3518,30 +3691,41 @@ SETTINGS: tuple[Setting, ...] = (
         key="web_search.enabled",
         path=("web_search", "enabled"),
         section="web_tools",
-        label="Web search",
+        label=_t(_ws.web_search_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Offer the search tool and let it run; off refuses every call.",
-        choices=_bool_choices("search available", "search disabled"),
+        help=_t(_ws.web_search_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.web_search_enabled_choice_true_description()),
+            _t(_ws.web_search_enabled_choice_false_description()),
+        ),
     ),
     Setting(
         key="web_search.strategy",
         path=("web_search", "strategy"),
         section="web_search",
-        label="Load balancing",
+        label=_t(_ws.web_search_strategy_label()),
         kind=Kind.ENUM,
         default="round_robin",
-        help="How the provider list is consumed.",
+        help=_t(_ws.web_search_strategy_help()),
         choices=(
-            Choice("round_robin", "round_robin", "rotate across providers"),
-            Choice("ordered", "ordered", "top of the list first, fall through"),
+            Choice(
+                "round_robin",
+                _t(_ws.web_search_strategy_choice_round_robin_label()),
+                _t(_ws.web_search_strategy_choice_round_robin_description()),
+            ),
+            Choice(
+                "ordered",
+                _t(_ws.web_search_strategy_choice_ordered_label()),
+                _t(_ws.web_search_strategy_choice_ordered_description()),
+            ),
         ),
     ),
     Setting(
         key="web_search.providers",
         path=("web_search", "providers"),
         section="web_search",
-        label="Providers",
+        label=_t(_ws.web_search_providers_label()),
         kind=Kind.LIST,
         default=["duckduckgo", "tavily"],
         # A PRIORITY PREFIX, not an allowlist: naming a provider here means "try
@@ -3549,7 +3733,7 @@ SETTINGS: tuple[Setting, ...] = (
         # automatic band. The help says so, because a user who reads the list as
         # "exactly these" would be surprised by the chain -- and that surprise is
         # the documented cost of not writing a freezing migration.
-        help="Comma-separated, in priority order; tried before the automatic free providers.",
+        help=_t(_ws.web_search_providers_help()),
         members=(
             "duckduckgo",
             "tavily",
@@ -3566,7 +3750,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="web_search.excluded_providers",
         path=("web_search", "excluded_providers"),
         section="web_search",
-        label="Excluded providers",
+        label=_t(_ws.web_search_excluded_providers_label()),
         kind=Kind.LIST,
         default=[],
         # `empty_unsets` is required HERE and is exactly what is wrong for
@@ -3574,7 +3758,7 @@ SETTINGS: tuple[Setting, ...] = (
         # empty field clears the key rather than failing validation the way an
         # empty priority list does.
         empty_unsets=True,
-        help="Never used, even in the automatic chain. Comma-separated; empty = none excluded.",
+        help=_t(_ws.web_search_excluded_providers_help()),
         members=(
             "duckduckgo",
             "tavily",
@@ -3591,10 +3775,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="web_search.timeout_seconds",
         path=("web_search", "timeout_seconds"),
         section="web_search",
-        label="Timeout (s)",
+        label=_t(_ws.web_search_timeout_seconds_label()),
         kind=Kind.FLOAT,
         default=20.0,
-        help="Per-provider request timeout. Clamped to 1-120 when read.",
+        help=_t(_ws.web_search_timeout_seconds_help()),
         minimum=1.0,
         maximum=120.0,
     ),
@@ -3602,58 +3786,61 @@ SETTINGS: tuple[Setting, ...] = (
         key="web_search.searxng_endpoint",
         path=("web_search", "searxng_endpoint"),
         section="web_search",
-        label="SearXNG endpoint",
+        label=_t(_ws.web_search_searxng_endpoint_label()),
         kind=Kind.TEXT,
         default="",
-        help="Base URL of a self-hosted SearXNG instance.",
+        help=_t(_ws.web_search_searxng_endpoint_help()),
     ),
     Setting(
         key="web_search.deepseek_evidence",
         path=("web_search", "deepseek_evidence"),
         section="web_search",
-        label="DeepSeek page evidence",
+        label=_t(_ws.web_search_deepseek_evidence_label()),
         kind=Kind.BOOL,
         default=False,
         # Off by default: it is a SECOND model turn (measured 4-11s on top of the
         # search) that buys a verbatim quote and a relevance score per source,
         # for the "which page do I fetch next" decision. Only the deepseek
         # provider consumes it; every other provider already returns snippets.
-        help="Adds a per-page quote and relevance score after a DeepSeek search.",
+        help=_t(_ws.web_search_deepseek_evidence_help()),
     ),
     Setting(
         key="web_search.read_enabled",
         path=("web_search", "read_enabled"),
         section="web_search",
-        label="Read from search",
+        label=_t(_ws.web_search_read_enabled_label()),
         kind=Kind.BOOL,
         default=True,
         # On by default because it is inert until used: the tool refuses (telling
         # the model to fetch instead) whenever no readable page context exists,
         # so a session that never uses it pays nothing but a tool schema.
-        help="Offer web_read: answer from pages a search already retrieved, no refetch.",
+        help=_t(_ws.web_search_read_enabled_help()),
     ),
     # -- web fetch ----------------------------------------------------------
     Setting(
         key="web_fetch.enabled",
         path=("web_fetch", "enabled"),
         section="web_tools",
-        label="Web fetch",
+        label=_t(_ws.web_fetch_enabled_label()),
         kind=Kind.BOOL,
         default=True,
         # 60 cells — see the note on `hosting`. No BACKTICKS: the footer is a
         # plain `Text`, so they render as literal characters, and this was the
         # only one of 57 help strings carrying any (design round 1, D5).
-        help="Offer the fetch tool and read <url>; off refuses every call.",
-        choices=_bool_choices("fetch available", "fetch disabled"),
+        help=_t(_ws.web_fetch_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.web_fetch_enabled_choice_true_description()),
+            _t(_ws.web_fetch_enabled_choice_false_description()),
+        ),
     ),
     Setting(
         key="web_fetch.timeout_seconds",
         path=("web_fetch", "timeout_seconds"),
         section="web_fetch",
-        label="Timeout (s)",
+        label=_t(_ws.web_fetch_timeout_seconds_label()),
         kind=Kind.FLOAT,
         default=20.0,
-        help="Per-request timeout.",
+        help=_t(_ws.web_fetch_timeout_seconds_help()),
         minimum=1.0,
         maximum=300.0,
     ),
@@ -3661,20 +3848,20 @@ SETTINGS: tuple[Setting, ...] = (
         key="web_fetch.max_bytes",
         path=("web_fetch", "max_bytes"),
         section="web_fetch",
-        label="Download ceiling (bytes)",
+        label=_t(_ws.web_fetch_max_bytes_label()),
         kind=Kind.INT,
         default=5 * 1024 * 1024,
-        help="Enforced during streaming, so a huge page is cut off rather than buffered.",
+        help=_t(_ws.web_fetch_max_bytes_help()),
         minimum=1024,
     ),
     Setting(
         key="web_fetch.max_redirects",
         path=("web_fetch", "max_redirects"),
         section="web_fetch",
-        label="Max redirects",
+        label=_t(_ws.web_fetch_max_redirects_label()),
         kind=Kind.INT,
         default=5,
-        help="Redirect hops followed before giving up.",
+        help=_t(_ws.web_fetch_max_redirects_help()),
         minimum=0,
         maximum=50,
     ),
@@ -3682,53 +3869,67 @@ SETTINGS: tuple[Setting, ...] = (
         key="web_fetch.cache_ttl_seconds",
         path=("web_fetch", "cache_ttl_seconds"),
         section="web_fetch",
-        label="Cache TTL (s)",
+        label=_t(_ws.web_fetch_cache_ttl_seconds_label()),
         kind=Kind.INT,
         default=900,
-        help="0 disables the URL cache entirely.",
+        help=_t(_ws.web_fetch_cache_ttl_seconds_help()),
         minimum=0,
     ),
     Setting(
         key="web_fetch.allow_private",
         path=("web_fetch", "allow_private"),
         section="web_fetch",
-        label="Allow private addresses",
+        label=_t(_ws.web_fetch_allow_private_label()),
         kind=Kind.BOOL,
         default=False,
-        help="SSRF guard. On permits loopback, private and link-local targets.",
-        choices=_bool_choices("allow private targets", "block private targets"),
+        help=_t(_ws.web_fetch_allow_private_help()),
+        choices=_bool_choices(
+            _t(_ws.web_fetch_allow_private_choice_true_description()),
+            _t(_ws.web_fetch_allow_private_choice_false_description()),
+        ),
     ),
     Setting(
         key="web_fetch.render_backend",
         path=("web_fetch", "render_backend"),
         section="web_fetch",
-        label="HTML renderer",
+        label=_t(_ws.web_fetch_render_backend_label()),
         kind=Kind.ENUM,
         default="auto",
-        help="Auto uses markdownify when the [fetch] extra is installed.",
+        help=_t(_ws.web_fetch_render_backend_help()),
         choices=(
-            Choice("auto", "auto", "markdownify if available, else stdlib"),
-            Choice("stdlib", "stdlib", "always the bundled renderer"),
+            Choice(
+                "auto",
+                _t(_ws.web_fetch_render_backend_choice_auto_label()),
+                _t(_ws.web_fetch_render_backend_choice_auto_description()),
+            ),
+            Choice(
+                "stdlib",
+                _t(_ws.web_fetch_render_backend_choice_stdlib_label()),
+                _t(_ws.web_fetch_render_backend_choice_stdlib_description()),
+            ),
         ),
     ),
     Setting(
         key="web_fetch.enrich",
         path=("web_fetch", "enrich"),
         section="web_fetch",
-        label="Enrich before scraping",
+        label=_t(_ws.web_fetch_enrich_label()),
         kind=Kind.BOOL,
         default=True,
-        help="Try .md, llms.txt and content negotiation before scraping HTML.",
-        choices=_bool_choices("try cleaner sources first", "scrape HTML directly"),
+        help=_t(_ws.web_fetch_enrich_help()),
+        choices=_bool_choices(
+            _t(_ws.web_fetch_enrich_choice_true_description()),
+            _t(_ws.web_fetch_enrich_choice_false_description()),
+        ),
     ),
     Setting(
         key="web_fetch.max_attempts",
         path=("web_fetch", "max_attempts"),
         section="web_fetch",
-        label="Attempts per hop",
+        label=_t(_ws.web_fetch_max_attempts_label()),
         kind=Kind.INT,
         default=3,
-        help="Retries share the call's timeout, so more attempts never take longer.",
+        help=_t(_ws.web_fetch_max_attempts_help()),
         minimum=1,
         maximum=5,
     ),
@@ -3736,11 +3937,14 @@ SETTINGS: tuple[Setting, ...] = (
         key="web_fetch.blocked_retry",
         path=("web_fetch", "blocked_retry"),
         section="web_fetch",
-        label="Browser-profile retry",
+        label=_t(_ws.web_fetch_blocked_retry_label()),
         kind=Kind.BOOL,
         default=True,
-        help="After a refusal, retry once with browser-shaped headers.",
-        choices=_bool_choices("retry refusals once", "stay self-identifying"),
+        help=_t(_ws.web_fetch_blocked_retry_help()),
+        choices=_bool_choices(
+            _t(_ws.web_fetch_blocked_retry_choice_true_description()),
+            _t(_ws.web_fetch_blocked_retry_choice_false_description()),
+        ),
     ),
     # -- tools --------------------------------------------------------------
     # ``path`` mirrors ``tools.builtin.BASH_SHELL_PATH``; the two are pinned
@@ -3753,34 +3957,34 @@ SETTINGS: tuple[Setting, ...] = (
         key="hooks.native",
         path=("hooks", "native"),
         section="hooks",
-        label="Native hooks",
+        label=_t(_ws.hooks_native_label()),
         kind=Kind.BOOL,
         default=False,
-        help="Run hooks from hooks.json in the lop config dir after each tool call.",
+        help=_t(_ws.hooks_native_help()),
     ),
     Setting(
         key="hooks.forward_claude",
         path=("hooks", "forward_claude"),
         section="hooks",
-        label="Forward Claude Code hooks",
+        label=_t(_ws.hooks_forward_claude_label()),
         kind=Kind.BOOL,
         default=False,
-        help="Run PostToolUse hooks from ~/.claude and plugins after each tool call.",
+        help=_t(_ws.hooks_forward_claude_help()),
     ),
     Setting(
         key="hooks.forward_codex",
         path=("hooks", "forward_codex"),
         section="hooks",
-        label="Forward Codex hooks",
+        label=_t(_ws.hooks_forward_codex_label()),
         kind=Kind.BOOL,
         default=False,
-        help="Run PostToolUse hooks from ~/.codex/hooks.json after each tool call.",
+        help=_t(_ws.hooks_forward_codex_help()),
     ),
     Setting(
         key="bash.shell",
         path=("bash", "shell"),
         section="tools",
-        label="Bash interpreter",
+        label=_t(_ws.bash_shell_label()),
         kind=Kind.TEXT,
         default="",
         help=_BASH_SHELL_HELP,
@@ -3807,13 +4011,10 @@ SETTINGS: tuple[Setting, ...] = (
         # ``unconfirmed`` -- and mailbox is the common one (the incident shape at
         # ~5 s), so a label that said "unconfirmed" sent an operator who wanted
         # the wake-failed notice looking in the wrong place.
-        label="Journal unacknowledged sends",
+        label=_t(_ws.send_journal_unconfirmed_label()),
         kind=Kind.BOOL,
         default=False,
-        help=(
-            "Write a transcript notice when a `send` is not acknowledged. "
-            "The tool result always reports it; this keeps a durable row too."
-        ),
+        help=(_t(_ws.send_journal_unconfirmed_help())),
     ),
     # -- search_interception ------------------------------------------------
     # ``path`` mirrors ``tools.builtin.SEARCH_INTERCEPTION_*_PATH`` (pinned
@@ -3832,38 +4033,28 @@ SETTINGS: tuple[Setting, ...] = (
         key="tools.search_interception.enabled",
         path=("tools", "search_interception", "enabled"),
         section="tools",
-        label="Block unbounded searches",
+        label=_t(_ws.tools_search_interception_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "Refuse a shell `grep`/`rg`/`find` that recurses from a repository root "
-            "or a vendor/build tree, and point the agent at the `grep` tool. "
-            "A scoped or single-file search is never touched. Off disables the check."
-        ),
+        help=(_t(_ws.tools_search_interception_enabled_help())),
     ),
     Setting(
         key="tools.search_interception.block",
         path=("tools", "search_interception", "block"),
-        label="...refuse rather than warn",
+        label=_t(_ws.tools_search_interception_block_label()),
         section="tools",
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "On: the command is refused with a suggestion. Off: it runs anyway and "
-            "the interception is logged, so an operator can watch before enforcing."
-        ),
+        help=(_t(_ws.tools_search_interception_block_help())),
     ),
     Setting(
         key="tools.search_interception.rg_excludes",
         path=("tools", "search_interception", "rg_excludes"),
-        label="...prune vendor trees for ripgrep",
+        label=_t(_ws.tools_search_interception_rg_excludes_label()),
         section="tools",
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "Give ripgrep a generated config that skips node_modules/.git/out etc., so "
-            "an `rg` the guard does not block is still fast. Applies to ripgrep only."
-        ),
+        help=(_t(_ws.tools_search_interception_rg_excludes_help())),
     ),
     # LIVE: ``Session._apply_config_change`` re-reads it into the publish
     # filter, so the next turn's tools array follows the edit. Path mirrors
@@ -3873,14 +4064,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="tools.defer",
         path=("tools", "defer"),
         section="tools",
-        label="Load rarely used tool schemas on demand",
+        label=_t(_ws.tools_defer_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "Keep rarely used tools' schemas out of every request until the agent "
-            "reads tool://<name> or calls one. The tools stay callable either way. "
-            "Off sends every schema on every request."
-        ),
+        help=(_t(_ws.tools_defer_help())),
     ),
     # -- memory_guard -------------------------------------------------------
     # ``path`` mirrors ``memory_guard.BASH_MEMORY_*_PATH``; the four are pinned
@@ -3892,57 +4079,53 @@ SETTINGS: tuple[Setting, ...] = (
         key="bash.memory.enabled",
         path=("bash", "memory", "enabled"),
         section="memory_guard",
-        label="Command memory limit",
+        label=_t(_ws.bash_memory_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "Give every bash command a RAM ceiling. A command whose process group "
-            "crosses it is killed (its group only, never lop) so it cannot take "
-            "the device down; the model is told to use less memory."
+        help=(_t(_ws.bash_memory_enabled_help())),
+        choices=_bool_choices(
+            _t(_ws.bash_memory_enabled_choice_true_description()),
+            _t(_ws.bash_memory_enabled_choice_false_description()),
         ),
-        choices=_bool_choices("cap command memory", "no ceiling"),
     ),
     Setting(
         key="bash.memory.mode",
         path=("bash", "memory", "mode"),
         section="memory_guard",
-        label="Ceiling source",
+        label=_t(_ws.bash_memory_mode_label()),
         kind=Kind.ENUM,
         default="auto",
-        help=(
-            "'auto' derives the ceiling from the memory this device has free right "
-            "now, so it tightens on its own when the machine is busy. 'manual' "
-            "pins it to the number below."
-        ),
+        help=(_t(_ws.bash_memory_mode_help())),
         choices=(
-            Choice("auto", "auto", "derive from available memory (default)"),
-            Choice("manual", "manual", "use the limit_mb below"),
+            Choice(
+                "auto",
+                _t(_ws.bash_memory_mode_choice_auto_label()),
+                _t(_ws.bash_memory_mode_choice_auto_description()),
+            ),
+            Choice(
+                "manual",
+                _t(_ws.bash_memory_mode_choice_manual_label()),
+                _t(_ws.bash_memory_mode_choice_manual_description()),
+            ),
         ),
     ),
     Setting(
         key="bash.memory.limit_mb",
         path=("bash", "memory", "limit_mb"),
         section="memory_guard",
-        label="Manual ceiling (MB)",
+        label=_t(_ws.bash_memory_limit_mb_label()),
         kind=Kind.INT,
         default=0,
-        help=(
-            "The ceiling when 'manual' is selected above. 0 means use the auto "
-            "ceiling instead, so leaving this at 0 never disables the guard."
-        ),
+        help=(_t(_ws.bash_memory_limit_mb_help())),
     ),
     Setting(
         key="bash.memory.soft_fraction",
         path=("bash", "memory", "soft_fraction"),
         section="memory_guard",
-        label="Advisory threshold",
+        label=_t(_ws.bash_memory_soft_fraction_label()),
         kind=Kind.FLOAT,
         default=0.8,
-        help=(
-            "Fraction of the ceiling at which one advisory line is emitted. It is "
-            "only an advisory — userspace cannot slow an allocation — so it warns "
-            "before the kill, it does not prevent it."
-        ),
+        help=(_t(_ws.bash_memory_soft_fraction_help())),
     ),
     # -- query_budget -------------------------------------------------------
     # ``path`` mirrors ``query_budget.QUERY_BUDGET_*_PATH`` in
@@ -3958,42 +4141,36 @@ SETTINGS: tuple[Setting, ...] = (
         key="bash.query_budget.enabled",
         path=("bash", "query_budget", "enabled"),
         section="query_budget",
-        label="Shell query budget",
+        label=_t(_ws.bash_query_budget_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "Time-box a shell `grep`/`find`/`du` walk that reads the filesystem rather "
-            "than a scoped file: one advisory at 10 s, then a stop at the budget "
-            "below. Builds, installs and test runs are never affected."
+        help=(_t(_ws.bash_query_budget_enabled_help())),
+        choices=_bool_choices(
+            _t(_ws.bash_query_budget_enabled_choice_true_description()),
+            _t(_ws.bash_query_budget_enabled_choice_false_description()),
         ),
-        choices=_bool_choices("time-box shell queries", "no budget"),
     ),
     Setting(
         key="bash.query_budget.stop",
         path=("bash", "query_budget", "stop"),
         section="query_budget",
-        label="...stop rather than warn",
+        label=_t(_ws.bash_query_budget_stop_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            "On: a query that crosses the budget is killed and told why. Off: it runs "
-            "to completion and only the advisory is shown, so an operator can watch "
-            "before enforcing."
+        help=(_t(_ws.bash_query_budget_stop_help())),
+        choices=_bool_choices(
+            _t(_ws.bash_query_budget_stop_choice_true_description()),
+            _t(_ws.bash_query_budget_stop_choice_false_description()),
         ),
-        choices=_bool_choices("stop the query", "advisory only"),
     ),
     Setting(
         key="bash.query_budget.seconds",
         path=("bash", "query_budget", "seconds"),
         section="query_budget",
-        label="Budget (seconds)",
+        label=_t(_ws.bash_query_budget_seconds_label()),
         kind=Kind.INT,
         default=60,
-        help=(
-            "Wall-clock budget for one shell query. The advisory fires at 10 s "
-            "whatever this says; this is the stop. A per-command prefix of "
-            "LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 skips the stop for a justified run."
-        ),
+        help=(_t(_ws.bash_query_budget_seconds_help())),
     ),
     # -- shell_environment ----------------------------------------------
     # ``path`` mirrors ``tools.shell_env.MODE_PATH`` and friends, pinned the
@@ -4015,59 +4192,49 @@ SETTINGS: tuple[Setting, ...] = (
         key="shell_environment.mode",
         path=("shell_environment", "mode"),
         section="shell_environment",
-        label="Agent shell environment",
+        label=_t(_ws.shell_environment_mode_label()),
         kind=Kind.ENUM,
         # Pinned to ``shell_env.MODE_DEFAULT`` by
         # ``test_shell_environment_rows_share_the_reader_paths`` rather than
         # imported: the default must stay the permissive one, and the pin is
         # what makes flipping it a decision rather than an edit.
         default="inherit",
-        help=(
-            "'inherit' lets a command the agent runs see your environment "
-            "(gh, aws, npm keep their tokens). 'allowlist' passes only "
-            "PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, "
-            "so the provider key this session launched with is not handed to a "
-            "command the model writes. Read once per session: changing it takes "
-            "effect at the next launch."
-        ),
+        help=(_t(_ws.shell_environment_mode_help())),
         choices=(
-            Choice("inherit", "inherit", "your environment, as today (default)"),
-            Choice("allowlist", "allowlist", "the safe set plus the lists below, nothing else"),
+            Choice(
+                "inherit",
+                _t(_ws.shell_environment_mode_choice_inherit_label()),
+                _t(_ws.shell_environment_mode_choice_inherit_description()),
+            ),
+            Choice(
+                "allowlist",
+                _t(_ws.shell_environment_mode_choice_allowlist_label()),
+                _t(_ws.shell_environment_mode_choice_allowlist_description()),
+            ),
         ),
     ),
     Setting(
         key="shell_environment.inherit",
         path=("shell_environment", "inherit"),
         section="shell_environment",
-        label="…kept in allowlist mode",
+        label=_t(_ws.shell_environment_inherit_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            "Empty = the safe set alone. Names the allowlist mode keeps ON TOP "
-            "of the safe set — e.g. LOCAL_OPERATOR_CONFIG_DIR for a shell that "
-            "must still resolve $(lop secret get NAME), or LANG. Inert in "
-            "inherit mode."
-        ),
+        help=(_t(_ws.shell_environment_inherit_help())),
         # OPEN namespace: these are the operator's own variable names, so there
         # is no vocabulary for this repo to bound.
-        placeholder="LOCAL_OPERATOR_CONFIG_DIR, LANG, …",
+        placeholder=_t(_ws.shell_environment_inherit_placeholder()),
         empty_unsets=True,
     ),
     Setting(
         key="shell_environment.exclude",
         path=("shell_environment", "exclude"),
         section="shell_environment",
-        label="…removed in both modes",
+        label=_t(_ws.shell_environment_exclude_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            "Empty = nothing removed. Names never handed to a command the agent "
-            "runs, in either mode — including the session credential store's "
-            "own injections, so this is how a variable is denied outright. "
-            "Covers the bash and eval children only; MCP servers and the "
-            "harness's own processes are not governed by it."
-        ),
-        placeholder="OPENROUTER_API_KEY, …",
+        help=(_t(_ws.shell_environment_exclude_help())),
+        placeholder=_t(_ws.shell_environment_exclude_placeholder()),
         empty_unsets=True,
     ),
     *[
@@ -4078,21 +4245,20 @@ SETTINGS: tuple[Setting, ...] = (
                 f"providers.{provider}.base_url",
                 ("providers", provider, "base_url"),
                 "local_providers",
-                f"{name} endpoint",
+                _t(_ws.local_providers_base_url_label(name=name)),
                 Kind.TEXT,
                 endpoint,
-                "HTTP(S) API root. Changing servers requires a new token through /login; "
-                "existing tokens are never forwarded to another endpoint.",
+                _t(_ws.local_providers_base_url_help()),
                 validate_value=validate_endpoint_setting,
             ),
             Setting(
                 f"providers.{provider}.models",
                 ("providers", provider, "models"),
                 "local_providers",
-                f"{name} model overrides",
+                _t(_ws.local_providers_models_label(name=name)),
                 Kind.TEXT,
                 DEFAULT_MODEL_OVERRIDES,
-                'JSON: {"model-id":{"context_window":8192}}; server limits still apply.',
+                _t(_ws.local_providers_models_help()),
                 validate_value=model_overrides,
             ),
         )
@@ -4105,34 +4271,34 @@ SETTINGS: tuple[Setting, ...] = (
         key="conversation_length",
         path=("conversation_length",),
         section="retired",
-        label="Conversation length",
+        label=_t(_ws.conversation_length_label()),
         kind=Kind.READONLY,
         default=100,
-        help="Deprecated. Superseded by the compaction engine.",
+        help=_t(_ws.conversation_length_help()),
     ),
     Setting(
         key="detail_length",
         path=("detail_length",),
         section="retired",
-        label="Detail length",
+        label=_t(_ws.detail_length_label()),
         kind=Kind.READONLY,
         default=15,
-        help="Deprecated. Superseded by the compaction engine.",
+        help=_t(_ws.detail_length_help()),
     ),
     Setting(
         key="max_learnings_history",
         path=("max_learnings_history",),
         section="retired",
-        label="Max learnings history",
+        label=_t(_ws.max_learnings_history_label()),
         kind=Kind.READONLY,
         default=50,
-        help="Deprecated. Superseded by the compaction engine.",
+        help=_t(_ws.max_learnings_history_help()),
     ),
     Setting(
         key="classification.notice",
         path=("classification", "notice"),
         section="retired",
-        label="Smart hints notice",
+        label=_t(_ws.classification_notice_label()),
         kind=Kind.READONLY,
         default=True,
         # RETIRED RATHER THAN DELETED, by this section's own rule above: a user who
@@ -4148,13 +4314,13 @@ SETTINGS: tuple[Setting, ...] = (
         # guide, which says in as many words that all three use that name). "the layer"
         # is this codebase's word, not the user's; design round 1 (D1) measured that a
         # user who once saw a suggestion line has no anchor for it.
-        help="Deprecated. Smart hints is silent in the chat; the call is in the log.",
+        help=_t(_ws.classification_notice_help()),
     ),
     Setting(
         key="desktop.launch_command",
         path=("desktop", "launch_command"),
         section="desktop",
-        label="launch command",
+        label=_t(_ws.desktop_launch_command_label()),
         # TEXT, NOT LIST, and the reason is the separator rather than the type.
         # ``Kind.LIST`` is a COMMA-SEPARATED token list (``web_search.providers``
         # and the OpenRouter host slugs), and a comma is a legal character in an
@@ -4194,11 +4360,8 @@ SETTINGS: tuple[Setting, ...] = (
         # so its tail was dead copy at every width the page measures: the
         # `{session}` semantics are now the SHORT half and the placeholder
         # carries the command's shape.
-        help=(
-            "Empty = discover the app (local-operator-ui, then the macOS app). "
-            "{session} is the session id."
-        ),
-        placeholder="local-operator-ui --open-session {session}",
+        help=(_t(_ws.desktop_launch_command_help())),
+        placeholder=_t(_ws.desktop_launch_command_placeholder()),
         # Empty is the DEFAULT that must not be disturbed, and it has a real
         # meaning here ("discover it for me"), so it clears the key rather than
         # storing "".
@@ -4213,20 +4376,16 @@ SETTINGS: tuple[Setting, ...] = (
         key="static.roots",
         path=("static", "roots"),
         section="static",
-        label="Extra preview roots",
+        label=_t(_ws.static_roots_label()),
         kind=Kind.LIST,
         default=[],
         empty_unsets=True,
         validate_value=_validate_static_roots,
         # The consequence is the point of the row: every entry WIDENS what an
         # unauthenticated local caller can trigger a read of.
-        warning="widens what the local server will serve to any local caller",
-        help=(
-            "Empty = only the built-in roots. Comma-separated absolute directories; "
-            "image/audio/video/HTML files inside them can be previewed. Dot-directories "
-            "below a root are never served."
-        ),
-        placeholder="~/Documents, /Volumes/data/reports",
+        warning=_t(_ws.static_roots_warning()),
+        help=(_t(_ws.static_roots_help())),
+        placeholder=_t(_ws.static_roots_placeholder()),
     ),
     # -- network: where peers reach this device -------------------------------
     # THE TRIO THE DESIGN'S OWN TABLE NAMES. mesh-transport-identity.md §10.4 lists
@@ -4248,7 +4407,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="network.listen_address",
         path=("network", "listen_address"),
         section="network",
-        label="Listen address",
+        label=_t(_ws.network_listen_address_label()),
         kind=Kind.TEXT,
         default="0.0.0.0",
         help=(
@@ -4260,7 +4419,7 @@ SETTINGS: tuple[Setting, ...] = (
             # sentence was dropped WHOLE off-default, so the reader who had set a mesh
             # address got the key path and no explanation of the field (design review
             # round 1, D1).
-            "127.0.0.1 = dial-only; 0.0.0.0 = all; or one address."
+            _t(_ws.network_listen_address_help())
         ),
     ),
     # INT with the port range enforced, because the value is a socket bind and a
@@ -4270,7 +4429,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="network.port",
         path=("network", "port"),
         section="network",
-        label="Mesh port",
+        label=_t(_ws.network_port_label()),
         kind=Kind.INT,
         default=4097,
         minimum=1,
@@ -4280,7 +4439,7 @@ SETTINGS: tuple[Setting, ...] = (
             # row's clause is 13 cells (`default: 4097`) against the 74-cell budget and
             # the 3-cell joiner, so the room is 58 and this string leaves 8 of it.
             # Anything past the room sheds the help whole at 80 columns.
-            "The port peers dial; endpoints without one use it."
+            _t(_ws.network_port_help())
         ),
     ),
     # LIST over an OPEN namespace — deliberately no `members`. The vocabulary is
@@ -4293,7 +4452,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="network.advertise_hosts",
         path=("network", "advertise_hosts"),
         section="network",
-        label="Advertised endpoints",
+        label=_t(_ws.network_advertise_hosts_label()),
         kind=Kind.LIST,
         default=[],
         help=(
@@ -4305,12 +4464,12 @@ SETTINGS: tuple[Setting, ...] = (
             # it only by failing. The 204-cell sentence it replaces never rendered its
             # last sentence at ANY usable width, not even 200 columns (design review
             # round 1, D1).
-            "Empty = detected. Others: host:port, e.g. 203.0.113.7:4097"
+            _t(_ws.network_advertise_hosts_help())
         ),
         # THE BARE ADDRESS LEADS. The ghost clips rather than wraps, and the example a
         # reader most needs is the one that shows an address WITH its port; the hostname
         # example it used to lead with ate the row and hid this one (design round 1, D4).
-        placeholder="203.0.113.7:4097, tunnel.example.com:4100",
+        placeholder=_t(_ws.network_advertise_hosts_placeholder()),
         empty_unsets=True,
         validate_value=_validate_advertise_hosts,
     ),
@@ -4324,40 +4483,34 @@ SETTINGS: tuple[Setting, ...] = (
         key="network.audit.max_bytes",
         path=("network", "audit", "max_bytes"),
         section="network",
-        label="Audit size per generation",
+        label=_t(_ws.network_audit_max_bytes_label()),
         kind=Kind.INT,
         default=8_388_608,
         minimum=65_536,
         maximum=1_073_741_824,
-        help=(
-            "Bytes per generation, after rotation. 8 MiB of gzipped JSONL is roughly "
-            "55k records; the five-generation ceiling is therefore ~40 MiB."
-        ),
+        help=(_t(_ws.network_audit_max_bytes_help())),
     ),
     Setting(
         key="network.audit.generations",
         path=("network", "audit", "generations"),
         section="network",
-        label="Audit generations kept",
+        label=_t(_ws.network_audit_generations_label()),
         kind=Kind.INT,
         default=5,
         minimum=1,
         maximum=50,
-        help="Rotated files kept before the oldest is pruned and that pruning is recorded.",
+        help=_t(_ws.network_audit_generations_help()),
     ),
     Setting(
         key="network.audit.max_age_days",
         path=("network", "audit", "max_age_days"),
         section="network",
-        label="Audit age cap (days)",
+        label=_t(_ws.network_audit_max_age_days_label()),
         kind=Kind.FLOAT,
         default=90.0,
         minimum=1.0,
         maximum=3650.0,
-        help=(
-            "Age and size both rotate, because age binds on a quiet install and size "
-            "on a busy one. Export with `lop network log --export` before pruning."
-        ),
+        help=(_t(_ws.network_audit_max_age_days_help())),
     ),
     # THE RELAY'S OWN LIMIT, and the one an operator needs exactly when a peer
     # cannot connect: §2.1's cap on UNAUTHENTICATED connections in flight. The slot
@@ -4374,16 +4527,12 @@ SETTINGS: tuple[Setting, ...] = (
         key="network.max_handshakes",
         path=("network", "max_handshakes"),
         section="network",
-        label="Concurrent handshakes",
+        label=_t(_ws.network_max_handshakes_label()),
         kind=Kind.INT,
         default=8,
         minimum=1,
         maximum=1024,
-        help=(
-            "Unauthenticated connections this relay will hold at once. A pairing "
-            "holds one for the seconds until the code is typed; anything past the "
-            "cap is dropped at accept, with no reply frame."
-        ),
+        help=(_t(_ws.network_max_handshakes_help())),
     ),
     # -- network.sync / network.credentials (mesh build plan P0) ---------------
     # Declared by P0 so the sync and credentials slices never edit this file (the
@@ -4396,42 +4545,34 @@ SETTINGS: tuple[Setting, ...] = (
         key="network.sync.debounce_s",
         path=("network", "sync", "debounce_s"),
         section="network",
-        label="Sync quiet period (s)",
+        label=_t(_ws.network_sync_debounce_s_label()),
         kind=Kind.FLOAT,
         default=30.0,
         minimum=1.0,
         maximum=3600.0,
-        help=(
-            "Seconds a session's transcript must stay unchanged before its owner "
-            "tells devices holding a copy to pull. A session going idle pushes at "
-            "once, so its final message is never held back by this."
-        ),
+        help=(_t(_ws.network_sync_debounce_s_help())),
     ),
     Setting(
         key="network.sync.tick_s",
         path=("network", "sync", "tick_s"),
         section="network",
-        label="Sync check interval (s)",
+        label=_t(_ws.network_sync_tick_s_label()),
         kind=Kind.FLOAT,
         default=15.0,
         minimum=1.0,
         maximum=3600.0,
-        help="How often the owner checks copied sessions for changes: one file stat each.",
+        help=_t(_ws.network_sync_tick_s_help()),
     ),
     Setting(
         key="network.credentials.grant_ttl_s",
         path=("network", "credentials", "grant_ttl_s"),
         section="network",
-        label="Borrowed login lifetime (s)",
+        label=_t(_ws.network_credentials_grant_ttl_s_label()),
         kind=Kind.FLOAT,
         default=900.0,
         minimum=60.0,
         maximum=3600.0,
-        help=(
-            "The longest a device may use a login it borrowed from its owner before "
-            "asking again, and so how long a revoked or offline owner's login keeps "
-            "working elsewhere. Never longer than the token itself."
-        ),
+        help=(_t(_ws.network_credentials_grant_ttl_s_help())),
     ),
     # The github adapter's allow-list (github.py's ``REPOSITORIES_PATH``; the same
     # key is read by the owner — the mint narrows to it and REFUSES when empty —
@@ -4442,11 +4583,11 @@ SETTINGS: tuple[Setting, ...] = (
         key="network.credentials.github.repositories",
         path=("network", "credentials", "github", "repositories"),
         section="network",
-        label="GitHub repositories",
+        label=_t(_ws.network_credentials_github_repositories_label()),
         kind=Kind.LIST,
         default=[],
-        help="owner/repo entries a brokered GitHub token may touch (empty: none)",
-        placeholder="damianvtran/scratch, damianvtran/sandbox",
+        help=_t(_ws.network_credentials_github_repositories_help()),
+        placeholder=_t(_ws.network_credentials_github_repositories_placeholder()),
         empty_unsets=True,
         validate_value=_validate_github_repositories,
     ),
@@ -4463,42 +4604,48 @@ SETTINGS: tuple[Setting, ...] = (
         key="hub.auto_update.agents",
         path=("hub", "auto_update", "agents"),
         section="hub",
-        label="Auto-update agents",
+        label=_t(_ws.hub_auto_update_agents_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices("merge hub updates automatically", "only tell me; I apply them"),
-        help="Merge hub updates into pulled agents automatically.",
+        choices=_bool_choices(
+            _t(_ws.hub_auto_update_agents_choice_true_description()),
+            _t(_ws.hub_auto_update_agents_choice_false_description()),
+        ),
+        help=_t(_ws.hub_auto_update_agents_help()),
     ),
     Setting(
         key="hub.auto_update.teams",
         path=("hub", "auto_update", "teams"),
         section="hub",
-        label="Auto-update teams",
+        label=_t(_ws.hub_auto_update_teams_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices("merge hub updates automatically", "only tell me; I apply them"),
-        help="Merge hub updates into pulled teams automatically.",
+        choices=_bool_choices(
+            _t(_ws.hub_auto_update_teams_choice_true_description()),
+            _t(_ws.hub_auto_update_teams_choice_false_description()),
+        ),
+        help=_t(_ws.hub_auto_update_teams_help()),
     ),
     Setting(
         key="hub.check_interval_min",
         path=("hub", "check_interval_min"),
         section="hub",
-        label="Check interval (minutes)",
+        label=_t(_ws.hub_check_interval_min_label()),
         kind=Kind.INT,
         default=60,
         minimum=5,
         maximum=1440,
-        help="Minutes between hub update checks (both modes).",
+        help=_t(_ws.hub_check_interval_min_help()),
     ),
     Setting(
         key="hub.merge_model",
         path=("hub", "merge_model"),
         section="hub",
-        label="Merge model",
+        label=_t(_ws.hub_merge_model_label()),
         kind=Kind.TEXT,
         default="",
-        placeholder="provider/model",
-        help="provider/model for merges; empty uses your default model.",
+        placeholder=_t(_ws.hub_merge_model_placeholder()),
+        help=_t(_ws.hub_merge_model_help()),
         empty_unsets=True,
     ),
     # -- agents ------------------------------------------------------------
@@ -4513,17 +4660,20 @@ SETTINGS: tuple[Setting, ...] = (
         key="agents.auto_update.seeds",
         path=("agents", "auto_update", "seeds"),
         section="agents",
-        label="Auto-update built-in roles",
+        label=_t(_ws.agents_auto_update_seeds_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices("keep unedited built-ins current", "only tell me; I apply them"),
+        choices=_bool_choices(
+            _t(_ws.agents_auto_update_seeds_choice_true_description()),
+            _t(_ws.agents_auto_update_seeds_choice_false_description()),
+        ),
         # <= 72 cells (the picker's budget). The round-1 copy measured 77 and
         # blew that budget; trimmed here to 61 on the ``cell_len`` measure
         # (design round 2, D2-2 / agent review R2-3). Names the held
         # exception too: "tool changes still ask" is what the launch pass
         # does, and leaving it out let the "on" choice over-promise
         # (design round 1, D7).
-        help="At launch, update unedited built-ins; tool changes still ask.",
+        help=_t(_ws.agents_auto_update_seeds_help()),
     ),
     # -- aida --------------------------------------------------------------
     # Defaults are LITERALS here, not imports: this module deliberately keeps the
@@ -4538,87 +4688,86 @@ SETTINGS: tuple[Setting, ...] = (
         # read as the old name beside a configured `Display name: Nova`, while
         # every sibling row in the section is a role term. The section title
         # stays "Aida" — that one is the config namespace (`aida.*`).
-        label="Chief of staff enabled",
+        label=_t(_ws.aida_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices("enabled", "disabled"),
-        help="Read at boot and by /aida; a disabled install never creates her session.",
+        choices=_bool_choices(
+            _t(_ws.aida_enabled_choice_true_description()),
+            _t(_ws.aida_enabled_choice_false_description()),
+        ),
+        help=_t(_ws.aida_enabled_help()),
     ),
     Setting(
         key="aida.name",
         path=("aida", "name"),
         section="aida",
-        label="Display name",
+        label=_t(_ws.aida_name_label()),
         kind=Kind.TEXT,
         default="Aida",
-        placeholder="Aida",
+        placeholder=_t(_ws.aida_name_placeholder()),
         validate_value=_validate_aida_name,
         help=(
             # ≤94 cells, the detail line's budget at 100x30 (design round 1,
             # D2): the previous wording truncated at "upd…", eating exactly
             # the clause that says the rename APPLIES.
-            "What she is called everywhere. Renaming her conversation or "
-            "/aida rename <name> updates it."
+            _t(_ws.aida_name_help())
         ),
     ),
     Setting(
         key="aida.cadence.at",
         path=("aida", "cadence", "at"),
         section="aida",
-        label="Daily check-in time",
+        label=_t(_ws.aida_cadence_at_label()),
         kind=Kind.TEXT,
         default="08:30",
-        placeholder="08:30",
-        help="Local wall-clock HH:MM. An invalid value falls back to 08:30 at the next arm.",
+        placeholder=_t(_ws.aida_cadence_at_placeholder()),
+        help=_t(_ws.aida_cadence_at_help()),
     ),
     Setting(
         key="aida.cadence.paused",
         path=("aida", "cadence", "paused"),
         section="aida",
-        label="Cadence paused",
+        label=_t(_ws.aida_cadence_paused_label()),
         kind=Kind.BOOL,
         default=False,
-        choices=_bool_choices("paused", "running"),
-        help=(
-            "Written by /aida pause|resume, which also hold her wakes; editing it "
-            "here works the same way at her next tick."
+        choices=_bool_choices(
+            _t(_ws.aida_cadence_paused_choice_true_description()),
+            _t(_ws.aida_cadence_paused_choice_false_description()),
         ),
+        help=(_t(_ws.aida_cadence_paused_help())),
     ),
     Setting(
         key="aida.cadence.max_extra_per_day",
         path=("aida", "cadence", "max_extra_per_day"),
         section="aida",
-        label="Extra check-ins / day",
+        label=_t(_ws.aida_cadence_max_extra_per_day_label()),
         kind=Kind.INT,
         default=2,
         minimum=0,
         maximum=12,
-        help="How many escalation check-ins she may arm per day. 0 disables escalation.",
+        help=_t(_ws.aida_cadence_max_extra_per_day_help()),
     ),
     Setting(
         key="aida.cadence.min_gap_minutes",
         path=("aida", "cadence", "min_gap_minutes"),
         section="aida",
-        label="Minimum gap (minutes)",
+        label=_t(_ws.aida_cadence_min_gap_minutes_label()),
         kind=Kind.INT,
         default=90,
         minimum=0,
         maximum=1440,
-        help="Minimum spacing between her wakes; closer requests are refused.",
+        help=_t(_ws.aida_cadence_min_gap_minutes_help()),
     ),
     Setting(
         key="aida.onboarding.nudge_days",
         path=("aida", "onboarding", "nudge_days"),
         section="aida",
-        label="Integration nudge interval (days)",
+        label=_t(_ws.aida_onboarding_nudge_days_label()),
         kind=Kind.INT,
         default=14,
         minimum=1,
         maximum=365,
-        help=(
-            "How rarely she may nudge about setting up an integration. Read from "
-            "the onboarding slice."
-        ),
+        help=(_t(_ws.aida_onboarding_nudge_days_help())),
     ),
     # -- projects -------------------------------------------------------------
     # The staleness window. Default is a LITERAL like the aida block's (this
@@ -4630,15 +4779,12 @@ SETTINGS: tuple[Setting, ...] = (
         key="projects.stale_after_hours",
         path=("projects", "stale_after_hours"),
         section="projects",
-        label="Stale after (hours)",
+        label=_t(_ws.projects_stale_after_hours_label()),
         kind=Kind.INT,
         default=4,
         minimum=1,
         maximum=168,
-        help=(
-            "A project whose progress is older than this reads stale and is "
-            "worth a check-in. 1–168 hours."
-        ),
+        help=(_t(_ws.projects_stale_after_hours_help())),
     ),
     # -- wake triggers --------------------------------------------------------
     # Defaults are LITERALS here too; `_consumer_defaults()` imports the
@@ -4648,49 +4794,49 @@ SETTINGS: tuple[Setting, ...] = (
         key="wakes.triggers.enabled",
         path=("wakes", "triggers", "enabled"),
         section="wakes",
-        label="Enabled",
+        label=_t(_ws.wakes_triggers_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices("enabled", "disabled"),
-        help="Master switch for trigger wakes; off means no check-in is ever created.",
+        choices=_bool_choices(
+            _t(_ws.wakes_triggers_enabled_choice_true_description()),
+            _t(_ws.wakes_triggers_enabled_choice_false_description()),
+        ),
+        help=_t(_ws.wakes_triggers_enabled_help()),
     ),
     Setting(
         key="wakes.triggers.max_per_day",
         path=("wakes", "triggers", "max_per_day"),
         section="wakes",
-        label="Max check-in wakes per day",
+        label=_t(_ws.wakes_triggers_max_per_day_label()),
         kind=Kind.INT,
         default=6,
         minimum=0,
         maximum=48,
-        help=(
-            "Per-target rolling 24 h budget for trigger wakes. 0 disables "
-            "trigger wakes without touching the switch above."
-        ),
+        help=(_t(_ws.wakes_triggers_max_per_day_help())),
     ),
     Setting(
         key="wakes.triggers.min_gap_minutes",
         path=("wakes", "triggers", "min_gap_minutes"),
         section="wakes",
-        label="Minimum gap (minutes)",
+        label=_t(_ws.wakes_triggers_min_gap_minutes_label()),
         kind=Kind.INT,
         default=60,
         minimum=10,
         maximum=1440,
-        help="Minimum spacing between trigger wakes to the same target.",
+        help=_t(_ws.wakes_triggers_min_gap_minutes_help()),
     ),
     Setting(
         key="wakes.triggers.project_staleness.enabled",
         path=("wakes", "triggers", "project_staleness", "enabled"),
         section="wakes",
-        label="Project staleness trigger",
+        label=_t(_ws.wakes_triggers_project_staleness_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices("watching", "off"),
-        help=(
-            "Wake to check in on projects whose progress went stale. Settled (done/paused/"
-            "archived) projects are never watched."
+        choices=_bool_choices(
+            _t(_ws.wakes_triggers_project_staleness_enabled_choice_true_description()),
+            _t(_ws.wakes_triggers_project_staleness_enabled_choice_false_description()),
         ),
+        help=(_t(_ws.wakes_triggers_project_staleness_enabled_help())),
     ),
     # -- proactive class ------------------------------------------------------
     # Defaults are LITERALS here, not imports, for the same reason the aida
@@ -4703,65 +4849,56 @@ SETTINGS: tuple[Setting, ...] = (
         key="proactive.patience.default_ms",
         path=("proactive", "patience", "default_ms"),
         section="proactive",
-        label="Default patience wait (ms)",
+        label=_t(_ws.proactive_patience_default_ms_label()),
         kind=Kind.INT,
         default=300000,
         minimum=60000,
         maximum=86400000,
-        help=(
-            "How long a hidden wait defaults to when the agent does not size one "
-            "(milliseconds; 300000 = 5 min). Clamped 60 s..24 h."
-        ),
+        help=(_t(_ws.proactive_patience_default_ms_help())),
     ),
     Setting(
         key="proactive.patience.backoff",
         path=("proactive", "patience", "backoff"),
         section="proactive",
-        label="Patience backoff factor",
+        label=_t(_ws.proactive_patience_backoff_label()),
         kind=Kind.INT,
         default=3,
         minimum=1,
         maximum=10,
-        help=(
-            "Each later wait in a cycle is at least this many times the first — "
-            "the default 5/15/45-minute progression."
-        ),
+        help=(_t(_ws.proactive_patience_backoff_help())),
     ),
     Setting(
         key="proactive.patience.max_attempts",
         path=("proactive", "patience", "max_attempts"),
         section="proactive",
-        label="Patience max attempts",
+        label=_t(_ws.proactive_patience_max_attempts_label()),
         kind=Kind.INT,
         default=3,
         minimum=1,
         maximum=10,
-        help=("How many outbound waits one cycle may hold before it must end."),
+        help=(_t(_ws.proactive_patience_max_attempts_help())),
     ),
     Setting(
         key="proactive.patience.episode_ttl_ms",
         path=("proactive", "patience", "episode_ttl_ms"),
         section="proactive",
-        label="Patience cycle TTL (ms)",
+        label=_t(_ws.proactive_patience_episode_ttl_ms_label()),
         kind=Kind.INT,
         default=7200000,
         minimum=60000,
         maximum=86400000,
-        help=(
-            "Hard stop for one cycle however the waits were sized (milliseconds; "
-            "7200000 = 2 h). A fire past it retires silently."
-        ),
+        help=(_t(_ws.proactive_patience_episode_ttl_ms_help())),
     ),
     Setting(
         key="proactive.patience.max_pending",
         path=("proactive", "patience", "max_pending"),
         section="proactive",
-        label="Pending waits per session",
+        label=_t(_ws.proactive_patience_max_pending_label()),
         kind=Kind.INT,
         default=4,
         minimum=0,
         maximum=16,
-        help="How many hidden waits may be pending at once for one session.",
+        help=_t(_ws.proactive_patience_max_pending_help()),
     ),
     # --- speech voicing -----------------------------------------------------
     # Every default below is a LITERAL on purpose (``settings_io`` must stay off
@@ -4773,90 +4910,130 @@ SETTINGS: tuple[Setting, ...] = (
         key="speech.voice.gender",
         path=("speech", "voice", "gender"),
         section="speech",
-        label="Voice gender",
+        label=_t(_ws.speech_voice_gender_label()),
         kind=Kind.ENUM,
         # ``auto`` is today's behaviour: the daemon classifies each agent and
         # resolves the result before sending, because the hub refuses ``auto``
         # (it has no agent context to classify with).
         default="auto",
-        help="auto picks per agent; a fixed value overrides the classifier.",
+        help=_t(_ws.speech_voice_gender_help()),
         choices=(
             Choice(
                 "auto",
-                "auto",
-                "Classify per agent (recommended).",
+                _t(_ws.speech_voice_gender_choice_auto_label()),
+                _t(_ws.speech_voice_gender_choice_auto_description()),
             ),
-            Choice("female", "female", "Always use a female voice."),
-            Choice("male", "male", "Always use a male voice."),
+            Choice(
+                "female",
+                _t(_ws.speech_voice_gender_choice_female_label()),
+                _t(_ws.speech_voice_gender_choice_female_description()),
+            ),
+            Choice(
+                "male",
+                _t(_ws.speech_voice_gender_choice_male_label()),
+                _t(_ws.speech_voice_gender_choice_male_description()),
+            ),
         ),
     ),
     Setting(
         key="speech.voice.tone",
         path=("speech", "voice", "tone"),
         section="speech",
-        label="Tone",
+        label=_t(_ws.speech_voice_tone_label()),
         kind=Kind.ENUM,
         default="warm",
-        help="Warmth of delivery. Honoured as a voice row or emulated in instructions.",
+        help=_t(_ws.speech_voice_tone_help()),
         choices=(
-            Choice("warm", "warm", "Friendly and approachable."),
-            Choice("neutral", "neutral", "Even and unmarked."),
-            Choice("bright", "bright", "Upbeat and energetic."),
-            Choice("calm", "calm", "Unhurried and steady."),
-            Choice("authoritative", "authoritative", "Confident and assured."),
+            Choice(
+                "warm",
+                _t(_ws.speech_voice_tone_choice_warm_label()),
+                _t(_ws.speech_voice_tone_choice_warm_description()),
+            ),
+            Choice(
+                "neutral",
+                _t(_ws.speech_voice_tone_choice_neutral_label()),
+                _t(_ws.speech_voice_tone_choice_neutral_description()),
+            ),
+            Choice(
+                "bright",
+                _t(_ws.speech_voice_tone_choice_bright_label()),
+                _t(_ws.speech_voice_tone_choice_bright_description()),
+            ),
+            Choice(
+                "calm",
+                _t(_ws.speech_voice_tone_choice_calm_label()),
+                _t(_ws.speech_voice_tone_choice_calm_description()),
+            ),
+            Choice(
+                "authoritative",
+                _t(_ws.speech_voice_tone_choice_authoritative_label()),
+                _t(_ws.speech_voice_tone_choice_authoritative_description()),
+            ),
         ),
     ),
     Setting(
         key="speech.voice.expressiveness",
         path=("speech", "voice", "expressiveness"),
         section="speech",
-        label="Expressiveness",
+        label=_t(_ws.speech_voice_expressiveness_label()),
         kind=Kind.ENUM,
         default="medium",
-        help="How animated the delivery is. Sets ElevenLabs stability; a phrase on OpenAI.",
+        help=_t(_ws.speech_voice_expressiveness_help()),
         choices=(
-            Choice("low", "low", "Restrained and plain."),
-            Choice("medium", "medium", "Today's constant."),
-            Choice("high", "high", "Lively and expressive."),
+            Choice(
+                "low",
+                _t(_ws.speech_voice_expressiveness_choice_low_label()),
+                _t(_ws.speech_voice_expressiveness_choice_low_description()),
+            ),
+            Choice(
+                "medium",
+                _t(_ws.speech_voice_expressiveness_choice_medium_label()),
+                _t(_ws.speech_voice_expressiveness_choice_medium_description()),
+            ),
+            Choice(
+                "high",
+                _t(_ws.speech_voice_expressiveness_choice_high_label()),
+                _t(_ws.speech_voice_expressiveness_choice_high_description()),
+            ),
         ),
     ),
     Setting(
         key="speech.voice.pace",
         path=("speech", "voice", "pace"),
         section="speech",
-        label="Pace",
+        label=_t(_ws.speech_voice_pace_label()),
         kind=Kind.FLOAT,
         default=1.0,
         minimum=0.5,
         maximum=2.0,
-        help="Speaking rate, 1.0 being normal. A provider whose own range is narrower clamps.",
+        help=_t(_ws.speech_voice_pace_help()),
     ),
     Setting(
         key="speech.voice.language",
         path=("speech", "voice", "language"),
         section="speech",
-        label="Language",
+        label=_t(_ws.speech_voice_language_label()),
         kind=Kind.TEXT,
         default="auto",
         # Cleared, the key is removed and the consumer's own ``auto`` applies.
         empty_unsets=True,
-        help="auto lets the provider detect; a two-letter code (e.g. es) pins it.",
+        help=_t(_ws.speech_voice_language_help()),
     ),
     Setting(
         key="speech.voice.accent",
         path=("speech", "voice", "accent"),
         section="speech",
-        label="Accent",
+        label=_t(_ws.speech_voice_accent_label()),
         kind=Kind.TEXT,
         default="",
         empty_unsets=True,
-        help="A region tag such as en-GB, or empty. Reaches the provider as instructions text.",
+        help=_t(_ws.speech_voice_accent_help()),
     ),
     Setting(
         key="speech.voice.instructions",
         path=("speech", "voice", "instructions"),
         section="speech",
-        label="Delivery instructions",
+        label=_t(_ws.speech_voice_instructions_label()),
         kind=Kind.TEXT,
         # The pre-#1835 native-dialect guidance. NOT ``empty_unsets``: an empty
         # value is meaningful (send no instructions of our own) and is a
@@ -4868,7 +5045,7 @@ SETTINGS: tuple[Setting, ...] = (
             "over-enunciate, consider word combinations that should have silent and natural "
             'transitions, like "raha hoon" -> "rahoon" or "je m\'appelle" -> "jm\'appelle".'
         ),
-        help="Free text for how speech should sound (OpenAI only). Empty sends none of our own.",
+        help=_t(_ws.speech_voice_instructions_help()),
     ),
 )
 
