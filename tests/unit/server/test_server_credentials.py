@@ -106,7 +106,8 @@ async def test_list_credentials_error(test_app_client, mock_credential_manager):
 
     assert response.status_code == 500
     data = response.json()
-    assert "Error retrieving credentials" in data.get("detail", "")
+    assert data["detail"]["code"] == "wire.errors.settings.credential_retrieve_failed"
+    assert data["detail"]["text"].startswith("Error retrieving credentials: ")
 
 
 @pytest.mark.asyncio
@@ -173,7 +174,9 @@ async def test_update_credential_empty_key(test_app_client, mock_credential_mana
 
     assert response.status_code == 400
     data = response.json()
-    assert "Credential key cannot be empty" in data.get("detail", "")
+    # RFC §2.6 envelope: react to `code`; `text` stays for string-only readers.
+    assert data["detail"]["code"] == "wire.errors.settings.credential_key_empty"
+    assert data["detail"]["text"] == "Credential key cannot be empty"
 
 
 @pytest.mark.asyncio
@@ -193,7 +196,8 @@ async def test_update_credential_error(test_app_client, mock_credential_manager)
 
     assert response.status_code == 500
     data = response.json()
-    assert "Error updating credential" in data.get("detail", "")
+    assert data["detail"]["code"] == "wire.errors.settings.credential_update_failed"
+    assert data["detail"]["text"].startswith("Error updating credential: ")
 
 
 @pytest.mark.asyncio

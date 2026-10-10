@@ -659,6 +659,67 @@ async def test_settings_census_typed_writes_reset_and_secret_exclusion(desktop):
     assert fresh.config.values["private_secret"] == "never-serialize-me"
 
 
+async def test_settings_refusals_use_the_envelope(desktop, monkeypatch):
+    """The configuration surface's refusals carry the RFC §2.6 envelope.
+
+    `detail` is `{code, params, text}` on this surface: `code` is what a client
+    reacts to, `params` carry the untranslated exception text where one is
+    involved, and `text` keeps the exact sentence older readers display. The
+    invalid-value path doubles as the verbatim-compatibility pin: its `text`
+    IS the settings layer's prose (translated at the source in a later slice),
+    not a re-worded copy.
+    """
+    client, _app = desktop
+
+    # 404 — the setting is not registered.
+    response = await client.patch("/v1/settings/does.not.exist", json={"value": "x"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == {
+        "code": "wire.errors.settings.not_registered",
+        "params": {},
+        "text": "This setting is not registered.",
+    }
+
+    # 422 — an endpoint value with inline credentials is refused up front.
+    response = await client.patch(
+        "/v1/settings/web_search.searxng_endpoint",
+        json={"value": "https://user:private@example.org"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "wire.errors.settings.inline_credentials"
+    assert response.json()["detail"]["text"] == (
+        "Use an endpoint without inline credentials or query parameters."
+    )
+
+    # 409 — the config file is unreadable; raised from the read gate.
+    def _unreadable(_manager):
+        raise settings_io.ConfigUnreadableError("config.yml cannot be parsed")
+
+    monkeypatch.setattr(settings_io, "_require_readable_config", _unreadable)
+    response = await client.get("/v1/settings")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == {
+        "code": "wire.errors.settings.config_unreadable",
+        "params": {},
+        "text": "The configuration file cannot be read. Repair it before saving.",
+    }
+    # No monkeypatch.undo(): it would also undo the fixture's setenv (desktop
+    # token, config dir, HOME) and make later calls 503; the patches below are
+    # inert for the remaining request.
+
+    # 422 — the settings layer's ValueError prose rides VERBATIM in `text`.
+    def _bad_write(*_args, **_kwargs):
+        raise ValueError("this setting is retired and cannot be changed")
+
+    monkeypatch.setattr(settings_io, "write_setting", _bad_write)
+    response = await client.patch("/v1/settings/language", json={"value": "en"})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "wire.errors.settings.invalid_value"
+    assert detail["params"] == {"error": "this setting is retired and cannot be changed"}
+    assert detail["text"] == "this setting is retired and cannot be changed"
+
+
 async def test_settings_projection_serves_the_registry_authored_annotations(desktop):
     """The three fields the registry authors and only the wire can carry.
 

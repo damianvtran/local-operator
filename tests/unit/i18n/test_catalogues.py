@@ -20,17 +20,19 @@ _PENDING_EXTRACTION = (
     "wire.exec",
     "wire.incidents",
     "wire.notices",
-    "wire.settings",
 )
 
 
 def test_shipped_wire_namespaces_exist() -> None:
-    # M0 ships the six `wire.*` namespace STUBS (RFC §5): the files exist so
-    # later slices populate them. `wire.slash` was populated by the S2
-    # extraction slice; the rest stay empty until their own slice lands.
+    # M0 shipped the six `wire.*` namespace files as STUBS (RFC §5): the files
+    # exist so later slices populate them. `wire.slash` was populated by the S2
+    # extraction slice, `wire.settings` by S1, and `wire.errors.settings` (a
+    # CHILD of `wire.errors`, RFC §2.2) by the E1 slice; the rest stay empty
+    # until their own slices land.
     assert catalogues.locales() == ("en",)
     assert catalogues.namespaces("en") == (
         "wire.errors",
+        "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
         "wire.notices",
@@ -39,7 +41,9 @@ def test_shipped_wire_namespaces_exist() -> None:
     )
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
+    assert catalogues.load_catalogue("en", "wire.errors.settings") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
+    assert catalogues.load_catalogue("en", "wire.settings") != {}
 
 
 def test_hash_is_over_file_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,6 +87,23 @@ def test_invalid_shapes_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         catalogues.load_catalogue("en", "list")
     with pytest.raises(catalogues.CatalogueInvalid):
         catalogues.load_catalogue("en", "value")
+
+
+def test_malformed_file_raises_catalogue_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Core hardening (S2 M1): decode/parse failures surface as the ONE
+    # catalogue exception the render path handles, so a garbled file degrades
+    # a render rather than raising a bare ValueError through it.
+    root = tmp_path / "catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / "en" / "demo.json").write_text("{not json", encoding="utf-8")
+    (root / "en" / "demo.bad.json").write_bytes(b"\xff\xfe{}")
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+    with pytest.raises(catalogues.CatalogueInvalid):
+        catalogues.load_catalogue("en", "demo")
+    with pytest.raises(catalogues.CatalogueInvalid):
+        catalogues.load_catalogue("en", "demo.bad")
 
 
 def test_context_sidecar_is_not_a_namespace_and_reads_when_present(

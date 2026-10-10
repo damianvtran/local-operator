@@ -21,6 +21,7 @@ from local_operator.network import (
     credentials,
     definitions,
     mcpdefs,
+    meshupdate,
     mobility,
     relay,
     sync,
@@ -332,6 +333,11 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # whole-bundle apply into the user's mcp.json — and bounded per bundle
             # for the same reason (see ``mcpdefs.MCP_DEFS_OP_DEADLINE_S``).
             "net_mcp_defs",
+            # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md
+            # §8.2): when the member is idle the handler may run a whole install
+            # inside its own bounded deadline, so it must not run on a link's
+            # reader (see ``meshupdate.UPDATE_OP_DEADLINE_S``).
+            "net_update",
         }
         assert server.slow_op_deadline("net_sync") == sync.SYNC_OP_DEADLINE_S
         assert server.slow_op_deadline("net_definitions") == definitions.DEFINITIONS_OP_DEADLINE_S
@@ -339,6 +345,7 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
         # the one deadline nothing asserted — the 60 s constant could decay
         # unnoticed.
         assert server.slow_op_deadline("net_mcp_defs") == mcpdefs.MCP_DEFS_OP_DEADLINE_S
+        assert server.slow_op_deadline("net_update") == meshupdate.UPDATE_OP_DEADLINE_S
         assert server.slow_op_deadline("net_broker") == credentials.BROKER_OP_DEADLINE_S
         assert server.slow_op_deadline("net_session_move") == mobility.MOVE_OP_DEADLINE_S
         assert server.slow_op_deadline("net_session_lifecycle") == mobility.LIFECYCLE_OP_DEADLINE_S

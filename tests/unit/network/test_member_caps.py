@@ -447,10 +447,12 @@ def test_a_peers_rotation_does_not_undo_a_local_grant() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_self_decided_set_is_exactly_the_onboarding_scopes() -> None:
+def test_the_self_decided_set_is_exactly_the_onboarding_scopes_and_update() -> None:
     # The carve-out is by NAME, so it cannot silently grow into a role capability:
-    # both scopes are grantable-only, and the set is exactly the pair.
-    assert types.SELF_DECIDED_SCOPES == frozenset({"approve", "unattended"})
+    # the two onboarding scopes AND `update` (S1 of the mesh rolling updates, whose
+    # decision governs this device's own install — RU §2) are grantable-only, and
+    # the set is exactly the three.
+    assert types.SELF_DECIDED_SCOPES == frozenset({"approve", "unattended", "update"})
     assert types.SELF_DECIDED_SCOPES <= types.GRANTABLE_CAPABILITIES
 
 

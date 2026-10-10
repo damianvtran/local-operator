@@ -111,7 +111,9 @@ async def test_update_config_empty(test_app_client, mock_config_manager):
 
     assert response.status_code == 400
     data = response.json()
-    assert "No valid update fields provided" in data.get("detail", "")
+    # RFC §2.6 envelope: react to `code`; `text` stays for string-only readers.
+    assert data["detail"]["code"] == "wire.errors.settings.no_update_fields"
+    assert data["detail"]["text"] == "No valid update fields provided"
 
 
 @pytest.mark.asyncio
@@ -137,7 +139,8 @@ async def test_update_config_invalid_values(test_app_client, mock_config_manager
 
         assert response.status_code == 500
         data = response.json()
-        assert "Error updating configuration" in data.get("detail", "")
+        assert data["detail"]["code"] == "wire.errors.settings.config_update_failed"
+        assert data["detail"]["text"].startswith("Error updating configuration: ")
 
 
 @pytest.mark.asyncio
@@ -189,7 +192,8 @@ async def test_get_system_prompt_error(test_app_client):
 
     assert response.status_code == 500
     data = response.json()
-    assert "Error retrieving system prompt" in data.get("detail", "")
+    assert data["detail"]["code"] == "wire.errors.settings.system_prompt_retrieve_failed"
+    assert data["detail"]["text"].startswith("Error retrieving system prompt: ")
 
 
 @pytest.mark.asyncio
@@ -258,4 +262,5 @@ async def test_update_system_prompt_error(test_app_client, tmp_path, monkeypatch
 
     assert response.status_code == 500
     data = response.json()
-    assert "Error updating system prompt" in data.get("detail", "")
+    assert data["detail"]["code"] == "wire.errors.settings.system_prompt_update_failed"
+    assert data["detail"]["text"].startswith("Error updating system prompt: ")

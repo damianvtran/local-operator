@@ -206,9 +206,9 @@ made here.
   grant is made to an origin that is not on the admitted allowlist -- including, unlike
   the rest of the legacy surface, on an allowlist-less daemon, because nothing reads
   these routes with `fetch` (`<img>`/`<video>`/`<iframe src>` are not CORS-gated).
-- **Still open:** the routes are unauthenticated. The UI embeds them by `src`, which
-  cannot carry a bearer; the fix is a short-lived signed query token minted by an
-  authenticated endpoint and checked here, and it needs the UI to request it. Also
+- **Still open: enforcement.** The routes accept the Phase A token and signed
+  query URLs now (the subsection below carries the contract) but refuse nothing
+  on them yet; the UI change to present either is the recorded follow-up. Also
   open: a symlink swapped between the check and the open (TOCTOU -- robustness
   rather than a boundary once no root list bounds the read; the recorded fix is
   Phase 3), and the accepted `<img>`-observable residual: general mode widens
@@ -221,8 +221,82 @@ made here.
   agent-named path (composer thumbnails, message attachments, video/HTML previews,
   canvas file viewer) is served on loopback -- `~/Downloads` picks, session
   scratchpads, agent output anywhere -- so the `static.roots` remedy is no longer
-  needed in normal operation. What stays open is authentication (above), which the
-  signed-URL phase brings.
+  needed in normal operation. What stays open is enforcement of that
+  authentication (above and below): the minting half has landed, refusing
+  arrives with the design's Phases B/C.
+
+### Local surface tokens and signed URLs (Phase A, permissive)
+
+The remaining gap above is authentication, and this is its first phase
+(`docs/design/file-serving-and-surface-convergence.md` §4). It ships
+PERMISSIVE: the credentials exist, validate and are observable, but nothing
+refuses on them yet. That is deliberate -- it lets every surface adopt them
+over a compat window before the later phases switch enforcement on, with no
+mixed-version cliff.
+
+**The serve-record fields.** Every announced boot draws a 256-bit seed
+(`secrets.token_bytes(32)`) and derives two values with HKDF-SHA256 (stdlib):
+the ACCESS TOKEN below, published in the record, and a signing key that never
+leaves the process. The seed is never stored. The record gains two additive
+fields: `access_token` (`"<generation>.<secret>"`) and `boot_generation`; an
+older reader drops them, and an older record parses with empty defaults. A
+restart re-derives the secret and bumps the generation, so a token and the
+record that carried it are classifiable against each other.
+
+**Presenting the token.** A surface reads the record and sends the token as
+`X-Local-Token: <generation>.<secret>`. Phase A, on the general
+(loopback-accepted) posture: a valid token is validated and counted; an
+invalid or stale one is treated as ABSENT -- never a refusal, and every
+malformed shape classifies as invalid rather than erroring -- and the first
+sighting of each stale generation logs one WARNING line (visible at the
+daemon's default log level). Rooted-mode STATIC reads ignore tokens -- the
+observation rides the general posture -- while the sign door accepts them in
+every mode (a valid token opens it on a rooted connection too). A surface
+can compare its token's generation prefix (or the `boot_generation` it cached)
+against the record and re-read on a mismatch. The later phases turn a missing
+or invalid token on a static GET into `401` with the stable code
+`files_token_required`, so clients get one re-read-and-retry rule.
+
+**Signed URLs for `src=` loads.** `POST /v1/static/sign` mints a URL for one
+static route + path + expiry. Authentication: the local access token or the
+desktop bearer; any failure is one stable `401` (the endpoint does not reveal
+which door refused). Body and response:
+
+```jsonc
+// POST /v1/static/sign
+{"route": "images",            // one of images|videos|audio|html
+ "path":  "/Users/me/x.png",   // the path string the URL will carry
+ "ttl_s": 600}                 // optional; default 600 s, cap 3600 s
+
+// 200
+{"url": "/v1/static/images?path=%2FUsers%2Fme%2Fx.png&exp=1730000000&sig=0000000000000000...",
+ "exp": 1730000000}
+```
+
+**The canonical signed bytes** -- both ends build exactly this, nothing else:
+
+```text
+sig = HMAC-SHA256(signing_key, f"{route}\n{path}\n{exp}")    # lowercase hex
+```
+
+`route` is the id above; `path` is the DECODED query value exactly as the
+request carries it (the URL percent-encodes it for the wire and the server
+decodes before verifying -- there is no second canonicalisation dialect);
+`exp` is unix seconds in decimal. The signature binds all three, so swapping
+the path, the route or `exp`, editing `sig`, or using the URL after `exp`
+fails verification -- which runs before any filesystem resolution, so an
+invalid signature can never probe what exists.
+
+**Replay and log exposure.** A signed URL is a bearer URL: whoever holds one
+can replay it until `exp`, and it travels in the query string, so the daemon's
+access log records `path`, `exp` and `sig` on every fetch. The token itself
+never lands in a log (headers are not logged).
+
+**`<video>` Range/seek lifetime.** Streaming issues many Range GETs against
+one URL. Mint with a `ttl_s` covering the viewing session (up to the 3600 s
+cap) and re-sign when the UI's existing version/mtime key changes
+(`html-preview.tsx:137`'s re-key is the precedent); when the later phases
+enforce expiry, a stale URL is a `401`-and-re-sign, not a stream failure.
 
 The deprecated `/v1/ws` socket surface was also in that ungated set and is now
 **gone** — route, mount and fan-out — so it is no longer listed. This is a
@@ -2063,18 +2137,20 @@ self-replacing by construction — and its fold key lives in `session/delta_merg
 transfer (a file or component a peer device holds reads as "on <peer>" with previews
 disabled — `GET …/attachments/{digest}` already answers 409 `attachment_on_peer`); the
 native (phone) WebView frame is pending its own lane; and the static preview routes
-(`/v1/static/*`) are not yet token-authenticated — short-lived signed URLs are a
-recorded follow-up that needs a client change. No renderer consumes any of this yet:
-the TUI, UI, relay and native renderers are separate lanes. The READ half is
-implemented (routes lane C2): the desktop document route serves the assembled component
-as `{html}` by digest (`nosniff`, `Cache-Control: no-store`, 409 `attachment_on_peer`
-passed through for a peer-held blob, an unassemblable blob an ordinary 404), keyed by
-`AttachmentDigest` so a caller-supplied path can never be part of the request; the
-`?supplements=1` reader gates `supplement_progress` per subscriber on live AND replay;
-and the relay serves both the document (`{html}`, the digest additionally
-reference-checked against that session's journal) and the recorded file callout
-(`row["files"][i]`, suffix-allowlisted `Content-Type` — never `text/html`, SVG or
-`+xml` — a 10 MB cap, and the §4.3 denylist re-applied per request).
+(`/v1/static/*`) are not yet token-ENFORCED -- Phase A accepts tokens and mints
+short-lived signed URLs (see the static section), but refusing is a later phase
+and the client change to present a credential is the recorded follow-up. No renderer
+consumes any of this yet: the TUI, UI, relay and native renderers are separate lanes.
+The READ half is implemented (routes lane C2): the desktop document route serves the
+assembled component as `{html}` by digest (`nosniff`, `Cache-Control: no-store`, 409
+`attachment_on_peer` passed through for a peer-held blob, an unassemblable blob an
+ordinary 404), keyed by `AttachmentDigest` so a caller-supplied path can never be part
+of the request; the `?supplements=1` events-route reader gates `supplement_progress`
+per subscriber on live AND replay; and the relay serves both the document (`{html}`,
+the digest additionally reference-checked against that session's journal) and the
+recorded file callout (`row["files"][i]`, suffix-allowlisted `Content-Type` — never
+`text/html`, SVG or `+xml` — a 10 MB cap, and the §4.3 denylist re-applied per
+request).
 
 ### Verification
 

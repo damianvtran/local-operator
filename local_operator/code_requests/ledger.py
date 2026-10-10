@@ -344,6 +344,12 @@ def touch_index(config_dir: str | Path, session_id: str) -> bool:
     the freshly written cache entries. Content is preserved verbatim; only the
     timestamp moves, and a missing/empty index is a no-op (a fetch for a
     session whose rows have since been removed must not resurrect the file).
+
+    STRICTLY monotone (design §3): the per-ref touches of one refresh pass can
+    land inside a single millisecond, and a revision that does not move is a
+    fill frame the client's ``(sessionId, revision)`` dedupe swallows. On a
+    collision the stamp advances by +1 ms instead, which keeps the currency
+    (the wall clock owns the value) while guaranteeing increase.
     """
     try:
         path = index_path(config_dir, session_id)
@@ -353,7 +359,8 @@ def touch_index(config_dir: str | Path, session_id: str) -> bool:
         entry = _read_json(path)
         if entry is None:
             return False
-        entry["updated_at"] = round(time.time(), 3)
+        prior = float(entry.get("updated_at") or 0.0)
+        entry["updated_at"] = round(max(time.time(), prior + 0.001), 3)
         return _write_json(path, entry)
 
 

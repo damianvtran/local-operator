@@ -267,7 +267,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "
         "(beside ``exec-jobs.jsonl``), history about a SWEEP, never a file in a session",
     ),
+    "local_operator/server/utils/local_tokens.py": (
+        1,
+        "``GENERATION_FILENAME`` (``generation``): the per-boot counter beside the serve "
+        "records under ``<config>/run/serve`` — machine-local boot state a receiving "
+        "device must mint its own, never inherit; not an entry of a session directory",
+    ),
     "local_operator/config.py": (1, "``config.yml``, the store's configuration file"),
+    "local_operator/clients/radient_cost.py": (
+        1,
+        "``HEADER_PREFIX`` (``x-radient-cost-``) prefixes an HTTP RESPONSE header "
+        "name: the adapter reads the media server's cost block off the wire, and "
+        "nothing in this module is an entry of a session directory",
+    ),
     # ``STORE_DIRNAME``/``_SESSIONS_DIRNAME`` are the store ROOT's name and the
     # conversations subtree under it, not entries inside a session: they are the
     # names ``paths.py`` declares for the same directories (see the entry above),
@@ -412,11 +424,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "that gates removal: none of them is a file a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
-        2,
+        4,
         "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
         "sweep lock): the former sits at the sessions root, the latter at the config root; "
-        "neither inside a session directory. (``ROSTER_NAME`` is a session entry, already "
-        "classified by the copy set.)",
+        "neither inside a session directory. ``RESCUE_BUNDLE_PREFIX``/``RESCUE_BUNDLE_SUFFIX`` "
+        "are the FRAGMENTS of the rescue bundle's name (``reap-rescue-<tree>.bundle``), joined "
+        "to a tree's name; the result is written beside that tree inside the pad and is never "
+        "a bare session entry. "
+        "(``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
     ),
     "local_operator/session_factory.py": (
         2,

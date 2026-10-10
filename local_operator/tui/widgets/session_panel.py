@@ -36,7 +36,7 @@ from __future__ import annotations
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Sequence, cast
+from typing import Any, Sequence, cast
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -54,6 +54,13 @@ from local_operator.analytics.model import (
     ToolCallStats,
     UsageAggregate,
 )
+from local_operator.session.channel_spend import (
+    BASIS_BILLED,
+    BASIS_ESTIMATED,
+    BASIS_NOT_TRACKED,
+    BASIS_SUBSCRIPTION,
+    NOT_TRACKED_MICRO,
+)
 from local_operator.session.protocol import SessionProtocol
 from local_operator.session.spend import SessionSpend
 from local_operator.tui.costs import (
@@ -64,6 +71,7 @@ from local_operator.tui.costs import (
     combined_spend,
     cost_label,
     cost_note_rungs,
+    format_usd,
     format_usd_exact,
 )
 from local_operator.tui.widgets.analytics_panel import (
@@ -187,6 +195,14 @@ class SessionDiagnostics:
     #: folded into ``Est. cost`` for that reason: the two are separately truthful
     #: and a merged row could state neither.
     search_spend: SearchSpendSnapshot | None = None
+    #: The PUBLISHED ``spend_channels`` object (an old runtime has none). When
+    #: present it REPLACES the search block above: one object the backend
+    #: computes, which the band, this screen, the phone and the Electron strip
+    #: all render, so no surface sums locally (design §5.1). Typed ``Any``
+    #: because it is a wire object this panel renders defensively (``getattr``
+    #: with defaults) rather than a model it should hard-depend on; ``None``
+    #: keeps the legacy block, which is what an old backend gets.
+    spend_channels: Any | None = None
 
     @classmethod
     def capture(cls, session: SessionProtocol) -> SessionDiagnostics:
@@ -885,7 +901,7 @@ def build_session_report(
         # reason every settled section has one -- without it the section header
         # abuts the loading notes and reads as a fourth note about the ledger.
         body.blank()
-        _draw_search_spend(body, runtime)
+        _draw_spend_sections(body, runtime)
         return body.to_text()
 
     aggregate = report.aggregate
@@ -898,6 +914,8 @@ def build_session_report(
         body.header("Ledger unavailable")
         body.note("Could not read local usage records. Close and reopen to try again.")
         body.blank()
+        _draw_spend_sections(body, runtime)
+        body.blank()
     elif not aggregate.calls:
         body.header("No recorded requests")
         body.note("No retained usage records for this session yet.")
@@ -905,26 +923,481 @@ def build_session_report(
         # The gauge is LIVE runtime data, so it is available even with an empty
         # ledger — a fresh session's one true visual.
         _draw_context_gauge(body, gauge, _measure_columns([gauge] if gauge else [], width), width)
+        _draw_spend_sections(body, runtime)
     else:
+        # The all-sources table is drawn inside, directly under the Totals it
+        # reconciles with (design round 1, N3): the answer to "what did this
+        # cost" used to sit below the diagnostics, where it was only ever a
+        # footnote for search spend.
         _draw_recorded_usage(body, report, runtime, gauge, width, metric)
 
-    _draw_search_spend(body, runtime)
     _draw_runtime_and_scope(body, report, runtime)
     return body.to_text()
 
 
-def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
-    """This session's search spend, as its own attributed block.
+def _channels_reconciliation_rungs(
+    notes: tuple[str, ...], runtime: SessionDiagnostics
+) -> tuple[str, ...]:
+    """Prepend a scope rung to the ``Est. cost`` note ladder, when channels publish.
 
-    Drawn from the RUNTIME snapshot rather than from ``report``, so it survives
-    a frame whose ledger read failed or found nothing: it is not in that ledger
-    (see :class:`SessionDiagnostics.search_spend`), and a session that spent
-    money on retrieval must not read as free because a different read broke.
-
-    Nothing at all is drawn when the session has no searches, which is the
-    ordinary case for most sessions, and matches the screen's rule of shedding a
-    row whose only content is the absence of a problem.
+    The ``Est. cost`` row is the recorded ledger's model+search figure; the
+    Spend by channel table directly below it is every source. Round 1 (MINOR 5)
+    named the two-sums shape as the defect this PR removes elsewhere: nothing
+    said how the two figures relate. The rung is the WIDEST spelling of the
+    ladder, so it sheds before the search clause that says what the figure
+    contains — the reconciliation is worth less than the row's own scope.
     """
+    if runtime.spend_channels is None:
+        return notes
+    return ("recorded model + search · all sources below", *notes)
+
+
+def _draw_spend_sections(body: _Body, runtime: SessionDiagnostics) -> None:
+    """The all-sources spend block: the published object, or the legacy block.
+
+    ONE dispatch so a frame cannot draw both halves — a backend that publishes
+    the object has already moved the search money inside it, and drawing the
+    legacy search block beside the channel table would show one sum twice.
+    """
+    if _draw_spend_channels(body, runtime):
+        return
+    _draw_search_spend(body, runtime)
+
+
+def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
+    """The published per-channel spend table, when the backend publishes one.
+
+    Returns True when it drew the section. Read ONLY from the object the
+    backend publishes (``spend_channels``): the point of publishing it is that
+    no surface sums locally, so this screen renders the same total and the
+    same marks the band and the phone do (design §5.1). A row's
+    ``amount_micro`` of ``None`` means the money could not be stated and
+    renders ``$—``, never ``$0``; a ``partial``/``floor`` row keeps the
+    attached, dim ``+``.
+
+    The layout is this table's own (see :data:`_SPEND_MONEY_CELL`): a fixed
+    right-aligned money column with the basis tag read WHERE THE MONEY IS, then
+    the units; the Total sits in the same money column as its parts, so the
+    arithmetic on screen scans (design round 1, D1/D4). The Total's mark is
+    keyed on the published ``knowledge``; a total that cannot be stated at all
+    (``unknown``) prints ``$—`` rather than a fabricated ``$0.0000`` (D2). An
+    untracked session says so in plain words and its total carries the
+    lower-bound mark (D3, via the combiner's ``partial``).
+
+    Sheds entirely (returning False, so the caller draws the legacy block) when
+    the host publishes nothing, or when there is no money and no rows.
+    """
+    published = runtime.spend_channels
+    if published is None:
+        return False
+    rows = [_row_mapping(row) for row in list(getattr(published, "rows", None) or [])]
+    children = getattr(published, "children", None)
+    child_micro = _as_micro(getattr(children, "total_micro", None)) or 0
+    total = _as_micro(getattr(published, "total_micro", None))
+    knowledge = str(getattr(published, "knowledge", "unknown"))
+    tracked = bool(getattr(published, "tracked", False))
+    if not rows and not total and not child_micro:
+        return False
+
+    body.header("Spend by channel", "this session · all sources")
+    if not tracked and knowledge != "exact":
+        # Plain words, the user's own three channels, and no internal
+        # vocabulary: round 1 measured "Channels not tracked … cannot be
+        # recovered in full" reading as a claim about partial recovery while
+        # the total beside it said `exact` (design round 1, D3). The notice now
+        # appears only when something is actually MISSING — degradation needs
+        # evidence (see ``combine``): a marker-less session with no recovered
+        # channel rows reads like any other, which is what the cold/in-process
+        # continuity tests require (review round 2, M-4).
+        body.note(
+            "Image, speech and search spend wasn't recorded for this conversation, "
+            "so the total may be missing it."
+        )
+    mark = "+" if knowledge in {"partial", "floor"} and total else ""
+    # A total that cannot be STATED is ``$—`` — never a fabricated ``$0.0000``
+    # (design round 1, D2). "Cannot be stated" is `unknown` knowledge with no
+    # money, and equally a partial total of zero with unstated rows inside it
+    # (an unpriced search alone): the digits would be a zero the reader would
+    # take for a measurement. A tracked session with a TRUE zero keeps
+    # ``$0.0000`` — that spelling is correct for a real zero.
+    total_text = (
+        UNKNOWN_COST_CELL
+        if (total is None or (not total and knowledge != "exact"))
+        else format_usd(total)
+    )
+    _spend_row(
+        body,
+        "Total",
+        total_text,
+        mark=mark,
+        dim_money=total_text == UNKNOWN_COST_CELL,
+        notes=_SPEND_MARK_RUNGS if mark else (),
+    )
+    if child_micro:
+        child_knowledge = str(getattr(children, "knowledge", "") or "")
+        child_note = {
+            "floor": ("at least this much · what was recorded", "at least this much"),
+            "partial": ("some spend has no stated price", "some spend unpriced"),
+            "unknown": ("price not stated", "not stated"),
+        }.get(child_knowledge, ())
+        _spend_row(
+            body,
+            "subagents · included in total",
+            format_usd(child_micro),
+            notes=child_note,
+        )
+    for row in rows:
+        amount = _as_micro(row.get("amount_micro"))
+        money = format_usd(amount) if amount is not None else UNKNOWN_COST_CELL
+        row_mark = (
+            "+"
+            if amount is not None and str(row.get("knowledge") or "") in {"partial", "floor"}
+            else ""
+        )
+        notes = list(_row_note_candidates(row))
+        if str(row.get("channel") or "") == "other":
+            notes.append("not itemised")
+        _spend_row(
+            body,
+            _channel_row_label(row),
+            money,
+            mark=row_mark,
+            dim_money=amount is None,
+            notes=tuple(notes),
+        )
+    _draw_spend_basis(body, published)
+    return True
+
+
+def _spend_note_budget(width: int) -> int:
+    """Cells reserved for a row's note column, decided for the WHOLE table.
+
+    One budget shared by every row (not a per-row fit): a per-row money column
+    is what made round 1's table ragged, the ``$`` landing anywhere between
+    cells 24 and 43 (design D4). Below 68 cells the notes shed entirely and
+    the words they carried weigh nothing, so reserving room for them would
+    shrink the name column for nothing (D6).
+    """
+    if width >= 92:
+        return 30
+    if width >= 78:
+        return 24
+    if width >= 68:
+        return 15
+    if width >= 62:
+        # An 80-column terminal's card lands here (65 content cells measured):
+        # the short basis rungs ("plan-covered", "est.", "billed") fit, which
+        # is the disclosure D1 needs beside the money; below this the notes
+        # shed entirely rather than crop.
+        return 12
+    return 0
+
+
+def _spend_row(
+    body: _Body,
+    name: str,
+    value: str,
+    *,
+    mark: str = "",
+    dim_money: bool = False,
+    notes: Sequence[str] = (),
+) -> None:
+    """One row of the spend table: name, fixed right-aligned money, notes.
+
+    Why this does not use ``_Body.kv``: that helper pads the name to a fixed
+    22-cell column and lets a longer name run into the value column — measured
+    in round 1 as a glued ``…sonnet-5-5$0.780``, and then, once the name pushed
+    the value instead, as a ragged money edge with the ``$`` at cells 24-43
+    (design round 1, D4). This table owns its columns: a fixed money cell of
+    :data:`_SPEND_MONEY_CELL` right-aligned at one column for every row
+    (marks attached, dim, no space), the name truncated conservatively
+    (keeping its tail — the model version is the discriminating part), and
+    notes chosen widest-first from a table-wide budget and shed WHOLE rather
+    than cropped (D6).
+    """
+    budget = _spend_note_budget(body.width)
+    note_text = ""
+    if budget:
+        for candidate in notes:
+            if candidate and len(candidate) <= budget:
+                note_text = candidate
+                break
+    money_extra = 2 + budget if budget else 0
+    money_col = max(_SPEND_NAME_MIN + 4, body.width - money_extra - _SPEND_MONEY_CELL)
+    # FOUR cells before the money column: two of indent are accounted
+    # separately, so the name column is ``money_col - 4`` and the gap after the
+    # name is at least two — one cell of slack was enough for a note to end a
+    # character past the frame and be cropped mid-bracket (measured in this
+    # round's re-render).
+    name_room = max(_SPEND_NAME_MIN, money_col - 4)
+    label = _shorten_name(name, name_room)
+    row = Text()
+    row.append(f"  {label}", style=semantic_style("dim"))
+    row.append(" " * max(2, money_col - 2 - len(label)), style=semantic_style("dim"))
+    row.append(
+        " " * max(0, _SPEND_MONEY_CELL - len(value) - len(mark)), style=semantic_style("dim")
+    )
+    row.append(value, style=semantic_style("dim" if dim_money else "fg"))
+    if mark:
+        row.append(mark, style=semantic_style("dim"))
+    if note_text:
+        # MUTED, not dim: the tag is the disclosure the whole section exists
+        # for, and dim measures 3.43:1 on the card (below AA) where muted
+        # measures 6.51:1 (design round 2, D2-4).
+        row.append(f"  {note_text}", style=semantic_style("muted"))
+    row.truncate(body.width, overflow="crop")
+    body.lines.append(row)
+
+
+#: Cells kept from the TAIL of a truncated name, and the money cell's width.
+#: The tail carries the discriminating part of a model identity (the version:
+#: ``…-5-5``), so truncation keeps it rather than cutting the row to a prefix
+#: two rows could share (design round 1, D4).
+_SPEND_NAME_TAIL = 8
+#: The money cell: wide enough for ``<$0.0001`` plus an attached mark.
+_SPEND_MONEY_CELL = 9
+#: The narrowest the name column may become before the row is cropped instead.
+_SPEND_NAME_MIN = 12
+#: The Total row's note when it carries a mark — the app's own +/$— legend
+#: language (``analytics_panel.COST_LEGEND``), laddered widest-first so the
+#: disclosure sheds to its shortest rung rather than being cropped mid-word
+#: (design round 1, D5).
+_SPEND_MARK_RUNGS = (
+    "+ lower bound (some spend has no stated price)",
+    "+ lower bound · some spend unpriced",
+    "+ lower bound",
+    # The shortest rung the canonical 80-column card can afford (12 cells —
+    # review round 2, D2-2): without it the Total's mark had NO explanation at
+    # 80 cols, which is the width where a legend matters most.
+    "lower bound",
+)
+
+
+def _shorten_name(name: str, room: int) -> str:
+    """``name`` cut to ``room`` cells, keeping its tail when it must cut."""
+    if len(name) <= room:
+        return name
+    if room <= _SPEND_NAME_TAIL + 3:
+        return name[: max(1, room - 1)] + "\u2026"
+    tail = name[-_SPEND_NAME_TAIL:]
+    head = room - len(tail) - 1
+    return name[:head].rstrip() + "\u2026" + tail
+
+
+def _row_note_candidates(row: dict[str, Any]) -> list[str]:
+    """Notes for one row, widest first: basis tag, then units, then each alone.
+
+    The tag leads because it is the disclosure the money needs beside it
+    ("this was billed / plan-covered / estimated"); the units follow because
+    they answer "how much of it". Both are refinements, so they may shed whole
+    at narrow widths (design round 1, D1/D6).
+    """
+    rungs = _basis_rungs(
+        row.get("basis"), amount_known=_as_micro(row.get("amount_micro")) is not None
+    )
+    units = _units_text(row)
+    candidates: list[str] = []
+    for rung in rungs:
+        if units:
+            candidates.append(f"{rung} · {units}")
+        candidates.append(rung)
+    if units:
+        candidates.append(units)
+    return candidates
+
+
+#: Per-basis note ladders, widest first: the full spelling, then the narrowest
+#: one that still means the same thing. A single wide string used to shed
+#: ENTIRELY below ~92 cells, which took the basis disclosure off every row of
+#: an 80-column frame — the one thing the tag column exists to carry (design
+#: round 1, D1/D6).
+_TAG_RUNGS: dict[str, tuple[str, ...]] = {
+    "billed": ("billed",),
+    "plan-covered (API price)": ("plan-covered (API price)", "plan-covered"),
+    "estimated": ("estimated", "est."),
+    "price not stated": ("price not stated", "not stated"),
+    # Shortest rung last and it fits the 80-column card's 12-cell note budget:
+    # the ladder prefers a TAG over the unit count when only one fits (review
+    # round 2, D2-2 — the biggest rows, both inference, showed "10 calls" and
+    # nothing about their basis at the canonical width).
+    "basis not recorded": ("basis not recorded", "basis unrecorded", "unrecorded"),
+}
+
+
+def _basis_rungs(basis: Any, *, amount_known: bool) -> tuple[str, ...]:
+    """The rungs for one row's basis list, widest first (see ``_TAG_RUNGS``)."""
+    tags = _basis_tag_list(basis, amount_known=amount_known)
+    if len(tags) == 1:
+        return _TAG_RUNGS.get(tags[0], (tags[0],))
+    # A row carrying several bases keeps the joined spelling only: there is no
+    # narrow form of "billed + estimated" that says the same thing.
+    return (" + ".join(tags),)
+
+
+def _basis_tag_list(basis: Any, *, amount_known: bool) -> list[str]:
+    """User-facing words for one row's basis list, in wire order.
+
+    ``quote`` never reaches here (the adapter maps it to ``estimated``), and
+    ``subscription_api_equivalent`` is spelled the way a user reads it —
+    "plan-covered (API price)" — rather than as the wire's shorthand (design
+    round 1, D1c). ``not_tracked`` reads as "basis not recorded" when the row's
+    amount IS known (the inference case: the money is stated, its billing basis
+    is the part missing) and as "price not stated" when the amount is missing
+    (N2's ask for $— rows).
+    """
+    not_tracked_label = "basis not recorded" if amount_known else "price not stated"
+    tags: list[str] = []
+    for value in basis if isinstance(basis, list) else []:
+        label = {
+            BASIS_BILLED: "billed",
+            BASIS_SUBSCRIPTION: "plan-covered (API price)",
+            BASIS_ESTIMATED: "estimated",
+            BASIS_NOT_TRACKED: not_tracked_label,
+        }.get(str(value))
+        if label and label not in tags:
+            tags.append(label)
+    return tags
+
+
+def _units_text(row: dict[str, Any]) -> str:
+    """``"3 searches"`` / ``"1 image"`` / ``""`` — count and noun, plural-correct.
+
+    ``units`` absent or ``None`` means NO count was recorded (a legacy row
+    recovered without one), and nothing is drawn: a literal ``0 images`` beside
+    a real dollar figure was a fabricated zero of the same class the money
+    columns refuse (QA round 1, Q6 / design D9 for the plurals).
+    """
+    units = row.get("units")
+    unit = str(row.get("unit") or "")
+    if not isinstance(units, (int, float)) or units <= 0 or not unit:
+        return ""
+    noun = unit[:-1] if units == 1 and unit.endswith("s") else unit
+    return f"{units:g} {noun}"
+
+
+def _draw_spend_basis(body: _Body, published: Any) -> None:
+    """The basis footer: buckets that SUM TO THE TOTAL, labels dim, figures fg.
+
+    Round 1 measured the old footer as the least legible line in the section
+    (3.43:1 dim) accounting for $0.140 of a $1.04 total while the inference
+    remainder was only a count in the same sentence (design round 1, D1b-d).
+    This one names every bucket the total is made of — including the money
+    whose basis is not recorded — so the parts reconcile with the whole, keeps
+    counts out of the money sentence, and wraps onto a continuation rather than
+    cropping. Nothing is drawn when the publisher carries no ``by_basis``.
+    """
+    basis = getattr(published, "by_basis", None)
+    if not isinstance(basis, dict):
+        return
+    # Each bucket is ONE wrapping unit (label + figure, separator attached at
+    # the FRONT of the next unit): round 2 measured the old segment-wise wrap
+    # orphaning the biggest bucket's figure onto the next line ("… · basis not
+    # recorded" / "$1.11 · …") and starting continuations with a bare "·"
+    # (design round 2, D2-1). The first line is indented like the table rows.
+    units: list[tuple[str, str]] = []  # (label, figure) — figure "" for a clause
+    for key, label in (
+        (BASIS_BILLED, "billed"),
+        (BASIS_SUBSCRIPTION, "plan-covered (API price)"),
+        (BASIS_ESTIMATED, "estimated"),
+        (NOT_TRACKED_MICRO, "basis not recorded"),
+    ):
+        value = _as_micro(basis.get(key))
+        if not value:
+            continue
+        units.append((label, format_usd(value)))
+    count = basis.get("not_tracked_calls")
+    if isinstance(count, int) and count and not isinstance(count, bool):
+        noun = "call" if count == 1 else "calls"
+        units.append((f"{count} {noun} with no price recorded", ""))
+    if not units:
+        return
+    prefix = "  By basis:  "
+    cont = " " * len(prefix)
+    line = Text(prefix, style=semantic_style("muted"))
+    used = len(prefix)
+    for index, (label, figure) in enumerate(units):
+        separator = " · " if index else ""
+        span = len(separator) + len(label) + (1 + len(figure) if figure else 0)
+        if index and used + span > body.width:
+            # The separator falls with the wrap so a continuation never starts
+            # on a bare "·" (design round 2, D2-1).
+            body.lines.append(line)
+            line = Text(cont, style=semantic_style("muted"))
+            used = len(cont)
+            separator = ""
+            span = len(label) + (1 + len(figure) if figure else 0)
+        line.append(separator + label, style=semantic_style("muted"))
+        used += len(separator) + len(label)
+        if figure:
+            line.append(" " + figure, style=semantic_style("fg"))
+            used += 1 + len(figure)
+    body.lines.append(line)
+
+
+def _row_mapping(row: Any) -> dict[str, Any]:
+    """One published row as a plain mapping, whatever shape it arrived in.
+
+    The panel receives the object over the frontend-state wire (a JSON dict) or
+    straight from the model (a pydantic instance); both must render the same,
+    so the conversion lives here rather than at each field read.
+    """
+    if isinstance(row, dict):
+        return row
+    dump = getattr(row, "model_dump", None)
+    if callable(dump):
+        value = dump(mode="json")
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _as_micro(value: Any) -> int | None:
+    """``value`` as integer micro-USD, or ``None`` when no figure was stated.
+
+    ``None`` here means the wire stated no amount — the same fact the backend's
+    ``amount_micro: None`` carries — and the renderer shows ``$—`` rather than a
+    confident ``$0.0000``. ``bool`` is rejected on purpose (``True`` is an
+    ``int`` in Python and must not render as one micro-dollar).
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _channel_row_label(row: dict[str, Any]) -> str:
+    """The row's display name: channel, and the serving identity when stated."""
+    channel = str(row.get("channel") or "other")
+    label = str(row.get("label") or "")
+    if channel == "inference":
+        return f"inference · {label}" if label else "inference"
+    if channel == "other" and label:
+        # The wire cap's aggregate row says how much it grouped ("other
+        # channels (5)"); rendering it as bare "other" hid both the count and
+        # the fact that anything was grouped (design round 2, D2-3).
+        return label
+    ident = "/".join(
+        part for part in (str(row.get("provider") or ""), str(row.get("model") or "")) if part
+    )
+    return f"{channel} · {ident}" if ident else channel
+
+
+def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
+    """This session's retrieval spend, as its own attributed block.
+
+    PREFERS the published ``spend_channels`` object when the backend has one:
+    then this screen renders the same object the band and every other surface
+    render, and the search money arrives inside it (the legacy block below is
+    drawn only when there is no published object, i.e. an old backend or a
+    reduced host). Either way the section survives a frame whose ledger read
+    failed: it is not in that ledger, and a session that spent money on
+    retrieval must not read as free because a different read broke.
+
+    Nothing at all is drawn when the session has no retrieval spend, which is
+    the ordinary case for most sessions, and matches the screen's rule of
+    shedding a row whose only content is the absence of a problem.
+    """
+    if _draw_spend_channels(body, runtime):
+        return
     snapshot = runtime.search_spend
     # ``count``, not ``searches``: a conversation whose only retrieval spend is
     # READS has money to show, and guarding on searches drew nothing here while
@@ -1135,7 +1608,7 @@ def _draw_recorded_usage(
         body.kv(
             cost_label(bool(search_note)),
             format_cost(MoneyFigure.of(spend)),
-            notes=ladder,
+            notes=_channels_reconciliation_rungs(ladder, runtime),
         )
         # Kept under ~70 characters so it does not wrap at the common widths.
         # The 103-character version wrapped at every width from 70 to ~128 and
@@ -1161,7 +1634,9 @@ def _draw_recorded_usage(
         body.kv(
             cost_label(bool(search_note)),
             format_cost(MoneyFigure.of(spend)),
-            notes=cost_note_rungs(spend, search_component=search_note),
+            notes=_channels_reconciliation_rungs(
+                cost_note_rungs(spend, search_component=search_note), runtime
+            ),
         )
     # Suppressed when both are zero: on the healthy path "0 requests; 0 unknown"
     # is a row whose only content is the absence of a problem.
@@ -1264,6 +1739,13 @@ def _draw_recorded_usage(
             "The status band shows ≥ (a restored floor from a resumed "
             "conversation); this figure is what the ledger actually retained."
         )
+    # The all-sources spend table sits HERE, directly under the Totals it
+    # reconciles with (design round 1, N3/D7): the Est. cost row above is the
+    # recorded ledger's model+search figure, this table's Total is every source,
+    # and the two are adjacent on purpose so the reader sees both scopes named
+    # rather than meeting a second "cost" 40 lines later.
+    body.blank()
+    _draw_spend_sections(body, runtime)
     body.blank()
 
     _draw_context_gauge(body, gauge, cols, width)
