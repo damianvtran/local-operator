@@ -819,6 +819,97 @@ def _capped_components(components: Sequence[Any]) -> list[Any]:
     return values[len(values) - USAGE_COMPONENT_CAP :]
 
 
+#: State fields whose value can only GROW while a conversation is worked in, so a
+#: closing row takes the larger of the runtime's own reading and the durable row's.
+#: Money and tokens are the two the reviewer measured going backwards when the row
+#: was not refreshed: a cold open painted ``context_tokens: 51000`` from a row
+#: written by the FIRST runtime while the journal's own receipts said 121000.
+#: State fields that only ever accumulate, so the larger of two readings wins.
+#: ``active_duration_s`` is the SUMMED DURATION OF THE TURNS this conversation ran
+#: (the figure the TUI's status line renders); review round 2 (F8) put it here
+#: rather than keeping the durable figure, because a runtime's own turn time is
+#: real elapsed duration either way and the larger value can never lower what a
+#: surface recorded.
+_MONOTONIC_STATE_FIELDS = ("cumulative_parent_cost", "subagent_cost", "active_duration_s")
+
+
+def closing_state_overrides(live: Any, durable: Any) -> dict[str, Any]:
+    """What a closing checkpoint must carry over from the durable row it read.
+
+    WHY THIS EXISTS. A closing row is REPLACEMENT state for every reader that
+    takes the newest row, so a runtime whose own view is poorer than the row it
+    restored would LOWER the conversation's durable state — the N1 defect
+    (``test_headless_turn_preserves_a_rich_frontend_checkpoint``), which review
+    round 1 (F1) required be fixed by MERGING rather than by writing once and
+    stopping. The rules, field by field, are the ones that test demands and the
+    ones the staleness probe demands:
+
+    * **Money and time never go backwards** (:data:`_MONOTONIC_STATE_FIELDS`):
+      the larger of the two wins, whoever wrote it — the cost fields and
+      ``active_duration_s``, the summed duration of the turns that ran, only ever
+      accumulate. Review round 2 (F8) folded the duration field into this rule and
+      removed the ``attached`` special case it used to need.
+    * **``context_tokens`` IS NOT MONOTONIC** (review round 2, F7): a compaction
+      SHRINKS it, so "the larger of the two wins" would pin a pre-compaction
+      reading over the runtime's own post-compaction one for the rest of the
+      conversation. The durable row supplies it only when this runtime has no
+      reading of its own — the N1 case, where a headless restore never saw a
+      provider receipt at all.
+    * **A blank field never overwrites a set one** — the title
+      (``conversation_title`` with its ``user_set``/``forked`` companions) and the
+      todo list. A headless runtime has no title of its own and reported ``""``,
+      which is how the TUI's title was lost; the title belongs to the
+      CONVERSATION, not to the runtime that happens to be closing it.
+    * **Identity stays this runtime's**: ``session_id``, ``epoch``,
+      ``checkpoint_id`` and ``jobs`` are never taken from the durable row. A
+      closing row names the runtime that wrote it — for a FORK, whose fixups
+      deliberately clear the parent's id and child list, inheriting them back
+      would smuggle another session's children into this transcript (the #573
+      shape ``_inherited_identity_fixups`` documents).
+
+    Everything else is the runtime's own current view, which is what a status row
+    is FOR.
+    """
+    overrides: dict[str, Any] = {}
+    for field in _MONOTONIC_STATE_FIELDS:
+        ours = getattr(live, field, None)
+        theirs = getattr(durable, field, None)
+        if theirs is not None and (ours is None or theirs > ours):
+            overrides[field] = theirs
+    if not getattr(live, "conversation_title", "") and getattr(durable, "conversation_title", ""):
+        overrides["conversation_title"] = durable.conversation_title
+        overrides["conversation_title_user_set"] = bool(
+            getattr(durable, "conversation_title_user_set", False)
+        )
+        overrides["conversation_title_forked"] = bool(
+            getattr(durable, "conversation_title_forked", False)
+        )
+    if not getattr(live, "todos", None) and getattr(durable, "todos", None):
+        overrides["todos"] = durable.todos
+    # NEITHER THE LATCH NOR THE GOAL IS CARRIED OVER (review round 3, F13). Round 2
+    # added two "a blank never overwrites a set one" branches here, for the title
+    # latch and for ``goal``, and both were the wrong rule for the same reason
+    # ``context_tokens`` was wrong in F7: these fields legitimately go BACKWARDS,
+    # because the user can release them. ``/goal --clear`` (``set_goal("")`` ->
+    # ``delete_goal``) and ``/title refresh`` (``release_user_set``) are real
+    # actions, and both produce exactly the shape the branches overruled — a blank
+    # live field against a set durable one — so the merge resurrected a goal the
+    # user cleared and re-set a latch the user released, in every later closing row.
+    # What makes that shape unambiguous is that the runtime's own view is the only
+    # one that has OBSERVED the release: a runtime that was merely restored carries
+    # the durable values as its own (the checkpoint restore seeds them), so a blank
+    # live field means someone cleared it.
+    # ``context_tokens`` has its own rule (see the docstring): taken from the
+    # durable row only when this runtime has NO reading of its own, because a
+    # compaction legitimately lowers it and the larger-of-two rule would hold the
+    # stale figure above the current one forever.
+    live_tokens = getattr(live, "context_tokens", None)
+    durable_tokens = getattr(durable, "context_tokens", None)
+    if not live_tokens and durable_tokens:
+        overrides["context_tokens"] = durable_tokens
+    return overrides
+
+
 def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
     """Fields a restored checkpoint must NOT be allowed to carry across a fork.
 
@@ -6612,7 +6703,19 @@ class FrontendStateStore:
         changes = dict(
             attention=dict(getattr(session, "_attention", {}) or {}),
             cwd=str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or os.getcwd()),
-            conversation_title=title,
+            # A BLANK TITLE NEVER OVERWRITES A SET ONE (review round 1, F1). The
+            # title belongs to the conversation, and the store is usually the only
+            # holder of it: a headless runtime whose own title lookup came up
+            # empty reported "" and the next reader lost the title a TUI had set
+            # (the N1 fixture, and QA-Q4's probe of a closing row over a row whose
+            # ``state.checkpoint_id`` was null). A title the user CLEARS is a
+            # different event and carries ``user_set``, so it still lands.
+            conversation_title=title
+            or (
+                ""
+                if getattr(title_state, "user_set", False)
+                else (current.conversation_title or "")
+            ),
             conversation_title_user_set=bool(getattr(title_state, "user_set", False)),
             conversation_title_forked=bool(getattr(session, "wears_inherited_title", False)),
             goal=str(getattr(session, "goal", "") or ""),
@@ -7456,7 +7559,18 @@ class FrontendStateStore:
         # needs installing against a reader.
         self._install(self._state.model_copy(update={"live_events": live}))
 
-    async def checkpoint(self, transcript: Any) -> None:
+    async def checkpoint(self, transcript: Any, *, preserve_mtime: bool = False) -> None:
+        """Append the durable turn-end (or closing) status row.
+
+        ``preserve_mtime`` is for the CLOSING checkpoint a runtime leaves at
+        teardown (see ``Session._write_closing_checkpoint``): that row is a
+        record ABOUT the session written after the user's last turn, so it must
+        not re-rank the session as freshly worked in ``retention.session_activity``
+        (the one clock the picker and ``session.cleanup`` share). It is a
+        REQUEST the transcript layer validates — honoured only for a whole batch
+        of :data:`~local_operator.session.transcript.BOOKKEEPING_CUSTOM_TYPES`,
+        which this type is a member of — so a caller cannot use it to hide work.
+        """
         state = self.state
         checkpoint_id = uuid.uuid4().hex
         state.checkpoint_id = checkpoint_id
@@ -7530,6 +7644,7 @@ class FrontendStateStore:
         await transcript.append_custom(
             FRONTEND_CHECKPOINT_CUSTOM_TYPE,
             {"checkpoint_id": checkpoint_id, "state": durable.model_dump(mode="json")},
+            preserve_mtime=preserve_mtime,
         )
 
     def _retained_windows(self) -> _TrajectoryWindows:

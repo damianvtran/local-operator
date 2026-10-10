@@ -1619,6 +1619,13 @@ def _live_generation_is_user_facing(session_id: str) -> bool:
     return is_user_session_origin(session_origin(directory))
 
 
+#: Children whose todo snapshot the cold durable projection reads, newest first
+#: (see ``_durable_projection``). 96 covers every roster a person watches while
+#: keeping the added cold CPU under ~100 ms on the 255-child real rosters that
+#: measured a 2-3x projection regression without it.
+_COLD_TODO_CHILD_LIMIT = 96
+
+
 def _durable_projection(session_id: str) -> SessionProjection | None:
     """Fold a user conversation and its routable child lineage from disk.
 
@@ -1686,6 +1693,24 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
     snapshot = state.latest_customs.get("subagent_roster") or {}
     jobs = {str(row.get("id") or ""): row for row in snapshot.get("jobs") or []}
     records = [row for row in snapshot.get("records") or [] if row.get("job_id")]
+    # WHICH CHILDREN GET THEIR TODO SNAPSHOT READ COLD (review round 1, F2).
+    # Every child costs one backward byte scan of its transcript — measured ~1 ms
+    # each, which is fine for the rosters this used to see (1 record) and not fine
+    # for the full one the sidecar now supplies: 255 children added ~255 ms to a
+    # projection whose whole base cost was 393-504 ms, against a 300 ms first-paint
+    # target. The snapshot is a FALLBACK (``todo_snapshot(child)`` is tried first
+    # and is a fold lookup), so the budget is spent on the children a user is most
+    # likely looking at: the newest ones, which is what a roster's append order
+    # makes the last rows. Older children still render — with their label, status,
+    # agent and prompt — and simply carry no todo rows, and NOTHING SAYS SO: the
+    # panel cannot tell "this child has no todos" from "this child is past the
+    # budget", which is a silent loss of information the phone used to show
+    # (review round 2, F10 — accepted with the loss recorded here). The follow-up
+    # that removes it is a LAZY per-child read: ``api_subagent_detail`` already
+    # serves one child on demand, so the todo snapshot belongs there rather than in
+    # a cold projection answering for 96 children at once. The alternative measured
+    # worse than the regression it was fixing (2-3x the whole projection).
+    todo_children = {str(record["job_id"]) for record in records[-_COLD_TODO_CHILD_LIMIT:]}
     by_parent: dict[str | None, list[str]] = {}
     for record in records:
         parent = str(record["parent_job_id"]) if record.get("parent_job_id") else None
@@ -1714,7 +1739,12 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             ancestors.insert(0, str(ancestor.get("label") or cursor))
             cursor = str(ancestor["parent_job_id"]) if ancestor.get("parent_job_id") else None
         raw_todos = todo_snapshot(child_dir.name) if child_dir else []
-        if not raw_todos and child_dir is not None and child_dir.is_dir():
+        if (
+            not raw_todos
+            and child_dir is not None
+            and child_dir.is_dir()
+            and job_id in todo_children
+        ):
             # The child's todo snapshot through the dedicated snapshot cache:
             # a deep roster used to full-parse every child transcript on every
             # durable projection, once per child. Routed around the fold cache

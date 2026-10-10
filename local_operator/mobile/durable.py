@@ -45,6 +45,7 @@ fold, not two).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -67,17 +68,60 @@ from local_operator.session.transcript import (
     _compaction_marker,
     _entry_to_message,
     _journal_injection_ids,
+    find_row_for_custom_type,
+    read_latest_custom_entry,
+    read_replay_suffix,
     read_transcript_page,
 )
 
 logger = logging.getLogger(__name__)
+
+#: The subagent roster's custom-entry type, restated from
+#: ``session.session.SUBAGENT_ROSTER_CUSTOM_TYPE`` (the same restatement
+#: discipline the tracked-type set documents below: importing the session
+#: module here would drag its whole import graph into every daemon boot).
+ROSTER_CUSTOM_TYPE = "subagent_roster"
 
 #: Custom-entry types the durable projection reads newest-wins (the store's
 #: ``latest_custom`` contract). Tracked in the fold cache so a cached session
 #: never re-parses its transcript to answer them. Importing the roster
 #: constant pulls in the session module, so the literals are restated here and
 #: asserted against the source of truth in the unit tests.
-_TRACKED_CUSTOM_TYPES = frozenset({"subagent_roster", "todo_snapshot"})
+_TRACKED_CUSTOM_TYPES = frozenset({ROSTER_CUSTOM_TYPE, "todo_snapshot"})
+
+#: The roster's own store, restated for the same reason as the type above:
+#: ``session.session.SUBAGENT_ROSTER_SIDECAR`` is the name writers use, and a
+#: unit test pins the two spellings together. Read (never written) here so the
+#: fold can seed a roster whose transcript row sits far above its replay window
+#: — 0 of the 40 largest real journals carry that row inside the window, while
+#: 30 of them have this file.
+ROSTER_SIDECAR_FILENAME = "subagent-roster.v1.json"
+
+#: The sidecar's own schema version, mirrored from
+#: ``session.session._SUBAGENT_ROSTER_VERSION``. A sidecar written by another
+#: version is not read: the fold would have to guess at a payload shape the
+#: writer owns, and the transcript fallback below is a correct answer for it.
+_ROSTER_SIDECAR_VERSION = 1
+
+#: Ceiling above which the fold will NOT go back into the journal for the roster
+#: when the window and the sidecar both came up empty.
+#:
+#: WHY A CEILING AT ALL, AND WHY IT IS NO LONGER 32 MiB. QA round 1 (Q1) measured
+#: the previous 32 MiB line LOSING data: a 35.5 MB journal with no sidecar and its
+#: only ``subagent_roster`` row above the replay window served 0 subagent rows on
+#: this branch and 4 on main. The line existed because the lookup was
+#: ``read_latest_custom_entry``, whose cost is the ANSWER'S DISTANCE FROM EOF — a
+#: parse of every row it steps over, measured at 457 ms on a 118 MB journal with
+#: neither a sidecar nor a roster row.
+#:
+#: That lookup now finds its row by BYTES (``transcript.find_row_for_custom_type``,
+#: the same needle the anchor lane uses): it scans chunks backward for the string
+#: every row of the type carries and JSON-decodes only the candidate, measured at
+#: 66 ms for the whole 118 MB journal — 7x cheaper, and no longer proportional to
+#: how many rows it steps over. So the ceiling is now only a sanity bound against
+#: a pathological file, set far above every journal that exists here (the largest
+#: real one is 129 MB) rather than below a population that needs its roster.
+_TRANSCRIPT_LOOKUP_MAX_BYTES = 256 * 1024 * 1024
 
 #: Bound on cached durable folds, in sessions. One entry holds the replayed
 #: history plus the UNCAPPED render rows (the history endpoint serves the full
@@ -157,8 +201,15 @@ class DurableFoldState:
     prunes: dict[str, str] = field(default_factory=dict)
     #: Transcript entries consumed so far. Not read by the fold itself — it is
     #: the cheap invariant that says the incremental cursor and the file agree,
-    #: which the cache tests assert against a full re-parse.
+    #: which the cache tests assert against a full re-parse. After the windowed
+    #: cold fold it counts the rows the fold CONSUMED (the replayed window, then
+    #: whatever the tail read appended), never the journal's total.
     entry_count: int = 0
+    #: Bytes of journal the cold fold last READ, for the caller's own evidence
+    #: and for the tests that have to prove the read was bounded (the walk's
+    #: granularity is a chunk, so a row count cannot show it). Not a contract:
+    #: nothing in the fold consults it. Mirrors ``ReplaySuffix.bytes_read``.
+    window_bytes: int = 0
     #: Ids of message entries journalled from a harness aside, accumulated as
     #: entries stream in. The INCREMENTAL fold has no journal in hand, so
     #: without this it could not resolve preserved-turn provenance and would
@@ -219,20 +270,15 @@ class DurableFoldCache:
         with self._lock:
             self._states.clear()
 
-    def load(self, directory: Path, *, at_bof: bool = True) -> DurableFoldState:
+    def load(self, directory: Path) -> DurableFoldState:
         """Fold state brought current with the file on disk.
 
         The common path reads only the bytes appended since the last load;
         rotation (``compact_file``) or a failed incremental repair falls back
-        to a full rebuild, which is still exactly what every request used to
-        do before this cache existed.
-
-        ``at_bof`` is the READER's fact, not a caller preference: does the
-        rebuild it may run start at the journal's first row? This reader always
-        reads the whole file, so it is True, and the parameter exists so the
-        bounded suffix read (lane T3) can say False instead of the state
-        inferring it from a list index (see
-        :attr:`DurableFoldState.scan_from_bof`)."""
+        to a rebuild, which reads the REPLAYED WINDOW rather than the whole file
+        (:meth:`_rebuild`) — and reports whether that window reached the
+        journal's first row, which the archive reads as
+        :attr:`DurableFoldState.scan_from_bof`."""
         state = self.get(directory)
         with state.lock:
             path = directory / TRANSCRIPT_FILENAME
@@ -260,7 +306,7 @@ class DurableFoldCache:
                             "durable fold: incremental read failed for %s; rebuilding", directory
                         )
             # New file, shrunk file, or failed increment: full rebuild.
-            self._rebuild(state, path, fingerprint, at_bof=at_bof)
+            self._rebuild(state, path, fingerprint)
             return state
 
     # -- internals -----------------------------------------------------------
@@ -350,39 +396,113 @@ class DurableFoldCache:
         state.fingerprint = fingerprint
         return True
 
-    def _rebuild(
-        self,
-        state: DurableFoldState,
-        path: Path,
-        fingerprint: _FileFingerprint,
-        *,
-        at_bof: bool = True,
-    ) -> None:
-        """Full fold from the file: the pre-cache behaviour, run once per
-        session per daemon lifetime (then maintained incrementally).
+    def _rebuild(self, state: DurableFoldState, path: Path, fingerprint: _FileFingerprint) -> None:
+        """Fold from the journal's REPLAYED WINDOW, not from the whole file.
 
-        ``at_bof`` says whether the entries read here began at the journal's own
-        first row, and it is written to the state because two later answers need
-        it (see :attr:`DurableFoldState.scan_from_bof`). This reader always
-        reads the whole file, so it is True unless the caller says otherwise —
-        the seam lane T3's bounded suffix read will drive.
+        This used to be the pre-cache behaviour run verbatim: read every row of
+        the journal, parse it, and replay it. On the operator's store that is
+        1229 ms for a 121 MB conversation and grows with the file, for a replay
+        that only ever reads the rows after the latest compaction — the same
+        argument (and the same reader) the desktop's cold attach already uses
+        (:func:`read_replay_suffix`, 11-130 ms on those files).
+
+        WHY THE SHARED READER RATHER THAN A SECOND SUFFIX WALK: the stop rule
+        here has to be the desktop's, byte for byte — the newest compaction's
+        ``first_kept_entry_id`` must be in hand before the replay may cut, and a
+        journal with no compaction has no boundary to stop at, so the honest
+        answer there is the whole file (which is what this reader returns). Two
+        implementations of that rule is exactly how the phone's notion of "what
+        the model still sees" drifts from the desktop's.
+
+        THE ROWS THE WINDOW DOES NOT CONTAIN are the other half of the change,
+        and they are why this is not merely "parse less": it is the derived
+        state (the subagent roster, the todo snapshot) whose rows are written
+        once and then live far above the cut — the roster's legacy row is inside
+        the window on 0 of the 40 largest real journals, its newest occurrence
+        sat 32-670 ms of backward scan away. The rule for seeding it is the one
+        the cold facet already applies in
+        ``AttachedSession._restore_cold_subagents``: the SIDECAR is the roster's
+        own store and the fresher of the two, so it wins when it is there; only
+        a session that has none pays a backward lookup for the transcript row.
+        Anything the window already carried costs nothing at all.
+
+        TWO FACTS THE WINDOW HAS TO REPORT, both of them lane T2's, and they are
+        the two answers ``at_bof`` below stands for: where the archive's cut is
+        (``_replay``'s ``keep_start_id``) and whether the prune map can be
+        trusted as the file's own (``scan_from_bof``). This reader used to be
+        handed the fact by its caller, which read the whole file and therefore
+        always said ``True``; a bounded window is where the question first has a
+        real answer, so it is derived from the read itself rather than asked for.
         """
-        entries: list[TranscriptEntry] = []
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                entry = TranscriptEntry.from_json(line)
-                if entry is not None:
-                    entries.append(entry)
-        # Newest-wins custom snapshots, backward scan like ``latest_custom``.
-        latest_customs: dict[str, dict[str, Any]] = {}
-        for entry in reversed(entries):
-            if entry.type != ENTRY_CUSTOM:
-                continue
-            custom_type = entry.payload.get("custom_type")
-            if custom_type in _TRACKED_CUSTOM_TYPES and custom_type not in latest_customs:
-                latest_customs[str(custom_type)] = dict(entry.payload.get("details", {}))
+        # Sorted, so the tuple a reader sees is deterministic rather than
+        # whatever order a frozenset happened to iterate in.
+        suffix = read_replay_suffix(
+            state.directory, opportunistic_types=tuple(sorted(_TRACKED_CUSTOM_TYPES))
+        )
+        entries = list(suffix.entries)
+        state.window_bytes = suffix.bytes_read
+        # THE READER'S OWN FACT, derived rather than taken from the caller. Two
+        # answers turn on it: this fold's boundary (``_replay``'s
+        # ``keep_start_id``, the archive's cut) and whether the prune map is the
+        # FILE's own (``scan_from_bof``, which ``_journal_page`` reads to decide
+        # whether the archive must rebuild it from the journal before serving a
+        # page — a prune marker sits ABOVE the row it blanks, so a windowed fold
+        # that served its own map would hand the phone output the live fold had
+        # hidden).
+        #
+        # ``bytes_read`` is the span from the chunk the backward walk stopped at
+        # to EOF, so it equals the file exactly when that walk reached the file's
+        # start — which is the case for a journal with no compaction to stop at,
+        # and not for a bounded window. The comparison is against the stat taken
+        # by ``load``; a file that grew between the two reads therefore lands
+        # conservative (``False``, rebuild the map), never the other way.
+        at_bof = suffix.bytes_read >= fingerprint.size
+        # ``opportunistic_types`` never gates the scan (a type that may
+        # legitimately be absent must not, see ``read_replay_suffix``), so this
+        # is the free half: snapshots the window already passed.
+        latest_customs: dict[str, dict[str, Any]] = {
+            name: dict(details)
+            for name, details in suffix.checkpoints.items()
+            if name in _TRACKED_CUSTOM_TYPES
+        }
+        roster = _read_roster_sidecar(state.directory)
+        if roster is not None:
+            latest_customs[ROSTER_CUSTOM_TYPE] = roster
+        elif fingerprint.size <= _TRANSCRIPT_LOOKUP_MAX_BYTES:
+            # Only the ROSTER goes back into the journal. It is the one tracked
+            # type with a consumer (``daemon._durable_projection`` reads it to
+            # rebuild the child rows), and a session with no sidecar is a legacy
+            # one whose roster row sits near the head of the journal — written
+            # once, before the sidecar existed — so nothing nearer than a
+            # backward scan can answer it. That scan is now a BYTE scan (see
+            # ``_TRANSCRIPT_LOOKUP_MAX_BYTES``), which is why the ceiling is a
+            # sanity bound rather than a population filter: QA round 1 (Q1) caught
+            # the 32 MiB line losing a legacy roster on a 35.5 MB journal, and a
+            # served roster is worth 66 ms of one-off scanning on the two journals
+            # out of this store's forty that have no sidecar at all.
+            #
+            # THE TODO SNAPSHOT DELIBERATELY DOES NOT, and that is a trade rather
+            # than an oversight. It IS harvested from the window whenever the
+            # window passes it (17 of the 40 largest real journals); beyond that
+            # nothing reads the entry: the daemon's durable projection reads the
+            # roster only, and a child's todos come from ``CustomSnapshotCache``.
+            # The scan costs O(distance) in the common case — measured 340 ms on
+            # a 5.9 MB fixture where the row does not exist at all, i.e. work paid
+            # on every cold open to fill a field no caller reads. A future
+            # consumer of it needs a bounded reader of its own; this comment is
+            # the hand-off.
+            entry = read_latest_custom_entry(state.directory, ROSTER_CUSTOM_TYPE)
+            if entry is not None:
+                # Newest-wins, exactly as ``Transcript.latest_custom`` answers it
+                # (same predicate, same projection) — one backward scan, not a
+                # second full parse.
+                latest_customs[ROSTER_CUSTOM_TYPE] = dict(entry.payload.get("details", {}))
+        else:
+            logger.debug(
+                "durable fold: %s is too large to scan for a roster row",
+                state.directory,
+            )
+
         state.injection_ids = _journal_injection_ids(entries)
         state.history, state.keep_start_id = _replay(entries, at_bof=at_bof)
         state.scan_from_bof = at_bof
@@ -393,6 +513,10 @@ class DurableFoldCache:
             if entry.type == ENTRY_PRUNE and entry.payload.get("target")
         }
         state.latest_customs = latest_customs
+        # The rows this fold actually consumed. It is still the cursor/file
+        # agreement invariant (the incremental path adds to it), but it now
+        # counts the WINDOW rather than the file — asserting equality with the
+        # file's line count would be asserting the whole-file read back.
         state.entry_count = len(entries)
         state.offset = fingerprint.size
         state.fingerprint = fingerprint
@@ -974,6 +1098,11 @@ class _CustomSnapshotEntry:
     inode: int
     size: int
     customs: dict[str, dict[str, Any]]
+    #: Which types this entry has actually looked for. A miss is only a miss for
+    #: a type that was SEARCHED: the reads are per-type now (see ``_scan``), so an
+    #: entry built for ``todo_snapshot`` says nothing about ``subagent_roster``
+    #: until that type is asked for too.
+    scanned: set[str] = field(default_factory=set)
 
 
 class CustomSnapshotCache:
@@ -1009,41 +1138,94 @@ class CustomSnapshotCache:
         key = str(directory)
         with self._lock:
             entry = self._entries.get(key)
-            if entry is not None and entry.inode == stat.st_ino and entry.size == stat.st_size:
+            if (
+                entry is not None
+                and entry.inode == stat.st_ino
+                and entry.size == stat.st_size
+                and custom_type in entry.scanned
+            ):
                 self._entries.move_to_end(key)
                 return entry.customs.get(custom_type)
-        customs = self._scan(path)
+        details = self._scan(directory, custom_type)
         with self._lock:
+            held = self._entries.get(key)
+            if held is not None and held.inode == stat.st_ino and held.size == stat.st_size:
+                # Another thread asked for a different type of the same version
+                # while this one scanned: keep its answer.
+                held.customs.update(details)
+                held.scanned.add(custom_type)
+                self._entries.move_to_end(key)
+                return held.customs.get(custom_type)
             self._entries[key] = _CustomSnapshotEntry(
-                inode=stat.st_ino, size=stat.st_size, customs=customs
+                inode=stat.st_ino,
+                size=stat.st_size,
+                customs=details,
+                scanned={custom_type},
             )
             self._entries.move_to_end(key)
             while len(self._entries) > self._max_entries:
                 self._entries.popitem(last=False)
-        return customs.get(custom_type)
+        return details.get(custom_type)
 
     @staticmethod
-    def _scan(path: Path) -> dict[str, dict[str, Any]]:
-        """One forward pass keeping the newest details per tracked type.
+    def _scan(directory: Path, custom_type: str) -> dict[str, dict[str, Any]]:
+        """The newest details for ONE tracked type, found by BYTES.
 
-        Streaming and retaining nothing but the answer dicts: the scan must
-        not materialize a child's whole transcript just to find one snapshot.
+        WHY NOT A FORWARD PARSE (review round 1, F2). This used to stream the
+        whole transcript, JSON-decoding every row to keep the newest snapshot of
+        each tracked type in one pass. That was cheap enough while the roster it
+        served had one record; once the roster came from its sidecar (all 255 of
+        them), ``_durable_projection`` called this per child and ``_scan`` measured
+        **2.15 s** of the phone's 3.31 s cold projection — a 2-3x regression on the
+        first open of a real session, against a 300 ms target.
+
+        The question is still "what does the newest row of this type say", so it
+        is answered by the same needle reader the fold's roster fallback uses:
+        chunked backward over the file, decoding only the candidate rows. Measured
+        against the parse on the same children: ~7x cheaper, and proportional to
+        BYTES rather than to rows.
+
+        A missing row is still a real absence: the needle is exact for this
+        format's spelling (``transcript.find_row_for_custom_type`` documents that
+        assumption and keeps the parse walk as the authority for a type it cannot
+        spell), and this reader's callers ask for types whose absence is normal.
         """
-        customs: dict[str, dict[str, Any]] = {}
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    entry = TranscriptEntry.from_json(line)
-                    if entry is None or entry.type != ENTRY_CUSTOM:
-                        continue
-                    custom_type = entry.payload.get("custom_type")
-                    if custom_type in _TRACKED_CUSTOM_TYPES:
-                        customs[str(custom_type)] = dict(entry.payload.get("details", {}))
-        except OSError:
-            pass
-        return customs
+        located = find_row_for_custom_type(directory, custom_type)
+        if located is None:
+            return {}
+        return {custom_type: dict(located[1].payload.get("details", {}))}
+
+
+def _read_roster_sidecar(directory: Path) -> dict[str, Any] | None:
+    """The roster sidecar's payload for ``directory``, or ``None``.
+
+    The fold's seeding path for the one tracked type whose rows are written once
+    and then sit above the replay window forever (see ``_rebuild``). Frozen
+    only as an answer for THIS fold: the file is rewritten on every roster move,
+    so a later ``load`` of a cached session does not re-read it — the same
+    staleness the transcript-row source has (its legacy row is written once
+    too), and the live path, not this cache, is what keeps a running
+    conversation's roster current.
+
+    Best-effort by construction: the durable projection must degrade to "no
+    roster" rather than fail because a sidecar is half-written, absent, or from
+    a version this build does not know. A payload that is not the shape the
+    writer promises is refused rather than passed on, because the daemon reads
+    ``jobs``/``records`` off it directly.
+    """
+    try:
+        with (directory / ROSTER_SIDECAR_FILENAME).open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != _ROSTER_SIDECAR_VERSION:
+        return None
+    if not isinstance(payload.get("jobs"), list) or not isinstance(payload.get("records"), list):
+        return None
+    # The projection's own reader (``daemon._durable_projection``) takes what it
+    # needs by key; the whole mapping is kept so the seeded value is the store's
+    # record rather than a projection of it that could drop something.
+    return dict(payload)
 
 
 #: One shared store: it is content-addressed under config_dir() and read-only
