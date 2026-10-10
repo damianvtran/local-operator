@@ -15,10 +15,12 @@ import { AttachmentImage } from "./attachment-image";
 import { ImageGenCard } from "./image-gen-card";
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
+import { Disclosure } from "./ui/disclosure";
 import { followScrollTop } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory } from "../api";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
+import { quietGroupLabel, quietGroupsOf, type QuietGroup } from "../lib/quiet-groups";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
 
@@ -288,6 +290,53 @@ function PendingEchoRow({ echo, streaming }: { echo: PendingEcho; streaming: boo
 	);
 }
 
+/** The bar of ONE quiet group and, when opened, the receipts it holds
+ * (quiet-turn design §5, slice S4).
+ *
+ * A group is a client-derived fold of >= 2 delivery receipts — peer messages
+ * and wake receipts on this wire (`lib/quiet-groups`, where the definition
+ * lives). The bar states the family's word and the count; the press reveals
+ * the receipts with their tool rows, exactly as they paint at top level, and
+ * the expansion survives the open tail's appends because the group's key
+ * (`qg:<first row id>`) never moves. `partial` is a group the window's top
+ * edge cuts: its count is a minimum, so the line states `N+` and the "at
+ * least" claim rides the title — the desktop's own reading of the same fact.
+ *
+ * The bar deliberately carries NO `data-completion-anchor`: it is not a
+ * text-bearing row, so it stays out of the scroll-follow ledger. A reader
+ * whose nearest row folded into a collapsed bar falls to the nearest
+ * surviving row — the fallback the follow effect documents for every
+ * vanished row.
+ */
+function QuietGroupRow({
+	group,
+	partial,
+	children,
+}: {
+	group: QuietGroup;
+	partial: boolean;
+	children: ReactNode;
+}) {
+	const countTitle = partial
+		? `At least ${group.count} messages — earlier rows are not loaded`
+		: undefined;
+	return (
+		<Disclosure
+			header={
+				<span className="flex min-w-0 items-center gap-1 text-meta text-ink-dim">
+					<span className="shrink-0">{quietGroupLabel(group.family)}</span>
+					<span aria-hidden className="shrink-0">·</span>
+					<span className="shrink-0" title={countTitle} aria-label={countTitle}>
+						{partial ? `${group.count}+` : `${group.count}`}
+					</span>
+				</span>
+			}
+		>
+			{children}
+		</Disclosure>
+	);
+}
+
 export function Transcript({
 	pid,
 	entries,
@@ -391,6 +440,34 @@ export function Transcript({
 			: visible.length > 0
 				? visible[0].id
 				: null;
+
+	/* THE QUIET GROUPS over the rows on hand (design §5, slice S4): pure per
+	   render — rows only append, so a closed group's facts cannot move and the
+	   open tail grows in place under its stable key. The definition lives once
+	   in `lib/quiet-groups` and is pinned across clients by the shared parity
+	   fixture. */
+	const groups = quietGroupsOf(visible);
+	const groupsByFirstId = new Map(groups.map((group) => [group.rowIds[0], group]));
+	const groupedIds = new Set(groups.flatMap((group) => group.rowIds));
+	const entriesById = new Map(visible.map((entry) => [entry.id, entry]));
+	/* A group whose first row IS the painted top edge may continue above: rows
+	   sit in `merged` but off-window (`hiddenCount`), and `hasMore` records that
+	   a page fetch has not yet proved there is nothing older. Its count is a
+	   minimum — the `N+` the bar states. */
+	const topGroup = visible.length > 0 ? groupsByFirstId.get(visible[0].id) : undefined;
+	const headCut = hiddenCount > 0 || hasMore;
+
+	/* One row's box + anchor attrs, shared by the plain rows and a group's
+	   receipts so the two can never disagree about the follow contract. A
+	   boundary per row: one malformed entry must not unmount the whole app
+	   (the "tap → blank screen" failure). */
+	const transcriptRow = (entry: TranscriptEntry) => (
+		<RowBoundary key={entry.id}>
+			<div data-completion-anchor={entry.id} data-completion-complete={entry.final && entry.text_complete === true}>
+				<Entry entry={entry} pid={pid} />
+			</div>
+		</RowBoundary>
+	);
 
 	/* Follow the tail on new content, but only when already at the bottom. */
 	useEffect(() => {
@@ -620,15 +697,28 @@ export function Transcript({
 					show {hiddenCount} more loaded
 				</button>
 			) : null}
-			{visible.map((e) => (
-				/* A boundary per row: one malformed entry must not unmount the
-				   whole app (the "tap → blank screen" failure). */
-				<RowBoundary key={e.id}>
-					<div data-completion-anchor={e.id} data-completion-complete={e.final && e.text_complete === true}>
-						<Entry entry={e} pid={pid} />
-					</div>
-				</RowBoundary>
-			))}
+			{visible.flatMap((entry) => {
+				const group = groupsByFirstId.get(entry.id);
+				if (group !== undefined) {
+					return [
+						<RowBoundary key={group.key}>
+							<QuietGroupRow
+								group={group}
+								partial={headCut && group.key === topGroup?.key}
+							>
+								{group.rowIds.map((id) => {
+									const member = entriesById.get(id);
+									return member ? transcriptRow(member) : null;
+								})}
+							</QuietGroupRow>
+						</RowBoundary>,
+					];
+				}
+				/* A row inside a group paints through the group's bar (its
+				   children mount only while open) — never a second time here. */
+				if (groupedIds.has(entry.id)) return [];
+				return [transcriptRow(entry)];
+			})}
 			{visible.length === 0 && pending.length === 0 ? emptyContent : null}
 			{/* After the last projected row, because that is where the session will
 			    write them. */}
