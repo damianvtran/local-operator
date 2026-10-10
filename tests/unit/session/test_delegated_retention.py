@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -1572,14 +1573,21 @@ def test_a_merged_clean_linked_worktree_is_removed_not_bundled(root: Path) -> No
 
 
 def test_a_worktree_copy_whose_pointer_escapes_is_kept(root: Path) -> None:
-    # A cp copy keeps the .git FILE, so it still names the ORIGINAL's gitdir
-    # while its own path is not registered anywhere: the belt must refuse, and
-    # the registered original must come out of the pass untouched.
+    # A recursive copy keeps the .git FILE, so it still names the ORIGINAL's
+    # gitdir while its own path is not registered anywhere: the belt must
+    # refuse, and the registered original must come out of the pass untouched.
+    # ``shutil.copytree``, not ``cp -Rc``: the reflink flag is macOS-only and
+    # fails on the Linux CI runners (no reflink support).
     pad = _kept_pad(root, "copied")
     owner = _worktree_owner(root, "owner2")
     source = _linked_worktree(owner, root / "worktrees" / "outside")
     copy = pad / "lo-before"
-    subprocess.run(["cp", "-Rc", os.fspath(source), os.fspath(copy)], check=True)
+    shutil.copytree(os.fspath(source), os.fspath(copy), symlinks=True)
+    git_file = copy / ".git"
+    assert git_file.is_file(), "the copy keeps the .git FILE, not a directory"
+    recorded = git_file.read_text().strip()
+    target = Path(recorded.removeprefix("gitdir:").strip())
+    assert target == owner / ".git" / "worktrees" / "outside", recorded
     result = _pass(root)
     assert copy.exists() and (copy / "a.txt").exists()
     assert source.exists(), "the registered original is untouched"
