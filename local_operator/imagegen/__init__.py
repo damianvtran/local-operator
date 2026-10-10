@@ -79,6 +79,9 @@ class ImageRoute(StrEnum):
     #: xAI's Grok Imagine images API (media wave-2, append-only); key or the
     #: Grok OAuth token both ride this route.
     XAI = "xai"
+    #: OpenRouter's dedicated Images API (media wave-2, append-only): one key,
+    #: the aggregator's whole image catalog.
+    OPENROUTER = "openrouter"
     #: No usable route. Appears in availability/refusal payloads only.
     NONE = "none"
 

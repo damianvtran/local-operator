@@ -63,6 +63,7 @@ FAL_ENV_KEY = "FAL_API_KEY"
 OPENAI_ENV_KEY = "OPENAI_API_KEY"
 GOOGLE_ENV_KEY = "GOOGLE_AI_STUDIO_API_KEY"
 XAI_ENV_KEY = "XAI_API_KEY"
+OPENROUTER_ENV_KEY = "OPENROUTER_API_KEY"
 
 
 def _open_store(config_dir: Path | None) -> AuthStore:
@@ -184,6 +185,7 @@ def image_provider_reachable(config_dir: Path | None = None) -> bool:
         or openai_subscription_grant(config_dir)
         or google_key(config_dir)
         or xai_available(config_dir)
+        or openrouter_key(config_dir)
     )
 
 
@@ -338,4 +340,53 @@ async def xai_call_bearer(store: AuthStore, session_id: str | None = None) -> st
     if access is not None and access.access_token:
         return access.access_token
     exported = os.environ.get(XAI_ENV_KEY)
+    return exported or None
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter: login row -> provider store row -> exported key (the FAL shape)
+# ---------------------------------------------------------------------------
+
+
+def openrouter_key(config_dir: Path | None = None) -> str | None:
+    """The OpenRouter key (sync form): ``api_key`` rows -> store -> env.
+
+    Same precedence as :func:`fal_key`; the namespace is the registry row's
+    ``openrouter`` (``lop login openrouter`` stores there) and the env leg is
+    the ``OPENROUTER_API_KEY`` name the row declares. Never raises.
+    """
+    try:
+        store = _open_store(config_dir)
+        try:
+            key = _api_key_from_rows(store.list_credentials("openrouter"))
+        finally:
+            store.close()
+        if key:
+            return key
+    except Exception:  # noqa: BLE001 - a probe must never take its caller down
+        logger.debug("openrouter login-row probe failed; falling back to store/env", exc_info=True)
+
+    from local_operator.providers.registry import provider_secret_value
+
+    stored = provider_secret_value(OPENROUTER_ENV_KEY, base=config_dir)
+    if stored:
+        return stored
+    exported = os.environ.get(OPENROUTER_ENV_KEY)
+    return exported or None
+
+
+async def openrouter_call_key(store: AuthStore, session_id: str | None = None) -> str | None:
+    """The bearer the OpenRouter rung would send: persisted rows, then env.
+
+    The ASYNC twin of :func:`openrouter_key` — same credential class, same failure
+    contract (never raises, ``None`` means "no key").
+    """
+    try:
+        key = await store.get_persisted_api_key("openrouter", session_id, kinds={"api_key"})
+    except Exception:  # noqa: BLE001 - a probe must never take its caller down
+        logger.warning("openrouter persisted-key read failed; reporting none")
+        key = None
+    if key:
+        return key
+    exported = os.environ.get(OPENROUTER_ENV_KEY)
     return exported or None

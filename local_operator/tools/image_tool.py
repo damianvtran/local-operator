@@ -194,6 +194,8 @@ def _preferred_route_label() -> str:
             return "Google"
         if image_availability.xai_available(cfg):
             return "xAI"
+        if image_availability.openrouter_key(cfg):
+            return "OpenRouter"
     except Exception:  # noqa: BLE001 - a describer must never fail a call
         logger.debug("image availability read failed for approval text", exc_info=True)
     return "the configured provider"

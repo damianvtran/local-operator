@@ -31,6 +31,7 @@ def _pin_probes(
     openai_sub: bool = False,
     google: bool = False,
     xai: bool = False,
+    openrouter: bool = False,
 ) -> None:
     async def fake_radient(config_dir, base_url, *, store):
         return radient
@@ -51,6 +52,9 @@ def _pin_probes(
         image_availability, "google_key", lambda config_dir=None: "gk" if google else None
     )
     monkeypatch.setattr(image_availability, "xai_available", lambda config_dir=None: xai)
+    monkeypatch.setattr(
+        image_availability, "openrouter_key", lambda config_dir=None: "ork" if openrouter else None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +123,25 @@ async def test_the_xai_rung_appends_after_google(
     resolution = await cascade.resolve_image_route(tmp_path)
     assert resolution.route == ImageRoute.XAI
     assert resolution.reason == "An xAI key or sign-in is stored."
+
+
+@pytest.mark.asyncio
+async def test_the_openrouter_rung_is_the_last_resort(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Append-only: everything earlier beats it, and it resolves alone.
+    _pin_probes(monkeypatch, radient=True, openrouter=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.RADIENT
+
+    _pin_probes(monkeypatch, xai=True, openrouter=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.XAI
+
+    _pin_probes(monkeypatch, openrouter=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.OPENROUTER
+    assert resolution.reason == "An OpenRouter key is stored."
 
 
 @pytest.mark.asyncio
@@ -335,6 +358,20 @@ async def test_the_walk_dispatches_the_xai_rung(
 
     assert calls == [ImageRoute.XAI]
     assert outcome.route == ImageRoute.XAI
+
+
+@pytest.mark.asyncio
+async def test_the_walk_dispatches_the_openrouter_rung(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, openrouter=True)
+    fake, calls = _make_route_script({ImageRoute.OPENROUTER: _result("seedream-4.5")})
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    outcome = await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path)
+
+    assert calls == [ImageRoute.OPENROUTER]
+    assert outcome.route == ImageRoute.OPENROUTER
 
 
 @pytest.mark.asyncio

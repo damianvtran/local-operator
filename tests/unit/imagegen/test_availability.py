@@ -170,6 +170,10 @@ def test_reachable_is_the_any_of_matrix(
     assert availability.image_provider_reachable(config_root) is True
     monkeypatch.delenv("XAI_API_KEY")
 
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ork")
+    assert availability.image_provider_reachable(config_root) is True
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+
     store.upsert_credential(
         "radient", {"type": "oauth", "refresh": "r", "access": "a", "expires": 4_000_000_000_000}
     )
@@ -190,6 +194,7 @@ def test_probes_never_raise(config_root: Path, monkeypatch: pytest.MonkeyPatch) 
     assert availability.openai_subscription_grant(config_root) is False
     assert availability.google_key(config_root) is None
     assert availability.xai_available(config_root) is False
+    assert availability.openrouter_key(config_root) is None
     assert availability.image_provider_reachable(config_root) is False
 
 
@@ -354,3 +359,39 @@ async def test_the_xai_bearer_twin_prefers_the_store_then_env(
 
     store.upsert_credential("xai", {"type": "api_key", "source": "login", "key": "xk"})
     assert await availability.xai_call_bearer(store) == "xk"
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter: login row -> provider store row -> exported key (the FAL shape)
+# ---------------------------------------------------------------------------
+
+
+def test_openrouter_reads_the_exported_key_when_nothing_is_stored(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert availability.openrouter_key(config_root) is None
+    monkeypatch.setenv("OPENROUTER_API_KEY", "exported-key")
+    assert availability.openrouter_key(config_root) == "exported-key"
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    assert availability.openrouter_key(config_root) is None
+
+
+def test_openrouter_login_row_wins_over_the_export(
+    store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "exported-key")
+    store.upsert_credential("openrouter", {"type": "api_key", "source": "login", "key": "ork"})
+    assert availability.openrouter_key(config_root) == "ork"
+
+
+@pytest.mark.asyncio
+async def test_the_openrouter_async_twin_agrees_with_the_sync_probe(
+    store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert availability.openrouter_key(config_root) is None
+    assert await availability.openrouter_call_key(store) is None
+
+    store.upsert_credential("openrouter", {"type": "api_key", "source": "login", "key": "ork"})
+    assert availability.openrouter_key(config_root) == "ork"
+    assert await availability.openrouter_call_key(store) == "ork"
