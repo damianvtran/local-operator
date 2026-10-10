@@ -2434,6 +2434,40 @@ requested destination is the DESKTOP UI, and the terminal is the fallback.
    ssh session, a non-darwin host and a hand-edited `desktop.launch_command`
    typo were otherwise clicks that did nothing and said nothing.
 
+**What makes the click survive until it is made** (the click half of an Aida
+check-in banner, which is posted at 08:30 and clicked whenever the person next
+sits down), per platform:
+
+- **macOS.** The click is delivered to the posting helper's delegate, so the
+  helper has to be alive. Its wait is the sixth argv slot of `notifier`
+  (seconds, clamped to 1 s – 24 h, default 30 s); Aida's banner passes 24 h
+  (`notify.DURABLE_CLICK_WINDOW_S`), every other banner keeps 30 s. A click after
+  the helper has exited does nothing: relaunching the binary takes its
+  no-arguments usage branch and exits. The identity bundle is pre-warmed when a
+  TUI or the desktop daemon boots (`resume_click.prepare_for_clicks`) and built
+  synchronously for a durable banner, because the cold-machine fallback
+  (`osascript`) cannot be clicked. `BUILD_STAMP` is "3" so installs whose helper
+  ignores the window argument rebuild.
+- **Linux.** The `notify-send --action` support probe is persisted in
+  `<config>/notifier/notify-send-actions.json`, keyed by the binary's path,
+  mtime and size, so the first toast of a fresh one-turn runtime is clickable. A
+  banner that asks for a durable click probes synchronously when the answer is
+  not yet known. The waiter is still `notify-send --expire-time=5000 --action`:
+  a click after the notification daemon has dropped the popup is not delivered
+  by every desktop (not verified — no Linux host).
+- **Windows.** A runtime banner does not exist there (`detached_notify` has no
+  Windows branch; `notify-send` is absent), so rung 1–4 are never reached from
+  one. What a Windows user gets is the desktop app's own Electron toast, while
+  the app is running, whose click is handled inside that app. A click-to-open
+  path for a runtime banner needs a registered toast activator and a Windows
+  host to test it on; neither exists here, so none is claimed. Recorded as a
+  limitation.
+- **Rung 4's terminal.** Detection finds nothing in a click's process, so the
+  rung tries the terminal the user last attended (`<config>/notifier/
+  last-terminal.json`, written when a TUI boots inside a detectable emulator;
+  cmux is never recorded because it opens unfocused) before the macOS
+  Terminal.app last resort.
+
 Rung 3 is asked for "whatever is left" rather than for a named surface, which is
 what keeps the fallback identical for viewer types this build does not have; the
 desktop's own preference lives in rung 1, and the surface filter is what narrows
