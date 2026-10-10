@@ -12,6 +12,7 @@ byte-identical provider request; and an existing compaction cut is unaffected.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -72,7 +73,7 @@ async def test_llm_history_and_the_provider_request_are_byte_identical(tmp_path:
     directory = tmp_path / "sess"
     transcript = await _seed(directory)
 
-    def history() -> list[dict]:
+    def history() -> list[dict[str, Any]]:
         return [m.model_dump() for m in transcript.build_llm_history()]
 
     before_history = history()

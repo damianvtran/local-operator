@@ -105,7 +105,6 @@ _AMBIENT_VARS = (
     # drives it onto the "nothing happens" arm while asserting the one nobody runs. Cells
     # that mean "off" set it through ``monkeypatch`` explicitly.
     "LOP_SUPPLEMENTS",
-
     # The soft query budget's escape hatch (``tools/query_budget.ALLOW_ENV``), the
     # same ESCAPE-HATCH class and scrubbed for the same reason: an inherited value
     # would waive the stop every cell in ``test_query_budget.py`` asserts. Read off

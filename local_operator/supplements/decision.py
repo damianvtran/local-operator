@@ -32,7 +32,8 @@ does not pass through the request ledger; its spend is the INFO line
 
 THE EGRESS BOUNDARY. Every string this module hands a vendor -- the two state texts and the
 option text -- passes :func:`_egress` at the point it is composed (memo §4's one-statement
-egress boundary; round-1 security S-R8). What is scrubbed, what survives and why is stated
+egress boundary; round-1 security S-R8): a literal pass over the turn's own path spellings
+first, then the conservative shape pass. What is scrubbed, what survives and why is stated
 on :func:`_egress`.
 
 NOT HERE: the generator, the validator, progress events, the ops -- later lanes.
@@ -42,7 +43,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Final, Sequence
+from typing import Any, Final, Iterable, Sequence
 
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.redaction_shapes import scrub_shapes
@@ -124,52 +125,142 @@ def _bound(text: str, limit: int) -> str:
     return text[: max(0, limit - len(marker))] + marker
 
 
-#: One path segment on its way to a vendor. A run of spaces inside a segment is carried only
-#: when the token after it is itself slash-attached -- ``Acme Corp/``, ``Client Work/`` -- so a
-#: segment with a space reduces whole without swallowing the sentence: ``see /x and /y`` is
-#: never crossed, while a token that is itself ``word/word`` (prose's ``and/or``) reads as
-#: slash-attached continuation and is taken with the path; a segment with further unattached
-#: spaces stops the crossing at the first of them.
-_PATH_SEGMENT: Final = r"[\w.@%+~-]+(?: +(?=[\w.@%+~-]+/)[\w.@%+~-]+)*"
+#: One path component on its way to a vendor: a run of word characters (``.``/``@``/``%``/
+#: ``+``/``~``/``-`` included), never whitespace. A confident match STOPS at whitespace; a
+#: whitespace run that is really inside a path is closed by the carried-run pass
+#: (:func:`_carried`), never guessed at inside this token class.
+_TOKEN: Final = r"[\w.@%+~-]+"
 
 #: An absolute-path occurrence on its way to a vendor: a ``file://`` URI (any case, RFC 8089),
 #: or a ``/``- or ``~/``-rooted POSIX path (``candidates._PROSE_PATH``'s own roots). The lead
 #: refuses a match that is really a URL tail, a fraction or a relative path (``https://host/x``,
 #: ``24/7`` and ``and/or`` all survive) while taking a ``:``/``-`` lead (``path:/x``, ``to-/x``,
-#: a forward-slash drive ``C:/x``); the final segment must carry a character, so a bare
+#: a forward-slash drive ``C:/x``); the final component must carry a character, so a bare
 #: separator cannot match. Windows backslash roots (``C:\...``, ``\\server\share\...``) are a
 #: recorded non-scrub -- see :func:`_egress`.
-_PATH_SPAN: Final = re.compile(
-    r"(?<![\w./~])(?i:file://)?~?/(?:" + _PATH_SEGMENT + r"/)*" + _PATH_SEGMENT
-)
+_PATH_SPAN: Final = re.compile(r"(?<![\w./~])(?i:file://)?~?/(?:" + _TOKEN + r"/)*" + _TOKEN)
+
+#: The lead a carried run may cross: any whitespace except the line break (so a run never
+#: leaves its sentential fragment -- the state's sections are line-bounded), with one lone
+#: ``/`` in front for the separator a component can leave behind (``/Users/damian/
+#: Client Work/reports``).
+_TAIL_LEAD: Final = re.compile(r"/?[^\S\n\r]+")
+
+#: The same whitespace class, between the tokens of a carried run.
+_INLINE_WS: Final = re.compile(r"[^\S\n\r]+")
+
+#: One slash-attached component chain: a token plus any ``/token`` continuations, with a
+#: lone trailing ``/`` (a component named as a directory: ``Corp/``) taken with it.
+_CHAIN: Final = re.compile(_TOKEN + r"(?:/" + _TOKEN + r")*/?")
+
+#: One token, matched at a position -- the carried-run scan's step.
+_TOKEN_AT: Final = re.compile(_TOKEN)
 
 
-def _path_base(match: re.Match[str]) -> str:
-    """One matched path -> its base name (a ``file://`` scheme, any case, rides with it)."""
-    path = match.group(0)
+def _base_of(path: str) -> str:
+    """One path spelling -> its base name (a ``file://`` scheme, any case, rides with it)."""
     if path[:7].lower() == "file://":
         path = path[7:]
     return path.rstrip("/").rsplit("/", 1)[-1].rstrip(".")
 
 
-def _egress(text: str) -> str:
+def _carried(text: str, start: int) -> tuple[int, str] | None:
+    """One whitespace run plus the slash-attached chain it reaches, ``None`` for prose.
+
+    ``start`` sits just past a confident match. The run is CROSSED -- the span extended
+    through the chain, whose final component becomes the base name -- only when it reaches
+    a slash-attached component (a token immediately followed by ``/``). The boundary the
+    tests pin:
+
+    * plain tokens before that component are crossed with it: over-redaction is preferred
+      to a tail leak, so ``Acme Corp Ltd/q3.pdf`` and ``Client Work/reports`` reduce whole,
+      and a multi-run path (``Ltd/Sub Dir/q3.pdf``) crosses once per run;
+    * the whitespace class is every separator except the line break, so tab- and
+      NBSP-separated runs (a pasted path) cross exactly as spaces do;
+    * a token that STARTS a rooted path (``/x``, ``~/x``) ends the scan: two paths in
+      prose are never joined, and ``see /x and /y`` stays ``see x and y`` the same way
+      ``see /x and then /y`` stays itself;
+    * a run that never reaches a slash-attached component is prose and is not crossed at
+      all (``and more`` survives); a ``word/word`` token inside the run is itself
+      slash-attached, so ``see /x and/or y`` reads the ``and/`` as a continuation and
+      becomes ``see or y`` -- the one continuation reading, pinned exactly by test.
+    """
+    lead = _TAIL_LEAD.match(text, start)
+    if lead is None:
+        return None
+    pos = lead.end()
+    while True:
+        if text.startswith("/", pos) or text.startswith("~/", pos):
+            return None
+        token = _TOKEN_AT.match(text, pos)
+        if token is None:
+            return None
+        if text.startswith("/", token.end()):
+            chain = _CHAIN.match(text, pos)
+            assert chain is not None  # the token just matched is the chain's first component
+            return chain.end(), _base_of(chain.group(0))
+        ws = _INLINE_WS.match(text, token.end())
+        if ws is None:
+            return None
+        pos = ws.end()
+
+
+def _span_end(text: str, match: re.Match[str]) -> tuple[int, str]:
+    """A confident match as the span to reduce: its base name, carried runs extending it.
+
+    Each carried run replaces the base with its chain's final component, so the whole span
+    -- match start through the LAST crossed component -- drops to that final base name
+    alone: "drop the fragment to its safe form", no directory component of an ambiguous
+    run can ride, at the cost of crossing the plain words on the way to it.
+    """
+    end, base = match.end(), _base_of(match.group(0))
+    while True:
+        step = _carried(text, end)
+        if step is None:
+            return end, base
+        end, base = step
+
+
+def _reduce(text: str) -> str:
+    """Reduce every rooted-path occurrence, each to the base name of its widest span."""
+    out: list[str] = []
+    pos = 0
+    for match in _PATH_SPAN.finditer(text):
+        if match.start() < pos:
+            continue  # a carried run already took this position
+        end, base = _span_end(text, match)
+        out.append(text[pos : match.start()])
+        out.append(base)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _egress(text: str, literals: Iterable[tuple[str, str]] = ()) -> str:
     """The decision payload's egress boundary: every string a vendor receives passes here.
 
     One call per composition point (the two state builders and the option builder below),
     because the decision is a paid third-party call that would otherwise carry the
     operator's final answer and directory layout off the machine on every eligible turn
-    (memo §4's egress statement; round-1 security S-R8). Two passes, in this order:
+    (memo §4's egress statement; round-1 security S-R8). Three passes, in this order:
 
-    * Absolute paths are reduced to their BASE NAME -- the home prefix and every directory
-      component go. A space inside a component is carried only where the crossing guard
-      permits: ``Acme Corp/q3.pdf`` reduces whole, while ``see /x and /y`` is never crossed
-      (the guard's exact boundary is on ``_PATH_SEGMENT``). The relative directory is the
-      field that would carry a client's or a project's name to the vendor (S-R8), and the
-      memo's minimisation permits neither relative directories nor absolute paths. The base
-      name stays because the decision needs it to judge "is this the deliverable?". A base
-      name is never altered beyond that: the shape pass below masks a credential spelling it
-      recognises, and leaves a spelling its negative corpus pins (a dotted artifact tail
-      like ``pypi-foo.json``) to itself.
+    * THE LITERAL PASS (primary; round-4 R4-1/R4-2/R4-3). Every full path spelling the
+      turn's OWN evidence holds (:func:`_egress_literals` over each candidate's
+      ``absolute`` and display ``path``) is replaced by its base name -- exact string
+      replacement, longest needle first -- so the payload can never carry a directory the
+      turn itself just wrote, whatever characters (spaces, tabs, NBSP) sit inside the
+      path. The absolute form is a SEARCH KEY here and nothing else; only the base name it
+      maps to can appear in a payload. Spellings the evidence does not hold fall to the
+      shape pass below.
+    * THE SHAPE PASS (secondary, conservative). Any ``~/``- or ``/``-rooted absolute path
+      still present reduces through :func:`_reduce`: a confident match (:data:`_PATH_SPAN`,
+      which stops at whitespace) drops to its base name, and a whitespace run that reaches
+      a slash-attached chain is crossed so the WHOLE span drops to that chain's final base
+      name -- over-redaction preferred to a tail leak. ``Acme Corp Ltd/q3.pdf`` and
+      ``Client Work/reports`` reduce whole; tab- and NBSP-separated runs cross the same
+      way; ``see /x and /y`` never crosses. The crossing's exact boundary, the scan's
+      stopping rules and the one recorded ``and/or`` continuation reading are on
+      :func:`_carried`.
     * The minimised text then passes the project's one credential-shape table
       (:func:`local_operator.redaction_shapes.scrub_shapes`), the same pass classification
       §6 requires for outbound state: a credential the table recognises is masked wherever
@@ -191,17 +282,46 @@ def _egress(text: str) -> str:
     not credentials, and the shape corpus pins ``user@example.com`` as a must-survive
     negative (an e-mail sitting in a credential POSITION, a password value, is masked as
     that credential); and the harness-authored instruction and criteria constants.
+
+    One RECORDED may-leak remains, stated as its must-survive/may-leak pair: a run that
+    never reaches a slash-attached continuation -- a spaced component (``.../Acme Corp
+    and more``), or one a punctuation mark stops early (``.../Acme, Corp/q3.pdf``) -- is
+    indistinguishable from prose without eating arbitrary words (every ``and``/``then``/
+    ``more`` is a plain token), so the confident match reduces to its own base name and
+    the run's remaining tokens ride -- may-leak: the component tail (``Corp``);
+    must-survive: the prose after it (``and more``). The pair is pinned by test rather
+    than left as an inference.
     """
-    return scrub_shapes(_PATH_SPAN.sub(_path_base, text))
+    for needle, replacement in sorted(literals, key=lambda pair: -len(pair[0])):
+        if needle and needle != replacement:
+            text = text.replace(needle, replacement)
+    return scrub_shapes(_reduce(text))
 
 
-def option_text(candidate: Candidate) -> str:
+def _egress_literals(candidates: Sequence[Candidate]) -> tuple[tuple[str, str], ...]:
+    """The turn's own path spellings for :func:`_egress`: full path -> base name.
+
+    Both spellings a :class:`Candidate` holds -- the resolved ``absolute`` and the display
+    ``path`` -- because the answer may carry either; a spelling that IS the base name is
+    dropped as a no-op. These are SEARCH KEYS: never journaled, never sent anywhere, and
+    only the base names they map to can appear in a payload.
+    """
+    pairs: dict[str, str] = {}
+    for candidate in candidates:
+        for spelling in (candidate.absolute, candidate.path):
+            if spelling and spelling != candidate.name:
+                pairs.setdefault(spelling, candidate.name)
+    return tuple(pairs.items())
+
+
+def option_text(candidate: Candidate, *, literals: Iterable[tuple[str, str]] = ()) -> str:
     """One option's description: ``name (kind, 4.1 KB) written by write: intent``. No directory.
 
     The name and the intent line are the option's two model/user-controlled halves, so the
-    composed text passes the egress scrub: a recognised credential spelling or a path in
-    the intent is masked or reduced, while a benign base name arrives byte-identical (the
-    decision needs it to judge the option).
+    composed text passes the egress scrub -- the turn's own path spellings first, then the
+    shape pass: a recognised credential spelling or a path in the intent is masked or
+    reduced, while a benign base name arrives byte-identical (the decision needs it to
+    judge the option).
     """
     name = sanitize_prompt_line(candidate.name, limit=_OPTION_NAME_CHARS) or "file"
     size = candidate.size_bytes
@@ -212,7 +332,7 @@ def option_text(candidate: Candidate) -> str:
     )
     text = f"{name} ({candidate.kind}, {shown}) {candidate.why}"
     intent = sanitize_prompt_line(candidate.intent, limit=_OPTION_INTENT_CHARS)
-    return _egress(f"{text}: {intent}" if intent else text)
+    return _egress(f"{text}: {intent}" if intent else text, literals)
 
 
 def option_ids(candidates: Sequence[Candidate]) -> dict[str, Candidate]:
@@ -229,12 +349,20 @@ def _state_text(user_text: str, answer_text: str) -> str:
     )
 
 
-def files_state(user_text: str, answer_text: str) -> str:
+def files_state(
+    user_text: str, answer_text: str, *, literals: Iterable[tuple[str, str]] = ()
+) -> str:
     """The files state: the bounded texts, scrubbed for egress as they are composed."""
-    return _egress(_state_text(user_text, answer_text))
+    return _egress(_state_text(user_text, answer_text), literals)
 
 
-def graphics_state(user_text: str, answer_text: str, evidence: Evidence) -> str:
+def graphics_state(
+    user_text: str,
+    answer_text: str,
+    evidence: Evidence,
+    *,
+    literals: Iterable[tuple[str, str]] = (),
+) -> str:
     """The graphics state: request, answer, and the evidence SHAPES -- never rows (memo §2.3).
 
     The dataset titles ride in the shapes and are turn data too, so the whole composed
@@ -243,13 +371,17 @@ def graphics_state(user_text: str, answer_text: str, evidence: Evidence) -> str:
     shapes = "\n".join(f"- {d.title}: {d.shape()}" for d in evidence.datasets) or (
         "- numbers inside the answer text"
     )
-    return _egress(_state_text(user_text, answer_text) + "\n\nDATA SHOWN THIS TURN:\n" + shapes)
+    return _egress(
+        _state_text(user_text, answer_text) + "\n\nDATA SHOWN THIS TURN:\n" + shapes, literals
+    )
 
 
-def files_question(options: dict[str, Candidate]) -> Any:
+def files_question(
+    options: dict[str, Candidate], *, literals: Iterable[tuple[str, str]] = ()
+) -> Any:
     from local_operator.classification.types import Question
 
-    criteria = {key: option_text(item) for key, item in options.items()}
+    criteria = {key: option_text(item, literals=literals) for key, item in options.items()}
     criteria[NONE_OPTION] = FILES_NONE_DESCRIPTION
     return Question(
         id=FILES_QUESTION_ID, kind="choice", instructions=FILES_INSTRUCTIONS, criteria=criteria
@@ -346,17 +478,26 @@ async def decide(
     "yes" nothing can act on is waste, and C1a ships no generator. The structured-signal
     overrule is applied here, so a model "yes" over no evidence is a "no".
     """
+    literals = _egress_literals(candidates)
     options = option_ids(candidates) if want_files else {}
     ask_files = bool(options)
     ask_graphics = want_graphics and evidence.structured
     vendor = "none"
     files_task = (
-        _ask(service, files_state(user_text, answer_text), files_question(options))
+        _ask(
+            service,
+            files_state(user_text, answer_text, literals=literals),
+            files_question(options, literals=literals),
+        )
         if ask_files and service is not None
         else None
     )
     graphics_task = (
-        _ask(service, graphics_state(user_text, answer_text, evidence), graphics_question())
+        _ask(
+            service,
+            graphics_state(user_text, answer_text, evidence, literals=literals),
+            graphics_question(),
+        )
         if ask_graphics and service is not None
         else None
     )

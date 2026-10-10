@@ -78,7 +78,7 @@ def test_the_committed_files_only_fixture_is_exactly_what_the_builders_produce()
     assert built["version"] == 1 and built["state"] == "done"
     assert [f["path"] for f in built["files"]] == [f["path"] for f in expected["files"]]
     assert built["components"] == expected["components"] == []
-    assert built["decision"] == expected["decision"]
+    assert "decision" in built and built["decision"] == expected["decision"]
     assert built["at"] == expected["at"]
 
 
@@ -103,8 +103,8 @@ def test_the_more_disclosure_is_capped_and_counts_qualified_files_only() -> None
         state="done",
         decision=_decision("keep.md", more=MORE_MAX + 5),
     )
-    assert built["files_more"] == MORE_MAX + 5
-    assert len(built["more"]) == MORE_MAX
+    assert "files_more" in built and built["files_more"] == MORE_MAX + 5
+    assert "more" in built and len(built["more"]) == MORE_MAX
     # An empty remainder writes neither key: a row stays lean and old readers keep working.
     lean = persistence.build_details(
         anchor="a" * 32, job="b" * 12, version=1, state="done", decision=_decision("only.md")
@@ -117,7 +117,8 @@ def test_a_new_version_carries_the_files_and_clears_the_state() -> None:
         anchor="a" * 32, job="b" * 12, version=1, state="done", decision=_decision("r.md")
     )
     nxt = persistence.next_version(first, state="failed", error="boom")
-    assert nxt["version"] == 2 and nxt["state"] == "failed" and nxt["error"] == "boom"
+    assert nxt["version"] == 2 and nxt["state"] == "failed"
+    assert "error" in nxt and nxt["error"] == "boom"
     assert nxt["files"] == first["files"], "a later version restates what it still shows"
     assert nxt["job"] == first["job"] and nxt["anchor"] == first["anchor"]
     assert nxt["at"] >= first["at"]
@@ -129,7 +130,8 @@ def test_a_superseded_row_renders_nothing() -> None:
             anchor="a" * 32, job="b" * 12, version=1, state="queued", decision=_decision("r.md")
         )
     )
-    assert row["state"] == "cancelled" and row["error"] == SUPERSEDED_ERROR
+    assert row["state"] == "cancelled"
+    assert "error" in row and row["error"] == SUPERSEDED_ERROR
     assert reader_disposition(row, job_live=True) == "nothing"
     assert reader_disposition(row, job_live=False) == "nothing"
 
@@ -143,7 +145,7 @@ def test_an_error_is_bounded_and_a_clean_row_has_no_error_key() -> None:
         decision=_decision(),
         error="x" * 10_000,
     )
-    assert len(long["error"]) == persistence._ERROR_MAX_CHARS
+    assert "error" in long and len(long["error"]) == persistence._ERROR_MAX_CHARS
     clean = persistence.build_details(
         anchor="a" * 32, job="b" * 12, version=1, state="done", decision=_decision()
     )
