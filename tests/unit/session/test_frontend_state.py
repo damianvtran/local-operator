@@ -2514,3 +2514,43 @@ def test_the_closing_merge_never_overrules_a_shrinking_context_reading():
     # With no reading of its own, the durable figure is the only one there is.
     quiet = FrontendSessionState(session_id="conv", epoch="cli-epoch")
     assert closing_state_overrides(quiet, durable)["context_tokens"] == 48_000
+
+
+def test_the_closing_merge_keeps_the_user_set_latch_and_a_set_goal():
+    """QA round 2, Q6/Q7: two fields the blank-field rule had missed.
+
+    Q6: ``conversation_title_user_set`` is the latch that stops a later GENERATED
+    title from overwriting the name the user gave the conversation, so a closing row
+    that clears it re-opens the conversation to being renamed. The title TEXT may
+    legitimately be this runtime's; the latch may not go backwards.
+
+    Q7: ``goal`` is a conversation-level field like the title and the todo list, so
+    a runtime with no goal of its own must not blank the one on the row it read.
+    """
+    durable = FrontendSessionState(
+        session_id="conv",
+        epoch="tui-epoch",
+        conversation_title="Real title",
+        conversation_title_user_set=True,
+        goal="ship it",
+    )
+    live = FrontendSessionState(
+        session_id="conv",
+        epoch="cli-epoch",
+        conversation_title="Real title (auto)",
+        conversation_title_user_set=False,
+        goal="",
+    )
+
+    overrides = closing_state_overrides(live, durable)
+
+    assert overrides["conversation_title_user_set"] is True, "the user-set latch was cleared"
+    assert overrides["goal"] == "ship it", "a runtime with no goal of its own blanked the row's"
+    assert (
+        "conversation_title" not in overrides
+    ), "the title text is this runtime's when it has one; only the latch is taken"
+    # A runtime with its OWN goal keeps it: the rule is about blanks, not about the
+    # durable row winning.
+    assert "goal" not in closing_state_overrides(
+        FrontendSessionState(session_id="conv", epoch="e3", goal="mine"), durable
+    )

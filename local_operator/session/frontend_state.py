@@ -880,6 +880,22 @@ def closing_state_overrides(live: Any, durable: Any) -> dict[str, Any]:
         )
     if not getattr(live, "todos", None) and getattr(durable, "todos", None):
         overrides["todos"] = durable.todos
+    # THE USER-SET LATCH IS MONOTONIC (QA round 2, Q6). ``user_set`` is the flag
+    # that stops a later GENERATED title from overwriting the name the user gave
+    # the conversation, so a closing row must never clear it. It is deliberately
+    # separate from the empty-title branch above: the title TEXT may legitimately
+    # be this runtime's (it may have renamed the conversation, or auto-titled it),
+    # while the latch only ever goes one way.
+    if getattr(durable, "conversation_title_user_set", False) and not getattr(
+        live, "conversation_title_user_set", False
+    ):
+        overrides["conversation_title_user_set"] = True
+    # ``goal`` follows the same rule as the title and the todo list: a runtime whose
+    # own goal is empty has none to report, and the goal belongs to the
+    # CONVERSATION (QA round 2, Q7 — the same "a blank field never overwrites a set
+    # one" rule, applied to the field the fix had missed).
+    if not getattr(live, "goal", "") and getattr(durable, "goal", ""):
+        overrides["goal"] = durable.goal
     # ``context_tokens`` has its own rule (see the docstring): taken from the
     # durable row only when this runtime has NO reading of its own, because a
     # compaction legitimately lowers it and the larger-of-two rule would hold the
