@@ -8351,6 +8351,14 @@ class Session:
         while the turn lock is held, and without the carriage the replayed
         continuation would mint an UNSTAMPED user row that the marker-only
         surfaces paint. Defaults ``False`` so no existing caller changes.
+
+        A steer admitted while NO turn is live opens a turn for itself (see
+        ``_ensure_steering_wake``): the row is queued exactly as before — the
+        queue stays the drain's single consumer — but a run is spawned that
+        takes it before its first request. Without that arm the row sat queued
+        until an unrelated wake happened to open a turn: a mid-composer steer
+        against an idle session (running subagents, a parked job) was never
+        processed — the operator's report.
         """
         extra: dict[str, Any] = {}
         if message_id:
@@ -8375,6 +8383,7 @@ class Session:
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
         self.refresh_frontend_state()
+        self._ensure_steering_wake()
 
     def queued_steering(self) -> list[AgentMessage]:
         """A FIFO snapshot of the steering queue, without draining it.
@@ -8411,9 +8420,85 @@ class Session:
         transcript blocks it painted for it) can later ask for THAT message
         back via :meth:`recall_steering`. ``steer`` builds the Message here,
         so no reference the host could match on ever leaves this method.
+
+        The idle arm is :meth:`steer`'s, for the same reason: this method is
+        the composer's other spelling.
         """
         self._steering_queue.put_nowait(message)
         self.refresh_frontend_state()
+        self._ensure_steering_wake()
+
+    def _ensure_steering_wake(self) -> None:
+        """Open a turn for queued steering when no live turn will drain it.
+
+        THE HOLE THIS CLOSES (operator report, 2026-10-09; probe-measured on
+        this base): every other delivery path re-checks ``_is_streaming`` and
+        has an idle arm that opens a turn (``receive_peer_message``, wakes,
+        monitors), but the composer STEER path had none — it only queued. A
+        steer admitted while the session was idle (running subagents, a parked
+        job, nothing streaming) therefore sat on the steering queue until an
+        unrelated wake happened to open a turn and its boundary drain took it:
+        the operator's steer "didn't respond until a subagent completed".
+
+        TWO RACES DECIDE WHETHER TO SPAWN, and both must leave the item to a
+        live consumer rather than open a rival one:
+
+        * ``_is_streaming`` True means a live turn will take the queue at its
+          next boundary (the established busy fold); the turn-end flush covers
+          the tail where that boundary never comes (see
+          ``_flush_parked_deliveries``). Spawning here too would be a second
+          consumer racing the first.
+        * The spawned run's ``guard`` re-checks the queue under ``_turn_lock``,
+          so a wake that loses the race to a turn which drained the row first
+          retires silently: no turn, no events, no provider call. The same
+          silent retirement covers the narrower window INSIDE the wake: its
+          opening drain (``drain_steering_on_open``) can also find the queue
+          already emptied (an in-flight drain that suspended mid-append took
+          the row), and a run with nothing to deliver returns before its first
+          event instead of spending a paid empty call (see ``harness/loop.py``'s
+          opening-drain comment).
+
+        The leaving arms are skipped exactly as the flush skips them: a turn
+        opened under ``_leaving_deliveries``/``_one_shot_exit`` could only ever
+        be aborted by the disposal that follows, so no wake opens and the row
+        stays where it is. THE SKIP IS NOT PRESERVATION — a plain typed steer
+        left queue-resident is destroyed when the session ends: ``dispose()``
+        consumes the steering queue and rejects what it finds without
+        persisting (the destruction ``_drop_pre_aborted_turn`` documents), so
+        it reaches neither the transcript nor a later turn. That is the known
+        price of the skip (agent review round 1, NIT-2), not a claim the row
+        is safe.
+
+        WHY A SPAWNED RUN AND NOT A DIRECT HAND-OFF: ``_drain_steering`` is
+        the queue's ONLY consumer — it persists what it takes, emits the
+        ``SteeringDeliveredEvent``/``MessageStartEvent`` pair, and the loop
+        folds its return into the request — and a second consumer (draining
+        here, or handing the taken messages into ``_prompt_messages`` as
+        ``initial``) would double-inject against whichever boundary drain also
+        saw them. So the wake keeps the queue intact and lets the spawned
+        run's OPENING drain (``drain_steering_on_open``) be the only taker,
+        before its first provider request — retiring before its first event
+        when that taker finds nothing.
+        """
+        if self._leaving_deliveries or self._one_shot_exit:
+            return
+        if self._is_streaming:
+            return
+        task = self._spawn_background(
+            self._prompt_messages(
+                [],
+                guard=lambda: not self._steering_queue.empty(),
+                guard_note="the queue was already drained",
+                drain_steering_on_open=True,
+            )
+        )
+        if task is None:
+            # Disposed before the spawn (``_spawn_background`` closes the
+            # coroutine and answers None): nothing was taken from the queue,
+            # and the disposed session's own drain destroys what is left (see
+            # the leaving-arm note above). Kept so a future await introduced
+            # above this spawn cannot silently drop the wake.
+            return
 
     async def fork_snapshot(
         self, message: str = "", *, through_entry_id: str | None = None
@@ -13242,6 +13327,8 @@ class Session:
         *,
         carried_prompt: bool = False,
         guard: Callable[[], bool] | None = None,
+        guard_note: str = "",
+        drain_steering_on_open: bool = False,
     ) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
         handling so it can REJECT reentrants instead of queueing).
@@ -13254,14 +13341,30 @@ class Session:
         whichever consumer took it (agent review round 1, MINOR-1; see
         ``_flush_parked_deliveries``).
 
-        ``guard`` is the patience delivery's under-lock re-check: it runs once
-        the turn lock is held, and a False return retires the delivery
-        silently — no turn, no events. It exists because the watermark that
-        dispatched the fire can change while the delivery waits for the lock
-        (a reply claiming it first); repeating the check under the lock is
-        what makes the reply's effect visible even when its own cancel landed
-        after the fire was already in flight. See ``wakes/patience`` for the
-        race table. Other callers pass nothing and are unchanged.
+        ``drain_steering_on_open`` marks a run opened BECAUSE the steering
+        queue holds a message with no live turn to take it: the loop drains
+        the queue once before this run's first request, so that call carries
+        the steer instead of an empty warm-up whose only output was the
+        model's reaction to history it had already answered — and a run whose
+        opening drain finds the queue already emptied (the in-flight drain
+        took the row first) retires before its first event and spends no call
+        at all (see ``harness/loop.py``'s opening-drain comment). Set only by
+        :meth:`_ensure_steering_wake`; every other caller keeps the
+        historical shape (a steer can never appear in a turn's first request).
+
+        ``guard`` is the under-lock re-check for deliveries whose dispatch
+        condition can change while they wait for the lock; a False return
+        retires the delivery silently — no turn, no events. Its first caller
+        is the patience delivery: the watermark that dispatched the fire can
+        change while it waits (a reply claiming it first), and repeating the
+        check under the lock is what makes the reply's effect visible even
+        when its own cancel landed after the fire was already in flight (see
+        ``wakes/patience`` for the race table). :meth:`_ensure_steering_wake`
+        is the other: its guard retires the wake when the queue is empty.
+        ``guard_note`` is the caller's short account of what its guard found,
+        appended to the retirement log so the line stops naming one caller's
+        cause for every caller (agent review round 1, NIT-1); empty leaves
+        the line bare. Other callers pass nothing and are unchanged.
         """
         if self._disposed:
             raise RuntimeError("session is disposed")
@@ -13287,7 +13390,10 @@ class Session:
                 await self._hold_deliveries_at_admission(initial)
                 return
             if guard is not None and not guard():
-                logger.info("patience: delivery retired under the turn lock (a reply landed)")
+                logger.info(
+                    "delivery retired under the turn lock%s",
+                    f" ({guard_note})" if guard_note else "",
+                )
                 return
             # A newly ARRIVING unit of work is a fresh intent, exactly like a
             # typed prompt, so it clears the sticky abort the same way
@@ -13364,7 +13470,11 @@ class Session:
             # instead of publishing the ``error|disposed`` its own rationale
             # promises (repro: peer_carried_prompt.py; the cell is
             # ``test_a_peer_prompt_cut_with_zero_round_trips_still_errors``).
-            await self._run_turn_pipeline(initial, carried_prompt=carried_prompt)
+            await self._run_turn_pipeline(
+                initial,
+                carried_prompt=carried_prompt,
+                drain_steering_on_open=drain_steering_on_open,
+            )
 
     async def _run_turn_pipeline(
         self,
@@ -13375,6 +13485,7 @@ class Session:
         producer_command_id: str | None = None,
         may_drop: bool = True,
         carried_prompt: bool = False,
+        drain_steering_on_open: bool = False,
     ) -> None:
         """One turn + its auto-continuations. Caller holds ``_turn_lock``.
 
@@ -13385,6 +13496,15 @@ class Session:
         catch-up). It is a parameter rather than a session flag because two
         arrivals can race for ``_turn_lock``, and the run that WINS must carry
         its own provenance rather than the last writer's.
+
+        ``drain_steering_on_open`` marks a run opened because the steering
+        queue holds a message with no live turn to take it (see
+        :meth:`_ensure_steering_wake`): the loop drains the queue once before
+        the run's first request, so the steer is IN that request rather than
+        riding an empty warm-up's continuation. A parameter for the same
+        reason as ``carried_prompt``: the run that wins the lock must be the
+        one flagged, and a continuation never inherits it (its own runs keep
+        the standard boundary drains).
 
         A post-compaction continuation is a CONTINUATION of the same logical
         run, not a new one: compaction happens after the loop has already
@@ -13511,6 +13631,7 @@ class Session:
                 admitted_id=admitted_id,
                 producer_command_id=producer_command_id,
                 may_drop=may_drop,
+                drain_steering_on_open=drain_steering_on_open,
             )
             await self._drain_continuation()
         except ImportError as exc:
@@ -13619,11 +13740,17 @@ class Session:
         admitted_id: str | None = None,
         producer_command_id: str | None = None,
         may_drop: bool = True,
+        drain_steering_on_open: bool = False,
     ) -> None:
         """One loop run + persistence. Caller holds ``_turn_lock``.
 
         ``may_drop`` is False for a SYNCHRONOUS typed prompt; see the drop gate
         below for why a caller that is waiting must not be dropped silently.
+
+        ``drain_steering_on_open`` rides into the run's :class:`LoopConfig`: see
+        :meth:`_ensure_steering_wake` for the one caller that sets it. The
+        continuation runs ``_drain_continuation`` opens call this method
+        directly and inherit the default — a continuation is not an opening.
         """
         if self._abort_requested and may_drop:
             # BORN PRE-ABORTED: do not open a turn at all. Running one spends a
@@ -13804,6 +13931,15 @@ class Session:
             # next model call. Do not re-describe this as "visible in the same
             # turn's first request": that was never true.
             #
+            # ONE EXCEPTION, added with the idle-steer wake: a run opened to
+            # drain the steering queue takes that drain before its first request
+            # (``drain_steering_on_open``, set only by
+            # ``_ensure_steering_wake``). A row steered into such a wake — the
+            # spooled owner row delivered mid-turn above is exactly one — DOES
+            # ride the run's first request, one boundary EARLIER than every
+            # sentence above assumes. Same row, same order in the transcript;
+            # only the request that carries it moved up.
+            #
             # And nothing is consumed before the turn can deliver it — the
             # once-per-lifetime flag is set inside the drain, so a turn dropped
             # as pre-aborted, or a turn that fails before its own rows are
@@ -13899,6 +14035,12 @@ class Session:
                 stream_fn=marking_stream_fn,
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
+                # The idle-steer wake's opening drain: this run exists because
+                # the queue holds a message no live turn was going to take, so
+                # its FIRST request carries that message instead of spending a
+                # paid no-op call (see ``_ensure_steering_wake`` and the loop's
+                # opening-drain comment).
+                drain_steering_on_open=drain_steering_on_open,
                 graceful_cancel_requested=lambda: self._graceful_cancel_requested,
                 has_urgent_steering_messages=self._has_urgent_steering,
                 # Rides the SAME interrupt poll steering uses, so a fork
@@ -14206,6 +14348,20 @@ class Session:
         recall-the-held-steer affordance live in ``_drain_steering``, which
         stays its one consumer.
 
+        KEEPING ITS PLACE IS NOT ENOUGH WHEN THE TURN THAT PARKED IT IS THE
+        ONE NOW ENDING (the tail-parked plain steer; probe-measured on this
+        base: after turn end, calls=1, qsize=1, and the row sat until the next
+        unrelated turn). Every other busy-parked message leaves this method
+        with a live reader -- the CMs get their spawned run, which also drains
+        plain items at its own first boundary -- but a plain steer parked in a
+        turn's tail had NO reader, precisely because the turn was past its last
+        boundary when the steer arrived. So when the re-queue above leaves a
+        plain item on the queue, the flush opens it a consumer of its own
+        (``_ensure_steering_wake``: the same guard shape the idle steer
+        admission uses). The two consumers cannot double-take: whichever run
+        reaches ``_drain_steering`` first removes the item, and the wake's
+        under-lock guard finds the queue empty and retires silently.
+
         The leaving arms are skipped on purpose: a turn opened under
         ``_leaving_deliveries`` or a one-shot exit could only ever be aborted
         by the disposal that follows (see ``_deliver_job_results``' leaving
@@ -14235,6 +14391,11 @@ class Session:
         if not parked:
             for item in drained:
                 self._steering_queue.put_nowait(item)
+            if drained:
+                # A plain steer was parked past the last boundary and nothing
+                # else will read it: open its consumer now (see the tail-parked
+                # paragraph above).
+                self._ensure_steering_wake()
             return
         # PARITY WITH THE PEER ARMS (agent review round 1, MINOR-1): both
         # ``receive_peer_message`` arms spawn with ``carried_prompt=True``,
@@ -14274,6 +14435,14 @@ class Session:
         # next refresh. Parity with ``_drain_steering`` and
         # ``_drop_queued_wake_deliveries`` (agent review round 1, NIT-1).
         self.refresh_frontend_state()
+        if any(not isinstance(item, CustomMessage) for item in drained):
+            # Parked plain steers were just re-queued beside the CM batch.
+            # The spawned CM run drains them at its first boundary, but its
+            # success is not something to lean on (a provider failure past
+            # the spawn, a pre-aborted drop): open the steer's own consumer
+            # too, and let the one that gets there first win -- the other
+            # finds the queue empty and retires (see the docstring).
+            self._ensure_steering_wake()
 
     async def _drop_pre_aborted_turn(
         self,
@@ -22816,7 +22985,11 @@ class Session:
             self._peer_arrival.mark(WAKE_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(
-            self._prompt_messages([wake_message], guard=self._patience_guard(due.schedule, pol))
+            self._prompt_messages(
+                [wake_message],
+                guard=self._patience_guard(due.schedule, pol),
+                guard_note="a reply landed",
+            )
         )
 
     def _patience_guard(self, row: WakeSchedule, pol: Any) -> Callable[[], bool]:

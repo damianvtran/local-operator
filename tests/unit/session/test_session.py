@@ -216,20 +216,23 @@ async def test_prompt_marks_only_explicit_producer_commands(tmp_path):
 @pytest.mark.asyncio
 async def test_steer_marks_only_explicit_producer_commands(tmp_path):
     session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    # ONE ROW PER DRAIN, deliberately (agent review round 1, MINOR-1): a
+    # single-row take completes before the drain's first append suspension, so
+    # the wake each admission spawns (see ``_ensure_steering_wake``) finds the
+    # queue empty at its under-lock guard and retires. A multi-row drain lets
+    # that wake's opening drain race the drain under test on a slow runner.
     session.steer("local", message_id="collision")
+    drained = await session._drain_steering()
+    assert [message.text for message in drained if isinstance(message, Message)] == ["local"]
+    assert not session.has_admitted_command("collision")
+
     session.steer(
         "mobile",
         message_id="mobile-message",
         producer_command_id="producer-steer",
     )
-
     drained = await session._drain_steering()
-
-    assert [message.text for message in drained if isinstance(message, Message)] == [
-        "local",
-        "mobile",
-    ]
-    assert not session.has_admitted_command("collision")
+    assert [message.text for message in drained if isinstance(message, Message)] == ["mobile"]
     assert session.has_admitted_command("producer-steer")
     assert Transcript(tmp_path / "sess").has_admitted_command("producer-steer")
     await session.dispose()

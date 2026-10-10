@@ -1272,6 +1272,13 @@ class AgentLoop:
         ``agent_start`` first and exactly one terminal ``agent_end`` whose
         ``messages`` are every message produced by this run. ``generation``
         stamps both boundary events so UIs can drop superseded ends.
+
+        ONE EXCEPTION TO THE PAIR: a run opened to drain the steering queue
+        (``drain_steering_on_open``) that finds nothing left to take retires
+        before its first event -- no ``agent_start``/``agent_end``, no
+        provider request (see ``_run``'s opening-drain comment; the session
+        already documents this silent settle for a dropped turn in
+        ``_drop_pre_aborted_turn``).
         """
         return self._run(initial_messages, context, config, signal, generation)
 
@@ -1302,10 +1309,42 @@ class AgentLoop:
         signal: AbortSignal | None,
         generation: int = 0,
     ) -> AsyncIterator[AgentEvent]:
+        # THE OPENING DRAIN (``drain_steering_on_open``): a run opened BECAUSE
+        # the steering queue holds a message with no live turn to take it
+        # (``Session.steer``'s idle wake) takes the queue ONCE, before its
+        # start event and before any request. Two properties ride this
+        # position, both load-bearing:
+        #
+        # * EMPTY MEANS RETIRE. The queue can empty between the host's
+        #   under-lock guard and this take -- an in-flight drain that
+        #   suspended mid-append takes a later row first, a recall removes one
+        #   -- and a run that finds nothing has nothing to ask the model. It
+        #   returns before ``AgentStartEvent``, so no front end paints a turn
+        #   for zero work and no provider call is spent (the same silent
+        #   settle ``Session._drop_pre_aborted_turn`` documents; the run
+        #   publishes no attention outcome either, since an end event is what
+        #   ``_publish_attention_outcome`` reads).
+        # * THE MESSAGES RIDE THE FIRST REQUEST. ``pending`` is populated
+        #   before the inner loop, so the first iteration folds them via
+        #   ``_drain_pending`` and issues ONE request carrying them. The
+        #   historical wake shape drained at the top of the first inner
+        #   iteration, where ``first_inner`` skipped it: the first call headed
+        #   out empty and the steer rode a continuation (measured: two calls,
+        #   the first carrying nothing new).
+        #
+        # Opt-in and run-scoped -- set only by that wake -- so every ordinary
+        # run keeps the historical shape where a steer can never appear in its
+        # first request (a spooled row parks behind the turn lock and lands at
+        # the boundary; see the session's ``_drain_spooled_peer_inbox`` note).
+        pending: list[AgentMessage] = []
+        if config.drain_steering_on_open:
+            if config.get_steering_messages is not None:
+                pending.extend(await config.get_steering_messages())
+            if not pending and not initial_messages:
+                return
         signal, deadline_task = self._wire_deadline(config, signal)
         new_messages: list[AgentMessage] = []
         context.messages.extend(initial_messages)
-        pending: list[AgentMessage] = []
         has_more_tool_calls = True  # forces the first model call
         reentries: dict[str, int] = {}  # per-producer outer-loop re-entries
         # A reasoning model can spend its ENTIRE output budget thinking and be
