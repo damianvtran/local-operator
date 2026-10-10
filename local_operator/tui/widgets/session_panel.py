@@ -57,9 +57,9 @@ from local_operator.analytics.model import (
 from local_operator.session.channel_spend import (
     BASIS_BILLED,
     BASIS_ESTIMATED,
-    BASIS_NOT_RECORDED,
     BASIS_NOT_TRACKED,
     BASIS_SUBSCRIPTION,
+    NOT_TRACKED_MICRO,
 )
 from local_operator.session.protocol import SessionProtocol
 from local_operator.session.spend import SessionSpend
@@ -1278,7 +1278,7 @@ def _draw_spend_basis(body: _Body, published: Any) -> None:
         (BASIS_BILLED, "billed"),
         (BASIS_SUBSCRIPTION, "plan-covered (API price)"),
         (BASIS_ESTIMATED, "estimated"),
-        (BASIS_NOT_RECORDED, "basis not recorded"),
+        (NOT_TRACKED_MICRO, "basis not recorded"),
     ):
         value = _as_micro(basis.get(key))
         if not value:

@@ -55,10 +55,13 @@ tolerant). Absent/`null` = "this build does not publish it"; a UI then renders
 its legacy inference-only view. Gate new UI on `features.cost_channels >= 1`.
 
 Changed in the round-1 remediation, both additive to the v1 shape:
-- `by_basis.basis_not_recorded` is the money whose BASIS is unknown (the
-  session's own inference plus the children bundle); the three money
-  buckets plus this one equal `total_micro`. `not_tracked_calls` counts
-  rows whose amount could not be stated at all.
+- `by_basis.not_tracked_micro` is the micro-USD amount whose billing BASIS
+  is not tracked yet (the session's own inference pre-PR-3 plus the
+  children bundle); the three money buckets plus this one equal
+  `total_micro`. `not_tracked_calls` counts rows whose amount could not be
+  stated at all. Both keys are ADDITIVE on v1: an older producer omits
+  them and a reader treats absence as 0 (a UI must never re-sum inference
+  rows to find this amount).
 - A row's `units` may be `null` when no unit count was recorded (a legacy
   row recovered without one) — render nothing rather than `0`.
 - `tracked: false` implies `knowledge` is at most `partial`: an untracked
@@ -75,7 +78,7 @@ Changed in the round-1 remediation, both additive to the v1 shape:
     "billed": 53000,
     "subscription_api_equivalent": 53000,
     "estimated": 10000,
-    "basis_not_recorded": 900000,
+    "not_tracked_micro": 900000,
     "not_tracked_calls": 1
   },
   "rows": [

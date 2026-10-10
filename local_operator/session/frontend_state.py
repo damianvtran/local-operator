@@ -1166,13 +1166,16 @@ class FrontendSpendChannels(BaseModel):
     total_micro: int = 0
     knowledge: CostKnowledge = CostKnowledge.UNKNOWN
     #: Money per billing basis: ``billed``/``subscription_api_equivalent``/
-    #: ``estimated`` are micro-USD SUMS, ``basis_not_recorded`` is the money
-    #: whose basis is unknown (this session's own inference plus the children
-    #: bundle), and ``not_tracked_calls`` is a COUNT of rows whose amount could
-    #: not be stated at all. The three money buckets plus
-    #: ``basis_not_recorded`` equal ``total_micro`` — the buckets reconcile
+    #: ``estimated`` are micro-USD SUMS, ``not_tracked_micro`` is the money
+    #: whose basis is not tracked yet (this session's own inference plus the
+    #: children bundle), and ``not_tracked_calls`` is a COUNT of rows whose
+    #: amount could not be stated at all. The three money buckets plus
+    #: ``not_tracked_micro`` equal ``total_micro`` — the buckets reconcile
     #: rather than describing a subset (design round 1, D1). Subscription
     #: dollars stay in their own bucket — never added into ``billed``.
+    #: ``not_tracked_micro`` is ADDITIVE on the v1 wire: an old producer omits
+    #: it and a reader treats absence as 0 (UI round-2 request: the backend
+    #: publishes the amount so no UI ever re-sums inference rows for it).
     by_basis: dict[str, int] = Field(default_factory=dict)
     rows: list[FrontendSpendChannelRow] = Field(default_factory=list)
     children: FrontendSpendChildren = Field(default_factory=FrontendSpendChildren)

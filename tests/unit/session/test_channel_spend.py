@@ -531,9 +531,10 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
         "billed",
         "subscription_api_equivalent",
         "estimated",
-        # Money whose BASIS is not recorded (this session's inference plus the
-        # children bundle): the bucket that makes the parts sum to the whole.
-        "basis_not_recorded",
+        # Money whose BASIS is not tracked yet (this session's inference plus
+        # the children bundle): the bucket that makes the parts sum to the
+        # whole. Additive on v1 — an old producer omits it (UI round-2 ask).
+        "not_tracked_micro",
         "not_tracked_calls",
     }
 
