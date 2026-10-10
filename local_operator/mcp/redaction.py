@@ -125,10 +125,13 @@ class StderrRedactor:
 
     The rule here: **release every complete line, hold back only the trailing
     run of bytes with no newline after it, then widen the cut backwards** so a
-    value that spans the release boundary is never split across two releases.
-    The cost of the weaker holdback is stated rather than hidden: a credential
-    that itself contains a newline cannot be scrubbed by a line-oriented sink,
-    which was already true of the per-line ``feed`` this replaces.
+    value that spans the release boundary is never split across two releases,
+    **and never end a release inside a JSON escape** (see
+    :func:`_hold_incomplete_escape` — an escape's own ``\\`` must stay with the
+    letters it pairs with, or the boundary rule cannot see it). The cost of the
+    weaker holdback is stated rather than hidden: a credential that itself
+    contains a newline cannot be scrubbed by a line-oriented sink, which was
+    already true of the per-line ``feed`` this replaces.
     """
 
     def __init__(self, values: list[str]) -> None:
@@ -155,6 +158,8 @@ class StderrRedactor:
             cut = min(cut, len(text))
         while True:
             previous = cut
+            if self._secrets and not final:
+                cut = _hold_incomplete_escape(text, cut)
             for secret in self._secrets:
                 start = text.find(secret, max(cut - len(secret) + 1, 0))
                 if 0 <= start < cut < start + len(secret):
@@ -168,6 +173,55 @@ class StderrRedactor:
         # every other surface had moved), and every spelling the pass generates is
         # masked from this sink too.
         return scrub_values(ready, self._secrets)
+
+
+def _hold_incomplete_escape(text: str, cut: int) -> int:
+    """``cut`` moved back so a release never ends inside a JSON escape.
+
+    **Why (deferred QA Q-3, #2140; follow-up fix).** The value pass judges a
+    word-like value against the letters around it, and a JSON escape is a
+    boundary, not its last letter (``\\n``+word masks — the raw text a child
+    writes is what the transcript and the wire replay). That judgement needs the
+    escape's own ``\\`` beside the letters, and a release boundary can strand it:
+    with the cut between ``\\`` and its letter, the NEXT release begins with the
+    escape's tail (``n``, or up to four hex digits of ``\\uXXXX``) followed by
+    the word, and the boundary rule reads that tail as an ordinary letter run —
+    ``n<word>`` — and leaves the value. The narrowest reach was a real pump on an
+    oversized unterminated line (the buffer flush at ``STDERR_LINE_LIMIT``
+    publishes the two releases as separate lines, so no later whole-line pass can
+    re-join them); reproduced here 1/27 two-way cuts for ``\\n``/``\\t`` and
+    5/31 for ``\\u000a``, all closed by holding the fragment.
+
+    The hold is exact, not a wider safety margin: the released prefix must not
+    END with a nonempty strict prefix of an escape — ``\\``, ``\\u``, ``\\uH``,
+    ``\\uHH`` or ``\\uHHH`` (the longest is 5 of the 6 chars of ``\\uXXXX``) —
+    and when it does, the cut moves to that fragment's own ``\\`` so the next
+    release carries the whole escape beside its letters. Longest first, so the
+    deepest fragment wins and re-running can never oscillate; a cut already at
+    the fragment start returns unchanged. Complete escapes are not held: a
+    released ``\\u000a`` or ``\\n`` before a later word is judged fine where it
+    lies, and holding it would delay a complete line's tail for nothing (the
+    class's line-promptness contract).
+
+    Only a strict prefix of an *escape-shaped* sequence is held. A backslash
+    whose next character is not ``u`` and not yet released is still a possible
+    escape start, which is why a bare trailing ``\\`` holds one character — the
+    character that would decide it has not arrived, and the cost is one byte of
+    delay on the next read. Text that is not an escape at all (``C:\\`` at a
+    chunk edge) releases one byte later with the letters it belongs to; the
+    concatenated stream is byte-identical either way.
+    """
+    for size in (5, 4, 3, 2, 1):
+        start = cut - size
+        if start < 0 or text[start] != "\\":
+            continue
+        if size == 1:
+            return start
+        if text[start + 1] == "u" and all(
+            char in "0123456789abcdefABCDEF" for char in text[start + 2 : cut]
+        ):
+            return start
+    return cut
 
 
 class _Filter(logging.Filter):
