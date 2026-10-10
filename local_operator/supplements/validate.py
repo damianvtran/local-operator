@@ -94,9 +94,12 @@ _BANNED: Final[tuple[str, ...]] = (
     "new Worker",
 )
 
-#: A numeric literal of three or more digits is a reject reason OUTSIDE ``viewBox``/``style``
-#: (memo §4.2): layout constants live in those two attributes, plotted values must come from
-#: ``<data>``, and a hard-coded 3-digit number in a script is how a fabricated series rides in.
+#: A numeric literal of three or more digits is a reject reason outside the STRUCTURAL
+#: attribute values (:data:`_STRUCTURAL_ATTRS` -- ``viewBox``, SVG geometry, sizes, ``style``):
+#: memo §4.2, whose viewBox/style-only exemption round-2 review R2-1 widened to the whole
+#: table (a 640x480 ``viewBox`` or ``points="0,480 …"`` was refused). Plotted values must
+#: come from ``<data>``, and a hard-coded 3-digit number in a script is how a fabricated
+#: series rides in.
 _INLINE_NUMBER_RE: Final = re.compile(r"\d{3,}")
 
 #: ``"… (derived: a/b)"``: the only way a computed column may appear (memo §2.10). The
@@ -115,17 +118,22 @@ _STATIC_NUMBER_RE: Final = re.compile(
     r"(?:\s?(?P<unit>%|[A-Za-zµ][A-Za-zµ/]{0,5}))?(?![\w\-/:])"
 )
 _STATIC_SKIP_RE: Final = re.compile(r"<(script|style|data)\b.*?</\1\s*>", re.DOTALL | re.I)
-_VIEWBOX_RE: Final = re.compile(r"viewBox\s*=\s*\"[^\"]*\"", re.I)
-_STYLE_ATTR_RE: Final = re.compile(r"style\s*=\s*\"[^\"]*\"", re.I)
 
 #: Attribute VALUES that are structural/geometry, never displayed claims (§4.2's own
-#: ``viewBox``/style carve-out, applied to the rendered-values scan; round-1 review R3).
+#: ``viewBox``/style carve-out, applied to BOTH scans since round-2 review R2-1; round-1
+#: review R3 introduced it for the rendered-values check).
 #: A raw DOM/SVG component draws WITH these numbers -- a ``viewBox``, a path's ``d``, a
 #: polyline's ``points``, a ``transform``, coordinates, sizes, stroke geometry -- and the
 #: blessed raw-SVG path (App. A: "no fixed widths, use viewBox SVG") must not be refused
 #: for them. Deliberately NAME-keyed: anything not listed (``aria-label``, ``title``, ...)
 #: stays scanned, because those attributes carry text a user can read. The list is the
 #: markup vocabulary the prelude and the fixtures build charts with.
+#:
+#: THE BOUNDARY THIS BUYS (round-2 review R2-2): blanking geometry means the scan verifies
+#: READABLE numerals -- element text and data-bearing attributes -- not drawn geometry: a
+#: chart's SHAPE may encode a value its text does not state (a bar ``height`` of 42 against
+#: data that says 98.5 is accepted, by construction), and proportion-level deception is the
+#: golden-set QA spot-check's territory (memo §5), not this check's.
 _STRUCTURAL_ATTRS: Final[frozenset[str]] = frozenset(
     {
         "viewbox",
@@ -154,9 +162,12 @@ _STRUCTURAL_ATTRS: Final[frozenset[str]] = frozenset(
         "style",
     }
 )
-#: One quoted attribute pair, either quote style: ``name="…"`` or ``name='…'``.
+#: One quoted attribute pair, either quote style: ``name="…"`` or ``name='…'``. The name
+#: class carries digits because :data:`_STRUCTURAL_ATTRS` does: ``x1``/``y1``/``x2``/``y2``
+#: could never match while it did not (round-2 review R2-1), so their values were still
+#: refused as displayed numbers by both scans.
 _ATTR_PAIR_RE: Final = re.compile(
-    r"(?P<name>[a-zA-Z:-]+)\s*=\s*(?P<quote>[\"'])(?P<value>.*?)(?P=quote)"
+    r"(?P<name>[a-zA-Z0-9:-]+)\s*=\s*(?P<quote>[\"'])(?P<value>.*?)(?P=quote)"
 )
 
 _VOID: Final[frozenset[str]] = frozenset(
@@ -451,7 +462,8 @@ def _blank_structural(match: re.Match[str]) -> str:
 
     The ``re.sub`` callback for :data:`_ATTR_PAIR_RE`: a value whose attribute NAME is in
     :data:`_STRUCTURAL_ATTRS` is layout and is removed from the scanned text; everything
-    else survives to be matched by :data:`_STATIC_NUMBER_RE` (round-1 review R3).
+    else survives to be matched by :data:`_STATIC_NUMBER_RE` and :data:`_INLINE_NUMBER_RE`
+    (round-1 review R3; shared by both scans since round-2 review R2-1).
     """
     if match.group("name").lower() not in _STRUCTURAL_ATTRS:
         return match.group(0)
@@ -470,8 +482,8 @@ def _check_static_numbers(body: str, data: Mapping[str, Any], units: set[str]) -
 
     Structural attribute values are BLANKED before the scan (round-1 review R3): ``viewBox``,
     a path's ``d``, ``points``, ``transform``, coordinates, sizes and stroke geometry are
-    layout the component draws WITH, not claims about data -- the same carve-out §4.2 already
-    gives ``viewBox``/style in the literal scan -- while element TEXT and data-bearing
+    layout the component draws WITH, not claims about data -- §4.2's carve-out, one shared
+    rule for both scans since round-2 review R2-1 -- while element TEXT and data-bearing
     attributes (``aria-label`` and friends) keep being validated, because those are what a
     user can actually read.
     """
@@ -510,18 +522,27 @@ def _check_static_numbers(body: str, data: Mapping[str, Any], units: set[str]) -
 
 
 def _check_scan(blob: str) -> list[str]:
-    """The §4.2 string scan plus the 3-digit literal rule, on the body (data excluded)."""
+    """The §4.2 string scan plus the 3-digit literal rule, on the body (data excluded).
+
+    The literal rule blanks the structural attribute values before searching (round-2
+    review R2-1): a chart drawn at a 640x480 ``viewBox`` or carrying ``points="0,480 …"``
+    draws with those numbers and must not be refused for them -- the same table
+    :func:`_check_static_numbers` uses, so both scans read readable numerals only (R2-2;
+    the boundary it buys is at :data:`_STRUCTURAL_ATTRS`).
+    """
     body = strip_data(blob)
     lowered = body.lower()
     errors: list[str] = [
         f"rejected string {needle!r}" for needle in _BANNED if needle.lower() in lowered
     ]
-    scannable = _STYLE_ATTR_RE.sub(" ", _VIEWBOX_RE.sub(" ", body))
+    # The banned-string pass above reads the RAW body (attributes and all); this scan reads
+    # the blanked text -- §4.2's viewBox/style carve-out widened to the structural table.
+    scannable = _ATTR_PAIR_RE.sub(_blank_structural, body)
     match = _INLINE_NUMBER_RE.search(scannable)
     if match is not None:
         errors.append(
-            f"inline numeric literal {match.group(0)!r} (3+ digits) outside viewBox/style: "
-            "plotted values belong in <data>"
+            f"inline numeric literal {match.group(0)!r} (3+ digits) outside structural "
+            "attribute values (viewBox, geometry, style): plotted values belong in <data>"
         )
     return errors
 
