@@ -36,7 +36,6 @@ import pytest
 
 from local_operator.harness.types import QUIET_TURN_KEY, AgentEndEvent
 from local_operator.session.attention import AttentionStore, conversation_identity
-from local_operator.tools.registry import create_tools
 from tests.e2e.harness import (
     NO_NOTIFY_ENV,
     ScriptedStream,
@@ -93,9 +92,11 @@ async def test_a_peer_message_into_an_idle_session_can_end_quietly(
         [tool_call_turn(text="", tool_name="no_reply", tool_call_id="q1", arguments={})]
     )
     session = build_session(directory, stream)
-    session.refresh_tools(
-        [*session._tools, *create_tools(session._build_tool_context(), enabled=["no_reply"])]
-    )
+    # The inventory is the one a real session builds — mounted by the
+    # constructor's own capability merge, NO hand-splice (round-1 M2: a spliced
+    # inventory proves the tool works but never that a session has it, which is
+    # exactly how B1 shipped). Asserted before the first prompt.
+    assert "no_reply" in {tool.name for tool in session._tools}
     ends: list[Any] = []
     session.subscribe(
         lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
@@ -164,7 +165,6 @@ from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import SessionRecord
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
-from local_operator.tools.registry import create_tools
 
 directory = Path(sys.argv[1])
 
@@ -188,9 +188,10 @@ async def main():
         yolo=True,
     )
     await session.async_init()
-    session.refresh_tools(
-        [*session._tools, *create_tools(session._build_tool_context(), enabled=["no_reply"])]
-    )
+    # Mounted by the constructor's own merge (round-1 M2) — no hand-splice;
+    # this is the inventory a real runtime boots with, and the cell's premise
+    # depends on it holding the tool.
+    assert "no_reply" in {tool.name for tool in session._tools}
     publisher = RecordPublisher(
         SessionRecord(
             pid=os.getpid(),

@@ -254,6 +254,11 @@ MEASURED_TOKENS: dict[str, int] = {
     "lsp": 276,
     "monitor": 357,
     "network": 874,
+    # NEW (quiet-turn S0a, docs/design/quiet-turns.md §4): the ``no_reply``
+    # doc — the argumentless call's description plus the "when NOT to call
+    # it" notes. Re-measured via this test's own print, and it is the ONLY
+    # entry that moved: every other count above is byte-identical.
+    "no_reply": 113,
     "patience": 334,
     "project": 1102,
     "project_delete": 95,

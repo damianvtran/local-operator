@@ -666,6 +666,14 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # end of the provider-visible array stays appended (design
     # sessions-tool.md §3.3).
     "sessions",
+    # The quiet-end tool is gated the same way (`quiet_end` is a field only the
+    # session's own per-turn context binds), so without this line the tool is
+    # created nowhere a real session looks and the feature is unreachable in
+    # production (round-1 blocker B1). A child never receives it: `_job_id` is
+    # set in `__init__` before the merge runs, so the builder refuses there and
+    # the derived prune finds nothing to undo. Appended last for the same
+    # prefix reason as `sessions` above.
+    "no_reply",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -10459,6 +10467,20 @@ class Session:
         if self._is_streaming:
             raise RuntimeError("cannot change the output contract while a turn is running")
         self._output_contract = contract
+        # "ABSENT, not inert" (docs/design/quiet-turns.md §4): this setter runs
+        # AFTER the inventory was built (``exec_startup``, ``sdk``), so the
+        # constructor's capability merge has already mounted ``no_reply`` —
+        # nulling the per-turn door alone would leave an advertised tool whose
+        # every call could only refuse, firing once per attempt. Re-filter the
+        # inventory through ``refresh_tools``, the way ``set_ask_handler(None)``
+        # drops ``ask``; clearing the contract restores the door, so re-run the
+        # merge and let the builder decide (it refuses wherever the door stays
+        # ``None`` for some other reason).
+        if contract is not None:
+            if any(tool.name == "no_reply" for tool in self._tools):
+                self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
+        else:
+            self._merge_capability_tools(("no_reply",))
 
     def materialize_declared_tools(self) -> tuple[str, ...]:
         """Grant the SCHEMAS of this session's declared tools that are lazy.
@@ -12082,6 +12104,18 @@ class Session:
         * ``LOP_NO_REPLY=0`` — the env kill switch, read ONCE at import by
           ``builtin.no_reply_enabled`` and deliberately not a config key
           (docs §10), so restoring the old behaviour needs no config edit.
+
+        ABSENCE IS ENFORCED ON THE INVENTORY TOO, and this half is load-bearing
+        because two of the four conditions are knowable only AFTER construction:
+        ``exec_startup`` installs the contract and ``run_print_mode`` declares
+        the one-shot exit long after the constructor's capability merge has
+        already mounted the tool. Nulling this door would leave a mounted schema
+        whose every call could only refuse — so :meth:`set_output_contract`
+        (when a contract is set) and :meth:`declare_one_shot_exit` drop
+        ``no_reply`` through :meth:`refresh_tools`, the way
+        ``set_ask_handler(None)`` drops ``ask``. The child case needs no such
+        drop: ``_job_id`` is set before the merge runs, so the builder refuses
+        there and the tool never enters the inventory at all.
         """
         if self._job_id is not None:
             return None
@@ -12122,7 +12156,7 @@ class Session:
         if "user" in self._run_triggers or self._has_awaiting_user():
             return "A person asked this turn; answer them in one line."
         if self._run_notify_requested:
-            return "This wake or monitor asked to tell the user; say what they " "need to know."
+            return "This wake or monitor asked to tell the user; say what they need to know."
         return None
 
     async def _publish_attention_outcome(self) -> None:
@@ -16311,6 +16345,14 @@ class Session:
         its turns are the run's own work, not teardown leftovers.
         """
         self._one_shot_exit = True
+        # The inventory follows the door (docs/design/quiet-turns.md §4,
+        # "absent, not inert"): this declaration lands after the constructor's
+        # capability merge, so ``no_reply`` may already be mounted, and the door
+        # this method just closed is a one-way latch — the mounted tool could
+        # only refuse from here on. Drop it the way
+        # ``set_ask_handler(None)`` drops ``ask``.
+        if any(tool.name == "no_reply" for tool in self._tools):
+            self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
 
     def retire_job_deliveries_to_transcript(self) -> None:
         """From now on, a settled job's result is durable and opens NO turn.

@@ -527,9 +527,23 @@ async def test_the_quiet_end_tool_is_absent_under_an_output_contract(tmp_path) -
     session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
     try:
         assert callable(session._quiet_end_callable()), "binds before the contract"
+        assert "no_reply" in {tool.name for tool in session._tools}, "mounted before"
         session.set_output_contract(OutputContract(format="json"))
         assert session._quiet_end_callable() is None
         assert session._build_tool_context().quiet_end is None
         assert create_tools(session._build_tool_context(), enabled=["no_reply"]) == []
+        # The setter runs AFTER construction (exec_startup/sdk), when the
+        # constructor's merge has already mounted the tool — so it must drop it
+        # from the LIVE inventory, not only null the per-turn door: an
+        # advertised tool whose every call could only refuse is exactly the
+        # "inert" shape the design forbids.
+        assert "no_reply" not in {
+            tool.name for tool in session._tools
+        }, "a contract must drop the mounted tool"
+        # And clearing restores it, because the door reopens: absent and
+        # present must follow the capability in both directions.
+        session.set_output_contract(None)
+        assert callable(session._quiet_end_callable())
+        assert "no_reply" in {tool.name for tool in session._tools}, "clearing restores it"
     finally:
         await session.dispose()

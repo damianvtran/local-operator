@@ -53,7 +53,6 @@ from local_operator.providers.failover import ProviderError
 from local_operator.session.attention import AttentionStore
 from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
-from local_operator.tools.registry import create_tools
 from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
 
 
@@ -441,14 +440,13 @@ def test_a_pre_field_row_reads_as_notifying_and_a_write_migrates(tmp_path: Path)
 def _quiet_session(tmp_path, stream, **kwargs) -> Any:
     """A session whose inventory holds the REAL ``no_reply`` tool.
 
-    Built through ``create_tools`` against the session's own per-turn context,
-    so the tool a scripted stream calls is the tool a live session would hold
-    (the door bound, the ``i`` intent injected) — never a hand-rolled double.
+    Mounted by the constructor's own capability merge — NO manual
+    ``refresh_tools``: the hand-splice this helper used to carry is what let
+    round 1's blocker (the tool absent from every real session) ship, because
+    a spliced inventory proves the tool works, never that a session has it.
     """
     session = make_session(tmp_path, stream, **kwargs)
-    tools = create_tools(session._build_tool_context(), enabled=["no_reply"])
-    assert tools, "the door must bind on a plain session"
-    session.refresh_tools([*session._tools, *tools])
+    assert any(tool.name == "no_reply" for tool in session._tools)
     return session
 
 

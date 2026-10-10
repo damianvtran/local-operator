@@ -1409,11 +1409,15 @@ def tool_schema_chars(tools: list[AgentTool]) -> int:
 
 #: Tools a SUBAGENT never holds, whatever its role: ``ask``/``ask_withdraw``
 #: need a front end's ask hook (a child's route to the operator is ``hub``),
-#: and ``wake``/``monitor``/``patience`` are pruned or gated off because a
+#: ``wake``/``monitor``/``patience`` are pruned or gated off because a
 #: child ends after one prompt (``harness/subagent.py``, the prune after
-#: construction). The child arm measures the unrestricted child — the widest
-#: surface a subagent can carry — so it is the full surface minus these.
-CHILD_NEVER_HOLDS = frozenset({"ask", "ask_withdraw", "wake", "monitor", "patience"})
+#: construction), and ``no_reply``'s door is ``None`` for every child — a
+#: parent's ``wait`` reads the child's final text AS the report
+#: (docs/design/quiet-turns.md §4) — so the constructor's capability merge
+#: never mounts it and there is nothing for the prune to undo. The child arm
+#: measures the unrestricted child — the widest surface a subagent can carry
+#: — so it is the full surface minus these.
+CHILD_NEVER_HOLDS = frozenset({"ask", "ask_withdraw", "wake", "monitor", "patience", "no_reply"})
 
 
 def measure_start_context(
