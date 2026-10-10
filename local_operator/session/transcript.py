@@ -1607,10 +1607,6 @@ def read_replay_suffix(
         # looked at rather than the walker's internal position.
         for chunk_start, lines in _iter_complete_lines_backward(handle, end_of_file):
             bytes_read = end_of_file - chunk_start
-            # The walker's last pair is ``chunk_start == 0``: reaching it means
-            # the file's leading fragment was consumed, which is the only way
-            # this read can claim the whole journal.
-            reached_bof = chunk_start == 0
             for raw in lines:
                 if not raw.strip():
                     continue
@@ -1650,7 +1646,14 @@ def read_replay_suffix(
                         # NEWEST row: its meeting index is what orders it against
                         # another type's newest row.
                         checkpoint_order[custom_type] = met
+            # The walker's last pair is ``chunk_start == 0``: reaching it means
+            # the file's leading fragment was consumed, which is the only way this
+            # read can claim the whole journal. ``reached_bof`` is read from the
+            # SAME expression the stop below turns on, so the two cannot drift —
+            # an inner-loop stop added later would otherwise leave the flag
+            # describing a chunk whose tail was skipped.
             at_start = chunk_start == 0
+            reached_bof = at_start
             boundary_seen = compaction is not None and (
                 first_kept_id is None or first_kept_id in seen_ids
             )

@@ -195,8 +195,14 @@ class DurableFoldState:
     #:   window, and a page served with the wrong map shows tool output the live
     #:   fold had blanked.
     #:
-    #: Set by :meth:`DurableFoldCache.load`'s caller, which is the only place that
-    #: knows it; every reader of this field degrades to the honest answer.
+    #: Set by :meth:`DurableFoldCache._rebuild`, from the fact the READ reports:
+    #: :attr:`ReplaySuffix.reached_bof`, true only when the backward walk consumed
+    #: the chunk holding the journal's first row. It used to be the caller's to
+    #: declare — when the only reader read the whole file, the answer was always
+    #: True and a caller could honestly say so. A bounded window is where the
+    #: question first has a real answer, so it is derived where the read happens
+    #: instead of being asked for (review round 9's fix, round 10's MINOR-10-1).
+    #: Every reader of this field degrades to the honest answer.
     scan_from_bof: bool = True
     prunes: dict[str, str] = field(default_factory=dict)
     #: Transcript entries consumed so far. Not read by the fold itself — it is
