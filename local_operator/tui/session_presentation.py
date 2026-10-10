@@ -199,8 +199,8 @@ class HistoryPageNotice(NoticeBlock, can_focus=True):
             super().__init__()
             self.notice = notice
 
-    def __init__(self) -> None:
-        super().__init__("More recent messages below", "note")
+    def __init__(self, *, fold_width: int = 0) -> None:
+        super().__init__("More recent messages below", "note", fold_width=fold_width)
         self.add_class("interactive-notice")
 
     def action_more(self) -> None:
@@ -678,7 +678,19 @@ class PreparedReplay(ReplayState):
         bound: int = 12,
         anchor_id: str = "",
         live_call_ids: set[str] | None = None,
+        fold_width: int = 0,
     ) -> None:
+        """Project ``history`` into ``self.blocks`` for an offscreen view.
+
+        ``fold_width`` is the width the view will have once it is revealed. It
+        is the caller's to name because this view has no laid-out width while
+        it is built: blocks authored without one fold at the 80-column fallback,
+        pin that fold as their height, and re-author when the view is laid out
+        AFTER the reveal — the switch then paints the 80-column heights first
+        and the real ones a frame later (S1, a sidebar switch at 160x45: block
+        heights 2/3/5 → 1/2/3 across three painted states). ``0`` keeps that
+        fallback for a caller with no destination to ask.
+        """
         # Snapshot the session's in-flight calls NOW, before the fold: the
         # answer can change mid-projection, and a half-guarded tail is the
         # duplicate this field exists to prevent.
@@ -702,17 +714,22 @@ class PreparedReplay(ReplayState):
             else None
         )
         end = min(len(history), anchor + bound) if anchor is not None else None
-        project_settled_rows(self, history, bound=bound, end=end)
+        project_settled_rows(self, history, bound=bound, end=end, fold_width=fold_width)
         if self._resume_pending_head:
             from local_operator.tui.app import RESUME_OLDER_NOTICE
 
-            # No width: a prepared replay is authored offscreen for a parked
-            # view (see `project_settled_rows`' `fold_width` note), and this
-            # notice is folded when that view is laid out.
-            self._resume_head_notice = OlderHistoryNotice(RESUME_OLDER_NOTICE)
+            self._resume_head_notice = OlderHistoryNotice(
+                RESUME_OLDER_NOTICE, fold_width=fold_width
+            )
             self.blocks.insert(0, self._resume_head_notice)
         if self._resume_pending_tail:
-            self._resume_tail_notice = HistoryPageNotice()
+            # The tail notice takes the width for the same reason the head one
+            # does, even though neither wraps at the widths in play today
+            # (``RESUME_OLDER_NOTICE`` is 42 chars, this one 30 — one row at 80
+            # and at 142, measured): the pair is built here, and a block that
+            # folds at a width its caller did not name is the class of bug this
+            # whole ``fold_width`` argument exists to close.
+            self._resume_tail_notice = HistoryPageNotice(fold_width=fold_width)
             self.blocks.append(self._resume_tail_notice)
         self._block_sink = None
         # One projection's liveness answer must not leak into the next pass:
@@ -957,8 +974,10 @@ def project_settled_rows(
 
     ``fold_width`` is the width every block this pass BUILDS will be given.
     Zero means "not supplied", and it is only right where there is no
-    destination to name: a prepared replay authors offscreen for a parked view
-    and is laid out inside it before that view is revealed.
+    destination to name. A prepared replay (:meth:`PreparedReplay.prepare`) was
+    once that case on the theory that its parked view is laid out before it is
+    revealed; a FIRST saved view is revealed without that layout (see
+    ``_prepare_sidebar_session``), so it now names its destination too.
 
     Every other caller has a destination and must name it, because a block
     built without one folds at the 80-column fallback, pins that fold as its
