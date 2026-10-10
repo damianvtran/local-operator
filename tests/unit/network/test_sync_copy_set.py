@@ -414,8 +414,9 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/session/delegated_retention.py": (
         2,
         "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
-        "sweep lock): both sit beside the store at the sessions root, never inside a session "
-        "directory. (``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
+        "sweep lock): the former sits at the sessions root, the latter at the config root; "
+        "neither inside a session directory. (``ROSTER_NAME`` is a session entry, already "
+        "classified by the copy set.)",
     ),
     "local_operator/session_factory.py": (
         2,
