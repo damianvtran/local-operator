@@ -192,6 +192,17 @@ def readonly_verdict(
         command = args.get("command")
         if not isinstance(command, str) or not command.strip():
             return 'monitor can\'t watch "bash": a bash monitor needs a "command".'
+        if args.get("background") is True:
+            # The check IS the runner: a backgrounded call returns a job id
+            # instead of output, so the watch would arm, capture that notice
+            # as its baseline, and never have anything to diff. Refuse it
+            # where the model can still act on the sentence instead of
+            # striking it out over five ticks.
+            return (
+                'monitor can\'t watch "bash" background=true: the check is the runner — '
+                "a backgrounded call returns a job id, not output to watch. "
+                "Drop background (a monitor cannot watch a detached call)."
+            )
         return _bash_verdict(command)
 
     tier = (

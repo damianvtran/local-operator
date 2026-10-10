@@ -1548,6 +1548,14 @@ class ToolContext(BaseModel):
     # advertised at all (createIf) rather than advertised and always
     # failing.
     jobs: JobManagerProtocol | None = None
+    #: True on a call the harness runs as a MONITOR CHECK (one tick of an
+    #: armed watch): unattended — no turn, no user waiting, nothing that
+    #: could carry a rehomed call forward. A cancellation of such a call is
+    #: teardown or the scheduler's own deadline, never a steering redirect,
+    #: so a tool that would otherwise convert the cancel into a background
+    #: job must stop the call instead. Read by bash's cancel handler; set
+    #: by ``Session._run_monitor_check``.
+    monitor_check: bool = False
     # Set by the session on each inbound ``lop send`` delivery so a blocking
     # ``wait`` can return early and let the model read its mailbox. Declared
     # rather than probed for, per this class's contract above. ``None`` means
