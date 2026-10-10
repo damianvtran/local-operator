@@ -68,8 +68,10 @@ reconfigure agents or use the unrestricted local harness.
 **Loopback is not a boundary between local accounts.** On a shared host, any
 local account that can reach `127.0.0.1:<port>` can call this API; the static
 file route serves unclamped on loopback-accepted connections, so -- subject to
-file permissions -- that account can read any file this user's account can
-read. It can also observe path existence and image dimensions across the disk
+file permissions -- that account can read any file the daemon user can read
+whose type the routes serve: images, video, audio and HTML documents (other
+file types are refused by the per-route allowlists). It can also observe path
+existence and image dimensions across the disk
 through `<img>` loads; that class stays bounded only because the document CSP
 keeps a preview page off the network, and widening that CSP is a security
 change (pinned by a core-side test; RFC §3.7 item 10). The supported posture is
