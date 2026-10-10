@@ -5698,8 +5698,13 @@ def _word_pattern(form: str) -> Pattern[str]:
     prose protection, and one ``origin/main`` did not have (its substring match
     masked there). So ``\\`` + letter and ``\\uXXXX`` count as separators; a letter
     run that is NOT an escape still suppresses the match, so ``un<word>ally`` stays
-    readable. Both extra lookbehinds are fixed-width, so the pattern costs no more
-    per position than the one it replaced.
+    readable. The extra alternatives are fixed-width, which bounds the KIND of the
+    cost and not its magnitude: the three-branch scan measures ~3x the
+    one-lookbehind pattern it replaced (agent review round 2, R6 — best of seven:
+    22.6 vs 7.6 ms per 1 MB here, 37.3 vs 12.4 ms on the review host; the ratio is
+    the claim, the absolute figure tracks the host). It is the same class of cost
+    the ``guard`` field comment records for a fixed-width assertion at every
+    character position.
     """
     letters = _ASCII_LETTER_CLASS
     return re.compile(
@@ -5739,13 +5744,15 @@ def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
     **One term is NOT cheap, and it is the feature's own case: a PRESENT word form.**
     A letters-only value's form is matched with the boundary regex
     (:func:`_word_pattern`), which scans the whole text, so the numbers above hold
-    while no registered word form occurs in it. With one present: ~13 ms per present
-    word form per 1 MB, linear in the text, against ~0.9 ms for the substring pass it
-    replaced (agent review round 1, R2 — best of five, M3 Max/CPython 3.12: 13.06 ms
-    vs 0.88 ms at 1 MB, 131 ms vs 9.7 ms at 10 MB; absent forms add nothing, 0.46 ms
-    vs 0.44 ms base). A typical tool result is a few hundred KB and presents a form
-    once at most, so the added cost is ≤ ~7 ms there; the term to watch is linear,
-    not quadratic.
+    while no registered word form occurs in it. One present form costs ~3x the
+    round-1 single-lookbehind pattern after the escape alternatives were added:
+    ~37 ms per present word form per 1 MB on the review host, ~23 ms here, linear in
+    the text, against ~0.4-0.9 ms for the substring pass it replaced (agent review
+    rounds 1-2, R2/R6 — best of five/seven; the RATIO is the claim, the absolute
+    figure tracks the host). Absent forms add nothing: the ``str.find`` gate skips
+    the scan entirely (measured 0.23 vs 0.00 ms per 1 MB here). A typical tool
+    result is a few hundred KB and presents a form once at most, so the added cost
+    is ≲ 15 ms there; the term to watch is linear, not quadratic.
     """
     result = text
     # The `str` filter is in the GENERATOR, not a guard inside the loop: `key=len`
