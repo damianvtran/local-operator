@@ -6,14 +6,19 @@ This module contains the FastAPI route handlers for serving static files.
 
 import logging
 import mimetypes
-import os
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 
+from local_operator.config import read_config_values
 from local_operator.helpers import convert_heic_to_png_file
+from local_operator.server.utils.static_roots import (
+    StaticPathDenied,
+    build_roots,
+    resolve_servable,
+)
 
 router = APIRouter(tags=["Static"])
 logger = logging.getLogger("local_operator.server.routes.static")
@@ -71,6 +76,42 @@ ALLOWED_HTML_TYPES: List[str] = [
 ]
 
 
+def _servable_path(request: Request, path: str) -> Path:
+    """Resolve ``path`` to a file this server is allowed to serve, or raise HTTP.
+
+    The one place the four handlers decide WHICH file; the extension/mime check
+    stays in each handler because the allowlist differs per route. The policy and
+    its reasoning live in :mod:`local_operator.server.utils.static_roots`. The
+    roots are built per request (the live-session arm is memoised there) so a
+    session started a moment ago, or a ``static.roots`` edit, takes effect
+    without a restart.
+
+    ``HTTPException`` rather than the policy's own error so this module keeps the
+    FastAPI surface and the policy module stays importable without it.
+    """
+    state = request.app.state
+    config_manager = state.config_manager
+    agent_cwds = [
+        agent.current_working_directory
+        for agent in state.agent_registry.list_agents()
+        if agent.current_working_directory
+    ]
+    # The file as it is on disk NOW, not ``config_manager.get_config()``: the
+    # server's manager holds the snapshot it loaded at startup, so a
+    # ``static.roots`` written by the settings page or ``lop config edit`` (another
+    # process) would not reach it until a restart -- and the settings row is
+    # labelled LIVE. ``read_config_values`` is a stat-memoised read and ``None``
+    # (a torn mid-write read) falls back to the manager's copy.
+    values = read_config_values(config_manager.config_dir)
+    if values is None:
+        values = config_manager.get_config().values
+    roots = build_roots(config_manager.config_dir, values, agent_cwds)
+    try:
+        return resolve_servable(path, roots)
+    except StaticPathDenied as denied:
+        raise HTTPException(status_code=denied.status, detail=denied.detail)
+
+
 @router.get(
     "/v1/static/images",
     summary="Serve image file",
@@ -81,6 +122,7 @@ ALLOWED_HTML_TYPES: List[str] = [
     response_class=FileResponse,
 )
 async def get_image(
+    request: Request,
     path: str = Query(..., description="Path to the image file on disk"),
 ) -> FileResponse:
     """
@@ -96,20 +138,8 @@ async def get_image(
         HTTPException: If the file doesn't exist, is not accessible, or is not an image file
     """
     try:
-        # Validate the path exists
-        file_path = Path(path)
-
-        expanded_path = file_path.expanduser().resolve()
-
-        if not expanded_path.exists():
-            raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-        if not expanded_path.is_file():
-            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-
-        # Check if the file is readable
-        if not os.access(expanded_path, os.R_OK):
-            raise HTTPException(status_code=403, detail=f"File not accessible: {path}")
+        # Root-confined, symlink-resolved, regular-file-only; see _servable_path.
+        expanded_path = _servable_path(request, path)
 
         # Determine the file's MIME type
         mime_type, _ = mimetypes.guess_type(expanded_path)
@@ -155,6 +185,7 @@ async def get_image(
     response_class=FileResponse,
 )
 async def get_video(
+    request: Request,
     path: str = Query(..., description="Path to the video file on disk"),
 ) -> FileResponse:
     """
@@ -170,20 +201,8 @@ async def get_video(
         HTTPException: If the file doesn't exist, is not accessible, or is not a video file
     """
     try:
-        # Validate the path exists
-        file_path = Path(path)
-
-        expanded_path = file_path.expanduser().resolve()
-
-        if not expanded_path.exists():
-            raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-        if not expanded_path.is_file():
-            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-
-        # Check if the file is readable
-        if not os.access(expanded_path, os.R_OK):
-            raise HTTPException(status_code=403, detail=f"File not accessible: {path}")
+        # Root-confined, symlink-resolved, regular-file-only; see _servable_path.
+        expanded_path = _servable_path(request, path)
 
         # Determine the file's MIME type
         mime_type, _ = mimetypes.guess_type(expanded_path)
@@ -211,6 +230,7 @@ async def get_video(
     response_class=FileResponse,
 )
 async def get_audio(
+    request: Request,
     path: str = Query(..., description="Path to the audio file on disk"),
 ) -> FileResponse:
     """
@@ -226,20 +246,8 @@ async def get_audio(
         HTTPException: If the file doesn't exist, is not accessible, or is not an audio file
     """
     try:
-        # Validate the path exists
-        file_path = Path(path)
-
-        expanded_path = file_path.expanduser().resolve()
-
-        if not expanded_path.exists():
-            raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-        if not expanded_path.is_file():
-            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-
-        # Check if the file is readable
-        if not os.access(expanded_path, os.R_OK):
-            raise HTTPException(status_code=403, detail=f"File not accessible: {path}")
+        # Root-confined, symlink-resolved, regular-file-only; see _servable_path.
+        expanded_path = _servable_path(request, path)
 
         # Determine the file's MIME type
         mime_type, _ = mimetypes.guess_type(expanded_path)
@@ -267,6 +275,7 @@ async def get_audio(
     response_class=Response,
 )
 async def get_html(
+    request: Request,
     path: str = Query(..., description="Path to the HTML file on disk"),
 ) -> Response:
     """
@@ -282,17 +291,7 @@ async def get_html(
         HTTPException: If the file doesn't exist, is not accessible, or is not an HTML file
     """
     try:
-        file_path = Path(path)
-        expanded_path = file_path.expanduser().resolve()
-
-        if not expanded_path.exists():
-            raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-        if not expanded_path.is_file():
-            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-
-        if not os.access(expanded_path, os.R_OK):
-            raise HTTPException(status_code=403, detail=f"File not accessible: {path}")
+        expanded_path = _servable_path(request, path)
 
         mime_type, _ = mimetypes.guess_type(expanded_path)
         if not mime_type or mime_type not in ALLOWED_HTML_TYPES:

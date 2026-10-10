@@ -8,20 +8,34 @@ they correctly serve image files and handle error cases appropriately.
 import pytest
 
 
+@pytest.fixture
+def served_dir(temp_dir):
+    """A directory INSIDE a root the static routes serve from.
+
+    ``test_app_client`` makes ``temp_dir`` the config dir, and ``<config>/uploads``
+    is one of the always-served roots. These tests are about type handling, not the
+    root policy (``test_static_roots.py`` covers that), so their files live here
+    rather than in a bare ``tmp_path``, which is outside every root and is now a 403.
+    """
+    directory = temp_dir / "uploads"
+    directory.mkdir()
+    return directory
+
+
 @pytest.mark.asyncio
-async def test_get_image_file_not_found(test_app_client):
-    """Test the get_image endpoint with a non-existent file path."""
-    response = await test_app_client.get("/v1/static/images?path=/nonexistent/path/image.jpg")
+async def test_get_image_file_not_found(test_app_client, served_dir):
+    """Test the get_image endpoint with a non-existent file path inside a served root."""
+    response = await test_app_client.get(f"/v1/static/images?path={served_dir}/missing.jpg")
     assert response.status_code == 404
     data = response.json()
     assert "File not found" in data["detail"]
 
 
 @pytest.mark.asyncio
-async def test_get_image_not_a_file(test_app_client, tmp_path):
+async def test_get_image_not_a_file(test_app_client, served_dir):
     """Test the get_image endpoint with a directory path."""
     # Create a temporary directory
-    dir_path = tmp_path / "test_dir"
+    dir_path = served_dir / "test_dir"
     dir_path.mkdir()
 
     response = await test_app_client.get(f"/v1/static/images?path={dir_path}")
@@ -31,10 +45,10 @@ async def test_get_image_not_a_file(test_app_client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_image_not_an_image(test_app_client, tmp_path):
+async def test_get_image_not_an_image(test_app_client, served_dir):
     """Test the get_image endpoint with a non-image file."""
     # Create a temporary text file
-    text_file = tmp_path / "test.txt"
+    text_file = served_dir / "test.txt"
     text_file.write_text("This is a test file")
 
     response = await test_app_client.get(f"/v1/static/images?path={text_file}")
@@ -44,10 +58,10 @@ async def test_get_image_not_an_image(test_app_client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_image_success(test_app_client, tmp_path):
+async def test_get_image_success(test_app_client, served_dir):
     """Test the get_image endpoint with a valid image file."""
     # Create a temporary image file (just a small PNG)
-    image_file = tmp_path / "test.png"
+    image_file = served_dir / "test.png"
 
     # Create a minimal valid PNG file
     # PNG header (8 bytes) + IHDR chunk (25 bytes) + IEND chunk (12 bytes)
@@ -68,19 +82,19 @@ async def test_get_image_success(test_app_client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_html_file_not_found(test_app_client):
-    """Test the get_html endpoint with a non-existent file path."""
-    response = await test_app_client.get("/v1/static/html?path=/nonexistent/path/index.html")
+async def test_get_html_file_not_found(test_app_client, served_dir):
+    """Test the get_html endpoint with a non-existent file path inside a served root."""
+    response = await test_app_client.get(f"/v1/static/html?path={served_dir}/index.html")
     assert response.status_code == 404
     data = response.json()
     assert "File not found" in data["detail"]
 
 
 @pytest.mark.asyncio
-async def test_get_html_not_a_file(test_app_client, tmp_path):
+async def test_get_html_not_a_file(test_app_client, served_dir):
     """Test the get_html endpoint with a directory path."""
     # Create a temporary directory
-    dir_path = tmp_path / "test_dir"
+    dir_path = served_dir / "test_dir"
     dir_path.mkdir()
 
     response = await test_app_client.get(f"/v1/static/html?path={dir_path}")
@@ -90,10 +104,10 @@ async def test_get_html_not_a_file(test_app_client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_html_not_an_html_file(test_app_client, tmp_path):
+async def test_get_html_not_an_html_file(test_app_client, served_dir):
     """Test the get_html endpoint with a non-HTML file."""
     # Create a temporary text file
-    text_file = tmp_path / "test.txt"
+    text_file = served_dir / "test.txt"
     text_file.write_text("This is a test file")
 
     response = await test_app_client.get(f"/v1/static/html?path={text_file}")
@@ -103,10 +117,10 @@ async def test_get_html_not_an_html_file(test_app_client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_html_success(test_app_client, tmp_path):
+async def test_get_html_success(test_app_client, served_dir):
     """Test the get_html endpoint with a valid HTML file."""
     # Create a temporary HTML file
-    html_file = tmp_path / "test.html"
+    html_file = served_dir / "test.html"
     html_content = """<!DOCTYPE html>
 <html>
 <head>
@@ -127,10 +141,10 @@ async def test_get_html_success(test_app_client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_html_xhtml_success(test_app_client, tmp_path):
+async def test_get_html_xhtml_success(test_app_client, served_dir):
     """Test the get_html endpoint with a valid XHTML file."""
     # Create a temporary XHTML file
-    xhtml_file = tmp_path / "test.xhtml"
+    xhtml_file = served_dir / "test.xhtml"
     xhtml_content = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
     "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">

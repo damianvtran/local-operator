@@ -676,6 +676,17 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Where a notification click sends you when the desktop app is not running.",
     ),
+    # The static file routes' served roots (``server/utils/static_roots.py``).
+    # LIVE: the roots are rebuilt from the config on every request, so an edit
+    # lands on the next thumbnail or preview with no restart.
+    Section(
+        "static",
+        "File previews",
+        Scope.LIVE,
+        "Extra directories the local server may serve image, audio, video and HTML "
+        "previews from. The agent home, session folders, uploads and the working "
+        "directories of your agents and running sessions are always included.",
+    ),
     # NEW_LAUNCH, honestly: the audit keys are read when the audit WRITER is built,
     # and the writer is built once per relay process (``AuditLog.from_config``);
     # ``max_handshakes`` is read when ``NetworkSettings.from_config`` builds the
@@ -1302,6 +1313,26 @@ def _validate_delegated_max_age_hours(value: Any) -> None:
         return
     if not 2 <= value <= 720:
         raise ValueError(f"max_age_hours must be between 2 and 720 (30 days); got {value}")
+
+
+def _validate_static_roots(value: Any) -> None:
+    """``static.roots`` entries are absolute directories, never the filesystem root.
+
+    Enforced at the write facade so a typo cannot silently widen the file-serving
+    boundary: a relative entry would be resolved against the DAEMON's cwd (the
+    reader drops it, so it would be a root that quietly does nothing), and ``/``
+    would turn the allowlist back into "anywhere on disk".
+    """
+    if not isinstance(value, list):
+        return
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        expanded = os.path.expanduser(item.strip())
+        if not os.path.isabs(expanded):
+            raise ValueError(f"{item!r} is not an absolute path (use /abs/path or ~/path)")
+        if os.path.normpath(expanded) == os.path.abspath(os.sep):
+            raise ValueError("the filesystem root cannot be a served root")
 
 
 def _validate_aida_name(value: Any) -> None:
@@ -3979,6 +4010,25 @@ SETTINGS: tuple[Setting, ...] = (
         # every click into a terminal with nothing on screen or in the log
         # saying why. Rejecting it here keeps the user in front of the field.
         validate_value=_validate_desktop_launch_command,
+    ),
+    Setting(
+        key="static.roots",
+        path=("static", "roots"),
+        section="static",
+        label="Extra preview roots",
+        kind=Kind.LIST,
+        default=[],
+        empty_unsets=True,
+        validate_value=_validate_static_roots,
+        # The consequence is the point of the row: every entry WIDENS what an
+        # unauthenticated local caller can trigger a read of.
+        warning="widens what the local server will serve to any local caller",
+        help=(
+            "Empty = only the built-in roots. Comma-separated absolute directories; "
+            "image/audio/video/HTML files inside them can be previewed. Dot-directories "
+            "below a root are never served."
+        ),
+        placeholder="~/Documents, /Volumes/data/reports",
     ),
     # -- network: where peers reach this device -------------------------------
     # THE TRIO THE DESIGN'S OWN TABLE NAMES. mesh-transport-identity.md §10.4 lists

@@ -355,6 +355,10 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.aida import proactive as aida_proactive
     from local_operator.aida.bootstrap import DEFAULT_ENABLED
 
+    # The static routes' served-root list, asked of the module that reads it.
+    from local_operator.server.utils.static_roots import DEFAULT_CONFIGURED_ROOTS
+
+    consumers["static.roots"] = DEFAULT_CONFIGURED_ROOTS
     consumers["aida.enabled"] = DEFAULT_ENABLED
     consumers["aida.name"] = aida_naming.DEFAULT_NAME
     consumers["aida.cadence.at"] = aida_proactive.DEFAULT_CADENCE_AT
