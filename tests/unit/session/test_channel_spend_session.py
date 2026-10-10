@@ -297,12 +297,25 @@ def test_fresh_session_is_tracked_from_creation(tmp_path: Path) -> None:
     asyncio.run(main())
 
 
-def test_fresh_session_writes_its_marker_at_the_adopt_seam(tmp_path: Path) -> None:
-    """A fresh session's ``start`` marker lands at adopt, once, with no records."""
+def test_fresh_session_writes_its_marker_with_the_first_message(tmp_path: Path) -> None:
+    """M-1: the marker rides the first REAL append, never adopt or construction.
+
+    The adopt-seam version materialised a ``defer_materialise`` transcript — an
+    immediate quit left ``transcript.jsonl`` behind, reddening tui-e2e
+    ``test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit`` —
+    so the marker is lazy now: a fresh, never-appended session stays empty on
+    disk, and one whose first durable non-bookkeeping append is a message gets
+    its marker in the same breath (a resumed chat-only session must still read
+    "tracked", which is the state review round 1's M2 asked for).
+    """
 
     async def main() -> None:
         session = make_session(tmp_path)
         session.rebuild_channels_if_needed()
+        await _settle(session)
+        assert session.channels_started is False, "adopt must not write the marker"
+        assert session._transcript.channel_spend_tracked() is False
+        await session._persist_new_messages([Message.user("hi")])
         await _settle(session)
         assert session.channels_started is True
         assert session._transcript.channel_spend_tracked() is True
@@ -316,6 +329,106 @@ def test_fresh_session_writes_its_marker_at_the_adopt_seam(tmp_path: Path) -> No
             and entry.payload["details"].get("kind") == "start"
         ]
         assert len(markers) == 1, "the marker is one-time"
+
+    asyncio.run(main())
+
+
+def test_identity_and_bookkeeping_rows_do_not_make_a_session_legacy(tmp_path: Path) -> None:
+    """M-5: Aida's bootstrapped first session is FRESH, not legacy forever.
+
+    ``aida/bootstrap._create_session_dir`` writes ``conversation_name`` and
+    ``aida_session`` rows before the ``Session`` exists, and a resumed session
+    of ANY kind carries spend records and checkpoints. The first classification
+    rule (\"no entries at all\") read every one of those as pre-feature
+    history; records ABOUT the session are not work in it.
+    """
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+
+    async def seed() -> None:
+        await transcript.append_custom("conversation_name", {"name": "A new chat"})
+        await transcript.append_custom("aida_session", {"v": 1})
+
+    asyncio.run(seed())
+
+    async def main() -> None:
+        session = make_session(tmp_path)
+        assert session._channels_origin == "fresh"
+        assert session.channels_tracked is True
+
+    asyncio.run(main())
+
+
+def test_grandchild_channel_spend_reaches_the_root_total(tmp_path: Path) -> None:
+    """m4: the relay is TRANSITIVE — a leaf's record reaches the root, once.
+
+    Round 2 measured the relay stopping at one hop: a grandchild's record
+    reached its parent but never the root (leaf 8000 -> mid children 8000 ->
+    root 0). Forwarding is one hop up per absorb, so the chain carries it.
+    """
+
+    async def main() -> None:
+        root = make_session(tmp_path / "r", session_name="root")
+        mid = make_session(
+            tmp_path / "m",
+            session_name="mid",
+            parent_session=root,
+            parent_session_id=str(root.session_id),
+        )
+        leaf = make_session(
+            tmp_path / "l",
+            session_name="leaf",
+            parent_session=mid,
+            parent_session_id=str(mid.session_id),
+        )
+        leaf.record_channel_spend(search_record(record_id="search:leaf"))
+        await _settle(leaf)
+        await _settle(mid)
+        await _settle(root)
+
+        assert published(mid._frontend_state_store).children.total_micro == 8000
+        assert (
+            published(root._frontend_state_store).children.total_micro == 8000
+        ), "the root must see the leaf's record, not only the middle hop"
+        # Idempotent: a replayed absorb changes nothing anywhere.
+        mid._absorb_child_channel_spend(leaf.channels.rows()[0])
+        assert published(root._frontend_state_store).children.total_micro == 8000
+
+    asyncio.run(main())
+
+
+def test_a_resumed_parent_degrades_its_children_block_with_a_reason(tmp_path: Path) -> None:
+    """m4/Q9: children from an earlier process are not re-readable — say so.
+
+    The relay is live-only, so a parent reopened over a checkpoint that carries
+    child rows can no longer account for those children's channel spend (QA
+    round 2, Q9: total dropped 71000 -> 18000 while ``knowledge`` stayed
+    ``exact``). The block now degrades to ``partial`` with a wire-visible
+    reason; the full journal re-scan is deferred in the PR thread.
+    """
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+
+    async def seed() -> None:
+        await transcript.append_custom(
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            {"checkpoint_id": "c1", "state": {"jobs": [{"id": "job-1"}]}},
+        )
+
+    asyncio.run(seed())
+
+    async def main() -> None:
+        session = make_session(tmp_path)
+        assert session._child_channels_predate_process is True
+        session.refresh_frontend_usage()
+        obj = published(session._frontend_state_store)
+        assert obj.children.knowledge == "partial"
+        assert "earlier processes" in (obj.children.reason or "")
+        # ... and a session with NO child rows keeps its exact block.
+        other = make_session(tmp_path / "clean", session_name="clean2")
+        assert other._child_channels_predate_process is False
 
     asyncio.run(main())
 

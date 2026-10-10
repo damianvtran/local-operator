@@ -43,8 +43,13 @@ PR-1 adds **one channel-record ledger beside `SessionSpend`**:
    what the plan funded. It gets its own `by_basis` bucket and never joins
    `billed`.
 5. **No fabricated zeros.** A session whose journal has no `start` marker has
-   `tracked: false` and an inference-only total; every surface must say
-   "channels not tracked" rather than imply $0 of channel spend.
+   `tracked: false`: provenance, not necessarily a warning. The total is
+   DEGRADED (lower bound) only when the journal also carries EVIDENCE of
+   missed channel spend — recovered legacy rows, or a lost-money row (review
+   round 2, M-4: a pre-feature session with no recovered rows keeps its own
+   figure, cold and in-process spelling it identically). A degrading surface
+   then says "wasn't recorded for this conversation" rather than implying $0
+   of channel spend.
 6. **One arithmetic site.** `channel_spend.combine()` is the only place that
    sums; every surface reads the published object.
 
@@ -56,17 +61,27 @@ its legacy inference-only view. Gate new UI on `features.cost_channels >= 1`.
 
 Changed in the round-1 remediation, both additive to the v1 shape:
 - `by_basis.not_tracked_micro` is the micro-USD amount whose billing BASIS
-  is not tracked yet (the session's own inference pre-PR-3 plus the
-  children bundle); the three money buckets plus this one equal
+  is not tracked yet (the session's own inference pre-PR-3, the children
+  bundle, plus any record that STATES an amount with a `not_tracked` basis —
+  review m1/QA Q10); the three money buckets plus this one equal
   `total_micro`. `not_tracked_calls` counts rows whose amount could not be
   stated at all. Both keys are ADDITIVE on v1: an older producer omits
   them and a reader treats absence as 0 (a UI must never re-sum inference
   rows to find this amount).
 - A row's `units` may be `null` when no unit count was recorded (a legacy
   row recovered without one) — render nothing rather than `0`.
-- `tracked: false` implies `knowledge` is at most `partial`: an untracked
-  total can never be exact. `children` includes channel records relayed
-  from live child sessions.
+
+Changed in the round-2 remediation:
+- `tracked: false` alone does not degrade `knowledge`; degradation needs
+  evidence (see principle 5). `children` may carry `reason` (a string, absent
+  when nothing to say) beside a `partial`/`floor` knowledge — the
+  resumed-parent case: children that ran in an earlier process are not
+  re-readable here, so the block says so rather than reading `exact` over an
+  undercount (m4/Q9). The full journal re-scan is deferred to the follow-up.
+- The wire row cap groups the remainder into ONE `other channels (N)` row and
+  prefers NAMED channels over inference filler when it selects what to keep
+  (m2): a session with many serving identities keeps its image/tts/stt/search
+  rows, and the aggregate is the only row allowed to hide rows.
 
 ```json
 {
@@ -174,12 +189,12 @@ Changed in the round-1 remediation, both additive to the v1 shape:
 | Field | Meaning |
 |---|---|
 | `version` | Wire version (1). An unknown version renders nothing. |
-| `tracked` | False = no channel `start` marker in the journal (pre-feature session). Inference-only total; say so. |
+| `tracked` | False = no channel `start` marker in the journal (pre-feature session). Provenance only: `knowledge` degrades only when recovered rows or a lost row give evidence (see principle 5 and the m4 note above). |
 | `total_micro` | Grand total: session inference + channel records + children, integer micro-USD. |
 | `knowledge` | `unknown` \| `partial` \| `floor` \| `exact` — the same four values as `cost_knowledge`; see the matrix. |
-| `by_basis` | `billed`/`subscription_api_equivalent`/`estimated` are micro-USD sums; `not_tracked_calls` is a COUNT of records with no trackable money basis (inference contributes one until PR-3 adds its basis columns). |
+| `by_basis` | `billed`/`subscription_api_equivalent`/`estimated`/`not_tracked_micro` are micro-USD sums that add up to `total_micro`; `not_tracked_calls` is a COUNT of records with NO stated amount. A record with a stated amount and a `not_tracked` basis lands in `not_tracked_micro` (m1/Q10). |
 | `rows` | Aggregated rows: inference by provider/model (`label` = the identity bucket) then one row per (channel, provider, model, unit). `amount_micro: null` = nothing in that group was sized. `basis` lists the bases present; `price_versions` lists the labels. |
-| `children` | The subagent/forked-children contribution already inside `total_micro` (PR-1: the children's inference ledger; relayed child channel records join in the follow-up). |
+| `children` | The subagent/forked-children contribution already inside `total_micro` (PR-1: the children's inference ledger; relayed child channel records join in the follow-up). Optional `reason` (string) qualifies a degraded knowledge — a resumed parent that cannot re-read earlier children's journals says so (m4/Q9). |
 
 ### Knowledge matrix
 
@@ -188,8 +203,10 @@ Changed in the round-1 remediation, both additive to the v1 shape:
   `SessionSpend.knowledge()`).
 - `partial` — some money is unstateable: a channel record with `amount_micro:
   null` that is not a `failed`-unbilled job (unreported `ok`, unsettled
-  `cancelled`), unpriced model calls, a child ledger with unknowns, or channel
-  rows on a session with `tracked: false` (recovered history).
+  `cancelled`), unpriced model calls, a child ledger with unknowns, or a
+  session with `tracked: false` whose journal CARRIES evidence of missed
+  channel spend (recovered rows, a lost row, or a durable child roster this
+  process cannot re-read). Marker-less without evidence stays `exact`.
 - `floor` — rows were positively reported lost.
 - `exact` — everything that spent money has a stated figure.
 - Precedence: `unknown` > `partial` > `floor` > `exact` (unpriced noise is

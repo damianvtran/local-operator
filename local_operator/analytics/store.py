@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -813,6 +814,7 @@ _CHANNEL_ROLLUP_UPSERT = (
     "updated_at_ms = excluded.updated_at_ms"
 )
 
+
 #: The cross-channel reporting view: ``calls`` mapped to
 #: ``channel='inference'`` UNION ALL ``channel_calls``, one column shape so a
 #: reader can query "all spend" without knowing which table a row lives in.
@@ -823,6 +825,17 @@ _CHANNEL_ROLLUP_UPSERT = (
 #: ``amount_micro`` is NULL when ``cost_known = 0``: the calls ledger's ``0``
 #: for an unpriced call is exactly the fabricated zero the channel side
 #: refuses, and the view must not launder it into a real-looking amount.
+def _view_sql_is_current(stored: str) -> bool:
+    """Whether ``sqlite_master``'s stored view text is today's definition.
+
+    Whitespace-insensitive by necessity: SQLite stores the statement with its
+    own leading/trailing line breaks trimmed, so a byte comparison would see a
+    difference on the very first open and re-create the view — the write this
+    guard exists to avoid.
+    """
+    return re.sub(r"\s+", " ", stored).strip() == re.sub(r"\s+", " ", _SPEND_ALL_VIEW_SQL).strip()
+
+
 _SPEND_ALL_VIEW_SQL = """
 CREATE VIEW spend_all AS
 SELECT
@@ -1831,16 +1844,31 @@ class AnalyticsStore:
 
     @staticmethod
     def _recreate_spend_all_view(conn: sqlite3.Connection) -> None:
-        """(Re)create the inference+channel UNION view, idempotently.
+        """(Re)create the inference+channel UNION view, but ONLY when it changed.
 
-        A VIEW has no ``ALTER`` path, so it is DROPPED and re-created on every
-        open: a later release that adds a column to ``channel_calls`` (or to
-        ``calls``) updates :data:`_SPEND_ALL_VIEW_SQL` and every existing
-        database picks the new shape up on the next launch. Best-effort — a
-        view that cannot be created is a missing reporting convenience, never a
-        store that refuses to open (analytics is not a hard dependency).
+        A VIEW has no ``ALTER`` path, so the definition is compared against
+        ``sqlite_master``: a later release that adds a column to
+        ``channel_calls`` (or to ``calls``) updates
+        :data:`_SPEND_ALL_VIEW_SQL` and every existing database picks the new
+        shape up on the next launch.
+
+        The comparison is load-bearing, not a micro-optimisation. DROP+CREATE
+        on EVERY open is a WRITE: it takes the write lock at every launch and
+        every thread-local connect, and it grows the WAL of a database that
+        otherwise has nothing to write — measured (review round 2, M-2) as a
+        second connection's open growing a pinned WAL 329,632 -> 346,112 bytes,
+        which defeats the byte-for-byte guarantee the maintenance code gives a
+        pinned snapshot and turns this convenience into writer contention.
+        Best-effort throughout — a view that cannot be created is a missing
+        reporting convenience, never a store that refuses to open (analytics is
+        not a hard dependency).
         """
         try:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'spend_all'"
+            ).fetchone()
+            if row is not None and _view_sql_is_current(str(row[0] or "")):
+                return
             conn.execute("DROP VIEW IF EXISTS spend_all")
             conn.execute(_SPEND_ALL_VIEW_SQL)
         except Exception:  # noqa: BLE001 — see the docstring

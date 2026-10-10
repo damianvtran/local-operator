@@ -21,6 +21,7 @@ from local_operator.session.channel_spend import (
     BASIS_NOT_TRACKED,
     BASIS_SUBSCRIPTION,
     CHANNEL_SPEND_CUSTOM_TYPE,
+    NOT_TRACKED_MICRO,
     ChannelSpend,
     ChannelSpendRecord,
     ChildrenSnapshot,
@@ -30,6 +31,7 @@ from local_operator.session.channel_spend import (
     map_image_cost_labels,
     new_record_id,
     normalise_basis,
+    records_from_details,
 )
 from local_operator.session.frontend_state import FrontendSpendChannels
 
@@ -217,13 +219,15 @@ def test_lost_rows_mark_floor_but_partial_outranks_it() -> None:
 
 
 def test_tracked_flag_semantics() -> None:
-    """Untracked means the total is NEVER exact — with or without recovered rows.
+    """Untracked + recovered rows = a lower bound; untracked + silence = the figure.
 
-    A pre-feature session cannot rule out channel spend it never recorded (a
-    TTS call leaves no trace at all), so "nothing recoverable" is not the same
-    as "nothing spent" and the total is partial either way. The flag alone
-    carrying the news was design round 1's D3: the panel said "channels not
-    tracked" beside a total labelled ``exact`` and an unmarked band figure.
+    The flag alone carrying the news was design round 1's D3; the FIX went too
+    far the other way and marked every marker-less session, which the operator's
+    cold/in-process continuity tests reject (review round 2, M-4): a pre-feature
+    session with NO recovered channel rows has nothing to warn about, and
+    degrading most of the store's sessions is noise, not honesty. Degradation
+    needs EVIDENCE — recovered rows, or a lost-money row — so the tests below
+    pin both shapes.
     """
     with_rows = payload([record()], tracked=False)
     assert with_rows["tracked"] is False and with_rows["knowledge"] == "partial"
@@ -233,8 +237,76 @@ def test_tracked_flag_semantics() -> None:
         tracked=False,
     )
     assert without_rows["tracked"] is False
-    assert without_rows["knowledge"] == "partial", "an untracked total cannot be exact"
+    assert without_rows["knowledge"] == "exact", "no evidence of missed spend = no mark"
     assert without_rows["rows"][0]["channel"] == "inference"
+    with_lost = payload(
+        [],
+        inference=InferenceSnapshot(micro=500, calls=1, priced_calls=1, knowledge="exact"),
+        tracked=False,
+        lost=True,
+    )
+    assert with_lost["knowledge"] == "partial", "a lost-money row is evidence too"
+
+
+def test_a_stated_amount_with_no_basis_reconciles_the_buckets() -> None:
+    """m1 / QA Q10: money whose basis is not tracked still lands in a bucket.
+
+    ``from_details`` defaults a missing basis to ``not_tracked`` while keeping
+    the amount, and PR-3's server-object adapter can produce the same shape —
+    previously such money was counted (``not_tracked_calls``) but sat in NO
+    bucket, breaking the "buckets sum to the total by construction" rule.
+    """
+    mixed = payload(
+        [
+            record(record_id="image:a", channel="image", amount_micro=53000, basis=BASIS_BILLED),
+            record(record_id="tts:b", channel="tts", amount_micro=5000, basis=BASIS_NOT_TRACKED),
+            record(record_id="stt:c", channel="stt", amount_micro=None, basis=BASIS_NOT_TRACKED),
+        ],
+        inference=InferenceSnapshot(micro=8000, calls=2, priced_calls=2, knowledge="exact"),
+    )
+    buckets = mixed["by_basis"]
+    assert buckets[NOT_TRACKED_MICRO] == 8000 + 5000, "inference remainder + the unbased amount"
+    assert buckets["not_tracked_calls"] == 1, "only the row with NO amount is a count"
+    total = sum(
+        buckets[key]
+        for key in (BASIS_BILLED, BASIS_SUBSCRIPTION, BASIS_ESTIMATED, NOT_TRACKED_MICRO)
+    )
+    assert total == mixed["total_micro"] == 66000
+
+
+def test_a_corrupt_row_is_skipped_without_losing_its_neighbours() -> None:
+    """m3: per-row hardening — one NaN row must not zero out the fold.
+
+    Measured in review round 2: a NaN ``ts_ms`` beside a healthy 8,000 µ$ row
+    made the WHOLE fold publish ``total 0``. The timestamp is checked for
+    finiteness before ``int()`` (NaN passes ``< 0`` and then raises), units
+    reject non-finite values (``Infinity`` is invalid JSON on the wire), and a
+    row that still raises is skipped individually.
+    """
+    good = record(record_id="image:good", channel="image", amount_micro=8000, basis=BASIS_BILLED)
+    nan_row = dict(good.to_details(), record_id="image:nan", ts_ms=float("nan"))
+    inf_row = dict(good.to_details(), record_id="image:inf", ts_ms=float("inf"))
+    rows = [good.to_details(), nan_row, inf_row]
+    recovered = records_from_details(rows)
+    assert [r.record_id for r in recovered] == ["image:good"], "the good row survives"
+    assert (
+        ChannelSpendRecord.from_details({"version": 1, "record_id": "r", "ts_ms": float("inf")})
+        is None
+    )
+    assert (
+        ChannelSpendRecord.from_details(
+            {"version": 1, "record_id": "r", "ts_ms": 1, "units": float("inf")}
+        )
+        is None
+    )
+    # And the record model itself normalises a non-finite count that slipped
+    # through some future constructor: no Infinity can reach a wire.
+    assert (
+        ChannelSpendRecord(
+            record_id="x", channel="image", provider="", model="", ts_ms=1, units=float("inf")
+        ).units
+        == 0.0
+    )
 
 
 def test_children_are_counted_once_and_propagate_their_knowledge() -> None:

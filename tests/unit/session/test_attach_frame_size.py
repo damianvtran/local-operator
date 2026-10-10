@@ -6636,16 +6636,114 @@ def test_spend_channel_rows_are_capped_and_the_remainder_is_grouped() -> None:
     aggregate = rows[-1]
     assert aggregate["channel"] == "other"
     assert aggregate["label"].startswith("other channels ("), aggregate
-    dropped = _busy_spend_channels().rows[SPEND_CHANNEL_ROW_CAP:]
-    assert aggregate["amount_micro"] == sum(
-        int(row.amount_micro) for row in dropped if row.amount_micro is not None
-    ), "the grouped row must keep the dropped rows' stated money"
     assert (
         aggregate["knowledge"] == "partial"
     ), "one dropped row has no stated amount, so the aggregate may not read exact"
-    # The kept rows are the head of the wire order, so the table's own
-    # hierarchy (inference before search, both above the aggregate) survives.
-    assert [row["channel"] for row in rows[:SPEND_CHANNEL_ROW_CAP]] == [
-        row.channel for row in _busy_spend_channels().rows[:SPEND_CHANNEL_ROW_CAP]
+    # NAMED CHANNELS WIN THE BUDGET (review round 2, m2). The fixture
+    # alternates inference/search, so all twelve kept rows are the head of the
+    # SEARCH rows — no metered channel is pushed behind inference filler — and
+    # the kept rows are exactly the first twelve named rows in wire order.
+    kept = [row["channel"] for row in rows[:SPEND_CHANNEL_ROW_CAP]]
+    assert kept == ["search"] * SPEND_CHANNEL_ROW_CAP, kept
+    expected = [row for row in _busy_spend_channels().rows if row.channel == "search"][
+        :SPEND_CHANNEL_ROW_CAP
     ]
+    assert [row["model"] for row in rows[:SPEND_CHANNEL_ROW_CAP]] == [row.model for row in expected]
+    kept_models = {row.model for row in expected}
+    dropped = [row for row in _busy_spend_channels().rows if row.model not in kept_models]
+    assert aggregate["amount_micro"] == sum(
+        int(row.amount_micro) for row in dropped if row.amount_micro is not None
+    ), "the grouped row must keep the dropped rows' stated money"
     assert _line_bytes(frame) < _MAX_LINE_BYTES
+
+
+def test_the_row_cap_prefers_named_channels_over_inference_filler() -> None:
+    """m2, the shape the alternating fixture cannot see.
+
+    A session with many serving identities (up to 32 inference rows of ONE
+    channel) and a handful of metered channels: the plain first-twelve cap
+    folded every image/tts/search row into ``other channels`` and the panel
+    could not name a single one. Named channels claim the budget first;
+    inference takes the remainder; wire order survives.
+    """
+    rows: list[dict[str, Any]] = []
+    for index in range(20):
+        rows.append(
+            {
+                "channel": "inference",
+                "provider": f"provider-{index}",
+                "model": f"model-{index:02d}",
+                "label": f"provider-{index}/model-{index:02d}",
+                "units": 1.0,
+                "unit": "calls",
+                "amount_micro": 1_000,
+                "knowledge": "exact",
+                "basis": ["billed"],
+                "price_versions": ["v1"],
+            }
+        )
+    for channel in ("image", "tts", "search"):
+        rows.append(
+            {
+                "channel": channel,
+                "provider": "radient",
+                "model": "",
+                "label": "",
+                "units": 1.0,
+                "unit": "calls",
+                "amount_micro": 5_000,
+                "knowledge": "exact",
+                "basis": ["billed"],
+                "price_versions": ["v1"],
+            }
+        )
+    channels = FrontendSpendChannels.model_validate(
+        {
+            "version": 1,
+            "tracked": True,
+            "total_micro": sum(int(row["amount_micro"]) for row in rows),
+            "knowledge": "exact",
+            "by_basis": {
+                "billed": sum(int(row["amount_micro"]) for row in rows),
+                "subscription_api_equivalent": 0,
+                "estimated": 0,
+                "not_tracked_micro": 0,
+                "not_tracked_calls": 0,
+            },
+            "rows": rows,
+            "children": {"total_micro": 0, "knowledge": "exact"},
+        }
+    )
+    state = FrontendSessionState(session_id="s1", epoch="e1", spend_channels=channels)
+    frame = {
+        "op": "frontend_sync",
+        "data": sync_wire_payload(FrontendStateStore(state).subscribe(lambda _u: None).sync),
+    }
+    wire_rows = frame["data"]["snapshot"]["spend_channels"]["rows"]
+    assert len(wire_rows) == SPEND_CHANNEL_ROW_CAP + 1
+    kept_channels = [row["channel"] for row in wire_rows[:SPEND_CHANNEL_ROW_CAP]]
+    for named in ("image", "tts", "search"):
+        assert named in kept_channels, f"{named} was folded behind inference filler"
+    assert kept_channels.count("inference") == SPEND_CHANNEL_ROW_CAP - 3
+    assert wire_rows[-1]["channel"] == "other"
+
+
+def test_the_delta_route_caps_spend_channel_rows_too() -> None:
+    """Q8: the refresh route is a SECOND wire boundary and carries the cap.
+
+    The cap exists on the attach snapshot and on the delta route (``mutate``);
+    QA round 2 falsified the delta by neutralising the cap there only — both
+    snapshot tests still passed while the delta shipped all 40 rows, 10,254 B.
+    This asserts the emitted CHANGE itself is capped, so that route can never
+    regress silently.
+    """
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    update = store.mutate(spend_channels=_busy_spend_channels())
+    assert update is not None
+    changes = update.changes["spend_channels"]
+    rows = changes["rows"]
+    assert len(rows) == SPEND_CHANNEL_ROW_CAP + 1, (
+        f"the delta carried {len(rows)} rows past the cap; the refresh route needs "
+        "the same bound as the snapshot (see _cap_spend_channel_rows_in_place)"
+    )
+    assert rows[-1]["channel"] == "other"
