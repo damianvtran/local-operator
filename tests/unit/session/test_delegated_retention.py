@@ -1761,6 +1761,60 @@ def test_a_tag_only_unique_commit_is_bundled_before_the_tree_goes(root: Path) ->
     assert result.errors == 0
 
 
+def _blob(tree: Path, payload: str = "local-only blob\n") -> str:
+    """A blob written into ``tree``'s object store and referenced by nothing."""
+    done = subprocess.run(
+        ["git", "-C", str(tree), "hash-object", "-w", "--stdin"],
+        input=payload,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **_GIT},
+        timeout=60,
+    )
+    return done.stdout.strip()
+
+
+def test_a_lone_non_commit_tag_ref_keeps_the_tree(root: Path) -> None:
+    # Review F2b / QA Q1: the commit walk silently ignores a tag on a blob or
+    # tree, so with that ref as the tree's ONLY local-unique one the walk was
+    # empty and the tree was reclaimed with NO bundle (the blob lost). The
+    # listing now runs BEFORE the empty-walk return.
+    shapes = ("light", "annotated", "tree", "mixed")
+    for name in shapes:
+        pad = _kept_pad(root, f"nc-{name}")
+        # One origin per pad: ``_merged_tree`` keys the bare origin on the tree
+        # name, so a shared name would make the second pad's push a
+        # non-fast-forward.
+        tree = _merged_tree(pad, f"clone-{name}", root)
+        if name == "tree":
+            tree_sha = subprocess.run(
+                ["git", "-C", str(tree), "rev-parse", "HEAD^{tree}"],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, **_GIT},
+                timeout=60,
+            ).stdout.strip()
+            _git(tree, "tag", "snap", tree_sha)
+        elif name == "annotated":
+            _git(tree, "tag", "-a", "-m", "snap", "snap", _blob(tree))
+        else:
+            _git(tree, "tag", "snap", _blob(tree))
+        if name == "mixed":
+            _git(tree, "checkout", "-qb", "stray")
+            (tree / "b.txt").write_text("b\n")
+            _git(tree, "add", "b.txt")
+            _git(tree, "commit", "-qm", "two")
+            _git(tree, "checkout", "-q", "main")
+    result = _pass(root)
+    kept = dict(result.content_kept)
+    for name in shapes:
+        assert kept[f"nc-{name}"] == (f"clone-{name}: a local ref points at a non-commit object")
+        assert (root / "sessions" / f"nc-{name}" / "scratchpad" / f"clone-{name}").exists()
+    assert result.content == []
+
+
 def test_a_clone_with_registered_worktrees_is_kept_whole(root: Path) -> None:
     # Review F3: the clone arm ignored worktree registrations, so removing the
     # store destroyed the worktrees' objects (including a worktree the same

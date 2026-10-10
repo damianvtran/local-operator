@@ -118,8 +118,11 @@ is walked — bounded, symlinks never followed, ``.git`` never matched by shape
     ``git bundle create`` + ``git bundle verify``) BEFORE the tree may go —
     any bundle failure keeps THAT tree (per-tree: a pad with several
     reclaimable clones gets one bundle each, and a failed bundle keeps only
-    its own tree). A rescue bundle carries no HEAD (bundles have none):
-    recover a preserved ref with ``git clone -b <branch> <bundle> <dest>``.
+    its own tree). A ref the commit walk cannot speak for — a tag whose
+    peeled target is not a commit (a blob or tree) — keeps the tree, checked
+    BEFORE the empty-walk return, so an empty walk never authorises one. A
+    rescue bundle carries no HEAD (bundles have none): recover a preserved
+    ref with ``git clone -b <branch> <bundle> <dest>``.
   - a ``.git`` SYMLINK: kept (the content layer never follows links).
 
   The "objects also exist in the main repo" shortcut is NOT automated: there
@@ -908,8 +911,12 @@ def _tree_reclaim_checks(repo: Path) -> _TreeDecision:
     unique_commits = unique.stdout.split()
     if len(unique_commits) > CONTENT_MAX_UNIQUE_COMMITS:
         return _TreeDecision(False, "more unique commits than the rescue check will list")
-    if not unique_commits:
-        return _TreeDecision(True)
+    # The listing runs BEFORE the "nothing unique" return (review F2b / QA Q1):
+    # the commit walk silently ignores a tag whose target is not a commit, so
+    # an empty walk must never authorise a tree whose refs include one — the
+    # listing is the only thing that SEES them (measured: a lightweight blob
+    # tag on an otherwise fully-pushed clone reclaimed the tree with no
+    # bundle, and the local-only blob was lost).
     listing = _git(
         path,
         "for-each-ref",
@@ -937,11 +944,14 @@ def _tree_reclaim_checks(repo: Path) -> _TreeDecision:
             # the peeled one (``%(*objectname)``, empty for non-tags), which
             # is what the commit set can speak for. A ref whose PEELED target
             # is not a commit (a tag on a blob or tree) is outside the commit
-            # walk's vocabulary — kept, not rescued (fail closed).
+            # walk's vocabulary — kept, not rescued (fail closed), whether or
+            # not the walk found unique commits.
             return _TreeDecision(False, "a local ref points at a non-commit object")
         tip = peeled or object_id
         if tip in wanted:
             names.append(refname)
+    if not unique_commits:
+        return _TreeDecision(True)
     if not names:
         return _TreeDecision(False, "unique commits exist but no ref names them to rescue")
     return _TreeDecision(True, bundle_refs=names)
