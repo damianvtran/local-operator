@@ -137,6 +137,9 @@ Pass a source and the call becomes an edit. Two ways to name it:
   (`generate_image` captions name the digest of every image they attached);
   pass that digest back to edit the image the harness just made.
 
+One source per call in v1; multi-source is a documented extension point (the
+rung specs' typed `max_sources` field).
+
 `strength` (0..1) tunes how far the edit may move from the source, where the
 provider supports it (FAL's flux-class image-to-image apps; its
 multi-reference editors document no strength field). Wherever it cannot be
