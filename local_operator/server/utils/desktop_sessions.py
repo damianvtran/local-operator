@@ -4841,7 +4841,33 @@ class DesktopSessionBridge:
         an async method on the loop thread. Cancellation stays correct because
         the task it may create is the bridge's own ``warm_task``, which
         ``_detach()`` cancels.
+
+        AND IT IS NEVER ONLY AN ENGAGE. The retire is the moment the served
+        projection's cold facts change and the last chance to restate anything
+        the owner's deltas left standing, so the honest replacement is
+        published BEFORE the engage attempt and independently of it — see the
+        honesty note in the comment below.
         """
+        # THE HONEST PROJECTION FIRST, AND IT IS NOT THE ENGAGE'S TO DECLINE
+        # (2026-10-10 incident). The facade has already corrected its canonical
+        # mirror where a claim outlived its owner
+        # (``AttachedSession._drop_liveness_claim``); this frame is what
+        # carries that correction — plus the fresh cold triple — to every
+        # mounted viewer. Published UNCONDITIONALLY and BEFORE the engage: the
+        # ``DaemonRetiring`` decline below is a statement about spawning a
+        # successor inside a daemon being replaced, never about what viewers
+        # should be told, and session 62480a153ced served
+        # ``frontend.streaming: true`` for 6+ minutes precisely because this
+        # path published nothing while its only other repair (the successor's
+        # snapshot) was declined away.
+        try:
+            self.publish_frontend_replace()
+        except RuntimeError:
+            # "frontend state has not synchronized": a retire frame that beat
+            # this facade's first sync has no projection to repaint yet — the
+            # same not-a-fault read ``roster_jobs`` makes. Its cold triple
+            # rides whatever frame follows.
+            logger.debug("retire frame for %s arrived before any canonical state", self.session_id)
         try:
             self._schedule_warm()
         except DaemonRetiring:
