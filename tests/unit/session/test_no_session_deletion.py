@@ -365,6 +365,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "server does not leave a lease behind and does not delete a live "
         "sibling's",
     ),
+    # The local surface keys' per-boot generation counter
+    # (`local_operator/server/utils/local_tokens.py`): one FILE at
+    # `<config>/run/serve/generation`, beside the serve records the registry
+    # publishes. The writer is a local copy of the staged-write shape for
+    # `network/identity.py`'s stated reason -- the shared helper is private to
+    # the session runtime's module, and this one keeps the boot path from
+    # depending on the session plane -- which is exactly why it carries
+    # argued rows here: every path it touches is that one sibling of the
+    # records the counter belongs to, a FILE never a directory, and never
+    # anything under sessions/.
+    (
+        "local_operator/server/utils/local_tokens.py::_write_staged",
+        "os.replace",
+        "Atomic replacement of the generation FILE at <config>/run/serve/generation, "
+        "beside the serve records; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/server/utils/local_tokens.py::_write_staged",
+        "os.unlink",
+        "Removes only its own `.generation.*.tmp` file after a failed replacement",
+    ),
     (
         "local_operator/server/utils/desktop_presence.py::"
         "DesktopDeliveryPublisher._prune_dead_records",
@@ -715,10 +736,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     # -- the one legitimate remover -----------------------------------------
     (
-        "local_operator/session/cleanup.py::remove_session_dir",
+        "local_operator/session/cleanup.py::_bounded_rmtree",
         "shutil.rmtree",
-        "THE session remover: guarded by the store marker, the config dir, "
-        "the hard guards and the cleanup log",
+        "THE ONE directory remover under sessions/, shared by remove_session_dir "
+        "and the scratchpad-content pass (remove_scratchpad_entry): called only "
+        "with a target those two already guarded, and its widen/retry phases "
+        "touch nothing outside the target itself",
+    ),
+    (
+        "local_operator/session/cleanup.py::remove_scratchpad_entry",
+        "os.unlink",
+        "The content phase's FILE remover: _scratchpad_refusal has cleared the "
+        "target (pre-resolve symlink check, strict containment below "
+        "<store>/<session>/scratchpad/, store marker, config dir), the removal "
+        "shape is an lstat-confirmed non-directory, and the caller only plans "
+        "files whose shape+size+age passed",
     ),
     (
         "local_operator/session/cleanup.py::_write_record",
@@ -959,6 +991,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/attached.py::AttachedSession._publish_working_directory",
         "<path>.replace",
         "FrontendStateStore.replace(state) — an in-memory paint swap, not a path",
+    ),
+    # The refresh-retire drop's version of the row above, and the same reading:
+    # its one `.replace` is `store.replace(state)` on the session's in-memory
+    # FrontendStateStore (it clears the canonical mirror's stale streaming bit),
+    # and the function takes no path at all — it reads `self._frontend_store`
+    # and the session id it logs, nothing else.
+    (
+        "local_operator/session/attached.py::AttachedSession._drop_liveness_claim",
+        "<path>.replace",
+        "FrontendStateStore.replace(state) — an in-memory claim drop, not a path",
     ),
     # Same shape as the browser-bridge/keys writers below: a temp FILE inside
     # the secrets directory replacing master.key in that same directory. Both
@@ -2608,6 +2650,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes this request's tempfile.mkdtemp() upload spool; never session-derived",
         2,
     ),
+    # -- the delegated content layer's rescue-bundle housekeeping ------------
+    # Both calls touch the SAME two artefacts, both spelled from the plan's
+    # ``bundle_path`` (``<pad>/reap-rescue-<tree>.bundle``, strictly inside a
+    # session's ``scratchpad/``): git's ``<bundle>.lock`` and the partial
+    # bundle itself. They are the only files this pass ever writes into a pad.
+    # The lock is cleared before ``git bundle create`` so a killed attempt
+    # cannot block every later retry with "File exists" (measured on the
+    # acceptance copy), and both are removed on failure so the next pass
+    # retries from nothing. Neither call can name a session entry or a
+    # directory — the lock is a sibling of a path the plan already vetted.
+    (
+        "local_operator/session/delegated_retention.py::_write_rescue_bundle",
+        "<path>.unlink",
+        "Clears <bundle>.lock before git bundle create; the bundle target is the "
+        "plan's own path inside the pad, and clearing its stale lock is self-healing",
+    ),
+    (
+        "local_operator/session/delegated_retention.py::_write_rescue_bundle._clean_up",
+        "<path>.unlink",
+        "Best-effort removal of those same two artefacts (partial bundle + lock) "
+        "after a failed create or verify, so the next pass starts clean",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
@@ -2812,6 +2876,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # a path operation, and this function holds no session-directory path at
         # all (it is handed a plain directory string).
         "local_operator/session/attached.py::AttachedSession._publish_working_directory",
+        # Same receiver, same reason, one function over: the refresh-retire drop
+        # swaps the in-memory frontend state (clearing the stale streaming bit)
+        # and holds no session-directory path at all.
+        "local_operator/session/attached.py::AttachedSession._drop_liveness_claim",
         "local_operator/session/frontend_state.py::FrontendStateStore.checkpoint",  # tmp -> FILE
         "local_operator/session/attached.py::AttachedSession._install_frontend",  # facade
         "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",  # facade
@@ -2874,7 +2942,13 @@ def test_cleanup_module_is_the_only_directory_remover_near_sessions() -> None:
         for rel, _line, label, owner in _call_sites()
         if rel in near and label.rsplit(".", 1)[-1] in ("rmtree", "rmdir", "removedirs")
     )
-    assert hits == [f"{CLEANUP_MODULE}::remove_session_dir"], hits
+    # The single remover MOVED when the scratchpad-content pass arrived
+    # (delegated content reclaim): remove_session_dir now delegates its rmtree
+    # to _bounded_rmtree so ONE call site — hook and pre-widen walk included —
+    # serves both it and remove_scratchpad_entry (see the allow-list rows).
+    # The belt's intent is unchanged: exactly ONE function, inside the cleanup
+    # module, holds a directory remover anywhere near sessions.
+    assert hits == [f"{CLEANUP_MODULE}::_bounded_rmtree"], hits
 
 
 def test_displacers_near_sessions_are_the_named_set() -> None:

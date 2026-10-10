@@ -11,6 +11,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from local_operator.config import ConfigManager
+from local_operator.i18n.keys import wire_errors_settings as _we
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.models.schemas import (
     CredentialListResult,
@@ -102,7 +103,11 @@ async def list_credentials(
         )
     except Exception as e:
         logger.exception("Error retrieving credentials")
-        raise HTTPException(status_code=500, detail=f"Error retrieving credentials: {e}")
+        # Envelope per RFC §2.6: `code` for clients, `text` for readers that
+        # only show the string; the exception text rides as a param, untranslated.
+        raise HTTPException(
+            status_code=500, detail=_we.credential_retrieve_failed(error=str(e)).envelope()
+        )
 
 
 @router.patch(
@@ -158,7 +163,7 @@ async def update_credential(
     try:
         # Validate the key
         if not credential_data.key:
-            raise HTTPException(status_code=400, detail="Credential key cannot be empty")
+            raise HTTPException(status_code=400, detail=_we.credential_key_empty().envelope())
 
         # Set the credential as a provider-class store row, under the manager's
         # own config root so a server with a custom root writes where it reads.
@@ -188,4 +193,6 @@ async def update_credential(
         raise
     except Exception as e:
         logger.exception("Error updating credential")
-        raise HTTPException(status_code=500, detail=f"Error updating credential: {e}")
+        raise HTTPException(
+            status_code=500, detail=_we.credential_update_failed(error=str(e)).envelope()
+        )

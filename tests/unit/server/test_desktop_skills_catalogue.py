@@ -8,9 +8,11 @@ folder. The session arm keeps answering for released clients and the ``/skills``
 panel; ``cwd`` WINS when both parameters are sent.
 
 Every row here is discovered from DISK, so the whole file runs against a
-synthetic HOME and a synthetic project folder: the three root shapes the
-contract names are the project root (walk-up), the home root, and the ecosystem
-roots (absent under the scratch HOME). The session arm is driven through a pool
+synthetic HOME and a synthetic project folder: the root shapes the contract
+names are the project root (walk-up), the home root, the ecosystem roots
+(absent under the scratch HOME), and the packaged builtin catalog (always
+present, and filtered out of the row assertions below). The session arm is
+driven through a pool
 shaped like ``DesktopSessions`` (``host(request).session(...)`` →
 ``bridge.remote``): the only fact the route reads from a session is
 ``frontend_state.cwd``, and a real runtime would add nothing to a scan that
@@ -33,6 +35,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.server.routes import desktop_catalogues
+from local_operator.skills.api import PACKAGED_SKILL_ROOT
 
 TOKEN = "desktop-skills-route-test-token"
 
@@ -105,6 +108,22 @@ def _rows(data: dict[str, Any]) -> list[dict[str, str]]:
     return [{"name": row["name"], "description": row["description"]} for row in data["skills"]]
 
 
+#: The packaged builtin catalog rides in every response: ``skills/api.py``
+#: appends its root LAST, so it is always discovered beside the fixture's own
+#: skills. The cells here assert the FIXTURE's rows, so they filter the catalog
+#: out by name; that all 14 builtins are discovered is pinned by
+#: ``tests/unit/skills/test_builtin_catalog.py``.
+_BUILTIN_NAMES = frozenset(
+    child.name
+    for child in PACKAGED_SKILL_ROOT.iterdir()
+    if child.is_dir() and (child / "SKILL.md").is_file()
+)
+
+
+def _fixture_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [row for row in rows if row["name"] not in _BUILTIN_NAMES]
+
+
 def _write_skill(root: Path, name: str, description: str, *, body: str = "") -> Path:
     """One ``<root>/<name>/SKILL.md``, the on-disk shape discovery reads."""
     skill_dir = root / name
@@ -126,7 +145,9 @@ async def test_the_cwd_arm_answers_with_no_session(env) -> None:
 
     assert response.status_code == 200, response.text
     data = _data(response)
-    assert _rows(data) == [{"name": "deploy", "description": "Project deploy helper."}]
+    rows = _rows(data)
+    assert _fixture_rows(rows) == [{"name": "deploy", "description": "Project deploy helper."}]
+    assert {row["name"] for row in rows} >= _BUILTIN_NAMES
     assert data["scope"] == "discoverable"
     assert data["detail"] is None
     assert data["warning_count"] == 0
@@ -151,7 +172,10 @@ async def test_the_cwd_arm_answers_exactly_what_the_session_arm_answers(env) -> 
         await env.client.get("/v1/desktop/skills", params={"session_id": session_id})
     )
 
-    assert {row["name"] for row in cwd_data["skills"]} == {"proj-deploy", "home-notes"}
+    assert {row["name"] for row in _fixture_rows(_rows(cwd_data))} == {
+        "proj-deploy",
+        "home-notes",
+    }
     assert cwd_data["skills"] == session_data["skills"]
     assert cwd_data["version"] == session_data["version"]
     assert cwd_data["warning_count"] == session_data["warning_count"]
@@ -165,7 +189,7 @@ async def test_the_sessionless_arm_never_opens_a_session(env) -> None:
     response = await env.client.get("/v1/desktop/skills", params={"cwd": str(project)})
 
     assert response.status_code == 200, response.text
-    assert [row["name"] for row in _data(response)["skills"]] == ["deploy"]
+    assert [row["name"] for row in _fixture_rows(_rows(_data(response)))] == ["deploy"]
 
 
 async def test_cwd_wins_when_both_parameters_are_sent(env) -> None:
