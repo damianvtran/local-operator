@@ -2578,6 +2578,12 @@ _TOOL_ROSTER_NAMES: tuple[str, ...] = (
     "wait",
     "jobs",
     "generate_image",
+    # The video lane's pair (media wave-2): the roster names the START tool
+    # and the one callable that answers "what happened to that job" — both
+    # are createIf-gated, so their presence in the built list IS the
+    # availability signal (the ``generate_image`` rule above).
+    "generate_video",
+    "video_status",
     "code_requests",
 )
 

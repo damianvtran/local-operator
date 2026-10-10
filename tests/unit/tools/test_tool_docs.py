@@ -242,6 +242,12 @@ MEASURED_TOKENS: dict[str, int] = {
     #: deliberately with this change, then again after the context-budget
     #: round trimmed the schema description (795 -> 793).
     "generate_image": 793,
+    # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
+    # lifecycle (receipt, completion, restart, cancel), the two rungs, the
+    # mode/source rules and the family quirks. The wire description carries
+    # one sentence; this holds the rest. Re-measured deliberately via this
+    # test's own print; the ONLY other count that moved is ``jobs`` below.
+    "generate_video": 796,
     "glob": 91,
     "grep": 337,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
@@ -254,7 +260,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
     # paused child is halted-and-resumable, not stopped. Re-measured.
     "hub": 650,
-    "jobs": 350,
+    # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
+    # "(task/bash/video)" — the video job type is a model-visible part of what
+    # ``op='list'`` shows. One token, re-measured.
+    "jobs": 351,
     "list_variables": 58,
     "lsp": 276,
     "monitor": 357,
@@ -276,6 +285,9 @@ MEASURED_TOKENS: dict[str, int] = {
     "team": 489,
     "team_delete": 90,
     "todo": 524,
+    # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
+    # read side: states, the at-most-once registration and the watcher handoff.
+    "video_status": 206,
     "wait": 272,
     "wake": 312,
     "web_fetch": 352,

@@ -22,6 +22,10 @@ from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
 from local_operator.tools.image_tool import build_generate_image_tool
+from local_operator.tools.video_tool import (
+    build_generate_video_tool,
+    build_video_status_tool,
+)
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.tools.project_tool import (
     build_project_delete_tool,
@@ -115,6 +119,13 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # purpose: appending never shifts a provider-visible array prefix, which
     # is what the prompt cache keys on.
     "generate_image": lambda context: build_generate_image_tool(context),
+    # createIf: rung 3 — present only where a video job can run (a persisted
+    # Radient login or a FAL key, plus the session's job manager), sync and
+    # socket-free like the image gate. The pair rides together: the start
+    # tool and the one callable that answers a pending job after a restart.
+    # Appended at the END of both tables on purpose (prompt-cache stability).
+    "generate_video": lambda context: build_generate_video_tool(context),
+    "video_status": lambda context: build_video_status_tool(context),
     # createIf: rung 3 — present only where the session has a store root
     # (its own directory plus a resolvable config root), so a reduced host
     # pays no schema for a tool whose every call could only say "no store".
@@ -175,6 +186,8 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "sessions",
     "ask_withdraw",
     "generate_image",
+    "generate_video",
+    "video_status",
     "code_requests",
     "no_reply",
 ]
