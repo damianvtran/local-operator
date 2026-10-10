@@ -781,4 +781,5 @@ def _fallback_popen(
     # contract — bytes/opaque handles — not the argv spelling. The only Popen
     # surface these call sites touch is pid/poll/wait/kill, where the pair is
     # identical.
-    return cast("subprocess.Popen[bytes]", subprocess.Popen(list(argv), **kwargs))  # noqa: S603 — fixed argv, no shell
+    spawned = subprocess.Popen(list(argv), **kwargs)  # noqa: S603 — fixed argv, no shell
+    return cast("subprocess.Popen[bytes]", spawned)
