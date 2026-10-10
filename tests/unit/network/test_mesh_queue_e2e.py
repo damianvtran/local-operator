@@ -264,6 +264,28 @@ async def test_the_queued_move_pauses_at_the_boundary_carries_the_wake_and_lets_
         assert not state_dir.exists(), "the source monitor state survived the prune"
 
         # ---- the state carry-over, destination side: rebuilt from the copy ----
+        # THE PROMOTE IS B'S OWN STEP and it runs AFTER the source's commit — the
+        # one `resumed` was awaited on above is stamped by the SOURCE at its
+        # commit (``move_queue.note_committed``), the "[commit → promote-rebuild]
+        # gap" ``network/carry.py`` names on purpose. B's integrate (the cold
+        # index rebuild included) runs on B's pull thread a beat later, so
+        # reading the index straight off `resumed` raced it: observed on CI
+        # (`test (3.12, 2)`, "the destination index was not rebuilt") with a
+        # passing rerun, and reproduced here by delaying only that rebuild.
+        #
+        # Wait on B's own `committed` stamp, not on the index: ``_destination_move``
+        # notes it only AFTER ``_promote`` returns, and ``_promote`` runs
+        # ``rebuild_indexes`` inline. So once it is set the rebuild has already
+        # happened, and the read below is the product claim itself ("rebuilt by the
+        # time B reports the move committed") with no timing in it. Waiting on the
+        # index file instead would also pass a rebuild that landed late.
+        assert await _wait(
+            lambda: "committed"
+            in [
+                str(stamp.get("phase")) for stamp in mobility.progress_for(server_b).phases(SESSION)
+            ],
+            timeout=30.0,
+        ), "the destination never reported the move committed"
         destination_entry = wake_store.read_entry(server_b.root, SESSION)
         assert destination_entry is not None, "the destination index was not rebuilt"
         carried = destination_entry["schedules"][0]
@@ -294,15 +316,6 @@ async def test_the_queued_move_pauses_at_the_boundary_carries_the_wake_and_lets_
 
         monkeypatch.setattr("local_operator.wakes.supervisor._has_live_runtime", has_live)
         from local_operator.wakes.supervisor import fire_due_wakes
-
-        # THE PROMOTE IS B'S OWN STEP and it races the driver's tombstone watch:
-        # the record reaches ``resumed`` the instant the SOURCE commits, while
-        # B's integrate (the cold rebuild included) runs on B's pull thread a
-        # beat later. Wait for the carried index rather than assuming the
-        # promote beat this line — the assertion below is the product claim.
-        assert await _wait(
-            lambda: wake_store.read_entry(server_b.root, SESSION) is not None, timeout=15.0
-        ), "the destination's promote never rebuilt the carried wake index"
 
         # ITS DUE TIME, SYNTHESISED. The row is armed an hour out (so nothing on
         # the source fires it while the move runs), and B's scan is taken one
