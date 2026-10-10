@@ -71,7 +71,12 @@ HONEST = component(
             "lat": {
                 "title": "Latency by region (ms)",
                 "columns": ["region", "ms"],
-                "rows": [["us-east", 120], ["us-west", 98.5], ["eu-west", 143], ["ap-south", 211.25]],
+                "rows": [
+                    ["us-east", 120],
+                    ["us-west", 98.5],
+                    ["eu-west", 143],
+                    ["ap-south", 211.25],
+                ],
             }
         }
     ),
@@ -102,7 +107,7 @@ def test_NONE_is_a_valid_answer_with_no_components() -> None:
 
 def test_a_component_without_a_source_is_refused() -> None:
     result = validate_output(HONEST.replace(' source="bench.csv"', ""), EVIDENCE)
-    assert result.rejected and "source" in result.rejected[0].describe()
+    assert result.rejected and any("source" in error for error in result.repair_errors)
 
 
 # --- the mutation proofs -----------------------------------------------------------------
@@ -157,8 +162,10 @@ def test_an_extrapolated_trend_is_refused() -> None:
 def test_a_baked_in_rounded_label_is_refused() -> None:
     """Design round 1 (D4): the data is honest, the PRINTED value is not.
 
-    "211.3" is a rounded literal the component wrote itself; ``LO.fmt`` at source precision
-    prints "211.25", so the label claims a precision the source does not have.
+    "98.6" is a rounded literal the component wrote itself; ``LO.fmt`` at source precision
+    prints "98.5", so the label claims a precision the source does not have. The value is
+    chosen below 100 on purpose: a 3-digit one is refused earlier by the §4.2 literal rule,
+    which would leave THIS rule untested.
     """
     rounded = component(
         json.dumps(
@@ -166,31 +173,51 @@ def test_a_baked_in_rounded_label_is_refused() -> None:
                 "lat": {
                     "title": "Latency",
                     "columns": ["region", "ms"],
-                    "rows": [["ap-south", 211.25]],
+                    "rows": [["us-west", 98.5]],
                 }
             }
         ),
-        '<div id="c">ap-south p99: 211.3 ms</div>',
+        '<div id="c">us-west p50: 98.6 ms</div>',
     )
     result = validate_output(rounded, EVIDENCE)
     assert not result.components, "a rounded literal reached the accepted set"
-    assert any("not reproducible" in error for error in result.rejected[0].errors)
+    assert any("<data> supports" in error for error in result.repair_errors), result.repair_errors
+    # ...and the SOURCE-precision spelling of the same value passes, so the rule is about the
+    # printed precision and not about printing a number at all.
+    exact = rounded.replace("98.6 ms", "98.5 ms")
+    assert validate_output(exact, EVIDENCE).components
 
 
 def test_a_derived_column_is_recomputed_and_a_wrong_one_refused() -> None:
-    share = {"columns": ["region", "ms", "share (derived: ms/285.75)"], "rows": [["ap-south", 211.25, 0.7393]]}
+    """Memo §2.10: a computed column is allowed only where the validator can recompute it.
+
+    Two numeric columns, one ratio and one percentage -- the two shapes the memo names -- and
+    a third row whose declared value is wrong, which must be refused rather than trusted.
+    """
+    evidence = (
+        Dataset(
+            title="Requests",
+            source="bench.csv",
+            columns=("region", "p50", "p99"),
+            rows=(("us-east", "100"), ("us-west", "200")),
+            n_rows=2,
+            numeric_columns=("p50", "p99"),
+        ),
+    )
+    columns = ["region", "p50", "p99", "overhead (derived: p99/p50)", "load (derived: p50/p99*100)"]
+    good_rows = [["us-east", 100, 200, 2.0, 50.0]]
+    bad_rows = [["us-east", 100, 200, 3.0, 50.0]]
+    body = '<div id="c"></div><script>LO.table(document.getElementById("c"),"req")</script>'
     good = component(
-        json.dumps({"lat": {"title": "Latency", **share, "rows": [["ap-south", 211.25, 0.7393]]}}),
-        '<div id="c"></div><script>LO.table(document.getElementById("c"),"lat")</script>',
+        json.dumps({"req": {"title": "Requests", "columns": columns, "rows": good_rows}}), body
     )
     bad = component(
-        json.dumps({"lat": {"title": "Latency", **share, "rows": [["ap-south", 211.25, 0.9]]}}),
-        '<div id="c"></div><script>LO.table(document.getElementById("c"),"lat")</script>',
+        json.dumps({"req": {"title": "Requests", "columns": columns, "rows": bad_rows}}), body
     )
-    assert validate_output(good, EVIDENCE).components, "a correct ratio was refused"
-    refused = validate_output(bad, EVIDENCE)
+    assert validate_output(good, evidence).components, "a correct ratio was refused"
+    refused = validate_output(bad, evidence)
     assert not refused.components
-    assert any("derived" in error for error in refused.rejected[0].errors)
+    assert any("derived" in error for error in refused.repair_errors), refused.repair_errors
 
 
 # --- the §4.2 scan -----------------------------------------------------------------------

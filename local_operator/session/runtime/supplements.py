@@ -47,17 +47,19 @@ worst outcome of this feature is "no callout".
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Final
+from typing import Any, Awaitable, Callable, Final, Mapping, cast
 
 from local_operator.supplements import generator, policy
 from local_operator.supplements.candidates import prefilter
-from local_operator.supplements.contract import SupplementDetails
+from local_operator.supplements.contract import (
+    SUPPLEMENT_CUSTOM_TYPE,
+    SupplementDetails,
+)
 from local_operator.supplements.decision import Decision
 from local_operator.supplements.decision import decide as decide_supplement
 from local_operator.supplements.evidence import Dataset
-from local_operator.supplements.generator import Component
 from local_operator.supplements.persistence import (
     append_row,
     build_details,
@@ -108,7 +110,9 @@ class _JobInputs:
     answer_text: str
     instruction: str = ""
     version: int = 1
-    details: SupplementDetails | None = None
+    #: The job's newest row, as the builders return it (a plain mapping of the contract's
+    #: shapes). ``None`` until the first write.
+    details: dict[str, Any] | None = None
 
 
 class SupplementRunner:
@@ -137,7 +141,7 @@ class SupplementRunner:
         #: reads ``values.monitor`` the same way, on the same kind of build path).
         self._settings = self._read_settings()
         self._task: asyncio.Task[None] | None = None
-        self._open_row: SupplementDetails | None = None
+        self._open_row: Mapping[str, Any] | None = None
         #: Jobs this runtime is running right now: the runtime's half of the reader rule
         #: (``contract.reader_disposition(job_live=...)``).
         self._live_jobs: set[str] = set()
@@ -182,7 +186,7 @@ class SupplementRunner:
     def is_live(self, job: str) -> bool:
         return job in self._live_jobs
 
-    def set_open_row(self, details: SupplementDetails | None) -> None:
+    def set_open_row(self, details: Mapping[str, Any] | None) -> None:
         """Register (or clear) the job's latest NON-terminal row, for supersede (C1b seam)."""
         self._open_row = details
 
@@ -327,7 +331,9 @@ class SupplementRunner:
             # Files-only: no generator is coming, so the first row is TERMINAL. A ``decided``
             # row would be read cold as "cancelled - Retry" under an answer with nothing to
             # retry (contract.reader_disposition).
-            details = build_details(anchor=anchor, job=job, version=1, state="done", decision=decision)
+            details = build_details(
+                anchor=anchor, job=job, version=1, state="done", decision=decision
+            )
             await append_row(self._session.transcript, details)
         finally:
             self._live_jobs.discard(job)
@@ -383,9 +389,7 @@ class SupplementRunner:
         if previous is not None:
             await asyncio.gather(previous, return_exceptions=True)
         try:
-            await asyncio.wait_for(
-                self._attempt(inputs, settings), timeout=settings.timeout_s
-            )
+            await asyncio.wait_for(self._attempt(inputs, settings), timeout=settings.timeout_s)
         except asyncio.CancelledError:
             # A cancel is not a failure: the row for it is written by whoever cancelled
             # (``cancel_job``/``steer_job``/``restart_job``), so a dispose or a supersede
@@ -408,7 +412,7 @@ class SupplementRunner:
             state="decided",
             decision=inputs.decision,
         )
-        inputs.details = details
+        inputs.details = dict(details)
         self.set_open_row(details)
         try:
             await append_row(transcript, details)
@@ -437,7 +441,7 @@ class SupplementRunner:
             components = await self._store(outcome)
             error = outcome.error if not components else ""
             state = "failed" if error else "done"
-            final = next_version(details, state=state, error=error)
+            final: dict[str, Any] = dict(next_version(details, state=state, error=error))
             final["components"] = components
             final["model"] = outcome.model
             final["turns"] = outcome.turns
@@ -448,6 +452,10 @@ class SupplementRunner:
                 final["instruction"] = outcome.instruction[:MAX_INSTRUCTION_CHARS]
             self.set_open_row(final)
             await append_row(transcript, final)
+            # The job's own pointer moves to the row it just wrote: a later steer/restart
+            # builds on the NEWEST row, never on the ``decided`` one it started from (which
+            # would reuse the terminal row's version number).
+            inputs.details = dict(final)
             self.set_open_row(None)
             await self._progress(final, state)
         finally:
@@ -532,7 +540,10 @@ class SupplementRunner:
         if usage is None:
             return 0.0
         try:
-            from local_operator.model.configure import cost_for_usage, resolve_model_info
+            from local_operator.model.configure import (
+                cost_for_usage,
+                resolve_model_info,
+            )
 
             spec = resolved.spec
             info = resolve_model_info(spec.provider, spec.model_id)
@@ -577,7 +588,7 @@ class SupplementRunner:
 
     async def _progress(
         self,
-        details: SupplementDetails,
+        details: Mapping[str, Any],
         state: str,
         *,
         stage: str = "",
@@ -595,18 +606,27 @@ class SupplementRunner:
             emit = getattr(self._session, "_emit", None)
             if not callable(emit):
                 return
+            await_emit = cast(Callable[[Any], Awaitable[None]], emit)
             event = SupplementProgressEvent(
                 anchor=str(details.get("anchor", "")),
                 job=str(details.get("job", "")),
                 version=int(details.get("version", 1)),
-                state=state,
+                state=cast("Any", state),
                 stage=stage,
                 elapsed_s=round(float(elapsed_s), 3),
-                files=list(details.get("files") or []) if state in ("decided", "done") else [],
-                components=list(details.get("components") or []) if state == "done" else [],
+                files=(
+                    [dict(item) for item in (details.get("files") or [])]
+                    if state in ("decided", "done")
+                    else []
+                ),
+                components=(
+                    [dict(item) for item in (details.get("components") or [])]
+                    if state == "done"
+                    else []
+                ),
                 error=str(details.get("error", "") or ""),
             )
-            await emit(event)
+            await await_emit(event)
         except Exception:  # noqa: BLE001 -- a missing beat is not a failed job
             logger.debug("supplement progress could not be emitted", exc_info=True)
 
@@ -671,19 +691,26 @@ class SupplementRunner:
         return "restarting"
 
     async def _cut_and_restart(self, inputs: _JobInputs, *, instruction: str) -> None:
-        """Cut the in-flight attempt (if any) and run the next version in its place."""
+        """Cut the in-flight attempt (if any) and run the next version in its place.
+
+        The ``cancelled`` row is written only when there WAS something to cut. A restart from
+        ``done``/``failed`` (the Retry affordance) has no attempt in flight, and a
+        ``cancelled`` row in that sequence would paint "Highlights cancelled - Retry" for a
+        moment and put a version in the audit trail that describes nothing.
+        """
         task = self._task
         if task is not None and not task.done():
             await self._progress(inputs.details or {}, "cancelling")
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        self._task = None
-        if inputs.details is not None:
-            # The cut attempt's row, so the versions a reader walks are honest: ``cancelled``
-            # renders "Highlights cancelled - Retry" and the next version immediately
-            # supersedes it by the newest-version-wins rule.
-            await self._settle(inputs, state="cancelled")
-        inputs.version += 1
+            self._task = None
+            if inputs.details is not None:
+                await self._settle(inputs, state="cancelled")
+        # The next version is read from the JOURNAL, not counted in memory: the cancelled row
+        # above and any row written by a previous process both occupy version numbers, and
+        # reusing one would put two different rows at the same version -- a contradiction the
+        # newest-version-wins rule would silently resolve to whichever came last.
+        inputs.version = self._next_free_version(inputs)
         inputs.instruction = instruction
         self._remember(inputs)
         self._task = asyncio.get_running_loop().create_task(
@@ -703,11 +730,56 @@ class SupplementRunner:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             self._task = None
-        if inputs is None or inputs.details is None:
+        details = inputs.details if inputs is not None else None
+        if details is None:
+            # No live or remembered job: the row may still be in the journal (a restart, or a
+            # surface dismissing a callout from history), and dismissing it is exactly the
+            # spam signal the metric reads. Read the anchor's newest version and build on it.
+            details = await asyncio.to_thread(self._newest_row, anchor)
+        if details is None:
             return "already finished"
-        final = next_version(inputs.details, state="skipped")
+        final = next_version(details, state="skipped")
         final["dismissed"] = True
         self.set_open_row(None)
         await append_row(self._session.transcript, final)
         await self._progress(final, "skipped")
         return "dismissed"
+
+    def _next_free_version(self, inputs: _JobInputs) -> int:
+        """One past the newest row this anchor already has (memo §2.4's version rule).
+
+        Read from the journal rather than tracked in memory: a restart after a process
+        restart, or a steer on a row this runtime never wrote, must not reuse a version
+        number that is already on disk.
+        """
+        newest = self._newest_row(inputs.anchor)
+        if newest is None:
+            return inputs.version + 1
+        return int(newest.get("version", 0) or 0) + 1
+
+    def _newest_row(self, anchor: str) -> SupplementDetails | None:
+        """The newest journaled row for one anchor, or ``None`` (memo §2.4's reader rule).
+
+        A journal walk on a user action, not on a path: it is the only way ``dismiss`` can
+        honour a row whose job this process never ran (a restart, or a history-page click),
+        and the alternative -- refusing -- would silently drop the operator's one explicit
+        "not useful" signal.
+        """
+        rows: list[dict[str, Any]] = []
+        try:
+            for entry in self._session.transcript.entries():
+                if entry.type != "custom":
+                    continue
+                payload = entry.payload if isinstance(entry.payload, dict) else {}
+                if payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
+                    continue
+                details = payload.get("details")
+                if isinstance(details, dict) and str(details.get("anchor", "")) == anchor:
+                    rows.append(details)
+        except Exception:  # noqa: BLE001 -- an unreadable journal is a missing callout
+            logger.debug("supplement row could not be read for dismiss", exc_info=True)
+            return None
+        if not rows:
+            return None
+        newest = max(rows, key=lambda row: int(row.get("version", 0) or 0))
+        return cast(SupplementDetails, newest)

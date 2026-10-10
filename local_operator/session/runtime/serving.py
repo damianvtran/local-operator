@@ -107,7 +107,10 @@ from local_operator.session.transcript import (
     is_bookkeeping_message,
     transcript_is_bookkeeping_only,
 )
-from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE, newest_per_anchor
+from local_operator.supplements.contract import (
+    SUPPLEMENT_CUSTOM_TYPE,
+    newest_per_anchor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -9387,7 +9390,7 @@ class ServingSessionHandle(SessionHandle):
         rows: list[dict[str, Any]] = []
         try:
             transcript = self._session.transcript
-            for entry in transcript.entries:
+            for entry in transcript.entries():
                 if entry.type != "custom":
                     continue
                 payload = entry.payload if isinstance(entry.payload, dict) else {}

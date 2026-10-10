@@ -290,6 +290,7 @@ async def generate(
         result = on_progress(stage, clock() - start)
         if inspect.isawaitable(result):
             await result
+
     accepted: list[Component] = []
     rejected: list[Rejected] = []
     error = ""
@@ -301,10 +302,6 @@ async def generate(
     prompt = evidence_block(
         datasets, user_text=user_text, answer_text=answer_text, instruction=instruction
     )
-
-    def _progress(stage: str) -> None:
-        if on_progress is not None:
-            on_progress(stage, clock() - start)
 
     while turns < max(1, max_turns):
         turns += 1
@@ -325,7 +322,7 @@ async def generate(
         tokens_out += int(getattr(usage, "output_tokens", 0) or 0)
         if price is not None and usage is not None:
             cost += float(price(usage) or 0.0)
-        _progress("validating")
+        await _progress("validating")
         accepted_now, rejected_now = validator(text, list(datasets))
         accepted.extend(accepted_now)
         rejected = list(rejected_now)
