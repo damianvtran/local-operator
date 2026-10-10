@@ -225,6 +225,14 @@ include = ["local_operator*"]
 local_operator = [
     "prompts_md/*.md",
     "guides/*/*.md",
+    # The builtin skill catalog. Discovered as the LAST root (skills/api.py), so a
+    # user copy in any earlier root always wins. Enumerated per directory because
+    # package-data globbing does not recurse on all admitted setuptools versions;
+    # a new nesting level needs its own line. tests/unit/skills/
+    # test_builtin_package_data.py fails when either line is missing or a file on
+    # disk is uncovered.
+    "skills/builtin/*/SKILL.md",
+    "skills/builtin/*/references/*.md",
     "tui/*.tcss",
     # The i18n message catalogues and generated `Intl` tables (RFC §2.2): the
     # backend serves catalogues from an INSTALLED package, so a wheel without
