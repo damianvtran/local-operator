@@ -5,7 +5,9 @@
     "local_operator/i18n/",
     "scripts/i18n/",
     "local_operator/slash_commands.py",
-    "local_operator/settings_io.py"
+    "local_operator/settings_io.py",
+    "local_operator/tui/widgets/welcome.py",
+    "local_operator/keymap.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,

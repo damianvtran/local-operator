@@ -28,9 +28,11 @@ def test_shipped_wire_namespaces_exist() -> None:
     # exist so later slices populate them. `wire.slash` was populated by the S2
     # extraction slice, `wire.settings` by S1, and `wire.errors.settings` (a
     # CHILD of `wire.errors`, RFC §2.2) by the E1 slice; the rest stay empty
-    # until their own slices land.
+    # until their own slices land. The TUI wave writes `tui.*` files instead —
+    # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
+    # in its own slice test, so this list does not churn per TUI slice.
     assert catalogues.locales() == ("en",)
-    assert catalogues.namespaces("en") == (
+    assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.errors.settings",
         "wire.exec",
@@ -38,12 +40,14 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.notices",
         "wire.settings",
         "wire.slash",
-    )
+    }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
     assert catalogues.load_catalogue("en", "wire.errors.settings") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
+    assert "tui.welcome" in catalogues.namespaces("en")
+    assert catalogues.load_catalogue("en", "tui.welcome") != {}
 
 
 def test_hash_is_over_file_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
