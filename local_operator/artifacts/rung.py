@@ -37,6 +37,7 @@ __all__ = [
     "RungResult",
     "RungSkipped",
     "RungSpec",
+    "SourceSupport",
 ]
 
 
@@ -52,6 +53,24 @@ class CancelSupport(StrEnum):
     NONE = "none"
     QUEUED_ONLY = "queued_only"
     SIGNAL = "signal"
+
+
+class SourceSupport(StrEnum):
+    """How many source images a rung's edit/reference path can take.
+
+    The TYPED capability the cascade's edit filter and the tool's approval
+    describer switch on (the free-text ``capabilities`` set predates any
+    consumer and stays only as vocabulary). The rule binding declaration to
+    behaviour: **a rung declares ``sources != NONE`` only in the same change
+    that wires its edit path** — a test walks every rung and fails on either
+    drift direction (a capable rung that raises the unsupported skip, or a
+    NONE rung that does not). NONE rungs are pre-recorded as
+    ``skipped``/``unsupported`` attempts on an edit request and never called.
+    """
+
+    NONE = "none"
+    SINGLE = "single"
+    MULTI = "multi"
 
 
 @dataclass(frozen=True)
@@ -76,6 +95,20 @@ class RungSpec:
     #: "reported" | "rate_table" | "subscription" | None — see
     #: :data:`local_operator.artifacts.CostSource`.
     cost: CostSource | None = None
+    #: Edit/reference input this rung accepts — the typed capability the
+    #: cascade filter and the approval describer read (see SourceSupport).
+    #: ``NONE`` (the default) is the honest state for a rung whose edit path
+    #: is not wired: the filter records its skip without a call.
+    sources: SourceSupport = SourceSupport.NONE
+    #: The source-image cap when ``sources`` is not NONE (1, 5, 14, 16...) —
+    #: the provider's documented ceiling. Sized for the single-source v1
+    #: wire and the gate a future multi-source wire must respect; read by no
+    #: send path yet (v1 sends at most one source).
+    max_sources: int = 0
+    #: Whether the rung's edit path accepts a mask beside the source.
+    #: DECLARED for the coming capability surface (the Radient media route
+    #: will expose one) and pinned by tests; nothing sends a mask in v1.
+    mask: bool = False
 
 
 @dataclass
@@ -147,3 +180,16 @@ class RungResult:
     #: ``cost_source``, which keeps its meaning). ``None`` with no amount.
     billing_basis: BillingBasis | None = None
     cost_provenance: str | None = None
+    #: The hub-side usage-record id a SETTLED charge equals, when the
+    #: provider's terminal payload carries one (Radient's does once settled).
+    #: Absent-safe: most rungs never set it and a payload without it leaves
+    #: this ``None`` — it is an identifier a consumer can cite, never an
+    #: amount.
+    usage_record_id: str | None = None
+    #: Set when the caller supplied ``strength`` and THIS rung's edit path
+    #: dropped it (FAL's multi-reference editors document no strength
+    #: field). Which sub-schema an edit routes through is decided INSIDE the
+    #: rung, so the cascade cannot pre-record this the way it pre-records a
+    #: capability; the tool folds the flag into ``details["strength_ignored"]``
+    #: and the caption note so the drop is recorded, never silent.
+    strength_ignored: bool = False

@@ -61,6 +61,30 @@ async def _write_turns_async(directory, n: int, start: int = 0) -> list[str]:
     return ids
 
 
+def _write_turns_bulky(directory, n: int, *, pad: int) -> list[str]:
+    """Append n user/assistant turns whose text is ``pad`` characters long.
+
+    Exists so a fixture can put real BYTES below a compaction's kept window: the
+    suffix walk's granularity is a chunk, so bytes — not rows — are what shows
+    whether a cold fold was bounded.
+    """
+    transcript = Transcript(directory)
+    ids: list[str] = []
+    for turn in range(n):
+        text = f"bulk {turn} " + "y" * pad
+        user = Message.user(text, id=f"bu-{turn:03d}")
+        assistant = Message.assistant(text, id=f"ba-{turn:03d}")
+        asyncio.run(transcript.append_message(user))
+        asyncio.run(transcript.append_message(assistant))
+        ids.extend([user.id, assistant.id])
+    return ids
+
+
+def _write_custom(directory, custom_type: str, details: dict[str, Any]) -> None:
+    """Append one host bookkeeping row (roster/todo snapshots) to the journal."""
+    asyncio.run(Transcript(directory).append_custom(custom_type, details))
+
+
 def _publish_completion(session_id: str, *, read: bool = False) -> str:
     """Use the shared authority; transcript mtime now affects recency only."""
     store = AttentionStore()
@@ -77,6 +101,13 @@ def _fresh_render(directory) -> list[str]:
 
     transcript = Transcript(directory)
     return [e.id for e in fold_messages_to_entries(transcript.build_llm_history())]
+
+
+def _fresh_fold(directory) -> list[Any]:
+    """The full-reparse render rows, for comparisons that need kinds too."""
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    return fold_messages_to_entries(Transcript(directory).build_llm_history())
 
 
 def test_fold_cache_matches_full_reparse_on_append(tmp_path, monkeypatch) -> None:
@@ -183,6 +214,141 @@ def test_fold_cache_rebuilds_on_rotation(tmp_path, monkeypatch) -> None:
 
     state = cache.load(directory)
     assert [e.id for e in state.render] == _fresh_render(directory)
+
+
+def test_fold_cache_cold_build_reads_the_window_not_the_whole_journal(
+    tmp_path, monkeypatch
+) -> None:
+    """The cold fold is bounded by the replay window, not by the file.
+
+    ``entry_count`` is the cursor/file agreement invariant, and after this
+    change it counts the rows the fold CONSUMED. On a compacted journal that is
+    the replayed window: the rows between the file's start and the compaction
+    are never parsed, which is the whole point (a 121 MB conversation cost
+    1229 ms to fold from BOF and 11-130 ms from the window). A regression to a
+    whole-file read fails the inequality below, and the render comparison keeps
+    that from being bought with an incomplete history.
+    """
+    cfg = tmp_path / "config"
+    directory = cfg / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    # Content BELOW the kept window: bulky turns, then a compaction that keeps
+    # only the last three of them. This is what a whole-file fold pays for and a
+    # windowed one must not — measured in BYTES, because the walk's granularity
+    # is a chunk and the below-window rows are few and huge.
+    _write_turns_bulky(directory, 20, pad=100_000)
+    ids = _write_turns(directory, 40)
+    transcript = Transcript(directory)
+    asyncio.run(transcript.append_compaction("summary", ids[-6], tokens_before=100))
+    _write_turns(directory, 3, start=40)
+
+    path = directory / "transcript.jsonl"
+    file_rows = [line for line in path.read_text().splitlines() if line.strip()]
+    state = DurableFoldCache().load(directory)
+    fresh = _fresh_fold(directory)
+    # The compaction notice's id is a fresh uuid per fold (pre-existing), so the
+    # parity check is over the rows that carry real ids.
+    assert [e.id for e in state.render if e.kind != "notice"] == [
+        e.id for e in fresh if e.kind != "notice"
+    ]
+    assert state.entry_count < len(file_rows), "the cold fold consumed the whole journal"
+    assert (
+        state.window_bytes < path.stat().st_size / 2
+    ), "the cold fold read most of the journal: the replay window is not bounding it"
+    # At most one chunk past the boundary — the walk's own granularity, and the
+    # reason the bound is asserted in bytes rather than rows.
+    assert state.window_bytes <= 2 * (1 << 20)
+    assert state.entry_count < len(file_rows), "the cold fold consumed the whole journal"
+    assert state.offset == path.stat().st_size
+
+
+def test_fold_cache_seeds_a_roster_its_window_does_not_contain(tmp_path, monkeypatch) -> None:
+    """The roster comes from its own store when the window cannot reach it.
+
+    Measured on the 40 largest real journals: the roster's transcript row is
+    inside the replay window on **0** of them — it is written once, early, and
+    the window starts near the tail — so a window-only fold would serve every
+    phone a roster-less projection. The sidecar is the roster's own store and
+    the fresher of the two, which is the precedence
+    ``AttachedSession._restore_cold_subagents`` already applies.
+    """
+    cfg = tmp_path / "config"
+    directory = cfg / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    ids = _write_turns(directory, 40)
+    # The legacy transcript row, written once near the head. It is BELOW the
+    # compaction below, so the window will never see it.
+    _write_custom(directory, "subagent_roster", {"jobs": [{"id": "legacy"}], "records": []})
+    asyncio.run(Transcript(directory).append_compaction("summary", ids[-6], tokens_before=100))
+    # The sidecar, rewritten on every roster move: newer than that row.
+    (directory / "subagent-roster.v1.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generation": 7,
+                "jobs": [{"id": "from-sidecar"}],
+                "records": [{"job_id": "from-sidecar"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = DurableFoldCache().load(directory)
+    roster = state.latest_customs["subagent_roster"]
+    assert roster["jobs"] == [{"id": "from-sidecar"}], "the fold served the stale legacy row"
+    assert roster["records"] == [{"job_id": "from-sidecar"}]
+
+
+def test_fold_cache_falls_back_to_the_transcript_row_without_a_sidecar(
+    tmp_path, monkeypatch
+) -> None:
+    """A session with no sidecar still gets its roster, from the journal.
+
+    The fallback is a targeted backward lookup, not a full parse: one scan that
+    stops at the newest matching row. This is the shape the 10 of 40 largest
+    real journals WITHOUT a sidecar take, and it is what keeps the change from
+    trading a fast fold for a missing subagent panel.
+    """
+    cfg = tmp_path / "config"
+    directory = cfg / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    ids = _write_turns(directory, 40)
+    _write_custom(directory, "subagent_roster", {"jobs": [{"id": "legacy"}], "records": []})
+    asyncio.run(Transcript(directory).append_compaction("summary", ids[-6], tokens_before=100))
+    assert not (directory / "subagent-roster.v1.json").exists()
+
+    state = DurableFoldCache().load(directory)
+    assert state.latest_customs["subagent_roster"] == {"jobs": [{"id": "legacy"}], "records": []}
+
+
+def test_fold_cache_reads_a_sidecar_written_by_another_version_as_absent(
+    tmp_path, monkeypatch
+) -> None:
+    """A future sidecar is not guessed at; the transcript answer is used.
+
+    The daemon reads ``jobs``/``records`` straight off this payload, so a shape
+    this build does not know must not be passed through. Refusing it degrades
+    to the same answer as an absent file, which is the ``None`` contract the
+    reader documents.
+    """
+    cfg = tmp_path / "config"
+    directory = cfg / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    _write_turns(directory, 3)
+    (directory / "subagent-roster.v1.json").write_text(
+        json.dumps({"version": 99, "generation": 1, "jobs": "not-a-list", "records": []}),
+        encoding="utf-8",
+    )
+    state = DurableFoldCache().load(directory)
+    assert "subagent_roster" not in state.latest_customs
 
 
 def test_fold_cache_lru_evicts_oldest(tmp_path, monkeypatch) -> None:
@@ -1712,3 +1878,27 @@ def test_set_pins_answers_what_the_reader_reports(tmp_path, monkeypatch) -> None
     assert table.set_pins("gone-1", True) is False
     assert json.loads((cfg / PINS_FILE).read_text()) == ["gone-1"]
     assert table.pins == ()
+
+
+def test_a_legacy_roster_above_the_old_ceiling_still_reaches_the_phone(tmp_path, monkeypatch):
+    """QA round 1 (Q1): the 32 MiB line lost a legacy roster on a 35.5 MB journal.
+
+    The shape: no sidecar, the roster's only row near the head, and a journal
+    larger than the old bound. Base served 4 subagent rows here; the 32 MiB gate
+    served 0. The lookup now finds its row by bytes (``find_row_for_custom_type``),
+    so the ceiling is a sanity bound far above every real journal and the answer
+    is the one every other reader gives.
+    """
+    cfg = tmp_path / "config"
+    directory = cfg / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    _write_custom(directory, "subagent_roster", {"jobs": [{"id": "legacy"}], "records": []})
+    # More than the old 32 MiB ceiling, below the new sanity bound.
+    _write_turns_bulky(directory, 180, pad=100_000)
+    assert (directory / "transcript.jsonl").stat().st_size > 32 * 1024 * 1024
+    assert not (directory / "subagent-roster.v1.json").exists()
+
+    state = DurableFoldCache().load(directory)
+    assert state.latest_customs["subagent_roster"] == {"jobs": [{"id": "legacy"}], "records": []}

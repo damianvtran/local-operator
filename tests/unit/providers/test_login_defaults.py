@@ -646,3 +646,218 @@ def test_apply_writes_a_model_only_plan(tmp_path: Path) -> None:
     reloaded = ConfigManager(tmp_path)
     assert reloaded.get_config_value("hosting") == "anthropic"
     assert reloaded.get_config_value("model_name") == "claude-opus-5-5"
+
+
+# ---------------------------------------------------------------------------
+# The STRANDED default: registry-known but no credential behind it
+# ---------------------------------------------------------------------------
+
+
+def test_a_stranded_default_is_replaced_by_the_provider_just_signed_in() -> None:
+    """The bug this exists for: a real provider with NO credential is stranded.
+
+    ``is_unusable_hosting`` asks only whether the registry owns the id, so a
+    stale ``radient/auto`` (credential removed, or signed in on another device)
+    survived every later sign-in and left the user with a working key and no
+    working turn. With the accessibility set in hand, both halves are replaced,
+    and the receipt names both providers so the change is not silent.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("openai", "radient", "auto", oauth=False, accessible={"openai"})
+
+    assert plan.hosting == "openai"
+    assert plan.model_name == "gpt-6-astra"
+    assert plan.model_label == "GPT-6 Astra"
+    # The wording says WHY in the session sentence's own vocabulary ("not signed
+    # in"), because the two rows land two lines apart in the TUI and one
+    # condition spelled two ways read as two causes (UX review U2 / design D4).
+    assert plan.receipt == ("Default moved to openai/gpt-6-astra — not signed in to radient.")
+    # NOT the registry-repair flag: ``radient`` IS a provider this build owns,
+    # and callers read that flag as "the stored id was not a provider at all".
+    assert plan.repairing is False
+
+
+def test_an_unknowable_store_moves_nothing() -> None:
+    """``accessible=None`` is "cannot tell", never "none": the old behaviour holds.
+
+    Byte-for-byte, because the CLI, the TUI and the server all pass this value
+    through on a failed store read, and any of them flipping a default on an
+    unreadable store would be worse than the bug being repaired.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    legacy = plan_login_defaults("openai", "radient", "auto", oauth=False)
+    unknowable = plan_login_defaults("openai", "radient", "auto", oauth=False, accessible=None)
+    assert legacy == unknowable
+    assert (unknowable.hosting, unknowable.model_name, unknowable.receipt) == (None, None, None)
+
+
+def test_a_keyless_local_default_follows_the_configured_rule() -> None:
+    """A local server counts only once the user has POINTED one somewhere.
+
+    The picker offers ``ollama`` unconditionally (it could run), but an
+    unconfigured one has never served a chat — there is no endpoint on record —
+    so a later login to a working provider replaces that default rather than
+    leaving chats pointed at a port nobody confirmed. A user who runs one has a
+    ``base_url`` (``configure_local_providers``' opt-in), and then it is just a
+    working choice and is left alone.
+
+    The set ``credentialed_chat_providers`` returns implements that rule; these
+    two calls pin what the PLANNER does with each answer.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    unconfigured = plan_login_defaults(
+        "openai", "ollama", "llama3.1", oauth=False, accessible={"openai"}
+    )
+    assert unconfigured.hosting == "openai"
+    assert unconfigured.model_name == "gpt-6-astra"
+
+    configured = plan_login_defaults(
+        "openai", "ollama", "llama3.1", oauth=False, accessible={"openai", "ollama"}
+    )
+    assert (configured.hosting, configured.model_name, configured.receipt) == (None, None, None)
+
+
+def test_a_keyless_local_login_cannot_adopt_a_stranded_default() -> None:
+    """A local server's availability is not something a sign-in established.
+
+    ``ollama`` is absent from the set unless configured, so it is not an
+    accessible TARGET and the stranded default stays where the user put it — the
+    sign-in stored nothing that could serve a turn.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("ollama", "radient", "auto", oauth=False, accessible={"openai"})
+    assert (plan.hosting, plan.model_name) == (None, None)
+
+
+def test_an_accessible_deliberate_pick_is_left_alone() -> None:
+    """The user chose anthropic and still has it: never overridden by a later login."""
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults(
+        "openai", "anthropic", "claude-opus-5-5", oauth=False, accessible={"openai", "anthropic"}
+    )
+    assert (plan.hosting, plan.model_name, plan.receipt) == (None, None, None)
+
+
+def test_a_flavour_hosting_is_matched_by_storage_id() -> None:
+    """``anthropic-key`` keeps ``anthropic`` accessible: one account, one answer.
+
+    The set from ``usable_providers`` names the ids the registry offers (flavour
+    ids included), while a config hosting names the BASE provider — so the
+    comparison has to go through the storage id or a key-based sign-in would
+    read as "signed out" and be replaced.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults(
+        "openai",
+        "anthropic",
+        "claude-opus-5-5",
+        oauth=False,
+        accessible={"anthropic-key", "openai"},
+    )
+    assert (plan.hosting, plan.model_name, plan.receipt) == (None, None, None)
+
+
+def test_a_provider_with_no_default_model_clears_the_stranded_one() -> None:
+    """The repair may not keep a model from the provider being replaced."""
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults(
+        "openai-compatible",
+        "radient",
+        "auto",
+        oauth=False,
+        accessible={"openai-compatible"},
+    )
+    assert plan.hosting == "openai-compatible"
+    assert plan.model_name == ""
+    assert plan.receipt == (
+        "Default moved to openai-compatible — not signed in to radient; model cleared."
+    )
+
+
+def test_a_stranded_default_is_not_replaced_by_an_unreachable_provider() -> None:
+    """Both halves are required: the new provider must be PROVED accessible."""
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("openai", "radient", "auto", oauth=False, accessible=set())
+    assert (plan.hosting, plan.model_name, plan.receipt) == (None, None, None)
+
+
+def test_the_stranded_receipt_fits_a_row_at_100_columns() -> None:
+    """The measured 90-cell row budget (design D5/D8), with realistic ids.
+
+    The sentence mirrors the registry-repair one deliberately, so its budget is
+    the same family; this pins the length once so a longer verb cannot creep in.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("openai", "radient", "auto", oauth=False, accessible={"openai"})
+    assert plan.receipt is not None
+    assert len(plan.receipt) <= 90, len(plan.receipt)
+
+
+# ---------------------------------------------------------------------------
+# The SUBSCRIPTION arm's model (operator refinement, round 1): the first login's
+# target must be the latest model the subscription route serves
+# ---------------------------------------------------------------------------
+
+
+def test_the_openai_subscription_login_picks_the_subscription_latest_model() -> None:
+    """``openai``/``openai-device`` are OAuth arms; their target is GPT-6 Astra.
+
+    Both arms resolve to hosting ``openai`` and pass ``oauth=True`` into
+    ``suggested_model_for``; with no OAUTH override for this provider the
+    suggestion is the SHARED latest, which is also the id the ChatGPT/Codex
+    subscription route serves — ``model/defaults.py``'s own sourcing comment
+    ("The ChatGPT-subscription (Codex) route serves the same id, which is what
+    ``scripts/bench_openai_oauth_cache.py`` drives over OAuth") and
+    ``model/registry.py``'s ``gpt-6-astra`` row (``recommended=True``, "OpenAI's
+    most capable model"). Pinned per provider, because this is the model a
+    first-login re-home will put a conversation on.
+    """
+    from local_operator.model.defaults import suggested_model_for
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    suggested = suggested_model_for("openai", oauth=True)
+    assert suggested is not None and suggested.id == "gpt-6-astra"
+    for flavour in ("openai", "openai-device"):
+        plan = plan_login_defaults(flavour, "", "", oauth=None, accessible={"openai"})
+        assert plan.hosting == "openai"
+        assert plan.model_name == "gpt-6-astra", flavour
+
+    # The API-key arm agrees: one account, one latest id, whichever door the
+    # credential came through (`store_credentials_as` puts both under `openai`).
+    api_key_plan = plan_login_defaults("openai-api-key", "", "", oauth=None, accessible={"openai"})
+    assert api_key_plan.model_name == "gpt-6-astra"
+
+
+def test_the_anthropic_subscription_login_picks_the_subscription_latest_model() -> None:
+    """``anthropic`` is the Claude Pro/Max OAuth arm; its target is Opus 5.5.
+
+    ``model/registry.py``'s ``claude-opus-5-5`` comment records the evidence:
+    "also served by the live /v1/models listing under a Claude Pro/Max OAuth
+    grant", and the row is ``recommended=True`` ("the recommended starting
+    model"). ``anthropic-key`` (the API-key flavour) resolves to the same
+    hosting and the same suggestion, so the subscription and keyed routes cannot
+    drift apart on what "latest" means.
+    """
+    from local_operator.model.defaults import suggested_model_for
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    suggested = suggested_model_for("anthropic", oauth=True)
+    assert suggested is not None and suggested.id == "claude-opus-5-5"
+
+    subscription = plan_login_defaults("anthropic", "", "", oauth=None, accessible={"anthropic"})
+    assert subscription.hosting == "anthropic"
+    assert subscription.model_name == "claude-opus-5-5"
+
+    api_key_plan = plan_login_defaults(
+        "anthropic-key", "", "", oauth=None, accessible={"anthropic"}
+    )
+    assert api_key_plan.model_name == "claude-opus-5-5"

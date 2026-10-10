@@ -13,7 +13,8 @@ import time
 import uuid
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
 from local_operator.harness.types import AbortSignal
@@ -179,6 +180,12 @@ def apply_desktop_login_defaults(
     receipt explaining why. ``model_name`` is the display name ("Claude Opus
     5.5"), so the renderer can say what was chosen without a second lookup.
 
+    The LIVE-SESSION repair is deliberately not here: it is ``desktop_rehome``'s
+    job, runs later (it awaits every owner), and folds its count into this
+    receipt as the additive ``rehomed_sessions`` field. What this function
+    supplies to it is the CONFIG half — the default the user ended up with —
+    which the planner decides and the re-home then targets.
+
     ``manager`` is re-read first: the TUI, the CLI and other server routes write
     the same ``config.yml`` through their own managers, and planning against a
     stale in-memory copy -- or writing it back whole -- would decide on, and then
@@ -194,11 +201,35 @@ def apply_desktop_login_defaults(
             apply_login_defaults,
             plan_login_defaults,
         )
+        from local_operator.providers.model_access import (
+            credentialed_chat_providers_here,
+        )
 
         manager.reload()
         hosting = manager.get_config_value("hosting")
+        # The accessibility predicate the planner cannot derive itself: which
+        # providers have a credential on THIS machine right now. Computed AFTER
+        # the credential write (the caller stores first), so the provider the
+        # user just signed in to is in the set, and computed through the
+        # one-shot helper rather than a shared controller because this function
+        # runs on a WORKER thread (``asyncio.to_thread`` at both call sites) and
+        # a store read belongs to the thread that opened it. ``None`` (unreadable
+        # store) disables only the stranded-default repair — every other case is
+        # unaffected.
+        try:
+            accessible = credentialed_chat_providers_here(
+                config_dir=Path(manager.config_dir),
+                config_values=manager.get_config().values,
+            )
+        except Exception:  # noqa: BLE001 — the repair degrades, the login does not
+            logger.debug("could not read credential access for %s", provider_id, exc_info=True)
+            accessible = None
         plan = plan_login_defaults(
-            provider_id, hosting, manager.get_config_value("model_name"), oauth=oauth
+            provider_id,
+            hosting,
+            manager.get_config_value("model_name"),
+            oauth=oauth,
+            accessible=accessible,
         )
         wrote = apply_login_defaults(manager, plan)
         if plan.receipt is None:
@@ -231,6 +262,23 @@ class DesktopAuth:
         #: defaults through. ``None`` (a host built without one) skips that step
         #: rather than inventing a second manager on a possibly different root.
         self.config_manager = config_manager
+        #: Repairs LIVE sessions the just-stored credential stranded: an async
+        #: callable taking the login provider's id and returning
+        #: ``(moved, deferred)`` — the ``(old, new)`` label pairs that switched,
+        #: and the old labels of the busy conversations the owner refused, which
+        #: the receipt counts (see ``server/utils/desktop_rehome``). The provider
+        #: id is what the first-login rule is evaluated against, so it is passed
+        #: per call rather than frozen in. Installed by the routes host
+        #: (``get_desktop_auth``), which is the only place that can reach the
+        #: app's session pool; ``None`` — every direct construction, tests
+        #: included — means "this host has no sessions to repair", and the
+        #: sign-in still applies the config defaults exactly as before. Set as an
+        #: attribute rather than a constructor argument so the pool's lazy
+        #: construction (it is built by the first request that needs it) cannot
+        #: be frozen into a stale ``None`` here.
+        self.rehome: (
+            "Callable[[str], Awaitable[tuple[list[tuple[str, str]], list[str]]]] | None"
+        ) = None
         self.operations: dict[str, LoginOperation] = {}
         # Serialises ``start``'s cancel-then-create. Superseding AWAITS the old
         # flow's teardown (so its loopback port is free before the new flow
@@ -436,12 +484,35 @@ class DesktopAuth:
                 )
             if not op.abandoned:
                 # Off the event loop: it reads and writes config.yml.
-                op.defaults_applied = await asyncio.to_thread(
+                applied = await asyncio.to_thread(
                     apply_desktop_login_defaults,
                     self.config_manager,
                     definition.id,
                     oauth=definition.login_kind != "api_key",
                 )
+                # …and then repair the sessions this credential stranded (see
+                # server/utils/desktop_rehome). AFTER the config write, so the new
+                # default is what the re-home targets; guarded, because a sign-in
+                # that succeeded must not be reported as failed by a repair that
+                # could not reach an owner.
+                moved: list[tuple[str, str]] = []
+                deferred: list[str] = []
+                if self.rehome is not None:
+                    try:
+                        # The LOGIN PROVIDER rides along: the re-home is
+                        # first-login-only, and which call this is cannot be
+                        # derived from config or the store (operator
+                        # refinement, round 1).
+                        moved, deferred = await self.rehome(definition.id)
+                    except Exception:  # noqa: BLE001 — the sign-in already succeeded
+                        logger.warning(
+                            "could not re-home sessions after the sign-in to %s",
+                            definition.id,
+                            exc_info=True,
+                        )
+                from local_operator.server.utils.desktop_rehome import with_rehome_count
+
+                op.defaults_applied = with_rehome_count(applied, moved, deferred)
             settle("succeeded", "Sign-in complete.")
         except asyncio.CancelledError:
             settle("cancelled", "Sign-in cancelled.")

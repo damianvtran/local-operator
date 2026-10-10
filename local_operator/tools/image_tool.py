@@ -2,9 +2,10 @@
 
 **Why ONE tool** (design D1): the footprint ladder says a new core surface is
 the last rung, and a second tool (img2img) would duplicate the whole schema.
-``source_image_path`` present ⇒ image-to-image; absent ⇒ text-to-image. The
-legacy tree shipped two tools; their params collapse cleanly into one model,
-and the modern surface precedent is one params model per capability.
+``source_image_path`` or ``source_attachment`` present ⇒ image-to-image;
+absent ⇒ text-to-image. The legacy tree shipped two tools; their params
+collapse cleanly into one model, and the modern surface precedent is one
+params model per capability.
 
 **Why this tool exists at all** (rather than a skill + bash): generation needs
 structured params (size enum, count cap, seed), a live progress row and a
@@ -51,11 +52,13 @@ import asyncio
 import base64
 import logging
 import mimetypes
+import re
 from pathlib import Path
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from local_operator.artifacts.rung import SourceSupport
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -65,15 +68,18 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.imagegen import ImageRoute
 from local_operator.imagegen import availability as image_availability
 from local_operator.imagegen import rungs as image_rungs
 from local_operator.imagegen.cascade import (
     RUNG_LABELS,
+    RUNG_SPECS,
+    STRENGTH_ROUTES,
     ImageGenerationCancelled,
     ImageGenerationUnavailable,
     run_image_cascade,
 )
-from local_operator.media import sniff_image_file
+from local_operator.media import sniff_image, sniff_image_file
 from local_operator.tools.builtin import _guard
 
 logger = logging.getLogger(__name__)
@@ -105,21 +111,34 @@ IMAGE_SIZE_VALUES = (
 )
 
 
+# The class docstring renders VERBATIM into the wire schema's ``description``
+# (pydantic), and the context-budget ratchet bills every character of this
+# schema on every request — so it stays ONE line and the constraints live
+# where they are read on demand (``read tool://generate_image``, the image
+# guide), plus comments here. v1 takes a SINGLE source per call: at most one
+# of ``source_image_path`` or ``source_attachment``; the multi-source wire
+# (an additive ``source_attachments`` list) ships only alongside the request
+# shapes that can validate it — the rung specs' ``max_sources`` already
+# gate it.
 class GenerateImageParams(BaseModel):
     """Arguments for the ``generate_image`` tool."""
 
     model_config = ConfigDict(extra="forbid")
 
-    prompt: str = Field(description="Text description; with source_image_path, the edit to apply.")
+    prompt: str = Field(description="Text description; with a source, the edit to apply.")
     source_image_path: str | None = Field(
         default=None,
         description="Local image to edit (image-to-image); uploaded as a data URI.",
+    )
+    source_attachment: str | None = Field(
+        default=None,
+        description="Session image digest to edit (from a result caption).",
     )
     strength: float | None = Field(
         default=None,
         ge=0.0,
         le=1.0,
-        description="Edit strength 0..1; only with source_image_path.",
+        description="Edit strength 0..1; requires a source.",
     )
     image_size: Literal[
         "square_hd",
@@ -171,31 +190,35 @@ def build_generate_image_tool(context: ToolContext) -> AgentTool | None:
     )
 
 
-def _preferred_route_label() -> str:
+def _preferred_route_label(*, editing: bool = False) -> str:
     """The cascade's first available route, as a human label for the prompt.
 
     A read of the same sync probes the gate uses; "the configured provider"
     when nothing answers (the tool would not have been built, but a describer
-    must never fail a call — it is read by the approval renderer).
+    must never fail a call — it is read by the approval renderer). On an EDIT
+    request (``editing``) the rungs whose specs declare no source support are
+    SKIPPED, so the prompt never names a provider that cannot run the edit —
+    the same filter ``run_image_cascade`` applies before dispatch.
     """
     from local_operator.paths import config_dir
 
     cfg = config_dir()
     try:
-        if image_availability.radient_available(cfg):
-            return "Radient"
-        if image_availability.fal_key(cfg):
-            return "FAL"
-        if image_availability.openai_images_key(cfg):
-            return "OpenAI"
-        if image_availability.openai_subscription_grant(cfg):
-            return "ChatGPT plan"
-        if image_availability.google_key(cfg):
-            return "Google"
-        if image_availability.xai_available(cfg):
-            return "xAI"
-        if image_availability.openrouter_key(cfg):
-            return "OpenRouter"
+        probes = (
+            (ImageRoute.RADIENT, image_availability.radient_available(cfg)),
+            (ImageRoute.FAL, bool(image_availability.fal_key(cfg))),
+            (ImageRoute.OPENAI, bool(image_availability.openai_images_key(cfg))),
+            (ImageRoute.OPENAI_SUB, bool(image_availability.openai_subscription_grant(cfg))),
+            (ImageRoute.GOOGLE, bool(image_availability.google_key(cfg))),
+            (ImageRoute.XAI, bool(image_availability.xai_available(cfg))),
+            (ImageRoute.OPENROUTER, bool(image_availability.openrouter_key(cfg))),
+        )
+        for route, available in probes:
+            if not available:
+                continue
+            if editing and RUNG_SPECS[route].sources is SourceSupport.NONE:
+                continue
+            return RUNG_LABELS[route]
     except Exception:  # noqa: BLE001 - a describer must never fail a call
         logger.debug("image availability read failed for approval text", exc_info=True)
     return "the configured provider"
@@ -239,11 +262,20 @@ def _describe_generate_image_approval(args: dict[str, Any], cwd: str) -> str:
     num = num if isinstance(num, int) and not isinstance(num, bool) and num > 0 else 1
     size = args.get("image_size")
     size = size if isinstance(size, str) and size else "square_hd"
-    source = args.get("source_image_path")
-    provider = _preferred_route_label()
+    path = args.get("source_image_path")
+    digest = args.get("source_attachment")
+    if isinstance(path, str) and path:
+        source_label: str | None = path
+    elif isinstance(digest, str) and digest:
+        # The digest is abbreviated for the card: four hex chars plus an
+        # ellipsis identify it without making the consent line unreadable.
+        source_label = f"attachment {digest[:4]}…"
+    else:
+        source_label = None
+    provider = _preferred_route_label(editing=source_label is not None)
     what = (
-        f"Edit {num} image{'s' if num != 1 else ''} ({source})"
-        if isinstance(source, str) and source
+        f"Edit {num} image{'s' if num != 1 else ''} ({source_label})"
+        if source_label is not None
         else f"Generate {num} image{'s' if num != 1 else ''}"
     )
     return (
@@ -390,7 +422,50 @@ def _load_source_image(raw_path: str, cwd: str) -> str:
         raise InvalidToolArgumentsError(
             f"source_image_path could not be read ({exc.__class__.__name__}): {raw_path}"
         ) from exc
-    return f"data:{info.mime_type};base64,{base64.b64encode(data).decode('ascii')}"
+    return _as_data_uri(data, info.mime_type)
+
+
+def _as_data_uri(raw: bytes, mime_type: str) -> str:
+    """The one place a source becomes the wire's ``data:`` URI."""
+    return f"data:{mime_type};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+#: A store digest: 32 lowercase hex chars (``attachments`` prefixes a sha256
+#: with exactly this many). Validated BEFORE any filesystem touch — the store
+#: builds paths from the digest, so a traversal-shaped string must never
+#: reach it — and the shape keeps the field unmistakably distinct from a
+#: path. ``fullmatch``, not ``match`` with a ``$`` anchor: ``$`` also matches
+#: before a trailing newline, and this gate must be exact.
+_DIGEST_PATTERN = re.compile(r"[0-9a-f]{32}")
+
+
+def _load_source_attachment(digest: str) -> str:
+    """The ``data:`` URI for an image in the session's attachment store.
+
+    Same contract as :func:`_load_source_image`, by reference: a digest is a
+    MODEL fault to get wrong (bad shape, unknown digest, or bytes that are
+    not a readable image), so every refusal is an
+    ``InvalidToolArgumentsError`` the model can correct. The bytes are
+    sniffed like the file branch's, and the SNIFFED mime — not the store's
+    remembered one — becomes the data URI's type (the same trust rule the
+    paste path applies: bytes decide, labels do not).
+    """
+    if not _DIGEST_PATTERN.fullmatch(digest):
+        raise InvalidToolArgumentsError(
+            f"source_attachment must be a 32-character hex digest: {digest!r}"
+        )
+    from local_operator.session.attachments import AttachmentStore
+
+    resolved = AttachmentStore().get_bytes(digest)
+    if resolved is None:
+        raise InvalidToolArgumentsError(
+            f"source_attachment {digest} was not found in the session's attachment store."
+        )
+    raw, _stored_mime = resolved
+    info = sniff_image(raw)
+    if info is None:
+        raise InvalidToolArgumentsError(f"source_attachment {digest} is not a readable image.")
+    return _as_data_uri(raw, info.mime_type)
 
 
 def _artifact_name(model: str, content_type: str, index: int) -> str:
@@ -412,10 +487,11 @@ def _dimensions_text(assets: tuple[Any, ...], fallback: str) -> str:
     return ", ".join(seen) if seen else fallback
 
 
-#: Shown as the reason when a generation completed but NOTHING registered.
-#: It must state the likely cause, because the model's next step (re-run vs
-#: save the URLs by hand) depends on which half failed.
-_REGISTER_FAILED_NOTE = "could not be registered in the session's attachment store"
+#: Composed after "but none …" in the all-refused sentence, so the
+#: clause reads "none could be registered" — registration FAILED for
+#: every asset. It must state the likely cause, because the model's next
+#: step (re-run vs save the URLs by hand) depends on which half failed.
+_REGISTER_FAILED_NOTE = "could be registered in the session's attachment store"
 
 
 @_guard("generate_image")
@@ -437,13 +513,23 @@ async def execute_generate_image(
         params = GenerateImageParams.model_validate(args)
     except ValidationError as exc:
         raise InvalidToolArgumentsError(str(exc)) from exc
-    if params.strength is not None and params.source_image_path is None:
-        raise InvalidToolArgumentsError("strength requires source_image_path.")
+    if params.source_image_path and params.source_attachment:
+        raise InvalidToolArgumentsError(
+            "Pass exactly one of source_image_path or source_attachment."
+        )
+    if (
+        params.strength is not None
+        and params.source_image_path is None
+        and params.source_attachment is None
+    ):
+        raise InvalidToolArgumentsError("strength requires source_image_path or source_attachment.")
 
     cwd = (context.cwd if context is not None else None) or "."
     source_url: str | None = None
     if params.source_image_path:
         source_url = _load_source_image(params.source_image_path, cwd)
+    elif params.source_attachment:
+        source_url = _load_source_attachment(params.source_attachment)
 
     from local_operator.paths import config_dir
 
@@ -509,8 +595,11 @@ async def execute_generate_image(
         )
 
     if progress is not None:
+        edit_verb = (
+            "Edit" if (params.source_image_path or params.source_attachment) else "Generation"
+        )
         progress(
-            f"Generation complete — {len(outcome.assets)} image(s) via "
+            f"{edit_verb} complete — {len(outcome.assets)} image(s) via "
             f"{RUNG_LABELS.get(outcome.route, str(outcome.route))} ({outcome.model}).",
             image_rungs.progress_details(
                 stage="completed",
@@ -576,10 +665,29 @@ def _generated_result(
         "cost_provenance": outcome.cost_provenance,
         "attempts": _attempt_list(outcome.attempts),
     }
+    if outcome.usage_record_id:
+        # Absent-safe: present only when the winning rung's settled payload
+        # carried one (Radient's does once settled). The cost-channels lane
+        # consumes it; it is an identifier, never an amount.
+        details["usage_record_id"] = outcome.usage_record_id
+    if params.source_attachment:
+        details["source_attachment"] = params.source_attachment
+    editing = bool(params.source_image_path or params.source_attachment)
+    strength_ignored = False
+    if editing and params.strength is not None:
+        details["strength"] = params.strength
+        # Two sources, one receipt: a winning rung outside
+        # ``STRENGTH_ROUTES`` never receives ``strength``
+        # (``cascade._run_route`` hands it to two edit paths only), while
+        # ``outcome.strength_ignored`` covers a drop INSIDE a rung that does
+        # receive it (FAL's multi-reference editors document no strength
+        # field). Either way the drop is recorded, never silent
+        # (audit §ii.7; review round 1, D2/R1).
+        strength_ignored = outcome.route not in STRENGTH_ROUTES or outcome.strength_ignored
+        if strength_ignored:
+            details["strength_ignored"] = True
     if params.source_image_path:
         details["source_image_path"] = params.source_image_path
-        if params.strength is not None:
-            details["strength"] = params.strength
 
     label = RUNG_LABELS.get(outcome.route, str(outcome.route))
     if not blocks:
@@ -590,7 +698,8 @@ def _generated_result(
             content=[
                 TextContent(
                     text=(
-                        f"Generated {len(outcome.assets)} image(s) with {label} "
+                        f"{'Edited' if editing else 'Generated'} {len(outcome.assets)} "
+                        f"image(s) with {label} "
                         f"({outcome.model}) but none {_REGISTER_FAILED_NOTE} "
                         f"(sources: {', '.join(failed)})."
                     )
@@ -601,11 +710,17 @@ def _generated_result(
 
     noun = "image" if len(blocks) == 1 else "images"
     seed_text = f", seed {outcome.seed}" if outcome.seed is not None else ""
+    strength_text = (
+        f" Strength {params.strength:g} was ignored (not supported by this provider)."
+        if strength_ignored
+        else ""
+    )
     cost_text = f" Cost ${outcome.cost_usd:g}." if outcome.cost_usd is not None else ""
     caption = (
-        f"Generated {len(blocks)} {noun} with {label} ({outcome.model}), "
+        f"{'Edited' if editing else 'Generated'} {len(blocks)} {noun} with {label} "
+        f"({outcome.model}), "
         f"{_dimensions_text(outcome.assets, params.image_size)}{seed_text} — "
-        f"attached to the session (digest {', '.join(digests)}).{cost_text}"
+        f"attached to the session (digest {', '.join(digests)}).{cost_text}{strength_text}"
     )
     if failed:
         caption += (

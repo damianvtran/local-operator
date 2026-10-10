@@ -286,7 +286,10 @@ async def test_headless_turn_preserves_a_rich_frontend_checkpoint(tmp_path: Path
     assert isinstance(restored, dict)
     state = FrontendSessionState.model_validate(restored["state"])
     assert state.cumulative_parent_cost == 12.34
-    assert state.active_duration_s == 300.0
+    # Not EXACTLY 300.0 any more (review round 2, F8): the merge takes the larger
+    # of the two figures, so the headless runtime's own turn time adds to the
+    # TUI's. The invariant is that the durable figure is never lowered.
+    assert 300.0 <= state.active_duration_s < 301.0
     assert state.conversation_title == "Real title"
 
 

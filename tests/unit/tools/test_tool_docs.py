@@ -236,7 +236,12 @@ MEASURED_TOKENS: dict[str, int] = {
     "console": 1096,
     "edit": 351,
     "eval": 376,
-    "generate_image": 730,
+    #: Media wave-2 edit lane (2026-10-10): the source paragraph now names
+    #: the by-reference input (``source_attachment``) and the edit rungs;
+    #: +63 tokens over the 730 the slimming wave measured — re-measured
+    #: deliberately with this change, then again after the context-budget
+    #: round trimmed the schema description (795 -> 793).
+    "generate_image": 793,
     "glob": 91,
     "grep": 337,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
@@ -254,6 +259,11 @@ MEASURED_TOKENS: dict[str, int] = {
     "lsp": 276,
     "monitor": 357,
     "network": 874,
+    # NEW (quiet-turn S0a, docs/design/quiet-turns.md §4): the ``no_reply``
+    # doc — the argumentless call's description plus the "when NOT to call
+    # it" notes. Re-measured via this test's own print, and it is the ONLY
+    # entry that moved: every other count above is byte-identical.
+    "no_reply": 113,
     "patience": 334,
     "project": 1102,
     "project_delete": 95,

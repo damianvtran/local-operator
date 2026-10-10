@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -20,9 +21,11 @@ import pytest
 from local_operator.harness.types import (
     AskOption,
     AskQuestion,
+    ModelSpec,
     NoticeEvent,
     SteeringDeliveredEvent,
 )
+from local_operator.providers.model_access import REHOME_BUSY_REPLY
 from local_operator.session.frontend_state import SlashResult as _SlashResult
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import (
@@ -3221,3 +3224,662 @@ async def test_audio_is_probed_away_for_a_session_that_predates_the_keyword() ->
         assert asyncio.get_running_loop().time() < deadline
         await asyncio.sleep(0.01)
     assert session.prompt_calls == ["with a recording"]
+
+
+# ---------------------------------------------------------------------------
+# ``rehome_if_current`` — the compare-and-set behind a sign-in's repair
+# ---------------------------------------------------------------------------
+
+
+class _EventRecorder:
+    """Collects what the handle emits; notices ride a fire-and-forget task."""
+
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    async def __call__(self, event: object) -> None:
+        self.events.append(event)
+
+    def notices(self) -> list[str]:
+        return [e.text for e in self.events if isinstance(e, NoticeEvent)]
+
+
+def _rehome_handle(
+    monkeypatch: pytest.MonkeyPatch, current: str = "radient/auto"
+) -> tuple[Any, FakeSession, list[Any], _EventRecorder]:
+    """A handle whose session is pinned to ``current`` and records switches.
+
+    Returns ``(handle, session, applied_specs, recorder)`` — the records live in
+    the test's own variables rather than on the fake, so pyright checks every
+    read (the fake declares no such attributes, and a typo here would otherwise
+    be a passing test that asserts nothing).
+    """
+    handle, session = make_handle()
+    session.model_label = current
+    applied: list[Any] = []
+
+    def _set_model(spec: Any, *, explicit: bool = False) -> None:
+        applied.append(spec)
+        session.model_label = f"{spec.provider}/{spec.model_id}"
+
+    monkeypatch.setattr(session, "set_model", _set_model, raising=False)
+    recorder = _EventRecorder()
+    session._emit = recorder
+    return handle, session, applied, recorder
+
+
+def _patch_access(monkeypatch: pytest.MonkeyPatch, accessible: set[str] | None) -> None:
+    """Point the owner-side credential read at a fixed set (None = unreadable)."""
+    from local_operator.providers import model_access
+
+    monkeypatch.setattr(
+        model_access, "credentialed_chat_providers_here", lambda **kwargs: accessible
+    )
+
+
+async def _settle_notices(handle: Any) -> None:
+    """A notice is emitted on the handle's own task holder — await it, do not sleep."""
+    for task in list(handle._mcp_reload_tasks):
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def _drain_background(handle: Any) -> None:
+    """Await the handle's DETACHED tasks (the turn-end re-home retry holds one).
+
+    A fixed number of ``sleep(0)`` yields is not a join: the retry hops to a
+    thread for the credential read, so how many loop iterations it needs depends
+    on how fast that pool starts. Draining the holder is the join, and it is
+    also what makes the assertions after it readable as "the retry is over".
+    """
+    for _ in range(10):
+        tasks = [task for task in list(handle._background_tasks) if not task.done()]
+        if not tasks:
+            return
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_rehome_switches_a_stranded_idle_session_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported bug's second half: the pin outranks config, so the OWNER moves it.
+
+    Asserted on three things at once, because any one alone can lie: the receipt
+    word the caller counts, the SPEC the session received (the switch really
+    happened), and the emitted notice (the user is told why).
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    _patch_access(monkeypatch, {"deepseek"})
+
+    detail = await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+
+    assert detail == "rehomed: radient/auto → deepseek/deepseek-flash"
+    assert [(spec.provider, spec.model_id) for spec in applied] == [("deepseek", "deepseek-flash")]
+    await _settle_notices(handle)
+    assert recorder.notices() == ["Switched to deepseek/deepseek-flash — not signed in to radient."]
+
+
+@pytest.mark.asyncio
+async def test_rehome_loses_to_a_pick_that_landed_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The compare-and-set's whole reason: a /model that landed in between WINS.
+
+    The desktop's candidate list is a snapshot; this re-check is what keeps a
+    stale one from clobbering a deliberate choice with a model the user did not pick.
+    """
+    handle, session, applied, _recorder = _rehome_handle(
+        monkeypatch, current="anthropic/claude-opus-5-5"
+    )
+    _patch_access(monkeypatch, {"deepseek", "anthropic"})
+
+    detail = await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+
+    assert detail == "kept: the model moved to anthropic/claude-opus-5-5 since the sign-in"
+    assert applied == []
+
+
+class _AccessSession(FakeSession):
+    """A session with a canonical store and a real model spec — the claim's inputs.
+
+    ``FakeSession`` is deliberately storeless, so the serve-side publication
+    early-outs on it and every other test in this file keeps its shape; this
+    subclass is the one double that stands in for a real runtime session, whose
+    ``_frontend_state_store`` is what carries the claim.
+    """
+
+    def __init__(self, label: str = "radient/auto") -> None:
+        super().__init__()
+        from local_operator.session.frontend_state import (
+            FrontendSessionState,
+            FrontendStateStore,
+        )
+
+        self._frontend_state_store = FrontendStateStore(
+            FrontendSessionState(session_id="sess-1", epoch="e1")
+        )
+        provider, _, model_id = label.partition("/")
+        self.model = ModelSpec(provider=provider, model_id=model_id)
+        self.model_label = label
+        self.effective_model_label = label
+
+    def set_model(self, spec: Any, *, explicit: bool = False) -> None:
+        self.model = spec
+        self.model_label = f"{spec.provider}/{spec.model_id}"
+        self.effective_model_label = self.model_label
+
+
+def _store_with_credential(root: Path, provider: str = "deepseek") -> None:
+    """A real credential store under ``root`` holding one api_key row."""
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(root / "auth.db", config_dir=root)
+    store.upsert_credential(provider, {"type": "api_key", "source": "login", "key": "probe"})
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_serve_side_publishes_the_access_claim_at_open_and_on_switch(
+    tmp_path: Path,
+) -> None:
+    """A desktop-only session carries the band's claim: at open, and after a switch.
+
+    The TUI host publishes ``model_access`` from its own controller, so a
+    session served by a runtime — no TUI anywhere — had no claim at all and the
+    band's "not signed in to <provider>" sentence could never render. The
+    serve-side host publishes the same claim from its own store on the two
+    edges that change it: taking the session up, and every model switch (the
+    re-home lands through ``set_model_effort`` too).
+    """
+    root = tmp_path / "cfg"
+    root.mkdir()
+    _store_with_credential(root)
+
+    session = _AccessSession()
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp", config_dir=root)
+
+    opened = session._frontend_state_store.state.model_access
+    assert opened is not None
+    assert (opened.state, opened.provider, opened.label) == ("signed_out", "radient", "Radient")
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    switched = session._frontend_state_store.state.model_access
+    assert switched is not None
+    assert (switched.state, switched.provider, switched.label) == (
+        "ok",
+        "deepseek",
+        "DeepSeek",
+    )
+
+    # THE TUI PARITY, for the same store: the serve-side predicate is the
+    # controller call the TUI publishes from, and the claim is the SHARED
+    # builder's answer over it — one computation, two hosts.
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.controller import ProviderController
+    from local_operator.providers.model_access import usable_providers_here
+    from local_operator.session.frontend_state import model_access_claim
+
+    store = AuthStore(root / "auth.db", config_dir=root)
+    try:
+        tui_usable = ProviderController(store, root).usable_providers()
+    finally:
+        store.close()
+    assert usable_providers_here(config_dir=root) == tui_usable
+    tui_ok = model_access_claim("deepseek/deepseek-flash", tui_usable)
+    tui_out = model_access_claim("radient/auto", tui_usable)
+    assert tui_ok is not None and tui_ok.state == switched.state
+    assert tui_out is not None and tui_out.state == opened.state
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_store_clears_the_claim_rather_than_leaving_a_stale_ok(
+    tmp_path: Path,
+) -> None:
+    """A stale ``ok`` is the one wrong answer a reader cannot detect.
+
+    When the store cannot be read the host says nothing (``None``, the absent
+    field) rather than keeping the previous claim: "could not check" must not
+    re-present as "you are signed in".
+    """
+    root = tmp_path / "cfg"
+    root.mkdir()
+    _store_with_credential(root)
+
+    session = _AccessSession("deepseek/deepseek-flash")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp", config_dir=root)
+    claim = session._frontend_state_store.state.model_access
+    assert claim is not None and claim.state == "ok"
+
+    # The store becomes unreadable: the db file is replaced by a directory, the
+    # shape both the picker and the re-home degrade on (D18's sibling case).
+    (root / "auth.db").unlink()
+    (root / "auth.db").mkdir()
+
+    handle.publish_model_access()
+
+    assert session._frontend_state_store.state.model_access is None
+
+
+@pytest.mark.asyncio
+async def test_a_pick_during_the_credential_read_still_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compare re-runs immediately before the switch (review MINOR-1).
+
+    The entry checks run, then the credential read awaits the loop — and the
+    dispatch chain serializes same-connection frames, so a pick landing inside
+    that window comes from ANOTHER connection (a phone or peer) or from a turn
+    starting. Either way the user's decision is live and the CAS exists to lose
+    to it, so the pre-switch re-read must catch it.
+    """
+    from local_operator.providers import model_access
+
+    handle, session, applied, _recorder = _rehome_handle(monkeypatch)
+
+    def _pick_then_read(**kwargs: Any) -> set[str]:
+        # Exactly the window the reviewer reproduced: the set arrives, but a
+        # selection landed while it was being read.
+        session.model_label = "openai/gpt-6-astra"
+        return {"deepseek"}
+
+    monkeypatch.setattr(model_access, "credentialed_chat_providers_here", _pick_then_read)
+
+    detail = await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+
+    assert detail == "kept: the model moved to openai/gpt-6-astra since the sign-in"
+    assert applied == []
+    assert session.model_label == "openai/gpt-6-astra"
+
+
+@pytest.mark.asyncio
+async def test_rehome_never_cuts_across_live_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sleeping on a stranded model is not a defect: switching mid-turn is.
+
+    And the refusal is SPOKEN (UX review U1): the caller only counts the word,
+    so the conversation itself gets the one sentence naming what happens next —
+    said once per attempt, for either flavour of busy (a turn, or subagents
+    still running).
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    _patch_access(monkeypatch, {"deepseek"})
+
+    session.is_streaming = True
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    session.is_streaming = False
+    session.running_children = 2
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+    await _settle_notices(handle)
+    assert (
+        recorder.notices()
+        == ["This conversation stays on radient/auto until the turn ends — /model switches it now."]
+        * 2
+    )
+    assert applied == []
+
+
+@pytest.mark.asyncio
+async def test_a_busy_refusal_is_armed_for_the_turn_end_and_completes_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The serve-side half of the deferral promise (round-2 M1/D6/Q2).
+
+    ``rehome_deferred_notice`` says the conversation waits "until the turn
+    ends". On a runtime-served session nobody used to keep that promise: the
+    owner emitted the sentence and returned, so the session stayed on the
+    unreachable model for good. The turn hook now retries the SAME
+    compare-and-set, and either outcome speaks: this test walks the completing
+    half — the move lands and the ordinary move notice follows the deferral.
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+    assert handle._rehome_pending is not None
+
+    session.is_streaming = False
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert session.model_label == "deepseek/deepseek-flash"
+    assert handle._rehome_pending is None
+    assert [spec.provider for spec in applied] == ["deepseek"]
+    assert recorder.notices()[-1] == (
+        "Switched to deepseek/deepseek-flash — not signed in to radient."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_retry_that_can_no_longer_land_says_so_and_disarms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The close-out is reachable (round-2 U3/D5/Q1) and the arm does not linger.
+
+    The promise's other outcome: the target credential is gone by the time the
+    turn ends, so the retry can never land. Before this the arm stayed set
+    across turn ends — silent at every one — and a later turn end could move the
+    session on an authorization given turns earlier once the credential came
+    back. Now the retry closes the arm with one sentence, and a restored
+    credential moves nothing without a fresh login.
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    session.is_streaming = False
+    _patch_access(monkeypatch, {"openrouter"})  # deepseek's credential is gone
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert applied == [], "nothing moved"
+    assert handle._rehome_pending is None, "the arm does not survive a failed retry"
+    assert recorder.notices()[-1] == (
+        "This conversation is still on radient/auto — /model switches it when you are ready."
+    )
+
+    # Restoring the credential does NOT resurrect the repair: the authority was
+    # spent (and a fresh first login would have to grant it again).
+    _patch_access(monkeypatch, {"deepseek"})
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+    assert applied == [] and session.model_label == "radient/auto"
+
+
+@pytest.mark.asyncio
+async def test_the_gate_is_re_applied_when_the_retry_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider login landing before the turn end takes the authority away.
+
+    Round-3 MINOR-1: the docstrings lean on "the gate runs on every attempt,
+    retry included", and nothing pinned it. With the gate mutated out this test
+    moves the session; with it in place nothing moves and the close-out speaks
+    once.
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    # A second provider signs in before the turn ends: this is no longer the
+    # first provider login, so the deferred move must NOT happen.
+    session.is_streaming = False
+    _patch_access(monkeypatch, {"deepseek", "openrouter"})
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert applied == [], "a non-first login must not move the conversation"
+    assert session.model_label == "radient/auto"
+    assert handle._rehome_pending is None
+    assert recorder.notices() == [
+        "This conversation stays on radient/auto until the turn ends — /model switches it now.",
+        "This conversation is still on radient/auto — /model switches it when you are ready.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_two_settles_before_the_first_retry_lands_move_it_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-3 MINOR-2: one in-flight retry, however many turn ends race it.
+
+    The retry's CAS re-check precedes its own credential read, so two live
+    retries both pass it — the probe saw two applies and two notices. The
+    spawn guard collapses them to one; without it this test fails.
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    session.is_streaming = False
+    handle._on_turn_settled()
+    await asyncio.sleep(0)  # the first retry is now live, parked on its read
+    handle._on_turn_settled()  # a second turn end before it lands
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert [spec.provider for spec in applied] == ["deepseek"], "moved exactly once"
+    assert session.model_label == "deepseek/deepseek-flash"
+    assert (
+        recorder.notices().count("Switched to deepseek/deepseek-flash — not signed in to radient.")
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_disposing_handle_starts_no_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retiring work must not begin new turns of its own (round-3 MINOR-2).
+
+    The probe moved the model on a disposing handle; the schedule and the spawn
+    both refuse, and the arm dies with the handle.
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    session.is_streaming = False
+    handle._disposing = True
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert applied == [] and session.model_label == "radient/auto"
+    assert handle._rehome_retry_task is None
+    assert recorder.notices() == [
+        "This conversation stays on radient/auto until the turn ends — /model switches it now."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_dispose_landing_on_the_parked_read_stops_the_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-4 Q1: the third window — a dispose during the credential read.
+
+    The schedule and spawn guards cannot see it: this retry already passed
+    them and is parked on the ``to_thread`` read when ``dispose()`` lands (its
+    first act is ``_disposing = True``). The pre-set re-check is the one that
+    keeps "retiring work begins no new work" true to the end — without it the
+    model moves and the notice paints on a handle that is going away.
+    """
+    import threading
+
+    from local_operator.providers import model_access
+
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _parked_read(**kwargs: Any) -> set[str]:
+        entered.set()
+        release.wait(timeout=10)
+        return {"deepseek"}
+
+    monkeypatch.setattr(model_access, "credentialed_chat_providers_here", _parked_read)
+
+    session.is_streaming = False
+    handle._on_turn_settled()
+    for _ in range(300):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert entered.is_set(), "the retry reached the credential read"
+
+    await handle.dispose()  # the real coroutine, flag included
+    release.set()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert applied == [], "a retiring handle must not move the model"
+    assert session.model_label == "radient/auto"
+    assert recorder.notices() == [
+        "This conversation stays on radient/auto until the turn ends — /model switches it now."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_switch_that_does_not_take_closes_the_arm_out_loud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-3 MINOR-3: a retry whose set did not stick must not go quiet.
+
+    The conversation is still on the unreachable model and the repair cannot
+    land, so the close-out speaks and the arm clears — the alternative was a
+    silent re-try at every later turn end.
+    """
+    handle, session, _applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    async def _no_take(provider: str, model_id: str, effort: str | None) -> str:
+        return "no-op"
+
+    session.is_streaming = False
+    monkeypatch.setattr(handle, "set_model_effort", _no_take)
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert session.model_label == "radient/auto"
+    assert handle._rehome_pending is None, "the arm does not survive"
+    assert recorder.notices()[-1] == (
+        "This conversation is still on radient/auto — /model switches it when you are ready."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_pick_inside_the_credential_read_gets_the_same_deferral_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-2 MINOR-2: the late busy refusal is SPOKEN like the entry ones.
+
+    The pool counts every ``REHOME_BUSY_REPLY`` as a deferral, so a refusal that
+    reached the receipt but not the conversation was one counted silence.
+    """
+    from local_operator.providers import model_access
+
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+
+    def _turn_starts_then_read(**kwargs: Any) -> set[str]:
+        # The turn starts inside the credential read: the entry idle check saw
+        # an idle session, the pre-switch one will not.
+        session.is_streaming = True
+        return {"deepseek"}
+
+    monkeypatch.setattr(model_access, "credentialed_chat_providers_here", _turn_starts_then_read)
+
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+    await _settle_notices(handle)
+
+    assert applied == []
+    assert handle._rehome_pending is not None
+    assert recorder.notices() == [
+        "This conversation stays on radient/auto until the turn ends — /model switches it now."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rehome_refuses_when_either_side_of_the_pair_is_wrong(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both re-checks on the owner: the old provider signed back in, or the new one
+    is not signed in HERE (the desktop runs under its own config root)."""
+    handle, session, applied, _recorder = _rehome_handle(monkeypatch)
+
+    _patch_access(monkeypatch, {"deepseek", "radient"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == "kept: radient is signed in again"
+    )
+
+    _patch_access(monkeypatch, {"openai"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == "kept: deepseek is not signed in on this device"
+    )
+
+    _patch_access(monkeypatch, None)
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == "kept: the credential store could not be read"
+    )
+    assert applied == []
+
+
+@pytest.mark.asyncio
+async def test_rehome_reports_a_switch_that_did_not_take(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The read-back decides, never the setter's own return (the ``set_model``
+    contract: it assigns the spec before its journal writes, so a later raise can
+    still leave a switch in force — and a silent no-op must not read as one)."""
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    _patch_access(monkeypatch, {"deepseek"})
+
+    def _set_model(spec: Any, *, explicit: bool = False) -> None:
+        # A host that swallowed the switch: the selection does not move.
+        return None
+
+    monkeypatch.setattr(session, "set_model", _set_model, raising=False)
+
+    detail = await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+
+    assert detail == "kept: the switch did not take (still radient/auto)"
+    assert session.model_label == "radient/auto"

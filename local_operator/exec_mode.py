@@ -31,8 +31,8 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from local_operator import procstate
 from local_operator.interpreter import python_argv
+from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.procstate import O_BINARY
 
 
@@ -712,20 +712,15 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     log_path = logs_root / f"exec-{timestamp}-{slugify(command)}-{job_id}.log"
     argv = build_worker_argv(command, exec_args)
     argv.append(f"--job-id={job_id}")
-    popen_kwargs: dict[str, Any] = dict(
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        close_fds=True,
-    )
-    # ``start_new_session`` is documented "(POSIX only)" and Windows SILENTLY
-    # ignores it — its ``_execute_child`` parameter is literally named
-    # ``unused_start_new_session`` — so a hand-rolled POSIX branch here looked
-    # like a detached worker on Windows while the child kept this console: a
-    # Ctrl-C and a console close both reached it, which is the property this
-    # call exists to get. ``procstate.detached_popen_kwargs`` owns the
-    # per-platform answer and the reasoning; this is the last call site that
-    # spelled its own.
-    popen_kwargs.update(procstate.detached_popen_kwargs())
+    # The worker is spawned through ``macos_disclaim.spawn_disclaimed`` — the
+    # one helper that detaches per platform AND, on macOS, disclaims the
+    # responsibility chain this CLI inherited, so a force-quit of the desktop
+    # app at the root of that chain can never sweep an exec worker
+    # (2026-10-09 incident). The helper owns ``start_new_session``,
+    # ``close_fds`` and stdio wholesale, and falls back to the previous
+    # ``subprocess.Popen(..., **detached_popen_kwargs())`` shape exactly where
+    # the platform lacks the lever; see the module for the fallback contract.
+    # It also records ``LOP_SPAWN_CHAIN`` for the worker's signal receipt.
 
     # Name the detached worker in the OS process listing, keyed by the job id
     # this call already prints to the user, so `ps` and `lop`'s own job output
@@ -739,14 +734,19 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     argv0, executable = procname.spawn_identity(procname.LABEL_EXEC, job=job_id)
     argv = list(argv)
     argv[0] = argv0
-    popen_kwargs["executable"] = executable
 
     with _open_log_file(log_path) as log_handle:
         log_handle.write(
             f"# local-operator exec background job\n# prompt: {command}\n".encode("utf-8")
         )
         log_handle.flush()
-        process = subprocess.Popen(argv, stdout=log_handle, **popen_kwargs)
+        process = spawn_disclaimed(
+            argv,
+            executable=executable,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+        )
 
     _append_job_record(log_path, command, process.pid, job_id=job_id, requested_team=exec_args.team)
     # --json and --background are independent flags, so these notices must not

@@ -46,6 +46,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+import local_operator.server.routes.desktop_sessions as desktop_sessions_routes
 from local_operator.config import ConfigManager
 from local_operator.harness.types import ModelSpec
 from local_operator.server.retire import RETIRING_STATE_ATTR
@@ -388,6 +389,40 @@ async def test_a_visible_watch_beat_arms_the_drafts_warm(draft_app, monkeypatch)
         )
         assert engaged[0] == ("engage", False), "the lease warm must be a BACKGROUND bind"
         assert bridge.warm_task is not None
+
+
+@pytest.mark.asyncio
+async def test_the_warm_route_schedules_the_index_warm_only_when_it_admits_the_call(
+    draft_app, monkeypatch
+) -> None:
+    """The per-session index warm rides this route, and only past its admissions.
+
+    Round 3's F12: scheduling it before the ``errors()``/``session()`` block ran a
+    scan for a call the route then REFUSED — an unknown session (404) or a daemon
+    that has latched against new work (503, ``daemon-retiring``), and a retiring
+    daemon must not start a disk write on its way out. The refused half is the
+    discriminating one: with the call placed before the block, the first assertion
+    sees a scheduled scan.
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    scheduled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        desktop_sessions_routes,
+        "start_session_warm",
+        lambda store_root, session_id: scheduled.append((str(store_root), session_id)) or True,
+    )
+
+    refused = await client.post("/v1/desktop/sessions/dead0000beef/warm", json={})
+    assert refused.status_code == 404, refused.text
+    assert scheduled == [], "a refused warm scheduled a scan"
+
+    draft_id = await _mint(client, root)
+    async with pool.session(draft_id, read=True, allow_draft=True):
+        response = await client.post(f"/v1/desktop/sessions/{draft_id}/warm", json={})
+
+    assert response.status_code == 200, response.text
+    assert scheduled == [(str(root), draft_id)]
 
 
 @pytest.mark.asyncio
