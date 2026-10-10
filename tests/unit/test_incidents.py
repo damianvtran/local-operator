@@ -848,3 +848,74 @@ def test_signal_receipt_detail_states_the_gap_and_never_names_a_sender() -> None
     # another device, so the clock it is on travels with it.
     dated = render_signal_receipt_detail(signal_name="SIGTERM", at=1_760_000_000.0)
     assert re.search(r"received at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}", dated), dated
+
+
+def test_signal_detail_names_a_gone_app_ancestor_and_claims_no_more() -> None:
+    """2026-10-09: the one direction fact a receipt can carry, stated as measured.
+
+    The clause names the app at the ROOT of the recorded chain and says only what
+    the liveness probe saw — "no longer running". It must not upgrade that to
+    "force-quit" or "killed": the receipt cannot observe who signalled, and the
+    tests around this one pin that it never infers beyond its evidence.
+    """
+    from local_operator.incidents import KILL_UNATTRIBUTED, render_signal_receipt_detail
+
+    detail = render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        at=1_760_000_000.0,
+        spawn_chain=[
+            {"pid": 111, "argv0": "lop", "alive": False},
+            {
+                "pid": 66213,
+                "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+                "alive": False,
+            },
+        ],
+    )
+    assert (
+        "the app that spawned this runtime's chain (pid 66213, "
+        "/Applications/Local Operator.app/Contents/MacOS/Local Operator)"
+        " was no longer running when the signal arrived"
+    ) in detail
+    assert "force quit" not in detail and "force-quit" not in detail
+    assert KILL_UNATTRIBUTED in detail
+
+
+def test_signal_detail_skips_alive_or_unprobed_ancestors() -> None:
+    from local_operator.incidents import render_signal_receipt_detail
+
+    for alive in (True, None):
+        detail = render_signal_receipt_detail(
+            signal_name="SIGTERM",
+            spawn_chain=[
+                {
+                    "pid": 66213,
+                    "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+                    "alive": alive,
+                }
+            ],
+        )
+        assert "no longer running" not in detail, alive
+
+
+def test_signal_detail_ignores_non_app_members_and_malformed_chains() -> None:
+    from local_operator.incidents import render_signal_receipt_detail
+
+    assert "no longer running" not in render_signal_receipt_detail(
+        signal_name="SIGTERM", spawn_chain=[{"pid": 9, "argv0": "/bin/zsh", "alive": False}]
+    )
+    assert "no longer running" not in render_signal_receipt_detail(
+        signal_name="SIGTERM", spawn_chain="garbage"
+    )
+    assert "no longer running" not in render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        spawn_chain=[{"argv0": "/Applications/X.app/Contents/MacOS/X", "alive": False}],
+    )
+
+
+def test_signal_detail_without_a_chain_is_byte_identical_to_before() -> None:
+    from local_operator.incidents import render_signal_receipt_detail
+
+    assert render_signal_receipt_detail(signal_name="SIGTERM") == (
+        " (unattributed, SIGTERM received from an unidentified sender; nobody asked for a stop)"
+    )

@@ -20,7 +20,13 @@ WHAT IT CAN AND CANNOT SAY (stated here once, repeated in ``docs/EXEC.md``):
   discards it, so the receipt says ``sender: unavailable`` rather than guessing.
   The only path that NAMES a caller is a covering stop marker, and that comes from
   the acting party's own attestation, not from this module observing anything.
-* SIGKILL, a crash or a power loss: NOTHING. The target is not executing. Those
+  What the receipt CAN add about direction is the spawn chain this process was
+  born into (``LOP_SPAWN_CHAIN``, recorded by ``macos_disclaim``), snapshotted
+  with per-member liveness at arrival: nothing here names a sender, but the
+  renderer can say that the app at the root of that chain was already gone when
+  the signal landed (2026-10-09 incident), which is evidence the marker-less
+  case previously could not carry.
+  * SIGKILL, a crash or a power loss: NOTHING. The target is not executing. Those
   stay on the acting party's marker (SIGKILL rung) or on no evidence at all.
 
 PAIRING IS DECIDED AT WRITE TIME. The marker is staged BEFORE the signal by
@@ -32,7 +38,8 @@ never retroactively sanction it. The residual false-sanction risk (a stale
 in-window marker adjacent to an unrelated signal) is bounded by
 :data:`PAIR_WINDOW_S` and is a stated limit, not a hidden one.
 
-Stdlib plus ``registry`` and ``types`` only: this is imported from the runtime's
+Stdlib plus ``registry``, ``types`` and ``macos_disclaim`` (itself stdlib-only,
+and imported for the spawn-chain snapshot): this is imported from the runtime's
 signal callback and from the exec worker, and neither may pay for anything
 heavier. Every function that runs on a signal-arrival path NEVER RAISES.
 """
@@ -46,6 +53,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from local_operator.macos_disclaim import snapshot_spawn_chain
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import SIGNAL_DRAIN_S
 
@@ -285,9 +293,17 @@ def observe(
     covered = marker_covers_signal(
         marker, session_id=session_id, pid=pid, started_at=started_at, at=at
     )
-    return build_signal(
+    entry = build_signal(
         name, number, at=at, in_flight=in_flight, action=action, marker=marker, covered=covered
     )
+    # The spawn chain with liveness AT THIS INSTANT: the one piece of direction
+    # evidence a target can honestly carry about an unmarked signal (its app
+    # ancestor already being gone). ``None`` when this process was not spawned
+    # with a chain — absent stays absent, and the renderer says nothing extra.
+    chain = snapshot_spawn_chain()
+    if chain is not None:
+        entry["spawn_chain"] = chain
+    return entry
 
 
 def record(
@@ -453,5 +469,6 @@ def cut_off_verdict(
             signal_name=str(entry.get("name") or ""),
             at=entry.get("at"),
             count=int(count or 1),
+            spawn_chain=entry.get("spawn_chain"),
         ),
     )
