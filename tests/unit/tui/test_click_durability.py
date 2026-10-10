@@ -51,11 +51,22 @@ def _refuse_seamless_source() -> None:
     banner. That is not hypothetical: the one banner this feature has put on a
     screen unasked (2026-10-09 20:44:18) came through exactly this shape. The
     check makes such a run fail before ``clang`` is even invoked.
+
+    The check asserts on the seam's EXECUTABLE anchors — the environment read
+    and the call that consults it — never the bare name: the prose comments in
+    ``notifier.m`` legitimately name the variable, so a bare substring would
+    pass a source whose seam code had been deleted, and the next run would
+    build a helper that ignores ``DRY_RUN=1``. Deleting the branch removes
+    ``dryRunRequested()``; deleting the read removes the ``getenv`` call;
+    neither anchor appears in the comments.
     """
     source = (Path(notifier_app.__file__).parent / "notifier.m").read_text(encoding="utf-8")
-    assert "LOCAL_OPERATOR_NOTIFIER_DRY_RUN" in source, (
-        "refusing to build or run the notifier helper: this source has no dry-run "
-        "seam, so it would ignore LOCAL_OPERATOR_NOTIFIER_DRY_RUN"
+    assert (
+        'getenv("LOCAL_OPERATOR_NOTIFIER_DRY_RUN")' in source and "dryRunRequested()" in source
+    ), (
+        "refusing to build or run the notifier helper: this source does not read "
+        "LOCAL_OPERATOR_NOTIFIER_DRY_RUN and consult it before posting (the seam "
+        "is absent or deleted)"
     )
 
 
@@ -1141,13 +1152,20 @@ def test_a_unit_run_cannot_start_a_real_notifier_without_the_seam(tmp_path: Path
     passes. A guard asserted by nothing is one refactor from being gone, and a
     guard that refuses too much is one refactor from being deleted: so this pin
     shows the refusal AND the visible opt-in every helper run in this file uses.
+
+    The refusal arm passes an explicit environment WITHOUT the seam: the guard
+    judges the SPAWN's environment, so an ambient
+    ``LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1`` in the runner must not mask the
+    refusal (a spawn that genuinely inherits a seam runs in dry-run by
+    definition, and is correctly allowed).
     """
     fake = tmp_path / "notifier"
     fake.write_text("#!/bin/sh\necho ran\n", encoding="utf-8")
     fake.chmod(0o755)
 
+    seam_off = {k: v for k, v in os.environ.items() if k != "LOCAL_OPERATOR_NOTIFIER_DRY_RUN"}
     with pytest.raises(RuntimeError, match="LOCAL_OPERATOR_NOTIFIER_DRY_RUN"):
-        subprocess.run([str(fake)], capture_output=True, text=True)
+        subprocess.run([str(fake)], capture_output=True, text=True, env=seam_off)
 
     with pytest.raises(RuntimeError, match="display notification"):
         subprocess.run(

@@ -1379,9 +1379,12 @@ def _run_action_probe(notifier: str) -> bool:
     2 s stall on a loaded machine a permanent plain-toast verdict (found in
     review; the in-memory-only version of the same False died with the process).
     Conclusive means the child RAN TO COMPLETION, exited 0 and printed a help
-    text we could read; anything else answers False for THIS process (so a long-
-    lived TUI does not re-fork a flaky binary per banner) and leaves the disk
-    untouched, so the next process asks again.
+    text we could read; only that answer is cached. Anything else answers from
+    what this invocation showed and leaves the disk untouched, so the next
+    process asks again: a timeout or an exception answers False for THIS process
+    (so a long-lived TUI does not re-fork a flaky binary per banner), while a
+    non-zero exit is answered from its output — text that still prints
+    ``--action`` answers True for THIS call.
     """
     conclusive = False
     try:
