@@ -83,7 +83,6 @@ PREWARM_MIN_FREE_BYTES = 2 * 1024**3
 #: same on a 4-core laptop and a 14-core build host.
 PREWARM_MAX_LOAD_PER_CPU = 1.0
 
-#: Strong references to the warm tasks, for the reason
 #: Journals whose anchor question was SETTLED in this process, as
 #: ``{session directory: (inode, size)}``.
 #:
@@ -95,8 +94,11 @@ PREWARM_MAX_LOAD_PER_CPU = 1.0
 #: journal the anchor exists for is never reached: measured on a real store as
 #: ``pass 1/2/3: candidates=['new', 'old'] started=1 anchor(new)=False anchor(old)=False``.
 #: Recording the settlement keeps the queue moving; the ``(inode, size)`` pair
-#: invalidates it the moment the journal changes, so a row that appears later (or a
-#: torn row that completes) is examined again.
+#: invalidates it when the journal GROWS, is replaced, or is trimmed, so a row that
+#: appears later (or a torn row that completes) is examined again. The limit, stated
+#: rather than implied: a same-size IN-PLACE rewrite changes neither number and keeps
+#: the settlement — the write path appends or replaces, never rewrites in place, so
+#: this is a limit of the instrument rather than a case a writer reaches.
 _NO_ANCHOR_NEEDED: dict[str, tuple[int, int]] = {}
 
 #: Single-flight guard for the anchor write, keyed by session directory.
@@ -109,6 +111,7 @@ _NO_ANCHOR_NEEDED: dict[str, tuple[int, int]] = {}
 _ANCHOR_IN_FLIGHT: set[str] = set()
 _ANCHOR_LOCK = threading.Lock()
 
+#: Strong references to the warm tasks, for the reason
 #: ``transcript_index.start_refresh`` documents for its own: a bare
 #: ``asyncio.create_task`` holds only a weak referent and can be collected
 #: mid-flight.
@@ -233,10 +236,12 @@ def start_session_warm(root: str | Path, session_id: str) -> bool:
     on whoever opens it. A client that knows which session it is about to open can
     ask for that work now, on a background task.
 
-    THE ANCHOR WRITE IS NOT HERE, and that is layering rather than an omission: a
-    journal's tail-anchor sidecar belongs to the stacked anchor change
-    (``session.tail_anchor``), which extends this function to schedule it alongside
-    the refresh. On this branch the per-session warm is the index half.
+    THE ANCHOR WRITE RIDES ALONG, on its own task beside the refresh, and it is the
+    half that is NEW work on every open: the queue above warms the newest journals at
+    core start, while the anchor a given open needs is the one for the session being
+    opened. It is deferred to that task rather than skipped — the write is a
+    whole-file scan for a checkpointless journal and must not run on the request's
+    time.
 
     NEVER RAISES and NEVER BLOCKS: the caller is an HTTP handler. The scan is the
     same single-flight task ``start_refresh`` hands out, so a second request — or the
@@ -259,12 +264,27 @@ def start_session_warm(root: str | Path, session_id: str) -> bool:
     # THE ANCHOR WRITE RIDES ALONG, on its own task: it is a whole-file scan for a
     # checkpointless journal and must not run on the request's time any more than the
     # index scan does. Held in ``_TASKS`` so the loop cannot collect it mid-flight.
-    anchor_task = asyncio.get_running_loop().create_task(
-        asyncio.to_thread(write_tail_anchor, root, session_id)
-    )
+    anchor_task = asyncio.get_running_loop().create_task(_write_anchor(root, session_id))
     _TASKS.add(anchor_task)
     anchor_task.add_done_callback(_TASKS.discard)
     return True
+
+
+async def _write_anchor(root: str | Path, session_id: str) -> None:
+    """Write one session's tail anchor, with the queue's own exception contract.
+
+    WHY IT IS WRAPPED (review round 4, F19): this runs on a task nobody retrieves, so
+    a raise inside it becomes an unretrieved-task exception rather than a line in the
+    log — and the queue's call of the same writer already states the intent, that "an
+    unwritable anchor is a slower read, not a failure". Two anchors landing at once is
+    the single-flight guard's business (``_ANCHOR_IN_FLIGHT``): the second caller
+    returns without scanning. A named helper rather than a closure so the contract is
+    callable in a test.
+    """
+    try:
+        await asyncio.to_thread(write_tail_anchor, root, session_id)
+    except Exception:  # noqa: BLE001 — an unwritable anchor is a slower read, not a failure
+        logger.debug("tail anchor not written for %s", session_id, exc_info=True)
 
 
 def _anchor_current(directory: Path) -> bool:
