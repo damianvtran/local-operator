@@ -508,17 +508,21 @@ def test_the_remembered_backend_is_not_tried_twice_when_it_is_the_detected_one(
     assert order == ["ghostty", "terminal.app"], order
 
 
-def test_cmux_is_never_remembered(tmp_path: Path) -> None:
+def test_cmux_is_never_remembered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """cmux spawns UNFOCUSED by design; as a click's landing it would look like
-    a click that did nothing."""
+    a click that did nothing.
+
+    Detection is FORCED to cmux rather than driven through markers: whether the
+    registry picks cmux depends on a cmux binary existing on the host, and a test
+    that only passed on a host without one would pin nothing.
+    """
     from local_operator.spawn import remembered
+    from local_operator.spawn.cmux import CmuxBackend
 
-    env = {"CMUX_SURFACE_ID": "x", "CMUX_WORKSPACE_ID": "y", "GHOSTTY_RESOURCES_DIR": "/g"}
-    # Whatever detection picks, if it is cmux nothing is written; if the host has
-    # no cmux binary it picks ghostty. Either way cmux is not the stored name.
-    remembered.remember_current(tmp_path, env)
+    monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: CmuxBackend())
 
-    assert remembered.recall(tmp_path) != "cmux"
+    assert remembered.remember_current(tmp_path, {}) is False
+    assert remembered.recall(tmp_path) is None
 
 
 def test_remember_current_stores_the_detected_backend_name(tmp_path: Path) -> None:
@@ -561,6 +565,10 @@ def test_preparing_for_clicks_is_inert_when_notifications_are_off(
 ) -> None:
     """A user who turned banners off pays no compile and leaves no file."""
     monkeypatch.setenv(notify.ENV_DISABLE, "1")
+    # The HOME gate is made PASS, so the kill switch is the only thing that can
+    # be doing the refusing (under pytest's redirected HOME it would otherwise
+    # refuse on its own and this test would pin nothing about the switch).
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: Path.home().resolve())
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
     monkeypatch.setattr(
         notifier_app, "prewarm", lambda root: pytest.fail("compiled for a muted user")
@@ -625,4 +633,5 @@ def test_both_attended_boot_paths_call_the_preparation() -> None:
     from local_operator.server import app as server_app
 
     assert "_schedule_click_preparation(app)" in inspect.getsource(tui.run_tui)
-    assert "prepare_for_clicks" in inspect.getsource(server_app.lifespan)
+    # The call itself, off the loop — not merely the import beside it.
+    assert "await asyncio.to_thread(prepare_for_clicks)" in inspect.getsource(server_app.lifespan)
