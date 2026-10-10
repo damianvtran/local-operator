@@ -1,7 +1,8 @@
-"""Radient usage-limit recovery: the sentence a quota failure carries.
+"""Radient out-of-credits recovery: the account-aware text a 402 carries.
 
 WHY THIS EXISTS. A Radient request that runs out of credit fails with a bare
-``rate limit or quota exceeded (HTTP 402): insufficient credits`` — true, and
+``out of credits (HTTP 402): insufficient credits`` (rendered, before the 402
+label split, as ``rate limit or quota exceeded (HTTP 402): ...``) — true, and
 useless: the account's free signup grant may simply be UNCLAIMED (the grant is
 withheld until the operator follows the verification link emailed at signup),
 in which case the remedy is an email, not a top-up. Nothing in the provider's
@@ -16,13 +17,37 @@ object, sibling to ``account``/``identity``::
     "verification": {"email_verified": bool,
                      "signup_grant": "claimed" | "pending" | "expired" | "none",
                      "grant_amount": <number, optional — captured at issue>,
-                     "claim_url": "https://console.radienthq.com/dashboard/verification"}
+                     "claim_url": "https://console.radienthq.com/dashboard/verification",
+                     "first_topup": {            # optional, newer backends only
+                         "bonus_amount": <number>,       # the registration bonus
+                         "minimum_purchase": <number>,   # card top-up that earns it
+                         "bonus_received": bool,         # true once no longer a first purchase
+                         "topup_url": "https://console.radienthq.com/dashboard/billing"}}
 
 ``email_verified`` is Radient's OWN Turnstile-gated claim state and is NEVER
 derived from Google/Microsoft OAuth claims, so it is read from this endpoint
 and nowhere else. The object is ABSENT on an older backend and every consumer
-must tolerate that: absence degrades to the generic console line, never an
-error and never a blank.
+must tolerate that: absence degrades to the neutral out-of-credits text, never
+an error and never a blank. Every field of ``first_topup`` is optional too: the
+bonus line is an OFFER, so it is stated only when every figure it quotes was
+read and ``bonus_received`` is exactly ``false``.
+
+WHAT THE TEXT SAYS, by account state (the copy is shared with the desktop UI
+and written for this surface):
+
+* not verified (``pending`` / ``expired``, or ``none`` with ``email_verified``
+  false) — free credits are WAITING behind verification, so that comes first;
+* verified (``claimed`` or ``email_verified``) — the credits are spent, so the
+  top-up link, plus the first-top-up bonus line while the bonus is unclaimed;
+* state unreadable (signed out, offline, ``/me`` failed, older backend) — a
+  neutral message naming BOTH links conditionally. It never claims a state it
+  could not read.
+
+THE TRIGGER IS THE 402, NOT THE QUOTA KIND. A 429 is a rate limit whose remedy
+is waiting, and advice about balances would be wrong for it. The gate therefore
+reads the out-of-credits label ``failover`` writes for HTTP 402 (and, for a
+transcript or follower written by an older runtime, the legacy quota label
+carrying ``HTTP 402``).
 
 HOW THE PROBE IS BOUNDED, and why it is shaped this way. A short-TTL process
 cache fronts one bounded GET (failures swallowed — a non-200, an unparseable
@@ -36,7 +61,7 @@ was ~10s in the pathological case (blackholed connect, then a stalled body)
 and review round 1 measured 5.04s on the connect phase alone. The token is the
 STORED one, deliberately not refreshed: a refresh is a network write (and a
 rotation) triggered by a turn that just failed, while a stale token merely
-fails the probe and degrades to the generic line.
+fails the probe and degrades to the neutral text.
 
 THREE ACCESS PATTERNS, and the caller each one serves. THE AWAITED ARM
 (:func:`append_usage_limit_recovery_async`) probes on a cache miss while
@@ -52,7 +77,7 @@ the sentence still lands. THE BOUNDED SYNC ARM
 (:func:`append_usage_limit_recovery`) blocks its caller for up to the probe
 envelope and exists for exactly one surface: the headless renderer, whose
 one-shot process exits with the line, so a cache-only answer there would
-render the generic fallback forever. Loop-side callers must not use it.
+render the neutral fallback forever. Loop-side callers must not use it.
 
 NOTHING HERE RAISES. Every branch returns a string: a recovery sentence is an
 ADDITION to an error the user is already being shown, so a store read, a parse
@@ -69,10 +94,10 @@ display site without double-firing.
 
 CACHING AND WHO INVALIDATES IT. The cache holds FETCH-BACKED facts only (a
 probe ran); the "no stored credential" answer is a cheap local read and is
-never cached, because the moment it changes — the operator logging in — is
-exactly the moment a stale "not signed in" would hurt. A successful-login
-invalidation is NOT wired in: the worst a stale entry can do is pick a
-different sentence for at most ``_TTL_S`` seconds on a path that is already
+never cached, because the moment it changes — the operator signing in — is
+exactly the moment the process must stop answering from memory. A
+successful-login invalidation is NOT wired in: the worst a stale entry can do
+is pick a different sentence for at most ``_TTL_S`` seconds on a path that is already
 failing, and reaching into the login flow to invalidate it would couple this
 hint to a surface that does not own it.
 """
@@ -80,12 +105,15 @@ hint to a surface that does not own it.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -98,9 +126,9 @@ logger = logging.getLogger(__name__)
 #: carry its own ``claim_url`` (a missing field is tolerated, never fatal).
 CLAIM_URL = "https://console.radienthq.com/dashboard/verification"
 
-#: The account console, for the generic fallback (fetch failed, older backend,
-#: or a state this module has no branch for).
-CONSOLE_URL = "https://console.radienthq.com"
+#: Where a top-up happens when the payload does not name a page (an older
+#: backend carries no ``first_topup``), and the page the neutral text points at.
+TOPUP_URL = "https://console.radienthq.com/dashboard/billing"
 
 #: TTL of the process cache. Inside the 2-5 minute band the frozen contract
 #: asks for: long enough that a quota storm costs one probe, short enough that
@@ -122,23 +150,55 @@ _PROBE_TIMEOUT = httpx.Timeout(
     pool=_READ_TIMEOUT_S,
 )
 
-#: Stable PREFIXES carried by every sentence this module appends: each quota
-#: branch line opens with ``Radient: `` and the no-sign-in remedy opens with
-#: its own words. Deliberately NOT the console URL: the payload's ``claim_url``
-#: may be any URL the backend supplies, so a URL-based marker silently stopped
-#: matching a line built from a non-console URL — and a branch flip between
-#: retries then stacked a second remedy (review round 1, R2). A retried render
-#: carrying a DIFFERENT branch's line must not stack under the first, which
-#: exact-line matching alone would miss.
-_FAMILY_MARKERS = ("Radient: ", "No Radient account is signed in")
-
-_GENERIC_LINE = f"Radient: check your account and credit balance at {CONSOLE_URL}."
-
-_NO_SIGN_IN_LINE = (
-    "No Radient account is signed in — to fix: `/login radient` in the TUI, "
-    "`local-operator login radient` from a shell, or Settings → Radient account "
-    "in the desktop app."
+#: Stable phrases carried by every text this module appends, matched
+#: case-insensitively by :func:`_carries_family_text`.
+#:
+#: DELIBERATELY NOT THE SENTENCE OPENERS (agent review round 1, R1-2). The
+#: guard used to key on "You're out of credits" / "You haven't verified your
+#: email yet", which are ordinary English a provider's OWN 402 body can carry:
+#: ``str(ProviderError(402, "You're out of credits. Add funds to continue."))``
+#: made the substring guard read the provider's words as this module's remedy
+#: and suppress the append. Each phrase below appears in every branch text this
+#: module can produce and in nothing a provider writes about a refusal: "top up
+#: in the radient console" (the verified top-up line, and the neutral text's
+#: own second line) and "start using local operator for free" (the verification
+#: head that pending/expired/none share). The line the old runtime wrote
+#: ("Radient: …") is not a marker either: it can only reach this module through
+#: a text that is already ours, and "Radient: " alone is a prefix ordinary tool
+#: errors carry. Deliberately not the URLs: the payload's may be any https page
+#: the backend supplies, so a URL-based marker would stop matching a line built
+#: from one of them (review round 1, R2 on the previous revision).
+_FAMILY_MARKERS = (
+    "top up in the radient console",
+    "start using local operator for free",
 )
+
+
+def _carries_family_text(text: str) -> bool:
+    """Whether ``text`` already carries a text this module appended.
+
+    Case-insensitive, so the two spellings of the console sentence ("Top up"
+    opening a line, "top up" mid-sentence in the neutral text) are one marker;
+    the match lives here rather than at each call site so the guard, the
+    scheduler and the append cannot drift. Never raises — nothing on this path
+    may.
+    """
+    lowered = text.lower()
+    return any(marker in lowered for marker in _FAMILY_MARKERS)
+
+
+@dataclass(frozen=True)
+class FirstTopupFacts:
+    """The optional ``first_topup`` object, parsed tolerantly.
+
+    ``bonus_received`` is None (not stated) rather than False when the payload
+    omits or mangles it: only a definite ``false`` earns the bonus line.
+    """
+
+    bonus_amount: float | None = None
+    minimum_purchase: float | None = None
+    bonus_received: bool | None = None
+    topup_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,18 +215,21 @@ class VerificationFacts:
     signup_grant: str | None = None
     grant_amount: float | None = None
     claim_url: str | None = None
+    first_topup: FirstTopupFacts | None = None
 
 
 @dataclass(frozen=True)
 class RecoveryFacts:
-    """What the recovery sentence is built from.
+    """What the recovery text is built from.
 
-    ``signed_in`` is TRI-state because the two failure answers differ in tone:
-    a definite ``False`` (no stored credential at all) earns the "no Radient
-    account is signed in" remedy, ``True`` continues to the verification
-    branches, and ``None`` means the probe could not tell (the store read
-    failed) so the sentence must not claim sign-in state either way and falls
-    to the generic console line.
+    ``signed_in`` is tri-state for what it says about the PROBE, not for two
+    different texts: ``False`` (no stored credential) and ``None`` (the
+    credential store could not be read) both render the neutral text, because
+    a 402 proves a credential was spent somewhere this process may not see —
+    an environment key or a runtime override — and "no Radient account is
+    signed in" would be a claim the evidence cannot support (the frozen
+    contract words the signed-out case as neutral too). Only ``True``
+    continues to the verification branches.
     """
 
     signed_in: bool | None
@@ -207,71 +270,198 @@ def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _https_url(value: Any) -> str | None:
+    """``value`` when it is a plain https URL, else None.
+
+    These URLs come off the wire and are PRINTED into a terminal, so the shape
+    is checked rather than trusted (agent review round 1, R1-3). Rejected:
+    anything but ``https`` with a host; whitespace; control characters — C0
+    AND C1, the latter reaching a terminal as escape/CSI introducers; FORMAT
+    characters (``Cf``: bidi overrides like U+202E and zero-width joiners that
+    can reorder or hide what a reader sees); and any netloc carrying
+    ``userinfo``, because ``https://console.radienthq.com@evil.example/p``
+    reads as the console host while addressing ``evil.example``. A rejected
+    value falls back to the known console page at the call site.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    for char in value:
+        if char.isspace() or unicodedata.category(char) in ("Cc", "Cf"):
+            return None
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not parts.netloc:
+        return None
+    if "@" in parts.netloc:
+        return None
+    return value
+
+
+def _number(value: Any) -> float | None:
+    """A finite non-bool number, else None (a bool is a number to Python, not to us)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _money(value: float | None) -> str | None:
+    """``5.0`` as ``$5`` and ``2.5`` as ``$2.50``; None for an unusable amount.
+
+    Whole numbers drop the cents, matching the verification email's subject so
+    the figure reads the same in the inbox and in the terminal.
+    """
+    if value is None or value <= 0:
+        return None
+    return f"${int(value)}" if value.is_integer() else f"${value:,.2f}"
+
+
+def parse_first_topup(value: Any) -> FirstTopupFacts | None:
+    """Parse the optional ``first_topup`` object; ``None`` when it is absent."""
+    if not isinstance(value, Mapping):
+        return None
+    received = value.get("bonus_received")
+    return FirstTopupFacts(
+        bonus_amount=_number(value.get("bonus_amount")),
+        minimum_purchase=_number(value.get("minimum_purchase")),
+        bonus_received=received if isinstance(received, bool) else None,
+        topup_url=_https_url(value.get("topup_url")),
+    )
+
+
 def parse_verification(value: Any) -> VerificationFacts | None:
     """Parse the ``verification`` object; ``None`` when it is absent.
 
     Absence (an older backend) is distinct from emptiness on purpose: the
-    caller renders the generic console line for ``None`` and a branch-specific
-    sentence for an object, and the two must stay distinguishable so
-    "not stated" never reads as "no grant".
+    caller renders the neutral text for ``None`` and a branch-specific sentence
+    for an object, and the two must stay distinguishable so "not stated" never
+    reads as "no grant".
     """
     if not isinstance(value, Mapping):
         return None
     grant = value.get("signup_grant")
     if not isinstance(grant, str) or grant not in ("claimed", "pending", "expired", "none"):
         grant = None
-    amount = value.get("grant_amount")
-    if not isinstance(amount, (int, float)) or isinstance(amount, bool):
-        amount = None
     verified = value.get("email_verified")
     if not isinstance(verified, bool):
         verified = None
-    claim_url = value.get("claim_url")
-    if not isinstance(claim_url, str) or not claim_url.strip():
-        claim_url = None
     return VerificationFacts(
         email_verified=verified,
         signup_grant=grant,
-        grant_amount=float(amount) if amount is not None else None,
-        claim_url=claim_url,
+        grant_amount=_number(value.get("grant_amount")),
+        claim_url=_https_url(value.get("claim_url")),
+        first_topup=parse_first_topup(value.get("first_topup")),
     )
 
 
-def recovery_line(facts: RecoveryFacts) -> str:
-    """The user-facing sentence for ``facts``. Never empty, never raises.
+def _first_topup_line(first_topup: FirstTopupFacts | None) -> str | None:
+    """The first-top-up bonus sentence, only while the bonus is still on offer.
 
-    The pending branch is the one this feature exists for: it says WHERE the
-    remedy is (the verification email) and what it is worth when the account
-    states an amount. ``expired``/``none`` deliberately do NOT claim an email
-    is waiting — the link is not in flight for either. ``claimed`` and every
-    unknown state fall to the generic console line, which is the only claim
-    that is true without knowing more.
+    No block (older backend), ``bonus_received`` true or not stated, or a
+    figure that did not parse, all produce NO line: the bonus is an offer, and
+    an offer that cannot be quoted exactly must not be made.
     """
-    if facts.signed_in is False:
-        return _NO_SIGN_IN_LINE
+    if first_topup is None or first_topup.bonus_received is not False:
+        return None
+    bonus = _money(first_topup.bonus_amount)
+    minimum = _money(first_topup.minimum_purchase)
+    if bonus is None or minimum is None:
+        return None
+    return f"Get an extra {bonus} free on your first top-up of {minimum} or more."
+
+
+def _neutral_text() -> str:
+    """The out-of-credits text that is true of EVERY account state.
+
+    For an account this process could not read (signed out, offline, ``/me``
+    failed, an older backend with no ``verification``). Both remedies are named
+    behind their own condition, so a verified user is not told to verify and an
+    unverified one is not told their credits are already spent.
+    """
+    return (
+        "You're out of credits. If you haven't verified your email yet, verify it "
+        f"to claim your free credits: {CLAIM_URL}\n"
+        f"Otherwise, top up in the Radient console: {TOPUP_URL}"
+    )
+
+
+AccountState = Literal["verified", "unverified", "unreadable"]
+
+
+def account_state(facts: RecoveryFacts) -> AccountState:
+    """The ONE classification of what ``facts`` proved about the account.
+
+    WHY A SEPARATE FUNCTION: :func:`recovery_line` (the sentence) and the
+    pre-emptive quota notice (``quota_notice``: its state and which buttons it
+    offers) must agree on which of the three situations an account is in. Two
+    copies of this ladder is how a notice would say "verify your email" over a
+    sentence that says "top up". ``recovery_line`` calls this; the notice calls
+    this; neither re-derives it.
+
+    - ``verified`` — a ``claimed`` grant, or ``email_verified`` true: the free
+      credits are spent (or were never owed), so the remedy is a top-up.
+    - ``unverified`` — ``pending`` / ``expired``, or any grant with an explicit
+      ``email_verified: false``: free credits are WAITING behind verification.
+    - ``unreadable`` — everything else (no probe answer, an older backend with
+      no ``verification``, an unrecognised shape): a claim about the account
+      would be a guess, so callers render the neutral text.
+    """
     verification = facts.verification
-    if verification is not None:
+    if verification is None:
+        return "unreadable"
+    if verification.signup_grant == "claimed" or verification.email_verified is True:
+        return "verified"
+    if verification.signup_grant in ("pending", "expired") or verification.email_verified is False:
+        return "unverified"
+    return "unreadable"
+
+
+def recovery_line(facts: RecoveryFacts) -> str:
+    """The user-facing text for ``facts``. Never empty, never raises.
+
+    Decided by :func:`account_state`, each branch stating only what the payload
+    proved:
+
+    1. **verified** — the free credits are spent: the top-up link, plus the
+       first-top-up bonus line while the bonus is unclaimed.
+    2. **unverified** — free credits are WAITING behind verification, so that
+       comes before any top-up. ``pending`` points at the inbox; ``expired`` at
+       requesting a new link, because the mail itself is dead; anything else
+       just opens the page.
+    3. **unreadable** — the neutral text, which makes no claim about the
+       account. That covers signed out too: the contract words the signed-out
+       case as neutral, and a 402 proves a credential WAS spent somewhere this
+       process may not see (an env key, a runtime override), so "you are not
+       signed in" would be a claim it cannot support.
+    """
+    verification = facts.verification
+    state = account_state(facts)
+    if verification is not None and state != "unreadable":
         claim = verification.claim_url or CLAIM_URL
+        if state == "verified":
+            topup = (
+                verification.first_topup.topup_url if verification.first_topup else None
+            ) or TOPUP_URL
+            lines = [f"You're out of credits. Top up in the Radient console: {topup}"]
+            bonus = _first_topup_line(verification.first_topup)
+            if bonus:
+                lines.append(bonus)
+            return "\n".join(lines)
+        amount = _money(verification.grant_amount)
+        credits = f"{amount} in free credits" if amount else "your free credits"
+        head = (
+            "You haven't verified your email yet. "
+            f"Verify to claim {credits} and start using Local Operator for free."
+        )
         if verification.signup_grant == "pending":
-            if verification.grant_amount is not None:
-                credits = f"claim ${verification.grant_amount:,.2f} in free credits"
-            else:
-                credits = "claim your free credits"
-            return (
-                "Radient: the free signup credits are unclaimed — check your email "
-                f"for the Radient verification link and {credits}: {claim}"
-            )
-        if verification.signup_grant == "expired":
-            return (
-                "Radient: the signup grant's claim window has expired — open "
-                f"{claim} to check the account or request a new link."
-            )
-        if verification.signup_grant == "none":
-            return (
-                "Radient: no signup grant is attached to this account — open "
-                f"{claim} to check the account."
-            )
-    return _GENERIC_LINE
+            action = f"Check your inbox for the Radient verification email, or open {claim}"
+        elif verification.signup_grant == "expired":
+            action = f"Your verification link has expired. Request a new one at {claim}"
+        else:
+            action = f"Open {claim} to verify your email."
+        return f"{head}\n{action}"
+    return _neutral_text()
 
 
 def _resolve_token(store: AuthStore) -> str | None:
@@ -360,17 +550,26 @@ def _probe_verification_sync(token: str) -> VerificationFacts | None:
         return fetch_me_verification_sync(client, token)
 
 
-async def get_recovery_facts(*, store: AuthStore | None = None) -> RecoveryFacts:
+async def get_recovery_facts(
+    *, store: AuthStore | None = None, force_refresh: bool = False
+) -> RecoveryFacts:
     """The cached-or-probed facts for this process's Radient account.
 
     ``store`` is a test seam and a caller's chance to reuse a store it already
     holds; production callers pass nothing and the process's shared store is
-    read. Never raises — see the module docstring.
+    read. ``force_refresh`` bypasses the process cache and re-probes, because
+    the cache is the WRONG answer for the one caller that asks right after the
+    account's state changed: a user who just clicked "I verified" must not be
+    re-served the pre-verification facts for up to the TTL (R1-X1). The fresh
+    result is remembered under the normal TTL, so the bypass also refreshes
+    the cache for every reader after it. Never raises — see the module
+    docstring.
     """
     now = time.monotonic()
-    cached = _cached_facts(now)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = _cached_facts(now)
+        if cached is not None:
+            return cached
     try:
         if store is None:
             from local_operator.providers.auth_store import shared_auth_store
@@ -392,8 +591,13 @@ async def get_recovery_facts(*, store: AuthStore | None = None) -> RecoveryFacts
     return facts
 
 
-def get_recovery_facts_sync(*, store: AuthStore | None = None) -> RecoveryFacts:
+def get_recovery_facts_sync(
+    *, store: AuthStore | None = None, force_refresh: bool = False
+) -> RecoveryFacts:
     """The bounded synchronous twin — the HEADLESS-ONLY arm.
+
+    ``force_refresh`` mirrors the async arm (see there): bypass the cache and
+    re-probe. The twins share one cache, so a divergence here would be a trap.
 
     See the module docstring's access patterns: this is the one entry point
     that blocks on a cold cache. It is kept for the one-shot headless
@@ -401,9 +605,10 @@ def get_recovery_facts_sync(*, store: AuthStore | None = None) -> RecoveryFacts:
     :func:`usage_limit_recovery_line_cached` (never blocks).
     """
     now = time.monotonic()
-    cached = _cached_facts(now)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = _cached_facts(now)
+        if cached is not None:
+            return cached
     try:
         if store is None:
             from local_operator.providers.auth_store import shared_auth_store
@@ -441,7 +646,7 @@ def usage_limit_recovery_line_cached(*, store: AuthStore | None = None) -> str |
     Cache-only by construction: it never probes and never blocks. The answers
     knowable without the wire are still computed — a warm cache, and the
     network-free "no stored credential" read (a store that cannot be read
-    degrades to the generic line, the same answer :func:`get_recovery_facts`
+    degrades to the neutral text, the same answer :func:`get_recovery_facts`
     gives it). ``None`` means exactly one thing: only a probe could decide, so
     a caller that can kick one off the event loop should (see
     :func:`usage_limit_recovery_pending`), and a caller that cannot renders
@@ -478,22 +683,28 @@ def usage_limit_recovery_pending(
     """
     if not usage_limit_recovery_applies(rendered_error, provider):
         return False
-    if any(marker in rendered_error for marker in _FAMILY_MARKERS):
+    if _carries_family_text(rendered_error):
         return False
     return usage_limit_recovery_line_cached(store=store) is None
 
 
 def usage_limit_recovery_applies(rendered_error: str, provider: str | None) -> bool:
-    """The trigger: a usage-limit-classified error on the Radient provider.
+    """The trigger: an out-of-credits (HTTP 402) refusal on the Radient provider.
+
+    The function keeps the name it shipped under (``usage_limit``) so its three
+    call sites, the TUI, the session journal and the headless renderer, did not
+    change shape; what it gates on is narrower than the name says. A 429 is a
+    rate limit whose remedy is waiting, and advice about verification or
+    top-ups would be wrong for it, so only the 402 label qualifies.
 
     The provider is normalized through ``credential_provider_id`` — the same
     translation every credential lookup uses — so a request that ran as the
     ``radient-key`` login flavour (which stores under ``radient``) is covered,
     while an unknown or unrelated provider is not.
     """
-    from local_operator.providers.failover import is_rendered_usage_limit_error
+    from local_operator.providers.failover import is_rendered_out_of_credits_error
 
-    if not is_rendered_usage_limit_error(rendered_error):
+    if not is_rendered_out_of_credits_error(rendered_error):
         return False
     try:
         from local_operator.providers.registry import credential_provider_id
@@ -512,7 +723,7 @@ def append_recovery_line_once(text: str, line: str) -> str:
     """
     if not line:
         return text
-    if line in text or any(marker in text for marker in _FAMILY_MARKERS):
+    if line in text or _carries_family_text(text):
         return text
     if not text:
         return line
@@ -530,7 +741,7 @@ async def append_usage_limit_recovery_async(
     """
     if not usage_limit_recovery_applies(rendered_error, provider):
         return rendered_error
-    if any(marker in rendered_error for marker in _FAMILY_MARKERS):
+    if _carries_family_text(rendered_error):
         return rendered_error
     line = await usage_limit_recovery_line(store=store)
     return append_recovery_line_once(rendered_error, line)
@@ -549,7 +760,7 @@ def append_usage_limit_recovery_cached(
     """
     if not usage_limit_recovery_applies(rendered_error, provider):
         return rendered_error
-    if any(marker in rendered_error for marker in _FAMILY_MARKERS):
+    if _carries_family_text(rendered_error):
         return rendered_error
     line = usage_limit_recovery_line_cached(store=store)
     return append_recovery_line_once(rendered_error, line or "")
@@ -561,7 +772,7 @@ def append_usage_limit_recovery(
     """The BOUNDED blocking twin, for the one surface that cannot await.
 
     That surface is the headless renderer: its one-shot process exits with
-    the line it prints, so a cache-only answer would render the generic
+    the line it prints, so a cache-only answer would render the neutral
     fallback forever, and it cannot await. Everything loop-side must use the
     awaited or cached variants instead (see the module docstring's access
     patterns). Bounded like every path here: the worst case is one probe
@@ -570,7 +781,7 @@ def append_usage_limit_recovery(
     """
     if not usage_limit_recovery_applies(rendered_error, provider):
         return rendered_error
-    if any(marker in rendered_error for marker in _FAMILY_MARKERS):
+    if _carries_family_text(rendered_error):
         return rendered_error
     line = usage_limit_recovery_line_sync(store=store)
     return append_recovery_line_once(rendered_error, line)

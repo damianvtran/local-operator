@@ -46,6 +46,7 @@ from local_operator.server.routes import (
     desktop_approvals,
     desktop_catalogues,
     desktop_claim,
+    desktop_code_requests,
     desktop_hub,
     desktop_lifecycle,
     desktop_mcp,
@@ -53,6 +54,7 @@ from local_operator.server.routes import (
     desktop_monitors,
     desktop_profiles,
     desktop_projects,
+    desktop_quota,
     desktop_radient,
     desktop_runtimes,
     desktop_sessions,
@@ -71,6 +73,11 @@ from local_operator.server.routes import (
     tts,
 )
 from local_operator.server.utils.event_broker import EventBroker
+from local_operator.server.utils.static_roots import (
+    host_is_acceptable,
+    is_static_path,
+    response_policy,
+)
 
 # Annotating the lifespan's record publisher (`None` on a boot that was not
 # announced) needs the shared publisher's type. Zero runtime cost where it
@@ -193,7 +200,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if not activation.human_surface_present():
                 logger.info("aida: no human surface at boot; not auto-activating")
                 return
+            # R17's third signal (2026-10-09), SCOPED TO THE TERMINAL ARM
+            # (design §3 / T9): a pty carries a RUN, not a person, when HOME
+            # is not the user's — a rig, a container or an orchestrator under
+            # `lop serve` must not create her session, arm a cadence and
+            # install a wake supervisor for a store nobody owns. The
+            # desktop-token arm is deliberately NOT gated here: the desktop
+            # app spawns its daemon as the user, and gating it would recast
+            # the shipped desktop contract (see
+            # ``activation.terminal_under_a_foreign_home`` for the full
+            # reasoning and the quiet paths that still bound such a boot).
+            if activation.terminal_under_a_foreign_home():
+                logger.info("aida: boot terminal is under a foreign HOME; not auto-activating")
+                return
             await ensure_session(config_dir)
+            # Same attended moment, same reason as the TUI's boot hook: make her
+            # first banner clickable. Off the loop on a daemon thread (the macOS build
+            # blocks, and a default-executor thread would delay shutdown); the
+            # remembered-terminal half finds no emulator markers in a daemon the
+            # desktop spawned and is a no-op there, which is fine.
+            from local_operator.tui.resume_click import prepare_for_clicks_detached
+
+            await prepare_for_clicks_detached()
         except Exception:  # noqa: BLE001 — a bootstrap must never fail the daemon
             logger.warning("aida: boot ensure failed", exc_info=True)
 
@@ -758,6 +786,13 @@ app.include_router(desktop_radient.router)
 # whatever the order: no sibling declares a single-segment `/v1/desktop/{...}`
 # template that could swallow it.
 app.include_router(desktop_tunnel.router)
+# `/v1/desktop/quota-notice`, the pre-emptive no-quota notice (design:
+# "pre-emptive no-quota notice"). A single-segment literal path with nothing
+# registered above it that could swallow it, and its own module rather than a
+# `desktop_catalogues` child for two reasons: the model-access work edits that
+# module, and the catalogue usage route returns credential identities that
+# this advisory must never echo. See `routes/desktop_quota.py`.
+app.include_router(desktop_quota.router)
 # The machine-wide wake surface. Registered AFTER `desktop_sessions` and after
 # the lifecycle routes for the reason the sessions module documents about its
 # own ordering: FastAPI matches in declaration order, so a `/v1/desktop/...`
@@ -796,6 +831,14 @@ app.include_router(desktop_mesh.router)
 # template declared earlier (`{id}/approve`/`{id}/deny` are two-segment children of a
 # path nothing else declares).
 app.include_router(desktop_approvals.router)
+# The CODE-REQUEST surface (`features.code_requests`): the per-session read of which PRs
+# and MRs this conversation touched, and the refresh affordance. Registered after the
+# approvals block for the reason each block above gives — FastAPI matches in declaration
+# order — and its templates (`/v1/desktop/sessions/{id}/code-requests` and its
+# `/refresh` child) collide with nothing declared earlier: the sessions router has no
+# `/code-requests` child of a session, and the two-segment `/refresh` path is declared
+# after its own parent here, so the literal suffix cannot be swallowed.
+app.include_router(desktop_code_requests.router)
 
 # Add CORS middleware
 app.add_middleware(
@@ -867,6 +910,62 @@ async def desktop_origin_cors(request: Request, call_next):
         # `del`, not `.pop()`: Starlette's MutableHeaders implements neither
         # `pop` nor dict's default-argument protocol, and deleting an absent
         # key is already a no-op there.
+        del response.headers["access-control-allow-origin"]
+        del response.headers["access-control-allow-credentials"]
+    return response
+
+
+@app.middleware("http")
+async def static_response_policy(request: Request, call_next):
+    """Harden every ``/v1/static/*`` response: CSP, ``nosniff``, no foreign CORS grant.
+
+    WHY A MIDDLEWARE AND NOT PER-HANDLER HEADERS. The policy has to ride the
+    error responses too (a JSON 403 wants ``nosniff``), and the CORS half can only
+    be done from here: ``CORSMiddleware`` writes its grant AFTER the handler, so a
+    handler cannot remove it. Registered after :func:`desktop_origin_cors`, i.e.
+    OUTERMOST, for the reason that function states: it is the only position that
+    observes the headers the CORS layer wrote. The preflight (``OPTIONS``) is
+    answered by ``CORSMiddleware`` itself without reaching a route, and this
+    wraps it too.
+
+    THE CORS DECISION. Unlike the rest of the legacy surface, which keeps its
+    historical wildcard echo because the shipped renderer reads ``/health``
+    cross-origin, nothing reads a static route with ``fetch``: the UI loads them
+    through ``<img>``, ``<video>``, ``<audio>`` and ``<iframe src>``, which are
+    not CORS-gated. So the grant is dropped for every origin that is not on the
+    admitted allowlist -- and with NO allowlist installed (the app-managed
+    default) for every origin, which is the case the echo was exploitable in. A
+    page can still *cause* a request (an ``<img>`` needs no grant); it can no
+    longer *read* the answer, and the root allowlist
+    (``utils/static_roots.py``) bounds what it could have caused.
+
+    THE HOST CHECK is the one thing here that is not about headers: a DNS-rebinding
+    page is same-origin with the daemon, so no CORS decision reaches it (review R8).
+    The ``Host`` it sends is its own name; see
+    :func:`~local_operator.server.utils.static_roots.host_is_acceptable` for what is
+    admitted and why the app's renderer is unaffected. It is answered HERE, before
+    the router, so the refusal cannot become a file-existence signal.
+
+    The policy is in ``utils/static_roots.py`` so it is testable without an app.
+    """
+    if not is_static_path(request.url.path):
+        return await call_next(request)
+    # Absent in a `--reload` child (the address arrives by environment and is
+    # consumed): the check then admits only IP literals and `localhost`, which is
+    # what a dev server is reached by.
+    announced = getattr(request.app.state, serve_registry.ANNOUNCED_STATE_ATTR, None)
+    if host_is_acceptable(request.headers.get("host"), announced[0] if announced else None):
+        response = await call_next(request)
+    else:
+        response = JSONResponse(
+            status_code=403, content={"detail": "This Host is not allowed to reach this server."}
+        )
+    allowed = desktop_posture().origins
+    for name, value in response_policy(request.url.path, allowed).items():
+        response.headers[name] = value
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in allowed:
+        # `del` on an absent key is a no-op in Starlette's MutableHeaders.
         del response.headers["access-control-allow-origin"]
         del response.headers["access-control-allow-credentials"]
     return response

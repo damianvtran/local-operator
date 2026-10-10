@@ -1792,7 +1792,7 @@ with real `compaction.api`: no pass at 234.8k on a 1M window, a pass at
 600,001, a 200k model still firing at 160,001, the provider-vs-estimate ruler
 split, and both knobs moving the gate), plus
 `tests/unit/test_session_factory.py::test_trigger_knobs_are_settable_in_config_yml`
-and `::test_default_config_compacts_at_600k_on_a_1m_model` for the config.yml
+and `::test_default_config_compacts_at_400k_on_a_1m_model` for the config.yml
 path.
 
 ## A turn that ended with every todo still open (2026-08-17)

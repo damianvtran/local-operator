@@ -11,9 +11,8 @@
 // module's regression net. It exists at the ADAPTER level
 // (rather than only through the rendered card) because the property most
 // worth pinning is subtractive: a field the feed does not carry — or carries
-// malformed — must reduce (null / empty / the indeterminate branch), never
-// become an invented number. A render test can miss that; a mapping table
-// cannot.
+// malformed — must reduce (null / empty / the reduced state), never become
+// an invented number. A render test can miss that; a mapping table cannot.
 import { describe, expect, it } from "vitest";
 import { IMAGE_GEN_TOOLS, imageGenView } from "./image-gen";
 import type { TranscriptEntry, TranscriptEntryDetails } from "../types";
@@ -218,6 +217,76 @@ describe("the cancel conflict (media_already_completed)", () => {
 	});
 });
 
+describe("the generating fact (the desktop's F3 rule, mirrored)", () => {
+	it("running implies true; every reduced and settled state is false", () => {
+		expect(imageGenView(entry({ tool_state: "running" })).generating).toBe(true);
+		expect(imageGenView(entry({ tool_state: "queued" })).generating).toBe(false);
+		expect(imageGenView(entry({ tool_state: "composing" })).generating).toBe(
+			false,
+		);
+		for (const wire of ["done", "failed", "interrupted"] as const) {
+			expect(imageGenView(entry({ tool_state: wire })).generating).toBe(false);
+		}
+	});
+
+	it("a press keeps the state it replaced — a queued hold never conjures a body", () => {
+		expect(imageGenView(entry({ tool_state: "queued" }), true).generating).toBe(
+			false,
+		);
+		expect(imageGenView(entry({ tool_state: "running" }), true).generating).toBe(
+			true,
+		);
+		/* The provider-side queue is a reduced `queued` view on this surface
+		   (the stage refine's own arm): the press holds that card's claim —
+		   nothing generating yet — rather than flipping it into a body. */
+		expect(
+			imageGenView(
+				entry({
+					tool_state: "running",
+					details: liveDetails({ stage: "queued" }),
+				}),
+				true,
+			).generating,
+		).toBe(false);
+	});
+
+	it("the wire's own cancelling keeps what the row's word last said", () => {
+		/* The frame no longer carries the stage the hold replaced, so the
+		   row's own word decides: `running` had started executing (true);
+		   `queued` had not (false — the reduced hold). */
+		expect(
+			imageGenView(
+				entry({
+					tool_state: "running",
+					details: liveDetails({ stage: "cancelling" }),
+				}),
+			).generating,
+		).toBe(true);
+		expect(
+			imageGenView(
+				entry({
+					tool_state: "queued",
+					details: liveDetails({ stage: "cancelling" }),
+				}),
+			).generating,
+		).toBe(false);
+	});
+
+	it("a live stage word keeps the fact current", () => {
+		/* `in_progress` says the provider is working, even over a row whose
+		   word still reads queued — the stage refines the fact the same way
+		   it refines the state. */
+		expect(
+			imageGenView(
+				entry({
+					tool_state: "queued",
+					details: liveDetails({ stage: "in_progress" }),
+				}),
+			).generating,
+		).toBe(true);
+	});
+});
+
 describe("live detail fields reduce honestly when absent or malformed", () => {
 	it("empty details carry no numbers and no text", () => {
 		const view = imageGenView(entry({}));
@@ -249,8 +318,9 @@ describe("live detail fields reduce honestly when absent or malformed", () => {
 		expect(at(0.42)).toBe(0.42);
 		expect(at(1)).toBe(1);
 		/* NOT clamped. 42 is not a fraction, and clamping it into a full bar
-		   would state 100% off a value that never meant one — the
-		   indeterminate branch is the honest rendering. */
+		   would state 100% off a value that never meant one — the reduced
+		   state (no bar at all; one draws only against a carried fraction)
+		   is the honest rendering. */
 		expect(at(42)).toBeNull();
 		expect(at(-0.1)).toBeNull();
 		expect(at(Number.NaN)).toBeNull();

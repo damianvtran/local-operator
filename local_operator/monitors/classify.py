@@ -152,6 +152,44 @@ def bounded_state(delta_text: str, max_chars: int) -> str:
     return delta_text[:keep] + TRUNCATION_MARKER
 
 
+#: Where the monitor's own purpose text is clipped before it rides to the gate.
+#: A code constant like ``DELTA_PREVIEW_CHARS``: the purpose is context for the
+#: verdict, not content, and a paragraph-long ``description`` would otherwise
+#: cost more per call than the delta it is there to explain.
+PURPOSE_MAX_CHARS = 400
+
+
+def gate_state(name: str, description: str, delta_text: str, max_chars: int) -> str:
+    """The state the gate judges: the monitor's purpose, then its bounded delta.
+
+    WHY THE PURPOSE RIDES WITH THE DELTA (regression, 2026-10-09): the question
+    asks whether "a human asked to be told" about the change, but the state used
+    to be the bare delta, so the model had nothing to say what was asked for.
+    Measured against the live cascade, an appended log line such as
+    ``+ 4| === c2 done rc=0 <ts> ===`` was answered ``non-material-metadata``
+    (three runs out of three) and a counter flip ``- 3 / + 4`` ``ignorable``: a
+    session's build-progress monitor ran 15 checks, suppressed two real
+    transitions and delivered none. With the purpose attached (same question,
+    same delta) the same lines are ``material``, while genuine churn (an
+    ``etag`` rewrite, a ``df`` use-count tick) is still suppressed.
+
+    The delta keeps its own ``classifyMaxChars`` bound (the contract's input
+    bound, unchanged); the purpose is bounded separately by
+    :data:`PURPOSE_MAX_CHARS`. With no ``description`` the state is the bare
+    delta exactly as before — a name alone says nothing about what was asked.
+    ``name`` leads the preamble only when a purpose exists.
+    """
+    delta = bounded_state(delta_text, max_chars)
+    purpose = " ".join((description or "").split())
+    if not purpose:
+        return delta
+    if len(purpose) > PURPOSE_MAX_CHARS:
+        purpose = purpose[:PURPOSE_MAX_CHARS] + "…"
+    label = " ".join((name or "").split())
+    head = f"Monitor: {label}\n" if label else ""
+    return f"{head}Purpose: {purpose}\nChange:\n{delta}"
+
+
 def suppressed_counter(choice: str | None) -> str | None:
     """The counters key a choice suppresses under; ``None`` means DELIVER.
 
@@ -210,7 +248,9 @@ __all__ = [
     "QUESTION_INSTRUCTIONS",
     "SUPPRESSED_COUNTERS",
     "TRUNCATION_MARKER",
+    "PURPOSE_MAX_CHARS",
     "bounded_state",
+    "gate_state",
     "materiality_question",
     "monitor_classify",
     "suppressed_counter",

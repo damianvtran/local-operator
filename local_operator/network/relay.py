@@ -3085,6 +3085,36 @@ def validate_history_limit(raw: Any) -> int:
     return raw
 
 
+def validate_open_frame(raw: Any) -> bool:
+    """THE open-frame decision, shared by BOTH halves of a stored-page read.
+
+    ``open_frame`` asks the owner for the turn-aligned, paint-only page of
+    ``DESKTOP_API.md`` §"The open frame" — named for the desktop request
+    ``open_frame=1`` and carried as an optional key the same way ``limit`` is.
+    This helper validates what a granted PEER put on the frame
+    (``RelayServer._op_session_history``) and what a caller put on the LOCAL
+    control frame (``RelayServer._ctl_peer_history``) — one function, for the
+    same reason :func:`validate_history_limit` is one function: the two halves
+    of one read must not answer "what is a valid flag?" differently.
+
+    ``None`` — the flag is ABSENT — is today's frame exactly, and it means NO:
+    an older owner receives nothing new to read, and a second spelling of "off"
+    would be a key an older owner could be asked to refuse. Present, the
+    accepted spellings are the two a caller may write — JSON ``true`` and
+    ``1`` — and anything else is refused BY NAME rather than coerced: a silently
+    read ``false`` or ``0`` would make "I did not ask" and "I asked for no" one
+    frame, and the owner-side build this flag feeds cannot tell them apart.
+    """
+    if raw is None:
+        return False
+    if raw is True or (isinstance(raw, int) and not isinstance(raw, bool) and raw == 1):
+        return True
+    raise MeshRefusal(
+        "protocol_error",
+        f"open_frame must be 1 (true) when present, not {raw!r}",
+    )
+
+
 def session_history_reply_bytes(req: Any, detail: dict[str, Any]) -> int:
     """The byte length of the reply frame ``wire.LinkCrypto.seal`` will serialize.
 
@@ -5646,10 +5676,20 @@ class RelayServer:
         # pair before this was fixed, and caught by the e2e test rather than by
         # review).
         if result is None:
-            return {"op": "ack", "req": req, "detail": ""}
-        if result.get("op") in ("ack", "error"):
-            return result
-        return {"op": "ack", "req": req, "detail": result}
+            reply: dict[str, Any] = {"op": "ack", "req": req, "detail": ""}
+        elif result.get("op") in ("ack", "error"):
+            reply = result
+        else:
+            reply = {"op": "ack", "req": req, "detail": result}
+        # EVERY REPLY LEAVES THROUGH ONE WRAP (agent review round 1, R1-2), the empty
+        # ack above included. A reply carrying SECRET material — the broker's `copy`
+        # value, the epoch-rotation answers, the reconcile catch-up — is an ack with
+        # no op of its own for `seal` to key on, so the GRANTED action is the marker:
+        # compressing it would put the secret's compressibility on the wire in the
+        # record length (see wire.py "Record compression").
+        if granted.action in wire.NEVER_COMPRESS_OPS:
+            return wire.UncompressedFrame(reply)
+        return reply
 
     # -- slow ops (build plan §0 finding 4) ---------------------------------
 
@@ -7205,6 +7245,16 @@ class RelayServer:
         raw_before = frame.get("before_id")
         before_id = str(raw_before) if raw_before else None
         limit = validate_history_limit(frame.get("limit"))
+        # THE OPEN-FRAME FLAG IS ACCEPTED AND TOLERATED. A viewer newer than this
+        # build may ask for the turn-aligned, paint-only page (``DESKTOP_API.md``
+        # §"The open frame"); the owner-side build that makes the answer different
+        # does not exist yet (``session/open_frame.py``, the facts half of this
+        # series), so the flag is validated by the SAME shared decision both
+        # halves of this read use (:func:`validate_open_frame`) and then serves
+        # today's answer, byte-for-byte. When the facts half lands, THIS is its
+        # call site: the flag is already on the frame and already trusted to be
+        # ``None`` or ``True``.
+        validate_open_frame(frame.get("open_frame"))
 
         from local_operator.harness.rows import visible_transcript_rows
 
@@ -10426,8 +10476,13 @@ class RelayServer:
         ``int`` — silently answering a different page than the one asked for, and
         turning a JSON ``true`` into a one-row page — while the owner refused a
         bad limit outright. One decision, one spelling, on both halves of the read.
+
+        ``open_frame`` (DESKTOP_API.md §"The open frame") IS VALIDATED BY THE
+        SAME SHARED DECISION, and it is carried ONLY when true — see the comment
+        on the frame below for why "no" has no spelling of its own.
         """
         limit = validate_history_limit(frame.get("limit"))
+        open_frame = validate_open_frame(frame.get("open_frame"))
         return self._local_peer_call(
             "net_session_history",
             str(frame.get("peer") or ""),
@@ -10435,6 +10490,17 @@ class RelayServer:
             session_id=str(frame.get("session_id") or ""),
             before_id=(str(frame["before_id"]) if frame.get("before_id") else None),
             limit=limit,
+            # THE FLAG RIDES ONLY WHEN IT WAS ASKED FOR. Absent, the frame this
+            # device sends is today's byte-for-byte, so a peer older than the
+            # flag reads the request it has always read; present, it is one
+            # extra key, which an older owner's dispatch IGNORES — the
+            # authoriser and the handler read only the keys they name (verified
+            # against v0.68.11, whose dispatch, authoriser and handler are
+            # byte-identical to this build's minus this change). This half does
+            # not interpret the flag: it is a REQUEST for the owner to build the
+            # page differently once its own read can; nothing on this side acts
+            # on it.
+            **({"open_frame": True} if open_frame else {}),
         )
 
     def _ctl_peer_facts(self, frame: dict[str, Any]) -> dict[str, Any]:

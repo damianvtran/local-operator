@@ -2,7 +2,10 @@
 
 What is pinned here is the contract the design froze: Radient's status/result/
 cancel reads take ``request_id`` ONLY and its failures switch on ``error_type``
-never prose; FAL drives its queue with the response-carried URLs (and derives
+never prose — including the SETTLED failure shape, where a failed generation
+arrives as status ``COMPLETED`` carrying ``error``/``error_type`` (agent-server
+``settledStatusResult``; the hub never emits a FAILED/ERROR word); FAL drives
+its queue with the response-carried URLs (and derives
 them from the app path when a response omits them); OpenAI decodes both
 ``b64_json`` and ``url`` items and has no provider-side cancel; and every
 download is bounded.
@@ -70,6 +73,7 @@ def _radient_handler(
     recorder: _Recorder,
     *,
     statuses: list[dict[str, Any]] | None = None,
+    result: dict[str, Any] | None = None,
     capacity: dict[str, Any] | None = None,
     capacity_status: int = 200,
 ) -> Callable[[httpx.Request], httpx.Response]:
@@ -106,6 +110,8 @@ def _radient_handler(
             payload = status_script.pop(0) if status_script else {"status": "COMPLETED"}
             return httpx.Response(200, json=payload)
         if path.endswith("/tools/media/result"):
+            if result is not None:
+                return httpx.Response(200, json=result)
             return httpx.Response(
                 200,
                 json={
@@ -124,6 +130,74 @@ def _radient_handler(
         return httpx.Response(404, json={"error": "unexpected"})
 
     return handler
+
+
+@pytest.mark.asyncio
+async def test_radient_settled_status_figure_replaces_the_quote_and_is_billed() -> None:
+    # agent-server: submit answers the QUOTE (0.08 in the fake), the terminal
+    # status carries the SETTLED figure (``settled: true``) that equals the
+    # ledger - that one is a charge, so it wins and is labelled ``billed``.
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(
+            recorder,
+            statuses=[{"status": "COMPLETED", "settled": True, "cost_usd": 0.05, "units": 1}],
+        )
+    ) as client:
+        result = await _run_radient(client)
+
+    assert result.cost_usd == 0.05
+    assert result.cost_source == "reported"
+    assert result.billing_basis == "billed"
+    assert result.cost_provenance is not None and "settled" in result.cost_provenance
+
+
+@pytest.mark.asyncio
+async def test_radient_settled_zero_is_a_billed_zero_not_the_quote() -> None:
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(
+            recorder, statuses=[{"status": "COMPLETED", "settled": True, "cost_usd": 0.0}]
+        )
+    ) as client:
+        result = await _run_radient(client)
+
+    assert result.cost_usd == 0.0
+    assert result.billing_basis == "billed"
+
+
+@pytest.mark.asyncio
+async def test_radient_unsettled_status_cost_keeps_the_quote_as_estimated() -> None:
+    # A ``cost_usd`` on a status payload WITHOUT ``settled: true`` is not a
+    # charge: the quote and the ``estimated`` label stand.
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(
+            recorder, statuses=[{"status": "COMPLETED", "settled": False, "cost_usd": 9.99}]
+        )
+    ) as client:
+        result = await _run_radient(client)
+
+    assert result.cost_usd == 0.08
+    assert result.billing_basis == "estimated"
+
+
+async def _run_radient(client: httpx.AsyncClient):
+    return await image_rungs.run_radient(
+        prompt="a cat",
+        base_url="https://hub.test",
+        credential="cred",
+        num_images=1,
+        image_size="square_hd",
+        seed=None,
+        strength=None,
+        source_url=None,
+        model=None,
+        handle=image_rungs.CancelHandle(),
+        emit=None,
+        pause=_no_pause,
+        client=client,
+    )
 
 
 @pytest.mark.asyncio
@@ -163,6 +237,11 @@ async def test_radient_happy_path_request_id_only_and_passthrough() -> None:
     assert result.model == "flux/dev", "the default is read off the live list"
     assert result.generation_id == "r1"
     assert result.cost_usd == 0.08
+    # The status never said ``settled``: the figure is still the submit-time
+    # QUOTE, so it is labelled ``estimated`` (the amount/source are unchanged).
+    assert result.cost_source == "reported"
+    assert result.billing_basis == "estimated"
+    assert result.cost_provenance is not None and "quote" in result.cost_provenance
     assert len(result.assets) == 1
     asset = result.assets[0]
     assert asset.data == PNG_1X1
@@ -405,6 +484,167 @@ async def test_radient_failed_switches_on_error_type_not_prose(
             )
     assert caught.value.code == expected_code
     assert str(caught.value) == "the platform sentence"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["FAILED", "ERROR"])
+async def test_radient_legacy_status_word_alone_still_classifies_upstream(status: str) -> None:
+    # Extends the pinned FAILED-word pin above: the status WORD alone — no
+    # ``error`` and no ``error_type`` at all — must still raise rather than be
+    # read as progress, with the platform-neutral sentence as the message.
+    recorder = _Recorder()
+    async with _client(_radient_handler(recorder, statuses=[{"status": status}])) as client:
+        with pytest.raises(APIError) as caught:
+            await _run_radient(client)
+
+    assert caught.value.code == "upstream"
+    assert str(caught.value) == "Radient reported the generation as FAILED."
+
+
+# ---------------------------------------------------------------------------
+# Radient: the SETTLED failure shape — status COMPLETED carrying the failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_radient_completed_status_carrying_error_classifies_before_completed() -> None:
+    # agent-server's REAL failure shape (``settledStatusResult`` for
+    # MediaSettlementFailed): status ``COMPLETED`` carrying
+    # ``error``/``error_type`` — the hub never emits a FAILED/ERROR word
+    # (docs/MEDIA-PROVIDERS.md section 5.5, hold H9). The failure must be
+    # classified BEFORE COMPLETED is treated as terminal: pre-fix this fell
+    # through to the result read and surfaced as ``invalid_response``
+    # ("completed the job but returned no asset URLs"), a real failure
+    # misreported as a protocol error, and the walk failed forward.
+    recorder = _Recorder()
+    failure = {
+        "status": "COMPLETED",
+        "error": "This generation failed.",
+        "error_type": "media_failed",
+        "settled": True,
+        "units": 0,
+        "cost_usd": 0,
+    }
+    async with _client(
+        _radient_handler(recorder, statuses=[{"status": "IN_QUEUE"}, failure])
+    ) as client:
+        with pytest.raises(APIError) as caught:
+            await _run_radient(client)
+
+    assert caught.value.code == "media_failed"
+    assert str(caught.value) == "This generation failed."
+    # Stopped AT the status read: no result read, no asset download — a failed
+    # generation emits no result (no assets, and the settled zero on the
+    # payload is never adopted as an amount).
+    assert recorder.paths() == [
+        "/tools/media/models",
+        "/me/billing-sources/capacity",
+        "/tools/media/generate",
+        "/tools/media/status",
+        "/tools/media/status",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_radient_completed_result_carrying_error_is_media_failed_never_downloads() -> None:
+    # The result-side R1-2 branch: a clean COMPLETED status, then /result
+    # answers COMPLETED + error/error_type with ``output`` omitted. The check
+    # runs BEFORE the asset rows are read: the failure is classified and
+    # nothing is downloaded or emitted (pre-fix this became the no-assets
+    # ``invalid_response`` after a pointless /result read).
+    recorder = _Recorder()
+    result_failure = {
+        "status": "COMPLETED",
+        "error": "This generation failed.",
+        "error_type": "media_failed",
+    }
+    async with _client(
+        _radient_handler(
+            recorder,
+            statuses=[{"status": "IN_QUEUE"}, {"status": "COMPLETED"}],
+            result=result_failure,
+        )
+    ) as client:
+        with pytest.raises(APIError) as caught:
+            await _run_radient(client)
+
+    assert caught.value.code == "media_failed"
+    assert str(caught.value) == "This generation failed."
+    assert "/tools/media/result" in recorder.paths(), "sanity: the result read happened"
+    assert not [
+        r for r in recorder.requests if r.url.host == "img.test"
+    ], "the result-side failure check runs before the asset download"
+
+
+@pytest.mark.asyncio
+async def test_radient_completed_error_text_only_is_upstream_not_a_swallowed_success() -> None:
+    # Robustness, not claimed emitted (lane repro variant C): a COMPLETED
+    # payload carrying only free-text ``error`` must not be read as success.
+    # With no structured token the code is ``upstream``; prose rides through
+    # as the message and is never parsed for classification.
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(recorder, statuses=[{"status": "COMPLETED", "error": "something broke"}])
+    ) as client:
+        with pytest.raises(APIError) as caught:
+            await _run_radient(client)
+
+    assert caught.value.code == "upstream"
+    assert str(caught.value) == "something broke"
+    assert "/tools/media/result" not in recorder.paths()
+
+
+@pytest.mark.asyncio
+async def test_radient_completed_unknown_error_type_is_upstream_closed_vocabulary() -> None:
+    # Variant D: a token outside RADIENT_ERROR_TYPES classifies as ``upstream``
+    # — the closed vocabulary is never widened by an unknown token, and the
+    # unknown token is never echoed as a code.
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(
+            recorder,
+            statuses=[{"status": "COMPLETED", "error": "x", "error_type": "brand_new_kind"}],
+        )
+    ) as client:
+        with pytest.raises(APIError) as caught:
+            await _run_radient(client)
+
+    assert caught.value.code == "upstream"
+    assert str(caught.value) == "x"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", sorted(image_rungs.RADIENT_ERROR_TYPES))
+async def test_radient_completed_frozen_error_type_rides_through_verbatim(error_type: str) -> None:
+    # Variant E: on the COMPLETED shape too, each frozen token is carried
+    # verbatim as the code (same contract as the legacy FAILED word pins).
+    recorder = _Recorder()
+    failure = {"status": "COMPLETED", "error": "busy", "error_type": error_type}
+    async with _client(_radient_handler(recorder, statuses=[failure])) as client:
+        with pytest.raises(APIError) as caught:
+            await _run_radient(client)
+
+    assert caught.value.code == error_type
+    assert str(caught.value) == "busy"
+
+
+@pytest.mark.asyncio
+async def test_radient_error_prose_quoting_an_error_type_is_never_parsed() -> None:
+    # Prose is never parsed: an ``error`` sentence that happens to quote a
+    # frozen token must not set the code — without ``error_type`` it is
+    # ``upstream``, and the sentence rides through untouched as the message.
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(
+            recorder,
+            statuses=[{"status": "COMPLETED", "error": "upstream said: media_rate_limited"}],
+        )
+    ) as client:
+        with pytest.raises(APIError) as caught:
+            await _run_radient(client)
+
+    assert caught.value.code == "upstream"
+    assert str(caught.value) == "upstream said: media_rate_limited"
 
 
 # ---------------------------------------------------------------------------

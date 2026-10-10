@@ -996,7 +996,33 @@ class RemoteOwner:
         from local_operator.network import relay
 
         bound = relay.engage_client_bound_s()
-        detail = _relay_call(
+        # OFF THE LOOP, and not optional. ``_relay_call`` is a blocking socket
+        # round trip bounded by ``bound`` (85 s), and this coroutine runs on the
+        # daemon's one event loop, which serves every HTTP route — local sessions
+        # included. Called inline it froze all of them for the whole wake: a fake
+        # relay answering after 2.0 s stalled the loop 2.17 s (measured), and the
+        # desktop lease-warm loop re-fires this for a visible remote pane, so a
+        # slow peer wake could arm it repeatedly. ``locate`` and
+        # ``peer_stored_history_page`` are already handed to ``asyncio.to_thread``
+        # by their callers; this was the one blocking call made from inside an
+        # ``async def`` here (``connect`` uses asyncio streams). The default
+        # executor is safe: the thread does one socket round trip, holds no lock
+        # and no shared state, and the socket's own timeout bounds its lifetime —
+        # a cancelled awaiter abandons the thread but never strands it past
+        # ``bound``. The pool is capped (min(32, cpu + 4) workers), so a burst of
+        # that many CONCURRENT wakes would queue other ``to_thread`` users for the
+        # wake's duration — still strictly better than the inline call, which
+        # froze every route for one wake; one wake per distinct remote session
+        # (the lease-warm loop is single-flight per pane) keeps real bursts far
+        # under the cap. Shutdown trade-off: the default executor is joined when
+        # the loop closes or the interpreter exits, so a wake still in flight at
+        # daemon exit can hold a clean stop for up to ``bound`` — no worse than
+        # the inline call, which blocked for the same time. The 2.0 s -> 2.17 s
+        # stall figure comes from the remote-session audit's own harness (a fake
+        # relay answering after 2.0 s; reproduced in the PR that introduced this
+        # line, #2136). No timeout or contract change.
+        detail = await asyncio.to_thread(
+            _relay_call,
             self._root,
             OP_PEER_ENGAGE,
             # AN ENGAGE-SHAPED BUDGET, never the control socket's 5 s default: a
@@ -1275,6 +1301,7 @@ def peer_stored_history_page(
     session_id: str,
     before_id: str | None = None,
     limit: int = 100,
+    open_frame: bool = False,
 ) -> dict[str, Any] | None:
     """One page of a PEER's stored journal, or ``None`` when it cannot be served.
 
@@ -1294,6 +1321,15 @@ def peer_stored_history_page(
     page did not arrive, and the peer's refusal sentence is not a sentence about
     this device's history.
 
+    ``open_frame`` ASKS FOR THE OPEN-FRAME PAGE of ``DESKTOP_API.md`` §"The open
+    frame" — the turn-aligned, paint-only page, built by the OWNER's read once
+    its facts half lands. The ask is the KEY'S PRESENCE, carried
+    only when true: a caller that did not ask sends today's frame byte-for-byte,
+    so an owner older than the flag reads its familiar request unchanged. The
+    reply's optional run facts (``runs``, ``runs_state``, ``head_cut``) are
+    passed through UNCHANGED when the owner produced them — and are absent
+    otherwise, which is the only shape any owner produces today.
+
     BLOCKING — it dials this device's relay's control socket. Callers on a loop
     must hand it to ``asyncio.to_thread``.
     """
@@ -1310,18 +1346,32 @@ def peer_stored_history_page(
         session_id=session_id,
         before_id=before_id or None,
         limit=int(limit),
+        # THE ASK IS THE KEY'S PRESENCE (``validate_open_frame`` in
+        # ``network/relay.py`` owns the spelling on both halves): a caller that
+        # did not ask sends today's frame, byte-for-byte.
+        **({"open_frame": True} if open_frame else {}),
     )
     if not reply or reply.get("refused"):
         return None
     entries = reply.get("entries")
     if not isinstance(entries, list):
         return None
-    return {
+    page: dict[str, Any] = {
         "entries": entries,
         "has_more": bool(reply.get("has_more")),
         "cursor_missing": bool(reply.get("cursor_missing")),
         "has_newer": reply.get("has_newer"),
     }
+    # THE OPTIONAL RUN FACTS: passed through UNCHANGED when the owner produced
+    # them, and absent otherwise (``runs``/``runs_state``/``head_cut`` of
+    # DESKTOP_API.md §"The open frame"). Absent keeps the answer's key set — and
+    # every byte — exactly today's; PRESENT means present, so an empty ``runs``
+    # list or ``head_cut: false`` is carried verbatim rather than dropped by a
+    # truthiness test.
+    for key in ("runs", "runs_state", "head_cut"):
+        if key in reply:
+            page[key] = reply[key]
+    return page
 
 
 def _relay_call(root: Path | None, op: str, **fields: Any) -> dict[str, Any] | None:

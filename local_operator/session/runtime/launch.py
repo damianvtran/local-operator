@@ -75,7 +75,7 @@ from local_operator.harness.approval import (
     remember_operator_cap,
 )
 from local_operator.interpreter import SAFE_PATH_FLAG
-from local_operator.procstate import detached_popen_kwargs
+from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.session.runtime.types import ENGAGED_ENV, RUNTIME_MODULE
 
 logger = logging.getLogger(__name__)
@@ -311,10 +311,12 @@ def _lease_holder(config_dir: Path, session_id: str, *, check_zombie: bool = Tru
 
     ``check_zombie=False`` is for the engage loop's dense grid, and it skips the
     IDENTITY proof with the corpse proof, for the same reason and with the same
-    bound. That proof costs a ``ps`` fork (2.4-4.6 ms across runs on an M-series
-    box, against the 23-30 µs budget published for one dense poll iteration at
-    ``_poll_delay``), so paying it every 10 ms pass would stretch that period by
-    24-46% and eat the dead time the grid exists to remove. The loop therefore
+    bound. That proof costs a platform probe (~90 µs via macOS ``sysctl``, far
+    more on the ``ps`` fallback; see ``procstate._sysctl_samples``), against the
+    23-30 µs budget published for one dense poll iteration at
+    ``_poll_delay``), so paying it every 10 ms pass would still cost several
+    iterations' worth of budget per pass (and, on a host where only the ``ps``
+    fallback answers, far more than the 10 ms period itself). The loop therefore
     passes False only while that grid is in force and True on every coarser
     pass — see the cadence note at the top of the loop.
 
@@ -595,7 +597,7 @@ def _spawn_runtime(
             procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
         )
     try:
-        process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        process = spawn_disclaimed(
             # TWO INDEPENDENT PROPERTIES ON ONE SPAWN, both required.
             # ``SAFE_PATH_FLAG`` supplies import isolation: this spawn passes
             # no ``cwd=``, so the child inherits the viewer's directory, and
@@ -632,31 +634,21 @@ def _spawn_runtime(
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=subprocess.STDOUT,
-            # The capture file is opened "wb", and `text=False` keeps the
-            # Popen's own generic at `bytes` where the runtime's readers expect
-            # it. (Default is False; stated because the platform kwargs below
-            # are spread from a map the analyzer cannot see through.)
-            text=False,
-            # Detachment is platform-spelled: `start_new_session=True` is a
-            # POSIX-only flag that Windows accepts and ignores, so the runtime
-            # this spawns would keep the viewer's console and die with a Ctrl-C
-            # or a console close — the opposite of the owned, attachable runtime
-            # this function exists to leave behind. See
-            # procstate.detached_popen_kwargs.
+            # DETACHMENT AND THE macOS RESPONSIBILITY DISCLAIM BOTH COME FROM
+            # ``spawn_disclaimed``: it keeps ``detached_popen_kwargs``' job on
+            # this call (own session/group on POSIX, no inherited console on
+            # Windows) and additionally leaves the runtime out of the
+            # responsibility chain this process inherited, so a force-quit of
+            # the desktop app at the root of that chain cannot sweep the
+            # runtime (2026-10-09 incident). Where the platform lacks the
+            # lever it falls back to the old ``Popen`` shape verbatim.
             #
-            # KEPT BESIDE THE HANDOFF'S FILE-DESCRIPTOR KWARGS (merge of
-            # ``origin/main``): the two answer different questions and neither
-            # replaces the other — detachment is about which CONSOLE and process
-            # group the child joins, while ``pass_fds``/``close_fds`` are about
-            # which DESCRIPTOR it inherits. ``detached_popen_kwargs`` sets no
-            # ``close_fds`` (POSIX: ``start_new_session``; Windows:
-            # ``creationflags``), so there is no duplicate keyword here.
-            **detached_popen_kwargs(),
             # ``pass_fds``/``close_fds`` come from the handoff: POSIX passes
-            # exactly the one descriptor and keeps ``close_fds=True`` (the
-            # hardening this file already relied on); Windows cannot use
-            # ``pass_fds`` at all, so it passes an inheritable handle and turns
-            # ``close_fds`` off. The runtime reports which boundary it got.
+            # exactly the one descriptor (kept open in the child) and keeps
+            # ``close_fds=True`` (the hardening this file already relied on);
+            # Windows cannot use ``pass_fds`` at all, so it passes an
+            # inheritable handle and turns ``close_fds`` off. The runtime
+            # reports which boundary it got.
             pass_fds=handoff.pass_fds,
             close_fds=handoff.close_fds,
         )
@@ -1160,7 +1152,8 @@ async def engage_runtime(
         # Two probes in this loop ask whether a holder is a live process rather
         # than a pid signal 0 accepts: the owner lookup inside
         # ``find_runtime_record`` and ``_lease_holder``. Proving a corpse costs a
-        # `ps` fork (2.4-4.6 ms measured across runs on this host) against the
+        # platform probe (~90 µs via macOS `sysctl`, far more on the `ps`
+        # fallback; see `procstate._sysctl_samples`) against the
         # 23-30 µs budget published for one DENSE iteration, so the grid asks
         # only the cheap question -- it already believes something is
         # constructing, and neither cheap answer can change ARBITRATION: only the
@@ -1464,9 +1457,10 @@ def _poll_delay(backoff: float, constructing_for_s: float | None) -> tuple[float
     than paid.** Two probes in a dense iteration ask whether a holder is a live
     process rather than a pid signal 0 accepts: the owner lookup this loop's
     ``find_runtime_record`` makes, and ``_lease_holder``. Proving a corpse costs
-    that same fork (2.4-4.6 ms across runs here) against the 23-30 µs budget
-    above, and asking every pass would have stretched the dense period by 24-46%
-    straight out of the dead time this grid exists to remove. So the grid asks
+    that same probe (~90 µs via macOS `sysctl`) against the 23-30 µs budget
+    above (and the ``ps`` fallback, where it is what answers, costs more than
+    the dense period itself), so asking every pass would come straight out of
+    the dead time this grid exists to remove. So the grid asks
     only the cheap question, keyed to the CADENCE rather than to elapsed time:
     past the grid the passes are 50 ms-1 s apart, where one or two forks is a
     fraction of a percent of a core, and there the proof is what recovers a

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.artifacts import BillingBasis, CostSource
 from local_operator.harness.types import AttachmentContent, TextContent, ToolContext
 from local_operator.imagegen import ImageAttempt, ImageOutcome, ImageRoute, MediaAsset
 from local_operator.imagegen import cascade as image_cascade
@@ -43,6 +44,9 @@ def _outcome(
     *,
     seed: int | None = 7,
     cost: float | None = 0.08,
+    cost_source: CostSource | None = None,
+    billing_basis: BillingBasis | None = None,
+    cost_provenance: str | None = None,
 ) -> ImageOutcome:
     if assets is None:
         assets = (
@@ -63,6 +67,9 @@ def _outcome(
         seed=seed,
         generation_id="r1",
         cost_usd=cost,
+        cost_source=cost_source,
+        billing_basis=billing_basis,
+        cost_provenance=cost_provenance,
     )
 
 
@@ -86,11 +93,13 @@ def test_the_builder_gates_on_reachability(monkeypatch: pytest.MonkeyPatch) -> N
     assert tool.label == "Generate image"
     assert tool.approval_tier == "write"
     assert tool.interruptible is True
-    # The wire description is pinned whole (design §2.3): 186 chars, and its
-    # FIRST sentence is what the classification roster may quote.
-    assert len(tool.description) == 186
+    # The wire description is pinned whole (media wave-2, design D9): 160
+    # chars, and its FIRST sentence is what the classification roster may
+    # quote. The provider list left the wire for the guide; the pins moved
+    # with the deliberate rewrite.
+    assert len(tool.description) == 160
     first = tool.description.split(". ", 1)[0] + "."
-    assert len(first) == 117
+    assert len(first) == 91
     assert tool.describe_approval is not None
 
 
@@ -163,6 +172,52 @@ def test_the_size_display_map_covers_every_accepted_token_and_falls_back_raw() -
 # ---------------------------------------------------------------------------
 # Execution: result shape (the lane-D contract)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_details_carry_cost_source_billing_basis_and_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_cascade(**kwargs):
+        return _outcome(
+            cost=0.053,
+            cost_source="subscription",
+            billing_basis="subscription-api-equivalent",
+            cost_provenance="API-equivalent, not billed: doc 2026-10-09",
+        )
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, None, None
+    )
+
+    details = result.details or {}
+    assert details["cost_usd"] == 0.053
+    assert details["cost_source"] == "subscription"
+    assert details["billing_basis"] == "subscription-api-equivalent"
+    assert details["cost_provenance"] == "API-equivalent, not billed: doc 2026-10-09"
+    # Caption unchanged this round: amount only, no basis suffix.
+    caption = result.content[0]
+    assert isinstance(caption, TextContent)
+    assert "Cost $0.053." in caption.text
+    assert "equivalent" not in caption.text
+
+
+@pytest.mark.asyncio
+async def test_details_leave_basis_none_when_there_is_no_amount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_cascade(**kwargs):
+        return _outcome(cost=None)
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, None, None
+    )
+
+    details = result.details or {}
+    assert details["billing_basis"] is None
+    assert details["cost_source"] is None
 
 
 @pytest.mark.asyncio

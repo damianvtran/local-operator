@@ -52,6 +52,7 @@ from local_operator.projects import (
     ProjectSchemaGuardError,
     ProjectStatus,
     build_project_view,
+    closed_with_open_milestones,
     display_name,
     history_lines,
     milestone_status,
@@ -615,11 +616,7 @@ async def _op_update(
             "replace_milestones=true)"
         )
     forced = ""
-    if (
-        params.force_done
-        and updated.status == "done"
-        and any(milestone.completed_at is None for milestone in updated.milestones)
-    ):
+    if closed_with_open_milestones(updated, force_done=params.force_done):
         # A forced close is as deliberate as a replaced list, and this receipt
         # names deliberate acts (the M1 rule): without the clause, a plan that
         # closed over open milestones would read as an ordinary update.

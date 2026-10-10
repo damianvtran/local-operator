@@ -20,6 +20,7 @@ from local_operator.incidents import (
     format_model_switch_message,
     render_involuntary_attribution,
 )
+from local_operator.providers.failover import ProviderError
 
 
 @pytest.mark.parametrize(
@@ -125,6 +126,72 @@ def test_the_reasoning_echo_hint_does_not_claim_a_retry_that_may_not_have_run():
     ).hint
     assert "did not clear" not in hint
     assert "no such rung" in hint
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # The REAL rendered form: enumerated from ``ProviderError.__str__`` rather
+        # than typed, so the test cannot drift from the string users actually see.
+        str(ProviderError(402, "insufficient credits")),
+        str(ProviderError(402, "Insufficient credits", retryable=False)),
+        # The pre-fix rendering, which a transcript written by an older runtime (or
+        # a follower attached to an older owner) still carries. It must classify
+        # billing too: its "quota" wording is what used to win the rate-limit rule.
+        "rate limit or quota exceeded (HTTP 402): insufficient credits",
+        # Provider-side wording with no harness label at all (a relayed body):
+        # the LATE billing rule still claims both spellings through its `credit`
+        # marker, now that the early rule no longer keys on wording (R1-1).
+        "insufficient credits",
+        "out of credits",
+    ],
+)
+def test_an_http_402_out_of_credits_refusal_is_billing_never_rate_limit(raw: str) -> None:
+    """Fix at the source: the rate-limit rule's bare ``quota`` marker used to claim it.
+
+    The desktop keys its "top up" affordance off ``category == "billing"``, so a
+    402 filed as ``rate-limit`` sent a user with a spent balance to wait it out.
+    """
+    incident = classify_incident(raw, "radient", "auto")
+    assert incident.category == "billing", raw
+    assert incident.render().startswith("[session incident (radient/auto)] billing:")
+
+
+def test_a_429_rate_limit_and_a_bare_402_digit_run_stay_rate_limit() -> None:
+    """The new billing rule is keyed on the status TOKEN, not any "402" substring."""
+    assert (
+        classify_incident(
+            str(
+                ProviderError(
+                    429, "Limit: 200000 tokens/min.", retryable=True, retry_after_ms=41600
+                )
+            )
+        ).category
+        == "rate-limit"
+    )
+    # ``used 402000 tokens`` is a token count, and it mentions a quota.
+    assert classify_incident("quota: used 402000 tokens this window").category == "rate-limit"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Agent review round 1, R1-1's repros: the words describe a balance, but
+        # the STATUS owns the failure — a rejected bearer and a throttle.
+        ("authentication failed (HTTP 401): insufficient credits to refresh", "auth"),
+        ("rate limit or quota exceeded (HTTP 429): out of credits? retry in 5s", "rate-limit"),
+        (
+            "rate limit or quota exceeded (HTTP 429): insufficient credits for this tier, "
+            "slow down",
+            "rate-limit",
+        ),
+    ],
+)
+def test_billing_wording_never_outranks_the_status_that_owns_the_failure(
+    raw: str, expected: str
+) -> None:
+    """The early 402 rule keys on the status token; wording stays downstream."""
+    assert classify_incident(raw).category == expected
 
 
 def test_unknown_has_no_invented_hint():
@@ -848,3 +915,104 @@ def test_signal_receipt_detail_states_the_gap_and_never_names_a_sender() -> None
     # another device, so the clock it is on travels with it.
     dated = render_signal_receipt_detail(signal_name="SIGTERM", at=1_760_000_000.0)
     assert re.search(r"received at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}", dated), dated
+
+
+def test_signal_detail_names_a_gone_app_ancestor_and_claims_no_more() -> None:
+    """2026-10-09, gated (design round 1, D1): the clause states BOTH readings.
+
+    The app at the ROOT of the recorded chain was alive when the chain was
+    recorded for this runtime and is gone at arrival — the clause says exactly
+    those two observations, names the app by DESCENT with its bundle name and
+    pid (D2/D3), and must not upgrade either reading to "force-quit" or to a
+    sender. The closing "nobody asked for a stop" stays final (D4).
+    """
+    from local_operator.incidents import KILL_UNATTRIBUTED, render_signal_receipt_detail
+
+    detail = render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        at=1_760_000_000.0,
+        spawn_chain=[
+            {"pid": 111, "argv0": "lop", "alive_at_spawn": True, "alive_now": False},
+            {
+                "pid": 66213,
+                "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+                "alive_at_spawn": True,
+                "alive_now": False,
+            },
+        ],
+    )
+    assert (
+        "the app this runtime descends from (Local Operator.app, pid 66213)"
+        " was running when the runtime started and was no longer running when the signal arrived"
+        " (when it exited is not recorded)"
+    ) in detail
+    # The rendered identity is the bundle name plus pid — never the recorded
+    # command line (D3) — and the order is sender → app status → the closing
+    # conclusion (D4).
+    assert "/Applications/" not in detail
+    assert detail.index("unidentified sender") < detail.index("this runtime descends from")
+    assert detail.rstrip(")").endswith("nobody asked for a stop")
+    assert "force quit" not in detail and "force-quit" not in detail
+    assert KILL_UNATTRIBUTED in detail
+
+
+def test_signal_detail_skips_ancestors_that_fail_either_reading() -> None:
+    """The gate is strict on both halves — anything but proven-alive → proven-gone says nothing."""
+    from local_operator.incidents import render_signal_receipt_detail
+
+    app = "/Applications/Local Operator.app/Contents/MacOS/Local Operator"
+    cases: list[dict[str, object]] = [
+        # still alive at arrival — it did not outlive anything
+        {"pid": 66213, "argv0": app, "alive_at_spawn": True, "alive_now": True},
+        # gone at BOTH readings — it was already gone when the chain was written
+        {"pid": 66213, "argv0": app, "alive_at_spawn": False, "alive_now": False},
+        # a probe that could not be made on either side is not evidence
+        {"pid": 66213, "argv0": app, "alive_at_spawn": None, "alive_now": False},
+        {"pid": 66213, "argv0": app, "alive_at_spawn": True, "alive_now": None},
+        # no recorded reading at all (a chain written by an older build)
+        {"pid": 66213, "argv0": app, "alive_now": False},
+    ]
+    for entry in cases:
+        detail = render_signal_receipt_detail(signal_name="SIGTERM", spawn_chain=[entry])
+        assert "no longer running" not in detail, entry
+
+
+def test_signal_detail_ignores_non_app_members_and_malformed_chains() -> None:
+    from local_operator.incidents import render_signal_receipt_detail
+
+    gone: dict[str, object] = {"alive_at_spawn": True, "alive_now": False}
+    assert "no longer running" not in render_signal_receipt_detail(
+        signal_name="SIGTERM", spawn_chain=[{"pid": 9, "argv0": "/bin/zsh", **gone}]
+    )
+    assert "no longer running" not in render_signal_receipt_detail(
+        signal_name="SIGTERM", spawn_chain="garbage"
+    )
+    assert "no longer running" not in render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        spawn_chain=[{"argv0": "/Applications/X.app/Contents/MacOS/X", **gone}],
+    )
+
+
+def test_signal_detail_renders_the_bundle_name_for_helper_shaped_lines() -> None:
+    """D3: a helper's command line carries flags — the clause cuts to its bundle."""
+    from local_operator.incidents import render_signal_receipt_detail
+
+    helper = (
+        "/Applications/Local Operator.app/Contents/Frameworks/"
+        "Local Operator Helper (Renderer).app/Contents/MacOS/Local Operator Helper (Renderer)"
+        " --type=renderer --user-data-dir=/Users/damian/Library/Application Support/Local Operator"
+    )
+    detail = render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        spawn_chain=[{"pid": 66213, "argv0": helper, "alive_at_spawn": True, "alive_now": False}],
+    )
+    assert "Local Operator Helper (Renderer).app, pid 66213" in detail
+    assert "--user-data-dir" not in detail and "--type=renderer" not in detail
+
+
+def test_signal_detail_without_a_chain_is_byte_identical_to_before() -> None:
+    from local_operator.incidents import render_signal_receipt_detail
+
+    assert render_signal_receipt_detail(signal_name="SIGTERM") == (
+        " (unattributed, SIGTERM received from an unidentified sender; nobody asked for a stop)"
+    )

@@ -371,6 +371,17 @@ class SessionList(BaseModel):
     scope: ScopedAsk | None = None
     #: The per-group census, present only when ``with_counts=true`` asked for it.
     counts: ScopeCounts | None = None
+    #: The ONE-TIME notice that delegated sessions (subagent and background
+    #: runs) were cleaned up, or ``None``. Carried by EVERY listed read until the
+    #: renderer acknowledges it (``POST /v1/desktop/delegated-cleanup-notice/ack``
+    #: flips the on-disk ``notice_acknowledged`` flag); a read must never consume
+    #: it, because this route is polled by many callers — including the app's own
+    #: attach and auth probes, which must not eat the band before the renderer
+    #: renders it (``session.delegated_retention``; the TUI keeps its
+    #: consume-on-show read). ``message`` is the finished text; render it as a
+    #: notice, once. Additive and defaulted: a client that ignores it behaves as
+    #: it always has.
+    delegated_cleanup_notice: dict[str, Any] | None = None
 
     # THE FOUR FIELDS ABOVE ARE ADDITIVE AND ALWAYS PRESENT, which is the whole
     # compatibility promise stated precisely: a request that sends none of
@@ -639,6 +650,55 @@ class HistoryEntry(BaseModel):
     ts_source: HistoryTsSource
 
 
+class RunFacts(BaseModel):
+    """One run's facts, for a client that must draw its bar before the turn is
+    fully loaded.
+
+    THE COUNTS ARE FILLED ONLY FOR A SETTLED RUN, and that is the honesty this
+    model exists to carry rather than a default anyone should read past: a live
+    tail's rows are still arriving, so a number taken now is one the client would
+    have to correct in front of the reader — exactly the after-paint change the
+    open frame exists to remove. An unsettled run is still LISTED (a client needs
+    to know which run it is and that it is live) with its counts absent, and a
+    client keeps its own fold for it.
+
+    ``complete`` is false only when the index could not read a row body inside
+    this run, which makes the counts a lower bound. Measured on this machine: 0
+    of 65,755 tool rows across the twelve largest journals exceed that limit.
+    """
+
+    #: The client's own run identity: the closing answer's id when the run has
+    #: one, else its last row's id (``runsOf`` in the desktop renderer), so a bar
+    #: can be matched against the run it already holds.
+    run_key: str
+    #: The run's opening USER row, absent for a run with no user row (a wake or
+    #: hub run). This is the id a client matching by ``opening_user_id`` uses,
+    #: and the one the page's extension guarantees is on the page when
+    #: ``head_cut`` is false.
+    opening_user_id: str | None = None
+    closing_answer_id: str | None = None
+    settled: bool
+    outcome: str | None = None
+    complete: bool = True
+    started_ts: float
+    ended_ts: float
+    #: Absent together whenever ``settled`` is false — see the class note.
+    action_count: int | None = None
+    failed_count: int | None = None
+    #: Absent (``null``) rather than ``0`` when NO row of the run reported a
+    #: duration: the desktop's own ``workedSeconds`` states null for that case,
+    #: and a bar that prints "0s" where the fold prints nothing is the kind of
+    #: disagreement this contract exists to remove.
+    worked_seconds: float | None = None
+    #: The subset of ``action_count`` / ``worked_seconds`` that the desktop HIDES
+    #: when ``display.hide_cross_session`` is on — ``send`` tool rows, classified
+    #: by the same arm as ``cross-session-visibility.ts::visibleRecords``. Additive
+    #: and documented for the client that hides them; a client with the setting off
+    #: ignores both.
+    cross_session_action_count: int | None = None
+    cross_session_worked_seconds: float | None = None
+
+
 class HistoryPage(BaseModel):
     entries: list[HistoryEntry]
     has_more: bool
@@ -650,6 +710,36 @@ class HistoryPage(BaseModel):
     #: made. The frozen wire (design §D9) draws the field as optional for
     #: exactly this reason, and an older client ignores a key it does not know.
     has_newer: bool | None = None
+    #: The open frame's per-run facts, its freshness state and its honest cut
+    #: flag — ABSENT unless the request carried ``open_frame=1`` (see
+    #: ``docs/DESKTOP_API.md`` §"The open frame"). ``None`` rather than a default
+    #: so an older renderer's page carries no new key AT ALL: the promise is
+    #: byte-for-byte, and a defaulted field would serialise as ``null`` on every
+    #: page and break it.
+    #: The open frame's three keys, ABSENT unless the request carried
+    #: ``open_frame=1`` (see ``docs/DESKTOP_API.md`` §"The open frame").
+    #:
+    #: ``exclude_if`` RATHER THAN A SERIALIZER, and the reason is the published
+    #: schema (review round 1, F7): a ``mode="wrap"`` serializer returns
+    #: ``dict[str, Any]``, and pydantic then publishes this model as
+    #: ``{"additionalProperties": true, "type": "object"}`` — so the properties
+    #: this contract is made of would vanish from ``docs/openapi.json`` the next
+    #: time it is regenerated. ``exclude_if`` omits the JSON key when the value is
+    #: unset AND leaves the model's schema intact: the promise is byte-for-byte
+    #: (no new key on an older client's page) and the documented shape at once.
+    #: ``has_newer`` keeps its existing ``null`` — that is today's shape, and only
+    #: these three are conditional.
+    runs: list[RunFacts] | None = Field(default=None, exclude_if=lambda value: value is None)
+    #: ``ready`` | ``building`` | ``unavailable`` | ``unsupported``. ``building``
+    #: means an index scan was started and THIS answer carries no facts; a client
+    #: keeps its own condensation and the next frame will have them.
+    runs_state: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    #: True when the extension was refused or a cap cut rows from the page: the
+    #: oldest run on the page has no opening user row on it, and ``runs`` is where
+    #: that run's true size lives. False only when the page's oldest row IS a user
+    #: row — an anchored page reports True as soon as a cap dropped rows from it,
+    #: because a jump window never claims its oldest run is whole.
+    head_cut: bool | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 #: How a child's transcript read ended, when the absence of rows needs naming.

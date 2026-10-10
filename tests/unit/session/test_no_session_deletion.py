@@ -128,6 +128,56 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # pairing code, a pending pairing request, one device certificate, and the
     # revocation record itself: four single files this module itself wrote, never a
     # directory.
+    # -- code-request store (derived files, never a session) -----------------
+    # All three calls below touch ONLY the two derived files this module owns, both
+    # built by ``index_path``/``cache_path`` as ``<config>/code_requests/<stem>.json``
+    # and ``<config>/cache/code_requests/<stem>.json``. The stem is not a raw string
+    # from the caller: ``_derived_stem`` refuses anything but ``[A-Za-z0-9_-]{1,128}``,
+    # so no id can contribute a separator or a ``..`` and none of these can name a path
+    # under ``sessions/``. The files are DERIVED — the transcript is the truth, and a
+    # deleted index is rebuilt by the next scan.
+    (
+        "local_operator/code_requests/ledger.py::_write_json",
+        "<path>.replace",
+        "Atomic pid-temp replace of one <config>/code_requests/<stem>.json (index or cache)",
+    ),
+    (
+        "local_operator/code_requests/ledger.py::write_index",
+        "<path>.unlink",
+        "Drops <config>/code_requests/<stem>.json when the session has no rows left",
+    ),
+    (
+        "local_operator/code_requests/ledger.py::drop_session",
+        "<path>.unlink",
+        "Drops both derived files for one session id, on that session's own deletion",
+    ),
+    # -- the code-request FETCH cache (1b): same derived-store argument as the
+    # ledger entries above. Every path here is built from ``fetch_dir()``
+    # (``<config>/cache/code_requests``) plus a sanitized host segment and a
+    # quoted-filename stem; no caller string can contribute a separator, and the
+    # files are cached fetch state, regenerable by the next refresh pass — a
+    # deleted entry is one conditional request away from being rebuilt.
+    (
+        "local_operator/code_requests/cache.py::_write_json",
+        "os.replace",
+        "Atomic pid-temp replace of one <config>/cache/code_requests/<host>/<file>.json",
+    ),
+    (
+        "local_operator/code_requests/cache.py::drop_entry",
+        "<path>.unlink",
+        "Drops one cached ref entry (memory + this file) on an explicit drop",
+    ),
+    (
+        "local_operator/code_requests/cache.py::clear_dirty",
+        "<path>.unlink",
+        "Drops one session's dirty marks once its fetch pass consumed them",
+        2,
+    ),
+    (
+        "local_operator/code_requests/cache.py::sweep",
+        "<path>.unlink",
+        "Drops entries untouched for SWEEP_AGE_S — the derived-store age sweep",
+    ),
     (
         "local_operator/operator/devices.py::clear_pairing",
         "<path>.unlink",
@@ -1663,15 +1713,35 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ("local_operator/tools/group_reaper.py::_safe_unlink", "<path>.unlink", "pgid ledger FILE"),
     ("local_operator/tools/group_reaper.py::kill_own_groups", "<path>.unlink", "pgid ledger FILE"),
     ("local_operator/tools/spill.py::SpillStore._remove", "<path>.unlink", "spill FILE"),
+    # The notifier's own files under <config_dir>/notifier/: a build lock, the
+    # terminal memory and the --action probe cache, each built from
+    # ``config_dir()`` plus a fixed basename — none can name a path under
+    # sessions/. The ``_build_in_background`` rows that stood here moved when
+    # the single-builder rework split the marker into claim/release.
     (
-        "local_operator/tui/notifier_app/__init__.py::_build_in_background",
+        "local_operator/tui/notifier_app/__init__.py::_claim_build_lock",
         "<path>.unlink",
-        "build marker FILE",
+        "stale build-marker FILE <config_dir>/notifier/.building; config-dir lock",
     ),
     (
-        "local_operator/tui/notifier_app/__init__.py::_build_in_background._run",
+        "local_operator/tui/notifier_app/__init__.py::_release_build_lock",
         "<path>.unlink",
-        "build marker FILE",
+        "build-marker FILE <config_dir>/notifier/.building; config-dir lock",
+    ),
+    (
+        "local_operator/spawn/remembered.py::remember",
+        "os.replace",
+        "Atomic write of <config_dir>/notifier/last-terminal.json; config-dir FILE",
+    ),
+    (
+        "local_operator/spawn/remembered.py::forget",
+        "<path>.unlink",
+        "Removes <config_dir>/notifier/last-terminal.json; config-dir FILE",
+    ),
+    (
+        "local_operator/tui/notify.py::_write_persisted_action_support",
+        "os.replace",
+        "Atomic write of <config_dir>/notifier/notify-send-actions.json; config-dir FILE",
     ),
     ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),

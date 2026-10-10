@@ -169,6 +169,17 @@ def _build_label(fields: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _parse_spawn_chain(value: Any) -> list[dict[str, Any]] | None:
+    """The stored spawn chain, validated; ``None`` on anything malformed.
+
+    Delegates to ``macos_disclaim``'s parser — the writer of the format — so a
+    reader cannot disagree with a writer about what a chain is.
+    """
+    from local_operator.macos_disclaim import parse_spawn_chain
+
+    return parse_spawn_chain(value)
+
+
 @dataclass
 class BootRecord:
     """One process's statement that it existed, published before it listens.
@@ -193,6 +204,11 @@ class BootRecord:
     build_ref: str = ""
     install_root: str = ""
     cwd: str = ""
+    #: The lineage this process was spawned into (``macos_disclaim``), recorded
+    #: at boot because it is what makes a later unattributed signal readable:
+    #: "the app at the root of this chain was gone when the signal landed".
+    #: ``None`` on processes spawned without a chain — absent stays absent.
+    spawn_chain: list[dict[str, Any]] | None = None
     started_at: float = field(default_factory=_now)
     heartbeat_at: float = field(default_factory=_now)
 
@@ -208,6 +224,11 @@ class BootRecord:
             "cwd": self.cwd,
             "started_at": self.started_at,
             "heartbeat_at": self.heartbeat_at,
+            # Additive and omitted when absent (same rule as the old-record
+            # compatibility the readers already honor): an older build reading
+            # this row never sees the key, and this build reading an older row
+            # gets ``None`` from ``from_json``.
+            **({"spawn_chain": self.spawn_chain} if self.spawn_chain else {}),
         }
 
     @classmethod
@@ -227,6 +248,7 @@ class BootRecord:
             build_ref=str(data.get("build_ref") or ""),
             install_root=str(data.get("install_root") or ""),
             cwd=str(data.get("cwd") or ""),
+            spawn_chain=_parse_spawn_chain(data.get("spawn_chain")),
             started_at=float(data.get("started_at") or 0.0),
             heartbeat_at=float(data.get("heartbeat_at") or 0.0),
         )
@@ -259,6 +281,7 @@ def write_boot_record(
     pid: int | None = None,
     parent_pid: int | None = None,
     cwd: str | None = None,
+    spawn_chain: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Publish this process's boot record. Returns where it landed.
 
@@ -275,6 +298,7 @@ def write_boot_record(
         build_ref=str(getattr(build, "source_ref", "") or ""),
         install_root=_install_root(),
         cwd=cwd if cwd is not None else os.getcwd(),
+        spawn_chain=spawn_chain,
     )
     path = registry.publish(record, root, HOST_RUN_DIRNAME)
     if record.pid == os.getpid() and root is None:
@@ -366,8 +390,8 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     ``SessionRecord`` every 15 s, while a ``BootRecord`` is a boot-time snapshot
     by design (see its docstring) and nothing ever refreshes its heartbeat. So
     every record of a runtime that has been up longer than 22.5 s is "quiet", and
-    deriving the probe from that age here would fork ``ps`` (~2.4-4.6 ms, see
-    ``procstate.is_zombie``) once per LIVE runtime at every boot — ~100-200 ms
+    deriving the probe from that age here would spend the zombie probe (see
+    ``procstate.is_zombie`` for its measured cost) once per LIVE runtime at every boot — ~100-200 ms
     for a forty-session fleet, on the path this design measured at ~1.2 s.
 
     The consequence is bounded and in the safe direction: a record whose pid has

@@ -80,6 +80,11 @@ class SettingView(BaseModel):
     #: that ignores it sees the previous response, and an app that predates it
     #: keeps rendering hotkeys by the rules it already shipped.
     hotkey_scope: str = ""
+    #: What an INT/FLOAT row counts ("hours"), so a UI can render a bounded
+    #: control from ``minimum``/``maximum``/``unit`` without parsing the help.
+    #: The stored value is always in this unit. Additive on the same terms as
+    #: the fields above: an older app ignores it, an older server omits it.
+    unit: str = ""
 
 
 class SettingsView(BaseModel):
@@ -127,6 +132,7 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         placeholder=setting.placeholder,
         gated_by=setting.gated_by,
         hotkey_scope=setting.hotkey_scope,
+        unit=setting.unit,
     )
 
 

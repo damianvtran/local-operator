@@ -223,7 +223,8 @@ from local_operator.tui.costs import (
     LOWER_BOUND_MARK,
     UNKNOWN_COST_CELL,
     SearchSpendSnapshot,
-    job_cost,
+    carry_floor,
+    job_subtree_cost,
     search_spend_is_floor,
     turn_cost,
 )
@@ -4730,8 +4731,25 @@ class OperatorApp(App[None]):
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
         self._setup_state_flag = False
+        #: ``/model --all`` — show the whole registry in the picker, including
+        #: rows this user has no credential for, so a model they are about to
+        #: sign in for is still findable. OFF is the shipped default view: the
+        #: filtered list is the one that costs no keystrokes on a miss, and its
+        #: footer says how many are hidden. An app-level view preference
+        #: (``/model`` chooses a model, not a session), so it survives session
+        #: switches and resets with the process.
+        self._model_show_all = False
         self._model_activation_generation = 0
         self._model_activation_pending: int | None = None
+        #: A FIRST-LOGIN re-home whose session was not bound when the login
+        #: completed: the provider id to re-home for. Drained on the session-bind
+        #: edge and, as a backstop, at the next turn end (QA round 1, Q1 — the
+        #: repair used to evaporate silently in exactly this window).
+        self._rehome_await_bind: str | None = None
+        #: ``(old_label, login_provider, model_id)`` for a stranded conversation
+        #: that was BUSY when its first-login re-home ran. Retried at the next
+        #: turn end; the deferral sentence told the user so (UX review U1).
+        self._rehome_pending: tuple[str, str, str] | None = None
         #: The unknown provider id that put us in the setup state, when that is
         #: why we are here (``None`` for the nothing-configured case).
         #:
@@ -7878,6 +7896,15 @@ class OperatorApp(App[None]):
                 bound=_viewport_message_budget(self.size.height),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
                 live_call_ids=live_projection_call_ids(session),
+                # The width the revealed view WILL have, asked of the view it
+                # replaces: both are `1fr` children of `#session-conversation`
+                # with the same stylesheet, so the on-screen view's scrollable
+                # content width is this one's to the cell. Without it every
+                # block folded at the 80-column fallback and refolded after the
+                # reveal — the 3-to-6 painted states of a sidebar switch. A
+                # hidden on-screen view (subagent page open) reports 0, which
+                # keeps the fallback rather than guessing.
+                fold_width=self._transcript_view().scrollable_content_region.width,
             )
             preview_unavailable = (
                 not replay.blocks
@@ -7966,10 +7993,30 @@ class OperatorApp(App[None]):
                 )
                 welcome.set_navigation_visible(False)
                 await replay.view.mount(welcome)
+            # A SAVED POSITION IS NOT A TAIL OPEN, and the difference is a
+            # frame the reader sees. `follow_tail()` does two jobs: it arms the
+            # follower and queues a scroll to the end. For a source the reader
+            # left mid-conversation the second one is a POSITION it must not
+            # take, and it is why a `display_only` saved-anchor return painted
+            # the tail one frame after the commit's own restore put the viewport
+            # at the saved anchor (QA round 2, Q8: state-104ms at the top,
+            # state-146ms at the tail, settled at the saved position — three
+            # frames, two of them content, neither final). So the position is
+            # ARMED instead, before the batch mounts, and `arrange` takes it in
+            # the pass that gives the anchor its rows — the reveal's first frame
+            # is then already the reader's own position.
+            saved_position = not source.draft.following_tail and bool(source.draft.scroll_anchor_id)
+            if saved_position:
+                replay.view.arm_navigation_anchor(
+                    source.draft.scroll_anchor_id,
+                    source.draft.scroll_anchor_part,
+                    source.draft.scroll_offset,
+                )
             with replay.view.batch_append():
                 for block in replay.blocks:
                     replay.view.append_block(block)
-            replay.view.follow_tail()
+            if not saved_position:
+                replay.view.follow_tail()
             # Retained/canonical views benefit from a measured parked layout.
             # A first saved view has no existing geometry to preserve: painting
             # it offscreen first adds a whole extra layout/frame before useful
@@ -9509,6 +9556,50 @@ class OperatorApp(App[None]):
         if incoming.welcome is not None:
             incoming.welcome.set_navigation_visible(True)
         incoming.replay.view.styles.height = "1fr"
+        # A FOLLOWER IS PLACED AT THE TAIL IN THE REVEAL FRAME ITSELF. The view
+        # comes out of its park at a new height (the parked copy is sized to
+        # the old composer), so the reveal is a reflow whose tail scroll lands
+        # in `_size_updated` — AFTER the compositor placed the rows. Measured on
+        # S1 at 160x45: the first painted frame of every switch showed the rows
+        # 15 lines low (and, once the prepared transcript was authored at the
+        # destination width, that was the last state left to remove). One extra
+        # visual state per switch, gone.
+        #
+        # A SAVED POSITION IS THE OPPOSITE CASE AND IS ASKED FIRST. The hold is
+        # about the TAIL, and a source the reader left mid-conversation is not
+        # going to the tail — it is going back to its own anchor. The two cannot
+        # both win: `_prepare_sidebar_session` calls ``follow_tail()``
+        # unconditionally (the parked view has no saved geometry to hold), so a
+        # `display_only` source with a saved anchor arrives here with
+        # ``following`` armed, and the reveal would paint the end of a
+        # conversation whose reader is somewhere in the middle before
+        # ``restore_revealed_anchor`` walks it back — the two painted states.
+        # So the anchor is restored on the revealed geometry HERE, in the same
+        # synchronous section, and the post-reveal restore stays as the net it
+        # has always been (it exists because a parked measurement is not the
+        # final geometry for wrapped content; where the offset already agrees it
+        # changes nothing, so the frame count is unaffected).
+        saved_position = not source.draft.following_tail and bool(source.draft.scroll_anchor_id)
+        if saved_position:
+            # ONLY PLACE IT IF THE ANCHOR IS MEASURED, and this is the whole
+            # correctness of the saved-position reveal. A ``display_only`` first
+            # visit skips the prepare-time layout (see the comment in
+            # ``_prepare_sidebar_session``), so every block's region is still a
+            # zero one here: the restore would clamp to the TOP of the
+            # conversation, and the reveal would paint the first message of a
+            # conversation the reader left in the middle — worse than the
+            # tail-first frame it replaced, which at least shared the reader's
+            # end of the transcript. ``restore_revealed_anchor`` below is the net
+            # that places it on the revealed geometry, and the F2 guarantee (no
+            # tail hold for a saved position) is unaffected either way.
+            incoming.replay.view.restore_navigation_anchor(
+                source.draft.scroll_anchor_id,
+                source.draft.scroll_anchor_part,
+                source.draft.scroll_offset,
+                only_when_measured=True,
+            )
+        else:
+            self._hold_tail_for_reveal(incoming.replay.view)
         incoming.replay.view.set_on_clear(self._on_transcript_cleared)
         incoming.replay.view.set_on_user_scroll(self._transcript_scrolled)
         incoming.replay.view.set_on_tail_requested(self._jump_newer_resume_tail)
@@ -12614,6 +12705,11 @@ class OperatorApp(App[None]):
             streaming=False,
         )
         self._wire_mcp_status(session)
+        # Both adoption paths publish (the claim `_adopt_session`'s own comment
+        # makes, QA round 1 Q2): a takeover replaces the owner whose credentials
+        # the catalogue and the access claim describe, so the new owner's rows
+        # are republished here too. Previously only the boot path did.
+        self._publish_model_catalogue(session)
         # The durable ledger carries the conversation's true cost/context
         # across the rotation. Seeding the band directly from the canonical
         # snapshot (not only from restored turn usage, which is one turn's
@@ -13344,6 +13440,18 @@ class OperatorApp(App[None]):
         #: Monotonic and never reset: a token from any earlier binding is simply
         #: unequal to the current one, which is all the comparison needs.
         self._binding_epoch += 1
+        # A first-login re-home that had no session to inspect (the login landed
+        # mid-swap) runs HERE, on the edge its decision was waiting for — the one
+        # writer of ``self._session``, so there is no second place the queue could
+        # be drained from a stale binding (QA round 1, Q1). Nothing runs on an
+        # UNBIND (``session is None``): the queue keeps its provider for the next
+        # bind or the turn-end backstop rather than firing against no session.
+        queued = self._rehome_await_bind
+        if queued is not None and session is not None:
+            self._rehome_await_bind = None
+            sentence = self._rehome_stranded_session(queued)
+            if sentence:
+                self._notice(sentence, "note")
 
     def _restore_search_spend(self, session: Any) -> None:
         """Seed a RESUMED conversation's search spend into the search ledger.
@@ -13595,6 +13703,10 @@ class OperatorApp(App[None]):
         screenful = _viewport_message_budget(self.size.height)
         first_cut = _resume_tail_start(history, screenful) if len(history) > screenful else 0
         if first_cut <= full_cut:
+            # The same first-frame tail placement the split branch below gets
+            # from its hold: without it a short conversation's first frame is
+            # placed at scroll 0 and moved to the tail one frame later.
+            self._hold_tail_for_reveal(self._transcript_view())
             self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
             # A message budget is a PROXY for height, and a poor one. Whether the
             # first frame can be scrolled is a question about ROWS, and only the
@@ -13623,6 +13735,36 @@ class OperatorApp(App[None]):
         view.hold_tail_through_layout(True)
         self._project_settled_rows(history, start=first_cut)
         self._backfill_resume_window(first_cut - full_cut, drop_notice=full_cut == 0)
+
+    @staticmethod
+    def _hold_tail_for_reveal(view: TranscriptView | None) -> None:
+        """Place a FOLLOWING view at its tail BEFORE the next layout, then let go.
+
+        For the frames that change the transcript's own geometry with rows
+        already on it, where the tail scroll otherwise runs after the compositor
+        has placed the rows — the frame the user sees as the conversation
+        jumping:
+
+        * a sidebar reveal, where the parked view comes back at the visible
+          height (measured at 160x45: the first painted frame of every switch
+          showed the rows 15 lines low, and the next frame moved them up, one
+          extra visual state per switch);
+        * a short resume, which fills in one go and would otherwise place its
+          first frame at scroll 0 and move to the tail a frame later (the long
+          case already holds through its backfill page).
+
+        ``TranscriptView.hold_tail_through_layout`` is the pre-placement seam,
+        and the release is scheduled for the refresh after, because a hold that
+        outlived its frame would re-land the tail on layouts the READER caused
+        by scrolling away. A view that is not following is never touched: a
+        restored scroll anchor must not be overridden (see
+        ``TranscriptView.arrange``).
+        """
+        if view is None or not view.is_following_tail:
+            return
+        view.hold_tail_through_layout(True)
+        if not view.call_after_refresh(view.hold_tail_through_layout, False):
+            view.hold_tail_through_layout(False)
 
     def _backfill_resume_window(self, count: int, *, drop_notice: bool) -> None:
         """Mount the newest ``count`` held messages as one page, after the paint.
@@ -14613,6 +14755,7 @@ class OperatorApp(App[None]):
         hide_cross_session = cross_session_hidden()
         from local_operator.harness.rows import (
             is_hidden_tool_call,
+            is_quiet_turn_call,
             is_settle_only_ask,
             queued_ask_engine_live,
         )
@@ -14631,8 +14774,12 @@ class OperatorApp(App[None]):
             # HIDDEN tools never paint a row on any seam: this one restores the
             # row for a call already in flight, so skipping it here is what
             # keeps a resumed ``patience`` call from appearing where the live
-            # path refuses to mount it (UX round 1, U2).
-            if is_hidden_tool_call(call):
+            # path refuses to mount it (UX round 1, U2). THE QUIET PAIR is the
+            # second member of that class (design docs/design/quiet-turns.md
+            # §5, S1): both live seams and the replay skip its call, so this
+            # restore painter must too, or a resumed quiet call would mount a
+            # row the rest of the app refuses to paint.
+            if is_hidden_tool_call(call) or is_quiet_turn_call(call):
                 continue
             if is_settle_only_ask(getattr(call, "name", ""), queued_engine=gate_settle_only):
                 continue
@@ -15505,9 +15652,12 @@ class OperatorApp(App[None]):
         The gate's ONE drop path (design docs/design/ask-gate.md §3): a
         diverted ask's row must vanish wherever a surface had mounted one
         before the mode could be read — the mixed-build fallback the design
-        records (today's mount, drop on the settle marker). Registries are
-        cleaned by IDENTITY first (the card may sit under a placeholder key),
-        then the view's ``remove_block`` takes the row off its retained list.
+        records (today's mount, drop on the settle marker). THE QUIET PAIR's
+        end frame rides the same path (design docs/design/quiet-turns.md §5,
+        S1): a card some seam older than the name gates could have mounted is
+        retired rather than settled. Registries are cleaned by IDENTITY first
+        (the card may sit under a placeholder key), then the view's
+        ``remove_block`` takes the row off its retained list.
         """
         for registry in (self._tool_cards, self._composing_cards):
             for key in [key for key, candidate in registry.items() if candidate is card]:
@@ -21572,6 +21722,27 @@ class OperatorApp(App[None]):
             return
         if body is not None:
             self._system_notice(body, "warning")
+            return
+        # The DELEGATED-work class announces itself ONCE per store, from its own
+        # record (`session.delegated_retention`), never from `last-cleanup.json`:
+        # that file is re-armed by every removing pass of the parent class and
+        # would make each hourly delegated sweep announce again.
+        try:
+            from local_operator.session.delegated_retention import (
+                format_delegated_notice,
+                take_unannounced_delegated_notice,
+            )
+
+            delegated = take_unannounced_delegated_notice(
+                config_dir() / SESSIONS_DIRNAME,
+                runtime_pid=runtime_pid if isinstance(runtime_pid, int) else None,
+            )
+            delegated_body = None if delegated is None else format_delegated_notice(delegated)
+        except Exception:  # noqa: BLE001 — a notice must never take the app down
+            logger.debug("delegated cleanup notice could not be built", exc_info=True)
+            delegated_body = None
+        if delegated_body is not None:
+            self._system_notice(delegated_body, "info")
             return
         if rechecks_left > 0:
             remaining = rechecks_left - STARTUP_CLEANUP_RECHECK_S
@@ -27827,6 +27998,15 @@ class OperatorApp(App[None]):
         # refresh of delay is one painted frame of the question overhanging the
         # composer — the exact artifact this fixes, merely briefer.
         self._sync_boot_layout()
+        # THE READER DOES NOT MOVE BECAUSE A QUESTION APPEARED. The host is a
+        # dock child under the transcript, so its rows come out of the
+        # transcript's own height: a card mounting while the reader is at the
+        # tail pushed every visible row up by the card's height, one frame
+        # after the rows had already been placed and painted (measured on S4's
+        # live open: the card mounts ~600 ms after the first rows and the
+        # transcript shortens from 38 rows to 23). A follower is therefore held
+        # to the tail THROUGH the new layout, so the frame that carries the
+        # card already carries the reader at the end of the conversation.
         # ...and only while that something can actually be drawn. On a terminal
         # too short for even the card's footer the card hides itself, and a host
         # left visible would keep its own separation row for a prompt painting
@@ -35326,7 +35506,9 @@ class OperatorApp(App[None]):
         """
         try:
             rows, _note = self._catalogue_rows(
-                self._providers.static_catalogue() if self._providers else []
+                self._providers.static_catalogue() if self._providers else [],
+                # The picker toggle is the picker's; see ``_catalogue_rows``.
+                show_all=False,
             )
             return rows
         except Exception:  # noqa: BLE001 — the page must open without a catalogue
@@ -38299,12 +38481,18 @@ class OperatorApp(App[None]):
         attachments: Mapping[int, Marked] | None = None,
         *,
         _inline_remote: bool = False,
+        _rehome: bool = False,
     ) -> Awaitable[None] | None:
         """Dispatch a typed slash command (with arguments) to its handler.
 
         Ordinary callers schedule remote work and return None. The cold-bind
         worker requests the SAME operation inline so queued commands reach the
         owner before a later prompt can overtake an extra scheduling hop.
+
+        ``_rehome`` is the sign-in repair's private spelling of ``/model
+        <p>/<id>``: it suppresses the dispatch's own receipt, because the repair
+        paints ONE sentence of its own and two receipts for one switch read as
+        two events (design round 1, D1). See ``_activate_resolved_model``.
 
         ``attachments`` is the composer's index→image map at submit time, passed
         through so the two prompt-sending commands (``/team``/``/agent``) can
@@ -38679,7 +38867,7 @@ class OperatorApp(App[None]):
         elif command == "/delete":
             self._cmd_delete(arg, notice)
         elif command == "/model":
-            self._cmd_model(arg, notice)
+            self._cmd_model(arg, notice, _rehome=_rehome)
         elif command == "/effort":
             self._cmd_effort(arg, notice)
         elif command == "/fast":
@@ -39755,7 +39943,7 @@ class OperatorApp(App[None]):
         )
 
     # -- model --------------------------------------------------------------
-    def _cmd_model(self, arg: str, notice: NoticeFn) -> None:
+    def _cmd_model(self, arg: str, notice: NoticeFn, *, _rehome: bool = False) -> None:
         """``/model`` — open the picker; ``/model provider/id`` — switch directly.
 
         A bare ``/model`` OPENS THE LIST rather than printing the current label.
@@ -39815,6 +40003,16 @@ class OperatorApp(App[None]):
         # direction.
         if lowered == "saved":
             self._cmd_model_saved(notice)
+            return
+        # ``/model --all`` — toggle the show-all view (see ``_model_show_all``).
+        # A command WORD like ``saved``, and for the same reason: it is consumed
+        # here rather than ranked as a selector, so the picker's empty state can
+        # name it (``_PERSIST_KEYWORDS``). The reopen is what repaints the rows
+        # under the new mode; the buffer route is the single authority on which
+        # picker shows.
+        if lowered == "--all":
+            self._model_show_all = not self._model_show_all
+            self._open_model_picker()
             return
         if (
             persist_default
@@ -39961,10 +40159,15 @@ class OperatorApp(App[None]):
             # This is a user-command receipt, not background infrastructure.
             # Retire the splash before the wait so completion cannot move the
             # composer underneath a draft typed while capacity is being checked.
-            notice(f"Checking active capacity for {provider}/{model_id}…", "info")
+            if not _rehome:
+                # A machine-initiated repair is not a user command waiting on a
+                # capacity answer, so the wait line goes with the receipt it
+                # belongs to (design round 1, D1): the re-home has its own single
+                # sentence.
+                notice(f"Checking active capacity for {provider}/{model_id}…", "info")
             self.run_worker(
                 self._resolve_local_model_activation(
-                    session, provider, model_id, persist_default, notice, generation
+                    session, provider, model_id, persist_default, notice, generation, _rehome
                 ),
                 group="local-model-resolution",
                 exclusive=True,
@@ -39975,7 +40178,9 @@ class OperatorApp(App[None]):
         except Exception as error:  # unresolvable hosting/model pair
             self._system_notice(f"cannot resolve {provider}: {error}", "error")
             return
-        self._activate_resolved_model(session, provider, model_id, spec, persist_default, notice)
+        self._activate_resolved_model(
+            session, provider, model_id, spec, persist_default, notice, _rehome=_rehome
+        )
 
     async def _resolve_local_model_activation(
         self,
@@ -39985,6 +40190,7 @@ class OperatorApp(App[None]):
         persist_default: bool,
         notice: NoticeFn,
         generation: int,
+        _rehome: bool = False,
     ) -> None:
         providers = self._providers
         if providers is None:
@@ -39996,7 +40202,7 @@ class OperatorApp(App[None]):
             # selection settles, so a fast next prompt cannot reach the old model.
             if self._session is session and generation == self._model_activation_generation:
                 self._activate_resolved_model(
-                    session, provider, model_id, spec, persist_default, notice
+                    session, provider, model_id, spec, persist_default, notice, _rehome=_rehome
                 )
         except Exception as error:
             self._system_notice(f"cannot resolve {provider}: {error}", "error")
@@ -40033,6 +40239,8 @@ class OperatorApp(App[None]):
         spec: Any,
         persist_default: bool,
         notice: NoticeFn,
+        *,
+        _rehome: bool = False,
     ) -> None:
         # Consume the ONE-SHOT effort override FIRST, before any early return.
         # `_cmd_model_saved` and the persist path leave it here so the NEXT
@@ -40347,7 +40555,22 @@ class OperatorApp(App[None]):
         # a row that is already three lines at 50 columns (UX review U7) and
         # the login warning would be about a provider already serving the
         # session.
+        if not write_only:
+            # The session's model just moved, so the published access claim must
+            # move with it: a typed `/model provider/id` is exactly the route
+            # that can land on a provider this host has no credential for.
+            self._publish_model_access(session)
         suffix, warning = ("", None) if write_only else self._model_access_note(provider)
+        if _rehome:
+            # ONE STATEMENT OF THE MOVE (design round 1, D1). Everything below is
+            # the dispatch's RECEIPT — the `model: X → Y (this session) · … —
+            # /model default saves this for new sessions` row (and the mid-turn
+            # and access rows that qualify it) — and the sign-in repair paints a
+            # sentence of its own, written for a move the user did not ask for.
+            # Two receipts for one switch read as two events, and the persist
+            # hint advised an action the config row above had already taken
+            # (D2). The switch itself, and the band, have already happened.
+            return
         if persist_result is not None:
             notice(persist_result, "warning")
         elif persist_default:
@@ -42209,6 +42432,42 @@ class OperatorApp(App[None]):
         # where the reader most needs it whole.
         return "partial list — not all models"
 
+    def _publish_model_access(self, session: Any) -> None:
+        """Publish "can the session's model actually run here" (PR2, additive).
+
+        The desktop band and any external reader answer "is this session on a
+        model its host is signed in for" from canonical state; the TUI is the
+        host that KNOWS (its controller's ``usable_providers`` is the one
+        predicate every picker already filters by), so it publishes the claim
+        rather than letting each reader re-read a credential store.
+
+        The MAPPING is not spelled here: ``model_access_claim`` owns it, one
+        spelling shared by every publishing host, so this host and a serve-side
+        runtime cannot describe the same store with two answers (cross-PR
+        unify with the re-home branch's publication). ``None`` inputs — no
+        selector yet, an unreadable store — make the builder answer ``None``,
+        and the claim is published rather than nothing: ``signed_out`` would be
+        an accusation the app failed to establish, and a stale claim from
+        before the store became unreadable is worse than no claim at all.
+        """
+        store = getattr(session, "_frontend_state_store", None) if session is not None else None
+        if store is None:
+            return
+        # NEVER RAISES, on any edge (agent review round 1, R1-2/R1-1 fallout):
+        # the same call runs on the boot path, on logins, on local switches and
+        # now on routed switches, and an additive state field is never worth
+        # failing the keystroke it rode in on. One guard here rather than a
+        # try/except around every call site, which is how the routed lane came
+        # to be missed in the first place.
+        try:
+            from local_operator.session.frontend_state import model_access_claim
+
+            store.refresh_model_access(
+                model_access_claim(self._current_selector(), self._usable_providers())
+            )
+        except Exception:
+            logger.debug("model access publication failed", exc_info=True)
+
     def _publish_model_catalogue(self, session: Any) -> None:
         """Push the owner's offerable models into canonical state (D3).
 
@@ -42231,8 +42490,15 @@ class OperatorApp(App[None]):
             store.refresh_model_catalogue(entries)
         except Exception:
             logger.debug("model catalogue publication failed", exc_info=True)
+        # The access claim rides the SAME edges as the catalogue — a login or a
+        # re-adoption is exactly when either fact changes, and both are reads
+        # this app already pays for on those edges. `_publish_model_access`
+        # carries its own never-raises guard.
+        self._publish_model_access(session)
 
-    def _catalogue_rows(self, entries: list["CatalogueEntry"]) -> tuple[list[ModelRow], str]:
+    def _catalogue_rows(
+        self, entries: list["CatalogueEntry"], *, show_all: bool | None = None
+    ) -> tuple[list[ModelRow], str]:
         """``(rows, note)`` — the models this user can actually run, and what was cut.
 
         HIDDEN, not demoted. The list used to be the whole registry with the
@@ -42268,6 +42534,12 @@ class OperatorApp(App[None]):
             settings if settings is not None else self._config_values()
         )
         usable = self._usable_providers()
+        # ``show_all`` is the ``/model --all`` toggle. ``None`` means "the
+        # picker's current mode"; the settings page's Default-model dropdown
+        # passes ``show_all=False`` explicitly, because that surface is a boot
+        # preference rather than this picker, and the two must not change
+        # together behind a key the settings page does not show.
+        show_all = self._model_show_all if show_all is None else show_all
         current = self._current_selector()
         # A follower merges the OWNER's published catalogue: the session runs
         # on the owner's credentials, so the owner's rows are the offerable
@@ -42335,9 +42607,14 @@ class OperatorApp(App[None]):
         # serving spec and no runtime catalogue to merge.
         from local_operator.providers.catalogue import picker_rows
 
+        # ``usable=None`` is picker_rows' own "show everything" spelling, so
+        # the show-all view is the same code path with the filter removed —
+        # unusable rows arrive with ``connected=False`` and render dim with
+        # their "login required" tag exactly as they do today wherever the
+        # unfiltered view shows them (a rescue row, an unreadable store).
         rows, _hidden = picker_rows(
             entries,
-            usable=usable,
+            usable=None if show_all else usable,
             current=current,
             use_max_context=use_max_context,
         )
@@ -42367,7 +42644,36 @@ class OperatorApp(App[None]):
         rows = self._with_current_row(rows, current)
         if usable is None:
             return rows, "credential check unavailable — showing every model"
-        return rows, (f"{hidden} hidden — /login <provider>" if hidden else "")
+        if show_all:
+            # Count what the DEFAULT view would withhold, from the same
+            # predicate, so the footer can still say how many rows need a
+            # sign-in while every one of them is on screen.
+            from local_operator.providers.catalogue import split_by_access
+
+            _, withheld = split_by_access(entries, usable=usable, current=current)
+            # Agreement is not nit-fodder here: the count is 1 in exactly the
+            # state the clause was added to teach (one unusable provider), so
+            # `1 need sign-in` was the commonest reading of the line.
+            needs = "needs" if withheld == 1 else "need"
+            # DROPPABLE CLAUSES, deliberately (UX review round 2, U4): the
+            # agreement fix added one cell and the DASH-CHAIN form overflowed
+            # the footer in the miss states, where the picker prepends its own
+            # clause — `no matching models · showing all — 1 needs sign-in —
+            # /model --all hid…`, cut mid-word. The picker drops TRAILING
+            # clauses at the app's ` · ` seam before it ever cuts one, so the
+            # sentence is written as three clauses and degrades by dropping,
+            # never by truncating. Measured at 110x30, 90x24 and the 60x20
+            # floor (no-match, partial-keyword and settled states): no miss
+            # renders an ellipsis at any of them.
+            return rows, (
+                f"showing all · {withheld} {needs} sign-in · /model --all hides" if withheld else ""
+            )
+        # The `--all` clause is a TRAILING clause on purpose (design review
+        # round 1, D1): `_fit_clauses` drops trailing clauses before it
+        # truncates the leading one, so a narrow picker loses the teaching
+        # hint and keeps the actionable `/login` path. 49 cells at N=1 fits
+        # the 53-cell body of the 56-cell minimum card and every wider one.
+        return rows, (f"{hidden} hidden — /login <provider> · /model --all shows" if hidden else "")
 
     def _with_current_row(self, rows: list[ModelRow], current: str | None) -> list[ModelRow]:
         """``rows`` guaranteed to contain the session's own model.
@@ -49191,10 +49497,33 @@ class OperatorApp(App[None]):
             # strictly narrower (it only knows about a value THIS boot
             # reported), so a config corrupted by another route was repaired by
             # the CLI and ignored here.
+            #
+            # ``accessible`` adds the OTHER half of the question the registry
+            # lookup cannot answer: a hosting the registry owns but this user
+            # has no credential for is STRANDED, and a sign-in to a working
+            # provider must replace it rather than bow to case 1 (see
+            # ``providers.model_access``; the read uses this app's own
+            # controller, so it sees the credential the login just stored).
+            # ``None`` on an unreadable store disables only that repair.
+            try:
+                from local_operator.providers.model_access import (
+                    credentialed_chat_providers,
+                )
+
+                accessible = (
+                    credentialed_chat_providers(
+                        self._providers, config_values=manager.get_config().values
+                    )
+                    if self._providers is not None
+                    else None
+                )
+            except Exception:  # noqa: BLE001 — the repair degrades, the login does not
+                accessible = None
             plan = plan_login_defaults(
                 provider,
                 manager.get_config_value("hosting"),
                 manager.get_config_value("model_name"),
+                accessible=accessible,
             )
             # A plan with nothing to write can still have something to SAY: a
             # decision-only provider (TypeSafe's Jev) leaves the routing exactly
@@ -49206,6 +49535,221 @@ class OperatorApp(App[None]):
             return plan.receipt
         except Exception as error:  # noqa: BLE001 — never fail a completed login
             return f"logged in, but could not save default hosting/model: {error}"
+
+    def _rehome_stranded_session(
+        self, login_provider: str, *, from_pending: bool = False
+    ) -> str | None:
+        """Move THIS session off a model the sign-in just proved unreachable.
+
+        The TUI's half of the re-home (the desktop's is ``server/utils/
+        desktop_rehome``; the policy, the predicate and the sentences all live in
+        ``providers/model_access``). A conversation's ``selected_model`` outranks
+        config — the owner is the only writer that may move it — so correcting
+        the default alone would leave the user staring at a chat pinned to a
+        provider whose credential is gone: the reported bug.
+
+        Runs AFTER the config write, so the target is the default the user now
+        has, and only for a session this process OWNS: a session reached over a
+        socket is governed by the config of the machine running it, whose own
+        sign-in path repairs it (the design's cross-process rule — lazy by
+        design, never pushed).
+
+        THE FIRST-LOGIN RULE (operator refinement, round 1) gates the move:
+        ``login_provider`` is the provider this login just added, and the repair
+        runs only when the credentialed chat providers other than it are empty
+        (``is_first_provider_login``; Radient counts). It exists for the state a
+        session can be in BEFORE any provider login — started by some earlier
+        build, pinned to ``radient/auto``, nothing behind it — and the first
+        OpenAI or Anthropic login is the one that moves it. Adding a second
+        provider later must never re-point open conversations. The gate runs on
+        EVERY attempt — the deferred retry included — because the authority can
+        lapse between the refusal and the turn end (a second login lands, or the
+        first provider is signed out again), and the queue is armed only once it
+        has passed (round-2 Q3: a non-first login must not even leave a string
+        waiting for the bind edge).
+
+        ``from_pending`` is the deferred retry of a first login that found the
+        conversation busy (see ``_settle_deferred_rehome``). It changes the
+        answer's SHAPE, not the checks: a still-busy conversation keeps the arm
+        silently (the sentence was said at the refusal), while every cannot-land
+        path closes the arm through :meth:`_deferred_close` — speaking the
+        close-out when the repair is still needed, silent when nothing is wrong
+        any more.
+
+        The switch goes through the ``/model`` dispatch rather than the raw
+        setter, for the reason ``_on_model_row_chosen`` gives: a picked or typed
+        selector and this repair must not be able to diverge, and the dispatch
+        carries ``_model_activation_generation`` with it. ``_rehome=True``
+        suppresses that dispatch's own receipt — the sentence returned here is
+        the ONE statement of the move (design round 1, D1). The check-then-
+        dispatch below is atomic by construction (both halves run in one
+        event-loop slot with no await between them), which is this front end's
+        equivalent of the owner-side compare-and-set the runtime uses.
+
+        Returns the sentence to paint — the move's notice, the deferral when the
+        conversation is busy, or the close-out ``_deferred_close`` writes — or
+        ``None`` when there is nothing to say. Never raises: the login it rides
+        on has already succeeded.
+        """
+        session = self._session
+        if self._providers is None:
+            # No controller to read a credential store with. The retry cannot be
+            # judged at all, so it closes rather than lapsing into silence; the
+            # conversation was stranded when the promise was made and nothing
+            # here shows that changed.
+            return self._deferred_close(from_pending, speak=True)
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+            from local_operator.providers.model_access import (
+                credentialed_chat_providers,
+                is_accessible,
+                is_first_provider_login,
+                is_stranded,
+                rehome_deferred_notice,
+                rehome_notice,
+            )
+
+            manager = ConfigManager(config_dir())
+            accessible = credentialed_chat_providers(
+                self._providers, config_values=manager.get_config().values
+            )
+            provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
+            model_id = str(manager.get_config_value("model_name", "") or "").strip()
+        except Exception:  # noqa: BLE001 — a repair must never fail a completed login
+            return self._deferred_close(from_pending, speak=True)
+        if not is_first_provider_login(accessible, login_provider):
+            return self._deferred_close(from_pending, speak=True)
+        if session is None:
+            # NO SESSION YET — the app is mid-swap, and there is no conversation
+            # to inspect (QA round 1, Q1: this window used to swallow the repair
+            # silently). The login authorised it, so it waits for the bind edge
+            # rather than evaporating. Not in the setup state, where no
+            # conversation exists to strand and the config write IS the repair.
+            if not from_pending and not self._setup_state:
+                self._rehome_await_bind = login_provider
+            return self._deferred_close(from_pending, speak=False)
+        if self._session_runs_elsewhere() or getattr(session, "is_cold", False):
+            # A follower is never ours to move (the design's cross-process
+            # rule), and a cold facade has no runtime to move — and in both
+            # states there is no local transcript for a sentence, so the arm is
+            # closed in silence rather than spoken into a conversation that is
+            # not here.
+            return self._deferred_close(from_pending, speak=False)
+        if not provider or not model_id or not is_accessible(provider, accessible):
+            # Nothing to move TO, or the target stopped being reachable: the
+            # repair is still needed (the conversation IS stranded) and cannot
+            # land, which is exactly what the close-out says.
+            return self._deferred_close(from_pending, speak=True)
+        old_label = str(getattr(session, "model_label", "") or "")
+        old_provider = old_label.partition("/")[0]
+        if not old_label or not is_stranded(old_provider, accessible):
+            # Either there is no model to move, or the old provider is
+            # credentialed again — nothing is wrong any more, and a "still on"
+            # sentence would invent a complaint.
+            return self._deferred_close(from_pending, speak=False)
+        if not self._idle_for_rehome(session):
+            # BUSY, and said so (UX review U1). The refusal is recorded here, so
+            # this is where the deferral sentence goes — and the repair is armed
+            # for the turn end instead of evaporating. A pending re-check keeps
+            # the arm rather than re-saying the sentence on every turn end.
+            self._rehome_pending = (old_label, login_provider, model_id)
+            if from_pending:
+                return None
+            return rehome_deferred_notice(old_label)
+        self._rehome_pending = None
+        self._run_slash_command(f"/model {provider}/{model_id}", _rehome=True)
+        return rehome_notice(old_label, f"{provider}/{model_id}")
+
+    def _deferred_close(self, from_pending: bool, *, speak: bool) -> str | None:
+        """Close the deferred arm; on a retry, return the sentence to paint.
+
+        ``speak`` is the caller's answer to "is the repair still NEEDED": a
+        conversation still stranded on a provider whose credential is gone gets
+        the close-out sentence, so the promise :func:`rehome_deferred_notice`
+        made ("until the turn ends") is either kept or visibly withdrawn
+        (round-2 U3/D5/Q1 — before this, every early return left the arm set and
+        the sentence unreachable, and a stale arm could move the session on a
+        much later, unrelated turn end). A state where nothing is wrong any
+        more — the old provider works again, or the user picked another model —
+        closes silently, because the sentence would invent a complaint.
+
+        A NON-pending call never owned an arm: it is a no-op returning ``None``.
+        """
+        if not from_pending:
+            return None
+        armed = self._rehome_pending
+        self._rehome_pending = None
+        if armed is None or not speak:
+            return None
+        from local_operator.providers.model_access import rehome_still_stranded_notice
+
+        return rehome_still_stranded_notice(armed[0])
+
+    def _settle_deferred_rehome(self) -> None:
+        """Complete — or close out — a re-home the login had to defer.
+
+        Runs at the ONE turn exit (see ``_finalize_turn``), where a busy
+        conversation becomes idle. Two queued repairs are honoured here, and both
+        were authorised at login time: the first-login move that had no session
+        yet (``_rehome_await_bind``, retried at this backstop if the bind edge
+        could not run it), and the deferred move itself (``_rehome_pending``).
+        The attempt returns the sentence to paint — the move, or the close-out
+        ``_deferred_close`` writes when the repair can no longer land — so
+        nothing stays armed across turn ends and nothing promised stays unsaid.
+        """
+        queued = self._rehome_await_bind
+        if queued is not None:
+            self._rehome_await_bind = None
+            sentence = self._rehome_stranded_session(queued)
+            if sentence:
+                self._notice(sentence, "note")
+            return
+        pending = self._rehome_pending
+        if pending is None:
+            return
+        old_label, login_provider, _model_id = pending
+        session = self._session
+        if session is None or self._session_runs_elsewhere() or getattr(session, "is_cold", False):
+            # No local conversation to paint into: the arm closes silently, for
+            # the same reason the same states do inside the attempt above.
+            self._rehome_pending = None
+            return
+        if str(getattr(session, "model_label", "") or "") != old_label:
+            # The user (or a reload) moved it themselves; whatever they chose
+            # wins, and there is nothing to explain.
+            self._rehome_pending = None
+            return
+        sentence = self._rehome_stranded_session(login_provider, from_pending=True)
+        if sentence:
+            self._notice(sentence, "note")
+
+    @staticmethod
+    def _idle_for_rehome(session: Any) -> bool:
+        """Whether a re-home would cut across nothing (the design's idle test).
+
+        Streaming is the live-turn signal, and a PARKED GATE is deliberately the
+        second term: the runbook already treats a parked approval as a running
+        turn (the tool slot is held mid-flight), so a model switch there would
+        land between the tool call and its result. Fails closed on an unreadable
+        probe — a skipped repair is recoverable, an interrupted turn is not.
+        """
+        try:
+            if bool(getattr(session, "is_streaming", False)):
+                return False
+            gate = getattr(session, "pending_gate", None)
+            if gate is None and not hasattr(session, "pending_gate"):
+                gate = getattr(getattr(session, "frontend_state", None), "pending_gate", None)
+            if gate is not None:
+                return False
+            count = getattr(session, "running_subagents", None)
+            if callable(count):
+                running = count()
+                if isinstance(running, int) and running > 0:
+                    return False
+            return True
+        except Exception:  # noqa: BLE001 — an unreadable state is assumed busy
+            return False
 
     async def _login_flow(self, provider: str) -> None:
         """Run the login on the event loop, reporting into the transcript.
@@ -49275,6 +49819,15 @@ class OperatorApp(App[None]):
                 # longest sentence in the block was also its least legible one while
                 # the two routine confirmations above it were bright.
                 await notice(set_msg, "note")
+            # Repair the conversation this sign-in stranded, if it is one this
+            # process owns and it is idle (see _rehome_stranded_session). AFTER
+            # the defaults write above, because the target is the default the
+            # user now has — and OUTSIDE the ``set_msg`` guard, because a login
+            # that wrote no config can still have stranded a session (its owner
+            # was pinned earlier, by a different sign-in or by /model).
+            rehome_msg = self._rehome_stranded_session(provider)
+            if rehome_msg:
+                await notice(rehome_msg, "note")
             # The credential set just changed, so the owner's offerable-model
             # publication is stale: a follower's picker must see the newly
             # usable provider without waiting for a session restart (D3).
@@ -51255,6 +51808,14 @@ class OperatorApp(App[None]):
         self._probe_quota_after_switch(session)
         self._effort_refusal_shown = None
         self._warm_usage_background()
+        # The routed lane is a REAL switch on the owner session — it is where a
+        # phone or any remote follower's `/model <selector>` lands
+        # (`may_run_slash_in_the_owners_terminal` routes them here) — so the
+        # canonical access claim has to move with it. Without this the claim
+        # kept describing the PREVIOUS model, which is the stale claim
+        # ``FrontendModelAccess``'s own docstring calls worse than none (agent
+        # review round 1, R1-2).
+        self._publish_model_access(session)
         suffix, warning = self._model_access_note(provider)
         # The switch lands on the SHARED session, so every terminal's band
         # repaints from the canonical update — the receipt below only has to
@@ -52624,6 +53185,17 @@ class OperatorApp(App[None]):
         EXTENDED in place (`NoticeBlock.restate`) the moment it lands. A miss
         leaves the notice exactly as rendered; nothing here raises, and a bare
         harness without a running worker degrades to the unextended notice.
+
+        A CLEARED SESSION REFERENCE IS A DELIBERATE MISS (QA round 1, Q1). The
+        provider identity is read off the live session's model label, so a
+        turn end processed while `_session` is already None — the session-swap
+        window a `/reload` can open before the replacement lands — leaves the
+        provider unknown, the Radient gate declines, and the row keeps its
+        bare text with no further attempt. The sync render above derives the
+        provider the same way and takes the same empty answer. Not fixed by
+        probing on an unresolved provider: the rendered 402 names no provider,
+        and decorating some other provider's 402 with Radient account advice
+        would be worse than the missed hint on a single reload-window notice.
         """
         try:
             from local_operator.providers.radient_recovery import (
@@ -52890,6 +53462,13 @@ class OperatorApp(App[None]):
         # path regardless, because "held when the turn ended" is a fact this
         # handler can check and "which boundary the loop reached" is not.
         self._settle_queued_steer_notices_unsent()
+        # A re-home the sign-in deferred (the conversation was busy) becomes
+        # possible exactly here, and a repair that never revisited it was the
+        # silent half of the bug (UX review U1). Books kept with the queued
+        # steer rows above, and for the same reason: it reconciles state this
+        # turn end is the first to see, and it is not part of the outcome
+        # announcement the latch below owns.
+        self._settle_deferred_rehome()
         # THE LATCH lands here — the notification ladder is the tail this turn
         # owes AT MOST ONCE, whichever route retired it. Everything above ran
         # unconditionally because a turn already closed can still have live
@@ -53331,12 +53910,17 @@ class OperatorApp(App[None]):
     def _harvest_subagent_costs(self) -> None:
         """Record each root task's whole subtree, keyed in the root namespace.
 
-        REPLACES each entry because a running subtree grows. Descendants are
-        read live only for display freshness; their owning root row receives a
-        detached summary before settlement, so polling is never the durability
-        mechanism. Keeping one accumulator entry per root also respects the
-        actual uniqueness boundary: independent child managers may reuse the
-        same local job id without overwriting one another.
+        REPLACES each entry because a running subtree grows. The subtree is the
+        LEDGER's own rollup (:func:`~local_operator.model.costs.job_subtree_cost`:
+        the row's calls, its settled descendants, and the live child manager
+        while one is attached), so a running parent's entry includes what its
+        nested children are spending right now and the entries sum to the
+        footer's subagent total. Descendants are read live only for display
+        freshness; their owning root row receives a detached summary before
+        settlement, so polling is never the durability mechanism. Keeping one
+        accumulator entry per root also respects the actual uniqueness boundary:
+        independent child managers may reuse the same local job id without
+        overwriting one another.
         """
         session = self._session
         manager = getattr(session, "jobs", None)
@@ -53348,55 +53932,18 @@ class OperatorApp(App[None]):
             return
         label = getattr(session, "model_label", "")
         for job in jobs:
-            direct = job_cost(job, default_model_label=label)
-            descendant = 0.0
-            components = list(getattr(job, "descendant_usage", ()) or ())
-            child_manager = getattr(job, "child_jobs", None)
-            if child_manager is not None:
-                try:
-                    # The live lease is replaced by the same bounded snapshot at
-                    # settlement, so this branch changes freshness, not totals.
-                    accounting = getattr(child_manager, "accounting_components", None)
-                    if callable(accounting):
-                        snapshot = accounting()
-                        if isinstance(snapshot, (list, tuple)):
-                            components = list(snapshot)
-                    else:
-                        # Reduced/embedder hosts expose only ``list()``. Sum
-                        # within this root instead of assigning manager-local ids
-                        # into the app-wide accumulator, preserving collision
-                        # safety even on that compatibility path.
-                        descendant += self._live_manager_cost(child_manager, label, set())
-                except Exception:  # noqa: BLE001 — one unreadable branch must not hide its siblings
-                    pass
-            unpriceable = False
-            for component in components:
-                provider = getattr(component, "provider", None) or ""
-                model_id = getattr(component, "model_id", None) or ""
-                cost = turn_cost(f"{provider}/{model_id}" if provider else model_id, component)
-                if cost is None:
-                    unpriceable = True
-                    break
-                descendant += cost
-            if unpriceable:
+            cost, lower_bound = job_subtree_cost(job, default_model_label=label)
+            if cost is None:
+                # Unpriced rows are skipped before their id is ever read: reduced
+                # and embedder hosts hand this poll id-less job objects, and an
+                # AttributeError on the 1 Hz timer takes the whole band repaint down.
                 continue
-            if direct is not None or components or descendant:
-                self._subagent_costs[job.id] = (direct or 0.0) + descendant
-
-    def _live_manager_cost(self, manager: Any, default_label: str, seen: set[int]) -> float:
-        """Compatibility total for a live manager lacking durable snapshots."""
-        identity = id(manager)
-        if identity in seen:
-            return 0.0
-        seen.add(identity)
-        total = 0.0
-        for row in manager.list():
-            cost = job_cost(row, default_model_label=default_label)
-            total += cost or 0.0
-            nested = getattr(row, "child_jobs", None)
-            if nested is not None:
-                total += self._live_manager_cost(nested, default_label, seen)
-        return total
+            job_id = getattr(job, "id", None)
+            if job_id is None:
+                continue
+            stored = carry_floor(self._subagent_costs.get(job_id), cost, lower_bound)
+            if stored is not None:
+                self._subagent_costs[job_id] = stored
 
     def _search_spend_is_floor(self) -> bool:
         """Whether the search half makes the band's figure a lower bound.
@@ -54067,10 +54614,19 @@ class OperatorApp(App[None]):
         # is where the row first exists, and suppressing it at the SOURCE —
         # before the supersede/rekey bookkeeping — is what keeps the later
         # start/end frames from finding a registry to adopt. The rows stay in
-        # the model's context; only the screen skips them.
-        from local_operator.harness.rows import is_hidden_tool_name, is_settle_only_ask
+        # the model's context; only the screen skips them. THE QUIET PAIR
+        # (design docs/design/quiet-turns.md §5, S1) is the same suppression
+        # class for the same reason: the announcement is the first frame that
+        # could mount its row.
+        from local_operator.harness.rows import (
+            is_hidden_tool_name,
+            is_quiet_turn_name,
+            is_settle_only_ask,
+        )
 
-        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+        if is_hidden_tool_name(getattr(event, "tool_name", None)) or is_quiet_turn_name(
+            getattr(event, "tool_name", None)
+        ):
             return
         # THE ASK GATE (design docs/design/ask-gate.md §3): while the queued
         # engine is live an `ask` call is SETTLE-ONLY — no row while it
@@ -54221,10 +54777,19 @@ class OperatorApp(App[None]):
         # composing gate above suppresses the announcement, and this one stops
         # a start frame from mounting a fresh card for a call with none — the
         # belt to that brace, because the two frames race and either can be a
-        # viewer's first sight of the call.
-        from local_operator.harness.rows import is_hidden_tool_name, is_settle_only_ask
+        # viewer's first sight of the call. THE QUIET PAIR (design
+        # docs/design/quiet-turns.md §5, S1) is gated here for exactly that
+        # race: suppressing only the composing seam would leave this one free
+        # to paint the ``no_reply`` card a moment later.
+        from local_operator.harness.rows import (
+            is_hidden_tool_name,
+            is_quiet_turn_name,
+            is_settle_only_ask,
+        )
 
-        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+        if is_hidden_tool_name(getattr(event, "tool_name", None)) or is_quiet_turn_name(
+            getattr(event, "tool_name", None)
+        ):
             return
         # THE ASK GATE's belt (design docs/design/ask-gate.md §3): the same
         # settle-only suppression the composing gate applies, because the two
@@ -54351,7 +54916,10 @@ class OperatorApp(App[None]):
         card.set_live_details(getattr(message.event.partial_result, "details", None))
 
     def on_tool_ended(self, message: ToolEnded) -> None:
-        from local_operator.harness.rows import is_ask_gate_divert_details
+        from local_operator.harness.rows import (
+            is_ask_gate_divert_details,
+            is_quiet_turn_result,
+        )
 
         event = message.event
         card = self._tool_cards.pop(event.tool_call_id, None)
@@ -54380,6 +54948,18 @@ class OperatorApp(App[None]):
             # The settle-mount's stash goes with it: a diverted ask never
             # reaches `_mount_settle_only_ask`, which is the other pop site.
             self._ask_gate_settled_calls.pop(event.tool_call_id, None)
+            if card is not None:
+                self._drop_tool_card(card)
+            self._refresh_working_activity()
+            return
+        # THE QUIET RESULT SETTLES NOTHING (design docs/design/quiet-turns.md
+        # §5, S1): the marker is the quiet end's own fact, read off the result
+        # at the same seam the divert check above reads its gate marker. The
+        # composing and started gates are the first doors for the pair's row;
+        # this drop half guarantees a card any seam older than the gates could
+        # have mounted is retired rather than settled — the pair's end can only
+        # ever paint nothing.
+        if is_quiet_turn_result(getattr(event, "result", None)):
             if card is not None:
                 self._drop_tool_card(card)
             self._refresh_working_activity()

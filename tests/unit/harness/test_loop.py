@@ -38,6 +38,7 @@ from local_operator.harness.types import (
     OUTPUT_LIMIT_ARGUMENTS,
     OUTPUT_LIMIT_KEY,
     OUTPUT_LIMIT_TURN,
+    QUIET_TURN_KEY,
     AbortSignal,
     AgentEndEvent,
     AgentTool,
@@ -77,6 +78,7 @@ from local_operator.providers.failover import (
     stream_with_failover,
     wrap_transport_error,
 )
+from local_operator.tools.registry import create_tools
 
 MODEL = ModelSpec(provider="test", model_id="m")
 
@@ -1044,6 +1046,187 @@ async def test_todo_reminder_follow_up_reenters_and_stays_invisible():
     assert isinstance(end, AgentEndEvent)
     assert reminder not in end.messages
     assert not any(getattr(event, "message", None) is reminder for event in events)
+
+
+# ---------------------------------------------------------------------------
+# The quiet turn: ``no_reply`` ends the turn (docs/design/quiet-turns.md §4).
+# ---------------------------------------------------------------------------
+
+
+async def _open_door() -> str | None:
+    """A quiet-end door that allows every call — the tool's happy path."""
+    return None
+
+
+def _quiet_tool() -> list[AgentTool]:
+    """The REAL ``no_reply`` tool, built exactly as a session builds it.
+
+    Through ``create_tools`` (not ``build_no_reply_tool`` directly) so the
+    schema carries the harness-injected ``i`` intent: that injection is what
+    the pop below the loop keys on, and a hand-rolled tool would let these
+    tests pass on a shape no session ever holds.
+    """
+    tools = create_tools(ToolContext(cwd=".", quiet_end=_open_door), enabled=["no_reply"])
+    assert tools, "the builder must produce the tool over an open door"
+    return tools
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_completion_ends_the_turn_without_another_call() -> None:
+    """The whole point of the tool: the call resolves, its marker rides the
+    result, and the loop ends the turn exactly like a no-tool-calls message —
+    no further provider request. The call carries the harness-injected ``i``
+    intent (review R7), which must be lifted off before validation or the
+    argumentless params model would refuse it."""
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(
+                    0, id="q1", name="no_reply", args='{"i": "peer ping needs no reply"}'
+                ),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            # A second request would consume this; the assertion below is that
+            # it never happens.
+            [StreamTextDelta(delta="should never run"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    door = ToolContext(cwd=".", quiet_end=_open_door)
+    context = LoopContext(system_blocks=["sys"], tools=_quiet_tool(), tool_context=door)
+
+    events = [
+        event
+        async for event in AgentLoop().run(
+            [Message.user("peer said hi")], context, make_config(stream), None
+        )
+    ]
+
+    assert len(stream.requests) == 1, "a quiet end must not buy another model call"
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert not end.aborted and not end.error
+    result = end.messages[-1]
+    assert isinstance(result, Message) and result.role == "tool"
+    details = (result.provider_payload or {}).get("details") or {}
+    assert details.get(QUIET_TURN_KEY) is True, "the marker is what every reader keys on"
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_result_early_in_a_batch_does_not_end_the_turn() -> None:
+    """REVIEW R8: the quiet end reads the batch's LAST result only. A batch
+    that asked for ``no_reply`` and then something else must run to completion
+    and feed EVERY result back — a quiet call short-circuiting its siblings
+    would drop their results on the floor and continue the model blind."""
+    executed: list[str] = []
+    echo = echo_tool(executed)
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="q1", name="no_reply", args="{}"),
+                tool_call_delta(1, id="e1", name="echo", args='{"text": "hi"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="both results seen"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    door = ToolContext(cwd=".", quiet_end=_open_door)
+    context = LoopContext(system_blocks=["sys"], tools=[*_quiet_tool(), echo], tool_context=door)
+
+    await AgentLoop().run_to_end(
+        [Message.user("check two things")], context, make_config(stream), None
+    )
+
+    assert len(stream.requests) == 2, "the batch did not END quiet — the turn continues"
+    assert executed == ["echo"]
+    second = stream.requests[1].messages
+    tool_rows = [m for m in second if isinstance(m, Message) and m.role == "tool"]
+    assert len(tool_rows) == 2, "the whole batch's results are fed back"
+    assert any(
+        ((m.provider_payload or {}).get("details") or {}).get(QUIET_TURN_KEY) for m in tool_rows
+    ), "the quiet result is among them"
+    assert any("ok:" in (m.text or "") for m in tool_rows), "so is the sibling's"
+
+
+@pytest.mark.asyncio
+async def test_a_late_follow_up_after_a_quiet_end_still_re_enters() -> None:
+    """The quiet end shortens the TURN, never the run's inbox: a message that
+    lands at the yield boundary still re-enters the loop, so a peer message
+    arriving mid-settle is answered rather than lost (docs §4)."""
+    follow_ups = [[Message.user("one more thing")], []]
+
+    async def get_follow_ups():
+        return follow_ups.pop(0) if follow_ups else []
+
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="q1", name="no_reply", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [
+                StreamTextDelta(delta="replied to the late message"),
+                StreamEndEvent(stop_reason="stop"),
+            ],
+        ]
+    )
+    door = ToolContext(cwd=".", quiet_end=_open_door)
+    context = LoopContext(system_blocks=["sys"], tools=_quiet_tool(), tool_context=door)
+    config = make_config(stream, get_follow_up_messages=get_follow_ups)
+
+    messages = await AgentLoop().run_to_end([Message.user("go")], context, config, None)
+
+    assert len(stream.requests) == 2, "the late message re-entered the loop"
+    assert any(isinstance(m, Message) and m.text == "one more thing" for m in context.messages)
+    assert any(isinstance(m, Message) and m.text == "replied to the late message" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_a_todo_reminder_after_a_quiet_end_still_fires() -> None:
+    """The quiet end is an ordinary end for the guardrails: open todos move
+    the fingerprint, the reminder re-enters the loop and the model gets its
+    list back — the quiet call must not skip the follow-up path."""
+    reminder = CustomMessage(
+        custom_type=TODO_REMINDER_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "<system-reminder>still open: ship it</system-reminder>"},
+    )
+    follow_ups: list[list[Any]] = [[reminder], []]
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="q1", name="no_reply", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="back to work"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+
+    async def get_follow_ups():
+        return follow_ups.pop(0) if follow_ups else []
+
+    def convert(messages):
+        # Mirrors the session's allow-list: a custom reminder renders as a user
+        # turn. Without this the loop would re-enter with nothing to react to.
+        out = []
+        for message in messages:
+            if isinstance(message, Message):
+                out.append(message)
+            elif message.custom_type == TODO_REMINDER_MESSAGE_TYPE:
+                out.append(Message.user(message.details["text"]))
+        return out
+
+    door = ToolContext(cwd=".", quiet_end=_open_door)
+    context = LoopContext(system_blocks=["sys"], tools=_quiet_tool(), tool_context=door)
+    config = make_config(stream, convert_to_llm=convert, get_follow_up_messages=get_follow_ups)
+
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert len(stream.requests) == 2, "the reminder re-entered the loop"
+    assert reminder in context.messages
+    assert any("still open: ship it" in m.text for m in stream.requests[1].messages)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert reminder not in end.messages, "the reminder stays invisible, quiet end or not"
 
 
 @pytest.mark.asyncio

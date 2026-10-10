@@ -41,17 +41,38 @@ import base64
 import contextlib
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 from pydantic import SecretStr
 
+from local_operator.artifacts import BillingBasis
+from local_operator.artifacts.progress import ProgressFn, emit_progress
+from local_operator.artifacts.progress import (
+    progress_details as _generic_progress_details,
+)
+from local_operator.artifacts.rung import CancelHandle, RungResult, RungSkipped
+from local_operator.artifacts.walk import PauseFn
 from local_operator.clients._http import APIError
 from local_operator.imagegen import ImageRoute, MediaAsset
 from local_operator.imagegen.errors import api_error_from_httpx_response
 from local_operator.imagegen.media import download_asset
+
+__all__ = [
+    "CancelHandle",
+    "ProgressFn",
+    "PauseFn",
+    "RungResult",
+    "RungSkipped",
+    "best_effort_cancel",
+    "emit_progress",
+    "progress_details",
+    "run_google",
+    "run_openai_sub",
+    "run_openrouter",
+    "run_xai",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +113,8 @@ FAL_DEFAULT_MODEL = "fal-ai/flux/dev"
 #: early (raising ``ImageGenerationCancelled``) when the user's abort signal
 #: fires, so the rare no-cancellation race becomes a clean receipt instead of
 #: a turn that waits out the provider. ``None`` in tests and library use.
-PauseFn = Callable[[float], Awaitable[None]]
+# ``PauseFn`` itself now lives in :mod:`local_operator.artifacts.walk`
+# (imported above); the protocol is unchanged.
 
 
 def _poll_interval(elapsed_s: float) -> float:
@@ -220,67 +242,10 @@ async def _download_rows(
 OPENAI_DEFAULT_IMAGE_MODEL = "gpt-image-1"
 OPENAI_IMAGE_BASE_URL = "https://api.openai.com/v1"
 
-#: The tool's live-progress callback: one bounded line plus a JSON-safe mapping.
-ProgressFn = Callable[[str, dict[str, Any]], None]
-
-
-class RungSkipped(Exception):
-    """A rung the walk REACHED but did not spend, with the honest reason.
-
-    Not a failure — the cascade records it as a ``skipped`` attempt and moves
-    to the next rung. Two producers: the Radient affordability probe (the
-    account cannot fund this request) and a capability mismatch (OpenAI has no
-    image-to-image route in v1). ``reason_class`` is closed vocabulary.
-    """
-
-    def __init__(self, message: str, *, reason_class: str) -> None:
-        super().__init__(message)
-        self.reason_class = reason_class
-
-
-@dataclass
-class CancelHandle:
-    """What a best-effort provider cancel needs, updated as the walk proceeds.
-
-    The cascade owns one per call and threads it through the rungs: a rung
-    FILLS it the instant a provider job exists, and CLEARS it the instant the
-    job reaches a terminal state — so a cancel attempt after completion reads
-    "none" (nothing left to cancel) rather than firing an ALREADY_COMPLETED
-    round-trip. ``credential`` is held only in process memory and never
-    printed; it exists so the cancel path does not have to re-resolve (and
-    potentially re-refresh) a credential under a 5 s budget.
-    """
-
-    provider: ImageRoute | None = None
-    request_id: str | None = None
-    model: str | None = None
-    #: The hub base the Radient cancel posts to (paths hang off it; kept so
-    #: the cancel path does not need a second config resolution under a 5 s
-    #: budget). FAL's cancel travels on the absolute ``cancel_url`` instead.
-    base_url: str | None = None
-    #: FAL's response-carried cancel URL (or the derived fallback).
-    cancel_url: str | None = None
-    credential: SecretStr | None = None
-
-    def clear(self) -> None:
-        self.provider = None
-        self.request_id = None
-        self.model = None
-        self.base_url = None
-        self.cancel_url = None
-        self.credential = None
-
-
-@dataclass(frozen=True)
-class RungResult:
-    """One successful rung run: the downloaded assets and the provider facts."""
-
-    assets: list[MediaAsset]
-    model: str
-    generation_id: str | None = None
-    #: Radient reports per-generation cost; FAL/OpenAI bill the key silently.
-    cost_usd: float | None = None
-
+# ``RungSkipped``, ``CancelHandle`` and ``RungResult`` — with ``ProgressFn``/
+# ``PauseFn`` beside them — moved to :mod:`local_operator.artifacts` in media
+# wave-2 (the kind-neutral rung seam) and are imported above under these exact
+# names, so the lane's pinned imports (tests, the tool) keep resolving here.
 
 # ---------------------------------------------------------------------------
 # Shared HTTP plumbing
@@ -373,21 +338,10 @@ def _num(value: Any) -> int | None:
         return None
 
 
-def emit_progress(emit: ProgressFn | None, text: str, **details: Any) -> None:
-    """One progress line; a broken emitter must never break a generation.
-
-    Public beside the private helpers because the cascade's failure updates
-    (another module) emit through it — one guarded spelling for "progress is
-    presentation, never control flow". The tool's own terminal updates route
-    through ITS guarded emitter (``image_tool._progress_emitter``'s closure),
-    which carries the same contract.
-    """
-    if emit is None:
-        return
-    try:
-        emit(text, details)
-    except Exception:  # noqa: BLE001 - progress is presentation, never control flow
-        logger.debug("image progress emitter raised; continuing", exc_info=True)
+# ``emit_progress`` moved to :mod:`local_operator.artifacts.progress` (imported
+# above) and is re-exported here under its exact name: the lane's own tests
+# call it from this module, and it is the one guarded spelling for "progress is
+# presentation, never control flow".
 
 
 def progress_details(
@@ -404,41 +358,24 @@ def progress_details(
 ) -> dict[str, Any]:
     """The canonical payload every ``generate_image`` update carries.
 
-    The canonical field set — ``stage``, ``queue_position``,
-    ``progress_fraction``, ``log_lines``, ``error``, ``error_type`` — is
-    emitted by THIS lane; the surfaces align their adapters afterwards (Q7
-    wire-side split, manager scope 2026-10-09). Every key is PRESENT on every
-    update; a value no provider supplied is ``None``, never a synthesized
-    stand-in. Constraints, each from what the rungs actually receive:
-
-    - ``stage`` vocabulary: ``queued`` / ``in_progress`` / ``completed`` /
-      ``cancelled`` / ``cancelling`` (the cancel-confirmation hold), and
-      ``None`` on a mid-walk failure update whose semantics ride
-      ``error``/``error_type`` instead.
-    - ``progress_fraction`` stays ``None`` until a provider reports one:
-      neither the hub's media route nor FAL's queue status carries a fraction
-      today, and elapsed-vs-budget is a TIMEOUT, not progress — it is
-      deliberately never synthesized into a bar.
-    - ``log_lines`` is the provider's own ``logs`` list passed through
-      verbatim (``[{message, timestamp}]``), ``None`` where the payload
-      carried none.
-    - ``error``/``error_type`` are the platform's sentence and the structured
-      code beside it; on a rung failure they carry the SAME classification as
-      that attempt's ``reason_class`` so the two can never disagree.
+    This lane's binding of the generic builder: the frozen ``tool_name`` slot
+    is pinned to THIS tool here, so every call site in the lane keeps today's
+    exact signature (the pinned call sites in tests, the rungs' update lines,
+    the tool's terminal stages). Field contract, constraints and the stage
+    vocabulary: :func:`local_operator.artifacts.progress.progress_details`.
     """
-    return {
-        "tool_name": "generate_image",
-        "stage": stage,
-        "provider": provider,
-        "model": model,
-        "elapsed_s": elapsed_s,
-        "num_images": num_images,
-        "queue_position": queue_position,
-        "progress_fraction": None,
-        "log_lines": log_lines,
-        "error": error,
-        "error_type": error_type,
-    }
+    return _generic_progress_details(
+        tool="generate_image",
+        stage=stage,
+        provider=provider,
+        model=model,
+        elapsed_s=elapsed_s,
+        num_images=num_images,
+        queue_position=queue_position,
+        log_lines=log_lines,
+        error=error,
+        error_type=error_type,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +448,33 @@ def _pick_radient_model(payload: dict[str, Any], requested: str | None) -> str:
         "Radient returned no usable image model in its media list.",
         status_code=None,
         code="invalid_response",
+    )
+
+
+def _radient_failure(payload: dict[str, Any], *, status: str = "") -> APIError | None:
+    """The platform's failure vocabulary on a status or result answer, else ``None``.
+
+    The hub NEVER emits a FAILED/ERROR status word: a failed generation settles as
+    status ``COMPLETED`` carrying ``error``/``error_type`` (agent-server
+    ``settledStatusResult`` and the result-side R1-2 branch; docs/MEDIA-PROVIDERS.md
+    section 5.5, hold H9 keeps it that way). Switch on ``error_type``, never prose; a
+    value outside the frozen vocabulary classifies as an upstream failure.
+    """
+    error_type = payload.get("error_type")
+    message = payload.get("error")
+    has_type = isinstance(error_type, str) and bool(error_type)
+    has_message = isinstance(message, str) and bool(message)
+    if not (has_type or has_message or status in ("FAILED", "ERROR")):
+        return None
+    code = error_type if has_type and error_type in RADIENT_ERROR_TYPES else "upstream"
+    return APIError(
+        (
+            message
+            if isinstance(message, str) and message
+            else "Radient reported the generation as FAILED."
+        ),
+        status_code=None,
+        code=code,
     )
 
 
@@ -674,7 +638,21 @@ async def run_radient(
         handle.model = model_id
         handle.base_url = base
         handle.credential = SecretStr(credential)
+        # SUBMIT-time figure: agent-server's ``POST /tools/media/generate``
+        # answers the QUOTED price (``cost_usd``/``units``/``unit``) - no
+        # charge exists yet at submit. The SETTLED figure arrives on
+        # ``GET /tools/media/status`` at the first terminal observation
+        # (``settled: true``; zero for a failed generation) and equals the
+        # usage record/ledger. Source of record: agent-server
+        # ``internal/responses/media.go`` MediaStatusResponse +
+        # ``services/media_service.go`` settledStatusResult (read 2026-10-09).
         cost_usd = _as_float(generate.get("cost_usd"))
+        cost_basis: BillingBasis | None = "estimated" if cost_usd is not None else None
+        cost_provenance = (
+            "Radient POST /tools/media/generate cost_usd (submit-time quote, not a settled charge)"
+            if cost_usd is not None
+            else None
+        )
 
         started = time.monotonic()
         while True:
@@ -694,32 +672,28 @@ async def run_radient(
             )
             status = str(status_payload.get("status") or "").strip().upper()
             elapsed = int(time.monotonic() - started)
+            # Classify BEFORE treating COMPLETED as terminal: a failure settles
+            # as COMPLETED carrying error/error_type (see _radient_failure).
+            failure = _radient_failure(status_payload, status=status)
+            if failure is not None:
+                raise failure
             if status == "COMPLETED":
+                # Prefer the settled figure over the quote: only ``settled``
+                # on the terminal status payload makes ``cost_usd`` a charge.
+                settled_cost = _as_float(status_payload.get("cost_usd"))
+                if status_payload.get("settled") is True and settled_cost is not None:
+                    cost_usd = settled_cost
+                    cost_basis = "billed"
+                    cost_provenance = (
+                        "Radient GET /tools/media/status cost_usd (settled: true; "
+                        "equals the usage record and ledger)"
+                    )
                 break
             if status == "CANCELLED":
                 raise APIError(
                     "Radient reported the generation as CANCELLED.",
                     status_code=None,
                     code="cancelled",
-                )
-            if status in ("FAILED", "ERROR"):
-                # Switch on error_type, never on prose. Anything outside the
-                # frozen vocabulary classifies as an upstream failure.
-                error_type = status_payload.get("error_type")
-                code = (
-                    error_type
-                    if isinstance(error_type, str) and error_type in RADIENT_ERROR_TYPES
-                    else "upstream"
-                )
-                message = status_payload.get("error")
-                raise APIError(
-                    (
-                        message
-                        if isinstance(message, str) and message
-                        else "Radient reported the generation as FAILED."
-                    ),
-                    status_code=None,
-                    code=code,
                 )
             queue_position = _num(status_payload.get("queue_position"))
             queued = status == "IN_QUEUE"
@@ -764,6 +738,9 @@ async def run_radient(
         # downloads so a cancellation mid-download reads "none" rather than
         # firing an ALREADY_COMPLETED round-trip.
         handle.clear()
+        failure = _radient_failure(result_payload)
+        if failure is not None:
+            raise failure
         assets = await _download_rows(
             http,
             _asset_rows(result_payload),
@@ -774,7 +751,13 @@ async def run_radient(
             started=started,
         )
         return RungResult(
-            assets=assets, model=model_id, generation_id=request_id, cost_usd=cost_usd
+            assets=assets,
+            model=model_id,
+            generation_id=request_id,
+            cost_usd=cost_usd,
+            cost_source="reported" if cost_usd is not None else None,
+            billing_basis=cost_basis,
+            cost_provenance=cost_provenance,
         )
 
 
@@ -1217,3 +1200,19 @@ async def best_effort_cancel(handle: CancelHandle | None) -> str:
         return "abandoned"
     except BaseException:  # noqa: BLE001 - incl. GeneratorExit; never raise from cleanup
         return "failed"
+
+
+# ---------------------------------------------------------------------------
+# Re-exported executors (media wave-2 breadth rungs)
+# ---------------------------------------------------------------------------
+#
+# The add-a-rung checklist puts each new executor in ``rungs_<provider>.py``
+# and re-exports it HERE so ``imagegen.rungs`` names every executor the wave
+# ships. The imports stay at the bottom on purpose: each provider module
+# reaches this module's shared plumbing at CALL time (one lazy import per
+# function), which keeps every import order working — this module importing
+# the provider module first, or the provider module imported first.
+from local_operator.imagegen.rungs_google import run_google  # noqa: E402
+from local_operator.imagegen.rungs_openai_sub import run_openai_sub  # noqa: E402
+from local_operator.imagegen.rungs_openrouter import run_openrouter  # noqa: E402
+from local_operator.imagegen.rungs_xai import run_xai  # noqa: E402

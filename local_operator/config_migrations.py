@@ -192,7 +192,23 @@ def migrate_session_cleanup(config_dir: Path) -> list[str]:
     if (config_dir / SESSIONS_DIRNAME).is_dir():
         mark_store(config_dir / SESSIONS_DIRNAME)
 
-    logger.warning(
+    # THE LOG LEVEL, AND ONLY THE LOG LEVEL. Under a per-run HOME (``lop
+    # exec``, agent-runtime-svc) this migration fires on EVERY run — the run
+    # config is rewritten per Execute, so the keys are absent every time — and
+    # the WARNING became one stderr line per run, which the runtime-svc adapter
+    # persists as an audit event. The writes and the ``.pre-cleanup-migration``
+    # backup stay EXACTLY as they were; the module docstring's two rules are
+    # untouched. A redirected HOME gets DEBUG; "cannot tell" keeps the
+    # WARNING, and so does any failure in the probe — fail loud is the safe
+    # direction for the one person who might genuinely want to read it.
+    try:
+        from local_operator.supervisors import home_is_the_users
+
+        redirected = home_is_the_users() is False
+    except Exception:  # noqa: BLE001 — a log level must never fail a migration
+        redirected = False
+    emit = logger.debug if redirected else logger.warning
+    emit(
         "config migration: %s in %s (backup at %s); the retired reapers' opt-out is "
         "pinned off for any older runtime, and no automatic session cleanup runs "
         "unless you turn it on in /settings",
