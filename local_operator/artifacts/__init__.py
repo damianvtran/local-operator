@@ -79,9 +79,12 @@ class ArtifactKind(StrEnum):
 AttemptOutcome = Literal["ok", "failed", "skipped"]
 
 #: Where a ``cost_usd`` figure (or its documented absence) comes from:
-#: ``reported`` = the provider returned it per call; ``rate_table`` = a
-#: documented vendor price exists but the call returns no figure, so ``cost_usd``
-#: stays ``None``; ``subscription`` = quota-funded, no cash figure exists.
+#: ``reported`` = the provider returned it per call; ``rate_table`` = the
+#: number (or the absence of one) rests on a published vendor price — most
+#: rate-table rungs return no usage to multiply and keep ``cost_usd`` empty,
+#: while a rung whose response carries the usage fields a rate table needs
+#: may carry a computed ESTIMATE (always labelled ``estimated``);
+#: ``subscription`` = quota-funded, no cash figure exists.
 CostSource = Literal["reported", "rate_table", "subscription"]
 
 #: What a ``cost_usd`` AMOUNT means in money terms (additive beside
@@ -197,7 +200,10 @@ class JobOutcome:
     predate the field; every walk-produced outcome sets it explicitly from the
     job spec, so the default only ever serves direct construction.
 
-    ``cost_usd`` only ever carries a figure a provider REPORTED (design D8);
+    ``cost_usd`` carries a figure a provider REPORTED (design D8), or —
+    since the edit lane — a computed ESTIMATE whose every multiplier is a
+    usage field the provider returned and whose rates are published (always
+    ``billing_basis="estimated"``; see :data:`CostSource`);
     ``cost_source`` labels it. ``lineage`` is a named future additive field
     (restart provenance) deliberately not built in v1.
     """
@@ -222,3 +228,8 @@ class JobOutcome:
     #: reported it). Both ``None`` when no amount exists.
     billing_basis: BillingBasis | None = None
     cost_provenance: str | None = None
+    #: The hub-side usage-record id a settled charge equals, when a rung's
+    #: terminal payload carried one (see ``RungResult.usage_record_id``);
+    #: ``None`` everywhere else. The tool surfaces it as
+    #: ``details["usage_record_id"]`` — absent-safe, and never an amount.
+    usage_record_id: str | None = None

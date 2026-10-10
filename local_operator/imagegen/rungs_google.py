@@ -31,10 +31,14 @@ field the wire cannot carry cannot be honoured) and ``num_images > 1`` is a
 recorded SKIP rather than a silent single-image delivery. Both labels are
 carried into the guide.
 
-**Editing**: documented on this endpoint (image content blocks in the same
-call), but v1 routes edits through Radient/FAL only — this rung records an
-``unsupported`` skip for ``source_url`` exactly like the OpenAI-key rung, and a
-future wave wires the refs path once it can be validated.
+**Editing** (wired media wave-2 edit lane, 2026-10-10): the source travels as
+an image content block appended to ``input`` — ``{"type": "image", "data":
+<b64>, "mime_type": ...}``, the docs' own block shape — with up to 14
+references per the model family. This rung sends ONE source (the
+single-source v1 wire) and splits the tool's data URI into the block's two
+fields. No API mask exists (the docs describe prompt-driven "semantic
+masking"), and the endpoint has no count parameter, so ``num_images > 1``
+stays a recorded skip.
 
 Imagen is shut down in the Gemini API (docs, 2026-10-09): this rung never
 targets it.
@@ -127,11 +131,6 @@ async def run_google(
     # take effect before the spend. A no-op without a signal.
     if pause is not None:
         await pause(0.0)
-    if source_url is not None:
-        raise RungSkipped(
-            "Google has no wired image-to-image route in this rung.",
-            reason_class="unsupported",
-        )
     if num_images > 1:
         raise RungSkipped(
             "Google's interactions rung generates one image per call "
@@ -143,11 +142,6 @@ async def run_google(
     aspect = GOOGLE_ASPECT_RATIOS.get(image_size)
     if aspect is not None:
         response_format["aspect_ratio"] = aspect
-    body = {
-        "model": model_id,
-        "input": [{"type": "text", "text": prompt}],
-        "response_format": response_format,
-    }
 
     # Call-time import on purpose: ``imagegen/rungs.py`` re-exports this
     # executor at ITS import time, so a module-scope import here would close
@@ -155,6 +149,25 @@ async def run_google(
     # monkeypatch seam (``image_rungs._client_scope``) is preserved because
     # this reads the module attribute at call time.
     from local_operator.imagegen import rungs as image_rungs
+
+    # An EDIT request appends the source as an image content block; the
+    # data-URI splitter is shared with the other rungs' edit paths.
+    input_blocks: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    if source_url is not None:
+        parts = image_rungs._data_uri_parts(source_url)
+        if parts is None:
+            raise APIError(
+                "Google edits require a base64 data-URI source.",
+                status_code=None,
+                code="invalid_response",
+            )
+        mime_type, data_b64 = parts
+        input_blocks.append({"type": "image", "data": data_b64, "mime_type": mime_type})
+    body = {
+        "model": model_id,
+        "input": input_blocks,
+        "response_format": response_format,
+    }
 
     async with image_rungs._client_scope(client) as http:
         try:

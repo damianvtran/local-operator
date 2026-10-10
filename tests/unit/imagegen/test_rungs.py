@@ -313,6 +313,44 @@ async def test_radient_happy_path_request_id_only_and_passthrough() -> None:
     assert handle.provider is None
 
 
+@pytest.mark.asyncio
+async def test_radient_edits_are_refused_before_any_network_call() -> None:
+    """The silent-T2I kill, client-side: an edit never reaches the media route.
+
+    The route forwards every body key verbatim to FAL and maps ``source_url``
+    only on the LEGACY adapter this client does not call, so an attempted
+    edit is a silent billed text-to-image or a rejection — the rung refuses,
+    with the specific sentence the cascade's pre-record shares, and BEFORE
+    the models-list/balance probes (no calls at all).
+    """
+    recorder = _Recorder()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.record(request)
+        return httpx.Response(200, json={})
+
+    async with _client(handler) as client:
+        with pytest.raises(image_rungs.RungSkipped) as caught:
+            await image_rungs.run_radient(
+                prompt="make it night",
+                base_url="https://hub.test",
+                credential="cred",
+                num_images=1,
+                image_size="square_hd",
+                seed=None,
+                strength=0.5,
+                source_url="data:image/png;base64,AAAA",
+                model=None,
+                handle=image_rungs.CancelHandle(),
+                emit=None,
+                pause=_no_pause,
+                client=client,
+            )
+    assert caught.value.reason_class == "unsupported"
+    assert str(caught.value) == image_rungs.RADIENT_EDIT_SKIP_MESSAGE
+    assert recorder.requests == [], "a refused edit runs no probes and spends nothing"
+
+
 def test_emit_progress_swallows_a_raising_emitter() -> None:
     """The rungs' guard (reviewer round-1 pin): progress never rides control flow.
 
@@ -664,7 +702,10 @@ def _fal_handler(
     def handler(request: httpx.Request) -> httpx.Response:
         recorder.record(request)
         path = request.url.path
-        if request.method == "POST" and path.startswith("/fal-ai/"):
+        if request.method == "POST":
+            # Every FAL submit is a POST to the chosen app path (flux-class
+            # or an edit-native app such as blackforestlabs/flux-3/edit-image);
+            # polls/result/cancel are GET/PUT.
             return httpx.Response(200, json=submit)
         if path.endswith("/status"):
             payload = status_script.pop(0) if status_script else {"status": "COMPLETED"}
@@ -799,6 +840,86 @@ async def test_fal_img2img_rides_the_image_to_image_route_with_image_url() -> No
     assert "image_size" not in body, "the img2img route takes no image_size"
 
 
+@pytest.mark.asyncio
+async def test_fal_multi_reference_editor_uses_image_urls_and_takes_no_strength() -> None:
+    """A pinned edit-native app keeps ITS schema: ``image_urls``, no strength."""
+    recorder = _Recorder()
+    submit = {"request_id": "req1", "status": "IN_QUEUE"}
+    async with _client(_fal_handler(recorder, submit=submit)) as client:
+        await image_rungs.run_fal(
+            prompt="combine these",
+            key="fk",
+            num_images=1,
+            image_size="square_hd",
+            seed=None,
+            strength=0.6,
+            source_url="data:image/png;base64,AAAA",
+            model="blackforestlabs/flux-3/edit-image",
+            handle=image_rungs.CancelHandle(),
+            emit=None,
+            pause=_no_pause,
+            base_url="https://queue.fal.test",
+            client=client,
+        )
+    assert recorder.paths()[0] == "/blackforestlabs/flux-3/edit-image"
+    body = recorder.bodies[0]
+    assert body["image_urls"] == ["data:image/png;base64,AAAA"]
+    assert "image_url" not in body
+    assert "strength" not in body, "the multi-reference schema documents no strength field"
+
+
+@pytest.mark.asyncio
+async def test_fal_an_edit_app_path_is_honoured_without_double_appending() -> None:
+    """The old unconditional append corrupted already-correct edit-app pins."""
+    recorder = _Recorder()
+    submit = {"request_id": "req1", "status": "IN_QUEUE"}
+    async with _client(_fal_handler(recorder, submit=submit)) as client:
+        await image_rungs.run_fal(
+            prompt="make it rain",
+            key="fk",
+            num_images=1,
+            image_size="square_hd",
+            seed=None,
+            strength=None,
+            source_url="data:image/png;base64,AAAA",
+            model="fal-ai/flux/dev/image-to-image",
+            handle=image_rungs.CancelHandle(),
+            emit=None,
+            pause=_no_pause,
+            base_url="https://queue.fal.test",
+            client=client,
+        )
+    assert recorder.paths()[0] == "/fal-ai/flux/dev/image-to-image"
+    assert recorder.bodies[0]["image_url"] == "data:image/png;base64,AAAA"
+
+
+@pytest.mark.asyncio
+async def test_fal_a_countless_edit_app_skips_a_multi_image_request() -> None:
+    """No silently smaller delivery: a count the schema cannot carry is a skip."""
+    recorder = _Recorder()
+    async with _client(_fal_handler(recorder, submit={"request_id": "r1"})) as client:
+        with pytest.raises(image_rungs.RungSkipped) as caught:
+            await image_rungs.run_fal(
+                prompt="combine",
+                key="fk",
+                num_images=2,
+                image_size="square_hd",
+                seed=None,
+                strength=None,
+                source_url="data:image/png;base64,AAAA",
+                model="blackforestlabs/flux-3/edit-image",
+                handle=image_rungs.CancelHandle(),
+                emit=None,
+                pause=_no_pause,
+                base_url="https://queue.fal.test",
+                client=client,
+            )
+    assert caught.value.reason_class == "unsupported"
+    assert caught.value.reason_class in REASON_CLASSES
+    assert "no image count" in str(caught.value)
+    assert recorder.requests == [], "skipped before the submit"
+
+
 # ---------------------------------------------------------------------------
 # OpenAI
 # ---------------------------------------------------------------------------
@@ -809,7 +930,7 @@ def _openai_handler(
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
         recorder.record(request)
-        if request.url.path.endswith("/images/generations"):
+        if request.url.path.endswith(("/images/generations", "/images/edits")):
             return httpx.Response(200, json=response_body)
         if request.url.host == "oai.test":
             return httpx.Response(200, content=PNG_1X1, headers={"content-type": "image/png"})
@@ -881,27 +1002,130 @@ async def test_openai_downloads_url_items() -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_img2img_is_skipped_with_a_reason() -> None:
+async def test_an_openai_edit_posts_multipart_with_the_source_bytes() -> None:
+    """Edits are the multipart transport (``image[]``), decoded from the data URI."""
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["content_type"] = request.headers.get("content-type", "")
+        seen["body"] = request.content
+        return httpx.Response(
+            200, json={"data": [{"b64_json": base64.b64encode(PNG_1X1).decode("ascii")}]}
+        )
+
+    async with _client(handler) as client:
+        result = await image_rungs.run_openai(
+            prompt="make it night",
+            key="sk",
+            num_images=1,
+            image_size="square_hd",
+            source_url=f"data:image/png;base64,{base64.b64encode(PNG_1X1).decode('ascii')}",
+            model=None,
+            emit=None,
+            pause=_no_pause,
+            base_url="https://oai.test/v1",
+            client=client,
+        )
+    body = seen["body"]
+    assert seen["content_type"].startswith("multipart/form-data")
+    assert b'name="image[]"' in body, "the documented file-part spelling"
+    assert PNG_1X1 in body, "the RAW bytes ride the part, not the base64 string"
+    assert b'name="model"' in body and b"gpt-image-1" in body
+    assert b'name="prompt"' in body and b"make it night" in body
+    assert b"1024x1024" in body
+    assert result.assets[0].data == PNG_1X1
+    # No usage in the payload -> no figure, no labels (nothing invented).
+    assert result.cost_usd is None
+    assert result.cost_source is None
+    assert result.billing_basis is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_id", "image_in_rate", "text_in_rate", "image_out_rate"),
+    [("gpt-image-2.5-sunburst", 8.0, 5.0, 30.0), ("gpt-image-1", 10.0, 5.0, 40.0)],
+)
+async def test_an_openai_edit_estimates_from_reported_usage_tokens(
+    model_id: str, image_in_rate: float, text_in_rate: float, image_out_rate: float
+) -> None:
+    """The ONLY computed figure: reported token counts x published rates."""
+    payload = {
+        "data": [{"b64_json": base64.b64encode(PNG_1X1).decode("ascii")}],
+        "usage": {
+            "input_tokens": 1200,
+            "input_tokens_details": {"image_tokens": 1100, "text_tokens": 100},
+            "output_tokens": 4000,
+            "total_tokens": 5200,
+        },
+    }
+    async with _client(_openai_handler(_Recorder(), payload)) as client:
+        result = await image_rungs.run_openai(
+            prompt="edit",
+            key="sk",
+            num_images=1,
+            image_size="square_hd",
+            source_url="data:image/png;base64,AAAA",
+            model=model_id,
+            emit=None,
+            pause=_no_pause,
+            base_url="https://oai.test/v1",
+            client=client,
+        )
+    expected = (1100 * image_in_rate + 100 * text_in_rate + 4000 * image_out_rate) / 1_000_000
+    assert result.cost_usd == pytest.approx(expected)
+    assert result.cost_source == "rate_table"
+    assert result.billing_basis == "estimated"
+    assert result.cost_provenance is not None and "estimate" in result.cost_provenance
+
+
+@pytest.mark.asyncio
+async def test_an_openai_edit_estimates_only_for_documented_models() -> None:
+    """Usage present but the model outside the table -> no borrowed rates."""
+    payload = {
+        "data": [{"b64_json": base64.b64encode(PNG_1X1).decode("ascii")}],
+        "usage": {
+            "input_tokens": 1200,
+            "input_tokens_details": {"image_tokens": 1100, "text_tokens": 100},
+            "output_tokens": 4000,
+            "total_tokens": 5200,
+        },
+    }
+    async with _client(_openai_handler(_Recorder(), payload)) as client:
+        result = await image_rungs.run_openai(
+            prompt="edit",
+            key="sk",
+            num_images=1,
+            image_size="square_hd",
+            source_url="data:image/png;base64,AAAA",
+            model="mystery-image-9000",
+            emit=None,
+            pause=_no_pause,
+            base_url="https://oai.test/v1",
+            client=client,
+        )
+    assert result.cost_usd is None
+    assert result.cost_source is None
+    assert result.billing_basis is None
+
+
+@pytest.mark.asyncio
+async def test_an_openai_edit_requires_a_data_uri_source() -> None:
     recorder = _Recorder()
     async with _client(_openai_handler(recorder, {"data": []})) as client:
-        with pytest.raises(image_rungs.RungSkipped) as caught:
+        with pytest.raises(APIError):
             await image_rungs.run_openai(
                 prompt="edit",
                 key="sk",
                 num_images=1,
                 image_size="square_hd",
-                source_url="data:image/png;base64,AAAA",
+                source_url="https://example.com/x.png",
                 model=None,
                 emit=None,
                 pause=_no_pause,
                 base_url="https://oai.test/v1",
                 client=client,
             )
-    assert caught.value.reason_class == "unsupported"
-    # And the token is INSIDE the closed vocabulary — a consumer switching on
-    # ``REASON_CLASSES`` must never meet an out-of-set class (round-1 finding).
-    assert caught.value.reason_class in REASON_CLASSES
-    assert recorder.requests == [], "nothing is spent on a skipped rung"
+    assert recorder.requests == [], "refused before the wire"
 
 
 # ---------------------------------------------------------------------------

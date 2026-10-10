@@ -74,17 +74,25 @@ covers the general rules for handling them.
 - **FAL**, **OpenAI** and **Google** bill the key you supplied at their
   published rates; **the ChatGPT-plan rung spends plan quota instead** — no
   cash charge, and the 3–5× burn above is the price. Rate tables with
-  provenance and dates: `docs/design/image-providers.md`; no prices are
-  duplicated into code, except the one labelled constant below.
+  provenance and dates: `docs/design/image-providers.md`; prices are not
+  duplicated into code except the labelled constants: the ChatGPT-plan
+  API-equivalent, and the GPT-image per-token rates the OpenAI edit estimate
+  multiplies (every multiplier there is provider-reported usage).
 - Every figure carries a `billing_basis` (and `cost_source`, `cost_provenance`)
   in the result details: `billed` (cash/credits charged — Radient's settled
   figure, xAI on an API key, OpenRouter), `estimated` (a figure that may still
-  be a quote — Radient when the status never reports `settled`), or
-  `subscription-api-equivalent` (the **ChatGPT-plan** rung: ≈ $0.053 per image,
-  OpenAI's published `gpt-image-2` 1024×1024 medium price, fetched 2026-10-09 —
-  an assumption, since the route pins no size/quality; and xAI on a Grok
-  sign-in, using xAI's reported figure). An API-equivalent is what the same
-  call would list at on the API — **never a charge**.
+  be a quote — Radient when the status never reports `settled` — or an OpenAI
+  edit computed from the response's reported token counts at published
+  rates), or `subscription-api-equivalent` (the **ChatGPT-plan** rung: ≈ $0.053
+  per image, OpenAI's published `gpt-image-2` 1024×1024 medium price, fetched
+  2026-10-09 — an assumption, since the route pins no size/quality; and xAI on
+  a Grok sign-in, using xAI's reported figure). An API-equivalent is what the
+  same call would list at on the API — **never a charge**.
+- **Edits can price differently from same-model generations** (xAI bills the
+  input image *and* the output image; OpenAI is token-priced). The result
+  carries only what the provider reports — an OpenAI edit estimates from its
+  reported usage tokens and the published rates, and everything else stays
+  figure-free rather than guessing.
 - `num_images` multiplies cost on every rung — it is the spend knob, and the
   approval prompt states the quantity before anything is spent. xAI accepts
   up to 10; OpenRouter models may return fewer than asked; the ChatGPT-plan
@@ -120,14 +128,27 @@ reproducibility there.
 
 ## Editing an image (image-to-image)
 
-Pass `source_image_path` (a local file) and the call becomes an edit: the file
-is read locally and uploaded to the provider as a data URI. `strength` (0..1)
-tunes how far the edit may move from the source, where the provider supports
-it. Without `source_image_path`, `strength` is rejected.
+Pass a source and the call becomes an edit. Two ways to name it:
 
-In this version edits route through Radient or FAL; the other rungs record an
-explicit skip, so an edit never silently degrades to a fresh image — if both
-edit-capable rungs are unavailable the call fails and says so.
+- `source_image_path` — a local file; read locally and uploaded to the
+  provider as a data URI.
+- `source_attachment` — the digest from a previous result's caption
+  (`generate_image` captions name the digest of every image they attached);
+  pass that digest back to edit the image the harness just made.
+
+`strength` (0..1) tunes how far the edit may move from the source, where the
+provider supports it (FAL's image-to-image apps); on providers that do not
+honour it, the result says it was ignored rather than dropping it silently.
+`strength` without a source is rejected.
+
+Edits run on FAL, OpenAI, Google, xAI and OpenRouter. The ChatGPT-plan rung —
+and Radient, until its media route learns source handling — records an
+explicit skip, so an edit never silently degrades to a fresh image: if no
+capable provider is available the call fails and names what to set up.
+
+Digests come from results. An image pasted straight into the chat has no
+digest you can cite yet — reference a local file with `source_image_path`
+when the bytes exist on disk.
 
 ## Cancelling and restarting
 

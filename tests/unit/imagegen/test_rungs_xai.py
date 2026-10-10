@@ -4,7 +4,8 @@ What is pinned: the OpenAI-images-shaped call (endpoint, bearer, body with
 ``n`` and ``response_format: "b64_json"``, the documented aspect-ratio
 mapping), the REPORTED cost from ``usage.cost_in_usd_ticks`` (the official
 OpenAPI schema requires it; 1 USD = 10,000,000,000 ticks), the b64 parse and
-the url fallback, the recorded img2img skip, and the failure classes. NO live
+the url fallback, the wired edit path (``/v1/images/edits``, single-image
+shape, reported ticks kept), and the failure classes. NO live
 probe ran this wave (operator decision) — tiered citations are in
 ``docs/design/image-providers.md``.
 """
@@ -18,7 +19,6 @@ from typing import Any, Callable
 import httpx
 import pytest
 
-from local_operator.artifacts.rung import RungSkipped
 from local_operator.clients._http import APIError
 from local_operator.imagegen import rungs_xai as rung_mod
 
@@ -196,13 +196,21 @@ async def test_a_url_item_falls_back_to_the_bounded_downloader() -> None:
 
 
 @pytest.mark.asyncio
-async def test_img2img_is_a_recorded_skip() -> None:
-    http = _client(lambda request: httpx.Response(500))
+async def test_an_edit_uses_the_single_image_shape_and_keeps_reported_ticks() -> None:
+    recorder = _Recorder()
+    http = _client(recorder.handler(_ok_response()))
 
-    with pytest.raises(RungSkipped) as caught:
-        await _run(_Recorder(), source_url="data:image/png;base64,AAAA", client=http)
+    result = await _run(recorder, source_url=f"data:image/png;base64,{PNG_B64}", client=http)
 
-    assert caught.value.reason_class == "unsupported"
+    assert recorder.requests[0].url.path == "/v1/images/edits"
+    body = recorder.bodies[0]
+    assert body["image"] == {"url": f"data:image/png;base64,{PNG_B64}", "type": "image_url"}
+    assert "n" not in body, "n is a generations-only parameter on this endpoint"
+    assert body["response_format"] == "b64_json"
+    # Edits bill input AND output (pricing page); the REPORTED ticks stay the
+    # only figure, and the generations flat rate is never reused.
+    assert result.cost_usd == pytest.approx(4.0)
+    assert result.cost_source == "reported"
 
 
 @pytest.mark.asyncio
@@ -251,7 +259,7 @@ async def test_a_pre_aborted_signal_stops_before_the_request() -> None:
 
 
 def test_the_spec_declares_reported_cost_and_no_cancel() -> None:
-    from local_operator.artifacts.rung import CancelSupport
+    from local_operator.artifacts.rung import CancelSupport, SourceSupport
     from local_operator.imagegen import ImageRoute, cascade
 
     spec = cascade.RUNG_SPECS[ImageRoute.XAI]
@@ -260,4 +268,6 @@ def test_the_spec_declares_reported_cost_and_no_cancel() -> None:
     # Amended from the wave's initial rate_table pencil: the official schema
     # requires usage.cost_in_usd_ticks, so the figure is REPORTED (design D8).
     assert spec.cost == "reported"
-    assert spec.capabilities == frozenset({"t2i"})
+    assert spec.capabilities == frozenset({"t2i", "i2i"}), "the edit path is wired"
+    assert spec.sources == SourceSupport.MULTI
+    assert spec.max_sources == 5

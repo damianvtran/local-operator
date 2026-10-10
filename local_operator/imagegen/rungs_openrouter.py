@@ -30,8 +30,18 @@ frontier ``openai/gpt-image-2.5`` / ``google/gemini-nano-banana-2.1`` classes
 as alternatives, and per-model availability/pricing moves, so nothing is
 pinned in code.
 
-**Editing**: ``input_references`` is documented, but v1 routes edits through
-Radient/FAL only — a recorded skip like Google's and xAI's.
+**Editing** (wired media wave-2 edit lane, 2026-10-10): the source rides
+``input_references`` — the docs' own shape, ``[{"type": "image_url",
+"image_url": {"url": <data URL>}}]`` — but only after ``GET
+/api/v1/images/models`` confirms the pinned model's
+``architecture.input_modalities`` accepts ``"image"``: a model that ignores a
+reference would bill a plain text-to-image, the silent class this lane exists
+to kill. A deterministic negative (model unlisted, or no image modality) is a
+recorded SKIP that fails forward; a models read that cannot answer RAISES
+(the rung failed — its real class rides the attempt record, and no
+capability is ever guessed). ``usage.cost`` settles the figure as before; the
+per-endpoint billables include the reference, so no reuse or invention is
+needed here.
 """
 
 from __future__ import annotations
@@ -50,6 +60,8 @@ from local_operator.imagegen import MediaAsset
 __all__ = ["run_openrouter"]
 
 OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images"
+#: The discovery read the edit path's capability check uses.
+OPENROUTER_IMAGES_MODELS_URL = "https://openrouter.ai/api/v1/images/models"
 
 #: A default, not a pin — see the module docstring.
 OPENROUTER_DEFAULT_IMAGE_MODEL = "bytedance-seed/seedream-4.5"
@@ -88,11 +100,6 @@ async def run_openrouter(
     # take effect before the spend. A no-op without a signal.
     if pause is not None:
         await pause(0.0)
-    if source_url is not None:
-        raise RungSkipped(
-            "OpenRouter has no wired image-to-image route in this rung.",
-            reason_class="unsupported",
-        )
     model_id = (model or OPENROUTER_DEFAULT_IMAGE_MODEL).strip()
     body: dict[str, Any] = {"model": model_id, "prompt": prompt}
     aspect = OPENROUTER_ASPECT_RATIOS.get(image_size)
@@ -111,6 +118,43 @@ async def run_openrouter(
     from local_operator.imagegen import rungs as image_rungs
 
     async with image_rungs._client_scope(client) as http:
+        if source_url is not None:
+            # Capability check BEFORE sending (audit §C.iv) — see the module
+            # docstring for the skip-vs-raise split.
+            models_payload = await image_rungs._request_json(
+                http,
+                "GET",
+                OPENROUTER_IMAGES_MODELS_URL,
+                label="OpenRouter images",
+                timeout_s=OPENROUTER_IMAGE_TIMEOUT_S,
+                secrets=(key,),
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            rows = models_payload.get("data")
+            rows = rows if isinstance(rows, list) else []
+            row = next(
+                (item for item in rows if isinstance(item, dict) and item.get("id") == model_id),
+                None,
+            )
+            if row is None:
+                raise RungSkipped(
+                    f"OpenRouter does not list image model {model_id!r}; edit skipped.",
+                    reason_class="unsupported",
+                )
+            architecture = row.get("architecture")
+            modalities = (
+                architecture.get("input_modalities") if isinstance(architecture, dict) else None
+            )
+            supports_image = isinstance(modalities, list) and "image" in [
+                str(value).lower() for value in modalities
+            ]
+            if not supports_image:
+                raise RungSkipped(
+                    f"OpenRouter model {model_id} does not declare image input "
+                    f"(input_modalities: {modalities!r}); edit skipped.",
+                    reason_class="unsupported",
+                )
+            body["input_references"] = [{"type": "image_url", "image_url": {"url": source_url}}]
         payload = await image_rungs._request_json(
             http,
             "POST",

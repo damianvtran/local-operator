@@ -3,8 +3,10 @@
 What is pinned: the Images API call (endpoint, bearer, body with the
 documented aspect-ratio mapping, ``n`` only when > 1, ``seed`` only when
 pinned), the ``data[].b64_json`` + ``media_type`` parse, the REPORTED
-``usage.cost`` (the docs' own settlement shape), the recorded img2img skip,
-and the failure classes (502 = the docs' all-or-nothing failure). NO live
+``usage.cost`` (the docs' own settlement shape), the wired edit path
+(``input_references`` behind the ``architecture.input_modalities`` check,
+skip-vs-raise split), and the failure classes (502 = the docs' all-or-nothing
+failure). NO live
 probe ran this wave (operator decision) — tiered citations are in
 ``docs/design/image-providers.md``.
 """
@@ -155,14 +157,109 @@ async def test_a_missing_usage_leaves_the_cost_unset() -> None:
     assert result.cost_provenance is None
 
 
+def _edit_handler(
+    recorder: _Recorder,
+    *,
+    models: httpx.Response,
+    generation: httpx.Response,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """The two-route handler an edit call makes: a models read, then the send."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.requests.append(request)
+        try:
+            recorder.bodies.append(json.loads(request.content) if request.content else None)
+        except ValueError:
+            recorder.bodies.append(None)
+        if request.url.path.endswith("/images/models"):
+            return models
+        return generation
+
+    return handler
+
+
+def _model_row(model_id: str, modalities: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {"id": model_id}
+    if modalities is not None:
+        row["architecture"] = {"input_modalities": modalities}
+    return row
+
+
 @pytest.mark.asyncio
-async def test_img2img_is_a_recorded_skip() -> None:
-    http = _client(lambda request: httpx.Response(500))
+async def test_an_edit_checks_the_model_capability_then_sends_input_references() -> None:
+    recorder = _Recorder()
+    handler = _edit_handler(
+        recorder,
+        models=httpx.Response(
+            200,
+            json={"data": [_model_row(rung_mod.OPENROUTER_DEFAULT_IMAGE_MODEL, ["text", "image"])]},
+        ),
+        generation=_ok_response(),
+    )
+
+    result = await _run(
+        recorder, source_url=f"data:image/png;base64,{PNG_B64}", client=_client(handler)
+    )
+
+    assert recorder.requests[0].method == "GET"
+    assert recorder.requests[0].url.path == "/api/v1/images/models"
+    assert recorder.requests[1].method == "POST"
+    body = recorder.bodies[1]
+    assert body["input_references"] == [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{PNG_B64}"}}
+    ]
+    # usage.cost settles the figure, references included (per-endpoint
+    # billables already count them).
+    assert result.cost_usd == pytest.approx(0.04)
+    assert result.cost_source == "reported"
+
+
+@pytest.mark.asyncio
+async def test_an_edit_on_a_model_without_image_input_is_a_skip_and_never_sends() -> None:
+    recorder = _Recorder()
+    handler = _edit_handler(
+        recorder,
+        models=httpx.Response(
+            200, json={"data": [_model_row(rung_mod.OPENROUTER_DEFAULT_IMAGE_MODEL, ["text"])]}
+        ),
+        generation=_ok_response(),
+    )
 
     with pytest.raises(RungSkipped) as caught:
-        await _run(_Recorder(), source_url="data:image/png;base64,AAAA", client=http)
+        await _run(recorder, source_url="data:image/png;base64,AAAA", client=_client(handler))
 
     assert caught.value.reason_class == "unsupported"
+    assert "does not declare image input" in str(caught.value)
+    assert len(recorder.requests) == 1, "the generation was never reached"
+
+
+@pytest.mark.asyncio
+async def test_an_edit_on_an_unlisted_model_is_a_skip() -> None:
+    recorder = _Recorder()
+    handler = _edit_handler(
+        recorder,
+        models=httpx.Response(200, json={"data": [_model_row("someone/else", ["image"])]}),
+        generation=_ok_response(),
+    )
+
+    with pytest.raises(RungSkipped) as caught:
+        await _run(recorder, source_url="data:image/png;base64,AAAA", client=_client(handler))
+
+    assert "does not list image model" in str(caught.value)
+    assert len(recorder.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_models_read_that_cannot_answer_raises_instead_of_guessing() -> None:
+    recorder = _Recorder()
+    handler = _edit_handler(
+        recorder,
+        models=httpx.Response(502, json={"error": {"message": "upstream down"}}),
+        generation=_ok_response(),
+    )
+
+    with pytest.raises(APIError):
+        await _run(recorder, source_url="data:image/png;base64,AAAA", client=_client(handler))
 
 
 @pytest.mark.asyncio
@@ -214,11 +311,13 @@ async def test_a_pre_aborted_signal_stops_before_the_request() -> None:
 
 
 def test_the_spec_declares_reported_cost_and_no_cancel() -> None:
-    from local_operator.artifacts.rung import CancelSupport
+    from local_operator.artifacts.rung import CancelSupport, SourceSupport
     from local_operator.imagegen import ImageRoute, cascade
 
     spec = cascade.RUNG_SPECS[ImageRoute.OPENROUTER]
     assert spec.label == "OpenRouter"
     assert spec.cancel_support == CancelSupport.NONE
     assert spec.cost == "reported"
-    assert spec.capabilities == frozenset({"t2i"})
+    assert spec.capabilities == frozenset({"t2i", "i2i"}), "the edit path is wired"
+    assert spec.sources == SourceSupport.SINGLE
+    assert spec.max_sources == 1
