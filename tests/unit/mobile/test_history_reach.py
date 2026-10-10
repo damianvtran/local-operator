@@ -1020,3 +1020,82 @@ def test_a_capped_projection_does_not_strand_the_row_the_cap_dropped(
         expected = {row.id for row in _journal_rows(walk["directory"])}
         assert ids["own_row"] in observed, f"page {page} stranded the dropped row"
         assert expected <= observed, f"page {page} stranded {sorted(expected - observed)[:3]}"
+
+
+#: The R4-1 shape: the compaction entry is appended AFTER the start of its own kept
+#: window, and that window paints more rows than the render's cap keeps.
+_COMPACT_TURNS = 70
+_COMPACT_KEEP_TURN = 30
+
+
+def _build_capped_compaction(config: Path) -> dict[str, Any]:
+    """A capped render whose NEWEST COMPACTION entry is newer than the cursor.
+
+    The fold hoists the newest compaction's marker into its prefix, so the render
+    paints it as its FIRST row — and ``ProjectionFold._cap_tail`` drops that row on
+    any render past its cap, because it pins a USER row for a marker that renders
+    as a ``notice``. The compaction ENTRY stays where it was written: an
+    auto-compaction is appended after the start of its own kept window, so the
+    rows between ``first_kept_entry_id`` and the entry are NEWER than the cursor
+    the client sends, and no page's ``older`` half can ever contain it (review
+    round 4, R4-1 — measured on two of eleven large real journals, one row each).
+    Seventy turns keep the window at 82 painted rows so the cap has to drop it.
+    """
+    directory = config / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    ids: dict[str, Any] = {}
+
+    async def run() -> None:
+        for i in range(_COMPACT_TURNS):
+            user = Message.user(f"turn {i}", id=f"cmp-u{i}")
+            await transcript.append_message(user)
+            await transcript.append_message(Message.assistant(f"reply {i}", id=f"cmp-a{i}"))
+            if i == _COMPACT_KEEP_TURN:
+                ids["kept"] = user.id
+        entry = await transcript.append_compaction(
+            summary="the boundary summary",
+            first_kept_entry_id=ids["kept"],
+            tokens_before=180_000,
+        )
+        ids["marker"] = entry.id
+
+    asyncio.run(run())
+    return ids
+
+
+def test_a_capped_render_still_serves_the_newest_compactions_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boundary marker has to outlive the cap that dropped it.
+
+    The marker is the one row that tells a reader history continues behind the
+    boundary, and on a freshly compacted session it is the only row the walk could
+    not reach: the render's cap drops it, and its journal position — after the
+    start of its own kept window — sits above the oldest row the client holds, so
+    every page (which serves only entries strictly older than its anchor) skipped
+    past it. The walk must serve it exactly once, on the page the client fetches
+    first.
+    """
+    config = tmp_path / "config"
+    ids = _build_capped_compaction(config)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+
+    projection = _durable_projection(SESSION_ID)
+    assert projection is not None
+    seed = [row.id for row in projection.transcript]
+    assert len(seed) == PROJECTION_TRANSCRIPT_LIMIT, "the render must sit AT its cap"
+    assert ids["marker"] not in seed, "the cap was supposed to drop the marker"
+
+    for page in (20, 120):
+        walk = _walk(config, monkeypatch, page=page)
+        observed = _observed(walk)
+        expected = {row.id for row in _journal_rows(walk["directory"])}
+        assert ids["marker"] in observed, f"page {page} stranded the boundary marker"
+        assert expected <= set(
+            observed
+        ), f"page {page} stranded {sorted(expected - set(observed))[:3]}"
+        served = [row for rows in walk["pages"] for row in rows]
+        assert (
+            served.count(ids["marker"]) == 1
+        ), f"page {page} served the marker {served.count(ids['marker'])} times"
