@@ -58,6 +58,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # ``lop prune``'s sweep vocabulary: these ARE the sentences that line prints
     # (``superseded, unreferenced``), authored in ``update.py`` for a reader.
     ("local_operator/cli.py", "_cleanup_row", "reason"): (1, "the prune vocabulary's own prose"),
+    # The delegated content layer's per-pad row — the same class of prose as
+    # ``_cleanup_row`` above: ``merged-clean clone past the window`` /
+    # ``stale output past the window``, composed by
+    # ``session/delegated_retention.py`` from this project's own class phrases
+    # (``CONTENT_CLASS_*``) and printed as the dry-run parenthetical. The
+    # content pass has no peers and no wire; nothing here is a mesh value.
+    ("local_operator/cli.py", "_content_row_text", "reason"): (
+        1,
+        "the content layer's own class prose (merged-clean clone / stale output past the window)",
+    ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
     # ``lop update``'s prune notices read the plan's OWN reasons — the same sweep
