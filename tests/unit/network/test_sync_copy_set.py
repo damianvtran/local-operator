@@ -675,6 +675,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_MARKER`` (``.build-stamp``): the notifier app's own build stamp, written into its "
         "package directory",
     ),
+    "local_operator/spawn/remembered.py": (
+        1,
+        "``_FILE`` (``last-terminal.json``): the attended-terminal memory, written under "
+        "``<config>/notifier/`` — machine-local state about an emulator, never an entry of "
+        "a session directory",
+    ),
+    "local_operator/tui/notify.py": (
+        1,
+        "``_ACTION_PROBE_FILE`` (``notify-send-actions.json``): the per-binary ``--action`` "
+        "probe cache under ``<config>/notifier/`` — machine-local state about an installed "
+        "binary, never an entry of a session directory",
+    ),
     # ---- the signed helper app the macOS wheel ships ----
     "local_operator/operator/macos/keyagent.py": (
         2,
