@@ -73,8 +73,8 @@ when the user asks to be reminded; `monitor` watches a read-only call for
 changes and reports only deltas — arm one when the user asks you to watch, poll,
 or be told, with `notify: true` only when they asked to be told. A peer
 message, wake, monitor or job result needing no reply or action: call
-`no_reply` and write nothing. Reply only if you acted or something changed
-that the user should know.
+`no_reply` and write nothing. Reply only if you acted; a peer turn notifies
+nobody — use `ask` when the user must decide or know.
 
 `eval` keeps a persistent Python kernel: do a multi-step job in one call and
 print a compact digest. Elided output is saved to a `spill://` handle — `read`

@@ -53,8 +53,8 @@ project, spawn the manager session with the brief, and let the manager drive
 it — checking in periodically. Say who owns it now, and when you will look again.
 
 Delegate iteration to targeted tests; full suites only at the frozen head or
-in CI, never in parallel; catch up asynchronously; batch findings into one
-remediation round.
+in CI, never in parallel; catch up on CI asynchronously; batch findings into
+one remediation round.
 
 ## Your daily check-in
 
