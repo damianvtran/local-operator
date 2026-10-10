@@ -525,6 +525,36 @@ class TestInstallIntoGeneration:
         assert marker.read_text(encoding="utf-8") == f"{'c' * 40} main\n"
         assert update_mod.current_generation() == language.resolve()
 
+    def test_a_deliberate_downgrade_composes_into_the_marker_note(self, home: Path) -> None:
+        """The audit trail the override promises: the note rides in ``.lop-source``.
+
+        A rollback must stay legible after the fact — that is what distinguishes
+        it from the silent downgrade ``classify_snapshot_downgrade`` refuses —
+        and the annotation slot composes: when the route also fell back (a
+        source build for an unreleased ref), its reason stays first and the
+        downgrade token follows, so neither fact is lost.
+        """
+        generation = update_mod.install_into_generation(
+            runner=FakeUv(version="0.63.2"),
+            version="0.63.2",
+            commit="d" * 40,
+            ref="v0.63.2",
+            origin=update_mod.SNAPSHOT_SOURCE_TOKEN,
+            note="unreleased-ref downgrade-allowed",
+        )
+        marker = generation / "tools" / "local-operator" / ".lop-source"
+        assert (
+            marker.read_text(encoding="utf-8")
+            == f"{'d' * 40} v0.63.2 unreleased-ref downgrade-allowed\n"
+        )
+        # The wheel shape records the same token after ``pypi <version>``, which
+        # is the shape the incident's downgrade would have carried.
+        pypi = update_mod.install_into_generation(
+            runner=FakeUv(version="0.63.1"), version="0.63.1", note="downgrade-allowed"
+        )
+        marker = pypi / "tools" / "local-operator" / ".lop-source"
+        assert marker.read_text(encoding="utf-8") == "pypi 0.63.1 downgrade-allowed\n"
+
     def test_a_failed_install_leaves_nothing_behind_and_no_flip(self, home: Path) -> None:
         good = _install("0.51.9")
         with pytest.raises(UpdateError, match="exited 9"):
