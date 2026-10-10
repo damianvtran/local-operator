@@ -68,6 +68,8 @@ def _build(
     tool_calls: int = 6,
     launch_row: bool = False,
     secret_prune: bool = False,
+    textless_calls: int = 0,
+    colon_call: bool = False,
 ) -> dict[str, Any]:
     """A journal with TWO compactions, a tool-heavy message, and a prune.
 
@@ -129,6 +131,62 @@ def _build(
                     Message.assistant("launched", id="subagent-launch:job-7f3:answer")
                 )
                 ids["launch"] = launch.id
+
+        if textless_calls:
+            # A TEXT-LESS multi-call message paints NO row of its own — only
+            # ``<id>:<call id>`` per call — so its own id is never among the row
+            # ids, and a page cut that grouped rows by row ids alone split the
+            # siblings (review round 2, R2-1). Each of the 12 largest real
+            # journals here carries 25-572 of these.
+            await transcript.append_message(
+                Message(
+                    role="assistant",
+                    content=[],
+                    tool_calls=[
+                        ToolCall(id=f"toolonly-call-{i}", name="bash", arguments={})
+                        for i in range(textless_calls)
+                    ],
+                    stop_reason="toolUse",
+                    id="toolonly",
+                )
+            )
+            for i in range(textless_calls):
+                await transcript.append_message(
+                    Message(
+                        role="tool",
+                        content=[TextContent(text=f"toolonly output {i}")],
+                        tool_call_id=f"toolonly-call-{i}",
+                        tool_name="bash",
+                        id=f"toolonly-res-{i}",
+                    )
+                )
+            ids["toolonly"] = "toolonly"
+
+        if colon_call:
+            # Real providers mint call ids with a colon of their own
+            # (``call_00_x7:06c08d4847`` in journal 439818272d84), so the ROW id
+            # carries two — and one narrowing step cannot name the message
+            # (review round 2, R2-2).
+            call = ToolCall(id="call_00_x7:06c08d4847", name="bash", arguments={"i": "true"})
+            await transcript.append_message(
+                Message(
+                    role="assistant",
+                    content=[TextContent(text="colon call")],
+                    tool_calls=[call],
+                    stop_reason="toolUse",
+                    id="coloncall",
+                )
+            )
+            await transcript.append_message(
+                Message(
+                    role="tool",
+                    content=[TextContent(text="ok")],
+                    tool_call_id=call.id,
+                    tool_name="bash",
+                    id="coloncall-res",
+                )
+            )
+            ids["colon_call_row"] = "coloncall:call_00_x7:06c08d4847"
 
         await transcript.append_compaction("summary of the early turns", "mid-u0", 1000)
 
@@ -795,3 +853,56 @@ def test_a_compaction_without_a_kept_row_serves_its_marker_once(
     assert (
         observed.count(marker_id) == 1
     ), f"the compaction marker was served {observed.count(marker_id)} times"
+
+
+def test_a_textless_multi_call_message_is_not_split_by_a_page_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cut must not land BETWEEN an assistant message's call rows.
+
+    That message paints no row of its own, so its id is only ever a JOURNAL entry
+    id. Resolving groups against the page's row ids alone therefore made every
+    sibling its own group, the cut landed inside the message, and the cursor it
+    handed over named the message — which serves only rows OLDER than it, leaving
+    the first siblings unreachable for good. Reproduced by review round 2 at page
+    sizes 2, 3 and 4 (two rows lost) and on a real 3,548-row journal at a 20-row
+    page (three rows lost); 25-572 such messages sit in each of the 12 largest
+    journals on this host.
+    """
+    config = tmp_path / "config"
+    _build(config, textless_calls=3)
+    for page in (2, 3, 4):
+        walk = _walk(config, monkeypatch, page=page)
+        observed = _observed(walk)
+        expected = [row.id for row in _journal_rows(walk["directory"])]
+        missing = [row_id for row_id in expected if row_id not in set(observed)]
+        assert missing == [], f"page {page} stranded {missing}"
+        assert len(observed) == len(set(observed)), f"page {page} served a row twice"
+
+
+def test_a_cursor_on_a_colon_bearing_call_id_still_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call id can carry a colon of its own, so the row id carries two.
+
+    ``call_00_x7:06c08d4847`` is the shape real providers mint (journal
+    439818272d84). The cursor misses as given, and one narrowing step — by the
+    last colon — names nothing, so the route answered ``([], False)`` and the
+    client ended history with every older row still unserved. The walk below is
+    the client's: it must reach the journal's own first row.
+    """
+    config = tmp_path / "config"
+    ids = _build(config, colon_call=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+
+    page, _ = _history_page(SESSION_ID, ids["colon_call_row"], 10)
+    served = [row.id for row in page]
+    assert served, "a cursor on a colon-bearing call id served nothing"
+    # The rows below the call's own message: the page crossed the cursor instead
+    # of answering end-of-history.
+    assert "early-u1" in served
+
+    walk = _walk(config, monkeypatch, page=5)
+    observed = set(_observed(walk))
+    expected = {row.id for row in _journal_rows(walk["directory"])}
+    assert expected <= observed, f"unreachable rows: {sorted(expected - observed)[:4]}"

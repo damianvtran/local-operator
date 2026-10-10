@@ -49,7 +49,7 @@ import logging
 import os
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Container
@@ -591,35 +591,8 @@ _ARCHIVE_READ_LIMIT = 200
 _ARCHIVE_PAIRING_MARGIN = 64
 
 
-def _journal_entry_id(row_id: str) -> str:
-    """The journal entry id a rendered row id names, when the suffix is the fold's.
-
-    ``fold_messages_to_entries`` composes a tool row's id from its message plus
-    the call (``<message id>:<call id>``, and ``<message id>:stop`` for the
-    budget stop), while the transcript reader's cursor is an ENTRY id. Callers
-    legitimately hold either — the web client's page cursor is the row id it was
-    served — so the narrowing happens here, once, for the call sites that need
-    it.
-
-    IT STRIPS ONE TRAILING SEGMENT, NOT EVERYTHING AFTER THE FIRST COLON, and
-    the difference is not cosmetic. ``harness/subagent.py`` mints
-    ``subagent-launch:<job id>`` user rows, so an entry id CAN contain a colon —
-    on this host 13 of the 60 largest journals name one as their newest
-    ``first_kept_entry_id`` — and splitting on the first colon turned such an id
-    into ``subagent-launch``, which resolves nowhere: the page reconciled, the
-    walk ended, and everything below it became unreachable. That is the same
-    defect this module exists to fix, reintroduced by an assumption about id
-    shape.
-
-    BECAUSE OF THAT IT IS A FALLBACK, never the first try: callers attempt the
-    id exactly as given and narrow only when the reader could not locate it.
-    """
-    base, _, _ = row_id.rpartition(":")
-    return base or row_id
-
-
 def _row_group(row_id: str, known: Container[str]) -> str:
-    """The message a rendered row belongs to, resolved against the rows at hand.
+    """The message a rendered row belongs to, resolved against the page at hand.
 
     A message paints its own row first and then one row per tool call, so the
     rows of one message are ``<message id>`` plus ``<message id>:<call id>`` —
@@ -629,16 +602,18 @@ def _row_group(row_id: str, known: Container[str]) -> str:
     (``subagent-launch:<job>``), so neither "strip everything after the first
     colon" nor "strip the last segment" is right on its own.
 
-    ``known`` is the set of row ids in the page being cut — the fold's own rows,
-    so the search answers with an id the conversation actually has. A row whose
-    message is NOT in the window keeps its OWN id as its group, and that is the
-    safe direction: the cut can only fall a row lower (the page gets longer), and
-    the cursor such a row hands over resolves to the message one page down rather
-    than to a stripped id that names nothing. Answering with the stripped base
-    there was wrong in exactly the way this module keeps re-learning: for
-    ``subagent-launch:<job>``, stripping answers ``subagent-launch`` for the bare
-    row and ``subagent-launch:<job>`` for its own call rows, so the two ends of
-    one group got different keys and the cut could land between them.
+    ``known`` IS THE PAGE'S ROW IDS *AND* ITS JOURNAL ENTRY IDS, and the entry
+    ids are load-bearing rather than belt-and-braces: an assistant message with
+    tool calls and NO TEXT paints no row of its own, only ``m:call-0``,
+    ``m:call-1``, …, so ``m`` never appears among the row ids and every sibling
+    would answer with its own id as its group. The cut could then land between
+    siblings, and the cursor it handed over (``m:call-2``) resolves — one prefix
+    down — to ``m``, which serves only rows OLDER than the message: the first
+    siblings were never asked for again. Measured on a real journal, 25-572 such
+    messages in each of the 12 largest, and 2-3 rows lost per walk on both a
+    synthetic case and a real clone (review round 2, R2-1). A row whose message
+    is in neither set keeps its OWN id as its group, and that stays the safe
+    direction: the cut can only fall a row lower.
     """
     head = row_id
     while ":" in head:
@@ -646,6 +621,32 @@ def _row_group(row_id: str, known: Container[str]) -> str:
         if head in known:
             return head
     return row_id
+
+
+def _cursor_candidates(row_id: str) -> Iterator[str]:
+    """The ids to try, longest first, for a rendered row id used as a cursor.
+
+    A tool row's id is ``<message id>:<call id>``, and EITHER half can carry a
+    colon of its own: ``harness/subagent.py`` mints ``subagent-launch:<job>``
+    entries (13 of the 60 largest journals here name one as their newest
+    ``first_kept_entry_id``), and real providers mint call ids shaped
+    ``call_00_x7:06c08d4847``. So the id AS SERVED is tried first, then each
+    prefix cut at a colon from the right, and the first one the reader can
+    locate wins.
+
+    Narrowing exactly ONCE was tried and is what this replaces: by the first
+    colon it broke ``subagent-launch:<job>``, and by the last it broke
+    ``m:call_00_X:hex`` (the cursor missed as given, the single narrowing named
+    nothing, and the route answered ``([], False)`` — every older row gone,
+    review round 2, R2-2). Each attempt costs the reader's own cursor lookup and
+    nothing else, and the shapes that need a second attempt are rare (7 rows in
+    one of the 150 largest journals).
+    """
+    yield row_id
+    head = row_id
+    while ":" in head:
+        head = head.rsplit(":", 1)[0]
+        yield head
 
 
 #: The needle a prune entry's line carries, exactly as the journal writes it:
@@ -831,10 +832,11 @@ def journal_rows_older_than(
 
     ``before_id`` is a rendered ROW id, not necessarily a bare journal entry id:
     the web client pages with the id it was served, and a tool row's id carries
-    its call. The id is tried AS GIVEN first and narrowed by
-    :func:`_journal_entry_id` only when the reader cannot locate it — an entry id
-    can itself contain a colon (``subagent-launch:<job>``), and narrowing first
-    would ask for a row that does not exist.
+    its call. :func:`_cursor_candidates` yields the id as given first and then
+    each prefix cut at a colon from the right, so an id that carries a colon in
+    EITHER half — a ``subagent-launch:<job>`` entry, a
+    ``call_00_x7:06c08d4847`` call id — is located by whichever attempt names a
+    real row, and a miss is a miss only once every attempt has failed.
 
     Returns ``None`` when ``before_id`` names no journal row — the cursor a
     client holds can outlive the file it came from (a compaction that landed
@@ -847,8 +849,12 @@ def journal_rows_older_than(
     has_more = False
     if not prunes_complete:
         prunes = _journal_prunes(directory, fallback=prunes)
-    candidate = before_id
-    narrowed_tried = False
+    # Journal entry ids read on the way, for the page cut's row GROUPING: a
+    # message with calls and no text paints no row of its own, so its own id is
+    # only ever visible here (see :func:`_row_group`).
+    entry_ids: set[str] = set()
+    candidates = _cursor_candidates(before_id)
+    candidate = next(candidates)
     while len(rows) < limit:
         try:
             # AN ANCHORED read rather than a plain ``before_id`` one: the page
@@ -866,17 +872,16 @@ def journal_rows_older_than(
         except FileNotFoundError:
             return None
         if page.reconciled:
-            narrowed = _journal_entry_id(before_id)
-            if not narrowed_tried and narrowed != before_id:
-                narrowed_tried = True
-                candidate = narrowed
-                continue
-            return None
+            candidate = next(candidates, None)
+            if candidate is None:
+                return None
+            continue
         anchor = next((i for i, entry in enumerate(page.entries) if entry.id == candidate), None)
         if anchor is None:
             return None
         older = list(page.entries[:anchor])
         newer = list(page.entries[anchor:])
+        entry_ids.update(entry.id for entry in page.entries)
         messages = _page_messages(older, prunes)
         if messages:
             messages += _pairing_messages(newer, messages, prunes)
@@ -893,9 +898,8 @@ def journal_rows_older_than(
         # (one message can paint several rows).
         cut = len(rows) - limit
         # EXCEPT that the cut has to fall on a row GROUP boundary. The cursor a
-        # caller holds is narrowed back to the message it names
-        # (:func:`_journal_entry_id`) and a message's rows are ordered own-row
-        # first, then one per tool call — so a page that STARTS mid-group makes
+        # caller holds names a message, and a message's rows are ordered own-row
+        # first then one per tool call — so a page that STARTS mid-group makes
         # the next page start strictly below the message, and the rows above the
         # cut are never asked for again. Measured: on the S6 fixture 2 of 1,813
         # folded rows were unreachable exactly this way; on this module's own
@@ -903,7 +907,7 @@ def journal_rows_older_than(
         # its first call. So the cut MOVES BACK to the group's first row and the
         # page is that much longer — bounded by one message's fan-out, and the
         # reader pays rows it was going to be served in the next page anyway.
-        known = {str(row.id) for row in rows}
+        known = {str(row.id) for row in rows} | entry_ids
         key = _row_group(str(rows[cut].id), known)
         while cut > 0 and _row_group(str(rows[cut - 1].id), known) == key:
             cut -= 1

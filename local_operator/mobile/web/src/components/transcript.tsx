@@ -473,7 +473,17 @@ export function Transcript({
 			const { entries: page, has_more } = jobId
 				? await getSubagentHistory(pid, jobId, oldestId, PAGE)
 				: await getHistory(pid, oldestId, PAGE);
-			if (page.length > 0) prependPage(page);
+			if (page.length > 0) {
+				prependPage(page);
+				/* A page that lands while the reader is parked at the top has to MOUNT
+				   in the same commit, or they see the idle hairline and nothing else
+				   until they gesture again — one extra flick per page, and the page is
+				   already held (review round 2, R2-3). Growing by the page's own
+				   length keeps one mechanism per gesture: this adds exactly what just
+				   arrived, and `onScroll` still owns everything after that. */
+				const el = scrollRef.current;
+				if (el && el.scrollTop < 120) setWindowSize((n) => n + page.length);
+			}
 			setHasMore(has_more);
 		} catch {
 			/* A failed page is not fatal — leave hasMore so a retry can load it. */

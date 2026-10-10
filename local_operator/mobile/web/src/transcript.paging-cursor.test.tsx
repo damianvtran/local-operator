@@ -3,9 +3,11 @@
 // THE OLDER-PAGE CURSOR (first-paint lane T2, the reach fix's second half).
 //
 // The transcript pages history with the id of its oldest row. It used
-// `visible[0].id` — the oldest row inside the MOUNTED window — and that window
-// only grows when the reader taps `show N more loaded`. So once fetch pace
-// outran taps the cursor stopped moving and every request returned the SAME
+// `visible[0].id` — the oldest row inside the MOUNTED window — and, in the
+// revision that had the affordance, that window only grew when the reader tapped
+// `show N more loaded` (the control is gone now: reaching the top grows the
+// window itself, and a fetched page mounts in the same commit). So once fetch
+// pace outran taps the cursor stopped moving and every request returned the SAME
 // page: measured on the S6 fixture against the real daemon, 40 taps produced
 // 139 requests and 4,680 mounted rows holding 240 distinct ones (twenty copies
 // of one page, which the reader then scrolls through as a conversation that
@@ -15,7 +17,7 @@
 //
 // What is pinned here: the SECOND fetch asks for what is older than the page
 // the first fetch delivered, not for the same page again.
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Transcript } from "./components/transcript";
 import { getHistory } from "./api";
@@ -82,25 +84,37 @@ describe("the older-history cursor", () => {
 		await waitFor(() => expect(calls.length).toBe(1));
 		expect(calls[0]).toBe("p0");
 
-		// The prepend does NOT move the mounted window, so the rows just fetched
-		// sit hidden above it. The reader's next scroll upward REVEALS them
-		// (grows the window) instead of fetching another page nobody can see —
-		// one mechanism at a time, which is what stopped the cascade that pulled
-		// 13 pages (2.24 MB) into a window the reader could not reach.
-		fireEvent.scroll(scroller as Element);
+		// The page landed while the reader was parked at the top, so it MOUNTS in
+		// the same commit (review round 2, R2-3): before that fix the rows were
+		// held but invisible until another gesture, which read as one extra flick
+		// per page.
 		await waitFor(() =>
 			expect(container.querySelectorAll("[data-completion-anchor]").length).toBe(122),
 		);
-		expect(calls.length).toBe(1);
 
-		// Once nothing is held above the reader, the next scroll fetches the page
-		// below the rows already held — and the cursor is the oldest row HELD
-		// (``older-1``), not the oldest row rendered (``p0``, which the mount
-		// already dropped from the window).
+		// The next scroll fetches the page below the rows already held — and the
+		// cursor is the oldest row HELD (``older-1``), not the oldest row rendered
+		// (``p0``, which the mount already dropped from the window).
 		fireEvent.scroll(scroller as Element);
 		await waitFor(() => expect(calls.length).toBeGreaterThan(1));
 		expect(calls[1]).toBe("older-1");
 		expect(getHistory).toHaveBeenCalled();
+	});
+
+	it("mounts a page that lands while the reader is parked at the top", async () => {
+		/* R2-3: `prependPage` grows the rows HELD and nothing else — the mounted
+		   window only followed scroll events, so a page fetched at the top sat
+		   invisible behind the hairline until the reader gestured again. The
+		   reader's own gesture must be enough. */
+		const { container } = render(<Transcript pid="s1" entries={window()} />);
+		const scroller = container.querySelector(".lo-scroll");
+		Object.defineProperty(scroller, "scrollTop", { value: 0, writable: true });
+		fireEvent.scroll(scroller as Element);
+		await waitFor(() => expect(calls.length).toBe(1));
+		await waitFor(() =>
+			expect(container.querySelectorAll("[data-completion-anchor]").length).toBe(122),
+		);
+		expect(screen.queryByText(/more loaded/)).toBeNull();
 	});
 
 	it("anchors past a pinned opener when the projection is at its cap", async () => {
