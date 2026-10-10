@@ -796,7 +796,13 @@ def _spawn_chain_clause(spawn_chain: object) -> str:
     never the recorded command line: that line is long, unstable, can carry
     helper flags or secrets, and the full path already lives on the pid-keyed
     boot record. The sentence claims exactly the two measured readings and
-    nothing more.
+    nothing more, and says so in its own last words — "(when it exited is not
+    recorded)" (design round 2, D6): the gate compares liveness at the
+    runtime's START with liveness at the signal, so an app that quit a second
+    ago and one that quit a week ago render the same, and without the caveat a
+    reader of a long-lived runtime's transcript (the clause is its NORMAL state
+    once runtimes outlive the app) could take the app's exit for the
+    explanation of an unrelated later SIGTERM.
     """
     if not isinstance(spawn_chain, list):
         return ""
@@ -818,7 +824,7 @@ def _spawn_chain_clause(spawn_chain: object) -> str:
         return (
             f"; the app this runtime descends from ({stem}.app, pid {pid})"
             " was running when the runtime started and was no longer running"
-            " when the signal arrived"
+            " when the signal arrived (when it exited is not recorded)"
         )
     return ""
 

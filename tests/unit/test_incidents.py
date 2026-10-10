@@ -877,6 +877,7 @@ def test_signal_detail_names_a_gone_app_ancestor_and_claims_no_more() -> None:
     assert (
         "the app this runtime descends from (Local Operator.app, pid 66213)"
         " was running when the runtime started and was no longer running when the signal arrived"
+        " (when it exited is not recorded)"
     ) in detail
     # The rendered identity is the bundle name plus pid — never the recorded
     # command line (D3) — and the order is sender → app status → the closing

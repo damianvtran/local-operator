@@ -459,7 +459,16 @@ def test_recorded_commands_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(macos_disclaim, "_process_table", lambda: {77: (1, long_command)})
     macos_disclaim._walk_cache.clear()
     chain = macos_disclaim._walk_parent_chain(77, cap=4)
-    assert [entry["argv0"] for entry in chain] == [long_command[: macos_disclaim.MAX_ENTRY_CHARS]]
+    (bounded,) = [entry["argv0"] for entry in chain]
+    # Cut to the budget AND marked as cut (R2-N3): a reader of the boot record
+    # can tell "the command ended here" from "the record ended here".
+    assert len(bounded) == macos_disclaim.MAX_ENTRY_CHARS
+    assert bounded.endswith("…")
+    assert bounded[:-1] == long_command[: macos_disclaim.MAX_ENTRY_CHARS - 1]
+    # Within budget is untouched and unmarked.
+    assert macos_disclaim._bound_command("x" * macos_disclaim.MAX_ENTRY_CHARS) == "x" * (
+        macos_disclaim.MAX_ENTRY_CHARS
+    )
 
 
 def test_parse_spawn_chain_bounds_commands_and_preserves_liveness() -> None:
@@ -469,7 +478,7 @@ def test_parse_spawn_chain_bounds_commands_and_preserves_liveness() -> None:
     assert macos_disclaim.parse_spawn_chain(raw) == [
         {
             "pid": 5,
-            "argv0": "y" * macos_disclaim.MAX_ENTRY_CHARS,
+            "argv0": "y" * (macos_disclaim.MAX_ENTRY_CHARS - 1) + "…",
             "alive_at_spawn": True,
             "alive_now": False,
         }
@@ -553,6 +562,62 @@ def test_e2big_after_shedding_raises_like_popen(monkeypatch: pytest.MonkeyPatch)
     assert len(calls) == 2
 
 
+def test_e2big_is_shed_on_the_popen_fallback_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R2-1: the fallback receives the same chain-bearing env, so it gets the same shed."""
+    monkeypatch.setattr(macos_disclaim, "_fallback_reason", lambda: "forced for the test")
+    monkeypatch.setattr(macos_disclaim, "_log_fallback", lambda reason: None)
+    attempts: list[dict[str, str]] = []
+    sentinel = object()
+
+    def fake_fallback(*args: Any, **kwargs: Any) -> Any:
+        attempts.append(dict(kwargs["env"]))
+        if len(attempts) == 1:
+            raise OSError(errno.E2BIG, "too big")
+        return sentinel
+
+    monkeypatch.setattr(macos_disclaim, "_fallback_popen", fake_fallback)
+    assert spawn_disclaimed(["/bin/true"]) is sentinel
+    assert len(attempts) == 2
+    assert ENV_SPAWN_CHAIN in attempts[0] and ENV_SPAWN_CHAIN not in attempts[1]
+
+    # A second E2BIG is the caller's own env, and surfaces like Popen's would.
+    attempts.clear()
+
+    def always_too_big(*args: Any, **kwargs: Any) -> Any:
+        attempts.append(dict(kwargs["env"]))
+        raise OSError(errno.E2BIG, "too big")
+
+    monkeypatch.setattr(macos_disclaim, "_fallback_popen", always_too_big)
+    with pytest.raises(OSError) as excinfo:
+        spawn_disclaimed(["/bin/true"])
+    assert excinfo.value.errno == errno.E2BIG
+    assert len(attempts) == 2
+
+
+def test_chain_annotation_does_not_write_into_the_memoised_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-3: ``alive_at_spawn`` belongs to one spawn's chain, never the lineage memo."""
+    monkeypatch.delenv(ENV_SPAWN_CHAIN, raising=False)
+    monkeypatch.setattr(
+        macos_disclaim, "_process_table", lambda: {os.getppid(): (1, "/Applications/X.app/x")}
+    )
+    macos_disclaim._walk_cache.clear()
+    try:
+        chain = macos_disclaim._chain_for_child()
+        assert chain is not None and all("alive_at_spawn" in entry for entry in chain)
+        memo = macos_disclaim._walk_parent_chain(os.getppid(), cap=macos_disclaim.MAX_CHAIN - 1)
+        assert memo and all("alive_at_spawn" not in entry for entry in memo)
+    finally:
+        macos_disclaim._walk_cache.clear()
+
+
+def test_a_pid_past_pid_t_reads_as_unknown_not_as_an_exception() -> None:
+    """R2-N2: ``os.kill`` raises ``OverflowError`` past 2**31-1; a corrupt env must not."""
+    assert macos_disclaim._pid_liveness(2**31) is None
+    assert macos_disclaim._pid_liveness(2**63) is None
+
+
 def test_a_disclaimed_child_gets_popens_signal_defaults(tmp_path: Path) -> None:
     """R1-4: ``restore_signals`` parity, observed on a real child.
 
@@ -600,8 +665,8 @@ def test_a_disclaimed_child_gets_popens_signal_defaults(tmp_path: Path) -> None:
         assert isinstance(proc, DisclaimedProcess)
         assert proc.wait(timeout=30) == -signal.SIGPIPE
     finally:
-        try:
-            os.kill(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        # ``kill()`` is guarded on ``returncode``: after a successful ``wait()``
+        # the pid is reaped and may already belong to someone else, so a bare
+        # ``os.kill(proc.pid, …)`` here could hit an unrelated process (R2-N1).
+        proc.kill()
     assert "SURVIVED" not in out_path.read_text()
