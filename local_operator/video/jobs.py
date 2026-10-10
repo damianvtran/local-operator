@@ -447,16 +447,26 @@ def make_video_job_runner(
     ):
         if value is not None:
             params[key] = value
-    source_rows = [dict(row) for row in (sources or [])]
+    source_rows: list[Mapping[str, Any]] = [dict(row) for row in (sources or [])]
 
     async def run(
         job_id: str,
         signal: Any,
         report_progress: Callable[[str | Mapping[str, Any]], None],
     ) -> str:
+        def _mirror_output(line: str) -> None:
+            """Copy one progress line to the job's rolling output.
+
+            ``append_output`` is opt-in (deliberately absent from
+            ``JobManagerProtocol``), and this nested def — not a lambda — is
+            what lets the None check hold inside the closure.
+            """
+            if append_output is not None:
+                append_output(job_id, line)
+
         emit = _progress_adapter(
             report_progress,
-            (lambda text: append_output(job_id, text)) if append_output is not None else None,
+            _mirror_output if append_output is not None else None,
         )
         wake = VideoWakeHandle(wake_scheduler, job_id)
         handle = CancelHandle()
@@ -624,8 +634,10 @@ def make_video_watcher_runner(
     """
     record_job_id = str(record.get("job") or "")
     mode = str(record.get("mode") or "")
-    params = record.get("params") if isinstance(record.get("params"), Mapping) else {}
-    source_rows = record.get("sources") if isinstance(record.get("sources"), list) else []
+    raw_params = record.get("params")
+    params: Mapping[str, Any] = raw_params if isinstance(raw_params, Mapping) else {}
+    raw_sources = record.get("sources")
+    source_rows: list[Mapping[str, Any]] = raw_sources if isinstance(raw_sources, list) else []
     # The ref the followed record carries: the rows this runner writes must
     # keep it (the handle may already be cleared by the terminal poll), or a
     # later refetch of an unregistered completion has nothing to poll.
@@ -638,9 +650,15 @@ def make_video_watcher_runner(
         signal: Any,
         report_progress: Callable[[str | Mapping[str, Any]], None],
     ) -> str:
+        def _mirror_output(line: str) -> None:
+            """Copy one progress line to the job's rolling output (see the
+            submit runner's twin: ``append_output`` is opt-in)."""
+            if append_output is not None:
+                append_output(job_id, line)
+
         emit = _progress_adapter(
             report_progress,
-            (lambda text: append_output(job_id, text)) if append_output is not None else None,
+            _mirror_output if append_output is not None else None,
         )
         handle = CancelHandle()
         pause = make_pause(signal, VideoGenerationCancelled)

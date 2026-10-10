@@ -661,10 +661,18 @@ def test_env_and_date_never_in_the_stable_head() -> None:
         assert "Darwin" not in block
 
 
-def test_inventory_block_matches_default_tool_order() -> None:
+def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPatch) -> None:
     # RT-33: block-1 ordering follows DEFAULT_TOOL_NAMES, which keeps the
     # inventory byte-stable against provider tool-array ordering.
+    from local_operator.tools import video_tool
     from local_operator.tools.registry import DEFAULT_TOOL_NAMES, create_tools
+
+    # The video pair is createIf-gated on a provider credential the way every
+    # other tool here is gated on a stub-able door — and a bare CI host holds
+    # none, so without this stub the pair is missing from a context that is
+    # otherwise fully capable and the ORDER assertion below reds (round-2
+    # review V8). Presence-only, same rule as the gates charted above.
+    monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
 
     tools = create_tools(
         ToolContext(

@@ -9,12 +9,14 @@ spellings, the completion receipt/text, and the wake's lifecycle.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from local_operator.artifacts import MediaAsset
+from local_operator.harness.types import AbortSignal
 from local_operator.video import jobs as video_jobs
 
 
@@ -101,7 +103,12 @@ async def test_success_path_records_cancel_wake_and_text(
         wake_scheduler=scheduler,
         append_output=lambda job_id, text: outputs.append(text),
     )
-    text = await runner("j1", SimpleNamespace(), lambda d: progress.append(dict(d)))
+
+    def collect(update: str | Mapping[str, Any]) -> None:
+        if isinstance(update, Mapping):
+            progress.append(dict(update))
+
+    text = await runner("j1", AbortSignal(), collect)
 
     states = [record["state"] for record in journal]
     assert states == ["running", "completed"]
@@ -124,6 +131,7 @@ async def test_success_path_records_cancel_wake_and_text(
     # Receipt on the job row + the §5.1 text.
     receipt = [entry for entry in progress if "video_receipt" in entry]
     assert receipt and receipt[0]["video_receipt"]["digest"] == "d" * 32
+    assert text is not None, "a successful run returns its completion text"
     assert "Video ready — job j1" in text
     assert "model minimax/h3-max/image-to-video" in text
     assert "8.0s" in text
@@ -167,7 +175,7 @@ async def test_signal_cancel_settles_cancelled_and_raises_carrier(
         wake_scheduler=scheduler,
     )
     with pytest.raises(asyncio.CancelledError):
-        await runner("j2", SimpleNamespace(), lambda d: cancels.append(d))
+        await runner("j2", AbortSignal(), lambda d: cancels.append(d))
 
     assert cancelled == ["req-2"], "the bounded provider cancel must run"
     states = [record["state"] for record in journal]
@@ -202,7 +210,7 @@ async def test_failure_settles_failed_and_reraises(
         wake_scheduler=scheduler,
     )
     with pytest.raises(VideoGenerationUnavailable):
-        await runner("j3", SimpleNamespace(), lambda d: None)
+        await runner("j3", AbortSignal(), lambda d: None)
     assert [record["state"] for record in journal] == ["failed"]
     assert "no provider could run it" in journal[0]["outcome_note"]
 
@@ -284,7 +292,7 @@ async def test_cancel_conflict_settles_the_frozen_already_finished_pair(
         wake_scheduler=_FakeScheduler(rows=[SimpleNamespace(id="video-check-j9")]),
     )
     with pytest.raises(asyncio.CancelledError):
-        await runner("j9", SimpleNamespace(), lambda d: None)
+        await runner("j9", AbortSignal(), lambda d: None)
 
     record = journal[0]
     assert record["state"] == "cancelled"
@@ -336,7 +344,7 @@ async def test_watcher_settles_provider_cancelled_as_cancelled(
     from local_operator.clients._http import APIError
 
     with pytest.raises(APIError):
-        await runner("w1", SimpleNamespace(), lambda d: None)
+        await runner("w1", AbortSignal(), lambda d: None)
 
     assert [record["state"] for record in journal] == ["cancelled"]
     assert journal[0]["outcome_note"] == "the provider reported the generation as CANCELLED"
@@ -376,7 +384,7 @@ async def test_watcher_settles_provider_gone_with_the_one_sentence(
     from local_operator.clients._http import APIError
 
     with pytest.raises(APIError):
-        await runner("w2", SimpleNamespace(), lambda d: None)
+        await runner("w2", AbortSignal(), lambda d: None)
 
     assert [record["state"] for record in journal] == ["failed"]
     assert journal[0]["outcome_note"] == video_jobs.PROVIDER_GONE_NOTE

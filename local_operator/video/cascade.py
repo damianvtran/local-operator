@@ -331,7 +331,7 @@ def capable_video_routes(
     request cannot be walkable in one place and refused in another.
     """
     return [
-        rung.route
+        VideoRoute(rung.route)
         for rung in resolution.rungs
         if rung.available
         and mode in VIDEO_RUNG_SPECS[rung.route].capabilities

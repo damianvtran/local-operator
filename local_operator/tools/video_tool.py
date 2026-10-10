@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, cast
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -182,7 +182,7 @@ class GenerateVideoParams(BaseModel):
 
 def _resolve_sources(
     params: GenerateVideoParams, cwd: str
-) -> tuple[str, str | None, str | None, list[dict[str, Any]]]:
+) -> tuple[str, str | None, str | None, list[Mapping[str, Any]]]:
     """Validate the source fields; derive ``(mode, source_kind, wire, record_rows)``.
 
     Exactly one source field may be set (the frozen one-source v1 rule). The
@@ -424,8 +424,12 @@ async def execute_generate_video(
         wake_scheduler=scheduler,
         append_output=getattr(jobs, "append_output", None),
     )
+    # ``register`` is deliberately outside ``JobManagerProtocol`` (its
+    # docstring: spawning must not ride the tool-facing surface), so the cast
+    # is the same sanctioned spelling bash's background path uses — the object
+    # beneath every production context is the real ``AsyncJobManager``.
     try:
-        job_id = jobs.register(type="video", label=label, run=runner)
+        job_id = cast(Any, jobs).register(type="video", label=label, run=runner)
     except RuntimeError as exc:
         return _error(tool_call_id, "generate_video", f"could not start the video job: {exc}")
     wake = VideoWakeHandle(scheduler, job_id)
@@ -531,7 +535,8 @@ class VideoStatusParams(BaseModel):
 
 def _receipt_from_record(record: dict[str, Any], job_id: str) -> dict[str, Any]:
     """The completion details block, rebuilt from the durable record."""
-    result = record.get("result") if isinstance(record.get("result"), Mapping) else {}
+    raw_result = record.get("result")
+    result: Mapping[str, Any] = raw_result if isinstance(raw_result, Mapping) else {}
     return {
         "job_id": job_id,
         "state": str(record.get("state") or ""),
@@ -549,7 +554,8 @@ def _receipt_from_record(record: dict[str, Any], job_id: str) -> dict[str, Any]:
 
 def _terminal_text(record: dict[str, Any], job_id: str) -> str:
     state = str(record.get("state") or "")
-    result = record.get("result") if isinstance(record.get("result"), Mapping) else {}
+    raw_result = record.get("result")
+    result: Mapping[str, Any] = raw_result if isinstance(raw_result, Mapping) else {}
     note = record.get("outcome_note")
     if state == "completed":
         pieces = [f"Video job {job_id} completed"]
@@ -633,8 +639,10 @@ def _answer_live(tool_call_id: str, job_id: str, record: dict[str, Any], live: A
     """A still-running job WITH a live runner: the row is the freshest source."""
     import time as _time
 
-    details_in = live.latest_details if isinstance(live.latest_details, Mapping) else {}
-    video = details_in.get("video") if isinstance(details_in.get("video"), Mapping) else {}
+    raw_details = live.latest_details
+    details_in: Mapping[str, Any] = raw_details if isinstance(raw_details, Mapping) else {}
+    raw_video = details_in.get("video")
+    video: Mapping[str, Any] = raw_video if isinstance(raw_video, Mapping) else {}
     stage = video.get("stage") or "in_progress"
     provider = record.get("provider") or video.get("provider")
     model = record.get("model") or video.get("model")
@@ -685,7 +693,8 @@ async def _spawn_watcher(
     from local_operator.paths import config_dir
 
     scheduler = getattr(context, "wake_scheduler", None)
-    params = record.get("params") if isinstance(record.get("params"), Mapping) else {}
+    raw_params = record.get("params")
+    params: Mapping[str, Any] = raw_params if isinstance(raw_params, Mapping) else {}
     duration = params.get("duration_s")
     provider = str(record.get("provider") or "")
     watcher = make_video_watcher_runner(
@@ -900,7 +909,8 @@ async def _answer_terminal(
     idempotent) — the provider may still serve a result whose registration
     failed, and a digest is worth one more read before the answer is final."""
     state = str(record.get("state") or "")
-    result = record.get("result") if isinstance(record.get("result"), Mapping) else {}
+    raw_result = record.get("result")
+    result: Mapping[str, Any] = raw_result if isinstance(raw_result, Mapping) else {}
     if state == "completed" and not result.get("digest"):
         from local_operator.artifacts.rung import CancelHandle
         from local_operator.paths import config_dir
