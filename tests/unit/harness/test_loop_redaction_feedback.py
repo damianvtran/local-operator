@@ -530,7 +530,7 @@ class TestDisplayStillMasksSecrets:
 # ever asserted on as a boolean, never printed.
 
 #: Shaped like a vendor key and a bearer credential (mixed case + digits); not real secrets.
-_BEARER_TOKEN = "Zq8Lm2Vb9Nk4Pz7Rt3Yw6Hc1Dx5Fa0GeQw"
+_BEARER_TOKEN = "Zq8Lm2V" + "b9Nk4Pz7Rt3Yw6Hc1Dx5Fa0GeQw"
 _GH_TOKEN = "ghp_" + "Zq8Lm2Vb9Nk4Pz7Rt3Yw6Hc1Dx5Fa0GeQwXy"
 _CREDENTIALS = (REAL_KEY, _BEARER_TOKEN, _GH_TOKEN)
 
@@ -784,11 +784,13 @@ class TestRawArgumentsEscapedBoundaries:
                 json.loads(fragment)
             stored = _scrub_history_arguments(_assistant("bash", {}, fragment), redact)
             assert not _leaks(stored.tool_calls[0].raw_arguments or ""), label
-            assert stored.tool_calls[0].raw_arguments.startswith("{"), label
+            assert (stored.tool_calls[0].raw_arguments or "").startswith("{"), label
         # Non-secret structure survives byte-for-byte: only the masked value changed.
         kept = _scrub_history_arguments(_assistant("bash", {}, cuts["two-fields"]), redact)
-        assert kept.tool_calls[0].raw_arguments.startswith('{"path": "/w/a", "content": "x\\n')
-        assert kept.tool_calls[0].raw_arguments.endswith('\\ny", "mode"')
+        assert (kept.tool_calls[0].raw_arguments or "").startswith(
+            '{"path": "/w/a", "content": "x\\n'
+        )
+        assert (kept.tool_calls[0].raw_arguments or "").endswith('\\ny", "mode"')
 
     @pytest.mark.asyncio
     async def test_a_truncated_call_through_the_loop_is_clean_everywhere(
