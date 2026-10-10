@@ -59,6 +59,7 @@ sys.path.insert(0, str(REPO))
 
 import local_operator  # noqa: E402
 from local_operator.harness.types import AgentTool  # noqa: E402
+from local_operator.i18n.resolve import preferred_language_line  # noqa: E402
 from local_operator.prompts_api import (  # noqa: E402
     CHANNEL_ASK,
     CHANNEL_HUB,
@@ -1370,7 +1371,23 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: would re-ship the silent-T2I class this lane exists to kill. The ratchet
 #: moves to the file's 55-token band (measured head + 55) so the next
 #: addition finds it as tight as this one did.
-BUDGET_BILLED_TOKENS = 27_270
+#: RAISED 27,270 -> 27,337 for SYS1 (the user's preferred language rides the
+#: stable prefix): every real session's head now carries the model-facing
+#: language sentence, so the guard must measure the shape that ships. The
+#: worst case is rendered — the longest display name (``zh-CN``) through the
+#: real ``preferred_language_line``, so the guard's text cannot drift from
+#: production. Measured with this script on both trees, one after the other:
+#:
+#:   baseline (origin/main f29d9e7fbe)     75,756 chars = ~27,250 billed
+#:   head (this branch)                    75,942 chars = ~27,317 billed
+#:     = +186 chars = +67 billed: one sentence, parameterised by the one
+#:       backend language setting — the mechanism that lets the model answer,
+#:       and address the user, in their language at all.
+#:
+#: The raise is exactly the feature's cost (+67), so the ceiling keeps the
+#: band the entries above it set; the tighten band below (1,200) is not in
+#: play.
+BUDGET_BILLED_TOKENS = 27_337
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1410,7 +1427,15 @@ BUDGET_BILLED_TOKENS = 27_270
 #:   delta      +94 chars = ~+34
 #:
 #: Band normalized to the 55-token band, as the top arm's entry states.
-BUDGET_CHILD_BILLED_TOKENS = 24_315
+#: RAISED 24,315 -> 24,382 for SYS1: the same sentence the top arm carries,
+#: same +186 chars = +67 billed (only the tool inventory differs between the
+#: arms). Measured on both trees with ``--kind child``:
+#:
+#:   baseline (origin/main f29d9e7fbe)     67,539 chars = ~24,295 billed
+#:   head (this branch)                    67,725 chars = ~24,362 billed
+#:
+#: The raise is exactly the feature's cost, as the top arm's entry states.
+BUDGET_CHILD_BILLED_TOKENS = 24_382
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
@@ -1433,6 +1458,11 @@ TIGHTEN_WHEN_HEADROOM_EXCEEDS = 1_200
 #: instructions, ~8k of repo guidance after truncation).
 _SAMPLE_USER_INSTRUCTIONS = "- A standing operator preference line.\n" * 150
 _SAMPLE_REPO_GUIDANCE = "Project convention paragraph explaining a rule.\n" * 170
+#: SYS1: every real session's head now carries the user's preferred-language
+#: line, and the guard measures the WORST case — the longest display name
+#: (``zh-CN``, 15 chars above ``en``). Rendered through the real function so
+#: the guard cannot drift from the shipped sentence.
+_SAMPLE_LANGUAGE_LINE = preferred_language_line("zh-CN")
 
 
 def tool_schema_chars(tools: list[AgentTool]) -> int:
@@ -1501,6 +1531,7 @@ def measure_start_context(
         date_str="2026-01-01",
         user_instructions=user_instructions,
         repo_guidance=repo_guidance,
+        language_line=_SAMPLE_LANGUAGE_LINE,
         # THE WORST CASE, AND IT MUST BE STATED: ``interactive`` defaults to
         # ``None``, which renders NO ``<interactivity>`` block at all (a host with
         # no runtime probe — an ``exec`` run, a scheduled run, a plain CLI). The

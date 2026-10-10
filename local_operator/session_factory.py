@@ -3501,6 +3501,7 @@ def _make_system_blocks_provider(
     goal_state: "GoalState | None" = None,
     user_instructions: str = "",
     repo_guidance: str = "",
+    language_line: str = "",
     variable_store: "VariableStore | None" = None,
 ) -> Callable[..., Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
@@ -3522,6 +3523,13 @@ def _make_system_blocks_provider(
     re-reading the file per turn would let a mid-session edit silently
     invalidate the whole cached prefix. Editing the file takes effect on
     the next session, which is also what makes a session's prompt reproducible.
+
+    ``language_line`` (SYS1) obeys the same capture-once contract, and for the
+    same reason: it rides the stable head block, so the language resolved at
+    session start is the session's language for its lifetime. A `language`
+    settings change takes effect at the next session (or the next stable-prefix
+    rebuild), never mid-session — rewriting it mid-session would reprice the
+    cached prefix from a settings edit nobody asked to be prompt-interrupting.
     """
 
     environment = _env_details(cwd)
@@ -3640,6 +3648,7 @@ def _make_system_blocks_provider(
             goal_status=goal_status,
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
+            language_line=language_line,
             credentials=names,
             team_brief=team_brief,
             agent_brief=agent_brief,
@@ -4622,6 +4631,16 @@ async def _prepare(
             )
             agent_prompt = ""
     user_instructions = load_user_instructions(agent_prompt)
+    # The model-facing language line (SYS1), resolved ONCE here beside
+    # ``user_instructions`` for the same head-block reason: it rides the stable
+    # prefix, so the process's language at session start is the session's
+    # language for its lifetime — a settings change takes effect at the next
+    # session/prefix rebuild, never mid-session. Function-local import, like
+    # ``load_repo_guidance`` below: the resolver is read at CALL time, not at
+    # module import.
+    from local_operator.i18n.resolve import preferred_language_line
+
+    language_line = preferred_language_line()
     # Repo guidance (AGENTS.md/CLAUDE.md ancestors) joins the same read-once
     # contract: the head block must stay byte-stable for the session, so the
     # filesystem is consulted here and never again.
@@ -4640,6 +4659,7 @@ async def _prepare(
         goal_state=goal_state,
         user_instructions=user_instructions,
         repo_guidance=repo_guidance,
+        language_line=language_line,
         variable_store=variable_store,
     )
 

@@ -30,6 +30,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from local_operator.harness.types import AgentTool  # noqa: E402
+from local_operator.i18n.resolve import preferred_language_line  # noqa: E402
 from local_operator.prompts_api import CHANNEL_ASK, build_system_blocks  # noqa: E402
 from scripts.real_tool_surface import build_real_tools  # noqa: E402
 
@@ -65,6 +66,10 @@ def measure(*, with_browser: bool = True) -> dict[str, int]:
         # it unstated renders none at all (a host with no runtime probe).
         interactive=True,
         channel=CHANNEL_ASK,
+        # SYS1: every real session's head carries the language sentence; the
+        # WORST case (longest display name) keeps this figure comparable to the
+        # guard's, which measures the same shape.
+        language_line=preferred_language_line("zh-CN"),
     )
     return {
         "instructions": len(blocks[0]),
