@@ -3283,6 +3283,21 @@ async def _settle_notices(handle: Any) -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def _drain_background(handle: Any) -> None:
+    """Await the handle's DETACHED tasks (the turn-end re-home retry holds one).
+
+    A fixed number of ``sleep(0)`` yields is not a join: the retry hops to a
+    thread for the credential read, so how many loop iterations it needs depends
+    on how fast that pool starts. Draining the holder is the join, and it is
+    also what makes the assertions after it readable as "the retry is over".
+    """
+    for _ in range(10):
+        tasks = [task for task in list(handle._background_tasks) if not task.done()]
+        if not tasks:
+            return
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_rehome_switches_a_stranded_idle_session_and_says_so(
     monkeypatch: pytest.MonkeyPatch,
@@ -3502,12 +3517,130 @@ async def test_rehome_never_cuts_across_live_work(monkeypatch: pytest.MonkeyPatc
     assert (
         recorder.notices()
         == [
-            "This conversation stays on radient/auto until the current turn ends — "
-            "/model switches it now.",
+            "This conversation stays on radient/auto until the turn ends — "
+            "/model switches it now."
         ]
         * 2
     )
     assert applied == []
+
+
+@pytest.mark.asyncio
+async def test_a_busy_refusal_is_armed_for_the_turn_end_and_completes_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The serve-side half of the deferral promise (round-2 M1/D6/Q2).
+
+    ``rehome_deferred_notice`` says the conversation waits "until the turn
+    ends". On a runtime-served session nobody used to keep that promise: the
+    owner emitted the sentence and returned, so the session stayed on the
+    unreachable model for good. The turn hook now retries the SAME
+    compare-and-set, and either outcome speaks: this test walks the completing
+    half — the move lands and the ordinary move notice follows the deferral.
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+    assert handle._rehome_pending is not None
+
+    session.is_streaming = False
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert session.model_label == "deepseek/deepseek-flash"
+    assert handle._rehome_pending is None
+    assert [spec.provider for spec in applied] == ["deepseek"]
+    assert recorder.notices()[-1] == (
+        "Switched to deepseek/deepseek-flash — not signed in to radient."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_retry_that_can_no_longer_land_says_so_and_disarms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The close-out is reachable (round-2 U3/D5/Q1) and the arm does not linger.
+
+    The promise's other outcome: the target credential is gone by the time the
+    turn ends, so the retry can never land. Before this the arm stayed set
+    across turn ends — silent at every one — and a later turn end could move the
+    session on an authorization given turns earlier once the credential came
+    back. Now the retry closes the arm with one sentence, and a restored
+    credential moves nothing without a fresh login.
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    session.is_streaming = False
+    _patch_access(monkeypatch, {"openrouter"})  # deepseek's credential is gone
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert applied == [], "nothing moved"
+    assert handle._rehome_pending is None, "the arm does not survive a failed retry"
+    assert recorder.notices()[-1] == (
+        "This conversation is still on radient/auto — /model switches it when you are ready."
+    )
+
+    # Restoring the credential does NOT resurrect the repair: the authority was
+    # spent (and a fresh first login would have to grant it again).
+    _patch_access(monkeypatch, {"deepseek"})
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+    assert applied == [] and session.model_label == "radient/auto"
+
+
+@pytest.mark.asyncio
+async def test_a_pick_inside_the_credential_read_gets_the_same_deferral_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-2 MINOR-2: the late busy refusal is SPOKEN like the entry ones.
+
+    The pool counts every ``REHOME_BUSY_REPLY`` as a deferral, so a refusal that
+    reached the receipt but not the conversation was one counted silence.
+    """
+    from local_operator.providers import model_access
+
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+
+    def _turn_starts_then_read(**kwargs: Any) -> set[str]:
+        # The turn starts inside the credential read: the entry idle check saw
+        # an idle session, the pre-switch one will not.
+        session.is_streaming = True
+        return {"deepseek"}
+
+    monkeypatch.setattr(model_access, "credentialed_chat_providers_here", _turn_starts_then_read)
+
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+    await _settle_notices(handle)
+
+    assert applied == []
+    assert handle._rehome_pending is not None
+    assert recorder.notices() == [
+        "This conversation stays on radient/auto until the turn ends — " "/model switches it now."
+    ]
 
 
 @pytest.mark.asyncio

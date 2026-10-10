@@ -49323,10 +49323,20 @@ class OperatorApp(App[None]):
         session can be in BEFORE any provider login — started by some earlier
         build, pinned to ``radient/auto``, nothing behind it — and the first
         OpenAI or Anthropic login is the one that moves it. Adding a second
-        provider later must never re-point open conversations.
-        ``from_pending`` is the deferred completion of an ALREADY-authorised
-        first login (see ``_settle_deferred_rehome``), so it skips the gate and
-        keeps every other check.
+        provider later must never re-point open conversations. The gate runs on
+        EVERY attempt — the deferred retry included — because the authority can
+        lapse between the refusal and the turn end (a second login lands, or the
+        first provider is signed out again), and the queue is armed only once it
+        has passed (round-2 Q3: a non-first login must not even leave a string
+        waiting for the bind edge).
+
+        ``from_pending`` is the deferred retry of a first login that found the
+        conversation busy (see ``_settle_deferred_rehome``). It changes the
+        answer's SHAPE, not the checks: a still-busy conversation keeps the arm
+        silently (the sentence was said at the refusal), while every cannot-land
+        path closes the arm through :meth:`_deferred_close` — speaking the
+        close-out when the repair is still needed, silent when nothing is wrong
+        any more.
 
         The switch goes through the ``/model`` dispatch rather than the raw
         setter, for the reason ``_on_model_row_chosen`` gives: a picked or typed
@@ -49338,25 +49348,18 @@ class OperatorApp(App[None]):
         event-loop slot with no await between them), which is this front end's
         equivalent of the owner-side compare-and-set the runtime uses.
 
-        Returns the sentence to paint — the move's notice, or the deferral when
-        the conversation is busy (and re-arms ``_rehome_pending`` for the turn
-        end) — or ``None`` when there is nothing to say. Never raises: the login
-        it rides on has already succeeded.
+        Returns the sentence to paint — the move's notice, the deferral when the
+        conversation is busy, or the close-out ``_deferred_close`` writes — or
+        ``None`` when there is nothing to say. Never raises: the login it rides
+        on has already succeeded.
         """
         session = self._session
         if self._providers is None:
-            return None
-        if session is None:
-            # NO SESSION YET — the app is mid-swap, and there is no conversation
-            # to inspect (QA round 1, Q1: this window used to swallow the repair
-            # silently). The login authorised it, so it waits for the bind edge
-            # rather than evaporating. Not in the setup state, where no
-            # conversation exists to strand and the config write IS the repair.
-            if not from_pending and not self._setup_state:
-                self._rehome_await_bind = login_provider
-            return None
-        if self._session_runs_elsewhere() or getattr(session, "is_cold", False):
-            return None
+            # No controller to read a credential store with. The retry cannot be
+            # judged at all, so it closes rather than lapsing into silence; the
+            # conversation was stranded when the promise was made and nothing
+            # here shows that changed.
+            return self._deferred_close(from_pending, speak=True)
         try:
             from local_operator.config import ConfigManager
             from local_operator.paths import config_dir
@@ -49376,15 +49379,37 @@ class OperatorApp(App[None]):
             provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
             model_id = str(manager.get_config_value("model_name", "") or "").strip()
         except Exception:  # noqa: BLE001 — a repair must never fail a completed login
-            return None
-        if not from_pending and not is_first_provider_login(accessible, login_provider):
-            return None
+            return self._deferred_close(from_pending, speak=True)
+        if not is_first_provider_login(accessible, login_provider):
+            return self._deferred_close(from_pending, speak=True)
+        if session is None:
+            # NO SESSION YET — the app is mid-swap, and there is no conversation
+            # to inspect (QA round 1, Q1: this window used to swallow the repair
+            # silently). The login authorised it, so it waits for the bind edge
+            # rather than evaporating. Not in the setup state, where no
+            # conversation exists to strand and the config write IS the repair.
+            if not from_pending and not self._setup_state:
+                self._rehome_await_bind = login_provider
+            return self._deferred_close(from_pending, speak=False)
+        if self._session_runs_elsewhere() or getattr(session, "is_cold", False):
+            # A follower is never ours to move (the design's cross-process
+            # rule), and a cold facade has no runtime to move — and in both
+            # states there is no local transcript for a sentence, so the arm is
+            # closed in silence rather than spoken into a conversation that is
+            # not here.
+            return self._deferred_close(from_pending, speak=False)
         if not provider or not model_id or not is_accessible(provider, accessible):
-            return None
+            # Nothing to move TO, or the target stopped being reachable: the
+            # repair is still needed (the conversation IS stranded) and cannot
+            # land, which is exactly what the close-out says.
+            return self._deferred_close(from_pending, speak=True)
         old_label = str(getattr(session, "model_label", "") or "")
         old_provider = old_label.partition("/")[0]
         if not old_label or not is_stranded(old_provider, accessible):
-            return None
+            # Either there is no model to move, or the old provider is
+            # credentialed again — nothing is wrong any more, and a "still on"
+            # sentence would invent a complaint.
+            return self._deferred_close(from_pending, speak=False)
         if not self._idle_for_rehome(session):
             # BUSY, and said so (UX review U1). The refusal is recorded here, so
             # this is where the deferral sentence goes — and the repair is armed
@@ -49398,18 +49423,42 @@ class OperatorApp(App[None]):
         self._run_slash_command(f"/model {provider}/{model_id}", _rehome=True)
         return rehome_notice(old_label, f"{provider}/{model_id}")
 
+    def _deferred_close(self, from_pending: bool, *, speak: bool) -> str | None:
+        """Close the deferred arm; on a retry, return the sentence to paint.
+
+        ``speak`` is the caller's answer to "is the repair still NEEDED": a
+        conversation still stranded on a provider whose credential is gone gets
+        the close-out sentence, so the promise :func:`rehome_deferred_notice`
+        made ("until the turn ends") is either kept or visibly withdrawn
+        (round-2 U3/D5/Q1 — before this, every early return left the arm set and
+        the sentence unreachable, and a stale arm could move the session on a
+        much later, unrelated turn end). A state where nothing is wrong any
+        more — the old provider works again, or the user picked another model —
+        closes silently, because the sentence would invent a complaint.
+
+        A NON-pending call never owned an arm: it is a no-op returning ``None``.
+        """
+        if not from_pending:
+            return None
+        armed = self._rehome_pending
+        self._rehome_pending = None
+        if armed is None or not speak:
+            return None
+        from local_operator.providers.model_access import rehome_still_stranded_notice
+
+        return rehome_still_stranded_notice(armed[0])
+
     def _settle_deferred_rehome(self) -> None:
         """Complete — or close out — a re-home the login had to defer.
 
         Runs at the ONE turn exit (see ``_finalize_turn``), where a busy
-        conversation becomes idle. Two queued repairs are honoured here, and
-        both were authorised at login time: the first-login move that had no
-        session yet (``_rehome_await_bind``, retried at this backstop if the bind
-        edge could not run it), and the deferred move itself
-        (``_rehome_pending``). Once the attempt can no longer land — the user
-        picked another model, the target went away — the promise is CLOSED with
-        one sentence, because a pending repair that silently evaporates is the
-        silence this whole path exists to end (U1).
+        conversation becomes idle. Two queued repairs are honoured here, and both
+        were authorised at login time: the first-login move that had no session
+        yet (``_rehome_await_bind``, retried at this backstop if the bind edge
+        could not run it), and the deferred move itself (``_rehome_pending``).
+        The attempt returns the sentence to paint — the move, or the close-out
+        ``_deferred_close`` writes when the repair can no longer land — so
+        nothing stays armed across turn ends and nothing promised stays unsaid.
         """
         queued = self._rehome_await_bind
         if queued is not None:
@@ -49424,6 +49473,8 @@ class OperatorApp(App[None]):
         old_label, login_provider, _model_id = pending
         session = self._session
         if session is None or self._session_runs_elsewhere() or getattr(session, "is_cold", False):
+            # No local conversation to paint into: the arm closes silently, for
+            # the same reason the same states do inside the attempt above.
             self._rehome_pending = None
             return
         if str(getattr(session, "model_label", "") or "") != old_label:
@@ -49434,13 +49485,6 @@ class OperatorApp(App[None]):
         sentence = self._rehome_stranded_session(login_provider, from_pending=True)
         if sentence:
             self._notice(sentence, "note")
-        elif self._rehome_pending is None:
-            from local_operator.providers.model_access import (
-                rehome_still_stranded_notice,
-            )
-
-            still = str(getattr(session, "model_label", "") or "") or old_label
-            self._notice(rehome_still_stranded_notice(still), "note")
 
     @staticmethod
     def _idle_for_rehome(session: Any) -> bool:

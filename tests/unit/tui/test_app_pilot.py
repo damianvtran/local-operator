@@ -14556,7 +14556,7 @@ async def test_a_login_leaves_an_accessible_session_and_a_busy_one_alone(
         # The refusal is SPOKEN (U1) and the repair is armed for the turn end
         # rather than evaporating: the session keeps its model for now.
         assert app._rehome_stranded_session("deepseek") == (
-            "This conversation stays on radient/auto until the current turn ends — "
+            "This conversation stays on radient/auto until the turn ends — "
             "/model switches it now."
         )
         assert app._rehome_pending is not None
@@ -14570,6 +14570,107 @@ async def test_a_login_leaves_an_accessible_session_and_a_busy_one_alone(
     assert busy.switched, "the deferred repair completes at the turn end"
     assert busy.model_label == "deepseek/deepseek-flash"
     assert app._rehome_pending is None
+
+
+@pytest.mark.asyncio
+async def test_the_deferred_rehome_closes_out_when_it_can_no_longer_land(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-2 U3/D5/Q1: the close-out is reachable, and the arm does not linger.
+
+    A deferred repair whose target credential vanishes before the turn ends
+    used to leave `_rehome_pending` set across every later turn end, silently —
+    the promise "until the turn ends" neither kept nor withdrawn, and a stale
+    arm that could move the session on a much later, unrelated turn end once the
+    credential came back. Now the failed retry says the still-on sentence and
+    clears the arm; a restored credential thereafter moves nothing without a
+    fresh login.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    # A mutable credential set: the fake's `has_any_credential` closure reads it,
+    # so the test can sign a provider out between the login and the turn end.
+    credentialed = {"deepseek"}
+    controller = FakeProviderController()
+
+    def _has(provider: str) -> bool:
+        return provider in credentialed
+
+    controller.has_any_credential = _has  # type: ignore[method-assign]
+
+    session = _RehomableSession()
+    session.streaming = True
+    app = OperatorApp(lambda: _factory(session), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._apply_login_defaults("deepseek")
+        assert app._rehome_stranded_session("deepseek") == (
+            "This conversation stays on radient/auto until the turn ends — "
+            "/model switches it now."
+        )
+        assert app._rehome_pending is not None
+
+        # deepseek's credential disappears before the turn ends.
+        credentialed.discard("deepseek")
+        session.streaming = False
+        app._settle_deferred_rehome()
+        for _ in range(6):
+            await pilot.pause()
+        text = _transcript_text(app)
+
+    assert session.model_label == "radient/auto", "nothing moved"
+    assert app._rehome_pending is None, "the arm does not survive a failed retry"
+    assert (
+        "This conversation is still on radient/auto — /model switches it when you are ready."
+        in text
+    )
+
+    # The credential coming back does NOT resurrect the repair: a later turn end
+    # has nothing armed, so the session is not moved on an old authorization.
+    credentialed.add("deepseek")
+    app._settle_deferred_rehome()
+    assert session.switched == []
+    assert app._rehome_pending is None
+
+
+@pytest.mark.asyncio
+async def test_a_non_first_login_never_arms_the_bind_edge_queue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-2 Q3: the queue is armed only after the first-login rule passes.
+
+    The `session is None` branch used to set `_rehome_await_bind` before the
+    gate ran, so an unbound Nth login left a provider string waiting for the
+    bind edge. The drain re-ran the gate and moved nothing, but a stale string
+    is one credential change away from a surprise — the arm now waits for the
+    same gate every other path does.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    session = _RehomableSession()
+    app = OperatorApp(
+        lambda: _factory(session),
+        provider_controller=_credentialed_controller("deepseek", "openrouter"),
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._bind_viewer(None)
+        assert app._rehome_stranded_session("openrouter") is None
+        assert app._rehome_await_bind is None, "a non-first login must not queue"
 
 
 @pytest.mark.asyncio

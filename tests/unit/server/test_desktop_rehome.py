@@ -222,8 +222,7 @@ def test_the_receipt_shape_is_additive_and_says_what_happened() -> None:
     assert busy_only is not None
     assert busy_only[DEFERRED_KEY] == 1
     assert busy_only["receipt"] == (
-        "This conversation stays on radient/auto until the current turn ends — "
-        "/model switches it now."
+        "This conversation stays on radient/auto until the turn ends — " "/model switches it now."
     )
 
     # Mixed: the move's sentence stands, both counts ride along.

@@ -901,6 +901,15 @@ class ServingSessionHandle(SessionHandle):
         # so the event loop cannot garbage-collect one mid-flight and drop the
         # title silently. Each task removes itself on completion.
         self._background_tasks: set[asyncio.Future[Any]] = set()
+        #: ``(selected_selector, provider, model_id)`` of a re-home this owner
+        #: REFUSED because the conversation was busy, retried at the turn end
+        #: (``_retry_deferred_rehome``). Also serves as the reply classified by
+        #: the sign-in pool (``REHOME_BUSY_REPLY``), so the deferral is counted
+        #: on the receipt while its promise — ``rehome_deferred_notice``'s
+        #: "until the turn ends" — is kept by the owner itself (round-2 M1/D6/Q2:
+        #: before this, only a TUI owner retried and a runtime-served session
+        #: stayed on the unreachable model with nothing more said).
+        self._rehome_pending: tuple[str, str, str] | None = None
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
         # request_id -> (monotonic instant, settled value) for gates that LANDED
@@ -4798,7 +4807,14 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("model access publication failed", exc_info=True)
 
     @_on_session_loop
-    async def rehome_if_current(self, expected_selector: str, provider: str, model_id: str) -> str:
+    async def rehome_if_current(
+        self,
+        expected_selector: str,
+        provider: str,
+        model_id: str,
+        *,
+        from_pending: bool = False,
+    ) -> str:
         """Move this session off an unreachable model — a COMPARE-AND-SET switch.
 
         WHY THIS IS NOT ``set_model``. A sign-in re-homes a session the user did
@@ -4830,6 +4846,15 @@ class ServingSessionHandle(SessionHandle):
         in a log without the sentence that explains it. A successful switch also
         emits the transcript notice (``rehome_notice``), which is the only place
         the USER is told their session moved and why.
+
+        ``from_pending`` is the turn-end RETRY of a refusal this owner already
+        spoke (``_retry_deferred_rehome``). It changes the answer's shape, not
+        the checks: a still-busy conversation re-arms silently (the sentence was
+        said once, at the refusal), and every cannot-land path closes the arm
+        through :meth:`_close_deferred_rehome` — speaking the close-out when the
+        repair is still needed, silent when nothing is wrong any more. The
+        first-login gate is re-applied on every attempt, retry included: the
+        authority can lapse between the refusal and the turn end.
         """
         self._check_loop_thread()
         from local_operator.mobile import peer_model
@@ -4837,6 +4862,7 @@ class ServingSessionHandle(SessionHandle):
             REHOME_BUSY_REPLY,
             credentialed_chat_providers_here,
             is_accessible,
+            is_first_provider_login,
             is_stranded,
             rehome_deferred_notice,
             rehome_notice,
@@ -4847,29 +4873,50 @@ class ServingSessionHandle(SessionHandle):
         if current != expected_selector:
             # The user (or a peer) picked something between the sign-in and this
             # request. Whatever they chose wins; a re-home never overwrites a
-            # live decision.
+            # live decision — and a deferred arm this retry owns closes in
+            # silence, because the choice is what replaced the complaint.
+            self._close_deferred_rehome(from_pending, speak=False)
             return f"kept: the model moved to {current or 'nothing'} since the sign-in"
         old_provider = current.partition("/")[0]
         if self.is_conversationally_active():
             # The refusal is SPOKEN, not just returned: the caller counts it, but
             # only the conversation itself can tell the user their session did
-            # not move and why (U1). The sentence names the manual route because
-            # no surface retries this by itself.
-            self._emit_notice(rehome_deferred_notice(current), "info")
+            # not move and why (U1). Armed for the turn end at the same time —
+            # this owner keeps the sentence's promise itself
+            # (``_retry_deferred_rehome``), and a retry that is still busy keeps
+            # the arm without re-saying what it already said.
+            self._rehome_pending = (current, provider, model_id)
+            if not from_pending:
+                self._emit_notice(rehome_deferred_notice(current), "info")
             return REHOME_BUSY_REPLY
         try:
             if session.running_subagents() > 0:
-                self._emit_notice(rehome_deferred_notice(current), "info")
+                self._rehome_pending = (current, provider, model_id)
+                if not from_pending:
+                    self._emit_notice(rehome_deferred_notice(current), "info")
                 return REHOME_BUSY_REPLY
         except Exception:  # noqa: BLE001 — an unreadable work state is assumed busy
+            # Assumed busy, so the retry stays armed for the next turn end — the
+            # same fail-closed reading ``_idle_for_rehome`` makes on the TUI side.
+            self._rehome_pending = (current, provider, model_id)
             return "kept: this session's work state is unreadable"
         accessible = await asyncio.to_thread(credentialed_chat_providers_here)
         if accessible is None:
+            self._close_deferred_rehome(from_pending, speak=True)
             return "kept: the credential store could not be read"
         if not is_stranded(old_provider, accessible):
+            # The old provider works again: nothing is wrong to complain about.
+            self._close_deferred_rehome(from_pending, speak=False)
             return f"kept: {old_provider} is signed in again"
         if not is_accessible(provider, accessible):
+            self._close_deferred_rehome(from_pending, speak=True)
             return f"kept: {provider} is not signed in on this device"
+        if not is_first_provider_login(accessible, provider):
+            # The gate, re-applied on every attempt: a later provider login took
+            # the authority away, and the conversation stays put — spoken, so the
+            # promise is visibly withdrawn rather than silently dropped.
+            self._close_deferred_rehome(from_pending, speak=True)
+            return f"kept: {provider} is not this device's first provider login"
         # THE COMPARE RE-RUNS IMMEDIATELY BEFORE THE SET (review MAJOR/MINOR-1):
         # the checks above ran before the credential read yielded the loop, and a
         # pick or a turn landing inside that await would otherwise be clobbered —
@@ -4879,8 +4926,16 @@ class ServingSessionHandle(SessionHandle):
         # reachable, and both must keep their choice.
         current = peer_model.selected_label(session)
         if current != expected_selector:
+            self._close_deferred_rehome(from_pending, speak=False)
             return f"kept: the model moved to {current or 'nothing'} since the sign-in"
         if self.is_conversationally_active():
+            # The SAME shape as the entry branches (round-2 MINOR-2): the pool
+            # counts this reply as deferred, so the conversation must be told —
+            # the silence here was one refusal that reached the receipt but not
+            # the reader.
+            self._rehome_pending = (current, provider, model_id)
+            if not from_pending:
+                self._emit_notice(rehome_deferred_notice(current), "info")
             return REHOME_BUSY_REPLY
         await self.set_model_effort(provider, model_id, None)
         # The answer comes from the read-back, never from the switch's own
@@ -4891,8 +4946,82 @@ class ServingSessionHandle(SessionHandle):
         new_label = peer_model.selected_label(session)
         if new_label != f"{provider}/{model_id}":
             return f"kept: the switch did not take (still {new_label or 'nothing'})"
+        self._rehome_pending = None
         self._emit_notice(rehome_notice(current, new_label), "info")
         return f"rehomed: {current} → {new_label}"
+
+    def _close_deferred_rehome(self, from_pending: bool, *, speak: bool) -> None:
+        """Close the deferred arm on a path where it can no longer land.
+
+        The turn-end retry (``_retry_deferred_rehome``) is the promise
+        ``rehome_deferred_notice`` makes ("until the turn ends") being kept; this
+        is the other outcome, and it is SPOKEN once when the repair is still
+        needed — a promise that silently evaporates is the round-1 U1 silence
+        one turn later (round-2 M1/D6/Q2, D5/U3/Q1). ``speak=False`` is for the
+        states where nothing is wrong any more (the old provider is credentialed
+        again, or the user moved the model themselves), where the sentence would
+        invent a complaint.
+
+        A call that did not come from the retry never owned an arm and is a
+        no-op, so the sign-in pass can call every branch uniformly.
+        """
+        if not from_pending:
+            return
+        armed = self._rehome_pending
+        self._rehome_pending = None
+        if armed is None or not speak:
+            return
+        from local_operator.providers.model_access import rehome_still_stranded_notice
+
+        # ``info``: ``NoticeEvent.kind`` has no ``note`` rung on the wire yet
+        # (design round 2, D7 — recorded as deferred in the PR thread), so this
+        # paints one tier dimmer than the TUI's own notice for the same state.
+        self._emit_notice(rehome_still_stranded_notice(armed[0]), "info")
+
+    def _schedule_rehome_retry(self) -> None:
+        """Run :meth:`_retry_deferred_rehome` once the turn boundary is behind us.
+
+        The hook fires inside the pipeline's ``finally``, still under
+        ``_turn_lock`` (see ``_on_turn_settled``), and the retry's idle test
+        reads that lock, so it lands on the NEXT loop iteration via ``call_soon``
+        — the same shape ``_publish_busy_soon`` uses, including its closed-loop
+        guard.
+        """
+        if self._rehome_pending is None:
+            return
+        try:
+            self._loop.call_soon(self._spawn_rehome_retry)
+        except RuntimeError:
+            # Loop closed under a disposing handle: nothing left to retry.
+            return
+
+    def _spawn_rehome_retry(self) -> None:
+        """Hold the retry task by reference, like the naming errand: a bare
+        ``create_task`` can be collected before it runs."""
+        task = self._loop.create_task(self._retry_deferred_rehome())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _retry_deferred_rehome(self) -> None:
+        """The serve-side half of the deferral promise (round-2 M1/D6/Q2).
+
+        The TUI retries at its own turn end (``_settle_deferred_rehome``); a
+        session served by THIS process has no TUI, so without this the sentence's
+        "until the turn ends" was a promise nobody kept and the conversation
+        stayed on the unreachable model for good. The retry is the SAME
+        compare-and-set with every term re-read — the first-login gate included —
+        and either outcome SPEAKS through the owner: the ordinary move notice,
+        or the close-out when the repair can no longer land.
+        """
+        pending = self._rehome_pending
+        if pending is None:
+            return
+        expected, provider, model_id = pending
+        try:
+            await self.rehome_if_current(expected, provider, model_id, from_pending=True)
+        except Exception:  # noqa: BLE001 — a retry must never fail a settled turn
+            logger.debug("deferred re-home retry failed", exc_info=True)
+            self._rehome_pending = None
 
     @_on_session_loop
     async def receive_peer_model(
@@ -5791,6 +5920,7 @@ class ServingSessionHandle(SessionHandle):
         self._publish_busy_soon()
         self._schedule_completion_announce()
         self._maybe_heal_name()
+        self._schedule_rehome_retry()
 
     def _schedule_completion_announce(self, *, attempt: int = 0) -> None:
         """Run :meth:`_announce_completion` off the event loop, and retry it.
