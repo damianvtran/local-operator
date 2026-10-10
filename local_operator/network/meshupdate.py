@@ -569,8 +569,11 @@ def _execute_validated(
     # busy probe on purpose: a target this device's channel cannot serve is a
     # TERMINAL refusal the origin should learn on its first ask, not a member
     # that keeps answering ``busy`` for as long as it happens to be working. It
-    # costs one bounded read (``PUBLISHED_CHECK_TIMEOUT_S``) and only on a path
-    # that was going to install anyway.
+    # costs one bounded read (``PUBLISHED_CHECK_TIMEOUT_S``) on every ask that
+    # reaches it — including a busy member's re-ask (agent review round 2, m7:
+    # "only on a path that was going to install" was true only before the
+    # reorder). A terminal refusal on the first ask is worth that read; it is
+    # the cost of the design's order, not an oversight.
     published, why = check_published(target_version)
     if not published:
         raise MeshRefusal(

@@ -546,6 +546,52 @@ def test_a_target_the_members_channel_cannot_serve_is_refused_by_name(
     assert refused_rows and refused_rows[-1]["detail"]["code"] == "target_not_published"
 
 
+def test_the_channel_check_precedes_the_idle_gate(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """m6: the ORDER is load-bearing — a non-servable target refuses before busy.
+
+    The member is busy AND the target cannot be served. Under the design's
+    order (RU §3) the first ask gets the TERMINAL refusal and the busy probe is
+    never consulted (``busy_calls == []``); with the check moved back after the
+    idle gate the same ask answers ``busy`` and this cell goes red — the two
+    asserts below are what make that revert fail (agent review round 2: the
+    reorder left 18/18 green before this pin existed).
+
+    CONTROL: with the target servable the same busy member answers ``busy``,
+    so the cell pins the ORDER and not merely the refusal.
+    """
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    _concrete_member(monkeypatch, current="0.0.1")
+    calls = _record_installs(monkeypatch)
+    busy_calls: list[int] = []
+
+    def _busy(root: Any) -> tuple[int, str]:
+        busy_calls.append(1)
+        return 1, "1 live session (a deliberately busy session)"
+
+    monkeypatch.setattr(meshupdate, "busy_sessions", _busy)
+    monkeypatch.setattr(
+        meshupdate,
+        "check_published",
+        lambda version: (False, "the member's channel does not serve this version"),
+    )
+
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "refused", detail
+    assert detail["code"] == "target_not_published", detail
+    assert busy_calls == [], "the idle gate must not run before a terminal refusal"
+    assert calls == []
+
+    # CONTROL: servable target, still busy → the busy answer, probe consulted.
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "busy", detail
+    assert busy_calls == [1], busy_calls
+    assert calls == []
+
+
 def test_the_channel_check_refuses_only_on_a_confirmed_absence() -> None:
     """m3: the asymmetry that keeps the op from depending on a weaker read.
 
