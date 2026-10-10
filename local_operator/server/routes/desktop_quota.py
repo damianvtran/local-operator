@@ -24,15 +24,26 @@ HOW THE EVIDENCE IS GATHERED. Cache-first with one bounded refresh:
   under ``asyncio.wait_for`` bound — the fetchers' own HTTP timeout is 10 s,
   far too slow for a banner on session open, and the cross-process lease
   inside ``fetch_usage`` keeps N sessions from fanning out at once anyway.
+  A forced refresh is additionally floored (``REFRESH_FLOOR_MS``) so a
+  focus-refetch loop cannot spend a provider's per-IP budget.
 - A timed-out or failed refresh falls back to whatever the cache holds; the
-  verdict's own freshness rule then decides whether it may say anything
-  (usually it may not, and the response says ``unknown``).
+  verdict's own freshness rule (``quota_notice.report_is_fresh``, mirrored
+  here) then decides whether it may say anything (usually it may not, and
+  the response says ``unknown``).
+
+THE FREE-MODEL RULE reads the pair's row from the CACHED LISTING first
+(``initial_catalogue``, network-free — the same rows the picker paints), with
+``entry_for``'s registry answer as the fallback: an aggregator ships no static
+rows, so the listing is the only place a quoted ``0.0/0.0`` can come from.
+
+THE RADIENT SENTENCE is fetched from the shared ``radient_recovery``
+machinery ONLY once the verdict says ``depleted`` for Radient (its /me probe
+is cached for 180 s, but a healthy user must not pay it), so no Radient
+string is authored here.
 
 The controller comes from ``get_desktop_auth`` and is closed in ``finally``;
 every store read stays on the loop thread, for the sqlite thread-affinity
-reason ``desktop_catalogues.py`` documents. The Radient sentence is fetched
-from the shared ``radient_recovery`` machinery (its /me probe is cached for
-180 s), so no Radient string is authored here.
+reason ``desktop_catalogues.py`` documents.
 """
 
 from __future__ import annotations
@@ -40,22 +51,28 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Sequence
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from local_operator.providers.billing_links import BillingKind
-from local_operator.providers.quota_notice import QuotaVerdict, evaluate_quota_notice
+from local_operator.providers.quota_notice import (
+    QuotaVerdict,
+    evaluate_quota_notice,
+    report_is_fresh,
+)
 from local_operator.providers.radient_recovery import get_recovery_facts, recovery_line
 from local_operator.providers.registry import credential_provider_id
 from local_operator.providers.usage import UsageReport
-from local_operator.providers.usage_cache import USAGE_REPORT_TTL_MS
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
 from local_operator.server.routes.desktop_sessions import reply
 from local_operator.server.utils.desktop_auth import DesktopAuth
+
+if TYPE_CHECKING:  # runtime import would put providers.controller on the app boot path
+    from local_operator.providers.controller import CatalogueEntry, ProviderController
 
 router = APIRouter(tags=["Desktop quota"], dependencies=[Depends(require_desktop)])
 
@@ -63,6 +80,16 @@ router = APIRouter(tags=["Desktop quota"], dependencies=[Depends(require_desktop
 #: sensible interaction budget for a banner that appears while the user is
 #: deciding to type: a slow provider must not hold the empty-session paint.
 LIVE_REFRESH_BOUND_S = 4.0
+
+#: Minimum interval between FORCED (``refresh=true``) live probes. The forced
+#: path bypasses the TTL and the lease — right for one click, a rate-limit
+#: hazard for a loop (the renderer refetches on focus; an empty session is
+#: exactly when a user's attention is on the banner). Inside the floor the
+#: answer is the cache the caller just asked about: still honest, because
+#: ``source`` and ``age_ms`` say how old it is. Deliberately far under the
+#: 5-minute TTL — a top-up checkout takes longer than this floor, so the
+#: "I topped up" click still re-probes.
+REFRESH_FLOOR_MS = 15_000
 
 
 class QuotaActionResponse(BaseModel):
@@ -94,13 +121,58 @@ def _now_ms() -> int:
 
 
 def _needs_live(reports: Sequence[UsageReport], now_ms: int) -> bool:
-    """Whether the cached set is too old (or absent) to answer from."""
+    """Whether the cached set is too old (or absent) to answer from.
+
+    Mirrors ``quota_notice.report_is_fresh`` — the verdict is the authority on
+    freshness and this is the route's spend decision, so they share one rule
+    rather than two boundary spellings (round-1 m5).
+    """
     if not reports:
         return True
-    return any(
-        report.fetched_at <= 0 or now_ms - report.fetched_at >= USAGE_REPORT_TTL_MS
-        for report in reports
-    )
+    return any(not report_is_fresh(report, now_ms) for report in reports)
+
+
+def _refresh_floor_blocks(reports: Sequence[UsageReport], now_ms: int) -> bool:
+    """Whether a FORCED refresh is too soon after the newest cached report.
+
+    Only the forced path is floored: a TTL-triggered refresh is already
+    bounded by the TTL itself and is not what loops. An empty set is never
+    blocked — the first open must be able to fetch.
+    """
+    newest = max((report.fetched_at for report in reports), default=0)
+    return newest > 0 and now_ms - newest < REFRESH_FLOOR_MS
+
+
+def _quota_model_entry(
+    controller: "ProviderController", provider: str, model_id: str
+) -> "CatalogueEntry | None":
+    """The pair's catalogue row for the free-model rule, CACHED LISTING first.
+
+    WHY NOT ``entry_for`` ALONE (round-1 M1). ``entry_for`` resolves
+    ``static_models()`` plus the session spec; for an aggregator both are empty
+    (no static rows ship for openrouter/radient), so every listing-derived
+    ``:free`` route answered ``None`` and a spent account still got the "no
+    balance" notice on a model it could send on. The quoted zeroes live in the
+    CACHED LISTING's rows — the same ones the picker paints — so the free flag
+    is read from the source that computes it, not re-derived here.
+    ``initial_catalogue`` is synchronous and network-free (a peek at the
+    document: ``cached_available_models``), which is what makes it safe on
+    this path.
+
+    The registry fallback keeps registry-described pairs (deepseek and
+    friends) working when no listing document exists. NEVER-FABRICATE holds
+    in both branches: each prices a stated zero to exactly ``0.0`` and a
+    silence to the unknown ``-1``. The read is guarded — a broken frame must
+    not take the notice route down with it.
+    """
+    try:
+        rows = controller.initial_catalogue()
+    except Exception:  # noqa: BLE001 — a broken frame falls back to the registry row
+        rows = []
+    for row in rows:
+        if row.provider == provider and row.model_id == model_id:
+            return row
+    return controller.entry_for(provider, model_id)
 
 
 def _response(
@@ -151,7 +223,7 @@ async def quota_notice(
         reports: list[UsageReport] = controller.cached_usage_reports(resolved)
         source: Literal["cached", "live"] = "cached"
         now_ms = _now_ms()
-        if refresh or _needs_live(reports, now_ms):
+        if _needs_live(reports, now_ms) or (refresh and not _refresh_floor_blocks(reports, now_ms)):
             attempted_at = _now_ms()
             try:
                 live = await asyncio.wait_for(
@@ -171,11 +243,26 @@ async def quota_notice(
                 source = "live" if any(r.fetched_at >= attempted_at for r in live) else "cached"
 
         now_ms = _now_ms()
-        radient_line: str | None = None
-        if credential_provider_id(resolved) == "radient":
-            # The one provider whose sentence is owned elsewhere. The probe is
-            # cache-fronted (180 s) and never raises; a timeout leaves the
-            # module's neutral rendering to stand in rather than a blank.
+        expected = controller.expected_oauth_identities(resolved)
+        api_key_present = bool(expected) and await _api_key_present(controller, resolved)
+        entry = _quota_model_entry(controller, resolved, model_id) if model_id else None
+        verdict = evaluate_quota_notice(
+            provider=resolved,
+            model=model_id,
+            reports=reports,
+            expected_identities=expected,
+            api_key_present=api_key_present,
+            entry=entry,
+            now_ms=now_ms,
+            radient_line=None,
+        )
+        if verdict.state == "depleted" and credential_provider_id(resolved) == "radient":
+            # The /me probe runs AFTER the verdict (round-1 m3): only a
+            # depleted Radient notice ever renders the sentence, so a healthy
+            # user must not pay a probe — or wait behind one — for a body they
+            # will never see. The probe is cache-fronted (180 s) and a timeout
+            # leaves the module's neutral rendering to stand in.
+            radient_line: str | None = None
             try:
                 facts = await asyncio.wait_for(
                     get_recovery_facts(store=auth.store), timeout=LIVE_REFRESH_BOUND_S
@@ -183,18 +270,17 @@ async def quota_notice(
                 radient_line = recovery_line(facts)
             except Exception:  # noqa: BLE001 — the module's neutral text stands in
                 radient_line = None
-
-        expected = controller.expected_oauth_identities(resolved)
-        verdict = evaluate_quota_notice(
-            provider=resolved,
-            model=model_id,
-            reports=reports,
-            expected_identities=expected,
-            api_key_present=bool(expected) and await _api_key_present(controller, resolved),
-            entry=controller.entry_for(resolved, model_id) if model_id else None,
-            now_ms=now_ms,
-            radient_line=radient_line,
-        )
+            if radient_line is not None:
+                verdict = evaluate_quota_notice(
+                    provider=resolved,
+                    model=model_id,
+                    reports=reports,
+                    expected_identities=expected,
+                    api_key_present=api_key_present,
+                    entry=entry,
+                    now_ms=now_ms,
+                    radient_line=radient_line,
+                )
         return reply(_response(verdict, provider=resolved, source=source, checked_at_ms=now_ms))
     finally:
         controller.close()

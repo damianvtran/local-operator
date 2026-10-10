@@ -18,6 +18,8 @@ because a leak here would be the credential's email on the wire.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -29,9 +31,12 @@ from httpx import ASGITransport, AsyncClient
 
 import local_operator.providers.usage as usage_module
 from local_operator.config import ConfigManager
+from local_operator.model import discovery as discovery_module
 from local_operator.providers import radient_recovery as rr
-from local_operator.providers.controller import CatalogueEntry, ProviderController
+from local_operator.providers.controller import ProviderController
+from local_operator.providers.quota_notice import report_is_fresh
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+from local_operator.providers.usage_cache import USAGE_REPORT_TTL_MS
 from local_operator.server.routes import auth, desktop_quota
 
 TOKEN = "desktop-quota-notice-token"
@@ -155,6 +160,60 @@ def _stub(monkeypatch: pytest.MonkeyPatch, name: str, fn) -> None:
     monkeypatch.setattr(usage_module, name, fn)
 
 
+def _plant_listing(root: Path, provider: str, rows: list[dict[str, Any]]) -> None:
+    """Write a provider's cached listing document the way the app writes it.
+
+    The capture stamp is the module's own (``listing_capture_version``): a
+    document from another stamp reads as unusable, so a test that hard-coded
+    a number would measure the registry fallback instead of the listing.
+    ``root`` is the isolated HOME — the reader resolves its cache under
+    ``~/.local-operator/cache``.
+    """
+    cache = root / ".local-operator" / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / f"{provider}.listing.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {
+                    "capture": discovery_module.listing_capture_version(provider),
+                    "models": rows,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _age_cache_row(root: Path, provider: str, by_ms: int) -> None:
+    """Move a cached row back in time — payload and columns on one clock.
+
+    The row's ``expires_at_ms`` (which decides cache freshness) and each
+    embedded report's ``fetched_at`` (which the route and the verdict read)
+    must move together; moving only one leaves a payload that still claims to
+    be seconds old, and every age check in the path would rightly believe it.
+    How far back is the caller's choice: past ``REFRESH_FLOOR_MS`` to make a
+    forced refresh actually probe, past ``USAGE_REPORT_TTL_MS`` to make the
+    row stale. Sleeping instead is not a test.
+    """
+    conn = sqlite3.connect(root / "usage_cache.db")
+    row = conn.execute(
+        "SELECT payload FROM usage_reports WHERE provider = ?", (provider,)
+    ).fetchone()
+    assert row is not None, f"no cache row for {provider} to age"
+    payload = json.loads(row[0])
+    for report in payload:
+        report["fetched_at"] -= by_ms
+    conn.execute(
+        "UPDATE usage_reports SET payload = ?, fetched_at_ms = fetched_at_ms - ?, "
+        "expires_at_ms = expires_at_ms - ?, updated_at_ms = updated_at_ms - ? "
+        "WHERE provider = ?",
+        (json.dumps(payload), by_ms, by_ms, by_ms, provider),
+    )
+    conn.commit()
+    conn.close()
+
+
 async def test_depleted_balance_live_then_cached(quota: Harness) -> None:
     """The real path: store credential -> stubbed endpoint -> notice; then a
     cache hit with no second fetch."""
@@ -208,28 +267,243 @@ async def test_fetcher_returning_nothing_is_unknown(quota: Harness) -> None:
 
 
 async def test_free_model_suppresses_the_notice(quota: Harness) -> None:
-    """A model priced at an explicit 0.0/0.0 shows nothing, even on an empty
-    account — the user can still send on a free model."""
-    free = CatalogueEntry(
-        provider="deepseek",
-        model_id="freebie",
-        label="freebie",
-        context_window=64_000,
-        input_price=0.0,
-        output_price=0.0,
-        connected=True,
+    """A ``:free`` route suppresses the notice through the REAL catalogue row.
+
+    Round-1 M1: this test used to patch ``ProviderController.entry_for`` —
+    which hid that ``entry_for`` alone cannot see a listing-priced zero, because
+    aggregators ship no static rows. The free row now comes from a CACHED
+    LISTING document (the picker's own source), so the production resolution
+    path is what fires.
+    """
+    _plant_listing(
+        quota.tmp_path,
+        "openrouter",
+        [
+            {
+                "id": "poolside/laguna-s-2.1:free",
+                "context_window": 131_072,
+                "input_price": 0.0,
+                "output_price": 0.0,
+                "free": True,
+            }
+        ],
     )
-    quota.monkeypatch.setattr(ProviderController, "entry_for", lambda self, p, m, spec=None: free)
+
+    async def fetch_openrouter(client, api_key):
+        return _balance_report("openrouter", 0.0)
+
+    _stub(quota.monkeypatch, "fetch_openrouter", fetch_openrouter)
+    quota.store.upsert_credential("openrouter", {"key": "sk-or-test", "source": "login"})
+
+    result = await quota.notice(provider="openrouter", model="poolside/laguna-s-2.1:free")
+    assert result["state"] == "not_applicable"
+    assert result["model_free"] is True
+    assert result["body"] == ""
+
+    # Anti-vacuity: with the listing document gone the same pair is unknown to
+    # the static registry, so the notice must STAND — which proves the listing
+    # row above is what suppressed it, not some other path.
+    (quota.tmp_path / ".local-operator" / "cache" / "openrouter.listing.json").unlink()
+    unsuppressed = await quota.notice(provider="openrouter", model="poolside/laguna-s-2.1:free")
+    assert unsuppressed["state"] == "depleted"
+    assert unsuppressed["model_free"] is False
+
+
+async def test_a_routed_meta_model_is_never_free(quota: Harness) -> None:
+    """A zero-priced ROUTED row must keep the notice (round-1 M1's control):
+    the user's message goes wherever the router sends it, not to the free
+    model, so the spent account is real evidence. Same cached-listing seam as
+    the free case — prices exactly 0.0/0.0, ``routed: true`` making the
+    difference."""
+    _plant_listing(
+        quota.tmp_path,
+        "openrouter",
+        [
+            {
+                "id": "openrouter/auto",
+                "context_window": 2_000_000,
+                "input_price": 0.0,
+                "output_price": 0.0,
+                "free": True,
+                "routed": True,
+            }
+        ],
+    )
+
+    async def fetch_openrouter(client, api_key):
+        return _balance_report("openrouter", 0.0)
+
+    _stub(quota.monkeypatch, "fetch_openrouter", fetch_openrouter)
+    quota.store.upsert_credential("openrouter", {"key": "sk-or-test", "source": "login"})
+
+    result = await quota.notice(provider="openrouter", model="openrouter/auto")
+    assert result["state"] == "depleted"
+    assert result["model_free"] is False
+    assert result["title"] == "No balance on OpenRouter"
+
+
+async def test_a_healthy_radient_user_never_pays_the_me_probe(quota: Harness) -> None:
+    """The /me probe runs only when a DEPLETED Radient notice will render its
+    sentence (round-1 m3) — a healthy account must not wait behind it."""
+    quota.store.upsert_credential(
+        "radient",
+        {"type": "oauth", "access": "tok-r", "refresh": "ref-r", "email": "r@example.com"},
+    )
+    probes = {"n": 0}
+
+    async def probe(token: str):
+        probes["n"] += 1
+        return rr.VerificationFacts(email_verified=True, signup_grant="claimed", grant_amount=5)
+
+    async def healthy(client, access_token):
+        return _balance_report("radient", 9.0)
+
+    quota.monkeypatch.setattr(rr, "_probe_verification_async", probe)
+    _stub(quota.monkeypatch, "fetch_radient_balance", healthy)
+
+    result = await quota.notice(provider="radient", model="radient/auto")
+    assert result["state"] == "unknown"
+    assert probes["n"] == 0, "a healthy account must not pay the /me probe"
+
+    # The depleted case still gets the builder's sentence — recomposed after
+    # the verdict, from the probe that only this path pays for.
+    async def spent(client, access_token):
+        return _balance_report("radient", 0.0)
+
+    _stub(quota.monkeypatch, "fetch_radient_balance", spent)
+    _age_cache_row(quota.tmp_path, "radient", 20_000)
+    spent_result = await quota.notice(provider="radient", model="radient/auto", refresh=True)
+    assert spent_result["state"] == "depleted"
+    assert probes["n"] == 1
+    assert spent_result["body"].startswith("You're out of credits")
+
+
+async def test_the_controller_is_closed_on_every_path(quota: Harness) -> None:
+    """The controller is closed in ``finally`` — success, error and the
+    cancelled-refresh path alike (round-1 m1: replacing the close with ``pass``
+    went unnoticed)."""
+    import asyncio
+
+    closed: list[str] = []
+    real_close = ProviderController.close
+
+    def spy(self):
+        closed.append("closed")
+        return real_close(self)
+
+    quota.monkeypatch.setattr(ProviderController, "close", spy)
+
+    async def fast(client, api_key):
+        return _balance_report("deepseek", 0.0)
+
+    _stub(quota.monkeypatch, "fetch_deepseek_balance", fast)
+    quota.store.upsert_credential("deepseek", {"key": "sk-deepseek-test", "source": "login"})
+
+    ok = await quota.notice(provider="deepseek", model="deepseek-chat")
+    assert ok["state"] == "depleted"
+    assert len(closed) == 1, "the success path must close the controller"
+
+    response = await quota.client.get(
+        "/v1/desktop/quota-notice", params={"provider": "not-a-provider"}
+    )
+    assert response.status_code == 422
+    assert len(closed) == 2, "the 422 path must close the controller too"
+
+    async def slow(client, api_key):
+        await asyncio.sleep(0.5)
+        return _balance_report("deepseek", 0.0)
+
+    _stub(quota.monkeypatch, "fetch_deepseek_balance", slow)
+    quota.monkeypatch.setattr(desktop_quota, "LIVE_REFRESH_BOUND_S", 0.05)
+    _age_cache_row(quota.tmp_path, "deepseek", 20_000)
+    timed_out = await quota.notice(provider="deepseek", model="deepseek-chat", refresh=True)
+    assert timed_out["source"] == "cached"
+    assert len(closed) == 3, "the cancelled-refresh path must close the controller"
+
+
+async def test_the_refresh_floor_skips_a_just_fetched_row(quota: Harness) -> None:
+    """``refresh=true`` inside the floor answers from the cache it just read:
+    no second upstream request for a focus loop (round-1 m4)."""
+    calls = {"n": 0}
 
     async def fetch_deepseek(client, api_key):
+        calls["n"] += 1
         return _balance_report("deepseek", 0.0)
 
     _stub(quota.monkeypatch, "fetch_deepseek_balance", fetch_deepseek)
     quota.store.upsert_credential("deepseek", {"key": "sk-deepseek-test", "source": "login"})
-    result = await quota.notice(provider="deepseek", model="freebie")
-    assert result["state"] == "not_applicable"
-    assert result["model_free"] is True
-    assert result["body"] == ""
+
+    first = await quota.notice(provider="deepseek", model="deepseek-chat")
+    assert first["source"] == "live" and calls["n"] == 1
+
+    forced = await quota.notice(provider="deepseek", model="deepseek-chat", refresh=True)
+    assert forced["source"] == "cached"
+    assert calls["n"] == 1, "the floor must cut the second probe short"
+    assert forced["age_ms"] is not None
+    assert forced["age_ms"] < desktop_quota.REFRESH_FLOOR_MS
+
+
+async def test_forced_refresh_beyond_the_floor_reaches_live(quota: Harness) -> None:
+    """A click past the floor re-probes and reports the NEW numbers — the
+    "I topped up" flow the force exists for."""
+
+    async def depleted(client, api_key):
+        return _balance_report("deepseek", 0.0)
+
+    _stub(quota.monkeypatch, "fetch_deepseek_balance", depleted)
+    quota.store.upsert_credential("deepseek", {"key": "sk-deepseek-test", "source": "login"})
+    primed = await quota.notice(provider="deepseek", model="deepseek-chat")
+    assert primed["state"] == "depleted"
+
+    async def topped_up(client, api_key):
+        return _balance_report("deepseek", 12.5)
+
+    _stub(quota.monkeypatch, "fetch_deepseek_balance", topped_up)
+    _age_cache_row(quota.tmp_path, "deepseek", 20_000)
+    result = await quota.notice(provider="deepseek", model="deepseek-chat", refresh=True)
+    assert result["source"] == "live"
+    assert result["state"] == "unknown", "the topped-up balance must be re-read, not the cache"
+
+
+async def test_a_stale_row_served_from_last_good_stays_cached_sourced(quota: Harness) -> None:
+    """A fetch that completes WITHOUT new numbers must not relabel the answer
+    ``live`` (round-1 m1: forcing ``source = "live"`` went unnoticed).
+
+    The stub fails fast rather than timing out, so ``fetch_usage`` hands back
+    the stale last-good payload — non-empty, but nothing in it was refreshed;
+    the verdict then keeps quiet because the numbers are stale."""
+
+    async def fast(client, api_key):
+        return _balance_report("deepseek", 0.0)
+
+    _stub(quota.monkeypatch, "fetch_deepseek_balance", fast)
+    quota.store.upsert_credential("deepseek", {"key": "sk-deepseek-test", "source": "login"})
+    primed = await quota.notice(provider="deepseek", model="deepseek-chat")
+    assert primed["state"] == "depleted"
+
+    _age_cache_row(quota.tmp_path, "deepseek", 10 * 60_000)
+
+    async def failing(client, api_key):
+        return None
+
+    _stub(quota.monkeypatch, "fetch_deepseek_balance", failing)
+    result = await quota.notice(provider="deepseek", model="deepseek-chat")
+    assert result["source"] == "cached", "last-good is a cached answer"
+    assert result["state"] == "unknown", "a stale depleted row must not be shown"
+
+
+async def test_the_route_mirrors_the_verdict_freshness_rule() -> None:
+    """One TTL boundary, two readers (round-1 m5): exactly-TTL is FRESH for
+    both the verdict's rule and the route's spend decision — the route used to
+    spell it ``>= TTL`` against the verdict's ``> TTL``."""
+    fetched = 1_000_000
+    report = UsageReport(provider="deepseek", fetched_at=fetched)
+    at_boundary = fetched + USAGE_REPORT_TTL_MS
+    assert report_is_fresh(report, at_boundary) is True
+    assert desktop_quota._needs_live([report], at_boundary) is False
+    past_boundary = at_boundary + 1
+    assert report_is_fresh(report, past_boundary) is False
+    assert desktop_quota._needs_live([report], past_boundary) is True
 
 
 async def test_multi_account_one_healthy_shows_nothing(quota: Harness) -> None:
@@ -259,6 +533,10 @@ async def test_multi_account_one_healthy_shows_nothing(quota: Harness) -> None:
     assert "a@example.com" not in str(both) and "b@example.com" not in str(both)
 
     _stub(quota.monkeypatch, "fetch_anthropic_oauth", one_healthy)
+    # Take the row past the refresh floor so the forced refresh really probes
+    # (inside the floor a force answers from cache by design — see the floor
+    # tests below).
+    _age_cache_row(quota.tmp_path, "anthropic", 20_000)
     mixed = await quota.notice(provider="anthropic", model="claude-opus-4", refresh=True)
     assert mixed["state"] == "ok"
     assert mixed["body"] == ""
@@ -281,8 +559,13 @@ async def test_kimi_mixed_credentials_stay_silent(quota: Harness) -> None:
     assert suppressed["state"] == "unknown"
 
     quota.monkeypatch.delenv("KIMI_API_KEY")
+    _age_cache_row(quota.tmp_path, "kimi", 20_000)
     warning = await quota.notice(provider="kimi", model="k3", refresh=True)
     assert warning["state"] == "limit_reached"
+    # The CODING-PLAN console, not the API-key top-up page: the link is
+    # resolved from the kind the report shape derived (round-1 M2), and this
+    # assertion is what pins it at the route level too.
+    assert warning["actions"][0]["url"] == "https://www.kimi.com/code/console"
 
 
 async def test_radient_body_comes_from_the_shared_recovery_builder(quota: Harness) -> None:
@@ -338,6 +621,9 @@ async def test_forced_refresh_failure_keeps_the_cached_row(quota: Harness) -> No
 
     _stub(quota.monkeypatch, "fetch_deepseek_balance", slow)
     quota.monkeypatch.setattr(desktop_quota, "LIVE_REFRESH_BOUND_S", 0.05)
+    # Past the refresh floor but inside the TTL: the forced refresh really
+    # attempts and is really cut short.
+    _age_cache_row(quota.tmp_path, "deepseek", 20_000)
     started = time.monotonic()
     result = await quota.notice(provider="deepseek", model="deepseek-chat", refresh=True)
     elapsed = time.monotonic() - started

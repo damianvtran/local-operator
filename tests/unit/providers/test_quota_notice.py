@@ -307,6 +307,10 @@ def test_kimi_mixed_credentials_suppress_the_notice() -> None:
     )
     assert proven.state == "limit_reached"
     assert proven.kind == "subscription"
+    # The coding-plan console, not the API-key top-up page: the link is
+    # resolved FROM the derived kind (round-1 M2 — before the fix the variant
+    # table was dead code on this path and this click went to platform.kimi.com).
+    assert proven.actions[0].url == "https://www.kimi.com/code/console"
 
 
 def test_zai_mixed_credentials_also_suppress_conservatively() -> None:
