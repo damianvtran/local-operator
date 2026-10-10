@@ -14,6 +14,8 @@ validator and the real prompt builder, and only the provider call is a stub.
 from __future__ import annotations
 
 import json
+import re
+import time
 from typing import Any
 
 import pytest
@@ -81,8 +83,11 @@ async def _run(
     max_cost_usd: float = 1.00,
     price: Any = None,
     max_components: int = generator.MAX_COMPONENTS,
+    timeout_s: float | None = None,
+    started: float | None = None,
+    usage_tokens: int = 10,
 ) -> tuple[generator.GenerationOutcome, Recorder]:
-    recorder = Recorder(answers)
+    recorder = Recorder(answers, usage_tokens=usage_tokens)
     outcome = await generator.generate(
         complete=recorder,
         model=generator.DesignModel(model_spec(), "ladder", "anthropic/claude-sonnet-5"),
@@ -93,7 +98,9 @@ async def _run(
         max_output_tokens=6000,
         max_cost_usd=max_cost_usd,
         max_components=max_components,
+        timeout_s=timeout_s,
         price=price,
+        started=started,
     )
     return outcome, recorder
 
@@ -135,6 +142,35 @@ async def test_the_turn_bound_stops_the_run_cleanly() -> None:
     outcome, recorder = await _run([LYING_BLOCK, LYING_BLOCK, LYING_BLOCK], max_turns=2)
     assert len(recorder.requests) == 2, "maxTurns=2 must not spend a third turn"
     assert outcome.turns == 2
+    # R7: the bound leaves a record, and with nothing accepted the row reports it.
+    assert any("bound:turns" in line for line in outcome.detail), outcome.detail
+    assert outcome.error == "bound:turns"
+
+
+@pytest.mark.asyncio
+async def test_the_clock_checked_between_turns_keeps_the_blocks_that_passed() -> None:
+    """R4: an expired wall clock is never spent on a repair turn; the good block survives."""
+    outcome, recorder = await _run(
+        [HONEST_BLOCK + "\n" + LYING_BLOCK],
+        timeout_s=1.0,
+        started=time.perf_counter() - 5.0,
+    )
+    assert len(recorder.requests) == 1, "the repair turn was paid for after the clock ran out"
+    assert [c.title for c in outcome.components] == ["Latency"]
+    assert any("bound:time" in line for line in outcome.detail), outcome.detail
+    assert outcome.error == "", "blocks survived, so the row reports the bound in detail only"
+    # Nothing accepted: the same expiry is a failure, and it says which bound.
+    empty, _ = await _run([LYING_BLOCK], timeout_s=1.0, started=time.perf_counter() - 5.0)
+    assert empty.error == "bound:time" and not empty.components
+
+
+@pytest.mark.asyncio
+async def test_a_turn_at_the_token_cap_leaves_a_record_without_failing_the_job() -> None:
+    """R7: the per-turn token bound is a CONSUMPTION bound -- recorded, not a failure."""
+    outcome, _ = await _run([HONEST_BLOCK], usage_tokens=6000)
+    assert outcome.components, "a truncated-but-valid answer still passes its blocks"
+    assert any("bound:tokens" in line for line in outcome.detail), outcome.detail
+    assert outcome.error == ""
 
 
 @pytest.mark.asyncio
@@ -153,6 +189,8 @@ async def test_a_cap_that_fires_keeps_the_blocks_that_already_passed() -> None:
     )
     assert len(recorder.requests) == 1
     assert [c.title for c in outcome.components] == ["Latency"], "the good block was dropped"
+    # R7a: with blocks surviving, the bound NAME still reaches the journal via ``detail``.
+    assert any("bound:cost" in line for line in outcome.detail), outcome.detail
 
 
 @pytest.mark.asyncio
@@ -210,6 +248,48 @@ async def test_the_fork_request_is_isolated_tools_free_and_priceable() -> None:
     assert request.purpose == "supplement_render"
     assert request.max_tokens == 1234
     assert request.system_blocks == [generator.SYSTEM_PROMPT]
+
+
+def test_the_evidence_budget_is_counted_in_bytes_not_characters() -> None:
+    """R6: the memo's caps are BYTE caps; a CJK block that fits 64 KB of characters must
+    still respect the 64 KB of bytes (the char-counted budget admitted all six datasets)."""
+    big = "宽" * 6600
+    datasets = tuple(
+        Dataset(
+            title="宽字符数据",
+            source="cjk.csv",
+            columns=("标签",),
+            rows=((f"{big}{index}",),),
+            n_rows=1,
+            numeric_columns=(),
+        )
+        for index in range(6)
+    )
+    payloads = [
+        json.dumps(
+            {
+                "id": generator.dataset_id(index, dataset),
+                "title": dataset.title,
+                "source": dataset.source,
+                "columns": list(dataset.columns),
+                "rows": [list(row) for row in dataset.rows],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        for index, dataset in enumerate(datasets)
+    ]
+    char_total = sum(len(payload) + 1 for payload in payloads)
+    byte_total = sum(len(payload.encode("utf-8")) + 1 for payload in payloads)
+    assert char_total <= generator.MAX_EVIDENCE_BYTES, "fixture must fit the CHAR budget"
+    assert byte_total > generator.MAX_EVIDENCE_BYTES, "fixture must break the BYTE budget"
+
+    block = generator.evidence_block(datasets, user_text="", answer_text="")
+    included = re.findall(r"<dataset>(.*?)</dataset>", block, re.DOTALL)
+    assert included, block[:200]
+    assert len(included) < len(datasets), "the byte budget must drop the tail"
+    included_bytes = sum(len(item.encode("utf-8")) + 1 for item in included)
+    assert included_bytes <= generator.MAX_EVIDENCE_BYTES
 
 
 def test_the_evidence_block_clips_the_user_message_and_the_answer() -> None:
@@ -307,7 +387,6 @@ def test_session_forces_the_session_model() -> None:
 
 def test_a_ladder_no_one_can_reach_falls_back_to_the_tier_then_the_session() -> None:
     session = model_spec()
-    tier = model_spec()
     tier = model_spec(model_id="gpt-5.6-sol")
 
     def unknown(provider: str) -> dict[str, Any]:

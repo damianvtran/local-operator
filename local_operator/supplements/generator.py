@@ -23,9 +23,12 @@ exception. ``supplements.model`` overrides the whole thing ("provider/model_id")
 
 BOUNDS, AND WHAT EACH ONE COSTS WHEN IT FIRES. Turns (``maxTurns``), output tokens per turn
 (``maxOutputTokens``), wall clock (``timeoutS``, enforced by the runner's ``wait_for``) and
-spend between turns (``maxCostUsd``). Any bound firing ends the job as ``failed`` with
-``error="bound:<name>"``, and the blocks that already passed validation are KEPT (§2.5) --
-losing a good chart because turn 2 hit the clock would be the worst of both worlds.
+spend between turns (``maxCostUsd``). Any bound firing ends the job, and the blocks that
+already passed validation are KEPT (§2.5) -- losing a good chart because turn 2 hit the clock
+would be the worst of both worlds. How the row reports it depends on what survived (the
+round-1 review R4/R7 reading of §2.5): with NO block kept it is ``state=failed``,
+``error="bound:<name>"``; with blocks kept the row is ``state=done`` -- the only state the
+frozen reader paints as a settled block -- and the bound is recorded in the row's ``detail``.
 
 TURN 2 IS A REPAIR, NOT A SECOND CHANCE. Only the rejected blocks are re-asked, with the
 validator's own errors, and turn 2's output replaces only them (§2.5). A block that fails
@@ -221,7 +224,7 @@ def evidence_block(
         f"<request>{_clip(user_text, MAX_USER_CHARS)}</request>",
         f"<answer>{_clip(answer_text, MAX_ANSWER_CHARS)}</answer>",
     ]
-    used = sum(len(part) + 1 for part in parts)
+    used = sum(len(part.encode("utf-8")) + 1 for part in parts)
     for index, dataset in enumerate(datasets):
         payload = json.dumps(
             {
@@ -234,11 +237,15 @@ def evidence_block(
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        if len(payload.encode("utf-8")) > MAX_DATASET_BYTES:
+        # The budgets are BYTE budgets (memo §2.5: "≤ 24 KB each, ≤ 64 KB total"), so the
+        # accounting must be bytes: counting characters let a CJK-heavy six-dataset block
+        # reach 143,924 bytes against the 64 KB total, silently (round-1 review R6).
+        payload_bytes = len(payload.encode("utf-8"))
+        if payload_bytes > MAX_DATASET_BYTES:
             continue
-        if used + len(payload) > MAX_EVIDENCE_BYTES:
+        if used + payload_bytes > MAX_EVIDENCE_BYTES:
             break
-        used += len(payload) + 1
+        used += payload_bytes + 1
         parts.append(f"<dataset>{payload}</dataset>")
     parts.append("</evidence>")
     if instruction:
@@ -268,14 +275,21 @@ async def generate(
     price: Callable[[Any], float] | None = None,
     on_progress: ProgressFn | None = None,
     started: float | None = None,
+    accepted_sink: list[Component] | None = None,
 ) -> GenerationOutcome:
     """Run the bounded turn loop and return what may be stored (memo §2.5).
 
     The loop is small on purpose: turn 1 asks for 0-3 blocks; the validator accepts some and
     rejects others; if anything was rejected AND turns remain, turn 2 is the repair message
     with the validator's errors. Nothing else is ever sent, and no bound is checked inside a
-    turn (the runner's ``wait_for`` owns the wall clock; this function owns turns, tokens and
-    cost).
+    turn -- the runner's ``wait_for`` owns the wall clock; this function owns turns, tokens
+    and cost, and checks the clock only BETWEEN turns, so a repair the clock cannot afford is
+    never started (round-1 review R4).
+
+    ``accepted_sink``, when given, is refilled as validation proceeds with the blocks the
+    caller may still keep: a bound firing OUTSIDE this function (the runner's ``wait_for``
+    cancelling a hanging turn) cancels this coroutine, and the sink is then the only
+    surviving copy of what had already passed (memo §2.5, round-1 review R4).
     """
     import time
 
@@ -322,10 +336,26 @@ async def generate(
         tokens_out += int(getattr(usage, "output_tokens", 0) or 0)
         if price is not None and usage is not None:
             cost += float(price(usage) or 0.0)
+        if (
+            max_output_tokens > 0
+            and usage is not None
+            and int(getattr(usage, "output_tokens", 0) or 0) >= max_output_tokens
+        ):
+            # The per-turn token bound was hit. It is a CONSUMPTION bound, not a failure: a
+            # truncated block is exactly what the repair turn exists for -- but it must leave
+            # a record, or "which bound touched this job" is unknowable (round-1 review R7).
+            detail.append(
+                f"bound:{BOUND_TOKENS} turn {turns} hit the {max_output_tokens}-token "
+                "per-turn limit"
+            )
         await _progress("validating")
         accepted_now, rejected_now = validator(text, list(datasets))
         accepted.extend(accepted_now)
         rejected = list(rejected_now)
+        if accepted_sink is not None:
+            # Exposed BEFORE any later await can be cancelled: this is the copy the runner
+            # recovers on its ``wait_for`` (round-1 review R4).
+            accepted_sink[:] = accepted
         if not accepted_now and not rejected_now:
             # The fork answered the single word NONE (a legitimate "no figure helps").
             none = True
@@ -338,14 +368,37 @@ async def generate(
             detail.append(f"components bound: kept {max_components} of {len(accepted)}")
             accepted = accepted[:max_components]
             error = f"bound:{BOUND_COMPONENTS}"
+            if accepted_sink is not None:
+                accepted_sink[:] = accepted
         if not rejected:
             break
         if turns >= max(1, max_turns):
+            # The turn bound: what was still rejected on the last allowed turn is dropped --
+            # never rendered -- and the drop is recorded (memo §2.5: "dropped and the
+            # failure recorded").
+            detail.append(
+                f"bound:{BOUND_TURNS} {len(rejected)} block(s) still rejected at "
+                f"{turns} of {max(1, max_turns)} turn(s)"
+            )
+            error = f"bound:{BOUND_TURNS}" if not accepted else error
             break
-        # BETWEEN-TURNS BOUND (memo §2.5): the cap decides whether turn 2 is paid for at all.
+        # BETWEEN-TURNS BOUNDS (memo §2.5): the cost cap and the wall clock decide whether
+        # turn 2 is paid for at all. The clock is checked HERE (round-1 review R4) so an
+        # expiry between turns returns NORMALLY -- the blocks that passed come back through
+        # the ordinary tail and are kept -- while the runner's ``wait_for`` remains the hard
+        # guard for a turn that hangs mid-flight.
         if cost >= max_cost_usd and max_cost_usd >= 0:
-            detail.append(f"cap: ${cost:.4f} of ${max_cost_usd:.2f} reached before repair")
+            detail.append(
+                f"bound:{BOUND_COST} cap: ${cost:.4f} of ${max_cost_usd:.2f} reached before repair"
+            )
             error = f"bound:{BOUND_COST}" if not accepted else error
+            break
+        if timeout_s is not None and clock() - start >= timeout_s:
+            detail.append(
+                f"bound:{BOUND_TIME} wall clock {clock() - start:.1f}s of {timeout_s:.0f}s "
+                "reached before repair"
+            )
+            error = f"bound:{BOUND_TIME}" if not accepted else error
             break
         prompt = repair_message([item.describe() for item in rejected])
     return GenerationOutcome(
@@ -367,10 +420,11 @@ async def generate(
 def _fork_request(spec: Any, prompt: str, *, max_output_tokens: int, purpose: str) -> Any:
     """The fork's ``ChatRequest``: isolated, tools-free, no replay (memo §2.5/§2.6).
 
-    The prefix-cache shape is the ask-gate precedent's: the session's own system blocks and
-    tools are untouched (there are none here), and this text rides as the fork's single system
-    block. Fast mode is cleared for the ``_errand_request`` reason -- an errand never pays the
-    turn's priority premium.
+    The prefix-cache shape is the ``_errand_request`` precedent's -- NOT the ask gate's: the
+    gate rides the turn's warm prefix by design (the session's system blocks and live tools),
+    while this request carries its own single system block and no tools, sharing no prefix
+    with the session (and on a different model there is none to share). Fast mode is cleared
+    for the same reason -- an errand never pays the turn's priority premium.
     """
     from local_operator.harness.types import ChatRequest, Message
 

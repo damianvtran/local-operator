@@ -36,7 +36,10 @@ not wait for the model), emits ``supplement_progress`` beats as it runs, stores 
 component as a content-addressed blob, and writes ONE terminal row (version + 1) that replaces
 the version a reader shows. The four control ops (``supplement_cancel/steer/restart/dismiss``)
 are methods here, dispatched by ``session/runtime/server.py`` -- the image-gen receipt rule
-(``"already finished"`` for a settled job) and the memo's semantics (§2.7). The row and the
+(``"already finished"`` for a settled job) and the memo's semantics (§2.7). An op is GATED ON
+IDENTITY (round-1 review R1): it can only ever affect the ``(anchor, job)`` it names, and a
+steer/restart on an older anchor is queued behind the running job (§2.9, depth 1) instead of
+cutting it. The row and the
 live events are SEPARATE on purpose: the row is durable and outside the model's context, the
 events are transient and go only to a viewer that negotiated ``supplements-v1``.
 
@@ -49,7 +52,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Final, Mapping, cast
+from typing import Any, Awaitable, Callable, Final, Mapping, Sequence, cast
 
 from local_operator.supplements import generator, policy
 from local_operator.supplements.candidates import prefilter
@@ -69,6 +72,7 @@ from local_operator.supplements.persistence import (
 )
 from local_operator.supplements.prompt import MAX_INSTRUCTION_CHARS
 from local_operator.supplements.trigger import final_answer, refusal
+from local_operator.supplements.validate import Component
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +151,17 @@ class SupplementRunner:
         self._live_jobs: set[str] = set()
         #: The inputs of the newest few jobs, newest last, for ``steer``/``restart`` (§2.7).
         self._inputs: dict[str, _JobInputs] = {}
+        #: The ``(anchor, job)`` the task on :attr:`_task` is running, or ``None`` while that
+        #: task is the decision half (which has no addressable job yet). Every control op
+        #: gates its cut on this (round-1 review R1): an op may only ever affect its own
+        #: job -- a cancel for a settled job must not kill a newer one, nor rewrite the
+        #: settled row.
+        self._running: tuple[str, str] | None = None
+        #: The depth-1 queue of memo §2.9: a steer/restart on an OLDER anchor arriving while
+        #: a newer job runs waits here (a newer request replaces the queued one) and starts
+        #: when the job it waits behind settles. It survives a later supersede on purpose --
+        #: the request was explicit, and §2.9 names exactly one eviction rule.
+        self._pending: tuple[_JobInputs, str] | None = None
 
     # -- the synchronous trigger ----------------------------------------------------------
 
@@ -175,6 +190,9 @@ class SupplementRunner:
                 # Prefer the newest answer. The cancelled job's own cleanup journals the
                 # superseded row if it had written a non-terminal one.
                 previous.cancel()
+            # The decision half has no addressable (anchor, job) yet: no op may cut it, and a
+            # queued steer waits through it (``_run``'s tail calls the drain).
+            self._running = None
             self._task = asyncio.get_running_loop().create_task(self._run(provenance, previous))
             return ""
         except Exception:  # noqa: BLE001 — the event path never fails on this feature
@@ -185,6 +203,25 @@ class SupplementRunner:
 
     def is_live(self, job: str) -> bool:
         return job in self._live_jobs
+
+    def _running_under(self, anchor: str, job: str | None = None) -> bool:
+        """Whether the live task runs a job of ``anchor`` -- exactly ``job`` when named.
+
+        THE CUT GATE (round-1 review R1): every control op that can cut a task checks this
+        first, so an op can only ever affect its own job. ``job=None`` is the dismiss shape,
+        which names an anchor and may cut whatever attempt of that anchor is running.
+        """
+        task = self._task
+        if task is None or task.done() or self._running is None:
+            return False
+        if self._running[0] != anchor:
+            return False
+        return job is None or self._running[1] == job
+
+    def _graphics_running(self) -> bool:
+        """Whether a live task runs an addressable fork job (memo §2.9's "newer job")."""
+        task = self._task
+        return task is not None and not task.done() and self._running is not None
 
     def set_open_row(self, details: Mapping[str, Any] | None) -> None:
         """Register (or clear) the job's latest NON-terminal row, for supersede (C1b seam)."""
@@ -198,6 +235,8 @@ class SupplementRunner:
         """Cancel and reap the task (dispose). Never raises."""
         task = self._task
         self._task = None
+        self._running = None
+        self._pending = None
         if task is None or task.done():
             return
         task.cancel()
@@ -222,6 +261,13 @@ class SupplementRunner:
             raise
         except Exception:  # noqa: BLE001 — fail open: the worst case is no callout
             logger.debug("supplement job failed", exc_info=True)
+        # A queued steer/restart (memo §2.9) waits behind the NEWEST work; when this decision
+        # tail started no fork, the newer job just settled -- drain. When it did start one,
+        # the fork task IS the newer job and the drain belongs to its own end. A cancelled
+        # ``_run`` (re-raised above) never drains: it was superseded, and an explicit queued
+        # request outlives a turn it was never about.
+        if not self._graphics_running():
+            self._drain_pending()
 
     async def _close_superseded(self) -> None:
         row, self._open_row = self._open_row, None
@@ -367,6 +413,7 @@ class SupplementRunner:
         previous = self._task
         if previous is not None and not previous.done():
             previous.cancel()
+        self._running = (inputs.anchor, inputs.job)
         self._task = asyncio.get_running_loop().create_task(
             self._run_graphics(inputs, settings, previous)
         )
@@ -386,10 +433,18 @@ class SupplementRunner:
         settings: policy.SupplementSettings,
         previous: asyncio.Task[None] | None,
     ) -> None:
+        """One fork job, from schedule to terminal row -- and the §2.9 drain behind it."""
         if previous is not None:
             await asyncio.gather(previous, return_exceptions=True)
+        # What has passed validation so far, refilled by ``generator.generate`` as it goes:
+        # the ``wait_for`` below cancels the attempt on a hard bound, and this sink is then
+        # the only surviving copy of the blocks a cut must keep (memo §2.5, round-1 R4).
+        sink: list[Component] = []
+        started = time.perf_counter()
         try:
-            await asyncio.wait_for(self._attempt(inputs, settings), timeout=settings.timeout_s)
+            await asyncio.wait_for(
+                self._attempt(inputs, settings, sink, started), timeout=settings.timeout_s
+            )
         except asyncio.CancelledError:
             # A cancel is not a failure: the row for it is written by whoever cancelled
             # (``cancel_job``/``steer_job``/``restart_job``), so a dispose or a supersede
@@ -397,13 +452,28 @@ class SupplementRunner:
             # "cancelled - Retry" -- the memo's own rule for a cut job (§2.9).
             raise
         except asyncio.TimeoutError:
-            await self._fail(inputs, f"bound:{generator.BOUND_TIME}")
+            await self._finish_bound(inputs, sink, settings)
         except Exception:  # noqa: BLE001 -- fail open: the worst case is no figure
             logger.debug("supplement generator job failed", exc_info=True)
             await self._fail(inputs, "generator:unexpected")
+        # The job settled: whatever waited behind it (memo §2.9, depth 1) may start now.
+        self._drain_pending()
 
-    async def _attempt(self, inputs: _JobInputs, settings: policy.SupplementSettings) -> None:
-        """The whole fork run: decided row, generator turns, blobs, terminal row."""
+    async def _attempt(
+        self,
+        inputs: _JobInputs,
+        settings: policy.SupplementSettings,
+        sink: list[Component],
+        started: float,
+    ) -> None:
+        """The whole fork run: decided row, generator turns, blobs, terminal row.
+
+        ``sink`` and ``started`` are the run's shared edge with the runner: the sink is
+        refilled by the generator with the accepted-so-far blocks (a bound firing inside the
+        runner's ``wait_for`` must not lose them -- round-1 review R4), and ``started`` is the
+        same clock the ``wait_for`` counts from, so the in-loop between-turns check and the
+        outer hard guard agree on the deadline.
+        """
         transcript = self._session.transcript
         details = build_details(
             anchor=inputs.anchor,
@@ -415,6 +485,10 @@ class SupplementRunner:
         inputs.details = dict(details)
         self.set_open_row(details)
         try:
+            # The runtime's half of the reader rule: the job is LIVE from before its first
+            # await until this block's ``finally``. C1a left this registry as the C1b seam;
+            # round-1 review R2 found the graphics path never added to it.
+            self._live_jobs.add(inputs.job)
             await append_row(transcript, details)
             await self._progress(details, "decided")
             resolved = await asyncio.to_thread(self._resolve_model, settings)
@@ -432,13 +506,15 @@ class SupplementRunner:
                 max_turns=settings.max_turns,
                 max_output_tokens=settings.max_output_tokens,
                 max_cost_usd=settings.max_cost_usd,
+                timeout_s=settings.timeout_s,
                 price=lambda usage: self._price(usage, resolved),
                 on_progress=lambda stage, elapsed: self._progress(
                     details, "running", stage=stage, elapsed_s=elapsed
                 ),
-                started=time.perf_counter(),
+                started=started,
+                accepted_sink=sink,
             )
-            components = await self._store(outcome)
+            components = await self._store(outcome.components)
             error = outcome.error if not components else ""
             state = "failed" if error else "done"
             final: dict[str, Any] = dict(next_version(details, state=state, error=error))
@@ -450,6 +526,11 @@ class SupplementRunner:
             final["cost_usd"] = round(outcome.cost_usd, 6)
             if outcome.instruction:
                 final["instruction"] = outcome.instruction[:MAX_INSTRUCTION_CHARS]
+            if outcome.detail:
+                # The generator's own notes REACH THE JOURNAL even when blocks survived and
+                # ``error`` is cleared: a bound that fired after acceptance is reported here,
+                # never as ``error`` on a ``done`` row (memo §2.5 as amended; round-1 R7).
+                final["detail"] = list(outcome.detail)
             self.set_open_row(final)
             await append_row(transcript, final)
             # The job's own pointer moves to the row it just wrote: a later steer/restart
@@ -476,6 +557,47 @@ class SupplementRunner:
             await self._progress(final, "failed")
         except Exception:  # noqa: BLE001 -- a failed write is a missing callout, not a turn error
             logger.debug("supplement failure row could not be written", exc_info=True)
+        finally:
+            self.set_open_row(None)
+
+    async def _finish_bound(
+        self,
+        inputs: _JobInputs,
+        sink: list[Component],
+        settings: policy.SupplementSettings,
+    ) -> None:
+        """A hard bound fired with blocks already accepted: KEEP them (memo §2.5, R4).
+
+        Called from :meth:`_run_graphics`'s ``TimeoutError`` arm -- the ``wait_for`` already
+        cancelled the attempt, so the sink holds the only surviving copy of what passed.
+        With nothing in the sink the row is ``failed`` / ``bound:time`` as before; with blocks
+        the row is ``done`` (the frozen reader paints the settled block only for ``done``)
+        and the bound is recorded in its ``detail`` (round-1 review R4/R7).
+        """
+        components = await self._store(sink)
+        if not components:
+            await self._fail(inputs, f"bound:{generator.BOUND_TIME}")
+            return
+        details = inputs.details or build_details(
+            anchor=inputs.anchor,
+            job=inputs.job,
+            version=inputs.version,
+            state="decided",
+            decision=inputs.decision,
+        )
+        final: dict[str, Any] = dict(next_version(details, state="done"))
+        final["components"] = components
+        detail = [str(line) for line in (final.get("detail") or [])]
+        detail.append(
+            f"bound:{generator.BOUND_TIME} wall clock {settings.timeout_s}s reached mid-job; "
+            f"{len(components)} block(s) kept"
+        )
+        final["detail"] = detail
+        try:
+            self.set_open_row(final)
+            await append_row(self._session.transcript, final)
+            inputs.details = dict(final)
+            await self._progress(final, "done")
         finally:
             self.set_open_row(None)
 
@@ -552,7 +674,7 @@ class SupplementRunner:
             logger.debug("supplement turn could not be priced", exc_info=True)
             return 0.0
 
-    async def _store(self, outcome: Any) -> list[dict[str, Any]]:
+    async def _store(self, components: Sequence[Component]) -> list[dict[str, Any]]:
         """Store each accepted component as a blob and build the row's ``components[]``.
 
         Content-addressed (memo §2.4): the row carries a 32-hex digest, so a large document
@@ -562,13 +684,13 @@ class SupplementRunner:
         disk, and a row pointing at a digest that resolves to nothing would paint a
         permanently broken frame.
         """
-        if not outcome.components:
+        if not components:
             return []
         from local_operator.session.attachments import AttachmentStore
 
         store = AttachmentStore()
         entries: list[dict[str, Any]] = []
-        for component in outcome.components:
+        for component in components:
             ref = await asyncio.to_thread(
                 store.put_bytes, component.blob.encode("utf-8"), "text/html"
             )
@@ -656,24 +778,31 @@ class SupplementRunner:
 
         Idempotent, and the receipt for a job that is not running is image-gen's neutral
         "already finished" -- a surface that lost a race with the job's own end must not be
-        told something happened.
+        told something happened. The running task is cut ONLY when it runs this very
+        ``(anchor, job)`` (round-1 review R1): a cancel for a settled job arriving while a
+        NEWER job runs must leave that newer job alone and must not rewrite the settled row.
         """
         inputs = self.recall(anchor, job)
         task = self._task
-        if inputs is None or task is None or task.done():
+        if inputs is None or task is None or task.done() or self._running != (anchor, job):
             return "already finished"
         await self._progress(inputs.details or {}, "cancelling")
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         self._task = None
+        self._running = None
         await self._settle(inputs, state="cancelled")
+        # The cut settled the running job: whatever waited behind it (memo §2.9) starts now.
+        self._drain_pending()
         return "cancelled"
 
     async def steer_job(self, anchor: str, job: str, text: str) -> str:
         """``supplement_steer``: cancel any in-flight attempt, start version + 1.
 
         NOT a turn (memo §2.7): it never touches the session's turn lock, steering queue or
-        model context -- it starts a new GENERATOR version with the user's instruction.
+        model context -- it starts a new GENERATOR version with the user's instruction. When
+        the named job is NOT the running one, the request is queued behind the running job
+        instead of cutting it (memo §2.9; round-1 review R1).
         """
         inputs = self.recall(anchor, job)
         if inputs is None:
@@ -683,7 +812,11 @@ class SupplementRunner:
         return "steering"
 
     async def restart_job(self, anchor: str, job: str) -> str:
-        """``supplement_restart``: version + 1 with the previous instruction, or none."""
+        """``supplement_restart``: version + 1 with the previous instruction, or none.
+
+        Shares the steer's queue rule: a restart of a job that is not the running one waits
+        behind the running job (memo §2.9, depth 1).
+        """
         inputs = self.recall(anchor, job)
         if inputs is None:
             return "already finished"
@@ -697,39 +830,86 @@ class SupplementRunner:
         ``done``/``failed`` (the Retry affordance) has no attempt in flight, and a
         ``cancelled`` row in that sequence would paint "Highlights cancelled - Retry" for a
         moment and put a version in the audit trail that describes nothing.
+
+        A request naming a job that is NOT the running one does not cut it: it is queued
+        behind the running job, depth 1 (memo §2.9; round-1 review R1) -- a newer request
+        replaces the queued one, and the queue drains when the job it waits behind settles.
         """
         task = self._task
         if task is not None and not task.done():
+            if not self._running_under(inputs.anchor, inputs.job):
+                self._pending = (inputs, instruction)
+                return
             await self._progress(inputs.details or {}, "cancelling")
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             self._task = None
+            self._running = None
             if inputs.details is not None:
                 await self._settle(inputs, state="cancelled")
-        # The next version is read from the JOURNAL, not counted in memory: the cancelled row
-        # above and any row written by a previous process both occupy version numbers, and
-        # reusing one would put two different rows at the same version -- a contradiction the
-        # newest-version-wins rule would silently resolve to whichever came last.
+        # This request executes NOW, so it replaces whatever was queued (memo §2.9's one
+        # eviction rule).
+        self._pending = None
+        self._start(inputs, instruction=instruction)
+
+    def _start(self, inputs: _JobInputs, *, instruction: str) -> None:
+        """Start the next version of ``inputs`` on a fresh task.
+
+        The ONE place a fork task and its identity are set: ``_running`` must always describe
+        the task the runner holds, because every control op's cut is gated on it (round-1
+        review R1). The next version is read from the JOURNAL, not counted in memory: a
+        cancelled row and any row written by a previous process both occupy version numbers,
+        and reusing one would put two different rows at the same version -- a contradiction
+        the newest-version-wins rule would silently resolve to whichever came last.
+        """
         inputs.version = self._next_free_version(inputs)
         inputs.instruction = instruction
         self._remember(inputs)
+        self._running = (inputs.anchor, inputs.job)
         self._task = asyncio.get_running_loop().create_task(
             self._run_graphics(inputs, self._settings, None)
         )
+
+    def _drain_pending(self) -> None:
+        """Start the depth-1 queued steer/restart once the job it waited behind has settled.
+
+        Memo §2.9: "a steer/restart on an *older* anchor while a newer job runs is queued
+        behind it (depth 1; a newer request replaces the queued one)". Every settle point
+        calls this -- a finished fork, a cut by cancel/dismiss, a decision tail that started
+        no fork -- while a superseded task never reaches it (its ``CancelledError`` re-raises
+        first), so an explicit queued request outlives a supersede by design.
+        """
+        pending, self._pending = self._pending, None
+        if pending is None:
+            return
+        inputs, instruction = pending
+        self._start(inputs, instruction=instruction)
 
     async def dismiss(self, anchor: str) -> str:
         """``supplement_dismiss``: the operator's "not useful" signal (memo §2.7).
 
         Writes ``state=skipped, dismissed=true`` on the anchor's newest version -- the spam
         metric reads ``dismissed`` (§5.2) -- and cancels a live job for that anchor first, so
-        a dismissed row cannot be overwritten by the job it just hid.
+        a dismissed row cannot be overwritten by the job it just hid. The cut is gated on the
+        running job being that anchor's (round-1 review R1): dismissing anchor A while a job
+        of anchor B runs must never cut B.
         """
         task = self._task
         inputs = self._inputs.get(anchor)
-        if inputs is not None and task is not None and not task.done():
+        cut = inputs is not None and self._running_under(anchor)
+        if cut:
+            assert task is not None  # implied by _running_under; named for the type
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             self._task = None
+            self._running = None
+        if self._pending is not None and self._pending[0].anchor == anchor:
+            # A queued steer/restart for this anchor would resurrect the row the dismiss just
+            # hid -- the same reason the live job is cut.
+            self._pending = None
+        if cut:
+            # The cut settled the running job: whatever waited behind it (memo §2.9) starts.
+            self._drain_pending()
         details = inputs.details if inputs is not None else None
         if details is None:
             # No live or remembered job: the row may still be in the journal (a restart, or a

@@ -352,3 +352,64 @@ def test_the_repair_message_names_the_errors_and_stays_short() -> None:
     message = repair_message(["one", "two"])
     assert message.startswith("Fix only these components") and "one; two" in message
     assert len(repair_message(["x" * 4000])) < 600
+
+
+# --- structural attributes are layout, not claims (round-1 review R3) --------------------
+
+
+def test_a_raw_svg_components_geometry_is_not_read_as_displayed_text() -> None:
+    """R3, the report's repro: the blessed raw-SVG path must not be refused for LAYOUT.
+
+    ``viewBox``, path data, ``points``, ``transform``, coordinates and sizes are structure
+    the component DRAWS with (App. A: "no fixed widths, use viewBox SVG"); the rendered-
+    values check reads element TEXT and data-bearing attributes, not tag internals.
+    """
+    raw = component(
+        json.dumps(
+            {
+                "lat": {
+                    "title": "Latency (ms)",
+                    "columns": ["region", "ms"],
+                    "rows": [["us-west", 98.5]],
+                }
+            }
+        ),
+        '<svg viewBox="0 0 48 20" role="img">'
+        '<rect x="0" y="0" width="48" height="20" fill="none"></rect>'
+        '<polyline points="0,20 12,8 24,14 48,10"></polyline>'
+        '<path d="M0 20 L48 2" transform="translate(2,3)"></path>'
+        '<circle cx="24" cy="10" r="5" stroke-width="2"></circle>'
+        '<text x="4" y="14">98.5 ms</text>'
+        "</svg>",
+    )
+    result = validate_output(raw, EVIDENCE)
+    assert not result.rejected, result.repair_errors
+
+
+def test_a_fabricated_number_in_svg_text_or_an_aria_label_is_still_refused() -> None:
+    """R3's guard: exempting geometry must not exempt CLAIMS -- text and readable attrs."""
+    data = json.dumps(
+        {
+            "lat": {
+                "title": "Latency (ms)",
+                "columns": ["region", "ms"],
+                "rows": [["us-west", 98.5]],
+            }
+        }
+    )
+    in_text = component(
+        data,
+        '<svg viewBox="0 0 48 20"><text x="4" y="14">99.9 ms</text></svg>',
+    )
+    result = validate_output(in_text, EVIDENCE)
+    assert not result.components, "a baked-in text literal reached the accepted set"
+    assert any("<data> supports" in error for error in result.repair_errors), result.repair_errors
+
+    in_attribute = component(
+        data,
+        '<svg viewBox="0 0 48 20" role="img" aria-label="p50: 99.9 ms">'
+        '<rect x="0" y="0" width="48" height="20"></rect></svg>',
+    )
+    result = validate_output(in_attribute, EVIDENCE)
+    assert not result.components, "a fabricated aria-label reached the accepted set"
+    assert any("<data> supports" in error for error in result.repair_errors), result.repair_errors

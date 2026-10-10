@@ -2149,11 +2149,14 @@ class DesktopSessionBridge:
         The three families fold under their own contracts: ``message_update``
         and ``reasoning_delta`` CONCATENATE (a later update already carries the
         earlier text; fragments are append-only), while
-        ``tool_execution_update`` KEEPS THE NEWEST -- a frame re-sends the
-        tool's current live view (a bounded tail for ``bash``, a bounded
-        display for ``eval``, never the whole transcript), and the family's
-        self-replacing contract is that the newest frame supersedes the earlier
-        ones, with the settled result riding ``tool_execution_end``. This is
+        ``tool_execution_update`` and ``supplement_progress`` KEEP THE NEWEST --
+        a tool frame re-sends the tool's current live view (a bounded tail for
+        ``bash``, a bounded display for ``eval``, never the whole transcript),
+        and the family's self-replacing contract is that the newest frame
+        supersedes the earlier ones, with the settled result riding
+        ``tool_execution_end``; a supplement beat re-sends the job's current
+        state and its durable copy is the journal row (memo §2.7, §3.1 row 14),
+        so the newest beat supersedes the ones it already carries. This is
         the same fold the runtime already runs on its own attach FIFO
         (``session/runtime/server.py::_compact_event_queue``) and for the same
         reason: without it a stalled viewer's queue fills with incompressible
