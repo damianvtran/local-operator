@@ -69,6 +69,24 @@ class _Recorder:
 # ---------------------------------------------------------------------------
 
 
+#: The listing the EDIT tests serve: the pre-slice shape (a video row + one
+#: T2I ``default``) plus the edit default at its own price — the row an
+#: un-pinned edit resolves, and the one the affordability probe must price.
+_EDIT_MODELS: list[dict[str, Any]] = [
+    {"id": "other-model", "type": "video"},
+    {"id": "flux/dev", "type": "image", "default": True, "unit_price_usd": 0.05},
+    {
+        "id": "openai/gpt-image-2.5/sunburst/edit",
+        "type": "image",
+        "edit_default": True,
+        "unit_price_usd": 0.08,
+    },
+]
+
+#: A 1x1 PNG data URI, the shape the tool builds from a local source file.
+_EDIT_SOURCE = "data:image/png;base64,AAAA"
+
+
 def _radient_handler(
     recorder: _Recorder,
     *,
@@ -76,6 +94,7 @@ def _radient_handler(
     result: dict[str, Any] | None = None,
     capacity: dict[str, Any] | None = None,
     capacity_status: int = 200,
+    models: list[dict[str, Any]] | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
     status_script = list(statuses or [{"status": "IN_QUEUE"}, {"status": "COMPLETED"}])
 
@@ -86,15 +105,19 @@ def _radient_handler(
             return httpx.Response(
                 200,
                 json={
-                    "models": [
-                        {"id": "other-model", "type": "video"},
-                        {
-                            "id": "flux/dev",
-                            "type": "image",
-                            "default": True,
-                            "unit_price_usd": 0.05,
-                        },
-                    ]
+                    "models": (
+                        models
+                        if models is not None
+                        else [
+                            {"id": "other-model", "type": "video"},
+                            {
+                                "id": "flux/dev",
+                                "type": "image",
+                                "default": True,
+                                "unit_price_usd": 0.05,
+                            },
+                        ]
+                    )
                 },
             )
         if path.endswith("/me/billing-sources/capacity"):
@@ -314,41 +337,156 @@ async def test_radient_happy_path_request_id_only_and_passthrough() -> None:
 
 
 @pytest.mark.asyncio
-async def test_radient_edits_are_refused_before_any_network_call() -> None:
-    """The silent-T2I kill, client-side: an edit never reaches the media route.
-
-    The route forwards every body key verbatim to FAL and maps ``source_url``
-    only on the LEGACY adapter this client does not call, so an attempted
-    edit is a silent billed text-to-image or a rejection — the rung refuses,
-    with the specific sentence the cascade's pre-record shares, and BEFORE
-    the models-list/balance probes (no calls at all).
+async def test_an_edit_walks_the_wire_with_image_url_size_prompt_and_no_source_url() -> None:
+    """The edit wire post-hub-slice: canonical ``image_url`` beside ALWAYS
+    ``prompt`` + ``image_size``; the pre-slice ``source_url`` key is gone (the
+    hub refuses it), and the settled terminal figure is billed.
     """
     recorder = _Recorder()
+    handle = image_rungs.CancelHandle()
+    async with _client(
+        _radient_handler(
+            recorder,
+            models=_EDIT_MODELS,
+            statuses=[{"status": "COMPLETED", "settled": True, "cost_usd": 0.05268, "units": 1}],
+        )
+    ) as client:
+        result = await image_rungs.run_radient(
+            prompt="Change the headline to Q3",
+            base_url="https://hub.test",
+            credential="cred",
+            num_images=1,
+            image_size="square_hd",
+            seed=None,
+            strength=None,
+            source_url=_EDIT_SOURCE,
+            model=None,
+            handle=handle,
+            emit=None,
+            pause=_no_pause,
+            client=client,
+        )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        recorder.record(request)
-        return httpx.Response(200, json={})
+    assert (
+        result.model == "openai/gpt-image-2.5/sunburst/edit"
+    ), "an un-pinned edit resolves the edit default, never the T2I default"
+    assert result.cost_usd == 0.05268
+    assert result.billing_basis == "billed"
+    generate_body = next(
+        body
+        for request, body in zip(recorder.requests, recorder.bodies)
+        if request.url.path.endswith("/tools/media/generate")
+    )
+    assert generate_body == {
+        "model": "openai/gpt-image-2.5/sunburst/edit",
+        "prompt": "Change the headline to Q3",
+        "num_images": 1,
+        "image_size": "square_hd",
+        "image_url": _EDIT_SOURCE,
+    }, "canonical image_url only; no source_url key and nothing invented"
+    # The hub request id rides the result (``generation_id``); the handle was
+    # CLEARED at the terminal state by design, so a late cancel reads
+    # "nothing to cancel" instead of an ALREADY_COMPLETED round-trip.
+    assert result.generation_id == "r1"
+    assert handle.request_id is None, "the terminal clear() ran"
 
-    async with _client(handler) as client:
+
+@pytest.mark.asyncio
+async def test_an_edit_with_no_model_prices_the_edit_default_row() -> None:
+    """Affordability reads the EDIT DEFAULT row's price, not the T2I one.
+
+    Balance 0.06 sits between the two listed prices (≥ flux/dev's 0.05, <
+    sunburst edit's 0.08): a picker or price read that followed
+    ``default: true`` would PROCEED — only the post-flip reading skips.
+    """
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(recorder, models=_EDIT_MODELS, capacity={"total_balance": 0.06})
+    ) as client:
         with pytest.raises(image_rungs.RungSkipped) as caught:
             await image_rungs.run_radient(
-                prompt="make it night",
+                prompt="Change the headline to Q3",
                 base_url="https://hub.test",
                 credential="cred",
                 num_images=1,
                 image_size="square_hd",
                 seed=None,
-                strength=0.5,
-                source_url="data:image/png;base64,AAAA",
+                strength=None,
+                source_url=_EDIT_SOURCE,
                 model=None,
                 handle=image_rungs.CancelHandle(),
                 emit=None,
                 pause=_no_pause,
                 client=client,
             )
-    assert caught.value.reason_class == "unsupported"
-    assert str(caught.value) == image_rungs.RADIENT_EDIT_SKIP_MESSAGE
-    assert recorder.requests == [], "a refused edit runs no probes and spends nothing"
+    assert caught.value.reason_class == "insufficient_balance"
+    assert "0.0800" in str(caught.value), "the edit default's price was the one compared"
+    assert not any(path.endswith("/tools/media/generate") for path in recorder.paths())
+
+
+@pytest.mark.asyncio
+async def test_an_edit_without_an_edit_default_fails_closed_never_the_t2i_default() -> None:
+    """A listing with no ``edit_default`` row refuses the un-pinned edit.
+
+    Falling back to ``default: true`` (a T2I pin) is the hub's own rejected
+    class (silent billed text-to-image), so the client twin fails the same
+    way: ``invalid_response`` before any generate call.
+    """
+    recorder = _Recorder()
+    async with _client(_radient_handler(recorder)) as client:
+        with pytest.raises(APIError) as caught:
+            await image_rungs.run_radient(
+                prompt="Change the headline to Q3",
+                base_url="https://hub.test",
+                credential="cred",
+                num_images=1,
+                image_size="square_hd",
+                seed=None,
+                strength=None,
+                source_url=_EDIT_SOURCE,
+                model=None,
+                handle=image_rungs.CancelHandle(),
+                emit=None,
+                pause=_no_pause,
+                client=client,
+            )
+    assert caught.value.code == "invalid_response"
+    assert "edit default" in str(caught.value)
+    assert not any(path.endswith("/tools/media/generate") for path in recorder.paths())
+
+
+@pytest.mark.asyncio
+async def test_a_caller_pinned_model_passes_verbatim_on_an_edit() -> None:
+    """A pinned id is never second-guessed; its absence from the listing
+    only drops the affordability comparison (a price this probe cannot read
+    must not strand a working rung). A non-source pin pinned WITH a source
+    fails forward at the hub (400 ``media_rejected``, no charge) instead.
+    """
+    recorder = _Recorder()
+    async with _client(_radient_handler(recorder, models=_EDIT_MODELS)) as client:
+        result = await image_rungs.run_radient(
+            prompt="Change the headline to Q3",
+            base_url="https://hub.test",
+            credential="cred",
+            num_images=1,
+            image_size="square_hd",
+            seed=None,
+            strength=None,
+            source_url=_EDIT_SOURCE,
+            model="nano-banana-2/edit",
+            handle=image_rungs.CancelHandle(),
+            emit=None,
+            pause=_no_pause,
+            client=client,
+        )
+    assert result.model == "nano-banana-2/edit"
+    generate_body = next(
+        body
+        for request, body in zip(recorder.requests, recorder.bodies)
+        if request.url.path.endswith("/tools/media/generate")
+    )
+    assert generate_body["model"] == "nano-banana-2/edit"
+    assert generate_body["image_url"] == _EDIT_SOURCE
 
 
 def test_emit_progress_swallows_a_raising_emitter() -> None:
