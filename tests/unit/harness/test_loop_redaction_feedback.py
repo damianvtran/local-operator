@@ -66,7 +66,6 @@ IDENT = "xai_" + "availab" + "le"
 #: ``xai`` test.
 OTHER_IDENTS = ("hf_" + "ready" + "probe", "tvly_" + "supports" + "streams", "npm_" + "installed")
 
-#: A realistic xAI-shaped key (mixed case + digits). It is REAL-SHAPED, not a real secret.
 #: A plain English word registered as a secret (``PASSWORD=<word>``). Assembled from parts for
 #: the same reason as ``IDENT``. The exact-value pass matches it on LETTER-RUN BOUNDARIES, so
 #: ordinary words that merely contain it (``un<word>ally``) stay readable; the standalone
@@ -89,6 +88,7 @@ def _store_that_has_scrubbed_the_word(tmp_path: Path) -> Any:
     return store
 
 
+#: A realistic xAI-shaped key (mixed case + digits). It is REAL-SHAPED, not a real secret.
 REAL_KEY = "xai-" + "Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6kM9nP2rS5tU8wX1yA4cD7fG0iL3oQ6"
 
 
@@ -97,8 +97,10 @@ class _MechanicalModel:
 
     ``plan`` receives the text of the read result exactly as the model would see it (after
     the session's redaction function) and returns the next tool call's ``(name, args)``.
-    Because it can only copy what is in front of it, a mask in the read result is a mask
-    in its call, which is the defect.
+    ``args`` is normally a dict, JSON-encoded here into the call's raw argument text; a
+    ``str`` is used VERBATIM as that text instead, for the tests that dictate a spelling
+    ``json.dumps`` cannot produce (``\u000a``). Because it can only copy what is in front of
+    it, a mask in the read result is a mask in its call, which is the defect.
     """
 
     def __init__(self, read_path: Path, plan: Any) -> None:
@@ -128,8 +130,9 @@ class _MechanicalModel:
                 for block in message.content
             )
             name, args = self.plan(self.seen_by_model)
+            raw = args if isinstance(args, str) else json.dumps(args)
             turn = [
-                StreamToolCallDelta(index=0, id="w1", name=name, argument_delta=json.dumps(args)),
+                StreamToolCallDelta(index=0, id="w1", name=name, argument_delta=raw),
                 StreamEndEvent(stop_reason="toolUse"),
             ]
         else:
@@ -672,3 +675,139 @@ class TestDisplayMasksARegisteredPlainWordAsAToken:
             masked = store.redact(text)
             assert value not in masked, text
             assert REDACTION_MARKER in masked
+
+
+# --- raw_arguments: a letter-ending escape is a boundary, not a letter (QA round 1, Q-1) --
+
+
+#: The escapes a JSON encoder can leave immediately before the token, and how each case is
+#: dictated: the five SHORT escapes come out of ``json.dumps`` when the content carries the
+#: real character, while the ``\uXXXX`` spellings it never emits for them are dictated as
+#: raw argument text. The ``\u`` cases whose last hex digit is a letter (``a``/``b``) are the
+#: class that regressed: on the raw string the character before the token was that hex
+#: letter, which the letter-run boundary read as a word character.
+ESCAPE_CASES = (
+    ("\\n", ("content", f"line1\n{PLAIN_WORD} here")),
+    ("\\t", ("content", f"line1\t{PLAIN_WORD} here")),
+    ("\\r", ("content", f"line1\r{PLAIN_WORD} here")),
+    ("\\b", ("content", f"line1\b{PLAIN_WORD} here")),
+    ("\\f", ("content", f"line1\f{PLAIN_WORD} here")),
+    ("\\u000a", ("raw", "line1\\u000a" + PLAIN_WORD + " here")),
+    ("\\u000b", ("raw", "line1\\u000b" + PLAIN_WORD + " here")),
+    ("\\u00ab", ("raw", "line1\\u00ab" + PLAIN_WORD + " here")),
+)
+
+
+class TestEscapedWordFormsStayMaskedThroughRawArguments:
+    """The raw provider string, its transcript row and BOTH wire replay shapes.
+
+    ``raw_arguments`` is the provider's verbatim JSON argument text. The loop scrubs it
+    (``_scrub_history_arguments``), the transcript persists it (when it does not round-trip
+    to the scrubbed ``arguments``) and the wire replays it verbatim
+    (``_replayable_tool_arguments_json``) or as its parsed object
+    (``_replayable_tool_arguments``). Reading an escape's last letter as a word character
+    released the token in all of these while the parsed ``arguments`` stayed masked — a
+    leak, not prose protection (QA round 1, Q-1).
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("escape_label", "case"), ESCAPE_CASES, ids=[case[0] for case in ESCAPE_CASES]
+    )
+    async def test_the_token_is_masked_in_the_stored_copy_transcript_and_replay(
+        self, tmp_path: Path, escape_label: str, case: tuple[str, str]
+    ) -> None:
+        from local_operator.providers.clients import (
+            _replayable_tool_arguments,
+            _replayable_tool_arguments_json,
+        )
+        from local_operator.session.transcript import Transcript
+
+        store = _store_that_has_scrubbed_the_word(tmp_path)
+        src = tmp_path / "seed.txt"
+        src.write_text("seed\n")
+        target = tmp_path / "out.md"
+        dictate, fragment = case
+
+        def plan(seen: str):
+            if dictate == "content":
+                return "write", {"path": str(target), "content": fragment}
+            return "write", '{"path": %s, "content": "%s"}' % (
+                json.dumps(str(target)),
+                fragment,
+            )
+
+        events = await _drive(
+            _MechanicalModel(src, plan), redact=lambda text: store.redact_with_report(text)[0]
+        )
+
+        end = events[-1]
+        assert isinstance(end, AgentEndEvent)
+        stored = [
+            call
+            for m in end.messages
+            if isinstance(m, Message)
+            for call in (m.tool_calls or [])
+            if call.name == "write"
+        ][0]
+        assert stored.raw_arguments is not None
+        assert PLAIN_WORD not in stored.raw_arguments, escape_label
+        assert PLAIN_WORD not in json.dumps(stored.arguments), escape_label
+        assert REDACTION_MARKER in stored.raw_arguments, escape_label
+        # BOTH wire replay shapes, exactly as the providers build them from the stored call.
+        assert PLAIN_WORD not in _replayable_tool_arguments_json(stored), escape_label
+        assert PLAIN_WORD not in json.dumps(_replayable_tool_arguments(stored)), escape_label
+
+        # The persisted transcript row, minus ``provider_payload`` (the executor's own
+        # record of the bytes it wrote — a separately-noted channel, not this one).
+        transcript = Transcript(tmp_path / "session")
+        for message in end.messages:
+            await transcript.append_message(message)
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "session" / "transcript.jsonl").read_text().splitlines()
+        ]
+        persisted = json.dumps(
+            [
+                {k: v for k, v in row.get("payload", {}).items() if k != "provider_payload"}
+                for row in rows
+            ]
+        )
+        assert PLAIN_WORD not in persisted, escape_label
+        assert REDACTION_MARKER in persisted, escape_label
+
+    @pytest.mark.asyncio
+    async def test_glued_and_backslash_neighbours_keep_their_behaviour(
+        self, tmp_path: Path
+    ) -> None:
+        """Both directions on the raw string: escapes separate, letter runs do not.
+
+        ``my_``- and backslash-glued occurrences stay masked (the escape is a separator,
+        not its last letter, and neither is an underscore); a word embedded in a longer
+        letter run stays readable — the accepted residual, on this surface too.
+        """
+        store = _store_that_has_scrubbed_the_word(tmp_path)
+        src = tmp_path / "seed.txt"
+        src.write_text("seed\n")
+        target = tmp_path / "out.md"
+        content = f"my_{PLAIN_WORD}\n\\{PLAIN_WORD}\n{EMBEDDED_WORD}\n"
+
+        model = _MechanicalModel(
+            src, lambda seen: ("write", {"path": str(target), "content": content})
+        )
+        events = await _drive(model, redact=lambda text: store.redact_with_report(text)[0])
+
+        end = events[-1]
+        assert isinstance(end, AgentEndEvent)
+        stored = [
+            call
+            for m in end.messages
+            if isinstance(m, Message)
+            for call in (m.tool_calls or [])
+            if call.name == "write"
+        ][0]
+        raw = stored.raw_arguments
+        assert raw is not None
+        assert json.loads(raw)["content"] == (
+            f"my_{REDACTION_MARKER}\n\\{REDACTION_MARKER}\n{EMBEDDED_WORD}\n"
+        )
