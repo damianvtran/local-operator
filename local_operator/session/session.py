@@ -11299,38 +11299,49 @@ class Session:
         # "surfaces never disagree" outranks "publish only durable state").
         self._publish_channel_spend()
 
-    def _schedule_channel_start_marker_if_fresh(self) -> None:
-        """Schedule the one-time channel ``start`` marker for a fresh session.
+    async def _write_channel_start_marker_if_fresh(self) -> None:
+        """Write the one-time channel ``start`` marker for a fresh session.
 
-        Called from :meth:`_persist_new_messages` (the first durable
-        non-bookkeeping append) and from the first channel record; NEVER from
-        construction or adopt, because writing a row at either would
+        Called from :meth:`_persist_new_messages` as the FIRST await of the
+        batch, so the marker commits BEFORE the messages it belongs to: both
+        appends take the transcript lock, and if this only SCHEDULED the write
+        the message batch could win that lock, leaving — to a kill between the
+        two — a message-only journal that classifies as legacy forever (the
+        marker is never written for a legacy journal, so the session could
+        never recover its "tracked" claim). Awaiting restores the durable
+        order the round-2 note promised; a kill between the appends then
+        leaves marker-with-no-messages, which reads as "born under this build,
+        nothing said yet" (round-3 review, R3-2). The first channel record
+        reaches the same write through ``_append_channel_record``'s inline
+        path.
+
+        NEVER from construction or adopt: writing a row there would
         materialise a ``defer_materialise`` transcript the host may abandon
         (review round 2, M-1 — an immediate quit left a ``transcript.jsonl``
-        behind). Guarded so the two callers cannot double-append.
+        behind). Guarded so no caller can double-append, and cheap after the
+        first call (``channels_started`` is then set, so the guard returns
+        before any await).
         """
         if self._channels_origin != "fresh" or self.channels_started:
             return
         if self._channel_start_scheduled:
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return  # no loop: the next append-capable process classifies afresh
         self._channel_start_scheduled = True
-        task = loop.create_task(self._write_channel_start_marker())
-        self._channel_tasks.add(task)
-        task.add_done_callback(self._channel_tasks.discard)
+        await self._write_channel_start_marker()
 
     async def _write_channel_start_marker(self) -> None:
         """Append the one-time channel ``start`` marker; never raises.
 
-        Shared by the first-record path and the adopt seam (a FRESH session
-        adopted for display writes its marker before it can be parked and
-        resumed, so a chat-only conversation does not come back claiming its
-        channels were untracked — review round 1, M2). Guarded on
-        ``channels_started`` so the two paths cannot double-append, and the
-        scheduled flag is reset on failure so a later attempt retries.
+        Reached from two callers only: the first-message seam
+        (:meth:`_persist_new_messages`, awaited before the message commit —
+        round-3 review, R3-2) and the first-channel-record path
+        (``_append_channel_record``). Both must land the marker with the work
+        it describes, so a resumed session never re-reads a conversation it
+        demonstrably watched as "channels not tracked" (review round 1, M2) —
+        while a session nobody appended to still writes nothing (round 2,
+        M-1). Guarded on ``channels_started`` so the paths cannot
+        double-append, and the scheduled flag is reset on failure so a later
+        attempt retries.
         """
         if self.channels_started:
             return
@@ -11367,15 +11378,16 @@ class Session:
                 logger.debug("channel spend publish failed", exc_info=True)
 
     def rebuild_channels_if_needed(self) -> None:
-        """The adopt seam for channel history: the legacy backfill, or a fresh
-        session's start marker.
+        """The adopt seam for channel history: the legacy backfill.
 
         Fires from the same adopt seam as :meth:`rebuild_spend_if_needed` (a
         session that is never adopted for display pays nothing), and SKIPS
         immediately for a session whose journal already carries the channel
         ``start`` marker: a live session journals every record as it happens,
         and a scan would only re-prove that. A "fresh" session has nothing to
-        recover but takes this seam to write its marker (see below).
+        recover and writes NO marker here — the marker rides the first message
+        or the first channel record, so a speculative transcript that is never
+        appended to never materialises (round 2, M-1; see below).
 
         Structural guarantees, the same shape as the spend rebuild: once per
         session per process; nothing on the event loop (the scan runs on a
@@ -17354,15 +17366,18 @@ class Session:
                 _arms_attention_run_output(message) for message in fresh
             )
         if fresh:
-            # FIRST REAL APPEND -> the channel ``start`` marker. A session whose
-            # first durable non-bookkeeping append is a real message is a
-            # session born under this build, which is exactly the claim the
-            # marker makes; a transcript that never materialises (a speculative
-            # runtime the host abandons) must stay empty, which is why the
-            # marker is not written at construction or adopt (review round 2,
-            # M-1). Bookkeeping rows do not trigger it: a boot that writes a
-            # name or an MCP card has not had a conversation yet.
-            self._schedule_channel_start_marker_if_fresh()
+            # FIRST REAL APPEND -> the channel ``start`` marker, AWAITED so it
+            # commits before the messages below (see the helper: a scheduled
+            # write could lose the transcript lock to this very batch and a
+            # kill in the window would strand the session as legacy forever).
+            # A session whose first durable non-bookkeeping append is a real
+            # message is a session born under this build, which is exactly the
+            # claim the marker makes; a transcript that never materialises (a
+            # speculative runtime the host abandons) must stay empty, which is
+            # why the marker is not written at construction or adopt (review
+            # round 2, M-1). Bookkeeping rows do not trigger it: a boot that
+            # writes a name or an MCP card has not had a conversation yet.
+            await self._write_channel_start_marker_if_fresh()
         # This list is a paired prefix at mid-turn gates and a closed run at
         # settlement. One durable commit preserves the same admission/fork
         # boundary while avoiding an fsync for every already-paired result.

@@ -865,14 +865,18 @@ def combine(
             # is stateable.
             by_basis["not_tracked_calls"] += 1
             continue
-        if record.billing_basis == BASIS_NOT_TRACKED:
-            # A STATED amount whose basis is not tracked (a TTS/STT server
-            # object with an amount and no basis, a journal row from before
-            # PR-3): its money must still land in a bucket or the buckets stop
-            # summing to the total (review m1 / QA Q10). It belongs to
-            # ``not_tracked_micro`` — the same bucket the inference remainder
-            # uses — not to ``not_tracked_calls``, which counts rows with NO
-            # amount.
+        if record.billing_basis == BASIS_NOT_TRACKED or record.billing_basis not in (
+            BASIS_BILLED,
+            BASIS_SUBSCRIPTION,
+            BASIS_ESTIMATED,
+        ):
+            # A STATED amount whose basis is not tracked — or is not even in
+            # the vocabulary (a foreign string from an older/other producer):
+            # its money must still land in a bucket or the buckets stop
+            # summing to the total (review m1 / QA Q10), and it must not write
+            # a fifth bucket key (round-3 review, R3-5). ``not_tracked_micro``
+            # is its home — the same bucket the inference remainder uses — NOT
+            # ``not_tracked_calls``, which counts rows with NO amount.
             record_not_tracked_micro += int(record.amount_micro)
             continue
         by_basis[record.billing_basis] += int(record.amount_micro)
