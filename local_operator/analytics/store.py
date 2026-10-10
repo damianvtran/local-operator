@@ -820,8 +820,10 @@ _CHANNEL_ROLLUP_UPSERT = (
 #: reader can query "all spend" without knowing which table a row lives in.
 #: Inference ``billing_basis`` is ``not_tracked`` for every historic row — the
 #: calls ledger gains its own basis columns in the follow-up slice, and because
-#: a VIEW has no ALTER path this definition is dropped and re-created on every
-#: open, so the updated shape is picked up without a migration.
+#: a VIEW has no ALTER path, this definition is re-created WHENEVER the stored
+#: one differs (``_view_sql_is_current`` — not on every open, which cost a
+#: write lock per launch and grew pinned WALs before round 2, M-2), so the
+#: updated shape is picked up without a migration.
 #: ``amount_micro`` is NULL when ``cost_known = 0``: the calls ledger's ``0``
 #: for an unpriced call is exactly the fabricated zero the channel side
 #: refuses, and the view must not launder it into a real-looking amount.
