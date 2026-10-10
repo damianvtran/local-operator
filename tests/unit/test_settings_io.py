@@ -345,6 +345,7 @@ def _consumer_defaults() -> dict[str, object]:
         consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
     consumers.update(_classification_consumer_defaults())
     consumers.update(_monitor_consumer_defaults())
+    consumers.update(_supplements_consumer_defaults())
     # The Aida keys, asked of the package that reads them. The registry rows
     # above carry literals on purpose (``settings_io`` must stay off the aida
     # package's import path — it is loaded on every CLI start), and this block
@@ -463,6 +464,25 @@ def _classification_consumer_defaults() -> dict[str, object]:
         "classification.maxStateChars": DEFAULT_MAX_STATE_CHARS,
         "classification.maxCandidates": DEFAULT_MAX_CANDIDATES,
         "classification.maxRecommendations": DEFAULT_MAX_RECOMMENDATIONS,
+    }
+
+
+def _supplements_consumer_defaults() -> dict[str, object]:
+    """``values.supplements.*`` defaults, asked of the module that reads them
+    (``local_operator.supplements.policy``), not restated beside the registry rows."""
+    from local_operator.supplements import policy
+
+    return {
+        "supplements.enabled": policy.DEFAULT_ENABLED,
+        "supplements.files": policy.DEFAULT_FILES,
+        "supplements.graphics": policy.DEFAULT_GRAPHICS,
+        "supplements.model": policy.DEFAULT_MODEL,
+        "supplements.maxTurns": policy.DEFAULT_MAX_TURNS,
+        "supplements.maxOutputTokens": policy.DEFAULT_MAX_OUTPUT_TOKENS,
+        "supplements.timeoutS": policy.DEFAULT_TIMEOUT_S,
+        "supplements.maxCostUsd": policy.DEFAULT_MAX_COST_USD,
+        "supplements.maxFeatured": policy.DEFAULT_MAX_FEATURED,
+        "supplements.denyPrefixes": list(policy.DEFAULT_DENY_PREFIXES),
     }
 
 
@@ -605,6 +625,74 @@ def test_the_team_depth_maximum_matches_max_org_depth() -> None:
 
     setting = settings_io.BY_KEY["subagents.max_team_depth"]
     assert setting.maximum == MAX_ORG_DEPTH
+
+
+def test_supplements_registry_bounds_are_honoured_by_the_reader() -> None:
+    """Every value the settings page ACCEPTS must come back AS STORED from the reader.
+
+    The registry's ``[minimum, maximum]`` is the page's control range; the reader's
+    accept range (``policy``'s bounds, applied by ``SupplementSettings.from_values``)
+    must CONTAIN it, or a value a user clicked is silently swapped for the default.
+    Agent review round 1, R4 found the two pairs disagreeing both ways: ``maxCostUsd: 0``
+    -- "never spend" -- came back as the default, and ``maxOutputTokens`` had no page
+    maximum while the reader maps anything above 1,000,000 to 6000. Exercised THROUGH
+    ``from_values`` at both extremes of every bounded row, so it fails on whichever side
+    of the pair drifts -- the shape ``test_the_team_depth_maximum_matches_max_org_depth``
+    gives the one-sided case.
+    """
+    from local_operator.supplements import policy
+    from local_operator.supplements.policy import SupplementSettings
+
+    rows = (
+        ("supplements.maxTurns", "maxTurns", "max_turns", policy.MAX_TURNS_BOUNDS),
+        (
+            "supplements.maxOutputTokens",
+            "maxOutputTokens",
+            "max_output_tokens",
+            policy.MAX_OUTPUT_TOKENS_BOUNDS,
+        ),
+        ("supplements.timeoutS", "timeoutS", "timeout_s", policy.TIMEOUT_S_BOUNDS),
+        ("supplements.maxFeatured", "maxFeatured", "max_featured", policy.MAX_FEATURED_BOUNDS),
+    )
+    for key, value_key, field, bounds in rows:
+        setting = settings_io.BY_KEY[key]
+        assert (
+            setting.minimum,
+            setting.maximum,
+        ) == bounds, f"{key}: the page's range is not the reader's range {bounds!r}"
+        for bound in bounds:
+            stored = SupplementSettings.from_values({"supplements": {value_key: bound}})
+            assert getattr(stored, field) == bound, (
+                f"{key}: the page accepts {bound!r} but the reader stores "
+                f"{getattr(stored, field)!r}"
+            )
+    # The cost cap is the one deliberately ONE-SIDED pair: the page's [0, 100] is a control
+    # window, while the reader honours any value >= 0 as stored (no upper cutoff -- a
+    # hand-edited higher cap is the user's own stated guard, not a number to substitute).
+    # ``0`` is the load-bearing end: "never spend" must survive as 0.
+    cost = settings_io.BY_KEY["supplements.maxCostUsd"]
+    assert (cost.minimum, cost.maximum) == (0.0, 100.0)
+    assert SupplementSettings.from_values({"supplements": {"maxCostUsd": 0.0}}).max_cost_usd == 0.0
+    assert (
+        SupplementSettings.from_values({"supplements": {"maxCostUsd": 100.0}}).max_cost_usd == 100.0
+    )
+
+
+def test_supplements_max_cost_default_is_pinned_as_a_literal() -> None:
+    """The shipped cap is $1.00 per job, pinned as a LITERAL.
+
+    ``test_every_default_matches_its_consumer`` compares the registry row against
+    ``policy.DEFAULT_MAX_COST_USD``, so the two moving together stays green; the NUMBER is
+    what needs pinning. $1.00 is the operator directive of 2026-10-10 -- roughly one
+    Opus-class turn -- where the original $0.20 assumed a Sonnet-class generator envelope.
+    """
+    from local_operator.supplements import policy
+    from local_operator.supplements.policy import SupplementSettings
+
+    assert settings_io.BY_KEY["supplements.maxCostUsd"].default == 1.00
+    assert policy.DEFAULT_MAX_COST_USD == 1.00
+    # And the reader's own fallback agrees, so an absent key stores the same number.
+    assert SupplementSettings.from_values({}).max_cost_usd == 1.00
 
 
 def test_display_keys_are_flat_dotted() -> None:

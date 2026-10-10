@@ -710,6 +710,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the caller owns (the benchmark run root), never an entry of a session "
         "directory; a replica re-creates the reserve rather than carrying it",
     ),
+    # ---- the turn-supplement feature's rule IDS ----
+    "local_operator/supplements/denylist.py": (
+        4,
+        "``RULE_CONFIG_DIR``/``RULE_NAME``/``RULE_NAME_PREFIX``/``RULE_SUFFIX`` are rule "
+        "IDS: the tags ``is_sensitive`` returns and a surface logs to say which class "
+        "refused a path (the module's docstring: 'every rule has a stable id'). Bare "
+        "words, never entries of a session directory; they trip this guard only because "
+        "their constant names end in DIR/NAME/PREFIX/SUFFIX while their values read as "
+        "path-shaped spellings",
+    ),
     # ---- ID / KEY FRAGMENTS (widened guard): a ``*_PREFIX``/``*_SUFFIX`` constant is a
     # ---- FRAGMENT joined to some id or key, never a bare entry of a session directory.
     # ---- Each is declared with what it is joined to, so a future keyed session
