@@ -55,7 +55,11 @@ from typing import Any, Final, Mapping
 #: version is how a host or a bug report names which prelude produced a document, and
 #: ``tests/unit/supplements/test_prelude.py`` pins the pair's digest to this number so an
 #: edit that forgets to bump it fails.
-PRELUDE_VERSION: Final = 1
+#:
+#: 2 — the ``div.ttl`` table title and its CSS rule strip (memo §8 F9, §2.8's no-chrome
+#: rule): a component renders body-only, so a served document re-derives with no drawn
+#: title. Ships with the existing rows: a row stores a digest, never prelude bytes.
+PRELUDE_VERSION: Final = 2
 
 #: The document CSP (memo §4.1), verbatim.
 CONTENT_SECURITY_POLICY: Final = (

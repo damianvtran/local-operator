@@ -356,7 +356,8 @@ Reasons:
   "decision": {"vendor": "radient", "files_p": {...}, "graphics_p": 0.83, "skipped": null},
   "instruction": "make it a table",            // steer text that produced this version
   "model": "anthropic/claude-…", "turns": 2, "tokens_in": 9120, "tokens_out": 2210,
-  "cost_usd": 0.0123, "error": "", "at": 1791...
+  "cost_usd": 0.0123, "error": "", "at": 1791...,
+  "detail": ["bound:cost cap: $0.0410 of $0.05 reached before repair"]  // generator notes: bound records live HERE, never in "error" on a done row (round-1 review R4/R7)
 }
 ```
 
@@ -434,9 +435,10 @@ in the fork is a new `job` id. Nothing else is needed.
 
 Why isolated: the generator needs the **evidence**, not the conversation. A warm-prefix
 request would put a design prompt in the session's cache lineage, and on a different model
-there is no prefix to share anyway. The system prompt is the Appendix A text: **972 o200k
-tokens** (968 cl100k), measured with tiktoken 0.14 on this exact text. It is cache-stable
-across jobs.
+there is no prefix to share anyway. The system prompt is the Appendix A text: **1,140 o200k
+tokens** (1,137 cl100k), 4,672 chars, measured with tiktoken 0.14 on this exact text
+(re-measured for the body-only amendment; the pre-amendment text was 972/968 on 3,919 chars).
+It is cache-stable across jobs.
 
 **Evidence.** The generator is given only:
 - the user message (≤ 2k chars);
@@ -469,7 +471,12 @@ process, the same redaction boundary classification-layer §6 requires for outbo
   (operator directive, 2026-10-10). The units contract is unchanged: the cap is only checked
   between turns, never a per-turn figure with a third turn added (round-1 review R3;
   round-2 R2-6).
-Any bound firing → `state=failed`, `error="bound:<name>"`, with valid blocks so far kept.
+Any bound firing ends the job. With NO block kept the row is `state=failed`,
+`error="bound:<name>"`; when valid blocks so far exist they are KEPT, the row is
+`state="done"` -- the only state the frozen reader paints as a settled block -- and the bound
+is recorded in the row's `detail` list (round-1 review R4/R7: the original "failed with the
+blocks kept" was unpaintable under the frozen reader rule, so the record moved rather than
+the rule). The turn cap and the per-turn token cap record the same way when they touch a job.
 
 **Fail-open.** Every exception → `failed`, a debug log, and no notice. A generator failure is
 never surfaced as an error in the transcript; the indicator settles to a quiet "Couldn't
@@ -486,15 +493,17 @@ The prelude is:
 - `prelude.js`: `LO.table/bar/line/el/fmt/color/onTheme/onSize/size`, plus the width-redraw
   and theme listener.
 
-Measured on a working spike (Appendix C), after the round-2 label-layout fix — **2,044 B CSS +
-8,180 B JS raw (minified build, esbuild 0.28.2); 4,538 B gzip combined** (one method for every
-figure here: `cat` the pair through `gzip -9`; the spike's `BUILD.md` carries it, `measure.py`
-re-derives it). Budget: **≤ 11 KB raw / ≤ 4.5 KB gzip** — 1,040 B and 70 B spare. Round 2 moved
+Measured on the vendored pair (the row-per-build table is `prelude/BUILD.md`) — **2,008 B CSS
++ 8,047 B JS raw (minified build, esbuild 0.28.2); 4,562 B gzip combined** (one method for every
+figure here: `cat` the pair through `gzip -9`; the spike's `measure.py` re-derives it). Budget:
+**≤ 11 KB raw / ≤ 4.5 KB gzip** — 1,209 B and 46 B spare. Round 2 moved
 the caps: D2-1's anchoring fix (measure the composed top-tick label, reserve its width, fall
 back inside the plot when the space is short) plus D2-2/D2-4's label fitting cost **+474 B gzip /
 +1,089 B raw** against the pre-fix pair through the same tool, and the old caps had 29 B of gzip
 headroom. The caps are self-imposed; that fix is not. Any further addition must trim rather than
-extend — the App. B guard (+412 B gzip) still does not fit.**
+extend — the App. B guard (+412 B gzip) still does not fit.** (The pair's own history: the spike
+row above, then C0's nonce echo, then C1b's `div.ttl` title strip, which took it from the C0
+build's 2,044 / 8,202 raw and 4,607 gzip.)**
 
 Trade-offs:
 
@@ -753,7 +762,11 @@ task per session. Rules:
   of evidence values. They must be declared as columns named `"… (derived: a/b)"`, and the
   validator recomputes them. Anything else fails validation → repair turn → drop.
 - Inline numeric literals in component scripts beyond layout constants are rejected by a
-  static scan (§4.2): `\d{3,}` outside `viewBox`/style is a reject reason.
+  static scan (§4.2): `\d{3,}` outside the structural attribute values (`viewBox`, SVG
+  geometry, `style`) is a reject reason. The scan verifies **readable numerals** — element
+  text and data-bearing attributes — not drawn geometry: a chart whose shape encodes a value
+  its text does not state is outside a lexical scan's reach by construction, and §5's
+  golden-set spot-check is that boundary's control (round-2 review R2-1/R2-2).
 - Every component carries `source` (required). Surfaces render it as one caption line,
   `Source: bench.csv (rows 1-12)` — `text-meta`, `ink-muted`, single line, ellipsis with
   the full text available; the caption idiom of §2.8 means chrome and a model `caption`
@@ -1352,8 +1365,8 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
   frame's *own* CSP does not constrain its own navigation, so a reader who takes that sentence
   for the embedding policy's too deletes the relay's only pre-request control. A failure here is
   a security hold, not a QA nit.
-- **Prelude size budget.** The build is 4,538 B gzip against the re-stated ≤ 4.5 KB cap (70 B
-  spare) and 10,224 B raw against ≤ 11 KB (1,040 B spare); caps, method and why they moved are
+- **Prelude size budget.** The build is 4,562 B gzip against the re-stated ≤ 4.5 KB cap (46 B
+  spare) and 10,055 B raw against ≤ 11 KB (1,209 B spare); caps, method and why they moved are
   in §2.6. Any addition must re-measure and, at this margin, trim: the App. B accent guard is
   **+412 B gzip measured on that same method** (the spike's `measure.py`), so it is still
   deliberately not in v1. This is the round-2 residue with the widest blast radius — the cap
@@ -1416,13 +1429,16 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
    feeding errors into turn 2). Not in v1, because it would need a browser engine in the
    runtime.
 9. Unifying the UI's `mentioned-files.ts` with core `supplements/candidates.py`.
-10. **F9 — the prelude's table title (`div.ttl`).** The vendored prelude
-    (`local_operator/supplements/prelude/prelude.src.js`) still renders the `div.ttl` table
-    title, which contradicts §2.8's no-chrome rule; it is the prelude/engine lane's fix, and it
-    must strip `.ttl`, rebuild the minified pair per `prelude/BUILD.md`, regenerate the prelude
-    fixture(s) and the Appendix C spike reference (its size figures and rendered shot), and bump
-    `PRELUDE_VERSION` so served documents re-derive. **Re-measure the size budget after the
-    strip** — Appendix C's figure is a measured artifact, not a target to assume.
+10. **F9 — the prelude's table title (`div.ttl`). CLOSED by lane C1b.** The vendored prelude
+    (`local_operator/supplements/prelude/prelude.src.js`) rendered the `div.ttl` table title,
+    which contradicts §2.8's no-chrome rule. The strip landed with C1b: `.ttl` is gone from the
+    sources and the stylesheet, the minified pair was rebuilt per `prelude/BUILD.md` (which now
+    carries a row per build), the prelude fixtures and the Appendix C reference were
+    regenerated, `PRELUDE_VERSION` is 2 so served documents re-derive, and the size budget was
+    re-measured rather than assumed — **2,008 B CSS + 8,047 B JS raw, 4,562 B gzip** (from
+    4,607; §2.6, App. C). The guard that keeps it closed is a drawn-node assertion in
+    `tests/unit/supplements/test_prelude.py`: no node carries the `ttl` class, the dataset title
+    appears nowhere in the output, and the column headers do.
 
 ---
 
@@ -1488,10 +1504,11 @@ Everything else in this memo is decided; a reviewer who disagrees should name th
 
 ## Appendix A — the generator prompt (the fork's system prompt, and only there)
 
-This doubles as the fork's design guidelines. Measured: **972 tokens (o200k_base), 968
-(cl100k_base), 3,919 chars**, with tiktoken 0.14 on this exact text. It is held verbatim in
+This doubles as the fork's design guidelines. Measured: **1,140 tokens (o200k_base), 1,137
+(cl100k_base), 4,672 chars**, with tiktoken 0.14 on this exact text (the pre-amendment text
+measured 972 / 968 / 3,919; §2.8's body-only clauses are what moved it). It is held verbatim in
 `supplements/prompt.py` as `GENERATOR_SYSTEM_PROMPT`, and a unit test pins its token count
-within ±5 %.
+within ±5 % -- and compares the constant to this fence, so the two cannot drift.
 
 ```text
 You make supporting graphics for an answer the user has already read. Output 0-3 components, or NONE. NONE is the right answer whenever a graphic would not make the answer faster to understand than the text already does.
@@ -1591,20 +1608,21 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
   `measure.py` which re-derives every size figure) — exists in the architect
   scratchpad and is attached to the C0 PR as the starting point; the round-1 remediation
   **and the round-2 label-layout fix** are folded in.
-- **No-chrome status:** the "no title line" claims below are target state, not the pair's
-  current output — the pair still draws the `div.ttl` table title, as does the spike's rendered
-  shot; §8 F9.
-- **Size:** 2,044 B CSS + 8,180 B JS raw (minified build, esbuild 0.28.2); **4,538 B gzip** for
+- **No-chrome status: closed.** The pair used to draw the `div.ttl` table title; C1b stripped the
+  helper, the element and its stylesheet rule (memo §8 F9, §2.8), so the rendered component is
+  body-only. The guard is `test_prelude.py`'s drawn-node assertion, not this sentence.
+- **Size:** 2,008 B CSS + 8,047 B JS raw (minified build, esbuild 0.28.2); **4,562 B gzip** for
   both (`cat` the pair through `gzip -9` — one method for the budget, the guard's cost and every
-  figure here). Budget: **≤ 11 KB raw / ≤ 4.5 KB gzip**, enforced by a unit test — 1,040 B and
-  70 B spare; round 2 moved both caps because D2-1/D2-2/D2-4's fix cost +474 B gzip / +1,089 B
+  figure here). Budget: **≤ 11 KB raw / ≤ 4.5 KB gzip**, enforced by a unit test — 1,209 B and
+  46 B spare; round 2 moved both caps because D2-1/D2-2/D2-4's fix cost +474 B gzip / +1,089 B
   raw against the pre-fix pair through the same tool (§2.6). Any addition re-measures and, at
   this margin, trims.
 - It provides:
   - `LO.data` (frozen, from `<script type="application/json" id="lo-data">`);
   - `LO.ds/col/fmt/color/el/onTheme/onSize`;
   - `LO.table` (right-aligned tabular numerals, horizontal scroll at 320 px, source-precision
-    cells — no title line, body-only §2.8);
+    cells — no title line: the component is body-only, §2.8, and the `div.ttl` draw was stripped
+    in C1b, memo F9);
   - `LO.bar` (vertical/horizontal, grouped, zero baseline, direct value labels at source
     precision, category-label step-thinning, truncate-only-when-the-slot-requires-it with the
     full text in a `<title>`, unit on the top axis tick);

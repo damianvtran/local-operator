@@ -550,3 +550,39 @@ async def test_the_incremental_merge_size_matches_a_full_dump_on_adversarial_del
             )
         assert "".join(frame["payload"]["delta"] for frame, _ in items) == "".join(fragments)
         await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_supplement_progress_run_keeps_the_newest_beat(tmp_path) -> None:
+    """§3.1 row 14 (round-1 review R8): ``supplement_progress`` keeps the NEWEST beat.
+
+    A beat re-sends the job's current state -- memo §2.7: the family "is self-replacing
+    by construction" -- and the durable copy is the journal row, so a viewer stalled
+    behind a run of beats collapses them to the latest one. 512 beats arrive as two:
+    the one the fold kept (512) and the tail (512).
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        sub, stream = await _opened_sub(bridge)
+        count = 512
+        for n in range(count):
+            bridge.publish(
+                "event",
+                {
+                    "type": "supplement_progress",
+                    "anchor": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+                    "job": "3f9c1a7e5b20",
+                    "version": n + 1,
+                    "state": "running",
+                    "stage": "generating",
+                    "elapsed_s": float(n),
+                },
+            )
+        assert not sub.overflow
+
+        delivered = await _drain(sub, stream)
+        assert len(delivered) == 2, "the fold collapsed 511 beats into their newest, then 511"
+        versions = [frame["payload"]["version"] for frame in delivered]
+        assert versions == [511, 512], "keep-newest keeps the latest beat, not every beat"
+        await stream.aclose()
