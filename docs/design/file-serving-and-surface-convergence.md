@@ -1,8 +1,8 @@
 # Design: one file server for every surface — unclamped on loopback, phased auth, surface convergence
 
-Status: proposal v2 (architect) — manager rulings of 2026-10-10 folded in (see §11). **Proposed final path: `docs/design/file-serving-and-surface-convergence.md`.**
+Status: proposal v3 (architect) — manager rulings of 2026-10-10 and the supplements-lane P0 pass (with conditions) folded in (see §11). **Proposed final path: `docs/design/file-serving-and-surface-convergence.md`.**
 Scope: core (server app, static routes, CLI, registry, settings), local-operator-ui (bridge, previews), mobile relay, docs. No `pyproject.toml` bump — the release owner handles that.
-Base: core `origin/main` @ `f8bc3ba3ba` (v0.68.24), UI `origin/main` @ `b53efe973ea`. Every file:line below was read at those refs, not recalled. Claims that are inference rather than reading are marked **[spec]**.
+Base: core `origin/main` @ `f8bc3ba3ba` (v0.68.24), UI `origin/main` @ `b53efe973ea`. Every file:line below was read at those refs, not recalled — except the two `turn-supplements.md` refs, read at `06fbd0ed61` (moved by later docs commits). Claims that are inference rather than reading are marked **[spec]**.
 
 **The operator's direction (fixed requirement, quoted).** *"I'm not sure if clamping down to a server's served roots is the right way here, the server needs to be able to serve from downloads, documents, etc. Because the TUI for example would access through that server. If we're just going to be accessing local files anyways, it doesn't make sense to lock that down. As long as we host on 127.0.0.1 and not 0.0.0.0 and the server is not made discoverable outside of the local device and any explicit tunnels, it's ok to have the server be able to serve. If needs be, we can have some sort of auth schema where surfaces generate a key … completely abstracted and automatic and not require the user to do anything, and shouldn't block in these next few releases … it's better to find a security solution that is general (and backward compatible) where all surfaces access through the same file server instead of redundantly implementing their own filesystem access … Worth noting that any public surfaces like the mobile relay and mobile app ONLY use the app over an authenticated tunnel in the first place."*
 
@@ -20,7 +20,7 @@ That bound is wrong under the operator's direction: `~/Downloads`, `~/Documents`
 
 The probe points that need to hold for an unclamped route:
 
-- **Loopback-only hosting**: `lop serve` defaults to `127.0.0.1:1111` (`cli.py:685-702`) but `--host` accepts *any* address, including `0.0.0.0`, with only a help-text warning (`cli.py:688-696`). A wildcard bind also **disables** the static Host check by design (`static_roots.py:525-529`; QA measured: "bind `--host 0.0.0.0` + rebinding Host → 200 — wildcard bind disables the check").
+- **Loopback-only hosting**: `lop serve` defaults to `127.0.0.1:1111` (`cli.py:685-702`) but `--host` accepts *any* address, including `0.0.0.0`, with only a help-text warning (`cli.py:688-696`). A wildcard bind also **disables** the static Host check by design (`static_roots.py:531-532`; QA measured: "bind `--host 0.0.0.0` + rebinding Host → 200 — wildcard bind disables the check").
 - **DNS rebinding**: a rebound page is same-origin with the daemon, so no CORS grant is needed; the one thing it cannot forge is the `Host` header. The check (`host_is_acceptable`, `static_roots.py:506-546`, wired at `app.py:976-985`) refuses every DNS name except `localhost`/the announced bind; IP literals pass (a rebinding page cannot present one). **With the roots gone, this check is the sole control that stands between a rebinding page and whole-disk reads.**
 - **Cross-origin pages**: the static middleware strips the CORS grant for non-admitted origins on every static response (`app.py:986-994`), so a foreign page cannot read a response body; it can still trigger requests and observe image existence/dimensions via `<img>` (`static_roots.py:22-34`, S-4b).
 - **Same-user processes**: can read any file directly; no route rule changes that. Not a boundary to defend.
@@ -43,21 +43,22 @@ No root allowlist in the default mode. Keep: raw `..` refusal, `expanduser`/reso
 **D2 — "Loopback" is enforced twice: the bind is refused, and the predicate itself is per-connection gated.**
 (a) `lop serve` refuses **every** non-loopback bind — `0.0.0.0`, `::`, LAN/other non-loopback IPs, and names that do not resolve exclusively to loopback — with exit 1 and **no override path** (Manager ruling 2026-10-10, strict). (b) Independently of (a), the static family applies the **unclamped predicate only when the connection's local socket address is loopback** (`request.scope["server"]` — the address the kernel actually accepted on). Everything else gets the *rooted* predicate (the v0.68.23 behaviour: `static.roots` + built-ins). So the invariant is not "we asked people not to bind wide"; it is **"unclamped reads are only ever answered on a loopback-accepted connection"** — which an SSH port-forward or a local tunnel deliberately provides, and a LAN client never does.
 
-**D3 — The Host check stays and is promoted to the load-bearing rebinding control on these routes; the wildcard-bind bypass is DELETED and a wildcard/empty announced host is fail-closed (IP literals and `localhost` only; DNS names refused).** Parser hardening (`:520-536`) kept. Extending the check beyond `/v1/static/*` (follow-up d) is §3.6.
+**D3 — The Host check stays and is promoted to the load-bearing rebinding control on these routes; the wildcard-bind bypass is DELETED and a wildcard/empty announced host is fail-closed (IP literals and `localhost` only; DNS names refused).** Parser hardening (`:535-537`) kept. Extending the check beyond `/v1/static/*` (follow-up d) is §3.6.
 
-**D4 — The response policy is untouched**: CSP (media/HTML), `frame-ancestors`, `nosniff`, CORS-grant strip — every static response, errors included (`static_roots.py:152-196, 482-490, 554-565`; `app.py:941-994`).
+**D4 — The response policy is untouched**: CSP (media/HTML), `frame-ancestors`, `nosniff`, CORS-grant strip — every static response, errors included (`static_roots.py:152-196, 482-490, 554-565`; `app.py:941-994`). **The document CSP's network-off directives are a security invariant of the executing-frame contract, not a current value**: `connect-src https:`, `worker-src blob:`, `img-src`/`media-src`/`font-src` limited to `data: blob: https:`, and `default-src 'none'` (`HTML_CSP`, `static_roots.py:152-166`) are what keep a previewed document from reaching this daemon or any other local service over plain http. Any future widening of those directives is a security change for the executing-frame contract and requires the supplements-lane review; a core-side test pins them against widening (§3.7 item 10). The UI-side `PREVIEW_CSP` equivalent (`window-guards.ts:643-654`) stays supplements-owned.
 
 **D5 — Route families are explicit, because the clamp's removal must not widen what an executing document can reach** (supplements lane constraint, verbatim requirement): *"a DISTINCT route family for executable generated documents, not reuse of the general file route"* and *"nothing we ship weakens the sandbox on a page that executes."* The family map:
    - `/v1/static/images|videos|audio` — bytes embedded or streamed by the app (media CSP). **These never serve `text/html` or any document type** (mime allowlists already enforce it; pinned by test).
    - `/v1/static/html` — **the only family that serves user documents that can run script**, with the document CSP + `frame-ancestors` and the UI-side `sandbox="allow-scripts"` unchanged. It is not "a permissive rule under the general route": it keeps its family, its policy, and its `MEDIA_CSP`-vs-`HTML_CSP` selection (`response_policy`, `:554-565`).
    - **Documents-that-execute for supplements (C2 lane) ride their own family only** — content-addressed blobs served from the store (digest-addressed, no caller path), carrying the §4.1 document policy, `nosniff`, `Cache-Control: no-store`, as their design already requires. This RFC changes none of that; the general media family cannot reach an executing frame's capability set because it serves no executable document type at all.
    - No new "general bytes" route ships in P1. If a later phase adds one, it serves `application/octet-stream` + `Content-Disposition: attachment` + `nosniff`, and §4's token gate — decided in that phase, not now.
+   - **Why the families stay separate (provenance):** a user document arrives as a path the *user* chose and is served by path through `/v1/static/html`; a supplement component blob is agent-generated content kept in a digest-addressed store with **no caller-supplied path** at all. Do not merge the two families for tidiness — the provenance difference is exactly what the distinct route families encode.
 
 **D6 — Phased, abstracted auth that is permissive first** (§4): a per-boot token published only in the daemon's `0600` serve record (the `claim_key` precedent, `server/desktop.py:10-24`), accepted as a header or a signed query URL, **not required for several releases**; enforcement becomes opt-in, then default, gated on the compat matrix, never on user action.
 
 **D7 — Surfaces converge on this server, not the reverse** (§6): the UI IPC bridge is kept for now (it is the shipped fix for real breakage and the daemon-down path) but loses source-of-truth status — new file features go through the server, bridge changes are maintenance-only, and its retirement/narrowing per surface is scheduled after P2. `html-preview` keeps the route permanently (route+CSP pairing, `html-preview.tsx:44-57`). The mobile relay gains a proxy path so one session shows the same files on the phone.
 
-**D8 — The mesh relay is out of this condition** (§3.5): it is not a file server (no file bytes flow; attachments degrade, `relay.py:7230-7235`), and its wide default is the feature's topology requirement (`relay.py:56-71`). It must stay a distinct story in docs so "loopback-only" is never read as fleet-wide.
+**D8 — The mesh relay is out of this condition** (§3.5): it is not a file server (no file bytes flow; attachments degrade, `relay.py:7230-7235`), and its wide default is the feature's topology requirement (`relay.py:159-160`; `DEFAULT_LISTEN_ADDRESS = "0.0.0.0"` at `:170`). It must stay a distinct story in docs so "loopback-only" is never read as fleet-wide.
 
 ## 3. The loopback condition — enforcement design
 
@@ -86,14 +87,14 @@ The rule (`:457-459`) was written as an inner bound of the root list. Under no r
 
 ### 3.4 What this does to the old claims
 
-- **The wildcard-bind Host bypass is deleted** (`:525-529`): with no wide binds possible through the product, `host_is_acceptable` becomes fail-closed for a wildcard/empty announced host — it admits only IP literals and `localhost` and refuses DNS names (there is no name to compare against, so a name fails closed). If a wide bind ever appears through embedding, the per-connection gate (§3.2) keeps its file serving rooted **and** the Host check still applies.
-- **SSH port-forward / local tunnel = unclamped: decided yes** (the operator's explicit-tunnel case; Manager ruling). The connection is loopback-accepted, which is exactly the condition.
+- **The wildcard-bind Host bypass is deleted** (`:531-532`): with no wide binds possible through the product, `host_is_acceptable` becomes fail-closed for a wildcard/empty announced host — it admits only IP literals and `localhost` and refuses DNS names (there is no name to compare against, so a name fails closed). If a wide bind ever appears through embedding, the per-connection gate (§3.2) keeps its file serving rooted **and** the Host check still applies.
+- **SSH port-forward / local tunnel = unclamped: decided yes** (the operator's explicit-tunnel case; Manager ruling). The connection is loopback-accepted, which is exactly the condition. One property stated rather than hidden: whoever holds that forward gets disk-wide read of everything the user's account can read, because an unclamped loopback-accepted connection is precisely what the server answers — an explicit operator choice under the "explicit tunnels" path, never a hidden property.
 - The uniform-403 body (`OUTSIDE_ROOTS_DETAIL`, `:187-196`) is rewritten per mode; in general mode the remaining refusal bodies are: invalid path, `..`, uniform resolve/stat-failure 403, not-a-file 400, unreadable 403. The "add the directory to static.roots" remedy text moves to rooted mode only.
 
 ### 3.5 The mesh relay — explicitly out, with reasons
 
 1. It serves no file bytes: no static routes in `network/relay.py`; session history drops attachments (`:7230-7235`); `net_stream` carries viewer frames, not files (`_op_stream`, `:7885`).
-2. Its 0.0.0.0 default is a product requirement — "the mesh's PRIMARY topology is one reachable device and one that is not" (`relay.py:56-71`) — and it has its own identity/pairing/capability auth with a pre-auth connection cap (`:75-98`).
+2. Its 0.0.0.0 default is a product requirement — "the mesh's PRIMARY topology is one reachable device and one that is not" (`relay.py:159-160`; `DEFAULT_LISTEN_ADDRESS = "0.0.0.0"` at `:170`) — and it has its own identity/pairing/capability auth with a pre-auth connection cap (`:174-185`; `DEFAULT_MAX_HANDSHAKES = 8` at `:185`).
 3. Consequence, stated for docs: **the mesh relay remains the one LAN-listening component**; the file server must never be reachable *through* it — no `net_*` op may carry file bytes without its own design (this RFC's change set adds none).
 
 ### 3.6 Host-check scope (follow-up d)
@@ -112,6 +113,7 @@ Unit + integration (isolated `HOME`, `env -i`, loopback ephemeral port; patterns
 7. Response policy on every status (CSP variants, nosniff, no ACAO for foreign origin) re-run from the `test_server_static.py` matrix; `turn-supplements`' copy of the attack matrix is the reference.
 8. A test pins that `/v1/static/images|videos|audio` cannot serve `text/html` or `*/*` bytes (D5's "no executable document under the general family").
 9. Docs tests (if the repo has any for DESKTOP_API/turn-supplements status) — else manual review checklist.
+10. **Core-side CSP invariant**: a test pins `HTML_CSP`'s network-off directives (`connect-src https:`, `worker-src blob:`, `img-src`/`media-src`/`font-src` = `data: blob: https:`, `default-src 'none'`) against widening — any change fails the test so it must go through the supplements-lane review (D4). The UI-side `PREVIEW_CSP` equivalent stays supplements-owned; not tested here.
 
 ## 4. The auth design (phased, abstracted, automatic)
 
@@ -122,7 +124,7 @@ Unit + integration (isolated `HOME`, `env -i`, loopback ephemeral port; patterns
 - **Automatic, zero user action:** every surface reads the record the way the desktop app already discovers the daemon (`backend-service.ts`, `serveRecord`), presents the token, and on 401 re-reads once. A daemon restart bumps the generation; surfaces refresh.
 - **For `src=` loads (the S-6 constraint: routes load by `src`, no bearer header possible):** an authenticated mint endpoint, `POST /v1/static/sign` (name proposal), auth = the access token or the desktop bearer, body `{route, path, ttl_s}` → `{url, exp}`. The URL carries the route, the original `path`, `exp` (unix seconds) and `sig = HMAC-SHA256(signing_key, route + newline + raw path string + newline + exp)`; the server verifies the signature **before any resolution** (no oracle) and refuses expired ones. TTL default 10 minutes, **approved** for previews (Manager ruling); the `<video>` Range/seek lifetime (longer TTL vs re-sign) is documented in P2 and pinned by QA. The UI re-signs on version changes, as it already re-keys on mtime/version — `html-preview.tsx:137`.
 - **Why not cookies:** the renderer runs at `file://` (opaque origin `"null"`, `desktop.py:44-52`) and the TUI/mobile are not browsers; signed query URLs + header tokens cover both classes without a cookie/session concept.
-- **Why HKDF:** one root, purpose-separated keys, stdlib; lets a future "read-only file token" split without re-minting; the manager's suggestion, honored.
+- **Why HKDF:** one root, purpose-separated keys, stdlib (RFC 5869 over `hmac`/`hashlib`); lets a future "read-only file token" split without re-minting. It stands on its own merits, not on anyone's preference.
 
 ### 4.2 Server behaviour, phase by phase
 
@@ -155,7 +157,7 @@ One file-serving semantics, owned by core: predicate + mime policy + size policy
 
 - **Desktop UI renderer**: phase 1 (with P2) gets tokens + signed URLs; `video-preview`'s route-first path keeps streaming (Range) and gains a token; `html-preview` keeps the route **permanently** (CSP pairing) and gets signed URLs. The IPC bridge stays as the interim path until the server path reaches parity, then each surface moves back: **decided (Manager ruling): keep the bridge as the fast-path / daemon-down path with policy constants shared with the server** (same 64 MiB → one constant; HEIC handled in one place); maintenance-only; revisit in P5. No big-bang.
 - **TUI**: today in-process; the operator's "TUI would access through that server" becomes (Manager ruling): **new** TUI file features (browsing/previews for a session, including remote/mesh-attached ones) use the server API; existing in-process previews are unchanged. A small client helper (token from the record) lives in core so no surface re-derives it.
-- **Mobile relay/app**: add a relay-side proxy (`/api/sessions/{id}/file?path=…`) that calls core's family with the local token, so the phone shows the same files as the desktop for the same session. Today's `/api/sessions/{id}/image` (transcript store) stays for history/attachments. Same-session-same-files becomes true for the live session; durable-history file references stay transcript-scoped. **[spec]** scope/ownership rules for the proxy mirror `api_session_image`'s (session resolution + `gate()`).
+- **Mobile relay/app**: add a **session-scoped** relay-side proxy (`/api/sessions/{id}/file?path=…`) that calls core's family with the local token, so the phone shows the same files as the desktop for the same session. **Decided (Manager ruling, 2026-10-10): the proxy serves only the session's own files — its cwd, scratchpad, and files the transcript references — and is explicitly not an arbitrary-path door; "the tunnel is authenticated" is not the boundary story for a general-file proxy.** Today's `/api/sessions/{id}/image` (transcript store) stays for history/attachments. Same-session-same-files becomes true for the live session; durable-history file references stay transcript-scoped. **[spec]** the proxy's path predicate and ownership rules mirror `api_session_image`'s session resolution + `gate()`, restricted to the session's dirs.
 - **Mesh peers**: unchanged; no file bytes; keep the degradation placeholder.
 - **Browser bridge**: unchanged (not a session-file surface).
 
@@ -212,12 +214,14 @@ One file-serving semantics, owned by core: predicate + mime policy + size policy
 4. **Supplements contract**: if their review reads the unclamped `/v1/static/html` as weakening (an executing frame can *load* any html, though it cannot read bytes or gain origin), fallback = the html family stays rooted until Phase C tokens gate it; the media families' unclamping is unaffected.
 5. **Documentation drift**: three docs + settings copy state the old bound; P1 ships their updates in the same PR (the #2134 R4 lesson).
 6. **macOS TCC (documented, not a mystery)**: reads of `~/Downloads`, `~/Documents` etc. may still be refused by OS privacy controls depending on the daemon's launch context; the predicate's errno classification (`static_roots.py:461-472`) already maps that to the uniform 403. Say so in the docs and the module docstring.
+7. **CSP network-off directives are an invariant of the executing-frame contract**: any widening of `connect-src`/`worker-src`/`img`/`media`/`font` sources in `HTML_CSP` is a security change requiring the supplements-lane review; a core-side test pins them (§3.7 item 10).
 
 ## 9. Open items after the rulings (no product decisions outstanding)
 
-1. **Supplements-lane review** of the sandbox half (their P0 gate before merge): the one reading that could change P1 is if they object to the unclamped `/v1/static/html`; fallback documented in §8 Risk 4 and §11.
+1. **Supplements-lane review — passed with conditions (2026-10-10)**: CSP network-off directives pinned as an invariant (§3.7 item 10), D5 provenance reason added, relay proxy recorded session-scoped (§5.2), SSH-forward read scope noted (§3.4). No objection to the unclamped `/v1/static/html`; the fallback in §8 Risk 4 stays recorded as contingency only.
 2. **[spec] implementation verifications**: `scope["server"]` wildcard semantics on the pinned uvicorn (macOS + Linux + Windows CI); the loopback-resolution predicate for `--host` names; the final record field set (naming decided at implementation).
 3. **P2 documentation item**: the `<video>` Range/seek re-sign approach (longer TTL vs re-sign), pinned by QA.
+4. *(Decided — recorded so it is not reopened)* **Relay proxy scope**: session-scoped only — the session's cwd/scratchpad/transcript-referenced files; never an arbitrary-path door; "authenticated tunnel" is not the boundary story for a general-file proxy (§5.2, §11).
 
 ## 10. Appendix — condensed exposure and surface audit
 
@@ -259,5 +263,7 @@ Folded into v2; recorded here so reviewers see dispositions without re-reading t
 | 6 | UI bridge end-state | **Decided:** keep as fast-path/daemon-down with shared policy constants; maintenance-only; P5 revisit (§5.2). |
 | 7 | Host scope (follow-up d) | **Decided:** P1.5, separate change, not blocking P1 (§3.6). |
 | 8 | Naming | `--allow-non-loopback-api` **gone** with ruling 1; `static.require_token` and record field names decided at implementation, keeping the stated property (§4.1). |
-| — | Signed-URL TTL (open Q2) | 10-min default **approved** for previews; `<video>` Range/seek lifetime documented in P2, QA pins it (§4.1). |
-| — | TUI adoption (open Q7) | **Decided:** new features first; existing in-process previews unchanged (§5.2). |
+| — | Signed-URL TTL — §4.1 | 10-min default **approved** for previews; `<video>` Range/seek lifetime documented in P2, QA pins it (§4.1). |
+| — | TUI adoption — §5.2 | **Decided:** new features first; existing in-process previews unchanged (§5.2). |
+| — | Supplements P0 read | **PASS with conditions (2026-10-10).** CSP network-off directives pinned as an invariant with a core-side test; D5 gains the provenance reason; relay proxy decided session-scoped; SSH-forward read-scope note folded (§3.7 #10, §5.2, §3.4). |
+| — | Relay proxy scope (P2) | **Decided:** session-scoped — the session's cwd/scratchpad/transcript-referenced files only; not an arbitrary-path door (§5.2). |
