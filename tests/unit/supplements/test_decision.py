@@ -374,3 +374,102 @@ def test_benign_slashes_urls_and_addresses_survive_byte_identical() -> None:
     credential POSITION is masked, and the payload test above covers that spelling."""
     benign = "ratio 24/7 and/or km/h; see https://example.com/reports/q3.html; ping ops@example.com"
     assert benign in dec.files_state(benign, benign)
+
+
+# -- round-3 remediation (space-carrying components, leads, pins) ---------------------------
+
+
+def test_a_space_in_a_directory_segment_reduces_the_whole_path() -> None:
+    """R3-1: the crossing guard carries a slash-attached continuation, so a spaced directory
+    reduces whole instead of truncating at the space and leaking the tail (round-3
+    reproductions: ``Acme Corp/q3.pdf`` and ``Client Work/reports``)."""
+    state = dec.files_state("u", "save ~/clients/Acme Corp/q3.pdf")
+    assert "save q3.pdf" in state
+    assert "Acme" not in state
+    state = dec.files_state("u", "save /Users/damian/Client Work/reports")
+    assert "save reports" in state
+    assert "Client Work" not in state
+    state = dec.files_state("u", "save /Users/damian/Client  Work/reports")
+    assert "save reports" in state, "a run of spaces crosses on the same rule"
+    assert "Work" not in state
+
+
+def test_a_spaced_path_in_the_intent_line_reduces_in_option_text() -> None:
+    """R3-1's third reproduction: the same reduction through the option text's intent line."""
+    canned = _cand("q3.pdf", intent="Writing it to /Users/damian/Client Work/reports")
+    text = dec.option_text(canned)
+    assert "Client Work" not in text
+    assert text.endswith("Writing it to reports")
+
+
+def test_the_space_crossing_never_takes_spaced_prose_with_it() -> None:
+    """The guard on a crossed space: it fires only when the next token is slash-attached, so
+    a spaced connective between two paths survives with both paths reduced -- ``see /x and /y``
+    must never become ``see y``. A token that itself contains a slash reads as continuation
+    (the guard's documented boundary)."""
+    state = dec.files_state("see /x and /y", "see /x and /y")
+    assert "see x and y" in state
+    assert "see y" not in state
+
+
+def test_the_file_scheme_reduces_regardless_of_case() -> None:
+    """RFC 8089 schemes are case-insensitive: ``FILE://`` and ``File://`` reduce like
+    ``file://`` (round-3 R3-2's scheme case)."""
+    state = dec.files_state("u", "open FILE:///Users/damian/clients/acme-corp/q3.pdf")
+    assert "q3.pdf" in state and "acme-corp" not in state
+    state = dec.files_state("u", "open File:///Users/damian/clients/acme-corp/q3.pdf")
+    assert "q3.pdf" in state and "acme-corp" not in state
+
+
+def test_a_colon_or_dash_glued_lead_is_still_reduced() -> None:
+    """R3-2's glued lead, closed: a path glued to a preceding ``:`` or ``-`` reduces like a
+    spaced one -- ``path:/x``, ``to-/x`` -- and a drive letter's forward-slash ``C:/...``
+    comes through the same ``:`` lead. A lead glued to a WORD character stays refused (the
+    URL-tail and relative-path protection, pinned in the test below)."""
+    state = dec.files_state("u", "see path:/Users/damian/clients/acme-corp/q3.pdf")
+    assert "q3.pdf" in state and "acme-corp" not in state
+    state = dec.files_state("u", "to-/Users/damian/secret/q3.pdf")
+    assert "q3.pdf" in state and "secret" not in state
+    state = dec.files_state("u", "C:/Users/damian/clients/acme-corp/q3.pdf")
+    assert "q3.pdf" in state and "acme-corp" not in state
+
+
+def test_a_word_character_lead_is_a_url_tail_or_relative_path_and_stays() -> None:
+    """R3-2's recorded non-scrub: a ``/`` immediately after a word character is a URL's tail
+    or a relative path -- taking it would take ``and/or``, ``24/7`` and every URL's path with
+    it -- so it is pinned here as deliberate rather than left as an untested gap."""
+    url = "open https://example.com/Users/damian/clients/acme-corp/q3.pdf"
+    assert url in dec.files_state("u", url)
+
+
+def test_windows_root_spellings_survive_as_a_recorded_non_scrub() -> None:
+    """R3-2's other recorded non-scrub: the reduction serves the POSIX roots the memo names.
+    A backslash-rooted rule would walk into the escape character of every embedded command
+    and code fragment, so closing the form needs its own false-positive review; the spellings
+    are pinned as deliberate, not left untested. (The forward-slash drive form reduces through
+    the relaxed ``:`` lead, above.)"""
+    drive = r"save C:\Users\damian\clients\acme-corp\q3.pdf"
+    assert drive in dec.files_state("u", drive)
+    unc = r"copy \\server\share\notes.md"
+    assert unc in dec.files_state("u", unc)
+
+
+def test_a_vendor_token_with_a_dotted_tail_survives_as_a_base_name() -> None:
+    """R3-3's pin: the shape table's negative is "dotted artifact names must survive", and
+    it holds in the base-name position -- ``glpat-<tail>.md`` is not masked, so as a base name
+    it arrives whole; the no-dot spelling is masked wherever it stands. This is the exception
+    the ``_egress`` docstring names; pinned, not inferred."""
+    dotted = "saved ~/artifacts/" + LEAK_TOKEN + ".md"
+    state = dec.files_state("u", dotted)
+    assert LEAK_TOKEN + ".md" in state, "a dotted-tail vendor token is not masked"
+    assert "artifacts" not in state, "its directory still reduces"
+    plain = "saved ~/artifacts/" + LEAK_TOKEN
+    state = dec.files_state("u", plain)
+    assert LEAK_TOKEN not in state and REDACTION_MARKER in state, "the no-dot spelling masks"
+
+
+def test_a_relative_path_with_directories_survives_byte_identical() -> None:
+    """R3-4's pin: the reduction takes only rooted paths, so a relative path with directories
+    passes through whole -- a stated non-scrub, not an inference."""
+    relative = "which clients/acme-corp/q3.pdf file?"
+    assert relative in dec.files_state("u", relative)
