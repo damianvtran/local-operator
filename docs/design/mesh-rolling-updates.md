@@ -1,7 +1,7 @@
 # Mesh rolling updates — primary-driven, idle-gated, one node at a time
 
-Status: **design, pre-implementation**. Verified against `origin/main` @
-`1f0a1b909` (v0.67.16), 2026-10-05.
+Status: **design, pre-implementation**; trigger half: `mesh-update-propagation.md`
+(@ `ff97ee6996`). Verified against `origin/main` @ `1f0a1b909` (v0.67.16), 2026-10-05.
 
 This document hangs off `mesh-network.md` (the spine). It consumes, by name:
 
@@ -297,6 +297,15 @@ whole reason a standing grant is defensible here where a standing
 | `update_in_progress` | "an update is already running here (`<run-id or pid>`); retry when it settles." |
 | `busy` | "`<n>` session(s) are busy; the update waits — nothing has been touched." (A *state*, not a failure; §4.) |
 
+**The trigger's authority is settled (recorded 2026-10-09, `mesh-update-propagation.md`
+§2).** The operator's standing instruction — *"if the primary host updates, it will also
+trigger an update across the mesh in the same safe, rolling way which waits for runtimes to
+complete/idle and then updates them"* (2026-10-05) — IS the authority for a primary's
+decision to propagate its own completed update. His decisions on this note's open questions
+are recorded (PR thread, 2026-10-05: roll after the update settles, with the `--no-roll`
+escape; published releases from each device's own channel; re-engage displaced sessions);
+§9 items 1–3 are answered by that record; items 4–6 remain the implementation's to settle.
+
 **What is deliberately NOT decided here: transitive or network-wide grants.**
 The grant is per direction and per member. There is no "follow whoever
 updates" mode; an origin rolls exactly the members that granted *it*.
@@ -323,9 +332,11 @@ a per-network policy.**
   explicit decision about *this build*; the members' standing consents are the
   gate that matters, and a member without the grant is never touched.
 - **Scope.** For each active network the origin belongs to: the active members,
-  minus self, **minus members that do not hold the origin's `update` grant**
-  (recorded `skipped` (`no_grant`), with the grants remedy above), **minus
-  members that do not advertise the update feature string** (§5; recorded
+  minus self, **minus members whose own row refuses `net_update`** — the grant
+  is receiver-side and cannot be read, so the origin learns it from the member's
+  `not_authorised` answer (recorded `skipped` (`no_grant`), with the grants
+  remedy above; `mesh-update-propagation.md` §3), **minus members that do not
+  advertise the update feature string** (§5; recorded
   `skipped` (`predates_rolling_updates`)), **minus `kind: "pool"` members**
   (ephemeral pods are replaced, not updated — `mesh-compute-pool.md` §3.5;
   recorded `skipped` (`unsupported_kind`)). What
@@ -423,12 +434,12 @@ substituted where it exists:
    scan`, the same read `process._another_move_in_flight` uses,
    `process.py:1864-1873`) and records the live set. No viewer, no TUI, no
    operator needed on the member.
-2. **Drain.** Wait until **no session is `busy`**, bounded by the origin's
-   per-member wait (default 15 min, `--wait` up to 30 min, `MOVE_MAX_WAIT_S`
-   precedent). Each probe is fresh; a member that stays busy past the budget is
-   answered `busy` with its own reason and the origin **defers** it
-   (record `deferred`, code `busy`, detail `2 sessions busy since 10:02`) and
-   continues. The drain never
+2. **Drain.** Wait until **no session is `busy`** — the registry walk plus the
+   busy bit (`mesh-update-propagation.md` §4), re-checked under the update lock
+   before the install. The wait budget is the record's window: each ask is a
+   fresh probe, a member that answers `busy` is parked and re-asked on the
+   origin's cadence (record `deferred`, code `busy`, detail `2 sessions busy
+   since 10:02`) while the pass continues. The drain never
    stops, signals, or signs anything on the member — the fleet tool's own
    words, kept as the bound on this step.
 3. **Install.** Under the member's update lock, re-probe idle (a turn may have
@@ -787,10 +798,11 @@ updating via the relayed terminal carrier (deliberately excluded,
 
 ## 9. Open questions, each with my recommendation
 
-1. **The auto-trigger default.** *Recommend `auto`* (the operator's words),
-   with `--no-roll` and the `ask`/`off` policy values for anyone who wants
-   them. Evidence that would change it: a drill where an auto-roll on a large
-   fleet surprises its operator more than it helps.
+1. **The auto-trigger default — SETTLED: `auto`.** Confirmed by the operator
+   (2026-10-05, recorded in §2): roll after the origin's update settles,
+   `--no-roll` to escape, `off` for anyone who wants it; `ask` is deferred to
+   `mesh-update-propagation.md` §5. Watch for a drill where an auto-roll on a
+   large fleet surprises its operator more than it helps.
 2. **The standing channel: published releases only?** *Recommend yes* — the
    bound in §2 depends on it. If members must also follow source builds, that
    is a second, separately-consented channel with a per-device ref allowlist
@@ -807,10 +819,10 @@ updating via the relayed terminal carrier (deliberately excluded,
    real turns run on the family's members.
 5. **Order source.** *Recommend the network's member order* from the record's
    snapshot; a per-network priority list is a later, additive field.
-6. **Does the origin's driver belong in the relay or the CLI?** *Recommend the
-   relay for the catch-up hooks (§3: it is the only process that is present at
-   "next contact") and the CLI for the foreground pass* — the record is the one
-   state both share; the drill in §8.3 exercises both paths.
+6. **Does the origin's driver belong in the relay or the CLI? — SETTLED: the
+   relay alone.** The catch-up hooks need the process that is present at "next
+   contact", and a foreground driver dies with its terminal; the CLI reads the
+   record (`mesh-update-propagation.md` §4); the drill in §8.3 exercises both.
 
 ---
 
