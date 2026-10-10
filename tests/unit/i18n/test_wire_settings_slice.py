@@ -1,8 +1,9 @@
 """S1 (`wire.settings`): the registry's en copy is byte-identical to extraction time.
 
 The fixture next to this file is a SNAPSHOT of every user-facing string in the
-settings registry, taken from `origin/main` at the merge base of the slice
-(`22498f1a59`) BEFORE the extraction. This test re-derives the same
+settings registry, taken from `origin/main` BEFORE the extraction
+(`22498f1a59`; the branch is rebased onto `b92f4e6148`, byte-identical for
+`settings_io.py`). This test re-derives the same
 enumeration from the live registry and requires every rendered string to
 match the golden EXACTLY — the committed form of the slice's byte-identical
 proof, re-runnable by review and QA, and the trip-wire for any later edit that
@@ -52,7 +53,8 @@ def _live_slots() -> dict[str, str]:
             )
             if choice.description:
                 record(
-                    f"wire.settings.{_snake(setting.key)}.choice.{_snake(choice.value)}.description",
+                    f"wire.settings.{_snake(setting.key)}.choice."
+                    f"{_snake(choice.value)}.description",
                     choice.description,
                 )
     for section in settings_io.SECTIONS:
@@ -110,6 +112,9 @@ def test_provider_rows_render_the_product_name_from_the_preset() -> None:
     }
     assert labels, "expected provider rows"
     assert all(label.endswith(" endpoint") for label in labels)
-    assert catalogues.load_catalogue("en", "wire.settings")[
-        "wire.settings.local_providers.base_url.label"
-    ] == "{name} endpoint"
+    assert (
+        catalogues.load_catalogue("en", "wire.settings")[
+            "wire.settings.local_providers.base_url.label"
+        ]
+        == "{name} endpoint"
+    )

@@ -158,7 +158,16 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
         else:
             signature = ""
             pairs = ""
-        body.append(f'def {fname}({signature}) -> Msg:\n    return Msg("{key}", {{{pairs}}})\n')
+        statement = f'    return Msg("{key}", {{{pairs}}})'
+        if len(statement) <= 100:
+            call = statement
+        else:
+            # Black-compatible wrapping for a call too long for one line: the
+            # generated files must satisfy `black --check` AS GENERATED — the
+            # drift gate compares bytes, so a formatter pass after generation
+            # would make the check unreproducible (review round 2, MAJOR).
+            call = f'    return Msg(\n        "{key}",\n        {{{pairs}}},\n    )'
+        body.append(f"def {fname}({signature}) -> Msg:\n{call}\n")
     if body:
         # Imports only when something uses them: a namespace stub with zero
         # keys yet must not trip flake8's unused-import rule (F401) — the
