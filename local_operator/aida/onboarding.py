@@ -462,6 +462,16 @@ def cadence_allowed(config_dir: Path | str) -> bool:
     nothing spent, and the next positive evidence settles it.
     Fail-OPEN on error for the same population the migration exists for: a read
     failure must not silently stop an existing user's cadence.
+
+    THE BANNER VETO'S COUNTERPART, stated here so the asymmetry is deliberate
+    and not read as a bug: this gate — whether the cadence ARMS at all — stays
+    fail-open on a ledger read error, while the settle-time banner veto
+    (``Session._aida_cadence_banner_veto``) fails CLOSED on the same read. The
+    directions are each the safe one for their question: losing an existing
+    user's check-in entirely is worse than a check-in that runs, and raising a
+    banner for an install that has provably NOT met the operator is worse than
+    a check-in that lands unseen (it stays unread in her conversation either
+    way).
     """
     try:
         current = greeting_state(config_dir)
@@ -901,8 +911,15 @@ _TIP_TEXT: dict[str, str] = {
     ),
 }
 
-#: The clause wrapper, so her instructions can key on one stable prefix.
-TIP_CLAUSE_PREFIX = "Tip for a quiet day (use only if nothing needs action): "
+#: The clause wrapper, so her instructions can key on one stable prefix. It also
+#: ASKS FOR the reply prefix the banner veto keys on (``Tip:``): a tip is a SILENT
+#: row by decision (``proactive.TIP_REPLY_NOTIFIES`` — see its docstring for why),
+#: so the veto needs a machine-decidable way to recognise a tip reply. If the model
+#: forgets the prefix the damage is bounded: one banner of at most the five
+#: lifetime tips, and the banner budget still counts it.
+TIP_CLAUSE_PREFIX = (
+    "Tip for a quiet day (use only if nothing needs action): start the reply with " "`Tip:` — "
+)
 
 
 def _tip_applicable(config_dir: Path, tip_id: str) -> bool:

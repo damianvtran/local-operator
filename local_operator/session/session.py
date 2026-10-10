@@ -2828,6 +2828,30 @@ class Session:
         #: consumed exactly once by ``_finalize_attention_notify``.
         self._run_triggers: set[str] = set()
         self._run_notify_requested: bool = False
+        #: §14.3's wake-id record, beside the trigger record and consumed the
+        #: same way: EVERY ``details["wake_id"]`` (and every id a resume
+        #: catch-up folds, from ``details["wake_ids"]``) seen in this run's
+        #: inputs. Asked by the Aida banner veto
+        #: (:meth:`_aida_cadence_banner_veto`) to tell a check-in delivery (the
+        #: cadence / an escalation extra) from every other reason a run can
+        #: notify — a trigger check-in, a user-armed wake, a person's message —
+        #: so a quiet reply can only ever silence her own check-ins.
+        self._run_wake_ids: set[str] = set()
+        #: Whether this run carried an Aida-shaped resume catch-up whose folded
+        #: wake ids were NOT recorded (an empty/missing ``wake_ids`` on a
+        #: ``wake_catchup`` delivery). Set by ``_note_run_input``; read by
+        #: ``_aida_checkin_run`` as FAIL-CLOSED evidence: a lost fold means the
+        #: run cannot be proven free of Aida rows, so it is treated as bearing
+        #: them rather than as bearing none (QA round 1, Q1).
+        self._run_catchup_unidentified: bool = False
+        #: Whether THIS run's True publish is one of her check-in BANNERS, as
+        #: judged once in ``_finalize_attention_notify`` beside ``notify``
+        #: itself (``notify and _aida_checkin_run()``). The banner budget is
+        #: spent off this flag, never off the raw publish value: a plain user
+        #: turn of hers also publishes True (user semantics), and counting
+        #: three of those once vetoed the next actionable check-in's banner
+        #: (review MAJOR-2 — the budget bounds banners, not publishes).
+        self._run_aida_checkin: bool = False
         #: Whether the CURRENT run's end has been CONSUMED for publication.
         #: Set False at every turn start and True the moment
         #: ``_publish_attention_outcome`` takes the end event, so a teardown can
@@ -3962,12 +3986,25 @@ class Session:
         self._resume_catchup_text: str | None = None
         self._resume_catchup_sent = False
         #: §14.4: the OR of the folded schedules' notify bits, carried on the
-        #: aggregated catch-up delivery. False until a catch-up is prepared.
+        #: aggregated catch-up delivery. False until a catch-up is prepared;
+        #: re-read from the LIVE rows at take time (review round 2, R9) so the
+        #: legacy-row upgrade landing between load and take is not missed by
+        #: the install's first catch-up.
         self._resume_catchup_notify = False
-        #: Ids of the overdue schedules the catch-up text folds. The shim
-        #: swallows only these (see _deliver_wake_catchup); empty when there
-        #: is no catch-up pending, so the shim is then a pure passthrough.
+        #: Ids of the overdue schedules the catch-up text folds. The take
+        #: stamps them into the message and then CLEARS this set (review
+        #: round 2, R7): nothing else may keep swallowing fires for them, or
+        #: the row's next REAL occurrence matches a stale id and disappears
+        #: (a whole day's check-in lost, silently). Empty when there is no
+        #: catch-up pending.
         self._resume_catchup_ids: set[str] = set()
+        #: The load-time fires the catch-up still owes a swallow. Seeded with
+        #: the fold ids at prepare; each fire that matches consumes its id
+        #: ONCE (see :meth:`_deliver_wake_catchup`). Kept SEPARATE from the
+        #: fold set so the take can clear the fold without un-suppressing the
+        #: remaining same-batch phantom fires — and so the next occurrence,
+        #: one interval later, matches neither set and delivers normally.
+        self._resume_catchup_phantoms: set[str] = set()
         self._load_wake_schedules()
         # Rebuild this session's wake-index entry from the transcript on EVERY
         # open. The index (``local_operator.wakes.store``) is a derived file
@@ -11743,13 +11780,39 @@ class Session:
         result, resume catch-up, incident notice, harness chrome). Called from
         the pipeline head for the opening messages and from ``_drain_steering``
         for messages that folded in mid-turn — both are the run's inputs.
+
+        The delivery's ``wake_id`` (and, for a resume catch-up, the folded
+        ``wake_ids`` list its builder stamps) is recorded into
+        ``_run_wake_ids`` beside the trigger classes: the Aida banner veto needs
+        "which rows woke this run" at settle time, and the delivery row is the
+        only place that fact exists.
         """
         custom_type = getattr(message, "custom_type", None)
         if custom_type in (WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE):
             self._run_triggers.add(str(custom_type))
             details = getattr(message, "details", None)
-            if isinstance(details, Mapping) and details.get("notify"):
-                self._run_notify_requested = True
+            if isinstance(details, Mapping):
+                if details.get("notify"):
+                    self._run_notify_requested = True
+                wake_id = details.get("wake_id")
+                if isinstance(wake_id, str) and wake_id:
+                    self._run_wake_ids.add(wake_id)
+                folded = details.get("wake_ids")
+                if isinstance(folded, (list, tuple)):
+                    named = [str(item) for item in folded if isinstance(item, str) and item]
+                    self._run_wake_ids.update(named)
+                    if not named:
+                        # AN EMPTY FOLD IS MISSING EVIDENCE, NOT "no Aida rows":
+                        # the catch-up builder stamps every id it folded, so an
+                        # empty list means the fold was lost in flight (QA
+                        # round 1, Q1). Fail CLOSED — the veto and the budget
+                        # treat the run as Aida-bearing rather than as having
+                        # no check-in at all.
+                        self._run_catchup_unidentified = True
+                elif details.get("wake_catchup"):
+                    # A catch-up with no ``wake_ids`` key at all (a pre-fix
+                    # producer, a hand-built message): same fail-closed rule.
+                    self._run_catchup_unidentified = True
         elif custom_type is not None or getattr(message, "role", None) != "user":
             self._run_triggers.add("internal")
         else:
@@ -11784,10 +11847,16 @@ class Session:
           notifies exactly as today — a quiet delivery never suppresses it;
         * wake/monitor-only runs notify iff one of their deliveries asked to
           (``notify_requested``, the OR of their ``notify`` parameters);
+        * AIDA'S CHECK-IN QUIETING VETO, applied after the rule above and only
+          ever turning a True into a False: a run of HER session woken only by
+          cadence-family rows stays silent when the reply is the quiet
+          sentinel, a tip, or empty, when her greeting ledger is not settled,
+          or when her 24 h banner budget is spent (see
+          :meth:`_aida_cadence_banner_veto` for each condition and why);
         * ``kind == "error"`` — a provider/tool failure or a classified cut-off
-          — always notifies, whatever the origins were. A deliberate stop
-          (``interrupted``) stays suppressed by the consumers' kind filters
-          whatever this value says.
+          — always notifies, whatever the origins were, and is EXEMPT from the
+          veto. A deliberate stop (``interrupted``) stays suppressed by the
+          consumers' kind filters whatever this value says.
         """
         kind = (
             "error"
@@ -11796,7 +11865,7 @@ class Session:
         )
         triggers = set(self._run_triggers)
         non_user = triggers - {"user"}
-        return (
+        notify = (
             self._has_awaiting_user()
             or "user" in triggers
             or not (
@@ -11804,6 +11873,131 @@ class Session:
             )
             or self._run_notify_requested
         ) or kind == "error"
+        if notify and kind != "error" and self._aida_cadence_banner_veto(event):
+            notify = False
+        # THE BANNER-BUDGET STASH (review MAJOR-2): whether this publish is one
+        # of her check-in banners is judged HERE, once, beside ``notify``. The
+        # stamping seam in ``_publish_attention_outcome`` spends the budget
+        # only on this flag, so an ordinary True publish of hers (a user turn)
+        # cannot silently spend it and veto a later actionable banner.
+        self._run_aida_checkin = bool(notify) and self._aida_checkin_run()
+        return notify
+
+    def _aida_cadence_banner_veto(self, event: AgentEndEvent) -> bool:
+        """Whether one of HER check-in runs must stay SILENT despite notify=True.
+
+        THE OPERATOR'S REQUIREMENT, made decidable. With no surface attached
+        her check-in must be able to banner when something needs action — and
+        must NOT banner when there is nothing to say, because a daily
+        her daily "nothing needs your attention" banner is how a chief of staff gets muted, which
+        silences the actionable ones too. The row can only declare INTENT
+        (``WakeSchedule.notify``); the reply is the evidence, and this is the
+        one place that reads it. Conditions, all required:
+
+        * the run is EXCLUSIVELY one of her check-ins
+          (:meth:`_aida_checkin_run` — hers, wake-delivery-only inputs, no
+          waiting user, every recorded id cadence-family; an Aida-shaped
+          catch-up with a lost fold counts as hers, FAIL CLOSED). A trigger
+          check-in, a user-armed wake, a peer/job/user input, a mixed
+          user+cadence run — anything else — keeps its normal semantics; user
+          intent is never silenced by this (review MAJOR-3).
+
+        Then any ONE of these quiets it:
+
+        * her greeting ledger is not ``delivered``/``skipped`` — FAIL CLOSED
+          (design §3): an unreadable ledger is not evidence she has met the
+          operator, and the never-contact-before-first-engagement rule wins
+          over the banner;
+        * the rolling banner budget is spent (``MAX_BANNERS_PER_DAY`` in 24 h);
+        * the run's last assistant reply is empty, the quiet sentinel
+          (``proactive.reply_is_quiet`` — case/whitespace/wrapper tolerant), or
+          a tip reply (``proactive.reply_is_tip``; a silent row by decision,
+          reversible via ``TIP_REPLY_NOTIFIES``).
+
+        Runs on the event loop (``_emit``), so nothing here takes a lock: the
+        ledger and budget reads are the lock-free atomic file reads both
+        helpers document. Never raises by construction: every read degrades to
+        the value its docstring names (the ledger to veto, the budget to
+        allow), and a defect in a row id can at worst mis-classify a run the
+        same way ``_note_run_input`` already would have.
+        """
+        if not self._aida_checkin_run():
+            return False
+        from local_operator.aida import onboarding, proactive
+
+        try:
+            settled = onboarding.greeting_state(self._config_dir) in (
+                onboarding.GREETING_DELIVERED,
+                onboarding.GREETING_SKIPPED,
+            )
+        except Exception:  # noqa: BLE001 — fail CLOSED: see the docstring
+            logger.debug("aida: could not read the greeting ledger", exc_info=True)
+            settled = False
+        if not settled:
+            return True
+        try:
+            if proactive.banner_budget_spent(self._config_dir):
+                return True
+        except Exception:  # noqa: BLE001 — the budget is a net, never a reason to eat a banner
+            logger.debug("aida: could not read the banner budget", exc_info=True)
+        reply = self._run_last_assistant_text(event)
+        if not reply:
+            return True
+        return proactive.reply_is_quiet(reply) or proactive.reply_is_tip(reply)
+
+    def _aida_checkin_run(self) -> bool:
+        """Whether THIS run's notifying deliveries are EXCLUSIVELY her check-ins.
+
+        THE SHARED SCOPE of the quiet-reply veto and the banner budget (reviews
+        MAJOR-2/MAJOR-3). True only when every one of these holds:
+
+        * the session is hers (``_aida_duty``);
+        * no plain user message is queued-but-unconsumed (``awaiting_user``);
+        * every recorded wake id is cadence-family (the cadence row or an
+          ``aida-extra-N`` extra) — a user-armed wake or a trigger check-in
+          keeps its normal semantics;
+        * the run's trigger classes are ONLY wake deliveries: any user
+          message, peer note, job result, monitor delivery or internal input
+          beside them keeps normal semantics — user intent is never silenced
+          by the veto, and an ordinary publish never spends the budget;
+        * the run carries at least one recorded wake id — OR is an Aida-shaped
+          resume catch-up whose fold could not be named
+          (``_run_catchup_unidentified``), which FAILS CLOSED: a lost fold is
+          not evidence of no Aida deliveries (QA round 1, Q1).
+
+        Read-only and cheap (attribute reads plus one lazy import inside the
+        id branch); called at settle only, at most twice per run.
+        """
+        if not getattr(self, "_aida_duty", False):
+            return False
+        if self._has_awaiting_user():
+            return False
+        if set(self._run_triggers) != {WAKE_PROMPT_MESSAGE_TYPE}:
+            return False
+        wake_ids = set(self._run_wake_ids)
+        if not wake_ids:
+            return bool(self._run_catchup_unidentified)
+        from local_operator.aida import proactive
+
+        return all(proactive.is_cadence_family_row(wake_id) for wake_id in wake_ids)
+
+    def _run_last_assistant_text(self, event: AgentEndEvent) -> str:
+        """The run's LAST assistant reply text, or ``""`` when it produced none.
+
+        The veto's evidence, read off the end event's own messages (the run
+        that is settling). No ``has_entry`` filter — unlike the publish
+        anchor's scan, this is not naming a durable row, it is reading the
+        reply the operator would have been shown, and demanding a transcript
+        entry here would veto a real reply in any window where persistence
+        lagged the emission.
+        """
+        for message in reversed(event.messages):
+            if getattr(message, "role", None) != "assistant":
+                continue
+            text = getattr(message, "text", "")
+            if text:
+                return str(text)
+        return ""
 
     async def _publish_attention_outcome(self) -> None:
         from local_operator.session.attention import (
@@ -11969,6 +12163,30 @@ class Session:
                     cause=cause,
                     notify=notify,
                 )
+                if notify and self._run_aida_checkin:
+                    # THE BANNER BUDGET'S STAMP (``aida.proactive``
+                    # ``MAX_BANNERS_PER_DAY``): one timestamp per True publish
+                    # that IS one of HER CHECK-IN BANNERS — the flag
+                    # ``_finalize_attention_notify`` judged once, beside
+                    # ``notify`` (review MAJOR-2: stamping every True publish
+                    # let three ordinary publishes of hers spend the budget and
+                    # silently veto the next actionable banner). AFTER the row
+                    # is durable — a crash between the two must count a banner
+                    # that may not have been raised rather than forget one that
+                    # was — and OFF the loop, like every locked aida write: the
+                    # cross-process lock waits up to 5 s and this runs in a
+                    # turn's ``finally`` on a serving loop. Best-effort: a
+                    # stamp failure is bookkeeping, never the outcome it
+                    # describes. The deferred-publish path (store contention)
+                    # lands its row via ``_republish_journalled_outcome`` and
+                    # does not stamp; the cap errs loud by one in a shape that
+                    # needs the store to be contended twice.
+                    try:
+                        from local_operator.aida import proactive as _aida_proactive
+
+                        await asyncio.to_thread(_aida_proactive.note_banner_sent, self._config_dir)
+                    except Exception:  # noqa: BLE001 — see above
+                        logger.debug("aida: could not stamp the banner budget", exc_info=True)
             except AttentionWriteDeferred as deferred:
                 # CONTENTION OUTLASTED THE STORE'S BOUNDED RETRY, and the completion
                 # is STILL not lost -- but "the next boot re-imports it" was never
@@ -13004,6 +13222,9 @@ class Session:
         # exactly once, at turn end, by ``_finalize_attention_notify``.
         self._run_triggers = set()
         self._run_notify_requested = False
+        self._run_wake_ids = set()
+        self._run_catchup_unidentified = False
+        self._run_aida_checkin = False
         for message in initial:
             self._note_run_input(message)
         # Cleared at the head of EVERY turn, alongside the outcome, so a cause
@@ -20086,8 +20307,14 @@ class Session:
         # The ids the catch-up text AGGREGATES. The shim uses this to swallow
         # only these schedules' fires — a wake that comes due later is NOT in
         # the folded text, so swallowing it would lose its message entirely
-        # (review round 3, M1).
+        # (review round 3, M1). The take clears it once the ids are stamped
+        # into the message (review round 2, R7); the leftover load-time fires
+        # are tracked separately as phantoms.
         self._resume_catchup_ids = {m["schedule"].id for m in missed}
+        # The swallow bookkeeping starts here: every folded row still OWES its
+        # load-time fire (the pump re-armed each to now + grace), and the shim
+        # must swallow each exactly once — see _deliver_wake_catchup.
+        self._resume_catchup_phantoms = set(self._resume_catchup_ids)
         # §14.4: the folded delivery carries the OR of the aggregated
         # schedules' notify bits, so a catch-up of reminders the user asked to
         # be told about keeps notifying while an all-quiet set stays quiet.
@@ -20116,6 +20343,23 @@ class Session:
         if catchup is not None:
             self._deliver_resume_catchup(catchup)
 
+    def _catchup_notify_from_live_rows(self) -> bool:
+        """The fold's notify intent, re-read from the scheduler's CURRENT rows.
+
+        Ours to keep honest across the load→take window (review round 2, R9):
+        ``_prepare_missed_wake_catchup`` computes the OR from the row objects
+        load returned, and a legacy cadence row (``notify=False``) is upgraded
+        in place by the first reconcile AFTER load — so the first catch-up an
+        upgraded install ever sends would carry the stale False and stay
+        silent one fire longer. Never raises: an unreadable scheduler is no
+        reason to change a delivery's shape, so the prepared value stands.
+        """
+        try:
+            live = {row.id: row for row in self._wake.schedules}
+        except Exception:  # noqa: BLE001 — see the docstring
+            return False
+        return any(bool(live[i].notify) for i in self._resume_catchup_ids if i in live)
+
     def _take_resume_catchup(self) -> CustomMessage | None:
         """Build the catch-up message once grace has passed, else None.
 
@@ -20134,10 +20378,13 @@ class Session:
         text, self._resume_catchup_text = self._resume_catchup_text, None
         self._resume_catchup_sent = True
         self._missed_wake_occurrences = {}
-        # The fold set is NOT cleared here: the catch-up shim consumes it one
-        # fire at a time (several folded fires arrive in the same pump), and
-        # a later PUNCTUAL fire of a recurring schedule must find its id gone
-        # so it delivers normally instead of being swallowed or doubled.
+        # The notify bit is re-read from the LIVE rows first (review round 2,
+        # R9): prepare computed it from the rows LOAD found, and the legacy-row
+        # upgrade runs on the first reconcile AFTER load — without this the
+        # install's first catch-up would carry the pre-upgrade False.
+        self._resume_catchup_notify = (
+            self._resume_catchup_notify or self._catchup_notify_from_live_rows()
+        )
         # The receipt event fires HERE, at take time, so both delivery modes
         # (own turn via ``_deliver_resume_catchup``, or inlined ahead of a user
         # turn in ``prompt``) paint the expandable catch-up line. It is a
@@ -20146,15 +20393,36 @@ class Session:
         # (``wake_catchup``), so this event is the only place the missed wakes
         # are surfaced.
         self._emit_nowait(WakeDeliveredEvent(text=text, catchup=True))
-        return CustomMessage(
+        message = CustomMessage(
             custom_type=WAKE_PROMPT_MESSAGE_TYPE,
             attribution="user",
             details={
                 "wake_catchup": True,
                 "text": text,
                 "notify": self._resume_catchup_notify,
+                # §14.3: WHICH schedules this fold stands for. ``_deliver_wake``
+                # stamps one ``wake_id`` per live delivery, but the catch-up
+                # aggregates several rows into one message, and the Aida banner
+                # veto needs the ids to tell her check-in catch-up (all
+                # cadence-family → reply-aware) from any fold that includes a
+                # user-armed wake (→ never silenced). Stamped HERE, before the
+                # set is spent below — this is the only reader of the fold set
+                # once the take has run.
+                "wake_ids": sorted(self._resume_catchup_ids),
             },
         )
+        # THE FOLD IS SPENT HERE, and only here (review round 2, R7) — AFTER
+        # the stamp above, the one place the folded ids are needed. From this
+        # point on no fire may be swallowed BY THE FOLD: a stale id left
+        # behind is matched by the row's NEXT REAL occurrence (24 h for the
+        # cadence), whose fire takes the swallow branch — no turn, no banner,
+        # no error, one whole day's check-in lost until the one after. The
+        # load-time fires still owed (the pump re-armed each folded row to
+        # now + grace) stay covered by ``_resume_catchup_phantoms``, consumed
+        # one fire at a time — so a same-batch fire arriving after this take
+        # is still swallowed, while an occurrence one interval later is not.
+        self._resume_catchup_ids = set()
+        return message
 
     def _deliver_resume_catchup(self, catchup: CustomMessage) -> None:
         """Deliver the catch-up as its own turn (or a steering message mid-turn).
@@ -20177,15 +20445,16 @@ class Session:
     async def _deliver_wake_catchup(self, due: DueWake) -> None:
         """Deliver hook while the resume catch-up is pending.
 
-        Swallows ONLY the fires the catch-up text aggregates (``due.schedule.id
-        in _resume_catchup_ids``): those are covered by the folded prompt, and
-        the schedule is still advanced + persisted by pump, so nothing
-        re-fires. Any OTHER fire — one that came due after load, so its message
-        is not in the folded text — falls through to a normal delivery;
-        swallowing it would lose the message entirely (review round 3, M1).
-        After the catch-up is sent the hook is a plain passthrough.
+        Swallows ONLY the catch-up's load-time fires (``due.schedule.id in
+        _resume_catchup_phantoms``): those are covered by the folded prompt,
+        and the schedule is still advanced + persisted by pump, so nothing
+        re-fires. Any OTHER fire — one that came due after load, so its
+        message is not in the folded text — falls through to a normal
+        delivery; swallowing it would lose the message entirely (review round
+        3, M1). Once every phantom has fired the hook is a plain passthrough,
+        and the row's NEXT occurrence delivers normally (review round 2, R7).
         """
-        if due.schedule.id in self._resume_catchup_ids:
+        if due.schedule.id in self._resume_catchup_phantoms:
             # The fire is folded into the catch-up text, so it never gets its
             # own delivery — pump already advanced the schedule. If no other
             # trigger has delivered the catch-up yet, deliver it HERE, on the
@@ -20197,17 +20466,18 @@ class Session:
             # calls). A resumed TUI session delivers the catch-up ahead of
             # its first prompt instead.
             #
-            # The fold set is consumed PER FIRE, not cleared at take: several
-            # folded fires arrive in the SAME pump (every overdue schedule was
-            # re-armed to the same deadline), and the second must still be
-            # swallowed after the first delivered the catch-up — while a
-            # LATER punctual fire of a recurring schedule, whose id has been
-            # consumed by then, delivers normally instead of being lost.
+            # THE PHANTOM IS CONSUMED PER FIRE, the fold only by its take
+            # (review round 2, R7): several folded fires arrive in the SAME
+            # pump (every overdue schedule was re-armed to the same deadline)
+            # and each must be swallowed exactly once — after the first
+            # delivered the catch-up, the rest still must not deliver (their
+            # content is in the folded text), while an occurrence one
+            # interval later matches neither set and delivers normally.
             if not self._resume_catchup_sent:
                 catchup = self._take_resume_catchup()
                 if catchup is not None:
                     self._deliver_resume_catchup(catchup)
-            self._resume_catchup_ids.discard(due.schedule.id)
+            self._resume_catchup_phantoms.discard(due.schedule.id)
             return
         await self._deliver_wake(due)
 
