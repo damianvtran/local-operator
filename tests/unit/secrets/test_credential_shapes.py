@@ -6047,7 +6047,7 @@ _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0e
 #:    That is the whole safety claim of this round: the enforcement narrowed the
 #:    release class the branch introduced and touched nothing the branch had not.
 #:
-#: 2. **The corpus grew by ELEVEN positives and ONE negative, which is what moves the
+#: 2. **The corpus grew by TEN positives and ONE negative, which is what moves the
 #:    constant.** The eleven are the DIGIT-CARRYING and LOWERCASE-BASE half of the
 #:    residual class plus the primitive-argument spellings — all of them released WHOLE
 #:    with no hit at all before this round, and all of them things the corpus had no row
@@ -6228,14 +6228,16 @@ _CORPUS_GRADING_DIGEST = "f1707c1f7bc4b8448998f19e32988b55fdbbb313f76f9ff7ae46de
 #:     change releases only a tail of 8-15 lowercase letters with no separator, and the
 #:     corpus's smallest letters-only POSITIVE is the 16-letter ``pk-`` round-1 repro.
 #:
-#: 14. **The corpus change is the specification:** NINE positives (``VENDOR_REAL_KEY_POSITIVES``:
+#: 14. **The corpus change is the specification:** TEN positives (``VENDOR_REAL_KEY_POSITIVES``:
 #:     realistic mixed-case/digit keys, the 16-letter ceiling, a long unbroken lowercase
-#:     tail, camelCase and digit-carrying identifiers that the rule's bet keeps masking) and
-#:     FIVE negatives (``VENDOR_IDENTIFIER_NEGATIVES``: the reported identifier in a bare,
-#:     ``def``, dotted-call, JSON-key and TypeScript-export position). ``POSITIVE_CASES``
-#:     moves 313 -> 322 and ``NEGATIVE_CASES`` 214 -> 219. The five negatives are MASKED
-#:     under ``origin/main``'s module and released under this one.
-_CORPUS_GRADING_DIGEST = "7fd06391f8d30231ffb2d1b453e0d72f0c95588c00784bf1ad7796e3fc0d67e0"
+#:     tail, camelCase and digit-carrying identifiers that the rule's bet keeps masking, and
+#:     one ``<prefix>_<word>=<value>`` pair that agent review R1 requires to keep masking)
+#:     and SIX negatives (``VENDOR_IDENTIFIER_NEGATIVES``: the reported identifier in a bare,
+#:     ``def``, dotted-call, JSON-key, TypeScript-export and spaced-assignment position).
+#:     ``POSITIVE_CASES`` moves 313 -> 323 and ``NEGATIVE_CASES`` 214 -> 220. The six
+#:     negatives are MASKED under ``origin/main``'s module and released under this one; the
+#:     ``=value`` positive is masked under BOTH.
+_CORPUS_GRADING_DIGEST = "c878ef5cc134d864afeda25990359d0af5e0d4ebb78a75d990a361f34146dcb3"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -8206,6 +8208,23 @@ def test_a_real_vendor_key_still_masks_beside_the_identifier_release(case: Case)
     """The release is bounded: case, a digit, or 16+ letters keeps the mask."""
     masked, hits = scrub_shapes_with_hits(case.text)
     assert masked != case.text and hits, case.reason
+
+
+def test_a_one_word_name_glued_to_a_value_is_not_released() -> None:
+    """Agent review R1: the identifier release is for the BARE word, never ``word=value``.
+
+    The first cut mirrored the two-word form's ``=value`` arm and so let the VALUE of a
+    ``<prefix>_<word>=<secret>`` pair through where the base masked it whole. Asserted on
+    the value itself (not just "something masked") and against the bare word beside it.
+    FAIL-ON-REVERT: re-adding the ``=`` arm to ``_VENDOR_TAIL_IS_ONE_WORD``.
+    """
+    value = "Hunter2" + "Secret99"
+    word = "availab" + "le"
+    pair = "gsk" + "_" + word + "=" + value
+    assert value not in scrub_shapes(pair)
+    assert value not in scrub_shapes("export X=" + pair)
+    bare = "gsk" + "_" + word
+    assert scrub_shapes(bare) == bare
 
 
 def test_the_identifier_release_ceiling_is_exactly_fifteen_letters() -> None:

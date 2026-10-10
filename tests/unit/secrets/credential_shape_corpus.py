@@ -632,6 +632,7 @@ VENDOR_IDENTIFIER_CONTEXTS: tuple[tuple[str, str], ...] = (
     ("cfg = provider.{x}(cfg)", "a dotted call"),
     ('{{"{x}": true}}', "a JSON key"),
     ("export const {x} = false;", "a TypeScript export"),
+    ("{x} = True", "a spaced assignment (the bare word, no `=` against it)"),
 )
 
 #: The corpus rows: the reported identifier in each source position. Deliberately FEW —
@@ -692,6 +693,14 @@ VENDOR_REAL_KEY_POSITIVES: tuple[Case, ...] = (
     ),
     Case("xai" + "_" + "availab" + "leProbeFlag", "a camelCase tail is a token by the rule's bet"),
     Case("xai" + "_" + "availab" + "le2", "a tail carrying a digit is a token by the rule's bet"),
+    # Agent review R1: the ``=value`` spelling is NOT released. A one-word name glued to
+    # ``=<value>`` is masked whole, as it was before the identifier form existed, so the
+    # VALUE of a ``<prefix>_<word>=<secret>`` pair never survives. Both halves pinned: the
+    # pair masks (here), and the bare word beside it is released (the matrix rows).
+    Case(
+        "gsk" + "_" + "availab" + "le" + "=" + "Hunter2" + "Secret99",
+        "a one-word name followed by =VALUE keeps the base masking: the value is not released",
+    ),
 )
 
 
