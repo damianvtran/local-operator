@@ -690,8 +690,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         default="127.0.0.1",
         help=(
-            "Host address (default: 127.0.0.1). This API has no authentication; "
-            "use a non-loopback address only behind trusted access controls."
+            "Host address (default: 127.0.0.1). Loopback-only by policy: every "
+            "non-loopback bind is refused. File serving is unclamped on loopback "
+            "connections; reach this API remotely through an explicit tunnel or an "
+            "SSH port-forward."
         ),
     )
     serve_parser.add_argument(
@@ -9489,6 +9491,60 @@ def _refuse_serve_bind(host: str, port: int, exc: OSError) -> int:
     return 1
 
 
+def _serve_bind_is_loopback_only(host: str) -> bool:
+    """Whether ``host`` may be a serve bind: loopback-only, strictly (RFC §3.1).
+
+    Accepts ``127.0.0.0/8``, ``::1``, ``localhost``, and a NAME only when every
+    address it resolves to is loopback -- a name that resolves anywhere else, or
+    nowhere, is refused. Everything the answer depends on lives in one spelling:
+    the literal half is the per-connection gate's own predicate
+    (:func:`~local_operator.server.utils.static_roots.is_loopback_host`), so the
+    bind policy and the request policy cannot drift apart.
+
+    There is deliberately NO override: the file server serves unclamped on
+    loopback connections, so the listener itself must never be reachable beyond
+    them (no CLI flag re-admits a wide bind; a test pins that).
+    """
+    from local_operator.server.utils.static_roots import is_loopback_host
+
+    name = host.strip().lower()
+    if not name:
+        return False
+    if is_loopback_host(name):
+        return True
+    try:
+        infos = socket.getaddrinfo(name, None)
+    except OSError:
+        return False
+    # ``str(...)``: getaddrinfo's host part is typed ``str | int`` by the union of
+    # sockaddr shapes; a non-string would not be loopback anyway (fail-closed).
+    addresses = {str(info[4][0]) for info in infos}
+    if not addresses:
+        return False
+    return all(is_loopback_host(address) for address in addresses)
+
+
+def _refuse_non_loopback_bind(host: str, port: int) -> int:
+    """Report a serve bind this process refuses by POLICY, naming the remedy.
+
+    Same shape as :func:`_refuse_serve_bind` (exit 1, the address named),
+    because to the operator it is the same class of problem: a listener that
+    will not exist. The difference is that no spelling of this address would
+    have worked -- the policy is strict, and the remedy is not a flag but a
+    different path to the server: bind loopback, then reach it through an
+    explicit tunnel or an SSH port-forward.
+    """
+    # Brackets for a v6 literal so the address stays unambiguous (``:::1111``).
+    display = f"[{host}]" if ":" in host else host
+    print(
+        f"\n\033[1;31mError: cannot bind http://{display}:{port}: the serve API is "
+        "loopback-only by policy; bind 127.0.0.1 (or ::1 / localhost) and reach "
+        "it through an explicit tunnel or an SSH port-forward.\033[0m",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def adopt_serve_socket(fd: int, host: str) -> socket.socket:
     """Take over an already-bound listener handed across ``execve``.
 
@@ -9534,6 +9590,10 @@ def adopt_serve_socket(fd: int, host: str) -> socket.socket:
 def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
     """Start the FastAPI server using uvicorn.
 
+    The bind address is refused unless it is loopback-only, with no override
+    flag (RFC §3.1, :func:`_serve_bind_is_loopback_only`) -- for the fresh bind,
+    the ``--reload`` probe, and an adopted ``--listener-fd`` alike.
+
     ``uvicorn`` is imported HERE, not at module scope: the HTTP facade lives
     behind the ``server`` extra, so a default install (and every non-server
     entry point) must be able to ``import local_operator.cli`` without
@@ -9559,6 +9619,14 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
     depends on, and the identity check a discovery does (``/health``'s
     ``instance_id``, never the record's port) is what admits a candidate.
     """
+    # STRICT bind policy, before anything binds or adopts (RFC §3.1): the serve
+    # API is loopback-only, with no override flag -- the file server answers
+    # unclamped on loopback connections, so the listener must never be reachable
+    # beyond them. Covers the fresh bind, the --reload probe, and the
+    # --listener-fd adopt (whose socket is verified again below).
+    if not _serve_bind_is_loopback_only(host):
+        return _refuse_non_loopback_bind(host, port)
+
     try:
         import uvicorn
     except ImportError:
@@ -9595,6 +9663,21 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
             listener = adopt_serve_socket(listener_fd, host)
         except OSError as exc:
             print(f"--listener-fd {listener_fd} could not be adopted: {exc}", file=sys.stderr)
+            return 1
+        # The host ARGUMENT passed the policy above; verify the socket's REAL
+        # bound address too. Adopting is the one path where the argument is not
+        # the truth -- the descriptor was bound by a previous process image,
+        # possibly an older build -- and "no override path" (§3.1) must hold for
+        # the address actually served on, not for the spelling that was asked
+        # for. Closed on refusal: an unadopted wide listener must not sit open.
+        bound_host = str(listener.getsockname()[0])
+        if not _serve_bind_is_loopback_only(bound_host):
+            listener.close()
+            print(
+                f"\n\033[1;31mError: cannot adopt a listener bound to {bound_host}: "
+                "the serve API is loopback-only by policy.\033[0m",
+                file=sys.stderr,
+            )
             return 1
         resolved_port = listener.getsockname()[1]
     elif not reload:

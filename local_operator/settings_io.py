@@ -4218,13 +4218,17 @@ SETTINGS: tuple[Setting, ...] = (
         default=[],
         empty_unsets=True,
         validate_value=_validate_static_roots,
-        # The consequence is the point of the row: every entry WIDENS what an
-        # unauthenticated local caller can trigger a read of.
-        warning="widens what the local server will serve to any local caller",
+        # The consequence is now scoped (file-serving RFC §3, core P1): this row
+        # is consulted only by the rooted FALLBACK posture -- a connection the
+        # server cannot prove is loopback. The default posture serves any
+        # readable file, so setting this no longer widens the normal path, and
+        # the daemon itself can no longer be bound beyond loopback at all.
+        warning="only applies to the fallback (non-loopback) posture",
         help=(
-            "Empty = only the built-in roots. Comma-separated absolute directories; "
-            "image/audio/video/HTML files inside them can be previewed. Dot-directories "
-            "below a root are never served."
+            "Empty = only the built-in roots. Consulted only by the fallback "
+            "posture (a connection that is not loopback): normal loopback previews "
+            "can serve any readable file. Comma-separated absolute directories; "
+            "dot-directories below a root are never served."
         ),
         placeholder="~/Documents, /Volumes/data/reports",
     ),

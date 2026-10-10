@@ -178,22 +178,29 @@ made here.
 `/v1/static/*` is the one of those four that now carries its own hardening
 (`server/utils/static_roots.py`), because it is the one that reads arbitrary files:
 
-- **Served roots.** `path` must resolve (symlinks followed) to a regular file inside
-  the agent home, `<config>/sessions`, `<config>/uploads`, the working directory of a
-  running session, or a root added through `static.roots` (settings page /
-  `config.yml`) or `LOCAL_OPERATOR_STATIC_ROOTS`. A session whose working directory is
-  `$HOME` or contains it adds nothing (serving `~` is an explicit `static.roots`
-  opt-in), and a registered agent's working directory is not a source at all (it is
-  writable through the ungated `PATCH /v1/agents/<id>`). A configured root that
-  contains `$HOME` (`/`, `/Users`, `~/..`) is refused. Anything else is a `403` that
-  does not say whether the file exists and names the remedy (`static.roots`); `..` is
-  refused outright, and a dot-directory below a root (`~/.ssh` under a root at `~`) is
-  never served.
+- **The bound is the connection, not a directory list.** `lop serve` refuses every
+  non-loopback bind (`0.0.0.0`, `::`, LAN addresses, non-loopback-resolving names:
+  exit 1, no override flag), and the route itself serves UNCLAMPED only on a
+  connection the kernel accepted on a loopback address: `path` may be any absolute
+  path that resolves (symlinks followed) to a readable regular file. Anything else
+  -- a non-loopback, unknown or missing accepted address (fail-closed) -- gets the
+  v0.68.23 clamp: the file must resolve inside the agent home, `<config>/sessions`,
+  `<config>/uploads`, the working directory of a running session, or an explicit
+  root (`static.roots` / `LOCAL_OPERATOR_STATIC_ROOTS`; the settings row is now
+  labelled as fallback-only). In that fallback a session whose working directory is
+  `$HOME` or contains it adds nothing, a registered agent's working directory is not
+  a source at all (it is writable through the ungated `PATCH /v1/agents/<id>`), a
+  configured root that contains `$HOME` (`/`, `/Users`, `~/..`) is refused, and a
+  dot-directory below a root (`~/.ssh` under a root at `~`) is never served; the
+  `403` does not say whether the file exists and names the remedy. `..` is refused
+  outright in both postures. This design is
+  `docs/design/file-serving-and-surface-convergence.md` §3.
 - **Host check.** A `Host` that is a DNS name other than `localhost` (or the
   daemon's own `--host`) is refused with `403`, so a DNS-rebinding page, which is
   same-origin and needs no CORS grant, cannot use the route. IP literals pass (the
-  app dials `http://127.0.0.1:<port>`); a wildcard bind (`--host 0.0.0.0`) turns the
-  check off.
+  app dials `http://127.0.0.1:<port>`); a wildcard/empty announced host fails
+  closed -- only IP literals and `localhost` are admitted and a DNS name is refused
+  (the former wildcard-bind bypass is deleted).
 - **Response policy.** Every response, errors included, carries `nosniff` and a
   `Content-Security-Policy` ending in `frame-ancestors` (the app only), and no CORS
   grant is made to an origin that is not on the admitted allowlist -- including, unlike
@@ -202,13 +209,15 @@ made here.
 - **Still open:** the routes are unauthenticated. The UI embeds them by `src`, which
   cannot carry a bearer; the fix is a short-lived signed query token minted by an
   authenticated endpoint and checked here, and it needs the UI to request it. Also
-  open: a symlink swapped inside a writable root between the check and the open
-  (TOCTOU), and a hardlink inside a root to a file outside it.
-- **Known regression until the UI follow-up lands.** Every UI consumer that passes a
-  user- or agent-named path (composer thumbnails, message attachments, video/HTML
-  previews, canvas file viewer) gets a `403` for a file outside the roots above.
-  local-operator-ui reading those bytes over IPC retires the dependency; until then the
-  remedy is `static.roots`.
+  open: a symlink swapped between the check and the open (TOCTOU -- robustness
+  rather than a boundary once no root list bounds the read; the recorded fix is
+  Phase 3), and the accepted `<img>`-observable existence/dimension residual.
+- **The former 403 class is retired.** Every UI consumer that passes a user- or
+  agent-named path (composer thumbnails, message attachments, video/HTML previews,
+  canvas file viewer) is served on loopback -- `~/Downloads` picks, session
+  scratchpads, agent output anywhere -- so the `static.roots` remedy is no longer
+  needed in normal operation. What stays open is authentication (above), which the
+  signed-URL phase brings.
 
 The deprecated `/v1/ws` socket surface was also in that ungated set and is now
 **gone** — route, mount and fan-out — so it is no longer listed. This is a

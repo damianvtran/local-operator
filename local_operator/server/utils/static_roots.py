@@ -11,46 +11,92 @@ security rounds recorded this as S-6 / F6 (``docs/design/turn-supplements.md``
 §4.1, §8); the UI-side fix (local-operator-ui PR #931) closes the app's own door
 only.
 
-This module closes the route's side of it, in two parts that need no UI change:
+THE ROUTE'S BOUND IS THE CONNECTION, NOT A DIRECTORY LIST (provenance). Core
+#2134 (v0.68.23) closed the route's side of it with a served-root allowlist.
+Under the operator's direction of 2026-10-10 (quoted in
+``docs/design/file-serving-and-surface-convergence.md``) the allowlist's
+*rationale* was replaced by the loopback condition, because the clamp refused
+exactly the paths the product exists to preview (``~/Downloads`` picks, session
+scratchpads under ``~/.local-operator``, agent output anywhere). The design is
+``docs/design/file-serving-and-surface-convergence.md`` §3 (D1-D3); this module
+keeps the #2134 hardening, which becomes MORE load-bearing without the roots.
 
-1. **A served-root allowlist** (:func:`resolve_servable`). ``path`` must resolve,
-   symlinks followed, to a regular file INSIDE one of the roots below.
+This module carries both halves that need no UI change:
+
+1. **The file predicate** (:func:`resolve_servable`), in two postures chosen per
+   CONNECTION, never per configuration -- **general** (unclamped; served only on
+   loopback-accepted connections) and **rooted** (the v0.68.23 clamp, kept as
+   the fail-closed fallback). The per-connection choice lives in
+   :func:`connection_mode` / :func:`is_loopback_host`; the bind-refusal half
+   lives in ``cli.py``.
 2. **A response policy** (:func:`response_policy`): ``nosniff``, a CSP, and a
    ``frame-ancestors`` naming only the app. The CORS half lives in the app
    middleware that calls this module (``server/app.py``).
 
+THE TWO POSTURES, and what enforces them (RFC §3.1-§3.2):
+
+* **General (loopback) mode.** When the connection's accepted local address is
+  loopback -- ``request.scope["server"]``, which uvicorn sets from the socket
+  the kernel accepted on, so no header or path can influence it -- ``path`` may
+  be any absolute path that resolves to a readable regular file; the per-route
+  mime allowlists are unchanged. No root list, and no dot-component rule: the
+  rule was an inner bound of the root list, and under no roots it cannot be a
+  boundary while it refuses session-scratchpad paths. Measured on the pinned
+  uvicorn (0.54, macOS): a loopback client reports a loopback address even to a
+  wildcard bind, and a LAN client reports the LAN address -- so the condition
+  holds even for a bind that leaked through a future embedding path.
+* **Rooted mode (the fallback).** Every other connection -- non-loopback,
+  unknown, or a missing ``scope["server"]`` (fail-closed) -- gets the v0.68.23
+  behaviour: the roots below, the dot rule, the live-session arm.
+
+The bind is refused at the source as well: ``lop serve`` refuses every
+non-loopback bind (``0.0.0.0``, ``::``, LAN addresses, non-loopback-resolving
+names -- exit 1, no override flag) and checks a ``--listener-fd`` adopt too;
+the per-connection gate exists because a future composition path that never
+sees the CLI flag (a bare ``uvicorn local_operator.server.app:app``, an
+unannounced embed) must still not serve unclamped to a non-loopback connection.
+
+An SSH port-forward or a local tunnel IS unclamped: the connection is
+loopback-accepted, which is exactly the condition -- and whoever holds the
+forward reads exactly what this account can read. That is the operator's
+"explicit tunnels" path, stated rather than hidden (RFC §3.4).
+
 WHAT IS STILL OPEN, stated so nobody reads this as more than it is: the routes
 remain unauthenticated. The UI loads them through ``<img>``/``<video>``/
 ``<iframe src>``, which cannot carry an ``Authorization`` header, so the bearer
-cannot simply be required. The follow-up is a short-lived signed query token
+cannot simply be required; the follow-up is a short-lived signed query token
 minted by an authenticated endpoint and verified here, which needs the UI lane
-to request it. Until then a hostile local caller can still *trigger* a read of
-anything inside the roots below -- and, since an ``<img>`` reports ``load`` /
-``error`` and ``naturalWidth``/``naturalHeight`` back to the page, still
-*observe* whether an image inside them exists, decodes and how many pixels it
-has; what no longer happens is reading a response cross-origin, or reaching
-anything outside the roots below. Also open, all of them
-needing write access INSIDE a root or a same-user local process (who could read
-the file directly anyway), so none is closed here:
+to request it (RFC §4, Phase 2). Until then:
+
+* a hostile local PAGE can still *trigger* a read of anything a loopback
+  connection serves -- and, since an ``<img>`` reports ``load``/``error`` and
+  ``naturalWidth``/``naturalHeight`` back to the page, still *observe* which
+  image paths (of allowlisted media types) exist, decode and how large they
+  are -- across the whole disk now, not a root list. Bytes cannot be read
+  cross-origin (the CORS grant is stripped) and the Host check is what keeps a
+  rebinding page from becoming same-origin (§3.4). Accepted residual, RFC §7e;
 
 * TOCTOU: :func:`resolve_servable` validates a realpath and the handlers then
-  open BY PATH, so a symlink swapped inside a writable root between the check and
-  the open is followed -- and it is not a narrow window: a 30k-request swap run
-  (security round 1, 2026-10-10) won ~1 request in 4 (7,343 served the outside
-  file), while swapping an intermediate symlink never won (0 of 15,872, the
-  handler opening the already-resolved path). The case that matters is a root
-  shared with another OS user (``static.roots`` pointing at a shared directory);
-  the fix is an ``O_NOFOLLOW``/``fstat`` open streamed from the fd, which needs a
-  custom response and is recorded as follow-up rather than done here;
-* hardlinks: a hardlink inside a root to a file outside it is indistinguishable
-  from a file that lives there, and no realpath test can tell;
+  open BY PATH, so a symlink swapped between the check and the open is followed
+  -- not a narrow window: a 30k-request swap run (security round 1, 2026-10-10)
+  won ~1 request in 4 (7,343 served the outside file), while swapping an
+  intermediate symlink never won (0 of 15,872, the handler opening the
+  already-resolved path). In general mode the swap target is the same class of
+  file the requester may ask for directly, so what remains there is robustness
+  (a swap to a FIFO/device can hang a worker); in rooted mode it is the
+  shared-root boundary case as before. Fix shape unchanged (``O_NOFOLLOW`` open
+  + ``fstat`` + stream-from-fd), scheduled Phase 3 (RFC §7b), not blocking;
+* hardlinks: a hardlink is indistinguishable from a file that lives where it is,
+  and no realpath test can tell. Moot for confidentiality under the no-roots
+  rationale (any same-user process reads the target directly; a page cannot
+  create links) -- noted, no work (RFC §7c);
 * Host validation covers DNS NAMES only (:func:`host_is_acceptable`): an IP
   literal Host is admitted, since a rebinding page cannot present one. It is also
   scoped to this module's routes -- :func:`is_static_path` is what the middleware
   gates on, so the rest of the legacy surface (``/v1/agents``, ``/health``) still
   answers under a rebinding Host (security round 1 measured it; out of scope).
 
-THE ROOTS, and why each is there (all compared as realpaths):
+THE ROOTS (ROOTED MODE ONLY), and why each is there (all compared as realpaths):
 
 * the agent home (``paths.agent_home_dir()``, ``~/local-operator-home``): the
   default workspace, where agents are told to put what they produce;
@@ -91,17 +137,18 @@ Two refusals apply on top of the roots, to every root:
   opt-in through ``static.roots`` / ``LOCAL_OPERATOR_STATIC_ROOTS``, never
   something a session's cwd can do for them.
 
-KNOWN COST OF A ROOT ALLOWLIST, wider than the composer: every UI consumer that
-hands this route the path a user or agent NAMED -- the composer's attachment
-thumbnails (files picked from ``~/Downloads``), message attachments and mentioned
-files, the video/HTML previews and the canvas file viewer -- now gets a 403 for a
-file outside every root above (agent output in ``/tmp``, a ``/var/folders``
-render, a file on another volume). The attachment itself is unaffected: the chat
-route reads it server-side. A core-side per-session grant cannot fix it: the
-thumbnail is requested at PICK time, before any transcript references the file.
-The operator's remedy today is ``static.roots`` (the 403 body says so); the
-durable one is for local-operator-ui to read local file bytes over IPC for
-previews and thumbnails, retiring this route as the file reader.
+WHAT THE LOOPBACK CONDITION CHANGED FOR PREVIEWS. The clamp's user-facing cost
+(formerly: every preview of a file outside every root -- a ``~/Downloads``
+pick, agent output in ``/tmp``, a file on another volume -- was a 403) is
+retired where it bit: a loopback-accepted connection, which is every
+first-party surface today, serves those files. The cost text survives only as
+the ROOTED posture's story, where the 403 body still names ``static.roots`` as
+the remedy.
+
+macOS TCC (documented, not a mystery): reads of ``~/Downloads``,
+``~/Documents``, ``~/Pictures`` and the like can still be refused by OS privacy
+controls depending on the daemon's launch context; the errno classification in
+:func:`resolve_servable` maps that to the uniform 403 rather than a crash.
 
 No FastAPI import here: this raises :class:`StaticPathDenied` and the route turns
 it into an ``HTTPException``, which keeps the module cheap to import from the
@@ -184,16 +231,22 @@ _ALWAYS_FRAMING = ("'self'", "file:")
 _LOOPBACK_DEV_FRAMING = ("http://localhost:*", "http://127.0.0.1:*")
 
 
-#: The ONE body for "not inside a served root", shared by every route and every
-#: reason (see :func:`resolve_servable`). It names the remedy: the UI consumers
-#: that hand this route a user-picked path (composer thumbnails, message
-#: attachments) break on it until local-operator-ui reads those bytes over IPC,
-#: and a developer reading logs should not have to find ``static.roots`` by grep.
+#: The ONE body for "not inside a served root" in ROOTED (fallback) mode,
+#: shared by every route and every reason there (see :func:`resolve_servable`).
+#: It names the remedy -- the rooted posture's 403 is what a developer debugging
+#: an embedded/off-loopback server sees, and the answer they need is the roots
+#: list, not a grep.
 OUTSIDE_ROOTS_DETAIL = (
     "Path is outside the directories this server may serve. To allow it, add the "
     "directory to static.roots (Settings > File previews, or config.yml) or to "
     f"{ROOTS_ENV}."
 )
+
+#: The ONE body for the uniform 403s in GENERAL (loopback) mode: a resolve
+#: failure, a stat failure that is not a clean miss. It names no reason and no
+#: remedy on purpose -- there is no root list to add to, and the uniform answer
+#: is the property (no refusal reason becomes a signal of its own; security S-4).
+UNSERVABLE_DETAIL = "Path could not be served."
 
 #: The stat errnos that mean "this path is not there", answered 404 inside a root:
 #: missing, a component that is not a directory, and a symlink loop. Everything
@@ -424,13 +477,21 @@ def _containing_root(path: Path, roots: Sequence[Path]) -> Path | None:
     return None
 
 
-def resolve_servable(raw: str, roots: ServedRoots) -> Path:
+def resolve_servable(raw: str, roots: ServedRoots, *, general: bool) -> Path:
     """The realpath of ``raw`` if it may be served, else :class:`StaticPathDenied`.
 
-    Order is the security property: every refusal that depends on the filesystem
-    (404 missing, 400 not a file) comes AFTER the root check, so a path outside
-    the roots gets the same 403 whether or not it exists -- the route is not an
-    existence oracle for the rest of the disk.
+    ``general=True`` is the loopback posture (RFC §3.2): any absolute path that
+    resolves to a readable regular file -- no root check, no dot rule; the
+    per-route mime allowlists are unchanged. ``general=False`` is the rooted
+    fallback: the roots, the dot rule and the live-session arm apply.
+
+    Order is the security property, per posture. Rooted: every refusal that
+    depends on the filesystem (404 missing, 400 not a file) comes AFTER the root
+    check, so a path outside the roots gets the same 403 whether or not it
+    exists -- the route is not an existence oracle for the rest of the disk.
+    General: there is no root check, and the uniform 403
+    (:data:`UNSERVABLE_DETAIL`) still speaks for every refusal reason; the raw
+    ``..`` scan comes first in both postures and rejects before any resolution.
     """
     if not raw or "\x00" in raw:
         raise StaticPathDenied(400, "Invalid path.")
@@ -438,38 +499,45 @@ def resolve_servable(raw: str, roots: ServedRoots) -> Path:
     # a clear refusal rather than something that happens to land back inside.
     if ".." in Path(raw).parts:
         raise StaticPathDenied(403, "Path may not contain '..'.")
-    # ONE refusal for everything that cannot be placed inside a root, whatever the
-    # reason it cannot: an unknown ``~user`` (``expanduser`` raises RuntimeError and
-    # would otherwise be a 500 that also tells a caller which local users exist)
-    # and a symlink loop (which would otherwise be a distinct 400, a loop-existence
-    # oracle for the rest of the disk) answer exactly like a path outside the roots.
+    # ONE refusal for everything that cannot be placed, whatever the reason: an
+    # unknown ``~user`` (``expanduser`` raises RuntimeError and would otherwise
+    # be a 500 that also tells a caller which local users exist), a symlink loop
+    # (which would otherwise be a distinct 400, a loop-existence oracle for the
+    # rest of the disk), any other resolve failure (e.g. a component over
+    # NAME_MAX, reproduced as a 500 in security round 1). Rooted mode answers
+    # with the remedy-shaped body; general mode with the neutral one.
+    unplaced = UNSERVABLE_DETAIL if general else OUTSIDE_ROOTS_DETAIL
     try:
         candidate = Path(raw).expanduser()
         if not candidate.is_absolute():
             raise StaticPathDenied(400, "Path must be absolute.")
         real = candidate.resolve()
     except (OSError, RuntimeError, ValueError):
-        raise StaticPathDenied(403, OUTSIDE_ROOTS_DETAIL) from None
+        raise StaticPathDenied(403, unplaced) from None
 
-    root = _containing_root(real, roots.roots)
-    if root is None:
-        raise StaticPathDenied(403, OUTSIDE_ROOTS_DETAIL)
-    # Dot-directories below the root (``~/.ssh`` under a session rooted at ``~``).
-    if any(part.startswith(".") for part in real.relative_to(root).parts):
-        raise StaticPathDenied(403, "Hidden paths may not be served.")
+    if not general:
+        root = _containing_root(real, roots.roots)
+        if root is None:
+            raise StaticPathDenied(403, OUTSIDE_ROOTS_DETAIL)
+        # Dot-directories below the root (``~/.ssh`` under a session rooted at
+        # ``~``). Rooted mode only: general mode dropped the rule -- without
+        # roots it cannot be a boundary, and it refuses the session-scratchpad
+        # previews the product exists for (RFC §3.3).
+        if any(part.startswith(".") for part in real.relative_to(root).parts):
+            raise StaticPathDenied(403, "Hidden paths may not be served.")
 
     # ONE ``os.stat``, not ``exists()``/``is_file()``: those SWALLOW some OS
     # errors and re-raise others, and which ones changed between Python 3.12 and
     # 3.14 (``ENAMETOOLONG`` is ignored from 3.13 on only). Uncaught, a refusal
-    # here escaped as the handler's generic 500 -- the one answer inside a root
-    # that was not a clean 4xx and so a signal in its own right (security S-4).
-    # Classifying the errno answers the same way on every interpreter.
+    # here escaped as the handler's generic 500 -- the one answer that was not a
+    # clean 4xx and so a signal in its own right (security S-4). Classifying the
+    # errno answers the same way on every interpreter.
     try:
         info = os.stat(real)
     except OSError as exc:
         if exc.errno in _MISSING_ERRNOS:
             raise StaticPathDenied(404, f"File not found: {raw}") from None
-        raise StaticPathDenied(403, OUTSIDE_ROOTS_DETAIL) from None
+        raise StaticPathDenied(403, unplaced) from None
     # ``real`` is already the resolved target, so this refuses a directory and
     # any FIFO, socket or device node (which would hang a read).
     if not stat.S_ISREG(info.st_mode):
@@ -477,6 +545,46 @@ def resolve_servable(raw: str, roots: ServedRoots) -> Path:
     if not os.access(real, os.R_OK):
         raise StaticPathDenied(403, f"File not accessible: {raw}")
     return real
+
+
+def is_loopback_host(host: str | None) -> bool:
+    """Whether ``host`` is a loopback address: ``127.0.0.0/8``, ``::1``, ``localhost``.
+
+    The RFC §3.2 condition, one spelling for both the per-connection gate and
+    the CLI's bind policy (``cli.py`` imports this). ``::ffff:127.0.0.1`` -- an
+    IPv4-mapped address a v6 listener reports for a v4 loopback client -- is
+    unwrapped to its v4 form first, because it IS loopback by identity; anything
+    that does not parse as an address and is not ``localhost`` is not loopback.
+    """
+    if host is None:
+        return False
+    name = host.strip().lower()
+    if name == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        mapped = address.ipv4_mapped
+        if mapped is not None:
+            address = mapped
+    return address.is_loopback
+
+
+def connection_mode(host: str | None) -> str:
+    """``"general"`` when the accepted connection's local address is loopback, else ``"rooted"``.
+
+    The caller passes the host half of ``request.scope["server"]`` (or ``None``
+    when it is missing/foreign). Everything that is not provably loopback -- a
+    LAN address, a wildcard, an unknown or absent value -- is rooted: the
+    fail-closed half of §3.2, so the unclamped predicate is only ever reached
+    on a connection the kernel accepted on a loopback address. Measured on the
+    pinned uvicorn (0.54, macOS): a wildcard bind still reports the
+    PER-CONNECTION local address, loopback for a loopback client and the LAN
+    address for a LAN client.
+    """
+    return "general" if is_loopback_host(host) else "rooted"
 
 
 def frame_ancestors(app_origins: Iterable[str]) -> str:
@@ -491,7 +599,8 @@ def frame_ancestors(app_origins: Iterable[str]) -> str:
 
 
 #: Bind addresses that mean "every interface": the daemon is then reachable under
-#: names this process cannot enumerate, so a Host check has nothing to compare to.
+#: names this process cannot enumerate, so a Host check has nothing to compare to
+#: and a DNS name fails closed there (see :func:`host_is_acceptable`).
 _WILDCARD_BINDS = frozenset({"0.0.0.0", "::", ""})
 
 
@@ -522,14 +631,14 @@ def host_is_acceptable(host_header: str | None, bound_host: str | None) -> bool:
     (security S-3). Neither is an authority a browser can send, and the split on
     ``:`` would otherwise read the attacker's name out of such a value.
 
-    No header at all is accepted: rebinding always carries a name. A WILDCARD bind
-    (``--host 0.0.0.0``) turns the check off, because the daemon is then meant to
-    be reached under names this process cannot list; that is an explicit operator
-    exposure and is recorded under WHAT IS STILL OPEN. The app's own renderer
+    No header at all is accepted: rebinding always carries a name. A wildcard or
+    empty announced host (``--host 0.0.0.0`` -- no longer producible through the
+    CLI, which refuses every non-loopback bind; kept fail-closed for an
+    embedding path) has nothing to compare a DNS name against, so a name fails
+    closed: only an IP literal or ``localhost`` passes (the wildcard-bind bypass
+    that admitted every name here is deleted; RFC §3.4). The app's own renderer
     dials ``http://127.0.0.1:<port>`` (backend-service.ts), which passes.
     """
-    if bound_host is not None and bound_host.strip().lower() in _WILDCARD_BINDS:
-        return True
     if host_header is None:
         return True
     authority = host_header.strip()
@@ -543,7 +652,12 @@ def host_is_acceptable(host_header: str | None, bound_host: str | None) -> bool:
         pass
     if name == "localhost":
         return True
-    return bool(bound_host) and name == _host_name(bound_host or "")
+    if not bound_host or bound_host.strip().lower() in _WILDCARD_BINDS:
+        # Nothing to compare a DNS name against: fail closed. (This branch is
+        # the fail-closed replacement for the wildcard-bind bypass that used to
+        # return True here -- RFC §3.4.)
+        return False
+    return name == _host_name(bound_host)
 
 
 def is_static_path(path: str) -> bool:

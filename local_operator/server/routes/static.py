@@ -17,6 +17,7 @@ from local_operator.helpers import convert_heic_to_png_file
 from local_operator.server.utils.static_roots import (
     StaticPathDenied,
     build_roots,
+    connection_mode,
     resolve_servable,
 )
 
@@ -84,7 +85,8 @@ def _servable_path(request: Request, path: str) -> Path:
     its reasoning live in :mod:`local_operator.server.utils.static_roots`. The
     roots are built per request (the live-session arm is memoised there) so a
     session started a moment ago, or a ``static.roots`` edit, takes effect
-    without a restart.
+    without a restart. The general/rooted posture is the CONNECTION's (RFC §3.2),
+    computed here from ``scope["server"]`` -- never from a header or a query.
 
     ``HTTPException`` rather than the policy's own error so this module keeps the
     FastAPI surface and the policy module stays importable without it.
@@ -101,8 +103,17 @@ def _servable_path(request: Request, path: str) -> Path:
     if values is None:
         values = config_manager.get_config().values
     roots = build_roots(config_manager.config_dir, values)
+    # ``scope["server"]`` is ``(host, port)`` as uvicorn sets it from the socket
+    # the kernel accepted on; a missing or foreign value is rooted (fail-closed),
+    # so only a loopback-accepted request reaches the unclamped predicate. The
+    # bind half of the condition lives in ``cli.py`` (every non-loopback bind is
+    # refused there).
+    server = request.scope.get("server")
+    host = None
+    if isinstance(server, (tuple, list)) and server and isinstance(server[0], str):
+        host = server[0]
     try:
-        return resolve_servable(path, roots)
+        return resolve_servable(path, roots, general=connection_mode(host) == "general")
     except StaticPathDenied as denied:
         raise HTTPException(status_code=denied.status, detail=denied.detail)
 
@@ -133,7 +144,7 @@ async def get_image(
         HTTPException: If the file doesn't exist, is not accessible, or is not an image file
     """
     try:
-        # Root-confined, symlink-resolved, regular-file-only; see _servable_path.
+        # Connection-gated, symlink-resolved, regular-file-only; see _servable_path.
         expanded_path = _servable_path(request, path)
 
         # Determine the file's MIME type
@@ -196,7 +207,7 @@ async def get_video(
         HTTPException: If the file doesn't exist, is not accessible, or is not a video file
     """
     try:
-        # Root-confined, symlink-resolved, regular-file-only; see _servable_path.
+        # Connection-gated, symlink-resolved, regular-file-only; see _servable_path.
         expanded_path = _servable_path(request, path)
 
         # Determine the file's MIME type
@@ -241,7 +252,7 @@ async def get_audio(
         HTTPException: If the file doesn't exist, is not accessible, or is not an audio file
     """
     try:
-        # Root-confined, symlink-resolved, regular-file-only; see _servable_path.
+        # Connection-gated, symlink-resolved, regular-file-only; see _servable_path.
         expanded_path = _servable_path(request, path)
 
         # Determine the file's MIME type

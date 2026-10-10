@@ -51,14 +51,19 @@ one-shot executor currently consumes conversation text only, not record files.
 
 ## Trust model and residual limits
 
-`lop serve` now defaults to `127.0.0.1`. An explicit `--host` still works, but
-this legacy API has **no authentication or tenant separation**. Loopback is a
-safer exposure default, not authorization: do not expose it to untrusted local
-or remote clients. Put access controls in front before intentionally widening
-the bind. Other API operations can configure an agent workspace; a workspace
-explicitly set to the filesystem root grants that scope. The edit check is not
-a security boundary against a caller already authorized to reconfigure agents
-or use the unrestricted local harness.
+`lop serve` now defaults to `127.0.0.1`, and widening the bind is refused
+outright: `--host` accepts only loopback (`0.0.0.0`, `::`, LAN addresses and
+non-loopback-resolving names exit 1, with no override flag). The static file
+route serves unclamped -- any readable regular file -- on loopback-accepted
+connections, and falls back to the served-roots clamp for anything else (see
+`docs/design/file-serving-and-surface-convergence.md` §3). This legacy API
+still has **no authentication or tenant separation**. Loopback is a safer
+exposure default, not authorization: do not expose it to untrusted local or
+remote clients, and reach it remotely only through an explicit tunnel or an
+SSH port-forward. Other API operations can configure an agent workspace; a
+workspace explicitly set to the filesystem root grants that scope. The edit
+check is not a security boundary against a caller already authorized to
+reconfigure agents or use the unrestricted local harness.
 
 Canonical resolution followed immediately by opening the canonical target is
 portable, but not race-free against a concurrent local process replacing path
