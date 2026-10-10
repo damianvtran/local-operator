@@ -3142,6 +3142,7 @@ async def snapshot(
     session_id: str,
     request: Request,
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3173,6 +3174,13 @@ async def snapshot(
     # ``allow_draft``: one of the five doors a new-chat pane may hold before a
     # session exists (spec §1.3); a draft answers the cold/empty shape.
     #
+    # ``open_frame=1`` IS THE OTHER ADDITIVE FLAG, and it is on this route for
+    # the same reason ``entry_ts`` is: the snapshot embeds a history page, and a
+    # renderer that paints from the paint-only page must get the same shape from
+    # the snapshot as from ``/history`` — two unit systems for one page is the
+    # defect this capability exists to avoid. See ``docs/DESKTOP_API.md``
+    # §"The open frame".
+    #
     # ``entry_ts=1`` RIDES THIS ROUTE TOO, because the snapshot embeds a history
     # page (``payload.history``) and that page is served by the same reader — so a
     # renderer that declared the vocabulary must get the SAME answer from the
@@ -3183,7 +3191,7 @@ async def snapshot(
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.snapshot(entry_times=bool(entry_ts)))
+        return reply(await bridge.snapshot(entry_times=bool(entry_ts), open_frame=bool(open_frame)))
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -3240,6 +3248,7 @@ async def history(
     after: int | None = Query(default=None, ge=0, le=500),
     limit: int = Query(default=100, ge=1, le=500),
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3251,6 +3260,14 @@ async def history(
     # named with a cursor, counts with no anchor) through ``errors()``, so the
     # request fails the same way whichever door it came through; the numeric
     # bounds here are the wire's (0..500 per side) and fail as the ordinary 422.
+    #
+    # ``open_frame=1`` ASKS FOR THE PAINT-ONLY, RUN-ALIGNED PAGE of
+    # ``docs/DESKTOP_API.md`` §"The open frame" — a page counted in paintable
+    # rows, cut back to a run's opening user row under a hard cap (with an honest
+    # ``head_cut`` when the cap binds), with non-painted bytes stripped and the
+    # per-run facts a collapsed turn's bar needs. It is additive in both
+    # directions: without it every answer is byte-for-byte today's, and this
+    # route's own reading is unchanged.
     #
     # ``entry_ts=1`` IS THE SAME KIND OF ADDITIVE NEGOTIATION as
     # ``frontend_replace`` on ``events`` beside it: it says this renderer can
@@ -3272,6 +3289,7 @@ async def history(
                 after=after,
                 limit=limit,
                 entry_times=bool(entry_ts),
+                open_frame=bool(open_frame),
             )
         )
 
@@ -4891,6 +4909,7 @@ async def events(
     after_seq: int = Query(default=0, ge=0),
     frontend_replace: int = Query(default=0, ge=0),
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -4961,7 +4980,13 @@ async def events(
             # silently skipped there. Closing it *inside* the ``try`` is the
             # load-bearing part: the outer ``finally`` below has not run yet.
             async with aclosing(
-                bridge.events(sub, epoch=epoch, after_seq=after_seq, entry_times=bool(entry_ts))
+                bridge.events(
+                    sub,
+                    epoch=epoch,
+                    after_seq=after_seq,
+                    entry_times=bool(entry_ts),
+                    open_frame=bool(open_frame),
+                )
             ) as frames:
                 try:
                     async for frame in frames:

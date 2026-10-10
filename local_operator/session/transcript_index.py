@@ -126,7 +126,7 @@ import os
 import time
 from bisect import bisect_right
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -144,11 +144,35 @@ logger = logging.getLogger(__name__)
 #: ``transcript_find``'s hidden-cross-session gate, a silent leak rather than
 #: the stale-cache miss a version mismatch is allowed to be.
 #:
+#: How often the row reader yields the GIL while scanning (see the note there).
+_SCAN_YIELD_ROWS = 512
+
+#: The byte marker that says a row is a ``send`` result, for the one case where
+#: the name cannot be read from a parsed payload: a row so large its body was
+#: dropped (see ``_carries_send_marker``).
+_SEND_MARKER = b'"tool_name":"send"'
+
+#: The tool name whose rows the desktop's cross-session filter hides
+#: (``cross-session-visibility.ts::visibleRecords``: ``kind === "tool" &&
+#: toolName === "send"``, gated on ``display.hide_cross_session``). One spelling
+#: here because the per-run split has to agree with that filter exactly.
+#: NOTE FOR THE NEXT CONSUMER (review round 2, F12): a hidden ``send`` row's
+#: FAILURE stays inside ``failed_count`` — there is no cross-session split of
+#: failures, because the client's own filter does not split them either. A surface
+#: that wants a hidden-failure count has to ask for one.
+CROSS_SESSION_TOOL_NAME = "send"
+
 #: 3: role-user rows that are harness chrome are skipped whole (no checkpoint,
 #: no doc — F1 of local-operator-ui#670). The bump IS the correctness again:
 #: the frozen prefix re-derives only on a full rescan, so without it every
 #: version-2 file would keep serving the rows its scan already minted.
-TRANSCRIPT_INDEX_VERSION = 3
+#:
+#: 4: the ``runs`` section (the open frame's per-run facts). The bump is the
+#: same correctness in a different direction: a version-3 file has no ``runs``
+#: key at all, and serving it to the open frame would read as "this session has
+#: no runs" — the absence the wire uses for "no facts available" — while the
+#: rows to derive them from are all still there. Only a rescan can mint them.
+TRANSCRIPT_INDEX_VERSION = 4
 
 #: Per-doc cap on stored message text. A match beyond the cap is a stated miss.
 DOC_TEXT_CAP = 32 * 1024
@@ -168,6 +192,15 @@ OUTCOME_COMPLETE = "complete"
 OUTCOME_ERROR = "error"
 OUTCOME_INTERRUPTED = "interrupted"
 OUTCOME_OPEN = "open"
+
+#: The marker kinds the desktop paints as a COMPLETED turn
+#: (``durableRecord``'s four arms; ``closed``/``retired`` are the neutral-closure
+#: and retire-for-build receipts, both of which still say ``complete: true``).
+_TERMINAL_MARKER_KINDS = frozenset({"closed", "retired", "error", "interrupted"})
+
+#: The error-level custom the renderer paints from a row of kind ``custom``: the
+#: second arm of its terminal vocabulary (``boundaryKindOf``).
+_SESSION_INCIDENT = "session_incident"
 
 _INDEX_DIRNAME = "transcript_index"
 _ATTENTION_STARTED = "attention_started"
@@ -310,6 +343,167 @@ class Checkpoint:
 
 
 @dataclass(frozen=True)
+class RunRecord:
+    """One RUN of a conversation: the rows between one opening and the next.
+
+    THE UNIT EVERY SURFACE RE-DERIVES AND NONE OF THEM AGREES ON. The desktop
+    partitions its loaded rows (``transcript-rows.ts::walkTurns``), the native
+    app runs its own condenser over a different window, the relay web folds a
+    third, and the TUI keeps a fourth reading — so a bar's action count and its
+    "worked for" are computed from whatever rows happen to be loaded, which is
+    why a turn heard the operator report ``30 actions`` at open and ``423
+    actions`` after thirteen pages. This record is the ONE derivation, from the
+    whole journal, on the backend.
+
+    THE PARTITION RULE IS THE DESKTOP'S, deliberately (``walkTurns``), because
+    the facts are consumed by a bar built from that partition: a user row opens
+    a run when no run is open, when the open run's last painting row is a
+    settled assistant row, when a TERMINAL marker has been seen since the run
+    opened (a completion the client paints as ``complete``, or a
+    ``session_incident``), or when the open run is an empty preamble that has
+    done no work. Otherwise the user row is a STEER and stays inside the run —
+    the client's own rule, and the reason a steered run's count is its whole
+    count rather than its last turn's.
+
+    ``attention_started`` rows do NOT delimit runs here even though they do in
+    the store: the desktop never renders one (``durableRecord`` drops every
+    ``custom`` that is not ``completion_attention``), so a partition built from
+    them would disagree with the client about which rows belong to which run.
+
+    COUNTS ARE EXACT, and the one case that could make them a lower bound says
+    so: ``complete`` is False only when the scanner dropped a row body inside
+    the run (a row past :data:`_MAX_KEPT_LINE_BYTES`), where a failure or a
+    duration may be unknowable. Measured on this machine: 0 of 65,755 tool rows
+    across the twelve largest journals exceed that limit.
+    """
+
+    #: The run's opening USER row, or ``""`` for a run whose head is cut off
+    #: (a wake/hub run with no user row, or pre-mechanism history).
+    opening_user_id: str
+    #: The row the client elects as this run's closing answer (the completion
+    #: checkpoint's own rule), or ``""`` when the run has no answer.
+    closing_answer_id: str
+    #: The run's last row, whatever it is.
+    last_id: str
+    first_seq: int
+    last_seq: int
+    start_ts: float
+    end_ts: float
+    action_count: int
+    failed_count: int
+    worked_seconds: float
+    #: True when the run is finished — the facts of a live tail would be
+    #: corrected by the next row, and the wire refuses to state them (see
+    #: ``open_frame``).
+    settled: bool
+    outcome: str | None
+    complete: bool
+    #: INTERNAL BOOKKEEPING, carried in the cache so an incremental scan can
+    #: resume a run that straddles its window (see ``_scan_incremental``). The
+    #: wire never sees these: ``open_frame.publish_runs`` builds its payloads
+    #: field by field, which is also what keeps a future internal addition from
+    #: silently becoming a client contract.
+    last_painter: str | None = None
+    saw_terminal: bool = False
+    saw_work: bool = False
+    opened_with_user_row: bool = True
+    #: The ordinal of the run's last WORK row (an assistant or tool row). The
+    #: tail run's settlement test needs it (F4): a marker older than the last work
+    #: row has been overtaken by work the run is still accumulating.
+    last_work_seq: int = -1
+    #: THE CLIENT'S OWN KEY for this run's closing record, in the vocabulary
+    #: ``walkTurns`` keys records with (``transcript-reducer.ts``: a tool result is
+    #: ``tool:<call_id>``, a completion-marker notice is ``prov-<token>``, anything
+    #: else is its entry id). It is what a client matches a fact against, so the
+    #: wire's ``run_key`` is this and not an entry id: a head-cut INTERRUPTED run
+    #: keyed by its marker's entry id never matched, and the bar showed the
+    #: placeholder (measured: "50+" for a 150-action run).
+    key_id: str = ""
+    #: Whether ANY row of the run reported a duration. The client states ``null``
+    #: rather than ``0s`` for a run that reported none (``workedSeconds`` in
+    #: ``trace-fold-model.ts``), so the wire must too.
+    worked_any: bool = False
+    #: The subset of this run's counted calls the desktop HIDES when
+    #: ``display.hide_cross_session`` is on: ``send`` tool rows, the arm of its own
+    #: filter (``cross-session-visibility.ts::visibleRecords``: ``kind === "tool"
+    #: && toolName === "send"``). Additive: a client that hides them subtracts
+    #: these from the counts so its bar matches its own fold.
+    cross_actions: int = 0
+    cross_worked: float = 0.0
+    #: The answer THIS REGION saw for the run (the index's per-turn rule). Kept
+    #: beside ``closing_answer_id`` rather than replacing it: the record's own
+    #: field is what other readers see, and this is what the emit pass consults
+    #: first, because a carried run must not keep the answer it had before the
+    #: append that completed it.
+    answer_id: str = ""
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "opening_user_id": self.opening_user_id,
+            "closing_answer_id": self.closing_answer_id,
+            "last_id": self.last_id,
+            "first_seq": self.first_seq,
+            "last_seq": self.last_seq,
+            "start_ts": self.start_ts,
+            "end_ts": self.end_ts,
+            "action_count": self.action_count,
+            "failed_count": self.failed_count,
+            "worked_seconds": self.worked_seconds,
+            "settled": self.settled,
+            "complete": self.complete,
+            "answer_id": self.answer_id,
+            "key_id": self.key_id,
+            "worked_any": self.worked_any,
+            "cross_actions": self.cross_actions,
+            "cross_worked": self.cross_worked,
+            "last_work_seq": self.last_work_seq,
+            "last_painter": self.last_painter,
+            "saw_terminal": self.saw_terminal,
+            "saw_work": self.saw_work,
+            "opened_with_user_row": self.opened_with_user_row,
+        }
+        if self.outcome is not None:
+            payload["outcome"] = self.outcome
+        return payload
+
+    @staticmethod
+    def from_payload(raw: Any) -> "RunRecord | None":
+        if not isinstance(raw, dict):
+            return None
+        try:
+            outcome = raw.get("outcome")
+            return RunRecord(
+                opening_user_id=str(raw["opening_user_id"]),
+                closing_answer_id=str(raw["closing_answer_id"]),
+                last_id=str(raw["last_id"]),
+                first_seq=int(raw["first_seq"]),
+                last_seq=int(raw["last_seq"]),
+                start_ts=float(raw["start_ts"]),
+                end_ts=float(raw["end_ts"]),
+                action_count=int(raw["action_count"]),
+                failed_count=int(raw["failed_count"]),
+                worked_seconds=float(raw["worked_seconds"]),
+                settled=bool(raw["settled"]),
+                complete=bool(raw["complete"]),
+                outcome=str(outcome) if outcome is not None else None,
+                answer_id=str(raw.get("answer_id", "")),
+                key_id=str(raw.get("key_id", "")),
+                worked_any=bool(raw.get("worked_any", False)),
+                cross_actions=int(raw.get("cross_actions", 0)),
+                cross_worked=float(raw.get("cross_worked", 0.0)),
+                last_work_seq=int(raw.get("last_work_seq", -1)),
+                last_painter=(
+                    str(raw["last_painter"]) if raw.get("last_painter") is not None else None
+                ),
+                saw_terminal=bool(raw.get("saw_terminal", False)),
+                saw_work=bool(raw.get("saw_work", False)),
+                opened_with_user_row=bool(raw.get("opened_with_user_row", True)),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+
+@dataclass(frozen=True)
 class ScanState:
     """Resume point for the incremental-append path (see the module docstring)."""
 
@@ -353,6 +547,11 @@ class TranscriptIndex:
     coverage: dict[str, Any]
     naming: dict[str, Any]
     scan: ScanState
+    #: The run partition and its per-run facts (the open frame's source).
+    #: Defaulted so a caller that only wants the rail can build an index
+    #: without one — and so the field's arrival is not a second constructor
+    #: arity every existing call site has to learn.
+    runs: list[RunRecord] = field(default_factory=list)
     version: int = TRANSCRIPT_INDEX_VERSION
 
 
@@ -410,6 +609,12 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
         return None
     parsed_checkpoints = [c for c in (Checkpoint.from_payload(c) for c in checkpoints) if c]
     parsed_messages = [m for m in (MessageDoc.from_payload(m) for m in messages) if m]
+    raw_runs = raw.get("runs")
+    parsed_runs = (
+        [r for r in (RunRecord.from_payload(r) for r in raw_runs) if r]
+        if isinstance(raw_runs, list)
+        else []
+    )
     return TranscriptIndex(
         checkpoints=parsed_checkpoints,
         messages=parsed_messages,
@@ -417,6 +622,7 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
         coverage=coverage,
         naming=naming if isinstance(naming, dict) else {},
         scan=scan,
+        runs=parsed_runs,
     )
 
 
@@ -444,6 +650,7 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         "coverage": index.coverage,
         "checkpoints": [c.to_payload() for c in index.checkpoints],
         "messages": [m.to_payload() for m in index.messages],
+        "runs": [r.to_payload() for r in index.runs],
         "naming": index.naming,
         "scan": index.scan.to_payload(),
     }
@@ -556,14 +763,45 @@ class _Row:
     end: int
     id: str
     ts: float
-    kind: str  # user | assistant | tool | inject | start | marker | other
+    kind: str  # user | assistant | tool | inject | start | marker | compaction | other
     text: str = ""
     token: str = ""
     marker_kind: str | None = None
     eligible: bool = True
+    #: A tool row's ``tool_call_id`` / ``tool_name``, for the client's own key
+    #: vocabulary (``tool:<call_id>``) and for its cross-session filter.
+    tool_call_id: str = ""
+    tool_name: str = ""
+    #: A marker row's own ``details.anchor`` — the id the PRODUCER gives the
+    #: record (``attention.py``: ``completion-<token>``), which is the id the
+    #: desktop's reducer keys it by. See ``RunRecord.key_id``.
+    anchor: str = ""
     #: ``payload.custom_type`` of an inject row — the same payload field the
     #: injection rule at ``_classify`` already inspects; None on other kinds.
     custom_type: str | None = None
+    #: The four facts a tool row contributes to its run's counters, read from the
+    #: payload the same way the desktop's own ``isFailedCall`` reads them (see
+    #: ``_tool_failure``): ``is_error`` from the row, and the fault/delivery
+    #: vocabulary from ``provider_payload.details``. The three exclusions are why
+    #: they are carried rather than inferred: a stopped call, a never-sent call and
+    #: a partial ``send`` delivery all carry ``is_error`` while being settled
+    #: non-failures, and a bar that counted them would state a failure that never
+    #: happened.
+    is_error: bool = False
+    duration_s: float | None = None
+    fault: str | None = None
+    delivery: str | None = None
+    #: True for a row whose body the scanner dropped (a row past
+    #: ``_MAX_KEPT_LINE_BYTES``): the row still counts as an action, but nothing
+    #: inside it can be read, so a run containing one is only ever ``complete:
+    #: False`` (see :class:`RunRecord`).
+    body_dropped: bool = False
+    #: True when this row PAINTS as a completed turn — the desktop's terminal
+    #: vocabulary (``boundaryKindOf``/``isTerminalMarker``): a
+    #: ``completion_attention`` marker the renderer turns into a ``complete``
+    #: notice (an anchor is what makes it renderable at all), or a
+    #: ``session_incident``, which the renderer paints at ``level: "error"``.
+    terminal: bool = False
 
 
 def _head_id(head: bytes) -> str:
@@ -679,22 +917,170 @@ def _is_harness_user_row(entry_id: str, payload: dict[str, Any], text: str) -> b
     return is_harness_notice_row({**payload, "id": entry_id}) or is_harness_chrome(text)
 
 
+def _tool_duration(payload: dict[str, Any]) -> float | None:
+    """The ``duration_s`` a tool row reports, or ``None`` when it reports none.
+
+    Read from ``provider_payload`` rather than from the row's top level for the
+    reason the desktop's own reducer does: the tool facts (``details``,
+    ``useless``, ``duration_s``) are a provider envelope, and a row that carries
+    no envelope contributes no worked time rather than a ``0`` — the difference
+    between "the tool was instant" and "the producer stated nothing", which the
+    bar's `Took` line refuses to conflate.
+    """
+    provider_payload = payload.get("provider_payload")
+    if not isinstance(provider_payload, dict):
+        return None
+    value = provider_payload.get("duration_s")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _tool_fault_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """The fault and delivery words a tool row's ``details`` carry, if any.
+
+    Both ride inside ``provider_payload.details`` — ``__fault`` for a call the
+    harness never ran or the user aborted, ``delivery`` for a ``send`` with a
+    partial outcome — and both exist to EXCLUDE a row from a failure count.
+    """
+    provider_payload = payload.get("provider_payload")
+    details = provider_payload.get("details") if isinstance(provider_payload, dict) else None
+    if not isinstance(details, dict):
+        return {"fault": None, "delivery": None}
+    fault = details.get("__fault")
+    delivery = details.get("delivery")
+    # ``details.delivery`` IS A DICT (``builtin.py`` writes ``{"state": ...}``),
+    # and the desktop reads ``details.delivery.state``
+    # (``transcript-reducer.ts:414``). Reading it as a string made
+    # ``row.delivery`` the repr of the dict, so a partial ``send`` was counted as
+    # a FAILURE — measured: the server said 3 where the desktop's own fold said 1.
+    # A plain string is what an older writer left behind, so both shapes are
+    # accepted rather than the newer one silently failing on an old journal.
+    if isinstance(delivery, dict):
+        delivery = delivery.get("state")
+    return {
+        "fault": str(fault) if fault is not None else None,
+        "delivery": str(delivery) if delivery is not None else None,
+    }
+
+
+def _tool_failure(row: _Row) -> bool:
+    """Whether a tool row is a genuine FAILURE, in the desktop's own terms.
+
+    The client's predicate is ``isFailedCall``
+    (``turn-collapse-model.ts``), and the bar's count is only useful if the
+    backend states the number the client would have derived itself. Three
+    settled non-failures carry ``is_error`` and are excluded there, so they are
+    excluded here:
+
+    - a never-run or aborted call (``__fault`` of ``skipped``/``aborted``) —
+      ``isInterruptedFault``'s two words;
+    - a partial ``send`` delivery (``mailbox``/``unconfirmed``), which draws the
+      amber row rather than a red one;
+    - and the ``stopped``/``never_sent``/``not_run_reason`` arms, which the
+      DURABLE payload does not carry at all: the reducer hard-codes those to
+      their defaults on this path, so a row read from a journal cannot be any of
+      them.
+    """
+    if not row.is_error:
+        return False
+    if row.fault in ("skipped", "aborted"):
+        return False
+    return row.delivery not in ("mailbox", "unconfirmed")
+
+
+def _row_is_invisible(entry: dict[str, Any]) -> bool:
+    """Whether the SERVED page would never contain this row.
+
+    The predicates live in ``harness.rows`` beside the filter that applies them
+    (``visible_transcript_rows``); this is the index asking the same question the
+    reader does, in the same place, so the counts and the page cannot disagree
+    about which rows exist.
+
+    THE SHAPE MATTERS AND IS NOT UNIFORM: these two read ``row["payload"]``
+    themselves, so they take the ENVELOPE — while ``is_harness_injection``
+    unwraps a payload and takes the PAYLOAD (``open_frame.strip_entry`` passes it
+    that way). Handing either one the other's shape matches nothing and fails
+    silently, which is how the first version of this check came to count every
+    hidden row it was written to exclude.
+    """
+    from local_operator.harness.rows import is_ask_gate_divert_row, is_hidden_tool_row
+
+    return is_hidden_tool_row(entry) or is_ask_gate_divert_row(entry)
+
+
+def _carries_send_marker(pieces: list[bytes]) -> bool:
+    """Whether a line's bytes, already in hand, say this is a ``send`` result.
+
+    Only used on a row whose body is being DROPPED, and only over bytes the
+    reader has streamed anyway, so it costs nothing the read was not already
+    paying.
+    """
+    return any(_SEND_MARKER in piece for piece in pieces)
+
+
+def is_tool_head(head: bytes) -> bool:
+    """Whether a row's HEAD (the bytes before its body) declares a tool result."""
+    return b'"role":"tool"' in head
+
+
 def _classify(
-    ordinal: int, line_start: int, line_end: int, head: bytes, line: bytes | None
+    ordinal: int,
+    line_start: int,
+    line_end: int,
+    head: bytes,
+    line: bytes | None,
+    dropped_tool_name: str = "",
 ) -> _Row:
     """One complete line -> a :class:`_Row` (dropped bodies classify from head)."""
     id_ = _head_id(head)
     ts = _head_ts(head)
     if line is None:
-        # Body dropped: only tool/other rows are ever dropped, see _skip_eligible.
-        kind = "tool" if b'"role":"tool"' in head else "other"
-        return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind=kind)
+        # Body dropped: only tool/compaction/other rows are ever dropped, see
+        # _skip_eligible. A compaction keeps its own kind because it is a RECORD
+        # on the wire (the marker a transcript pins) while ``other`` is where the
+        # rows no client ever sees land — and the run partition must treat the
+        # two differently.
+        if is_tool_head(head):
+            kind = "tool"
+        elif b'"type":"compaction"' in head:
+            kind = "compaction"
+        else:
+            kind = "other"
+        return _Row(
+            ordinal=ordinal,
+            offset=line_start,
+            end=line_end,
+            id=id_,
+            ts=ts,
+            kind=kind,
+            # The name a dropped row still has to carry: see ``dropped_tool_name``
+            # and the note at its call site (UI review round 2, M2).
+            tool_name=dropped_tool_name if kind == "tool" else "",
+            body_dropped=True,
+        )
     try:
         entry = json.loads(line)
     except ValueError:
         return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
     if not isinstance(entry, dict):
         return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
+    if _row_is_invisible(entry):
+        # F5: A ROW THE CLIENT NEVER RECEIVES IS NOT WORK. The page is filtered
+        # through ``harness.rows.visible_transcript_rows`` before it is served —
+        # hidden wake deliveries, the ``patience`` arm's ledger rows and a
+        # diverted ask's result — so a count that included them would state work
+        # the reader cannot see, and the client's own fold would contradict it
+        # (reproduced: a run of one visible call and one hidden row reported
+        # ``action_count=2``, worked 3.5 s, against the fold's 1 and 3.0 s).
+        return _Row(
+            ordinal=ordinal,
+            offset=line_start,
+            end=line_end,
+            id=id_,
+            ts=ts,
+            kind="other",
+        )
     if not id_:
         id_ = str(entry.get("id", ""))
     if not ts:
@@ -703,11 +1089,24 @@ def _classify(
         except (TypeError, ValueError):
             ts = 0.0
     etype = entry.get("type")
+    if etype == "compaction":
+        # Classified before the payload branches: a compaction is a transcript
+        # RECORD (the marker a reader pins) and never a message, whatever the
+        # payload holds.
+        return _Row(
+            ordinal=ordinal,
+            offset=line_start,
+            end=line_end,
+            id=id_,
+            ts=ts,
+            kind="compaction",
+        )
     payload = entry.get("payload")
     if not isinstance(payload, dict):
         payload = {}
     if etype == "message":
         if payload.get("kind") == "custom" and payload.get("custom_type"):
+            inject_type = str(payload.get("custom_type"))
             return _Row(
                 ordinal=ordinal,
                 offset=line_start,
@@ -716,7 +1115,11 @@ def _classify(
                 ts=ts,
                 kind="inject",
                 text=_inject_text(payload.get("details")),
-                custom_type=str(payload.get("custom_type")),
+                custom_type=inject_type,
+                # The desktop paints this one at ``level: "error"``, which is its
+                # second terminal-marker arm (``boundaryKindOf``'s ``custom``
+                # case). Every other custom is an info-level statement.
+                terminal=inject_type == _SESSION_INCIDENT,
             )
         role = payload.get("role")
         if role == "user" or role == "assistant":
@@ -743,7 +1146,17 @@ def _classify(
             )
         if role == "tool":
             return _Row(
-                ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="tool"
+                ordinal=ordinal,
+                offset=line_start,
+                end=line_end,
+                id=id_,
+                ts=ts,
+                kind="tool",
+                is_error=payload.get("is_error") is True,
+                duration_s=_tool_duration(payload),
+                tool_call_id=str(payload.get("tool_call_id") or ""),
+                tool_name=str(payload.get("tool_name") or ""),
+                **_tool_fault_fields(payload),
             )
         return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
     if etype == "custom":
@@ -765,13 +1178,23 @@ def _classify(
         if custom_type == _COMPLETION_ATTENTION:
             details = payload.get("details")
             token = ""
+            anchor = ""
             marker_kind: str | None = None
             eligible = True
+            anchored = False
             if isinstance(details, dict):
                 token = str(details.get("token", ""))
                 kind = details.get("kind")
                 marker_kind = str(kind) if kind is not None else None
                 eligible = bool(details.get("eligible", True))
+                # THE ANCHOR IS WHAT MAKES THE ROW RENDERABLE, so a run's
+                # settlement cannot be read off the marker's kind alone: the
+                # renderer returns a notice only for a marker carrying an anchor
+                # string (``durableRecord``), and a marker without one paints
+                # nothing at all — a boundary the client cannot see is not a
+                # boundary.
+                anchored = isinstance(details.get("anchor"), str)
+                anchor = str(details.get("anchor") or "") if anchored else ""
             return _Row(
                 ordinal=ordinal,
                 offset=line_start,
@@ -779,9 +1202,11 @@ def _classify(
                 id=id_,
                 ts=ts,
                 kind="marker",
+                anchor=anchor,
                 token=token,
                 marker_kind=marker_kind,
                 eligible=eligible,
+                terminal=anchored and marker_kind in _TERMINAL_MARKER_KINDS,
             )
     return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
 
@@ -826,6 +1251,9 @@ class _RowReader:
             parts: list[bytes] = []
             head = b""
             dropped = False
+            # Per-ROW state, reset after each yield below: it has to exist before
+            # the first row streams, which is why it is initialised here too.
+            send_attr = False
             while True:
                 chunk = handle.read(_CHUNK_BYTES)
                 if not chunk:
@@ -843,8 +1271,11 @@ class _RowReader:
                             if not dropped:
                                 parts.append(piece)
                                 if line_len > _MAX_KEPT_LINE_BYTES and _skip_eligible(head):
+                                    send_attr = send_attr or _carries_send_marker(parts)
                                     dropped = True
                                     parts.clear()
+                            elif _SEND_MARKER in piece:
+                                send_attr = True
                         break
                     piece = chunk[pos:newline]
                     pos = newline + 1
@@ -855,17 +1286,46 @@ class _RowReader:
                         if not dropped:
                             parts.append(piece)
                             if line_len > _MAX_KEPT_LINE_BYTES and _skip_eligible(head):
+                                send_attr = send_attr or _carries_send_marker(parts)
                                 dropped = True
                                 parts.clear()
+                        elif _SEND_MARKER in piece:
+                            send_attr = True
+                    if dropped and is_tool_head(head) and send_attr:
+                        # A DROPPED BODY STILL BELONGS TO A ``send``, and the
+                        # desktop hides the row by its NAME — which rides BEYOND
+                        # the head on a row this large, so it is not in ``head``.
+                        # The stream is already in hand (the reader sees every
+                        # chunk of the line while dropping it), so the marker is
+                        # caught as it goes past rather than by re-reading the
+                        # file. Without it the dropped ``send`` was an action the
+                        # facts counted but the cross-session split did not, and
+                        # the desktop's subtraction left a hidden action in the
+                        # bar (UI review round 2, M2).
+                        tool_name_override = CROSS_SESSION_TOOL_NAME
+                    else:
+                        tool_name_override = ""
                     row = _classify(
                         self._next_ordinal,
                         line_start,
                         line_start + line_len + 1,
                         head,
                         None if dropped else b"".join(parts),
+                        dropped_tool_name=tool_name_override,
                     )
                     self.rows += 1
                     self._next_ordinal += 1
+                    # YIELD THE GIL, PERIODICALLY, BECAUSE THIS LOOP IS A THREAD
+                    # ON THE SERVER'S OWN PROCESS (review/QA round 1, item 1): a
+                    # cold scan of a large journal parses JSON back to back, and
+                    # while it does, every other session's read on the same server
+                    # waits behind it — measured at 322-674 ms of stall for
+                    # another session's snapshot during a 118 MB scan. CPython
+                    # releases the GIL on ``time.sleep``, so a zero-length sleep
+                    # every ``_SCAN_YIELD_ROWS`` rows hands the loop its turn at a
+                    # cost no reader can measure.
+                    if self.rows % _SCAN_YIELD_ROWS == 0:
+                        time.sleep(0)
                     self.last_end = row.end
                     self.last_id = row.id
                     if self.rows == 1:
@@ -876,6 +1336,7 @@ class _RowReader:
                     parts = []
                     head = b""
                     dropped = False
+                    send_attr = False
             if line_len > 0:
                 self.torn = True
             self.st = os.fstat(handle.fileno())
@@ -885,10 +1346,107 @@ class _Replaced(Exception):
     """The journal was atomically replaced while it was being read."""
 
 
+class _RunBuilder:
+    """The open run a :class:`_Derivation` is filling, in mutable form.
+
+    Split from :class:`RunRecord` because a run's counters are written once per
+    tool row: rebuilding a frozen record per row would make the scan's cost
+    proportional to the number of rows rather than the number of runs.
+    """
+
+    def __init__(
+        self,
+        *,
+        opening_user_id: str,
+        first_seq: int,
+        start_ts: float,
+        opened_with_user_row: bool,
+        last_painter: str | None = None,
+        saw_terminal: bool = False,
+        saw_work: bool = False,
+        last_work_seq: int = -1,
+        key_id: str = "",
+        worked_any: bool = False,
+        cross_actions: int = 0,
+        cross_worked: float = 0.0,
+        action_count: int = 0,
+        failed_count: int = 0,
+        worked_seconds: float = 0.0,
+        complete: bool = True,
+        closing_answer_id: str = "",
+    ) -> None:
+        self.opening_user_id = opening_user_id
+        #: The closing answer the REGION has seen so far, by the index's own
+        #: per-turn rule (an assistant row with text in it; the last one wins).
+        #: A carried run starts with none, so the region's own rows decide its
+        #: answer — seeding it from the prefix's record pinned a run to the answer
+        #: it had BEFORE the append that completed it.
+        self.answer_id = ""
+        self.closing_answer_id = closing_answer_id
+        self.first_seq = first_seq
+        self.last_seq = first_seq
+        self.start_ts = start_ts
+        self.end_ts = start_ts
+        self.last_id = opening_user_id or ""
+        self.action_count = action_count
+        self.failed_count = failed_count
+        self.worked_seconds = worked_seconds
+        self.complete = complete
+        self.last_painter = last_painter
+        self.saw_terminal = saw_terminal
+        self.saw_work = saw_work
+        #: The region's last WORK row (F4's settlement test reads it); a carried
+        #: run seeds it from the prefix so a marker older than the prefix's work
+        #: stays older.
+        self.last_work_seq = last_work_seq
+        self.key_id = key_id
+        self.worked_any = worked_any
+        self.cross_actions = cross_actions
+        self.cross_worked = cross_worked
+        self.opened_with_user_row = opened_with_user_row
+
+    def touch(self, row: _Row) -> None:
+        self.last_seq = row.ordinal
+        self.end_ts = row.ts
+        self.last_id = row.id
+
+
 class _Derivation:
     """Accumulates the scan's raw facts and derives checkpoints and docs."""
 
-    def __init__(self) -> None:
+    def __init__(self, carry: RunRecord | None = None) -> None:
+        # THE CARRIED RUN (see ``_scan_incremental``): an incremental scan
+        # re-derives from a resume window, and a steered run can straddle that
+        # window — its opening user row lies above it while the window sits on
+        # the steer's own ``attention_started``. The prefix's record is handed in
+        # as the OPEN run so the region's rows continue it instead of opening a
+        # second head-cut run beside it, which would state half a count twice.
+        self.runs: list[RunRecord] = []
+        self._open_run: _RunBuilder | None = None
+        self._prev_row: _Row | None = None
+        if carry is not None:
+            self._open_run = _RunBuilder(
+                opening_user_id=carry.opening_user_id,
+                closing_answer_id=carry.closing_answer_id,
+                first_seq=carry.first_seq,
+                start_ts=carry.start_ts,
+                opened_with_user_row=carry.opened_with_user_row,
+                last_painter=carry.last_painter,
+                saw_terminal=carry.saw_terminal,
+                saw_work=carry.saw_work,
+                last_work_seq=carry.last_work_seq,
+                key_id=carry.key_id,
+                worked_any=carry.worked_any,
+                cross_actions=carry.cross_actions,
+                cross_worked=carry.cross_worked,
+                action_count=carry.action_count,
+                failed_count=carry.failed_count,
+                worked_seconds=carry.worked_seconds,
+                complete=carry.complete,
+            )
+            self._open_run.last_seq = carry.last_seq
+            self._open_run.end_ts = carry.end_ts
+            self._open_run.last_id = carry.last_id
         self.users: list[_Row] = []
         self.user_ords: list[int] = []
         self.messages: list[MessageDoc] = []
@@ -906,8 +1464,43 @@ class _Derivation:
         self._last_user: tuple[int, int] | None = None
         self._last_marker: tuple[int, int] | None = None
 
+    def _run_closed(self) -> bool:
+        """The client's closure test, evaluated as its own ``walkTurns`` does.
+
+        Three arms, and the desktop's module comment is the authority for each:
+        a TERMINAL marker seen since the run opened; a tail whose last painting
+        row is a settled assistant row (``settledTail`` — every durable row is
+        settled by construction, so that is "the last painter is an assistant");
+        and an EMPTY PREAMBLE, a run that opened off a non-user row and has done
+        no work of its own, which cannot be steered into.
+        """
+        run = self._open_run
+        if run is None:
+            return True
+        return (
+            run.saw_terminal
+            or run.last_painter == "assistant"
+            or (not run.opened_with_user_row and not run.saw_work)
+        )
+
+    def _open_head_cut_run(self, row: _Row) -> _RunBuilder:
+        """Start a run whose head is not in the rows being read."""
+        return _RunBuilder(
+            opening_user_id="",
+            first_seq=row.ordinal,
+            start_ts=row.ts,
+            opened_with_user_row=False,
+        )
+
+    def _ensure_run(self, row: _Row) -> _RunBuilder:
+        if self._open_run is None:
+            self._open_run = self._open_head_cut_run(row)
+        return self._open_run
+
     def consume(self, row: _Row) -> None:
         kind = row.kind
+        self._track_run(row)
+        self._prev_row = row
         if kind == "user":
             self.users.append(row)
             self.user_ords.append(row.ordinal)
@@ -985,6 +1578,138 @@ class _Derivation:
                 self.answer_row[index] = row
                 self.answer_text[index] = row.text
 
+    def _track_run(self, row: _Row) -> None:
+        """The run partition, in the client's own unit (see :class:`RunRecord`).
+
+        A user row OPENS a run when no run is open or the open one is closed;
+        otherwise it is a steer and the run keeps its identity — which is why the
+        identity of a steered run is its FIRST user row and its count is the
+        whole steered span.
+        """
+        kind = row.kind
+        if kind == "user":
+            if self._open_run is None or self._run_closed():
+                self._close_run()
+                self._open_run = _RunBuilder(
+                    opening_user_id=row.id,
+                    first_seq=row.ordinal,
+                    start_ts=row.ts,
+                    opened_with_user_row=True,
+                )
+            else:
+                self._open_run.touch(row)
+            return
+        if kind in ("start", "other"):
+            # NEITHER KIND IS A RECORD THE CLIENT EVER SEES, so neither may open a
+            # run NOR extend one. ``attention_started`` is dropped by the
+            # renderer's projection and ``other`` is where harness chrome, prune
+            # markers and unknown types land. Two failures came from treating
+            # them as rows: opening a run on a leading ``attention_started``
+            # produced an empty head-cut run at the top of every journal (a fact
+            # entry with no rows, no count and no identity), and TOUCHING a run
+            # with a young run's start row made the next run's marker resolve
+            # against the previous run's span.
+            return
+        run = self._ensure_run(row)
+        run.touch(row)
+        # THE CLIENT'S KEY, tracked on every record it keys: a tool result is
+        # ``tool:<call_id>``, a marker notice ``prov-<token>``, anything else its
+        # entry id (``transcript-reducer.ts:2838``, ``:2979``).
+        if kind == "tool":
+            run.key_id = f"tool:{row.tool_call_id}" if row.tool_call_id else row.id
+        elif kind == "marker":
+            # THE PRODUCER'S OWN ANCHOR (QA round 2, Q5): ``attention.py`` names
+            # the record ``completion-<token>`` and that is the id the desktop's
+            # reducer keys it by, so it is what a run's facts must be published
+            # under. ``prov-<token>`` was a spelling invented here; a client never
+            # derived it, so on a head-cut interrupted run — the case Q2 exists
+            # for — the fact matched nothing and the bar kept its loaded span.
+            run.key_id = row.anchor or (f"prov-{row.token}" if row.token else "")
+        elif row.id:
+            run.key_id = row.id
+        if kind in ("assistant", "tool"):
+            run.saw_work = True
+            run.last_work_seq = row.ordinal
+        if kind == "assistant" and row.text:
+            # ``paintsSomething``: an assistant row paints only with text in it,
+            # so an empty one is not the run's last painter.
+            run.last_painter = "assistant"
+            run.answer_id = row.id
+        elif kind == "tool":
+            run.last_painter = "tool"
+            run.action_count += 1
+            if row.body_dropped:
+                # The row counts as an action (the head names the role); what is
+                # inside it — a failure, a duration — is unknowable, and the run
+                # says so rather than reporting an exact-looking number.
+                run.complete = False
+            else:
+                if _tool_failure(row):
+                    run.failed_count += 1
+                if row.duration_s is not None:
+                    run.worked_seconds += row.duration_s
+                    # The client states ``null``, never ``0s``, for a run that
+                    # reported no figure at all (``workedSeconds``), so whether
+                    # anything reported one is part of the fact.
+                    run.worked_any = True
+            # THE CROSS-SESSION SPLIT IS OUTSIDE THE ``body_dropped`` TEST (UI
+            # review round 2, M2): the desktop hides the ROW, not its body, so a
+            # ``send`` whose body the strip removed is still an action the client
+            # subtracts. Counting it only when the body survived left the
+            # subtraction one short and a hidden action in the bar.
+            if row.tool_name == CROSS_SESSION_TOOL_NAME:
+                run.cross_actions += 1
+                if row.duration_s is not None:
+                    run.cross_worked += row.duration_s
+        if row.terminal:
+            run.saw_terminal = True
+
+    def _close_run(self) -> None:
+        """Finalise the open run with the span it actually accumulated.
+
+        NOT extended to "the row before the next user row". A run's span is the
+        rows TOUCHED while it was open, and the row between a run's last record
+        and the next user row belongs to the NEXT run — a young run's
+        ``attention_started`` sits exactly there. Extending the span made one run
+        own the next run's start row, which the resolution floor then mis-bound,
+        and it is why the span is stated as rows touched rather than as an
+        interval between two user rows.
+        """
+        run = self._open_run
+        if run is None:
+            return
+        self.runs.append(
+            RunRecord(
+                opening_user_id=run.opening_user_id,
+                closing_answer_id=run.closing_answer_id,
+                last_id=run.last_id,
+                first_seq=run.first_seq,
+                last_seq=run.last_seq,
+                start_ts=run.start_ts,
+                end_ts=run.end_ts,
+                action_count=run.action_count,
+                failed_count=run.failed_count,
+                worked_seconds=run.worked_seconds,
+                # Settled and outcome are decided in ``emit``, where every
+                # marker of the region is in hand: a run's closure can be
+                # proven by a marker that arrived after its last row.
+                settled=False,
+                outcome=None,
+                complete=run.complete,
+                answer_id=run.answer_id,
+                key_id=run.key_id,
+                worked_any=run.worked_any,
+                cross_actions=run.cross_actions,
+                cross_worked=run.cross_worked,
+                last_work_seq=run.last_work_seq,
+                last_painter=run.last_painter,
+                saw_terminal=run.saw_terminal,
+                saw_work=run.saw_work,
+                opened_with_user_row=run.opened_with_user_row,
+            )
+        )
+        self._open_run = None
+
     def window(self) -> tuple[int, int]:
         """The ``(offset, ordinal)`` the next append must re-derive from.
 
@@ -1013,8 +1738,9 @@ class _Derivation:
         prior_checkpoints: list[Checkpoint],
         prior_messages: list[MessageDoc],
         turn_base: int,
-    ) -> tuple[list[Checkpoint], list[MessageDoc]]:
-        """Derive this region's checkpoints and docs, merged behind the priors."""
+        prior_runs: list[RunRecord] | None = None,
+    ) -> tuple[list[Checkpoint], list[MessageDoc], list[RunRecord]]:
+        """Derive this region's checkpoints, docs and runs, merged behind the priors."""
         outcomes: dict[int, str | None] = {}
         for ordinal, token, marker_kind, eligible in self.markers:
             start = self.starts.get(token)
@@ -1096,7 +1822,132 @@ class _Derivation:
                     outcome=outcome,
                 )
             )
-        return checkpoints, list(prior_messages) + self.messages
+        return (
+            checkpoints,
+            list(prior_messages) + self.messages,
+            self._emit_runs(prior_runs or [], last_marker_ordinal, last_start_ordinal),
+        )
+
+    def _emit_runs(
+        self,
+        prior_runs: list[RunRecord],
+        last_marker_ordinal: int,
+        last_start_ordinal: int,
+    ) -> list[RunRecord]:
+        """Close the open run and decide every run's settlement and outcome.
+
+        DECIDED HERE RATHER THAN AT ``_close_run`` because a run's closure can be
+        proven by a row that arrives after its own last row: a run whose last row
+        is a tool call is closed by the marker that lands when the turn finishes,
+        and a record emitted the moment the run stopped growing would keep
+        calling that run live for the rest of the journal's life.
+        """
+        self._close_run()
+        runs = list(prior_runs) + self.runs
+        out: list[RunRecord] = []
+        for position, run in enumerate(runs):
+            is_tail = position == len(runs) - 1
+            outcome: str | None = None
+            # The run before this one: a marker's ``attention_started`` is written
+            # BEFORE its user row, so the start row legitimately lies ABOVE the
+            # run's opening user row — requiring ``start >= first_seq`` dropped
+            # every outcome for every run whose marker resolved normally. What
+            # proves the binding is that the start sits inside this run and not
+            # inside the previous one.
+            floor = runs[position - 1].last_seq if position > 0 else -1
+            for ordinal, token, marker_kind, eligible in self.markers:
+                if ordinal < run.first_seq or ordinal > run.last_seq:
+                    continue
+                start = self.starts.get(token)
+                if start is None or start <= floor or start > ordinal:
+                    continue
+                if marker_kind == "closed":
+                    # The neutral closure: the run is over with no outcome to
+                    # state, exactly as the checkpoint rule reads it.
+                    continue
+                if marker_kind == "retired":
+                    marker_kind = OUTCOME_INTERRUPTED
+                outcome = marker_kind if eligible else None
+            # F4: THE TAIL RUN IS SETTLED ONLY WHEN NOTHING CAN JOIN IT ANY
+            # MORE, which is stricter than "a marker resolved it once". A run
+            # that is resolved and then CONTINUED without a user row — a wake,
+            # hub or peer follow-up — keeps the same identity here and in the
+            # client's ``walkTurns``, so a count stated for it would move on
+            # every row that lands afterwards: reproduced as a run reported
+            # ``settled: true, actions: 1`` and then ``actions: 3`` with the
+            # same key, after a wake turn appended to it. The rail's own
+            # open-tail rule is the test — the newest resolvable marker must be
+            # newer than the newest ``attention_started`` AND newer than the
+            # run's last WORK row — and a run that fails it is stated as LIVE
+            # with no outcome and, on the wire, no counts, so a client keeps
+            # its own fold for it rather than trusting a number about to
+            # change.
+            # A marker bound to the run above is not enough for the TAIL: the
+            # region can hold a marker whose work continued afterwards, and the
+            # decision must not depend on which loop proved what.
+            settled = not is_tail
+            if is_tail:
+                settled = (
+                    last_marker_ordinal > last_start_ordinal
+                    and last_marker_ordinal >= run.last_work_seq
+                    and last_marker_ordinal >= run.first_seq
+                )
+                if not settled:
+                    outcome = OUTCOME_OPEN
+            closing = run.answer_id or run.closing_answer_id
+            if not closing:
+                closing = self._run_answer_id(run)
+            out.append(
+                RunRecord(
+                    opening_user_id=run.opening_user_id,
+                    closing_answer_id=closing,
+                    last_id=run.last_id,
+                    first_seq=run.first_seq,
+                    last_seq=run.last_seq,
+                    start_ts=run.start_ts,
+                    end_ts=run.end_ts,
+                    action_count=run.action_count,
+                    failed_count=run.failed_count,
+                    worked_seconds=run.worked_seconds,
+                    # A RUN THAT IS NOT THE TAIL IS OVER, whatever marker it has:
+                    # the next user row closed it (that is what makes it not the
+                    # tail), and only the LAST run can still grow. This is the
+                    # same rule the checkpoints state for the rail's tail turn,
+                    # applied to the unit the bar is drawn over.
+                    settled=settled,
+                    outcome=outcome,
+                    complete=run.complete,
+                    answer_id=run.answer_id,
+                    key_id=run.key_id,
+                    worked_any=run.worked_any,
+                    cross_actions=run.cross_actions,
+                    cross_worked=run.cross_worked,
+                    last_work_seq=run.last_work_seq,
+                    last_painter=run.last_painter,
+                    saw_terminal=run.saw_terminal,
+                    saw_work=run.saw_work,
+                    opened_with_user_row=run.opened_with_user_row,
+                )
+            )
+        return out
+
+    def _run_answer_id(self, run: RunRecord) -> str:
+        """The id the client would elect as this run's closing answer.
+
+        The COMPLETION CHECKPOINT's own rule — the turn's answer row
+        (``answer_row``), or its last message row when the turn has no answer —
+        and it lives here rather than in the wire layer so the two cannot drift:
+        a run's ``closing_answer_id`` is the id the client's own bar keys on.
+        """
+        low = bisect_right(self.user_ords, run.first_seq - 1)
+        high = bisect_right(self.user_ords, run.last_seq)
+        for index in range(high - 1, low - 1, -1):
+            if not self.content[index]:
+                continue
+            answer = self.answer_row[index]
+            if answer is not None:
+                return answer.id
+        return ""
 
 
 def _flatten(text: str, limit: int) -> str:
@@ -1156,7 +2007,7 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
     for row in reader:
         state.consume(row)
     _assert_same_file(reader)
-    checkpoints, messages = state.emit(prior_checkpoints=[], prior_messages=[], turn_base=0)
+    checkpoints, messages, runs = state.emit(prior_checkpoints=[], prior_messages=[], turn_base=0)
     naming = preserved_naming(naming_raw, {c.id for c in checkpoints if c.kind == KIND_USER})
     window_offset, window_rows = state.window()
     return TranscriptIndex(
@@ -1174,6 +2025,7 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
             "complete": not reader.torn,
         },
         naming=naming,
+        runs=runs,
         scan=ScanState(
             rows=reader.rows,
             offset=reader.last_end,
@@ -1192,15 +2044,32 @@ def _scan_incremental(
     keep_checkpoints = [c for c in previous.checkpoints if c.seq < window_rows]
     keep_messages = [m for m in previous.messages if m.seq < window_rows]
     turn_base = sum(1 for c in keep_checkpoints if c.kind == KIND_USER)
+    # A RUN CAN STRADDLE THE WINDOW, and it is the one section that cannot simply
+    # be cut at it: the window is chosen for the RAIL, and the run that contains it
+    # may open at a user row ABOVE the window (the window then names a steer's own
+    # ``attention_started``), so that run is re-derived WHOLE — its record is
+    # handed to the derivation as the open run and the kept prefix stops before
+    # it. Cutting the keeps at ``window_rows`` instead would emit the straddling
+    # run twice, once truncated and once head-cut, and the two counts would not
+    # reconcile with any surface's ledger.
+    straddle = next((r for r in previous.runs if r.last_seq >= window_rows), None)
+    # ONLY A RUN THE REGION STARTS INSIDE IS CARRIED. When the window sits ABOVE
+    # the run's opening user row the region re-derives the whole run from its
+    # first row, and carrying the prefix's counters as well would count those
+    # rows twice — measured as a run of 2 actions and 5 s reporting 4 and 10 s.
+    carry = straddle if straddle is not None and window_rows > straddle.first_seq else None
+    cut = carry.first_seq if carry is not None else window_rows
+    keep_runs = [r for r in previous.runs if r.last_seq < cut]
     reader = _RowReader(path, window_offset, window_rows)
-    state = _Derivation()
+    state = _Derivation(carry=carry)
     for row in reader:
         state.consume(row)
     _assert_same_file(reader)
-    checkpoints, messages = state.emit(
+    checkpoints, messages, runs = state.emit(
         prior_checkpoints=keep_checkpoints,
         prior_messages=keep_messages,
         turn_base=turn_base,
+        prior_runs=keep_runs,
     )
     naming = preserved_naming(naming_raw, {c.id for c in checkpoints if c.kind == KIND_USER})
     new_window_offset, new_window_rows = state.window()
@@ -1219,6 +2088,7 @@ def _scan_incremental(
             "complete": not reader.torn,
         },
         naming=naming,
+        runs=runs,
         scan=ScanState(
             rows=reader.rows,
             offset=reader.last_end,
@@ -1394,6 +2264,38 @@ def resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     if entry is not None:
         _RESIDENT.move_to_end(_key(config_dir, session_id))
     return entry
+
+
+def fresh_resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
+    """The resident index for a session, but only while it is still CURRENT.
+
+    THE HOT-PATH DOOR, and it exists because the open cannot pay a scan. The
+    resident index is revalidated against one stat of the journal plus the cache
+    file's own mtime — the same two facts ``checkpoints_view``'s fast path reads
+    — so a caller on a paint path gets either an index whose ``runs`` describe
+    the journal as it is now, or ``None``. It never scans, never reads the cache
+    file and never waits: the caller decides what to do with ``None`` (the open
+    frame starts a refresh and answers without facts — see ``open_frame``).
+
+    Synchronous on purpose. Its two ``stat`` calls are microseconds, and every
+    caller runs in a worker thread (the page builder is invoked through
+    ``asyncio.to_thread``), so there is no event loop to block — and keeping it
+    sync is what lets it share the revalidation rule with the async callers
+    instead of re-implementing it around ``await``.
+    """
+    key = _key(config_dir, session_id)
+    index = _RESIDENT.get(key)
+    if index is None:
+        return None
+    st, cache_st = _freshness_pair(config_dir, session_id)
+    stamp = _RESIDENT_STAMP.get(key)
+    cache_stable = (stamp is None and cache_st is None) or (
+        stamp is not None and cache_st is not None and stamp == cache_st.st_mtime
+    )
+    if st is not None and _sig_matches(index.sig, st) and cache_stable:
+        _RESIDENT.move_to_end(key)
+        return index
+    return None
 
 
 def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Task[Any], bool]":
