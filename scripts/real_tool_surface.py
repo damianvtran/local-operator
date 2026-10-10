@@ -80,6 +80,16 @@ class _UntypedStub:
         return lambda *args, **kwargs: None
 
 
+async def _allow_quiet() -> None:
+    """A quiet-end door that allows — the value a real session binds.
+
+    ``build_no_reply_tool`` only checks PRESENCE, and every call the benchmark
+    makes is a builder call, so the body is never run; it stays async to match
+    the field's declared type.
+    """
+    return None
+
+
 def build_real_tool_context(cwd: str) -> ToolContext:
     """A ToolContext whose capabilities are all present.
 
@@ -125,6 +135,13 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # surface is one tool lighter than a real session's, the same defect
         # the project registry above records.
         session_dir=f"{cwd}/.stub-session",
+        # The quiet-end door (docs/design/quiet-turns.md §4): the newest
+        # createIf gate, carried as a bare callable rather than a Protocol —
+        # a real session binds it, so leaving it unbound here would measure a
+        # surface one tool short of every session's (``no_reply``), the same
+        # defect the project registry above records. The stub is never
+        # awaited: the builder only checks presence.
+        quiet_end=_allow_quiet,
     )
 
 

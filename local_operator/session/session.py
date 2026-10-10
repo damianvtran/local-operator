@@ -137,6 +137,7 @@ from local_operator.harness.subagent import (
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
+    QUIET_TURN_KEY,
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
@@ -665,6 +666,14 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # end of the provider-visible array stays appended (design
     # sessions-tool.md §3.3).
     "sessions",
+    # The quiet-end tool is gated the same way (`quiet_end` is a field only the
+    # session's own per-turn context binds), so without this line the tool is
+    # created nowhere a real session looks and the feature is unreachable in
+    # production (round-1 blocker B1). A child never receives it: `_job_id` is
+    # set in `__init__` before the merge runs, so the builder refuses there and
+    # the derived prune finds nothing to undo. Appended last for the same
+    # prefix reason as `sessions` above.
+    "no_reply",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -10458,6 +10467,20 @@ class Session:
         if self._is_streaming:
             raise RuntimeError("cannot change the output contract while a turn is running")
         self._output_contract = contract
+        # "ABSENT, not inert" (docs/design/quiet-turns.md §4): this setter runs
+        # AFTER the inventory was built (``exec_startup``, ``sdk``), so the
+        # constructor's capability merge has already mounted ``no_reply`` —
+        # nulling the per-turn door alone would leave an advertised tool whose
+        # every call could only refuse, firing once per attempt. Re-filter the
+        # inventory through ``refresh_tools``, the way ``set_ask_handler(None)``
+        # drops ``ask``; clearing the contract restores the door, so re-run the
+        # merge and let the builder decide (it refuses wherever the door stays
+        # ``None`` for some other reason).
+        if contract is not None:
+            if any(tool.name == "no_reply" for tool in self._tools):
+                self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
+        else:
+            self._merge_capability_tools(("no_reply",))
 
     def materialize_declared_tools(self) -> tuple[str, ...]:
         """Grant the SCHEMAS of this session's declared tools that are lazy.
@@ -11896,6 +11919,16 @@ class Session:
             )
             or self._run_notify_requested
         ) or kind == "error"
+        # THE QUIET-TURN FORCE (docs/design/quiet-turns.md §4): a run that ended
+        # with ``no_reply`` notifies nobody. Applied BEFORE the veto below so a
+        # quiet run never reaches the banner-budget journal that follows the
+        # veto (``_run_aida_checkin`` stays False with it), and skipped for the
+        # error arm (review R3): an error "always notifies, whatever the
+        # origins were" — reachable when a quiet batch's re-entry (a todo nudge,
+        # a late steer) then fails — and this must not silence the one signal
+        # that a turn died.
+        if notify and kind != "error" and self._run_ended_quiet(event):
+            notify = False
         if notify and kind != "error" and self._aida_cadence_banner_veto(event):
             notify = False
         # THE BANNER-BUDGET STASH (review MAJOR-2): whether this publish is one
@@ -12022,6 +12055,110 @@ class Session:
                 return str(text)
         return ""
 
+    def _run_ended_quiet(self, event: AgentEndEvent) -> bool:
+        """Whether this run ended with a ``no_reply`` call and no answer after it.
+
+        THE QUIET-TURN PREDICATE (docs/design/quiet-turns.md §4): true when the
+        run's LAST tool result carries the ``QUIET_TURN_KEY`` marker and no
+        assistant text exists after it — the marker must be the run's last
+        word. Read by exactly two consumers, ``_finalize_attention_notify``
+        (suppress the notify) and ``_publish_attention_outcome`` (publish
+        nothing), and it is a pure function of the end event's messages, so the
+        two cannot disagree.
+
+        A backwards scan, and the order is load-bearing: walking back from the
+        end, the first thing seen is either assistant TEXT (a real answer
+        produced after the call — not quiet, and it does not matter whether the
+        marker is still in the history) or the run's LAST tool result (its
+        marker decides). Earlier narration does NOT block the verdict — text
+        already streamed stays visible and persisted; the explicit quiet signal
+        governs the END — which is why this is not "no assistant text in the
+        run". A run with no tool result at all is not quiet.
+        """
+        for message in reversed(event.messages):
+            if getattr(message, "role", None) == "tool":
+                payload = getattr(message, "provider_payload", None)
+                details = payload.get("details") if isinstance(payload, Mapping) else None
+                return bool(details) and details.get(QUIET_TURN_KEY) is True
+            if getattr(message, "role", None) == "assistant" and getattr(message, "text", ""):
+                return False
+        return False
+
+    def _quiet_end_callable(self) -> Callable[[], Awaitable[str | None]] | None:
+        """The ``no_reply`` tool's quiet-end door, or ``None`` where silence is unavailable.
+
+        Bound per turn beside the ask doors (:meth:`_ask_gate_callable`); its
+        presence IS the fact that this session may end a turn quietly, which is
+        exactly what ``build_no_reply_tool``'s createIf gate reads — the tool is
+        ABSENT, not inert, where a quiet end could not be honoured (footprint
+        rung 3, docs/design/quiet-turns.md §4). It is ``None`` for:
+
+        * a subagent child (``_job_id`` set): a parent's ``wait`` reads the
+          child's final text AS the report, so a quiet end there is a lost
+          result rather than a courtesy;
+        * a one-shot/headless host (``_one_shot_exit``): the host's product IS
+          the final text (``headless_print.py`` prints ``if final_text``), and
+          nothing distinguishes "silent on purpose" from "produced nothing";
+        * a session with an output contract: the contract gate reads a textless
+          end as a missing final response and would re-ask forever;
+        * ``LOP_NO_REPLY=0`` — the env kill switch, read ONCE at import by
+          ``builtin.no_reply_enabled`` and deliberately not a config key
+          (docs §10), so restoring the old behaviour needs no config edit.
+
+        ABSENCE IS ENFORCED ON THE INVENTORY TOO, and this half is load-bearing
+        because two of the four conditions are knowable only AFTER construction:
+        ``exec_startup`` installs the contract and ``run_print_mode`` declares
+        the one-shot exit long after the constructor's capability merge has
+        already mounted the tool. Nulling this door would leave a mounted schema
+        whose every call could only refuse — so :meth:`set_output_contract`
+        (when a contract is set) and :meth:`declare_one_shot_exit` drop
+        ``no_reply`` through :meth:`refresh_tools`, the way
+        ``set_ask_handler(None)`` drops ``ask``. The child case needs no such
+        drop: ``_job_id`` is set before the merge runs, so the builder refuses
+        there and the tool never enters the inventory at all.
+        """
+        if self._job_id is not None:
+            return None
+        if self._one_shot_exit:
+            return None
+        if self._output_contract is not None:
+            return None
+        from local_operator.tools import builtin
+
+        if not builtin.no_reply_enabled():
+            return None
+        return self._quiet_end_refusal
+
+    async def _quiet_end_refusal(self) -> str | None:
+        """The refusal sentence for a quiet end, or ``None`` when it is allowed.
+
+        THE RULE IS A DENYLIST (review R4, docs/design/quiet-turns.md §4):
+        ``_note_run_input`` collapses every custom non-wake/monitor input into
+        the single class ``internal`` — peer, hub, job result, incident notice,
+        session_state — so an allowlist of "quietable" origins cannot be
+        written at this seam without a new finer-grained per-run record; the
+        implementable rule is the short list of runs whose words someone is
+        waiting on:
+
+        * a person asked this turn (a consumed user message) or is waiting to
+          (``_has_awaiting_user``): user semantics win, and a refusal is never
+          coerced into a message — the model reads the sentence and writes
+          text on the next, one extra, call;
+        * the wake/monitor delivery said ``notify``: the operator expected to
+          be told, so the sentence path (and Aida's cadence sentence) stays.
+
+        Everything else — peer, hub_message, job_result, a ``session_incident``
+        notice, session_state, resume catch-up, wake/monitor with
+        ``notify=false`` — may end quietly: an incident notice's
+        operator-visible row is already published, so silence about it loses
+        nothing (pinned by test).
+        """
+        if "user" in self._run_triggers or self._has_awaiting_user():
+            return "A person asked this turn; answer them in one line."
+        if self._run_notify_requested:
+            return "This wake or monitor asked to tell the user; say what they need to know."
+        return None
+
     async def _publish_attention_outcome(self) -> None:
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
@@ -12145,7 +12282,14 @@ class Session:
         # opens, so the pair is serialised rather than left to interleave
         # (review round 1, MAJOR-1).
         async with self._attention_publish_lock:
-            if kind == "complete" and (not messages or delegated):
+            # A QUIET END PUBLISHES NOTHING (docs/design/quiet-turns.md §4): the
+            # same ``eligible:false`` shape the textless branch below writes —
+            # no row, no unread mark, no banner — but the condition needs the
+            # affirmative signal, because a quiet run can still hold EARLIER
+            # narration text and ``not messages`` alone would miss it. Errors
+            # never reach this branch (``kind == "complete"``), which keeps
+            # R3's "always notifies" for a quiet batch whose re-entry fails.
+            if kind == "complete" and (not messages or delegated or self._run_ended_quiet(outcome)):
                 await self._transcript.append_custom(
                     ATTENTION_CUSTOM_TYPE,
                     {
@@ -13746,8 +13890,16 @@ class Session:
                 # start is what keeps a call whose end never arrived (batch
                 # skip, abort) from reading as no work at all. Reset in
                 # _run_turn_pipeline's head, beside the guardrail latches.
+                #
+                # EXCEPT THE QUIET CALL (docs/design/quiet-turns.md §1):
+                # ``no_reply`` is not work, and counting it would let a quiet
+                # wake trigger the stale-project nudge — a continuation the
+                # operator never asked for, caused by a call that produced
+                # nothing. Excluded here so both halves of the pair leave
+                # together, exactly as they would if the call had never run.
                 if isinstance(event, (ToolExecutionStartEvent, ToolExecutionEndEvent)):
-                    self._turn_tool_calls += 1
+                    if event.tool_name != "no_reply":
+                        self._turn_tool_calls += 1
                 is_todo_end = isinstance(event, ToolExecutionEndEvent) and event.tool_name == "todo"
                 if is_todo_end:
                     # The tool has already mutated its store when this event is
@@ -14532,6 +14684,12 @@ class Session:
             # "this ask would queue" — which is exactly the population the
             # gate exists for. ``None`` means the tool never awaits a check.
             gate_ask=self._ask_gate_callable(),
+            # THE QUIET-END DOOR (design docs/design/quiet-turns.md §4): the
+            # whole availability fact of ``no_reply`` — ``None`` for subagent
+            # children, one-shot hosts, output-contract sessions and under the
+            # kill switch, which is exactly where the tool must not exist. Its
+            # presence is what ``build_no_reply_tool``'s createIf gate reads.
+            quiet_end=self._quiet_end_callable(),
             # The BOUND METHOD, not its value: this context is a snapshot taken
             # once per turn, so a stored boolean would freeze the answer for the
             # whole turn and a re-read per call is what the browser flow needs
@@ -16187,6 +16345,14 @@ class Session:
         its turns are the run's own work, not teardown leftovers.
         """
         self._one_shot_exit = True
+        # The inventory follows the door (docs/design/quiet-turns.md §4,
+        # "absent, not inert"): this declaration lands after the constructor's
+        # capability merge, so ``no_reply`` may already be mounted, and the door
+        # this method just closed is a one-way latch — the mounted tool could
+        # only refuse from here on. Drop it the way
+        # ``set_ask_handler(None)`` drops ``ask``.
+        if any(tool.name == "no_reply" for tool in self._tools):
+            self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
 
     def retire_job_deliveries_to_transcript(self) -> None:
         """From now on, a settled job's result is durable and opens NO turn.
