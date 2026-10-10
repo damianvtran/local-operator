@@ -71,9 +71,11 @@ from local_operator.session.frontend_state import (
     LIVE_EVENT_TEXT_FLOOR_CHARS,
     LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS,
     MODEL_CATALOGUE_FLOOR_ROWS,
+    SPEND_CHANNEL_ROW_CAP,
     USAGE_COMPONENT_CAP,
     FrontendModelSpec,
     FrontendSessionState,
+    FrontendSpendChannels,
     FrontendStateStore,
     FrontendSync,
     FrontendUpdate,
@@ -106,6 +108,56 @@ from local_operator.session.runtime.server import (
 )
 from local_operator.tui.costs import job_cost
 from tests.unit.session.runtime.test_server import FakeHandle
+
+
+#: A populated ``spend_channels`` the size a busy session produces: one row per
+#: serving identity plus one per metered channel, with the LAST row deliberately
+#: left unstated so the grouping's knowledge rule is exercised by the same
+#: fixture the cap test uses.
+def _busy_spend_channels(row_count: int = 40) -> FrontendSpendChannels:
+    rows = [
+        {
+            "channel": "inference" if index % 2 == 0 else "search",
+            "provider": f"provider-{index}",
+            "model": f"model-{index:02d}",
+            "label": f"provider-{index}/model-{index:02d}",
+            "units": float(index + 1),
+            "unit": "calls" if index % 2 == 0 else "searches",
+            "amount_micro": None if index == row_count - 1 else (index + 1) * 1_000,
+            "knowledge": "exact" if index != row_count - 1 else "unknown",
+            "basis": ["not_tracked"] if index % 2 == 0 else ["estimated"],
+            "price_versions": [] if index % 2 == 0 else ["client-search-table-2026-09"],
+        }
+        for index in range(row_count)
+    ]
+    return FrontendSpendChannels.model_validate(
+        {
+            "version": 1,
+            "tracked": True,
+            "total_micro": sum(
+                row["amount_micro"] for row in rows if row["amount_micro"] is not None
+            ),
+            "knowledge": "partial",
+            "by_basis": {
+                "billed": 0,
+                "subscription_api_equivalent": 0,
+                "estimated": sum(
+                    row["amount_micro"]
+                    for row in rows
+                    if row["basis"] == ["estimated"] and row["amount_micro"] is not None
+                ),
+                "not_tracked_micro": sum(
+                    row["amount_micro"]
+                    for row in rows
+                    if row["basis"] == ["not_tracked"] and row["amount_micro"] is not None
+                ),
+                "not_tracked_calls": 1,
+            },
+            "rows": rows,
+            "children": {"total_micro": 0, "knowledge": "exact"},
+        }
+    )
+
 
 #: The settled stamp the released arm builds its rows with. Any value in the
 #: past works (`_released_predicate` is never consulted on this path — the arm
@@ -1350,6 +1402,37 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         "fixture does not — see the comment above), so something NEW is spending per-row "
         f"bytes at the guard's worst case. "
         f"{oversized_frame_report(released_frame, _MAX_LINE_BYTES)}"
+    )
+
+    # THE CHANNEL OBJECT'S OWN ARM (round-1 remediation). Exactly the shape the
+    # additive ``spend_channels`` field rides in production — a busy roster AND
+    # a populated money table — must not be able to push the frame past the
+    # same allowance. The object YIELDS here rather than shrinking to fit: the
+    # frame is over the socket line before the object is even counted, so the
+    # only honest options are "give way" or "send a line the reader drops", and
+    # giving way costs nothing durable — the next money event or refresh
+    # republishes it from the store (see
+    # ``_yield_spend_channels_when_the_frame_has_no_room``). Without the yield
+    # the object's rows ride a frame that cannot be sent at all, which is the
+    # failure this arm exists to catch.
+    channels_store = FrontendStateStore(
+        state.model_copy(update={"spend_channels": _busy_spend_channels()})
+    )
+    channels_frame = {
+        "op": "frontend_sync",
+        "data": sync_wire_payload(channels_store.subscribe(lambda _u: None).sync),
+    }
+    channels_size = _line_bytes(channels_frame)
+    assert channels_frame["data"]["snapshot"].get("spend_channels") is None, (
+        "a populated spend_channels rode a frame that is already over the socket line; "
+        "the last-resort yield did not fire, so the frame cannot be sent and the whole "
+        "attach fails (see _yield_spend_channels_when_the_frame_has_no_room)."
+    )
+    assert channels_size <= _MAX_LINE_BYTES + _RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES, (
+        f"the populated-channel arm is {channels_size - _MAX_LINE_BYTES:,} bytes over "
+        f"the {_MAX_LINE_BYTES:,}-byte line, past the fixture's own "
+        f"{_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES:,} bytes of pre-existing excess. "
+        f"{oversized_frame_report(channels_frame, _MAX_LINE_BYTES)}"
     )
 
 
@@ -6527,3 +6610,42 @@ def test_the_decode_window_reaches_the_frame_once_and_only_once():
     assert all(
         "decode_us" not in row["usage"] for row in frame["snapshot"]["jobs"] if row.get("usage")
     )
+
+
+def test_spend_channel_rows_are_capped_and_the_remainder_is_grouped() -> None:
+    """The object's row list is a wire bound, and the overflow is GROUPED.
+
+    The attach frame's slack is ~24 bytes, so the row list — the one part of
+    ``spend_channels`` that scales with the session's own history — may not
+    ride uncapped. Rows past ``SPEND_CHANNEL_ROW_CAP`` collapse into ONE
+    ``other`` row that keeps their summed money and their worst knowledge, so
+    the table's parts still sum to the total and no row claims exactness over
+    an unstated remainder. Measured through the REAL ``sync_wire_payload``, so
+    deleting the bound fails here rather than only changing a table's length.
+    """
+    state = FrontendSessionState(session_id="s1", epoch="e1", spend_channels=_busy_spend_channels())
+    frame = {
+        "op": "frontend_sync",
+        "data": sync_wire_payload(FrontendStateStore(state).subscribe(lambda _u: None).sync),
+    }
+    rows = frame["data"]["snapshot"]["spend_channels"]["rows"]
+    assert len(rows) == SPEND_CHANNEL_ROW_CAP + 1, (
+        f"the row cap did not run: {len(rows)} rows rode the frame. "
+        "See _cap_spend_channel_rows_in_place."
+    )
+    aggregate = rows[-1]
+    assert aggregate["channel"] == "other"
+    assert aggregate["label"].startswith("other channels ("), aggregate
+    dropped = _busy_spend_channels().rows[SPEND_CHANNEL_ROW_CAP:]
+    assert aggregate["amount_micro"] == sum(
+        int(row.amount_micro) for row in dropped if row.amount_micro is not None
+    ), "the grouped row must keep the dropped rows' stated money"
+    assert (
+        aggregate["knowledge"] == "partial"
+    ), "one dropped row has no stated amount, so the aggregate may not read exact"
+    # The kept rows are the head of the wire order, so the table's own
+    # hierarchy (inference before search, both above the aggregate) survives.
+    assert [row["channel"] for row in rows[:SPEND_CHANNEL_ROW_CAP]] == [
+        row.channel for row in _busy_spend_channels().rows[:SPEND_CHANNEL_ROW_CAP]
+    ]
+    assert _line_bytes(frame) < _MAX_LINE_BYTES

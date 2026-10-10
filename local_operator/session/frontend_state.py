@@ -3722,6 +3722,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
             snapshot["usage_components"] = _capped_components(components)
         _bound_live_events_in_place(snapshot)
         _bound_asks_in_place(snapshot)
+        _bound_spend_channels_in_place(snapshot)
         # The goal record is bounded at ENTRY by `GoalState` (a swept history, a
         # clipped judge reason) and yielded HERE at the wire, because an entry
         # cap is not a wire bound: the frame this field rides is the one the
@@ -3763,6 +3764,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
         # catalogue takes a residual budget where jobs take a fixed one.
         _bound_model_catalogue_in_place(payload, snapshot)
+        _yield_spend_channels_when_the_frame_has_no_room(payload, snapshot)
         _yield_asks_when_the_frame_has_no_room(snapshot, payload)
     return payload
 
@@ -4126,6 +4128,113 @@ def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
         # the precedent, and QA's reproduction (20 long asks shipped as 9 rows
         # beside ``asks_open: 20``) is why it exists.
         snapshot["asks_truncated"] = True
+
+
+#: Rows a serialized ``spend_channels`` object may carry before the remainder
+#: is GROUPED into one aggregate row.
+#:
+#: The row list is the one part of the object that scales with the session's
+#: own history: one row per serving identity (the inference split) plus one per
+#: metered channel/provider/model, and every row costs ~200 bytes of JSON. The
+#: attach frame's all-maximum shape has ~24 bytes of margin, so a list bounded
+#: only by the session can never be a wire bound. Twelve covers every shape a
+#: normal session produces (the worst real session measured on this host had
+#: 9); bytes past that are bought for a table no surface shows at once.
+SPEND_CHANNEL_ROW_CAP = 12
+
+
+def _cap_spend_channel_rows_in_place(channels: Any) -> None:
+    """Bound ONE serialized ``spend_channels`` row list, grouping the remainder.
+
+    Rows past :data:`SPEND_CHANNEL_ROW_CAP` are GROUPED, not dropped: their
+    stated money is summed into one ``other`` row whose ``knowledge`` is the
+    worst of theirs, so the table's parts still sum to the published total —
+    the invariant ``combine`` exists to keep — and a reader can see that more
+    channels exist. The ``by_basis`` buckets are computed over every record and
+    are NOT touched by the grouping, so the headline and the basis line stay
+    exact even for a clipped table.
+
+    Shared by both routes on purpose: the object rides the attach snapshot AND
+    every refresh delta, and a bound placed only at the snapshot boundary holds
+    for the first frame and leaks on every one after it (the rule this file
+    records for the job fields).
+    """
+    if not isinstance(channels, dict):
+        return
+    rows = channels.get("rows")
+    if not isinstance(rows, list) or len(rows) <= SPEND_CHANNEL_ROW_CAP:
+        return
+    kept = rows[:SPEND_CHANNEL_ROW_CAP]
+    dropped = [row for row in rows[SPEND_CHANNEL_ROW_CAP:] if isinstance(row, dict)]
+    stated = [
+        int(row["amount_micro"])
+        for row in dropped
+        if isinstance(row.get("amount_micro"), int)
+        and not isinstance(row.get("amount_micro"), bool)
+    ]
+    degraded = any(
+        row.get("amount_micro") is None
+        or str(row.get("knowledge") or "") in {"partial", "floor", "unknown"}
+        for row in dropped
+    )
+    channels["rows"] = kept + [
+        {
+            # ``other`` is the closed set's own overflow channel (see
+            # ``channel_spend.CHANNELS``), and the panel's rank order already
+            # sorts it last — the aggregate cannot displace a named row.
+            "channel": "other",
+            "provider": "",
+            "model": "",
+            "label": f"other channels ({len(dropped)})",
+            # No unit count: the aggregate mixes channels, so any number would
+            # be a fabricated one (the same rule that keeps ``units`` null on a
+            # row whose count was never recorded).
+            "units": None,
+            "unit": "",
+            "amount_micro": sum(stated) if stated else None,
+            "knowledge": "partial" if degraded else "exact",
+            "basis": [],
+            "price_versions": [],
+        }
+    ]
+
+
+def _bound_spend_channels_in_place(snapshot: dict[str, Any]) -> None:
+    """Omit the null form of ``spend_channels`` and cap its row list.
+
+    WHY THE NULL IS OMITTED: on the attach frame's all-maximum fixture the key
+    costs exactly 24 bytes (``,"spend_channels": null``) and that fixture's
+    entire remaining margin was 24 bytes, so an object that is NOT published
+    must cost nothing on the wire. Absent and null mean the same thing here
+    (``None`` is "this build publishes no channel ledger"), which is why
+    dropping the key loses nothing a reader can act on.
+    """
+    channels = snapshot.get("spend_channels")
+    if channels is None:
+        snapshot.pop("spend_channels", None)
+        return
+    _cap_spend_channel_rows_in_place(channels)
+
+
+def _yield_spend_channels_when_the_frame_has_no_room(
+    payload: dict[str, Any], snapshot: dict[str, Any]
+) -> None:
+    """Drop the channel object when the frame it would ride cannot be sent.
+
+    THE LAST-RESORT YIELD for the money table, and it runs BEFORE the ask yield
+    deliberately: an object that gives way here is re-published by the next
+    money event or refresh (the field is read from the store and rebuilt from
+    the journal), while a dropped ask has no second route on this frame. It
+    measures the REAL payload the socket writes — the same shape
+    ``_frame_line_bytes`` charges for, so the branch cannot fail to fire the way
+    the ask yield's first revision could — and it runs after every other bound
+    so the residual budgets have already accounted for what they can.
+    """
+    if not isinstance(snapshot.get("spend_channels"), dict):
+        return
+    if _frame_line_bytes(payload) <= _MODEL_CATALOGUE_LINE_LIMIT:
+        return
+    snapshot.pop("spend_channels", None)
 
 
 def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:
@@ -6379,6 +6488,13 @@ class FrontendStateStore:
             for summary in summaries:
                 _elide_row_facts_in_place(summary)
             wire_changes["jobs"] = summaries
+        if "spend_channels" in wire_changes:
+            # The object rides every refresh's DELTA as well (the band's own
+            # publish path), so the cap runs on this route too — a bound placed
+            # only at the snapshot boundary holds for the first frame and leaks
+            # on every one after it, the rule this file records for the job
+            # fields.
+            _cap_spend_channel_rows_in_place(wire_changes["spend_channels"])
         if "asks" in wire_changes:
             # THE DELTA ROUTE IS BOUNDED TOO. ``_bound_asks_in_place`` runs on the
             # attach SNAPSHOT, and the queue's own change path drives the DELTA
