@@ -301,6 +301,7 @@ from local_operator.tui.notify import (
     remote_park_banner,
     remote_park_card,
 )
+from local_operator.tui.quota_notice import await_prewarm, start_prewarm
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
 from local_operator.tui.session_interaction import (
@@ -4702,6 +4703,13 @@ class OperatorApp(App[None]):
         # commands; ``None`` degrades /provider /usage /model-switch to
         # pointer notices when it is absent.
         self._providers = provider_controller
+        # The splash's quota-verdict prewarm, engaged from CONSTRUCTION — not
+        # a mount hook — because Textual dispatches the welcome's own
+        # on_mount (its first read) before the app's; scheduling there ran
+        # one full read too late (CI review round 4, R4-1). See
+        # ``start_prewarm`` for why this is a plain thread, and
+        # ``_prewarm_quota_notice`` for the post-load re-snapshot.
+        start_prewarm()
         #: True once session construction has DEFINITIVELY failed and no
         #: replacement is in flight (U7-1).
         #:
@@ -11644,6 +11652,10 @@ class OperatorApp(App[None]):
         # Cached: every appended block asks the splash to hide, and that path
         # should not pay for a DOM query per block.
         self._welcome = self.query_one(WelcomeView)
+        # Await the construction-time verdict prewarm and re-snapshot the
+        # splash once it lands (the read SKIPPED the row while the import
+        # was in flight — see `tui/quota_notice`).
+        self.run_worker(self._prewarm_quota_notice(), thread=False, group="quota-prewarm")
         # An empty transcript is the boot layout's whole precondition, and the
         # session starts empty — so the app opens in it. Set here rather than in
         # the stylesheet's base rules because this is state, not style: it is the
@@ -11758,6 +11770,17 @@ class OperatorApp(App[None]):
         from local_operator.session_factory import warm_session_imports
 
         await asyncio.to_thread(warm_session_imports)
+
+    async def _prewarm_quota_notice(self) -> None:
+        """Re-snapshot the splash once the construction-time prewarm lands.
+
+        The import itself starts at construction (``start_prewarm``, and see
+        there for why not a mount hook); this worker only waits for it OFF
+        the loop and refreshes, so the row a skip deferred is painted.
+        """
+        loaded = await await_prewarm()
+        if loaded and self._welcome is not None:
+            self._welcome.refresh_info()
 
     async def _construct_session(self) -> Any:
         """Apply the factory's import policy and await it. RAISES; adopts nothing.
@@ -45454,13 +45477,21 @@ class OperatorApp(App[None]):
         Deliberately NOT the panel's ``group="usage"`` worker: a warm-up must
         neither cancel an in-flight panel fetch nor be cancelled by one, and it
         has no surface to update — its only output is the shared cache row the
-        next `/usage` reads.
+        next `/usage` reads. The one splash-facing line IS refreshed here: the
+        pre-emptive quota notice reads the row this worker maintains
+        (``tui/quota_notice``), so the empty session that was painted before
+        the row existed must re-snapshot once it lands — otherwise a cold boot
+        would show the notice only after some unrelated refresh event.
         """
         try:
             assert self._providers is not None
             await self._providers.fetch_usage([provider])
         except Exception:  # noqa: BLE001 — warm-up failure is a future live fetch
             pass
+        # Cheap and idempotent: `refresh_info` only repaints when the snapshot
+        # actually changed, so a failed fetch (cache unchanged) costs nothing.
+        if self._welcome is not None:
+            self._welcome.refresh_info()
 
     def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
         """``r`` in the panel — re-run the same fetch behind the same view.
