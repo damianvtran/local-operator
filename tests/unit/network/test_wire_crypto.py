@@ -599,3 +599,100 @@ def test_compressed_records_cross_a_real_socket_pipelined(socketpair: object) ->
     reader = wire.FrameReader(client)
     for frame in frames:
         assert receiver.open(reader.read_record_payload(wire.deadline_in(5.0))) == frame
+
+
+# ---------------------------------------------------------------------------
+# The secret-bearing frame classes, excluded by NAME at the codec
+# (agent review round 1, R1-1)
+# ---------------------------------------------------------------------------
+
+
+def _rotation_record() -> Any:
+    """A record with enough members that its rotation frames exceed the threshold.
+
+    The exclusion is only load-bearing on frames big enough to compress, so the
+    fixture is sized to the measured shape (the review's frames were 2.4-3 KB).
+    """
+    from local_operator.network import relay as relay_mod
+    from local_operator.network import types as net_types
+
+    record = net_types.NetworkRecord(
+        network_id="n_" + "0" * 22,
+        name="wire-compression-test",
+        created_by="d_" + "a" * 32,
+        self_device_id="d_" + "a" * 32,
+        self_role="admin",
+        self_capabilities=sorted(net_types.capabilities_for_role("admin")),
+        listen={"address": "127.0.0.1", "port": 0, "advertised": []},
+    )
+    for index in range(8):
+        relay_mod.admit(
+            record,
+            device_id=f"d_{index:032x}",
+            public_key=wire.b64u(bytes([index]) * 32),
+            name=f"device-{index}",
+            role="read",
+            endpoints=[f"10.0.0.{index}:4097"],
+            persist=False,
+        )
+    return record
+
+
+def test_epoch_and_pairing_secret_frames_are_never_compressed() -> None:
+    """The rotation and pairing frames carry the NEW EPOCH SECRET and are large
+    enough to compress well, so only the named exclusion keeps them plain on the
+    wire: a compressed length would publish the secret's compressibility (wire.py
+    "Record compression"; agent review round 1, R1-1).
+
+    Built by the PRODUCTION builders (``epoch_frame``, ``panic_frame``,
+    ``pair_result_frame``), never by hand. ``net_reconcile``'s reply is pinned
+    separately, at the relay wrap (``test_refusals.py``), because it has no op of
+    its own to seal under.
+    """
+    from local_operator.network import handshake as handshake_mod
+    from local_operator.network import relay as relay_mod
+    from local_operator.network import types as net_types
+
+    record = _rotation_record()
+    state = net_types.SecretState(
+        network_id=record.network_id, epoch=record.epoch, secret=wire.b64u(b"k" * 32)
+    )
+    frames = {
+        "net_epoch": relay_mod.epoch_frame(record, state, reason="member_rm"),
+        "net_panic": relay_mod.panic_frame(record, state, reason="operator_panic"),
+        "net_pair_result": handshake_mod.pair_result_frame(
+            req=1,
+            admit=True,
+            network={
+                "network_id": record.network_id,
+                "name": record.name,
+                "epoch": record.epoch,
+                "sequence": record.sequence,
+                "trust": record.trust,
+            },
+            member=record.members[0].to_json(),
+            members=[row.to_json() for row in record.members],
+            members_digest=relay_mod.members_digest_of(record),
+            material=state.secret,
+            rotations={},
+            shares=[],
+            reduced=[],
+        ),
+    }
+    for name, frame in frames.items():
+        assert frame["op"] == name and name in wire.NEVER_COMPRESS_OPS, name
+        plaintext = _plaintext_of(frame)
+        # NON-VACUOUS ON BOTH COUNTS: over the threshold, and worth compressing —
+        # the review measured 2421/2396 B frames shrinking to 841 B.
+        assert len(plaintext) > wire.COMPRESS_MIN_BYTES, (name, len(plaintext))
+        assert len(zlib.compress(plaintext, wire.COMPRESS_LEVEL)) < len(plaintext) // 2, name
+        keys = wire.link_keys(_shared(), b"t" * 32, b"l" * 16)
+        sender = wire.LinkCrypto(keys, role="dialer", compression=True)
+        receiver = wire.LinkCrypto(keys, role="listener", compression=True)
+        legacy = wire.LinkCrypto(keys, role="dialer")  # the pre-compression codec
+        record_bytes = sender.seal(frame)
+        # Byte-identical to the codec that has no compression at all: not merely
+        # "uncompressed", the very bytes today's build would send.
+        assert record_bytes == legacy.seal(frame), name
+        assert not _decrypt_raw(receiver, record_bytes).startswith(wire.COMPRESSED_MARKER)
+        assert receiver.open(record_bytes[4:]) == frame
