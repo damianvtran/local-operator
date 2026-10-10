@@ -175,7 +175,12 @@ describe("SessionScreen and queued asks", () => {
 		render(<SessionScreen sessionId="s1" />);
 		slot = { projection: projection({ asks: [ask()], asks_open: 1 }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-		const field = screen.getByPlaceholderText("Message…");
+		/* The reserved frame carries the same placeholder by design (design round
+		   1, D1) and is `aria-hidden` + disabled, so the ACTIONABLE field is the
+		   one without the marker. */
+		const field = screen
+			.getAllByPlaceholderText("Message…")
+			.find((el) => !el.hasAttribute("aria-hidden")) as HTMLElement;
 		fireEvent.change(field, { target: { value: "an ordinary message" } });
 		fireEvent.keyDown(field, { key: "Enter" });
 		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
