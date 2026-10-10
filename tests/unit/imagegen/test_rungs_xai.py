@@ -94,6 +94,9 @@ async def test_the_call_shape_and_the_reported_cost() -> None:
     # usage.cost_in_usd_ticks), so it may ride cost_usd under design D8.
     assert result.cost_usd == pytest.approx(4.0)
     assert result.cost_source == "reported"
+    # Default credential class is an API key: metered cash.
+    assert result.billing_basis == "billed"
+    assert result.cost_provenance is not None and "API key" in result.cost_provenance
 
     request = recorder.requests[0]
     assert request.method == "POST"
@@ -107,6 +110,32 @@ async def test_the_call_shape_and_the_reported_cost() -> None:
     assert body["aspect_ratio"] == "1:1"
     # The schema has no seed parameter: it is dropped, never smuggled.
     assert "seed" not in body
+
+
+@pytest.mark.asyncio
+async def test_a_grok_sign_in_labels_the_same_figure_subscription_api_equivalent() -> None:
+    recorder = _Recorder()
+    http = _client(recorder.handler(_ok_response()))
+
+    result = await _run(recorder, credential_kind="oauth", client=http)
+
+    # Same reported amount and source as the key path; only the money meaning
+    # differs (a subscription draws allotment, it is not billed).
+    assert result.cost_usd == pytest.approx(4.0)
+    assert result.cost_source == "reported"
+    assert result.billing_basis == "subscription-api-equivalent"
+    assert result.cost_provenance is not None and "not billed" in result.cost_provenance
+
+
+@pytest.mark.asyncio
+async def test_a_grok_sign_in_without_usage_has_no_figure_and_no_basis() -> None:
+    recorder = _Recorder()
+    http = _client(recorder.handler(_ok_response(ticks=None)))
+
+    result = await _run(recorder, credential_kind="oauth", client=http)
+
+    assert result.cost_usd is None
+    assert result.billing_basis is None
 
 
 @pytest.mark.asyncio
@@ -142,6 +171,8 @@ async def test_a_missing_usage_leaves_the_cost_unset() -> None:
 
     assert result.cost_usd is None
     assert result.cost_source is None
+    assert result.billing_basis is None
+    assert result.cost_provenance is None
 
 
 @pytest.mark.asyncio

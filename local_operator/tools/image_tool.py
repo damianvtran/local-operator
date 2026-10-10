@@ -567,6 +567,13 @@ def _generated_result(
         "generation_id": outcome.generation_id,
         "cancel_handle": _cancel_handle_details(handle),
         "cost_usd": outcome.cost_usd,
+        # Where the figure came from (``cost_source``), what it means in money
+        # terms (``billing_basis``) and its provenance: a subscription run's
+        # figure is an API-equivalent, not a charge, and the caption (which
+        # prints only the amount) must not be the sole carrier of that.
+        "cost_source": outcome.cost_source,
+        "billing_basis": outcome.billing_basis,
+        "cost_provenance": outcome.cost_provenance,
         "attempts": _attempt_list(outcome.attempts),
     }
     if params.source_image_path:
