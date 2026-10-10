@@ -307,7 +307,11 @@ async def test_every_registration_failing_is_an_error_naming_sources(
 
     assert result.is_error is True
     text = result.content[0].text  # type: ignore[union-attr]
-    assert "none" in text and "https://img.test/x.png" in text
+    # The clause composes after "but none ": ONE negative — "none could not be
+    # registered" was the round-2 design finding (D5); pin the fixed reading.
+    assert "none could be registered in the session's attachment store" in text
+    assert "could not be registered" not in text
+    assert "https://img.test/x.png" in text
 
 
 # ---------------------------------------------------------------------------

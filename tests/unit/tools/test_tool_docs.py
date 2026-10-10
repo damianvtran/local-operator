@@ -238,9 +238,10 @@ MEASURED_TOKENS: dict[str, int] = {
     "eval": 376,
     #: Media wave-2 edit lane (2026-10-10): the source paragraph now names
     #: the by-reference input (``source_attachment``) and the edit rungs;
-    #: +65 tokens over the 730 the slimming wave measured, re-measured
-    #: deliberately with this change.
-    "generate_image": 795,
+    #: +63 tokens over the 730 the slimming wave measured — re-measured
+    #: deliberately with this change, then again after the context-budget
+    #: round trimmed the schema description (795 -> 793).
+    "generate_image": 793,
     "glob": 91,
     "grep": 337,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was

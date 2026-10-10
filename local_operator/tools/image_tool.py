@@ -111,15 +111,17 @@ IMAGE_SIZE_VALUES = (
 )
 
 
+# The class docstring renders VERBATIM into the wire schema's ``description``
+# (pydantic), and the context-budget ratchet bills every character of this
+# schema on every request — so it stays ONE line and the constraints live
+# where they are read on demand (``read tool://generate_image``, the image
+# guide), plus comments here. v1 takes a SINGLE source per call: at most one
+# of ``source_image_path`` or ``source_attachment``; the multi-source wire
+# (an additive ``source_attachments`` list) ships only alongside the request
+# shapes that can validate it — the rung specs' ``max_sources`` already
+# gate it.
 class GenerateImageParams(BaseModel):
-    """Arguments for the ``generate_image`` tool.
-
-    SINGLE source per call in v1: at most one of ``source_image_path`` (a
-    local file) or ``source_attachment`` (a store digest from a previous
-    result). The multi-source wire (an additive ``source_attachments`` list)
-    ships only alongside the request shapes that can validate it — the rung
-    specs' ``max_sources`` already gate it.
-    """
+    """Arguments for the ``generate_image`` tool."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -130,10 +132,7 @@ class GenerateImageParams(BaseModel):
     )
     source_attachment: str | None = Field(
         default=None,
-        description=(
-            "Digest of a session image to edit (from a previous result's caption); "
-            "alternative to source_image_path."
-        ),
+        description="Session image digest to edit (from a result caption).",
     )
     strength: float | None = Field(
         default=None,
@@ -488,10 +487,11 @@ def _dimensions_text(assets: tuple[Any, ...], fallback: str) -> str:
     return ", ".join(seen) if seen else fallback
 
 
-#: Shown as the reason when a generation completed but NOTHING registered.
-#: It must state the likely cause, because the model's next step (re-run vs
-#: save the URLs by hand) depends on which half failed.
-_REGISTER_FAILED_NOTE = "could not be registered in the session's attachment store"
+#: Composed after "but none …" in the all-refused sentence, so the
+#: clause reads "none could be registered" — registration FAILED for
+#: every asset. It must state the likely cause, because the model's next
+#: step (re-run vs save the URLs by hand) depends on which half failed.
+_REGISTER_FAILED_NOTE = "could be registered in the session's attachment store"
 
 
 @_guard("generate_image")
