@@ -1406,3 +1406,30 @@ class TestQuietGroupFold:
             assert bar.partial is True
             assert bar.group.count == 3
             assert "3+" in bar._build_row(100).plain
+
+    @pytest.mark.asyncio
+    async def test_a_page_span_touching_a_folded_bar_stays_cards(self) -> None:
+        """The drain seam (review round 1, MINOR-1): when the deferred head
+        later drains, a page's bottom stretch can end AT the bar standing for
+        the frozen head-cut run. The bar is not a boundary — such a stretch
+        continues into a folded group — so the page keeps its cards; folding
+        it would put two bars over one logical run. Pins
+        ``fold_quiet_group_page`` and its boundary read, which no other cell
+        reached."""
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            view = app.query_one(TranscriptView)
+            index = view.blocks().index(bar)
+            page = [
+                PeerMessageBlock("older one", LONG_SENDER),
+                PeerMessageBlock("older two", LONG_SENDER),
+            ]
+            folded = view.fold_quiet_group_page(page, index, head_cut=True)
+            assert folded == page, "cards — never a second bar beside the folded group"
+            assert all(block.display for block in page)

@@ -17,6 +17,7 @@ from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
+    AskResponseBlock,
     PeerMessageBlock,
     QuietGroupBlock,
     UserBlock,
@@ -56,6 +57,20 @@ def test_each_row_classifies_into_the_derivations_vocabulary() -> None:
     assert assistant_record.kind == "assistant"
     assert group_splitter_of(assistant_record), "visible prose splits"
     assert quiet_family_of(quiet_group_record_of(_peer())) == "peer"
+
+
+def test_an_ask_receipt_splits_like_the_relay_port() -> None:
+    """An ask card is a QUESTION to the reader — the row they came back to
+    answer, so a boundary, never a member a collapse could hide (review
+    round 1, MAJOR-2). ``AskResponseBlock`` is a ``WakeBlock`` by inheritance
+    (the shared ledger contract), not by meaning; the relay port names
+    ``ask_response``/``ask_timeout`` as splitters the same way."""
+    ask = AskResponseBlock({"text": "asked about the deploy"}, kind="response")
+    assert quiet_group_record_of(ask).kind == "ask"
+    assert group_splitter_of(quiet_group_record_of(ask))
+    timeout = AskResponseBlock({"text": "asked about the rollback"}, kind="timeout")
+    assert quiet_group_plan([_peer("one"), ask]) == []
+    assert quiet_group_plan([ask, timeout]) == []
 
 
 def test_the_quiet_pair_maps_to_the_sentinel_tool_name() -> None:
@@ -173,4 +188,21 @@ def test_the_list_fold_is_stable_across_two_derivations() -> None:
     first = fold_quiet_group_list(run, fold_width=100)
     second = fold_quiet_group_list(run, fold_width=100)
     assert [type(block) for block in first] == [type(block) for block in second]
-    assert first[0].group == second[0].group
+    first_bar = first[0]
+    second_bar = second[0]
+    assert isinstance(first_bar, QuietGroupBlock)
+    assert isinstance(second_bar, QuietGroupBlock)
+    assert first_bar.group == second_bar.group
+
+
+def test_a_span_touching_an_existing_bar_is_refused() -> None:
+    """The drain seam (review round 1, MINOR-1): a bar stands for rows still
+    on screen (its hidden members), so a span touching one is the
+    continuation of a folded group — folding it would put two bars over one
+    logical run. The whole-span refusal, applied across a seam."""
+    bar = fold_quiet_group_list([_peer("a"), _peer("b")], fold_width=100)[0]
+    assert isinstance(bar, QuietGroupBlock)
+    run = [_peer("c"), _peer("d")]
+    assert fold_quiet_group_list(run, prev_block=bar) == run
+    assert fold_quiet_group_list(run, next_block=bar) == run
+    assert all(member.display for member in run)
