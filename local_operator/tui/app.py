@@ -25860,13 +25860,18 @@ class OperatorApp(App[None]):
         if stopped:
             text = f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
             # Sparing backgrounded `bash` is deliberate (`background=true`
-            # exists so a build outlives the turn) and genuinely surprising
-            # to a user who just escalated a stop, which reads as "stop all
-            # of it". Naming the survivors here, and only when there ARE
-            # any, prevents the "I stopped everything, why is the build
-            # still running" question at the one moment the answer is
-            # wanted (D3, design round 1). Unconditional, it would be noise.
-            spared = self._job_count("bash")
+            # exists so a build outlives the turn), and the media lane's video
+            # jobs outlive a stop for the same class of reason (the job is
+            # detached; contract §4.3) — both are genuinely surprising to a
+            # user who just escalated a stop, which reads as "stop all of
+            # it". Naming the survivors here, and only when there ARE any,
+            # prevents the "I stopped everything, why is the build still
+            # running" question at the one moment the answer is wanted (D3,
+            # design round 1). Unconditional, it would be noise. Video joins
+            # the count (remediation round 1, folded from the reviewer's
+            # observation): the sentence's own remedy — "jobs cancel to stop"
+            # — is exactly a video job's cancel rail (`jobs op='cancel'`).
+            spared = self._job_count("bash") + self._job_count("video")
             if spared:
                 text += (
                     f"; {spared} background job{'s' if spared != 1 else ''} "
@@ -36974,12 +36979,17 @@ class OperatorApp(App[None]):
             self.screen.set_focus(None)
 
     def _job_count(self, kind: str) -> int:
-        """Jobs of one ``kind`` the band counts — ``task`` (subagents) or ``bash``.
+        """Jobs of one ``kind`` the band counts — ``task`` (subagents),
+        ``bash`` (backgrounded shell) or ``video`` (the media lane's detached
+        jobs).
 
-        The two are counted separately because they are different things an
+        The kinds are counted separately because they are different things an
         operator tracks: a subagent is delegated reasoning with no other
         representation on screen, while a backgrounded shell command already has
-        a tool card. Summing them would hide which kind is running.
+        a tool card. Summing them would hide which kind is running. ``video``
+        rides the same rungs as ``bash`` at the callers (the band's §5.4
+        post-turn row and the stop notice's spared count); it is named here so a
+        later reader cannot "simplify" the two-term callers back to one.
 
         ``task`` INCLUDES children still queued behind the capacity gate;
         ``bash`` does not. The asymmetry is the point. This counter is the

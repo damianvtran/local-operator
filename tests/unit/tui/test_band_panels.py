@@ -2079,6 +2079,46 @@ async def test_the_band_counts_running_video_jobs_on_the_jobs_rung() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_follower_path_counts_running_video_jobs_too() -> None:
+    """The follower path (``_apply_frontend_state``) mirrors the owner's rung:
+    the reviewer probed all four cases correct on head (review round 1,
+    MINOR); this pins the behaviour so the two readings of one session cannot
+    drift apart — the parity rule the follower block already states for
+    ``subagents``. The follower reads ``state.jobs`` rows type-exactly:
+    running video + running bash count; queued video does not; task rides its
+    own counter."""
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+        JobState,
+    )
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        state = FrontendSessionState(
+            session_id="session-1",
+            epoch="1",
+            effective_model=FrontendModelSpec(provider="test", model_id="model"),
+            jobs=[
+                JobState(id="vid-1", type="video", status="running"),
+                JobState(id="bash-1", type="bash", status="running"),
+                JobState(id="vid-2", type="video", status="running", queued=True),
+                JobState(id="sub-1", type="task", status="running"),
+            ],
+        )
+        app._apply_frontend_state(state)
+        await pilot.pause()
+        assert app._status is not None
+        assert app._status._jobs == 2, "running video + bash, queued video excluded"
+        assert app._status._subagents == 1, "task rides its own rung"
+
+
+@pytest.mark.asyncio
 async def test_the_gate_admitting_a_queued_child_updates_the_summary_caption() -> None:
     """Round 2 Q2/F7: the counts memo must see a queued→running promotion.
 

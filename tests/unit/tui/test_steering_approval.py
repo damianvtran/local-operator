@@ -2778,6 +2778,34 @@ async def test_a_stop_that_spares_background_jobs_says_so() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_stop_that_spares_a_running_video_job_says_so() -> None:
+    """The same sentence covers the media lane's detached jobs: a video
+    generation outlives the turn (contract §4.3) and its cancel rail IS
+    ``jobs op='cancel'`` — the remedy the line names — so a stop that leaves
+    one running must say so exactly as it does for a build (remediation
+    round 1, the reviewer's observation folded in by the manager)."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 1
+        session.running_video_jobs = 1
+
+        await pilot.press("escape")
+        await pilot.pause()
+        app._stop_offered_at = time.monotonic()
+        await pilot.press("escape")
+        await pilot.pause()
+
+        painted = rows(app)
+        assert any("stopped 1 subagent" in row for row in painted)
+        assert any(
+            "1 background job" in row and "jobs cancel" in row for row in painted
+        ), "the spared video job was not named"
+
+
+@pytest.mark.asyncio
 async def test_the_confirmation_stays_quiet_when_nothing_was_spared() -> None:
     """The `bash` clause is conditional: unconditional, it would be noise on
     every stop (D3)."""
