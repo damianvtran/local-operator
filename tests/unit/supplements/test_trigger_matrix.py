@@ -42,8 +42,10 @@ from local_operator.session.session import Session
 from local_operator.supplements.trigger import TRIGGER_INJECTED, TRIGGER_TYPED
 from tests.unit.session.test_session import ScriptedStream, wait_for
 
-pytestmark = pytest.mark.asyncio
-
+# There is deliberately no module-level ``pytestmark = pytest.mark.asyncio``: every async
+# cell below carries its own mark, and the module-wide mark also lit the ONE sync test at
+# the foot of this file, drawing pytest-asyncio's "marked ... but it is not an async
+# function" (QA round 1, Q-3).
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
 

@@ -25,12 +25,20 @@ BOTH FORMS. The rules are applied to the path AS WRITTEN and to its RESOLVED for
 followed): ``report.md -> ~/.ssh/id_rsa`` must be denied by its target, and a benign-named
 target behind a sensitive-named link by its link. Either matching denies.
 
-CASE-FOLDED, because APFS and NTFS are case-insensitive by default: ``PROD.ENV`` and ``.ENV``
-are the same inode as the lowercase names (``references._sensitive_name`` measured this).
+NFKC-FOLDED AND CASE-FOLDED. Case, because APFS and NTFS are case-insensitive by
+default: ``PROD.ENV`` and ``.ENV`` are the same inode as the lowercase names
+(``references._sensitive_name`` measured this). NFKC, because compatibility-equivalent
+spellings name the same KIND of file to a reader while comparing unequal: the full-width
+``.ｅｎｖ`` (U+FF45), the ``conﬁg`` ligature and mathematical-bold letters all fold onto
+the denied spelling, as do canonical decompositions. QA round 1 reproduced ``.ｅｎｖ``
+reaching the vendor payload as an offered basename under the casefold-only comparison.
+Every rule INPUT and the settings/env-derived roots compared in :func:`_under` go through
+the one fold (:func:`_fold`), so no equivalence class is split across two comparisons.
 """
 
 import fnmatch
 import os
+import unicodedata
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Final
@@ -129,30 +137,52 @@ _DIR_FILE_PAIRS: Final[tuple[tuple[str, str, str], ...]] = (
 )
 
 
+def _fold(text: str) -> str:
+    """The comparison key for every rule input: NFKC, casefold, then NFKC again.
+
+    ``NFKC(CaseFold(NFKC(x)))`` is the shape of Unicode's ``toNFKC_Casefold``: the first
+    normalisation folds compatibility spellings onto their canonical ones (full-width
+    ``.ｅｎｖ`` at U+FF45, the ``conﬁg`` ligature, mathematical-bold letters), casefold keeps
+    the APFS/NTFS case-insensitivity this module already relies on, and the second
+    normalisation is what keeps the result stable for the vocabulary sets it is compared
+    against. Applied to rule INPUTS and to the settings/env-derived roots alike, so one
+    spelling cannot slip one comparison and match the other.
+    """
+    return unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", text).casefold())
+
+
 @lru_cache(maxsize=1)
 def _composed() -> (
     tuple[frozenset[str], frozenset[str], frozenset[str], frozenset[str], tuple[str, ...]]
 ):
     """``(names, suffixes, prefixes, dir parts, credential patterns)`` from the two existing
-    gates, casefolded. Cached: the sets are module constants upstream and never change."""
+    gates, folded with :func:`_fold` so both sides of every comparison live in one
+    equivalence class. Cached: the sets are module constants upstream and never change."""
     from local_operator import browser_files, references
 
-    names = frozenset(item.casefold() for item in references.SENSITIVE_NAMES)
-    suffixes = frozenset(item.casefold() for item in references.SENSITIVE_SUFFIXES)
-    prefixes = frozenset(item.casefold() for item in references.SENSITIVE_NAME_PREFIXES)
+    names = frozenset(_fold(item) for item in references.SENSITIVE_NAMES)
+    suffixes = frozenset(_fold(item) for item in references.SENSITIVE_SUFFIXES)
+    prefixes = frozenset(_fold(item) for item in references.SENSITIVE_NAME_PREFIXES)
     parts = frozenset(
-        item.casefold()
+        _fold(item)
         for item in (*references.SENSITIVE_DIR_PARTS, *browser_files.CREDENTIAL_COMPONENTS)
     )
-    patterns = tuple(item.casefold() for item in browser_files.CREDENTIAL_NAME_PATTERNS)
+    patterns = tuple(_fold(item) for item in browser_files.CREDENTIAL_NAME_PATTERNS)
     return names, suffixes, prefixes, parts, patterns
 
 
 def _under(child: str, root: str) -> bool:
-    """Whether ``child`` is ``root`` or beneath it (both already absolute and normalised)."""
+    """Whether ``child`` is ``root`` or beneath it (both already absolute and normalised).
+
+    Compared through :func:`_fold` like every rule input: a root set from settings/env (a
+    relocated config dir) is reachable through a canonically-equivalent spelling -- APFS
+    matches the two as one file -- and a raw string compare missed it. Folding both sides
+    only ADDS matches: an exact spelling folds to itself.
+    """
     if not root:
         return False
-    root = root.rstrip(os.sep) or os.sep
+    child = _fold(child)
+    root = _fold(root).rstrip(os.sep) or os.sep
     return child == root or child.startswith(root + os.sep)
 
 
@@ -187,7 +217,7 @@ def _rule_for(path: str, roots: list[tuple[str, str]]) -> str:
             return rule
     names, suffixes, prefixes, parts, patterns = _composed()
     pure = PurePosixPath(path.replace(os.sep, "/"))
-    components = [part.casefold() for part in pure.parts if part not in ("/", "")]
+    components = [_fold(part) for part in pure.parts if part not in ("/", "")]
     if not components:
         return ""
     name = components[-1]

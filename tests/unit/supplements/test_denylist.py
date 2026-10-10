@@ -8,6 +8,7 @@ candidates tests, so a rule that over-matches (denies every ``config.json``) fai
 from __future__ import annotations
 
 import os
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,32 @@ ALLOWED = [
     "notes/tokenizer-design.md".replace("tokenizer", "design"),
     "chart.png",
     "~/Documents/analysis.xlsx",
+    # QA round 1 (Q-2): an NFKC-STABLE non-ASCII name, and a compatibility spelling whose
+    # fold is BENIGN, must survive -- the fold denies equivalence to a denied name, never
+    # non-ASCII itself, or it would start refusing real deliverables.
+    "na\u00efve-notes.md",  # naïve-notes.md
+    # ｍｅｅｔｉｎｇ-ｎｏｔｅｓ.md folds to a benign ASCII name; it must survive.
+    "\uff4d\uff45\uff45\uff54\uff49\uff4e\uff47-\uff4e\uff4f\uff54\uff45\uff53.md",
+]
+
+#: QA round 1 (Q-2): NFKC-equivalent spellings of denied names must land on the SAME rule
+#: the plain spelling produces. Written as escapes because the codepoint IS the test -- the
+#: casefold-only comparison let ``.ｅｎｖ`` (U+FF45 each) reach the vendor payload as an
+#: offered basename; the fix folds the class (full-width, ligature, mathematical-bold,
+#: canonical decompositions), not that spelling. The must-survive twins are in ``ALLOWED``.
+COMPATIBILITY_TABLE = [
+    (".\uff45\uff4e\uff56", denylist.RULE_NAME),  # .ｅｎｖ -- the QA reproduction
+    ("\uff0e\uff45\uff4e\uff56", denylist.RULE_NAME),  # ．ｅｎｖ -- the dot is full-width too
+    (".\uff53\uff53\uff48/config", denylist.RULE_COMPONENT),  # .ｓｓｈ/
+    (".\uff4b\uff55\uff42\uff45/config", denylist.RULE_COMPONENT),  # .ｋｕｂｅ/
+    (".con\ufb01g/gcloud/properties", denylist.RULE_GCLOUD),  # conﬁg: the fi ligature
+    (".\U0001d41e\U0001d427\U0001d42f", denylist.RULE_NAME),  # .𝐞𝐧𝐯 -- mathematical bold
+    # Full-width NFKC-equivalent of the S14 row ``service-account-prod.json``.
+    (
+        "\uff53\uff45\uff52\uff56\uff49\uff43\uff45"
+        "-\uff41\uff43\uff43\uff4f\uff55\uff4e\uff54-\uff50\uff52\uff4f\uff44.json",
+        denylist.RULE_CREDENTIAL_PATTERN,
+    ),  # ｓｅｒｖｉｃｅ-ａｃｃｏｕｎｔ-ｐｒｏｄ.json
 ]
 
 
@@ -88,6 +115,16 @@ def test_matching_is_case_insensitive_like_the_filesystem(tmp_path) -> None:
     assert is_sensitive(".ENV", cwd=str(tmp_path)) != ""
     assert is_sensitive("~/.SSH/id_rsa", cwd=str(tmp_path)) != ""
     assert is_sensitive("Docker-Compose.yaml", cwd=str(tmp_path)) == denylist.RULE_COMPOSE
+
+
+@pytest.mark.parametrize(("path", "rule"), COMPATIBILITY_TABLE)
+def test_nfkc_equivalent_spellings_of_denied_names_are_denied(
+    path: str, rule: str, tmp_path
+) -> None:
+    """QA round 1 (Q-2): folding is NFKC + casefold, so compatibility spellings that compared
+    unequal before reach the same rule as the plain spelling they fold onto -- the class, not
+    the one spelling the round reproduced."""
+    assert is_sensitive(path, cwd=str(tmp_path)) == rule
 
 
 def test_a_symlink_to_a_secret_is_denied_by_its_target(tmp_path) -> None:
@@ -141,6 +178,30 @@ def test_the_scratchpad_root_is_denied_from_the_environment(tmp_path, monkeypatc
     assert is_sensitive(out, cwd=str(tmp_path)) == denylist.RULE_SCRATCHPAD
     monkeypatch.delenv("LOCAL_OPERATOR_SCRATCHPAD")
     assert is_sensitive(out, cwd=str(tmp_path)) == ""
+
+
+def test_a_folded_spelling_of_a_root_is_denied_like_the_root(tmp_path, monkeypatch) -> None:
+    """QA round 1 (Q-2), the settings/env half: the roots compared in ``_under`` fold with the
+    same function as the rules, so a canonically-equivalent (NFD) or case-variant spelling of
+    a relocated config dir -- which APFS resolves to the same file -- cannot slip; the fold is
+    not split across the two comparisons. Control: a sibling the fold does NOT map onto it."""
+    cfg = tmp_path / "caf\u00e9-cfg"  # NFC on disk
+    cfg.mkdir()
+    (cfg / "notes.md").write_text("x")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    decomposed = unicodedata.normalize("NFD", str(cfg))
+    assert decomposed != str(cfg), "NFD and NFC spellings must differ as strings"
+    assert (
+        is_sensitive(os.path.join(decomposed, "notes.md"), cwd=str(tmp_path))
+        == denylist.RULE_CONFIG_DIR
+    )
+    case_variant = os.path.join(os.path.dirname(str(cfg)), "CAF\u00c9-CFG", "notes.md")
+    assert is_sensitive(case_variant, cwd=str(tmp_path)) == denylist.RULE_CONFIG_DIR
+    # Control: a sibling directory the fold does NOT map onto the root stays allowed.
+    sibling = tmp_path / "caf\u00e9-other"
+    sibling.mkdir()
+    (sibling / "notes.md").write_text("x")
+    assert is_sensitive(sibling / "notes.md", cwd=str(tmp_path)) == ""
 
 
 def test_the_denylist_is_a_superset_of_both_existing_gates() -> None:
