@@ -147,16 +147,22 @@ def _force_browser_available(monkeypatch):
     reads the session's store root (``context.session_dir``), which this
     factory's context does not carry, so the whole-table assertions force the
     predicate the same way.
+
+    ``generate_video``/``video_status`` joined them with the video phase: the
+    pair's gate reads the machine's video credentials
+    (``video.availability``); the job manager their second gate reads is
+    already on this factory's context (``jobs`` is in the default table).
     """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
     from local_operator.code_requests import tool as code_requests_tool
-    from local_operator.tools import image_tool
+    from local_operator.tools import image_tool, video_tool
 
     monkeypatch.setattr(
         image_tool.image_availability, "image_provider_reachable", lambda *a, **k: True
     )
     monkeypatch.setattr(code_requests_tool, "code_requests_available", lambda context: True)
+    monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
 
 
 def test_default_set_builds_all_builtin_tools() -> None:

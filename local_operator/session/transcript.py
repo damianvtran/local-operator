@@ -192,6 +192,14 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         # re-ranking a session as freshly worked because a callout arrived would reorder
         # the sidebar for nothing. The writer passes ``preserve_mtime=True``.
         SUPPLEMENT_CUSTOM_TYPE,
+        # The video lane's durable job record (``local_operator.video.records``):
+        # its writes are caused by a generation the user started, but the
+        # terminal transition lands minutes later with the user away — a
+        # bookkeeping row, never a sign the operator returned. The writer
+        # passes ``preserve_mtime=True``. The literal is pinned against
+        # ``video.records.VIDEO_JOB_CUSTOM_TYPE`` by a unit test (the
+        # ``stt.sidecar`` drift rule: this module does not import the writer).
+        "video_job_v1",
     }
 )
 
@@ -1336,6 +1344,70 @@ def find_row_for_custom_type(
                 index = buf.rfind(needle, 0, index)
             position = start
     return None
+
+
+def read_custom_entries(
+    directory: str | Path, custom_type: str, *, max_rows: int | None = None
+) -> list[TranscriptEntry]:
+    """Every custom row of ``custom_type``, NEWEST first, without parsing the journal.
+
+    The multi-row sibling of :func:`read_latest_custom_entry`, for one consumer
+    class the single-row answer cannot serve: append-only rows where MULTIPLE
+    live objects each need their latest revision — the video phase's
+    ``video_job_v1`` records are written one row per state transition and the
+    reader groups them per job id (newest-wins per id).
+
+    Same scan, same needle, same per-row decode as
+    :func:`find_row_for_custom_type`; the differences are that it collects
+    instead of returning on first match, dedupes by row OFFSET (a payload string
+    that happens to contain the needle decodes to the same enclosing row), and
+    answers newest-first, so a caller may truncate from the tail and keep the
+    newest rows. ``max_rows`` bounds the walk for a journal that has accumulated
+    very many rows of this type; ``None`` reads all of them. The walk cost is
+    the distance from EOF to the OLDEST returned row — never worse than the
+    one-row reader's worst case, which reaches the file start itself.
+    """
+    encoded = json.dumps(custom_type)
+    if encoded != f'"{custom_type}"':
+        return []
+    if max_rows is not None and max_rows <= 0:
+        return []
+    needle = b'"custom_type":' + encoded.encode("utf-8")
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return []
+    entries: list[TranscriptEntry] = []
+    seen_offsets: set[int] = set()
+    with handle:
+        handle.seek(0, os.SEEK_END)
+        end_of_file = handle.tell()
+        overlap = len(needle) - 1
+        position = end_of_file
+        while position > 0:
+            start = max(0, position - _CUSTOM_NEEDLE_CHUNK_BYTES)
+            read_start = max(0, start - overlap)
+            handle.seek(read_start)
+            buf = handle.read(position - read_start)
+            index = buf.rfind(needle)
+            while index != -1:
+                offset = read_start + index
+                located = _row_at_offset(handle, offset)
+                if located is not None:
+                    row_offset, entry = located
+                    if (
+                        entry.type == ENTRY_CUSTOM
+                        and str(entry.payload.get("custom_type", "")) == custom_type
+                        and row_offset not in seen_offsets
+                    ):
+                        seen_offsets.add(row_offset)
+                        entries.append(entry)
+                        if max_rows is not None and len(entries) >= max_rows:
+                            return entries
+                index = buf.rfind(needle, 0, index)
+            position = start
+    return entries
 
 
 def _row_at_offset(handle: Any, offset: int) -> tuple[int, TranscriptEntry] | None:

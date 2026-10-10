@@ -1548,6 +1548,15 @@ class ToolContext(BaseModel):
     # advertised at all (createIf) rather than advertised and always
     # failing.
     jobs: JobManagerProtocol | None = None
+    # The video lane's durable-record writer (``Session.journal_video_job``):
+    # appends one ``video_job_v1`` transcript row. Declared rather than probed
+    # for, per this class's contract; ``None`` on a host that cannot journal
+    # (a reduced host or a test) — the video runner then logs and continues,
+    # losing restart durability for that transition but never the generation.
+    # Typed as a plain callable: the payload is the record mapping
+    # ``local_operator.video.records.build_record`` returns, and this module
+    # must not import that module's way up the graph.
+    journal_video_job: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     # Set by the session on each inbound ``lop send`` delivery so a blocking
     # ``wait`` can return early and let the model read its mailbox. Declared
     # rather than probed for, per this class's contract above. ``None`` means

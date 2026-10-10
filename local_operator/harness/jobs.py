@@ -213,7 +213,14 @@ CANCELLED_BEFORE_START = "cancelled before it started"
 #: ``SubagentComms.roster``/``resume``), instead of the row vanishing with the
 #: process.
 JobStatus = Literal["running", "completed", "failed", "cancelled", "interrupted"]
-JobType = Literal["bash", "task"]
+#: ``video`` is the detached artifact-generation job (media wave-2, the video
+#: phase): a long provider-side generation registered by ``generate_video``.
+#: It rides the same manager — residency (a running row pins the runtime),
+#: ``peek``, ``cancel``, settle and delivery — but keeps NO roster sidecar:
+#: its durable state is the ``video_job_v1`` transcript record (see
+#: ``local_operator.video.records``), so the ``persist_roster=type=="task"``
+#: sites deliberately do not cover it and ``restore`` never rehydrates it.
+JobType = Literal["bash", "task", "video"]
 
 # run(job_id, signal, report_progress) -> awaitable text result
 JobRunFn = Callable[
