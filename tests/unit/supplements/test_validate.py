@@ -495,3 +495,74 @@ def test_a_fabricated_three_digit_numeral_in_text_or_aria_label_is_still_refused
     result = validate_output(beside_geometry, EVIDENCE)
     assert not result.components, "a fabricated text numeral beside geometry was accepted"
     assert any("<data> supports" in error for error in result.repair_errors), result.repair_errors
+
+
+def test_unquoted_and_multi_line_geometry_is_exempt_too() -> None:
+    r"""R3-2: the exemption's grammar covers unquoted values and multi-line quoted values.
+
+    The pair regex required a QUOTED, SINGLE-LINE value, so ``<rect x=0 y=0 width=640
+    height=480>`` still tripped ``inline numeric literal '640'`` and a wrapped ``points``
+    list was refused for the same class of reason as R2-1 (real geometry refused, lower
+    frequency). Unquoted values cannot contain whitespace (HTML's attribute grammar), so
+    a spaced coordinate LIST has to stay quoted for the value to be blankable -- the
+    boundary the regex comment records, in the direction that keeps scanning (refusal),
+    not one that silently accepts.
+    """
+    data = json.dumps(
+        {
+            "lat": {
+                "title": "Latency (ms)",
+                "columns": ["region", "ms"],
+                "rows": [["us-east", 120], ["us-west", 98.5], ["eu-west", 143]],
+            }
+        }
+    )
+    unquoted = component(
+        data,
+        '<svg viewBox="0 0 640 480" role="img">'
+        "<rect x=0 y=0 width=640 height=480 fill=none></rect>"
+        "</svg>",
+    )
+    result = validate_output(unquoted, EVIDENCE)
+    assert result.components and not result.rejected, result.repair_errors
+
+    wrapped = component(
+        data,
+        '<svg viewBox="0 0 640 480">'
+        '<polyline points="0,480\n320,240\n640,60"></polyline>'
+        "</svg>",
+    )
+    result = validate_output(wrapped, EVIDENCE)
+    assert result.components and not result.rejected, result.repair_errors
+
+
+def test_an_unquoted_value_outside_the_structural_table_is_still_refused() -> None:
+    """R3-2's guard: widening the pair regex to unquoted values must not exempt readable
+    claims. A 3+ digit numeral in an unquoted NON-structural attribute (``title=7000``)
+    and a fabricated text numeral beside unquoted geometry are both still refused.
+    """
+    data = json.dumps(
+        {
+            "lat": {
+                "title": "Latency (ms)",
+                "columns": ["region", "ms"],
+                "rows": [["us-west", 98.5]],
+            }
+        }
+    )
+    claimed_attribute = component(
+        data,
+        '<svg viewBox="0 0 48 20" title=7000><rect x=0 y=0 width=48 height=20></rect></svg>',
+    )
+    result = validate_output(claimed_attribute, EVIDENCE)
+    assert not result.components, "an unquoted fabricated attribute reached the accepted set"
+    assert any("7000" in error for error in result.repair_errors), result.repair_errors
+
+    beside_unquoted_geometry = component(
+        data,
+        '<svg viewBox="0 0 640 480"><rect x=0 y=0 width=640 height=480></rect>'
+        "<text x=4 y=14>480 ms</text></svg>",
+    )
+    result = validate_output(beside_unquoted_geometry, EVIDENCE)
+    assert not result.components, "a fabricated text numeral beside unquoted geometry was accepted"
+    assert any("<data> supports" in error for error in result.repair_errors), result.repair_errors
