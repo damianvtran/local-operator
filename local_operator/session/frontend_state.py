@@ -71,7 +71,12 @@ from local_operator.harness.types import (
     decode_window_of,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
-from local_operator.model.costs import cost_summary, job_cost, turn_cost
+from local_operator.model.costs import (
+    carry_floor,
+    cost_summary,
+    job_subtree_cost,
+    turn_cost,
+)
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from local_operator.session.spend import (
@@ -2056,12 +2061,11 @@ def _released_row(job: Any) -> "JobState":
         elif isinstance(component, FrontendUsage):
             descendants.append(component)
     values["descendant_usage"] = descendants
-    direct_cost, unknown = cost_summary(
-        (usage.cost_components or [usage]) if usage is not None else [],
-        model_label=str(getattr(job, "model_label", None) or ""),
+    row_cost, unknown = job_subtree_cost(
+        job, default_model_label=str(getattr(job, "model_label", None) or "")
     )
-    values["direct_cost"] = direct_cost
-    values["direct_cost_knowledge"] = _cost_knowledge(direct_cost, unknown)
+    values["direct_cost"] = row_cost
+    values["direct_cost_knowledge"] = _cost_knowledge(row_cost, unknown)
     return _freeze_job(JobState.model_validate(values))
 
 
@@ -2480,6 +2484,15 @@ class JobState(BaseModel):
     usage: Usage | None = None
     # None knowledge marks old runtimes, which still need the legacy pricing path.
     # Explicit UNKNOWN forbids viewers from discovering/pricing independently.
+    #
+    # THE ROW'S WHOLE-SUBTREE FIGURE, despite the name: its own calls plus every
+    # descendant, settled or still running (``harness.jobs.job_subtree_components``,
+    # the same rollup the session ledger uses). The name predates nested
+    # accounting and stays because it is on the wire and in two shipped clients;
+    # a row that showed only the parent's own cents while its scouts spent dollars
+    # disagreed with the footer total (session 3463fc25dade: $0.02 on the row,
+    # ~$5.5 of Sonnet scouts beneath it). ``direct_cost_knowledge`` is PARTIAL when
+    # any part of the subtree is unpriced, so the figure is then a lower bound.
     direct_cost: float | None = None
     direct_cost_knowledge: CostKnowledge | None = None
     start_time: float = 0.0
@@ -2683,9 +2696,10 @@ class JobState(BaseModel):
         usage = getattr(job, "usage", None)
         if isinstance(usage, dict):
             usage = Usage.model_validate(usage)
-        direct_cost, unknown = cost_summary(
-            (usage.cost_components or [usage]) if usage is not None else [],
-            model_label=getattr(job, "model_label", None) or "",
+        # The row's figure covers its WHOLE subtree, not only its own calls; see
+        # the ``JobState.direct_cost`` note for why the wire name is kept.
+        row_cost, unknown = job_subtree_cost(
+            job, default_model_label=str(getattr(job, "model_label", None) or "")
         )
         descendants = []
         for component in list(getattr(job, "descendant_usage", None) or []):
@@ -2708,8 +2722,8 @@ class JobState(BaseModel):
             requested_model_label=getattr(job, "requested_model_label", None),
             context_window=getattr(job, "context_window", None),
             usage=usage,
-            direct_cost=direct_cost,
-            direct_cost_knowledge=_cost_knowledge(direct_cost, unknown),
+            direct_cost=row_cost,
+            direct_cost_knowledge=_cost_knowledge(row_cost, unknown),
             start_time=float(
                 getattr(job, "start_time", 0.0)
                 or getattr(job, "started_at", 0.0)
@@ -2763,18 +2777,17 @@ class FrontendModelSpec(ModelSpec):
 
 
 class FrontendModelAccess(BaseModel):
-    """Whether the session's SELECTED model can run on the publishing host.
+    """Whether the session's selected model can actually run on its host.
 
-    The composer band's claim, carried on the session state so every reader of
-    a desktop or phone session answers "is this conversation on a model its
-    host is signed in for" without a second credential read of its own — the
-    host KNOWS (``ProviderController.usable_providers`` is the one predicate
-    every picker already filters by) and publishes it here.
-
-    ``None`` (the field ABSENT, see the serializer) is "this host makes no
-    statement" — a host that does not publish it, or one whose store could not
-    be read. ``signed_out`` is a positive finding and must never stand in for
-    "could not check".
+    ADDITIVE and published by the host that knows the credentials, because the
+    truth of it is a fact about a CREDENTIAL STORE, not about the conversation:
+    the same session resumed on a machine without the sign-in is genuinely not
+    runnable there, and the field must therefore be recomputed by whichever
+    host publishes state rather than restored from a checkpoint (see the
+    checker's durable fold). ``None`` on the wire means NO CLAIM is made —
+    either the host does not compute it, or its credential store could not be
+    read, in which case "signed_out" would be an accusation the app failed to
+    establish (the same reason ``picker_rows(usable=None)`` shows everything).
     """
 
     model_config = ConfigDict(extra="allow")
@@ -2989,10 +3002,10 @@ class FrontendSessionState(BaseModel):
     effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None
-    #: "Can the model this session is on actually run on the publishing host" —
-    #: see :class:`FrontendModelAccess`. ``None`` = no claim (a host that does
-    #: not publish it, or one whose store could not be read); old clients ignore
-    #: the key, and a client that knows it renders nothing for ``None``.
+    #: "Can the model this session is on actually run here" — see
+    #: :class:`FrontendModelAccess`. ``None`` = no claim (a host that does not
+    #: publish it, or one whose store could not be read); old clients ignore
+    #: the key, and this client renders nothing for ``None``.
     model_access: "FrontendModelAccess | None" = None
     last_usage: FrontendUsage | None = None
     usage_components: list[FrontendUsage] = Field(default_factory=list)
@@ -3174,12 +3187,16 @@ class FrontendSessionState(BaseModel):
             payload.pop("asks_open", None)
         if mutable.asks_truncated is None:
             payload.pop("asks_truncated", None)
-        # An idle claim costs the frame its null (``, "model_access": null`` —
-        # 22 bytes), and the attach frame has no slack (the same reason the ask
-        # fields pop above). Absence already means "no claim" for every consumer
-        # (the field defaults to None), so the null is spent only when a claim
-        # EXISTS; the delta that CLEARS one still carries an explicit null,
-        # which is what lets a follower tell "cleared" from "never said".
+        # An IDLE claim costs the frame its null (``, "model_access": null`` —
+        # 22 bytes), and the attach frame has no slack: the class guard in
+        # tests/unit/session/test_attach_frame_size.py sat 2,177 bytes under
+        # the 1 MiB line without the field and 22 bytes over with it (QA round
+        # 1, Q3). Absence already means "no claim" for every consumer — the
+        # field defaults to None and the durable fold writes None for the same
+        # reason — so the null is spent only when a claim EXISTS. A live claim
+        # serializes normally; the delta that CLEARS one still carries an
+        # explicit null (this seam shapes snapshots, not change sets), which
+        # is what lets a follower tell "cleared" from "never said".
         if mutable.model_access is None:
             payload.pop("model_access", None)
         return payload
@@ -6505,9 +6522,7 @@ class FrontendStateStore:
         jobs = self._jobs(session, self._retained_windows(), self._released_memo())
         child_costs: dict[str, float] = dict(current.child_costs)
         for job in jobs:
-            cost = _job_subtree_cost(job, default_model_label=_label(selected))
-            if cost is not None:
-                child_costs[job.id] = cost
+            _carry_child_cost(child_costs, job, default_model_label=_label(selected))
         parent_cost = current.cumulative_parent_cost
         knowledge = current.cost_knowledge
         # The record is the durable money and it is newer than the checkpoint's
@@ -6978,9 +6993,7 @@ class FrontendStateStore:
         child_costs = dict(self._state.child_costs)
         selected = getattr(session, "model", None)
         for job in jobs:
-            cost = _job_subtree_cost(job, default_model_label=_label(selected))
-            if cost is not None:
-                child_costs[job.id] = cost
+            _carry_child_cost(child_costs, job, default_model_label=_label(selected))
         update = self.mutate(jobs=jobs, child_costs=child_costs, **_ledger_cost(session))
         # After the reducer has decided, so the memo hands back the object the
         # state actually holds -- see :meth:`_TrajectoryWindows.adopt_from`.
@@ -6991,14 +7004,13 @@ class FrontendStateStore:
     def refresh_model_access(self, access: "FrontendModelAccess | None") -> FrontendUpdate | None:
         """Publish whether the session's selected model can run on this host.
 
-        Called by the edges that CHANGE that fact — session open, a login, a
-        model switch or re-home — and NOT by ``refresh_from_session``: that
-        method runs on every streaming edge of the session loop, and reading a
-        credential store there would put a SQLite read on that path for a field
-        that changes on credential timescales. The caller owns the credential
-        knowledge (``ProviderController.usable_providers``, or
-        ``providers.model_access.usable_providers_here`` for a serve-side host
-        with no controller of its own); this is only the wire.
+        Owner-side, and called by the same edges that republish the model
+        catalogue (adoption, a login, a model switch) rather than by
+        ``refresh_from_session``: that method runs on every streaming edge of
+        the session loop, and reading a credential store there would put a
+        SQLite read on that path for a field that changes on credential
+        timescales. The caller owns the credential knowledge
+        (``ProviderController.usable_providers``); this is only the wire.
         """
         # Dumped to the wire shape rather than stored as the model, matching
         # ``refresh_model_catalogue``'s rows: this store is JSON in and JSON
@@ -7987,28 +7999,28 @@ def _ledger_cost(session: Any) -> dict[str, Any]:
     }
 
 
-def _job_subtree_cost(job: Any, *, default_model_label: str) -> float | None:
-    """Direct plus nested descendant spend for one root job row.
+def _carry_child_cost(child_costs: dict[str, float], job: Any, *, default_model_label: str) -> None:
+    """Record one root row's whole-subtree spend in the compatibility ``child_costs`` map.
 
-    Mirrors the harness accounting (`jobs.py`): each descendant component is
-    priced at ITS OWN serving identity, never the parent's rate. Any
-    unpriceable component returns ``None`` so the prior figure is retained
-    rather than silently undercounted — the same honesty rule the legacy
-    harvest applied.
+    The rollup is the ledger's own (:func:`job_subtree_cost`), so each component
+    is priced at ITS OWN serving identity, never the parent's rate, and a running
+    parent includes its live children. A partly-unpriced subtree never lowers a
+    figure already shown (:func:`carry_floor`) — the same retain-the-prior rule
+    the legacy harvest applied.
     """
-    direct = job_cost(job, default_model_label=default_model_label)
-    components = list(getattr(job, "descendant_usage", None) or [])
-    if direct is None and not components:
-        return None
-    descendant = 0.0
-    for component in components:
-        provider = getattr(component, "provider", None) or ""
-        model_id = getattr(component, "model_id", None) or ""
-        cost = turn_cost(f"{provider}/{model_id}" if provider else model_id, component)
-        if cost is None:
-            return None
-        descendant += cost
-    return (direct or 0.0) + descendant
+    knowledge = getattr(job, "direct_cost_knowledge", None)
+    if knowledge is not None:
+        # The runtime already priced this row's subtree when it built the row
+        # (``JobState.from_job``, on the loop that owns the live managers), and a
+        # frozen row has no live manager left to read: use its figure, do not
+        # reprice it in a viewer that may lack the credentials or the memo.
+        cost = getattr(job, "direct_cost", None)
+        lower_bound = knowledge in {CostKnowledge.PARTIAL, CostKnowledge.FLOOR}
+    else:
+        cost, lower_bound = job_subtree_cost(job, default_model_label=default_model_label)
+    stored = carry_floor(child_costs.get(job.id), cost, lower_bound)
+    if stored is not None:
+        child_costs[job.id] = stored
 
 
 def _last_turn_outcome_from(session: Any, current: str) -> str:

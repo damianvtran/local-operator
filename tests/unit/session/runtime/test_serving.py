@@ -3516,10 +3516,7 @@ async def test_rehome_never_cuts_across_live_work(monkeypatch: pytest.MonkeyPatc
     await _settle_notices(handle)
     assert (
         recorder.notices()
-        == [
-            "This conversation stays on radient/auto until the turn ends — "
-            "/model switches it now."
-        ]
+        == ["This conversation stays on radient/auto until the turn ends — /model switches it now."]
         * 2
     )
     assert applied == []
@@ -3610,6 +3607,147 @@ async def test_a_retry_that_can_no_longer_land_says_so_and_disarms(
 
 
 @pytest.mark.asyncio
+async def test_the_gate_is_re_applied_when_the_retry_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider login landing before the turn end takes the authority away.
+
+    Round-3 MINOR-1: the docstrings lean on "the gate runs on every attempt,
+    retry included", and nothing pinned it. With the gate mutated out this test
+    moves the session; with it in place nothing moves and the close-out speaks
+    once.
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    # A second provider signs in before the turn ends: this is no longer the
+    # first provider login, so the deferred move must NOT happen.
+    session.is_streaming = False
+    _patch_access(monkeypatch, {"deepseek", "openrouter"})
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert applied == [], "a non-first login must not move the conversation"
+    assert session.model_label == "radient/auto"
+    assert handle._rehome_pending is None
+    assert recorder.notices() == [
+        "This conversation stays on radient/auto until the turn ends — " "/model switches it now.",
+        "This conversation is still on radient/auto — /model switches it when you are ready.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_two_settles_before_the_first_retry_lands_move_it_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-3 MINOR-2: one in-flight retry, however many turn ends race it.
+
+    The retry's CAS re-check precedes its own credential read, so two live
+    retries both pass it — the probe saw two applies and two notices. The
+    spawn guard collapses them to one; without it this test fails.
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    session.is_streaming = False
+    handle._on_turn_settled()
+    await asyncio.sleep(0)  # the first retry is now live, parked on its read
+    handle._on_turn_settled()  # a second turn end before it lands
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert [spec.provider for spec in applied] == ["deepseek"], "moved exactly once"
+    assert session.model_label == "deepseek/deepseek-flash"
+    assert (
+        recorder.notices().count("Switched to deepseek/deepseek-flash — not signed in to radient.")
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_disposing_handle_starts_no_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retiring work must not begin new turns of its own (round-3 MINOR-2).
+
+    The probe moved the model on a disposing handle; the schedule and the spawn
+    both refuse, and the arm dies with the handle.
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    session.is_streaming = False
+    handle._disposing = True
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert applied == [] and session.model_label == "radient/auto"
+    assert handle._rehome_retry_task is None
+    assert recorder.notices() == [
+        "This conversation stays on radient/auto until the turn ends — " "/model switches it now."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_switch_that_does_not_take_closes_the_arm_out_loud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-3 MINOR-3: a retry whose set did not stick must not go quiet.
+
+    The conversation is still on the unreachable model and the repair cannot
+    land, so the close-out speaks and the arm clears — the alternative was a
+    silent re-try at every later turn end.
+    """
+    handle, session, _applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    async def _no_take(provider: str, model_id: str, effort: str | None) -> str:
+        return "no-op"
+
+    session.is_streaming = False
+    monkeypatch.setattr(handle, "set_model_effort", _no_take)
+    handle._on_turn_settled()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert session.model_label == "radient/auto"
+    assert handle._rehome_pending is None, "the arm does not survive"
+    assert recorder.notices()[-1] == (
+        "This conversation is still on radient/auto — /model switches it when you are ready."
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_pick_inside_the_credential_read_gets_the_same_deferral_sentence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3639,7 +3777,7 @@ async def test_a_pick_inside_the_credential_read_gets_the_same_deferral_sentence
     assert applied == []
     assert handle._rehome_pending is not None
     assert recorder.notices() == [
-        "This conversation stays on radient/auto until the turn ends — " "/model switches it now."
+        "This conversation stays on radient/auto until the turn ends — /model switches it now."
     ]
 
 

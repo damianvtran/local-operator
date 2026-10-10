@@ -910,6 +910,12 @@ class ServingSessionHandle(SessionHandle):
         #: before this, only a TUI owner retried and a runtime-served session
         #: stayed on the unreachable model with nothing more said).
         self._rehome_pending: tuple[str, str, str] | None = None
+        #: The ONE in-flight turn-end retry, held so two turn ends landing
+        #: before it yields cannot both run (round-3 MINOR-2): the retry's CAS
+        #: re-check precedes its own credential read, so two live retries both
+        #: pass it — a duplicate sentence and a redundant same-model set. Held
+        #: by reference like the naming errand, and cleared when it settles.
+        self._rehome_retry_task: asyncio.Task[None] | None = None
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
         # request_id -> (monotonic instant, settled value) for gates that LANDED
@@ -4945,6 +4951,12 @@ class ServingSessionHandle(SessionHandle):
         # reason).
         new_label = peer_model.selected_label(session)
         if new_label != f"{provider}/{model_id}":
+            # The switch did not take, so the conversation is still on the
+            # unreachable model: the repair is still NEEDED and cannot land —
+            # the close-out speaks rather than leaving an arm that silently
+            # re-tries at every later turn end (round-3 MINOR-3). ``speak``
+            # matches every other still-stranded cannot-land branch.
+            self._close_deferred_rehome(from_pending, speak=True)
             return f"kept: the switch did not take (still {new_label or 'nothing'})"
         self._rehome_pending = None
         self._emit_notice(rehome_notice(current, new_label), "info")
@@ -4976,6 +4988,10 @@ class ServingSessionHandle(SessionHandle):
         # ``info``: ``NoticeEvent.kind`` has no ``note`` rung on the wire yet
         # (design round 2, D7 — recorded as deferred in the PR thread), so this
         # paints one tier dimmer than the TUI's own notice for the same state.
+        # The precedent the deferral cites is `_on_config_change`'s loosening
+        # refusal ("``note`` … is NOT available to a runtime notice"), not an
+        # approvals-default helper: that rung exists only for embedded hosts
+        # (review round 3, NIT-1).
         self._emit_notice(rehome_still_stranded_notice(armed[0]), "info")
 
     def _schedule_rehome_retry(self) -> None:
@@ -4986,8 +5002,14 @@ class ServingSessionHandle(SessionHandle):
         reads that lock, so it lands on the NEXT loop iteration via ``call_soon``
         — the same shape ``_publish_busy_soon`` uses, including its closed-loop
         guard.
+
+        A DISPOSING handle starts no retry: retiring work must not begin new
+        turns of its own (round-3 MINOR-2), and the arm dies with the handle.
+        The in-flight guard lives in :meth:`_spawn_rehome_retry`, which is where
+        it can be exact — two ``call_soon`` callbacks can be queued before either
+        runs, so only the loop-thread check sees them both.
         """
-        if self._rehome_pending is None:
+        if self._rehome_pending is None or self._disposing:
             return
         try:
             self._loop.call_soon(self._spawn_rehome_retry)
@@ -4996,11 +5018,29 @@ class ServingSessionHandle(SessionHandle):
             return
 
     def _spawn_rehome_retry(self) -> None:
-        """Hold the retry task by reference, like the naming errand: a bare
-        ``create_task`` can be collected before it runs."""
+        """Start the ONE in-flight retry, held by reference like the naming errand.
+
+        Both guards live here, not at the scheduling site: this runs on the
+        loop thread with no await between the check and the ``create_task``, so
+        it is the only place two queued settles can be told apart (round-3
+        MINOR-2 — the probe's double move was exactly two retries passing the
+        same CAS because the re-check precedes its own credential read).
+        """
+        if self._disposing:
+            return
+        task = self._rehome_retry_task
+        if task is not None and not task.done():
+            return
         task = self._loop.create_task(self._retry_deferred_rehome())
+        self._rehome_retry_task = task
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(self._forget_rehome_retry)
+
+    def _forget_rehome_retry(self, task: asyncio.Task[None]) -> None:
+        """Release the in-flight slot when the retry settles (or is cancelled)."""
+        if self._rehome_retry_task is task:
+            self._rehome_retry_task = None
 
     async def _retry_deferred_rehome(self) -> None:
         """The serve-side half of the deferral promise (round-2 M1/D6/Q2).
@@ -5012,7 +5052,12 @@ class ServingSessionHandle(SessionHandle):
         compare-and-set with every term re-read — the first-login gate included —
         and either outcome SPEAKS through the owner: the ordinary move notice,
         or the close-out when the repair can no longer land.
+
+        A handle that began retiring between the schedule and this task does
+        nothing (see ``_spawn_rehome_retry``): the arm goes with the handle.
         """
+        if self._disposing:
+            return
         pending = self._rehome_pending
         if pending is None:
             return
@@ -6048,6 +6093,17 @@ class ServingSessionHandle(SessionHandle):
         opened nor can see in any list. Settled rather than deferred, and the
         same absence of contention as the silenced arm above: no claim, no
         release, and the durable mark left exactly as another surface needs it.
+
+        A PROCESS WHOSE HOME IS NOT THE USER'S DOES NOT CLIMB IT, silently
+        (``tui.notify.desktop_belongs_to_this_process(report=False)``): the
+        third arm, for the shapes the first two structurally cannot catch —
+        ``lop exec`` and agent-runtime-svc's per-run ``HOME`` do not declare
+        themselves with a switch and can host real providers. Nothing here can
+        reach the user's screen, and before this arm every such run paid the
+        ladder's claim/release churn plus a one-shot WARNING in its stderr
+        (which the adapter persists as an audit event). SETTLED for the same
+        reason as above: the unseen mark stays, so the user's own surfaces are
+        unaffected.
         """
         try:
             from local_operator.tui.notify import notifications_enabled
@@ -6055,6 +6111,25 @@ class ServingSessionHandle(SessionHandle):
             if not notifications_enabled():
                 return _ANNOUNCE_SETTLED
             if not _session_may_announce(getattr(self, "_session", None)):
+                return _ANNOUNCE_SETTLED
+            from local_operator.tui.notify import desktop_belongs_to_this_process
+
+            # A RUN, NOT A PERSON: this process's HOME is not the user's
+            # (``lop exec``, a per-run agent-runtime-svc home), so nothing this
+            # arm raises could land on a screen the user is in front of, and
+            # SETTLED is the honest answer — nothing is owed TO THIS PROCESS.
+            # Before this check the arm fell through to ``detached_notify``,
+            # whose own identity gate refused, and the refusal armed the
+            # 2/8/30 s retry ladder and printed a one-shot WARNING into the
+            # run's stderr (which the agent-runtime-svc adapter persists as an
+            # audit event) on EVERY per-run execution.
+            #
+            # ``report=False``: the warning exists for a human who lost toasts
+            # to a redirected home; an automation run is not one, and its one
+            # line per process became one line per run. A containerised user
+            # still hears it from their interactive path, because the report is
+            # per process, not per call.
+            if not desktop_belongs_to_this_process(report=False):
                 return _ANNOUNCE_SETTLED
             if self._watching_surfaces():
                 # Rung 1. Cheap and first: no store read, no filesystem probe.

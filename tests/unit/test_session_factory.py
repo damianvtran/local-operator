@@ -653,6 +653,9 @@ async def test_the_tool_roster_follows_the_sessions_final_inventory(
             "task",
             "wait",
             "jobs",
+            # Appended LAST by design (§E): a roster entry the classification
+            # block may advertise once this session's inventory holds the tool.
+            "code_requests",
         ]
         cached = session_factory._classification_roster(hooks)
         assert [row.name for row in cached if row.kind == "tool"] == [
@@ -662,6 +665,7 @@ async def test_the_tool_roster_follows_the_sessions_final_inventory(
             "task",
             "wait",
             "jobs",
+            "code_requests",
         ]
         # A later inventory write rebuilds both the roster and its cache: the
         # cache key carries the tool term, so the change is visible on the
@@ -924,10 +928,10 @@ async def test_trigger_knobs_are_settable_in_config_yml(tmp_config_dir: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_default_config_compacts_at_600k_on_a_1m_model(tmp_config_dir: Path) -> None:
+async def test_default_config_compacts_at_400k_on_a_1m_model(tmp_config_dir: Path) -> None:
     """No ``compaction`` block at all: a 1M-context session must not compact
     at ~235k (23% of its window — three quarters of the usable context thrown
-    away per pass), it must wait for min(80% x 1M, 600k) = 600k."""
+    away per pass), it must wait for min(80% x 1M, 400k) = 400k."""
     (tmp_config_dir / "config.yml").write_text(
         "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: test-model\n",
         encoding="utf-8",
@@ -944,8 +948,62 @@ async def test_default_config_compacts_at_600k_on_a_1m_model(tmp_config_dir: Pat
     # No block in the file: the session runs on the shipped defaults.
     settings = cast(Session, session)._compaction_settings or CompactionSettings()
     assert should_compact(234_800, 1_000_000, settings) is False
-    assert should_compact(600_001, 1_000_000, settings) is True
+    assert should_compact(400_000, 1_000_000, settings) is False  # on the line: stable
+    assert should_compact(400_001, 1_000_000, settings) is True
     await session.dispose()
+
+
+def test_coerce_compaction_settings_without_a_threshold_resolves_the_400k_default() -> None:
+    """``{}`` and a block that sets other keys both land on the 400k default:
+    the coercion adds nothing of its own to ``threshold_tokens``."""
+    from local_operator.compaction.thresholds import resolve_threshold_tokens
+
+    for raw in ({}, {"enabled": True}, {"strategy": "context-full", "keep_recent_tokens": 30_000}):
+        settings = coerce_compaction_settings(raw)
+        assert settings is not None
+        assert settings.threshold_tokens == 400_000
+        assert resolve_threshold_tokens(1_000_000, settings) == 400_000
+        assert resolve_threshold_tokens(200_000, settings) == 160_000
+
+
+def test_a_seeded_config_yml_gets_400k_and_an_explicit_600k_is_kept(tmp_path: Path) -> None:
+    """Through the REAL write path and the REAL load path, not a hand-built dict.
+
+    There is no migration for the 600k -> 400k change because nothing ever
+    seeds ``threshold_tokens`` into a user's file: ``compaction`` is not in
+    ``DEFAULT_CONFIG`` and ``write_setting`` merges exactly one leaf. So a file
+    that only turned compaction on falls through to the new default, while a
+    file that holds 600000 explicitly keeps it. Both halves are asserted
+    against a config.yml written by ``write_setting`` and re-read by a fresh
+    ``ConfigManager`` (the way a new session sees it).
+    """
+    import yaml
+
+    from local_operator import settings_io
+    from local_operator.compaction.thresholds import resolve_threshold_tokens
+    from local_operator.config import ConfigManager
+
+    config_dir = tmp_path / "seeded"
+    config_dir.mkdir()
+    manager = ConfigManager(config_dir)
+
+    def resolved(window: int) -> int:
+        settings = coerce_compaction_settings(
+            ConfigManager(config_dir).get_config_value("compaction", None)
+        )
+        assert settings is not None
+        return resolve_threshold_tokens(window, settings)
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["compaction.enabled"], True)
+    on_disk = yaml.safe_load((config_dir / "config.yml").read_text(encoding="utf-8"))
+    assert on_disk["values"]["compaction"] == {"enabled": True}  # no threshold seeded
+    assert resolved(1_000_000) == 400_000
+    assert resolved(400_000) == 320_000
+    assert resolved(200_000) == 160_000
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["compaction.threshold_tokens"], 600_000)
+    assert resolved(1_000_000) == 600_000
+    assert resolved(200_000) == 160_000
 
 
 def test_coerce_compaction_reads_legacy_max_threshold_tokens() -> None:

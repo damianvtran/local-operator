@@ -81,6 +81,33 @@ actionable she stays quiet in substance (her instructions say so explicitly).
 The wake row is re-armed for the next day by her own runtime; the cadence works
 with every terminal closed because arming also installs the wake supervisor.
 
+**Notifications.** Her check-ins reach you with NO surface attached: the
+cadence row and the escalation extras declare `notify=True`, so a check-in that
+found something actionable raises an OS banner through the completion ladder
+(the desktop app, a TUI or a watching surface takes over when one is running),
+and clicking the banner opens the conversation. Whether a banner is actually
+raised is decided at settle time from her ACTUAL REPLY — a quiet day does not
+notify, because a daily "nothing needs your attention" banner is how a chief of
+staff gets muted, taking the actionable ones with it:
+
+- a reply of exactly `Nothing needs your attention today.` is silent (case,
+  padding, quotes, backticks and a trailing period are tolerated; the legacy
+  `(no action needed)` spelling is still recognised; a paraphrase is not);
+- a quiet-day TIP is a silent row by decision: it lands unread in her
+  conversation and shows on any surface you open, but does not interrupt. The
+  one-line switch is `TIP_REPLY_NOTIFIES` in `aida/proactive.py`;
+- a check-in on an install whose greeting ledger is not yet `delivered`/
+  `skipped` never banners — she does not ping someone she has not met;
+- at most `MAX_BANNERS_PER_DAY` (3, a constant — no config key) banners are
+  raised in a rolling 24 h, counted in `aida/onboarding.json` under `banners`;
+- trigger check-ins stay quiet — they ask her to ACT (message the linked
+  sessions), not to report, so the sentinel rule does not describe them;
+- `display.notifications` and `LOCAL_OPERATOR_NO_NOTIFICATIONS` apply exactly
+  as for every other banner, and per-run/automation homes (a `lop exec` run,
+  agent-runtime-svc's per-run `HOME`) never raise one at all.
+
+An ERRORED check-in turn always notifies, whatever the reply reads like.
+
 **Escalation (bounded).** During a turn she can ask for an extra proactive
 check-in by writing `<config>/aida/escalate.json`:
 
