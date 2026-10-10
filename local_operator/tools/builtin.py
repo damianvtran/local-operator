@@ -4806,6 +4806,21 @@ async def execute_bash(
         # whose completion auto-delivers when the session is idle. A REAL
         # abort (Ctrl+C, jobs cancel) still kills: that is a stop, not a
         # redirect.
+        if context is not None and context.monitor_check:
+            # EXCEPT a monitor check: it is UNATTENDED, so no steer may
+            # interrupt it and a cancel here is teardown or the scheduler's
+            # deadline. The detach branch below cannot tell those from a
+            # steer and would return a "job … steering interrupted" NOTICE
+            # as the call's result — the scheduler records it as the check's
+            # OUTPUT and adopts it as the diff baseline (measured live: m28's
+            # post-restart delta ran against exactly that notice text), and
+            # the detached command outlives the check with no consumer. Kill
+            # and let the cancel propagate: the check path turns a deadline
+            # into a failed check and a teardown into a cancelled task,
+            # never into output.
+            _kill()
+            _reap_synchronously()
+            raise
         if signal is not None and signal.aborted:
             _kill()
             raise
