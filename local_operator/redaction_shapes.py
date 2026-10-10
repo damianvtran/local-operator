@@ -42,8 +42,10 @@ deliberately no "looks random" / entropy rule: see the note on
 
 **A plain-word secret is masked as a WORD, not as a substring.** A registered value
 made only of ASCII letters is matched on letter-run boundaries (see
-:func:`_is_word_like`): it is masked wherever it stands alone or beside a digit or
-symbol, and it is NOT masked inside a longer run of letters. The residual, accepted
+:func:`_is_word_like`): it is masked wherever it stands alone or beside a digit,
+symbol or backslash escape (a ``\\n`` before a value at the start of a raw-JSON line
+is a boundary too — :func:`_word_pattern` carries the why), and it is NOT masked
+inside a longer run of letters. The residual, accepted
 on purpose: a password that is an ordinary word and appears embedded in a longer
 word (``unsynthetically`` for the password ``synthetic``) is shown. Masking it
 rewrote vocabulary in tool output the model copies back into source files.
@@ -4051,9 +4053,13 @@ def is_registerable_component(value: str) -> bool:
     Registration is a PROMOTION: the value is masked in every later result for
     the rest of the session, so a false positive here outlives the line that
     caused it (``Basic authentication`` was registered as a credential once, and
-    the word was then masked in every subsequent result). The floor is well
-    floor is the masking floor and the discriminator is the SHAPE: a value that
-    is a plain word is never registered, whatever its length.
+    the word was then masked in every subsequent result). What remains is the
+    LENGTH floor (:data:`DETECTED_COMPONENT_FLOOR`) plus the two refusals below —
+    a placeholder, a store-grammar name. The word-shape refusal this rule once
+    carried was removed deliberately: it left a word-shaped credential that a real
+    rule had masked free to reappear in the next result (the body comment records
+    the measurement), and such a value is now masked as a WORD rather than a
+    substring (see :func:`_word_pattern`).
 
     **Only genuine secret VALUES can enter a redaction set** (operator directive): a
     token spelled the way a stored secret's NAME is spelled
@@ -5639,7 +5645,11 @@ def _is_word_like(value: str) -> bool:
     ordinary vocabulary, and mangling vocabulary is the worse failure — it blinds
     the model and corrupts files. A word glued to a digit, an underscore or any
     symbol is NOT a longer run of letters and is still masked
-    (``synthetic1``, ``my_synthetic``, ``synthetic.``).
+    (``synthetic1``, ``my_synthetic``, ``synthetic.``). A backslash ESCAPE is a
+    boundary too, not its last letter: in raw provider JSON a value at the start of a
+    line sits after ``\\n`` (or after a ``\\uXXXX`` whose last hex digit is a letter),
+    and the token must stay masked there — :func:`_word_pattern` carries the why and
+    the regression it fixes.
 
     ASCII only, deliberately: a boundary is the edge of a run of letters, and
     scripts that are written without spaces (CJK) have no such edge, so a
@@ -5647,13 +5657,16 @@ def _is_word_like(value: str) -> bool:
     character. Those values keep the substring match, which fails toward masking.
 
     Applied to the two spellings of a word-like value that are themselves a run of
-    letters a reader can meet in prose: the verbatim value and its reversal (a
-    reversed word is still a word often enough — ``stressed`` reverses to
-    ``desserts`` — that the substring match mangled it for the same reason). Every
-    ENCODED spelling (base64, hex, percent, escaped, separator-spread) keeps the
-    substring match even when it happens to be all letters: it is an opaque string
-    that is not ordinary vocabulary, and a base64 spelling glued into a longer
-    base64 blob is a leak, so that side fails toward masking.
+    letters a reader can meet in prose: the verbatim value and its reversal — a
+    letters-only value reverses to letters-only, so the reversal is the same case
+    whenever it exists. It exists only at or over ``_TRANSFORM_MIN_VALUE_LEN``:
+    below that floor ``credential_forms`` returns the verbatim spelling alone, so
+    the stock pair (``stressed``/``desserts``, 8 letters each) illustrates the shape
+    without being reachable. Every ENCODED spelling (base64, hex, percent, escaped,
+    separator-spread) keeps the substring match even when it happens to be all
+    letters: it is an opaque string that is not ordinary vocabulary, and a base64
+    spelling glued into a longer base64 blob is a leak, so that side fails toward
+    masking.
 
     **Chunked surfaces over-mask, never under-mask, at a cut.** A stream cut can
     leave the word at the very edge of a chunk, where the missing neighbour reads as
@@ -5674,9 +5687,25 @@ def _word_pattern(form: str) -> Pattern[str]:
     are exactly the spellings a credential is glued into. Cached because the pass
     runs over every settled tool result; the key set is bounded by the session's
     registration cap times the (closed) spelling list.
+
+    **A backslash escape is the boundary, not its last letter** (QA round 1, Q-1).
+    The pass runs over RAW provider JSON as well as prose: ``raw_arguments`` is what
+    the transcript persists and the wire replays, and there a value at the start of
+    a line or after a tab sits immediately after ``\\n``, ``\\t`` ... — whose last
+    character is a letter — or after the fourth hex digit of a ``\\uXXXX`` when that
+    digit is ``a``-``f``. Reading that character as an ordinary letter released the
+    token on this surface while the parsed ``arguments`` stayed masked: a leak, not
+    prose protection, and one ``origin/main`` did not have (its substring match
+    masked there). So ``\\`` + letter and ``\\uXXXX`` count as separators; a letter
+    run that is NOT an escape still suppresses the match, so ``un<word>ally`` stays
+    readable. Both extra lookbehinds are fixed-width, so the pattern costs no more
+    per position than the one it replaced.
     """
     letters = _ASCII_LETTER_CLASS
-    return re.compile(f"(?<![{letters}]){re.escape(form)}(?![{letters}])")
+    return re.compile(
+        f"(?:(?<![{letters}])|(?<=\\\\[{letters}])|(?<=\\\\u[0-9A-Fa-f]{{4}}))"
+        f"{re.escape(form)}(?![{letters}])"
+    )
 
 
 def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
@@ -5706,6 +5735,17 @@ def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
     of magnitude cheaper than the table it sits beside. The dominant new term is
     the spelling count, not the value count, which is why the count is what the
     policy bounds and what a test pins.
+
+    **One term is NOT cheap, and it is the feature's own case: a PRESENT word form.**
+    A letters-only value's form is matched with the boundary regex
+    (:func:`_word_pattern`), which scans the whole text, so the numbers above hold
+    while no registered word form occurs in it. With one present: ~13 ms per present
+    word form per 1 MB, linear in the text, against ~0.9 ms for the substring pass it
+    replaced (agent review round 1, R2 — best of five, M3 Max/CPython 3.12: 13.06 ms
+    vs 0.88 ms at 1 MB, 131 ms vs 9.7 ms at 10 MB; absent forms add nothing, 0.46 ms
+    vs 0.44 ms base). A typical tool result is a few hundred KB and presents a form
+    once at most, so the added cost is ≤ ~7 ms there; the term to watch is linear,
+    not quadratic.
     """
     result = text
     # The `str` filter is in the GENERATOR, not a guard inside the loop: `key=len`

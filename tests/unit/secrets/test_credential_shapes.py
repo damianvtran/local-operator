@@ -2915,15 +2915,48 @@ class TestPlainWordValueIsMatchedOnWordBoundaries:
         masker = redaction_shapes.StreamMasker([PLAIN_WORD])
         assert masker.push(text, final=True) == f"a [redacted] store, un{PLAIN_WORD}ally\n"
 
-    def test_the_variable_store_registers_the_word_and_masks_it_as_a_word(self) -> None:
+    def test_the_variable_store_registers_the_word_and_masks_it_as_a_word(
+        self, tmp_path: Path
+    ) -> None:
         """The real path: SCRUB ``PASSWORD=<word>``, never ``register_redaction`` by hand."""
-        store = VariableStore(cwd=tempfile.mkdtemp())
+        store = VariableStore(cwd=str(tmp_path))
         first, _ = store.redact_with_report(f"PASSWORD={PLAIN_WORD}")
         assert PLAIN_WORD not in first
         assert PLAIN_WORD in store.redaction_values(), "premise: the shape pass registered it"
         assert store.redact(f"a {PLAIN_WORD} store") == "a [redacted] store"
         prose = f"un{PLAIN_WORD}ally {PLAIN_WORD.capitalize()} {PLAIN_WORD.upper()}"
         assert store.redact(prose) == prose
+
+    @pytest.mark.parametrize(
+        "escape",
+        ("\\n", "\\t", "\\r", "\\b", "\\f", "\\u000a", "\\u000b", "\\u00ab"),
+    )
+    def test_a_json_escape_is_a_boundary_not_its_last_letter(self, escape: str) -> None:
+        """The raw-JSON shape: an escape's last character can itself be a letter.
+
+        ``raw_arguments`` is scrubbed as the RAW string, so a value at the start of a line
+        sits after ``\\n`` — whose last character is a letter — or after a ``\\uXXXX`` whose
+        last hex digit is one (``a``/``b``). Reading that character as a word character
+        released the token there while the parsed arguments stayed masked (QA round 1, Q-1).
+        """
+        for prefix in ("line1", "pre"):
+            raw = '{"content": "' + prefix + escape + PLAIN_WORD + ' here"}'
+            masked = redact_secret_values(raw, [PLAIN_WORD])
+            assert PLAIN_WORD not in masked, (escape, prefix)
+            assert REDACTION_MARKER in masked, (escape, prefix)
+
+    def test_a_letter_run_that_is_not_an_escape_still_suppresses_the_mask(self) -> None:
+        """The other direction: "escape before the token" did not become "backslash letter".
+
+        A plain letter before the token is still a longer run of letters (the accepted
+        residual), and the glued forms keep masking — the escape reading only widens what
+        counts as a SEPARATOR; it does not narrow the letter run.
+        """
+        for text in (f"un{PLAIN_WORD}ally", f"{PLAIN_WORD}ally"):
+            assert redact_secret_values(text, [PLAIN_WORD]) == text, text
+        for before in ("_", "1", "\\", '"'):
+            masked = redact_secret_values(f"x{before}{PLAIN_WORD} tail", [PLAIN_WORD])
+            assert PLAIN_WORD not in masked, before
 
 
 def test_every_spelling_of_a_longer_value_is_masked_before_a_prefix_value() -> None:
