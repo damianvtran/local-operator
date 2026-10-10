@@ -1167,6 +1167,33 @@ def _merged_tree(pad: Path, name: str, root: Path) -> Path:
     return tree
 
 
+def _worktree_owner(root: Path, name: str) -> Path:
+    """A repository with a bare origin and a pushed ``main`` — a worktree source.
+
+    The owner lives OUTSIDE any pad (a worktree's objects are its shared
+    repository's, so the fixtures need one that is not itself a candidate),
+    and the linked worktree it hands out is created with ``git worktree add``
+    so the real ``.git`` FILE and the real registration exist.
+    """
+    origin = root / "worktrees" / f"{name}.git"
+    origin.parent.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "--bare", "-b", "main", os.fspath(origin))
+    owner = root / "worktrees" / name
+    _git(root, "clone", "-q", os.fspath(origin), os.fspath(owner))
+    (owner / "a.txt").write_text("a\n")
+    _git(owner, "add", "a.txt")
+    _git(owner, "commit", "-qm", "one")
+    _git(owner, "push", "-q", "origin", "main")
+    _git(owner, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    return owner
+
+
+def _linked_worktree(owner: Path, target: Path) -> Path:
+    """``git worktree add --detach`` ``target`` at the owner's ``main``."""
+    _git(owner, "worktree", "add", "--detach", os.fspath(target), "main")
+    return target
+
+
 def test_a_merged_clean_clone_past_the_window_is_reclaimed_whole(root: Path) -> None:
     pad = _kept_pad(root, "reapme")
     tree = _merged_tree(pad, "clone", root)
@@ -1232,7 +1259,7 @@ def test_a_broken_gitdir_link_keeps_the_directory_whole(root: Path) -> None:
     result = _pass(root)
     assert tree.exists() and (tree / "notes.txt").exists()
     assert result.content_kept == [
-        ("broken", "clone: HEAD does not resolve (or the gitdir link is broken)")
+        ("broken", "clone: the gitdir link does not name a linked worktree")
     ]
 
 
@@ -1523,6 +1550,146 @@ def test_a_stale_bundle_lock_does_not_block_the_next_pass(root: Path) -> None:
     bundle = pad / "reap-rescue-clone.bundle"
     assert bundle.exists() and not (pad / "reap-rescue-clone.bundle.lock").exists()
     assert result.content and result.errors == 0
+
+
+def test_a_merged_clean_linked_worktree_is_removed_not_bundled(root: Path) -> None:
+    pad = _kept_pad(root, "wtpad")
+    owner = _worktree_owner(root, "owner1")
+    tree = _linked_worktree(owner, pad / "lo-before")
+    result = _pass(root)
+    assert not tree.exists(), "a merged-clean worktree is reclaimed through the owner"
+    listed = _git_stdout("-C", os.fspath(owner), "worktree", "list", "--porcelain")
+    assert "lo-before" not in listed, "the registration is pruned by the removal itself"
+    assert [(row.session, row.reason) for row in result.content] == [
+        ("wtpad", "merged-clean clone past the window")
+    ]
+    row = result.content[0]
+    assert row.method == "worktree-remove" and row.rescue_bundle == ""
+    assert not (
+        pad / "reap-rescue-lo-before.bundle"
+    ).exists(), "a worktree's objects are the shared store's; nothing is bundled"
+    assert list(pad.iterdir()) == [], "no bundle, no leftovers"
+
+
+def test_a_worktree_copy_whose_pointer_escapes_is_kept(root: Path) -> None:
+    # A cp copy keeps the .git FILE, so it still names the ORIGINAL's gitdir
+    # while its own path is not registered anywhere: the belt must refuse, and
+    # the registered original must come out of the pass untouched.
+    pad = _kept_pad(root, "copied")
+    owner = _worktree_owner(root, "owner2")
+    source = _linked_worktree(owner, root / "worktrees" / "outside")
+    copy = pad / "lo-before"
+    subprocess.run(["cp", "-Rc", os.fspath(source), os.fspath(copy)], check=True)
+    result = _pass(root)
+    assert copy.exists() and (copy / "a.txt").exists()
+    assert source.exists(), "the registered original is untouched"
+    listed = _git_stdout("-C", os.fspath(owner), "worktree", "list", "--porcelain")
+    assert "outside" in listed, "the registration is not acted on through a copy"
+    assert result.content == []
+    assert result.content_kept == [
+        ("copied", "lo-before: not registered in the shared repository's worktree list")
+    ]
+
+
+def test_a_dirty_linked_worktree_is_kept(root: Path) -> None:
+    pad = _kept_pad(root, "wtdirty")
+    owner = _worktree_owner(root, "owner3")
+    tree = _linked_worktree(owner, pad / "wt")
+    (tree / "a.txt").write_text("changed\n")
+    result = _pass(root)
+    assert tree.exists() and (tree / "a.txt").read_text() == "changed\n"
+    assert result.content_kept == [("wtdirty", "wt: uncommitted changes")]
+
+
+def test_a_dry_run_does_not_remove_a_linked_worktree(root: Path) -> None:
+    pad = _kept_pad(root, "wtdry")
+    owner = _worktree_owner(root, "owner4")
+    _linked_worktree(owner, pad / "wt")
+    before = _git_stdout("-C", os.fspath(owner), "worktree", "list", "--porcelain")
+    result = _pass(root, dry_run=True)
+    assert (pad / "wt" / "a.txt").exists()
+    after = _git_stdout("-C", os.fspath(owner), "worktree", "list", "--porcelain")
+    assert after == before, "a dry run performs no worktree operation"
+    assert [row.session for row in result.content] == ["wtdry"]
+    assert result.content[0].method == "worktree-remove"
+    assert result.content[0].rescue_bundle == ""
+    assert not (pad / "reap-rescue-wt.bundle").exists()
+
+
+def test_a_submodule_gitdir_link_is_kept(root: Path) -> None:
+    pad = _kept_pad(root, "submod")
+    tree = pad / "wtsub"
+    tree.mkdir()
+    (tree / ".git").write_text("gitdir: /elsewhere/.git/modules/foo/worktrees/wtsub\n")
+    (tree / "keep.txt").write_text("x\n")
+    result = _pass(root)
+    assert tree.exists() and (tree / "keep.txt").exists()
+    assert result.content_kept == [("submod", "wtsub: a submodule pointer (never touched)")]
+
+
+def test_a_dangling_worktree_pointer_is_kept(root: Path) -> None:
+    pad = _kept_pad(root, "dangling")
+    tree = pad / "gone"
+    tree.mkdir()
+    (tree / ".git").write_text("gitdir: /nonexistent/repo/.git/worktrees/gone\n")
+    result = _pass(root)
+    assert tree.exists()
+    reason = dict(result.content_kept)["dangling"]
+    assert "HEAD does not resolve" in reason
+
+
+def test_a_malformed_git_file_is_kept(root: Path) -> None:
+    pad = _kept_pad(root, "malformed")
+    tree = pad / "weird"
+    tree.mkdir()
+    (tree / ".git").write_text("not a pointer\n")
+    result = _pass(root)
+    assert tree.exists()
+    assert result.content_kept == [("malformed", "weird: the .git link is malformed")]
+
+
+def test_a_symlinked_git_entry_is_kept(root: Path) -> None:
+    pad = _kept_pad(root, "symgit")
+    owner = _worktree_owner(root, "owner5")
+    tree = pad / "linked"
+    tree.mkdir()
+    (tree / ".git").symlink_to(owner / ".git")
+    result = _pass(root)
+    assert tree.exists()
+    assert result.content_kept == [("symgit", "linked: the .git entry is a symlink")]
+
+
+def test_evidence_paths_are_never_taken_by_the_shape_arm(root: Path) -> None:
+    pad = _kept_pad(root, "evidence")
+    cache = pad / "r3" / "be" / "docs" / "evidence" / "session-load-central-cache"
+    cache.mkdir(parents=True)
+    (cache / "README.md").write_text("evidence\n")
+    (cache / "bench_ab.json").write_text("{}\n")
+    _stale_file(cache / "session-load.log")
+    archive = pad / "docs" / "evidence"
+    archive.mkdir(parents=True)
+    (archive / "bundle.tar.gz").write_text("x\n")
+    own_name = pad / "r3" / "evidence-build"
+    own_name.mkdir()
+    (own_name / "keep.bin").write_text("x\n")
+    sibling = pad / "r3" / "deep-cache"
+    sibling.mkdir()
+    (sibling / "blob.bin").write_text("x\n")
+    result = _pass(root)
+    assert not sibling.exists(), "a plain shape match still goes"
+    assert cache.exists() and (cache / "README.md").exists()
+    assert not (
+        cache / "session-load.log"
+    ).exists(), "an exempted dir is still walked: rule (a) carries no evidence exemption"
+    assert (archive / "bundle.tar.gz").exists()
+    assert own_name.exists() and (own_name / "keep.bin").exists()
+    assert [(row.session, row.reason) for row in result.content] == [
+        ("evidence", "build shapes past the window + stale output past the window")
+    ]
+    reasons = [reason for session, reason in result.content_kept if session == "evidence"]
+    assert any("session-load-central-cache: evidence path" in r for r in reasons)
+    assert any("evidence-build: evidence path" in r for r in reasons)
+    assert any("docs/evidence/bundle.tar.gz: evidence path" in r for r in reasons)
 
 
 def test_content_of_a_young_session_is_never_evaluated(root: Path) -> None:

@@ -90,16 +90,33 @@ is walked — bounded, symlinks never followed, ``.git`` never matched by shape
 
 * MERGED-CLEAN GIT TREES. A directory that is a git tree (its ``.git``
   resolves) is reclaimed WHOLE only when its HEAD resolves, its status is
-  clean, its HEAD is an ancestor of the remote trunk (``origin/HEAD``, else
-  ``origin/main``, else ``origin/master``; no trunk keeps), and no commit of
-  HEAD is absent from every remote. The sidebar refs (``refs/heads/*`` and
-  ``refs/stash``) are then checked for uniqueness against the same remotes:
-  when every tip is reachable the tree goes as-is, and when any is not, its
-  refnames are rescued into a bundle beside the tree
-  (``reap-rescue-<tree>.bundle``: ``git bundle create`` + ``git bundle
-  verify``) BEFORE the tree may go — any bundle failure keeps the tree. The
-  "objects also exist in the main repo" shortcut is NOT automated: there is
-  no generic way to locate that repo on an arbitrary machine, and a wrong
+  clean, and its HEAD is an ancestor of the remote trunk (``origin/HEAD``,
+  else ``origin/main``, else ``origin/master``; no trunk keeps). Where the
+  tree's objects live decides HOW it may go:
+
+  - ``.git`` FILE naming a linked worktree (``<shared>/.git/worktrees/<name>``):
+    the objects belong to the SHARED repository, so a bundle would duplicate
+    that store into the pad (measured: the operator's lo-before tree, 133 MB,
+    bundled 205 shared refs into 264 MB — the pad would GROW). After the
+    merged+clean checks the tree is removed with ``git -C <shared> worktree
+    remove <tree>`` WITHOUT ``--force`` (git's own refusal is the last word),
+    and only once ``git worktree list`` of the shared repository LISTS this
+    exact path — the belt that keeps a COPY of a worktree (whose ``.git``
+    still points at the original) from acting on a registration that is not
+    its own. No bundle; the registration is pruned by the removal itself. A
+    pointer that is malformed, dangling, names a submodule
+    (``.git/modules/``), or a tree the shared repository does not list: KEPT.
+  - ``.git`` DIR (an independent clone): callers continue to the uniqueness
+    logic — no commit of HEAD may be absent from every remote, and the
+    sidebar refs (``refs/heads/*`` and ``refs/stash``) are checked against
+    the same remotes: when every tip is reachable the tree goes as-is, and
+    when any is not, its refnames are rescued into a bundle beside the tree
+    (``reap-rescue-<tree>.bundle``: ``git bundle create`` + ``git bundle
+    verify``) BEFORE the tree may go — any bundle failure keeps the tree.
+  - a ``.git`` SYMLINK: kept (the content layer never follows links).
+
+  The "objects also exist in the main repo" shortcut is NOT automated: there
+  is no generic way to locate that repo on an arbitrary machine, and a wrong
   guess would authorise a lossy delete, so the bundle arm is the general safe
   path and the per-machine determination stays a human one. Dirty, unmerged,
   no-remote and unresolvable trees are KEPT WHOLE and nothing inside them is
@@ -108,9 +125,17 @@ is walked — bounded, symlinks never followed, ``.git`` never matched by shape
   policy's refused SEGMENT vocabulary, or a file whose name matches its
   refused SUFFIX vocabulary, is removed. The same arms on the same sides the
   write refusal uses — parents by segment, leaves by suffix — so the pass can
-  only ever take what a write could not have put there, and ``.git`` is never
-  taken by shape. The vocabulary is imported LAZILY from
-  ``local_operator.scratchpad`` so this module keeps its import weight.
+  only ever take what a write could not have put there, ``.git`` is never
+  taken by shape, and ONE documented exemption outranks the vocabulary: a
+  path with a pad-relative segment whose case-folded name starts with
+  ``evidence`` is never taken by this arm (measured: a real
+  ``docs/evidence/session-load-central-cache/`` holding scripts and bench
+  results matched the ``-cache`` segment suffix). An exempted entry is kept
+  WHOLE as a directory and the walk still descends into it — rules (a) and
+  (c) carry no evidence exemption, so a big stale log or a merged-clean tree
+  inside evidence is still judged by its own arm. The vocabulary is imported
+  LAZILY from ``local_operator.scratchpad`` so this module keeps its import
+  weight.
 * STALE OUTPUT. A file with suffix in :data:`STALE_OUTPUT_SUFFIXES` of at
   least :data:`STALE_OUTPUT_MIN_BYTES`, untouched for
   :data:`STALE_OUTPUT_GRACE_S`, is removed (the desk's measured 122 MB
@@ -308,14 +333,15 @@ CONTENT_CLASS_STALE = "stale output"
 RESCUE_BUNDLE_PREFIX = "reap-rescue-"
 RESCUE_BUNDLE_SUFFIX = ".bundle"
 
-#: Bound for the rescue bundle's create and verify. Measured on this host: a
+#: Bound for the content layer's HEAVY git operations — a rescue bundle's
+#: create and verify, and ``git worktree remove``. Measured on this host: a
 #: full dev clone's 207 unique refs bundled in 14.9 s (266 MB) — orders of
 #: magnitude over :data:`GIT_TIMEOUT_S`, whose 5 s budget is sized for
 #: ``status``/``rev-parse`` probes; the first bound tried (5 s) killed a create
 #: mid-write and left a stale lock that blocked every retry. 300 s clears the
 #: measured cost with margin under fleet load; a fired bound keeps the tree
 #: (fail closed) and the next pass retries from a cleaned slate.
-BUNDLE_TIMEOUT_S = 300.0
+HEAVY_GIT_TIMEOUT_S = 300.0
 
 #: How many unique commits the rescue check will list before it gives up and
 #: KEEPS the tree (fail closed). One bounded ``rev-list`` walk answers every
@@ -417,6 +443,12 @@ class ContentRow:
     #: when the uniqueness check found refs that live nowhere else.
     rescue_bundle: str = ""
     rescue_bundle_bytes: int = 0
+    #: How the removal was carried out: ``"remove"`` (the guarded pad-level
+    #: path), ``"worktree-remove"`` (a linked worktree removed through its
+    #: shared repository), or ``"bundle-rescue"`` (an independent clone whose
+    #: unique refs were bundled first). The cleanup-log row carries it so a
+    #: reader can tell which of the three actually ran.
+    method: str = "remove"
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +656,98 @@ class _TreeDecision:
     #: Refnames a rescue bundle must carry before the tree may go. Empty when
     #: every local ref is reachable from the remotes (no bundle needed).
     bundle_refs: list[str] = field(default_factory=list)
+    #: The SHARED repository when this tree is a linked worktree (its ``.git``
+    #: is a FILE naming ``<shared>/.git/worktrees/<name>``): such a tree is
+    #: removed by ``git worktree remove`` in ``<shared>``, never bundled —
+    #: its refs and objects ARE the shared store's, and a bundle would only
+    #: duplicate the operator's whole clone into the pad.
+    worktree: Path | None = None
+
+
+def _read_gitdir_link(entry: Path) -> str | None:
+    """The target of a ``.git`` FILE's ``gitdir:`` pointer, or ``None``.
+
+    The pointer is resolved against the file's own directory (git writes it
+    relative in some layouts) and returned as a path string; ``None`` covers
+    everything malformed or unreadable, which the caller treats as keep.
+    """
+    try:
+        content = entry.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not content.startswith("gitdir:"):
+        return None
+    raw = content[len("gitdir:") :].strip()
+    if not raw:
+        return None
+    target = Path(raw)
+    if not target.is_absolute():
+        target = entry.parent / target
+    return os.fspath(target)
+
+
+def _linked_worktree_shared(repo: Path) -> tuple[Path | None, str | None]:
+    """Where a linked worktree's objects live, when ``repo`` is one.
+
+    Returns ``(shared, None)`` for a ``.git`` FILE naming
+    ``<shared>/.git/worktrees/<name>`` (the shape ``git worktree add``
+    writes), ``(None, why)`` for every other ``.git`` FILE — a submodule
+    pointer (``.git/modules/``), a separate-git-dir link, anything malformed
+    — and ``(None, None)`` for a ``.git`` DIRECTORY (an independent clone,
+    which the clone path judges). A ``.git`` SYMLINK is a keep: the content
+    layer never follows links, not even to decide what a tree is.
+    """
+    git_entry = repo / ".git"
+    if git_entry.is_symlink():
+        return None, "the .git entry is a symlink"
+    if not git_entry.is_file():
+        return None, None
+    link = _read_gitdir_link(git_entry)
+    if link is None:
+        return None, "the .git link is malformed"
+    if "/modules/" in link.replace(os.sep, "/"):
+        return None, "a submodule pointer (never touched)"
+    parts = Path(link).parts
+    for i in range(len(parts) - 3, -1, -1):
+        if parts[i] == ".git" and parts[i + 1] == "worktrees" and len(parts) == i + 3:
+            return Path(*parts[:i]), None
+    return None, "the gitdir link does not name a linked worktree"
+
+
+def _worktree_listed(listing: str, repo: Path) -> bool:
+    """Whether ``repo`` is one of the worktree paths ``git worktree list`` shows.
+
+    Both sides are realpath-ed so a store reached through a symlinked root
+    still matches; only the porcelain format's ``worktree <path>`` lines are
+    read. This is the belt that keeps a COPY of a worktree — whose ``.git``
+    still names the original's gitdir — from acting on the original's
+    registration: the copy's own path is not in the list.
+    """
+    wanted = os.path.realpath(os.fspath(repo))
+    for line in listing.splitlines():
+        if line.startswith("worktree "):
+            candidate = line[len("worktree ") :].strip()
+            if candidate and os.path.realpath(candidate) == wanted:
+                return True
+    return False
+
+
+def _remove_linked_worktree(shared: Path, tree: Path) -> str | None:
+    """``git worktree remove`` for one reclaimable linked worktree; None on success.
+
+    WITHOUT ``--force``: git's own refusal (dirty, locked, unlisted, missing)
+    is the last word and comes back as the keep-reason, exactly like a failed
+    bundle. The removal also prunes the registration, so a success leaves
+    nothing behind to retry.
+    """
+    done = _git(
+        os.fspath(shared), "worktree", "remove", os.fspath(tree), timeout=HEAVY_GIT_TIMEOUT_S
+    )
+    if done.returncode == 0:
+        return None
+    lines = done.stderr.strip().splitlines()
+    detail = lines[0][:160] if lines else "no output"
+    return f"git worktree remove failed for {tree.name}: {detail}"
 
 
 def _rescue_bundle_path(root: str, relative: str) -> Path:
@@ -642,15 +766,18 @@ def _tree_reclaim_decision(repo: Path) -> _TreeDecision:
 
     The desk's test (``tick-role.md``, "Reclaimable class — stale session
     scratchpad trees") as tightened for this pass: HEAD must resolve, the
-    worktree must be clean, HEAD must be an ancestor of the remote trunk
-    (``origin/HEAD`` -> ``origin/main`` -> ``origin/master``; no trunk keeps),
-    and no commit of HEAD may be absent from every remote. The sidebar refs
-    (``refs/heads/*`` and ``refs/stash``) are then checked against the same
-    remotes for uniqueness; when any tip is unreachable its refname comes back
-    so the caller rescues it into a bundle BEFORE the tree may go. Dirty,
-    unmerged, no-remote and unresolvable trees all come back as keep — anything
-    that cannot be PROVEN reclaimable is kept, and this function never raises
-    (a repository it cannot inspect is a keep).
+    worktree must be clean, and HEAD must be an ancestor of the remote trunk
+    (``origin/HEAD`` -> ``origin/main`` -> ``origin/master``; no trunk keeps).
+    The tree's ``.git`` then decides HOW it may go: a linked worktree is
+    removed through its shared repository (no bundle — its refs and objects
+    are the shared store's) and only when that repository LISTS this path; an
+    independent clone must additionally have no commit of HEAD on no remote,
+    and its sidebar refs (``refs/heads/*`` and ``refs/stash``) are checked
+    against the same remotes for uniqueness — when any tip is unreachable its
+    refname comes back so the caller rescues it into a bundle BEFORE the tree
+    may go. Dirty, unmerged, no-remote and unresolvable trees all come back as
+    keep — anything that cannot be PROVEN reclaimable is kept, and this
+    function never raises (a repository it cannot inspect is a keep).
     """
     try:
         return _tree_reclaim_checks(repo)
@@ -661,6 +788,9 @@ def _tree_reclaim_decision(repo: Path) -> _TreeDecision:
 def _tree_reclaim_checks(repo: Path) -> _TreeDecision:
     """The decision body for :func:`_tree_reclaim_decision`; may raise on a bad repo."""
     path = os.fspath(repo)
+    shared, why_not = _linked_worktree_shared(repo)
+    if why_not is not None:
+        return _TreeDecision(False, why_not)
     head = _git(path, "rev-parse", "-q", "--verify", "HEAD")
     if head.returncode != 0 or not head.stdout.strip():
         return _TreeDecision(False, "HEAD does not resolve (or the gitdir link is broken)")
@@ -688,6 +818,21 @@ def _tree_reclaim_checks(repo: Path) -> _TreeDecision:
         return _TreeDecision(False, "HEAD is not merged into the remote trunk")
     if ancestor.returncode != 0:
         return _TreeDecision(False, "cannot decide whether HEAD is merged")
+    if shared is not None:
+        # A LINKED WORKTREE: its refs and objects ARE the shared repository's,
+        # so there is nothing to rescue and nothing to bundle — only git's own
+        # removal, gated on the shared repository LISTING this exact path (the
+        # belt that keeps a COPY of a worktree, whose .git still points at the
+        # original, from acting on a registration that is not its own).
+        listed = _git(os.fspath(shared), "worktree", "list", "--porcelain")
+        if listed.returncode != 0:
+            return _TreeDecision(
+                False,
+                "the shared repository cannot be inspected (missing or dangling pointer)",
+            )
+        if not _worktree_listed(listed.stdout, repo):
+            return _TreeDecision(False, "not registered in the shared repository's worktree list")
+        return _TreeDecision(True, worktree=shared)
     on_remote = _git(path, "log", "HEAD", "--not", "--remotes", "--oneline")
     if on_remote.returncode != 0:
         return _TreeDecision(False, "cannot decide whether HEAD is on a remote")
@@ -737,7 +882,7 @@ def _write_rescue_bundle(repo: Path, bundle_path: Path, refnames: list[str]) -> 
     The rescue is the WHOLE price of removing a tree whose local refs are not
     all reachable from its remotes: the bundle is written and verified before
     the tree is given up, and ANY failure (a non-zero ``git bundle create`` or
-    ``git bundle verify``, a fired :data:`BUNDLE_TIMEOUT_S`, git missing)
+    ``git bundle verify``, a fired :data:`HEAVY_GIT_TIMEOUT_S`, git missing)
     returns a reason string the caller logs and keeps the tree for. A failed
     attempt is CLEANED UP first — its partial ``.bundle`` and git's
     ``<bundle>.lock`` — so the next pass starts from nothing rather than
@@ -765,7 +910,7 @@ def _write_rescue_bundle(repo: Path, bundle_path: Path, refnames: list[str]) -> 
             "create",
             os.fspath(bundle_path),
             *refnames,
-            timeout=BUNDLE_TIMEOUT_S,
+            timeout=HEAVY_GIT_TIMEOUT_S,
         )
         if create.returncode != 0:
             lines = create.stderr.strip().splitlines()
@@ -777,7 +922,7 @@ def _write_rescue_bundle(repo: Path, bundle_path: Path, refnames: list[str]) -> 
             "bundle",
             "verify",
             os.fspath(bundle_path),
-            timeout=BUNDLE_TIMEOUT_S,
+            timeout=HEAVY_GIT_TIMEOUT_S,
         )
         if verify.returncode != 0:
             _clean_up()
@@ -800,6 +945,12 @@ class _PlannedRemoval:
     cls: str
     bytes: int
     entries: int
+    #: How the removal is carried out: ``"remove"`` (the guarded pad-level
+    #: path) or ``"worktree-remove"`` (``git -C <shared_repo> worktree
+    #: remove``, for a linked worktree whose objects are the shared store's).
+    method: str = "remove"
+    #: The shared repository for ``method == "worktree-remove"``.
+    shared_repo: Path | None = None
 
 
 @dataclass
@@ -825,6 +976,19 @@ class _PadPlan:
             for name in (CONTENT_CLASS_MERGED, CONTENT_CLASS_BUILD, CONTENT_CLASS_STALE)
             if name in taken
         )
+
+
+def _has_evidence_segment(relative: str) -> bool:
+    """Whether any pad-relative segment starts with ``evidence`` (case-folded).
+
+    ONE documented exemption to the build-shape arm: an entry under — or
+    named by — a segment like ``evidence/`` is never shape-matched, because
+    evidence outranks the shape vocabulary. Measured on a real pad whose
+    ``docs/evidence/session-load-central-cache/`` held scripts and bench
+    results and matched the ``-cache`` segment suffix. Rule (a), stale
+    output, is unaffected.
+    """
+    return any(part.lower().startswith("evidence") for part in Path(relative).parts)
 
 
 def _plan_pad_content(pad: Path, *, now: float) -> _PadPlan | None:
@@ -900,11 +1064,22 @@ def _plan_pad_content(pad: Path, *, now: float) -> _PadPlan | None:
                         _plan_tree(entry.path, root, plan)
                         continue
                     if _is_refused_segment(name):
-                        stats = _bounded_dir_stats(Path(entry.path))
-                        plan.removals.append(
-                            _PlannedRemoval(Path(entry.path), CONTENT_CLASS_BUILD, *stats)
-                        )
-                        continue
+                        relative = os.path.relpath(entry.path, root)
+                        if _has_evidence_segment(relative):
+                            # Kept as a directory — and the walk still DESCENDS
+                            # into it, because rules (a) and (c) carry no
+                            # evidence exemption: a big stale log or a
+                            # merged-clean tree inside evidence is still
+                            # judged by its own arm.
+                            plan.kept.append(
+                                f"{relative}: evidence path (never taken by the shape arm)"
+                            )
+                        else:
+                            stats = _bounded_dir_stats(Path(entry.path))
+                            plan.removals.append(
+                                _PlannedRemoval(Path(entry.path), CONTENT_CLASS_BUILD, *stats)
+                            )
+                            continue
                     if depth >= CONTENT_MAX_DEPTH:
                         continue  # beyond the cap: left in place (the keep side)
                     stack.append((entry.path, depth + 1))
@@ -912,6 +1087,12 @@ def _plan_pad_content(pad: Path, *, now: float) -> _PadPlan | None:
                 if not entry.is_file(follow_symlinks=False):
                     continue  # fifos, sockets: never touched
                 if _refused_suffix(name) is not None:
+                    relative = os.path.relpath(entry.path, root)
+                    if _has_evidence_segment(relative):
+                        plan.kept.append(
+                            f"{relative}: evidence path (never taken by the shape arm)"
+                        )
+                        continue
                     info = entry.stat(follow_symlinks=False)
                     plan.removals.append(
                         _PlannedRemoval(Path(entry.path), CONTENT_CLASS_BUILD, info.st_size, 1)
@@ -939,7 +1120,15 @@ def _plan_tree(path: str, root: str, plan: _PadPlan) -> None:
         plan.kept.append(f"{relative}: {decision.keep}")
         return
     stats = _bounded_dir_stats(Path(path))
-    plan.removals.append(_PlannedRemoval(Path(path), CONTENT_CLASS_MERGED, *stats))
+    plan.removals.append(
+        _PlannedRemoval(
+            Path(path),
+            CONTENT_CLASS_MERGED,
+            *stats,
+            method="worktree-remove" if decision.worktree is not None else "remove",
+            shared_repo=decision.worktree,
+        )
+    )
     if decision.bundle_refs:
         plan.bundle_tree = Path(path)
         plan.bundle_path = _rescue_bundle_path(root, relative)
@@ -1011,11 +1200,14 @@ def _reclaim_pad_content(
     The hard guards run first; a refusal comes back as ``kept`` and nothing
     below is touched. Then the pad is planned (bounded walk, no writes); then,
     in a real pass, each planned removal goes through
-    ``cleanup.remove_scratchpad_entry`` (the one guarded removal shape). A
-    rescue bundle is written and verified BEFORE the tree it belongs to is
-    removed; any bundle failure keeps THAT tree (its planned removal is
-    dropped from the plan) and counts an error, while the pad's other planned
-    removals still proceed.
+    ``cleanup.remove_scratchpad_entry`` (the one guarded removal shape) —
+    except a linked worktree's, which goes through ``git worktree remove`` in
+    its shared repository (its objects are not the pad's to bundle). A rescue
+    bundle is written and verified BEFORE the tree it belongs to is removed;
+    any bundle failure keeps THAT tree (its planned removal is dropped from
+    the plan) and counts an error, while the pad's other planned removals
+    still proceed. A refusal or failure of the git removal keeps that tree and
+    counts an error the same way.
     """
     outcome = _ContentOutcome()
     guard = _content_guard(
@@ -1060,6 +1252,21 @@ def _reclaim_pad_content(
         if dry_run:
             taken.append(removal)
             continue
+        if removal.method == "worktree-remove" and removal.shared_repo is not None:
+            # A LINKED WORKTREE: git removes it, and the pad-level remover is
+            # for entries that are the pad's own — this one is the shared
+            # repository's to take down, registration included.
+            try:
+                failure = _remove_linked_worktree(removal.shared_repo, removal.path)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failure = f"cannot run git worktree remove ({exc.__class__.__name__})"
+            if failure is not None:
+                outcome.errors += 1
+                outcome.kept.append(f"{os.path.basename(os.fspath(removal.path))}: {failure}")
+                logger.warning("session cleanup: %s; keeping the tree", failure)
+                continue
+            taken.append(removal)
+            continue
         try:
             removed = remove_scratchpad_entry(
                 removal.path, config_dir=config_dir, sessions_dir=sessions_dir
@@ -1090,10 +1297,20 @@ def _reclaim_pad_content(
         entries=sum(removal.entries for removal in taken),
         origin=_origin(cand.path),
         classes=classes,
+        method=_taken_method(taken, bundle_path),
         rescue_bundle=bundle_path,
         rescue_bundle_bytes=bundle_bytes,
     )
     return outcome
+
+
+def _taken_method(taken: list[_PlannedRemoval], bundle_path: str) -> str:
+    """The executed removal method for a pad's row (see :class:`ContentRow`)."""
+    if any(removal.method == "worktree-remove" for removal in taken):
+        return "worktree-remove"
+    if bundle_path:
+        return "bundle-rescue"
+    return "remove"
 
 
 def _content_log_record(row: ContentRow, *, actor: str) -> dict[str, Any]:
@@ -1115,6 +1332,7 @@ def _content_log_record(row: ContentRow, *, actor: str) -> dict[str, Any]:
         "bytes": row.bytes,
         "entries": row.entries,
         "classes": list(row.classes),
+        "method": row.method,
     }
     if row.rescue_bundle:
         record["rescue_bundle"] = row.rescue_bundle
