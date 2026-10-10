@@ -351,11 +351,20 @@ def test_xai_lights_from_the_export(config_root: Path, monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_the_xai_bearer_twin_prefers_the_store_then_env(
+async def test_the_xai_bearer_prefers_the_key_row_then_the_grant_then_env(
     store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Reviewer round 1 F4: the API key is the reliable path (xAI tiers its
+    # OAuth surface; the 403 class is unprobed), so a stored key wins over
+    # the grant; persisted rows beat an ambient export, the lane's rule.
     monkeypatch.setenv("XAI_API_KEY", "exported")
     assert await availability.xai_call_bearer(store) == "exported"
+
+    store.upsert_credential(
+        "xai",
+        {"type": "oauth", "refresh": "r", "access": "grant", "expires": 4_000_000_000_000},
+    )
+    assert await availability.xai_call_bearer(store) == "grant"
 
     store.upsert_credential("xai", {"type": "api_key", "source": "login", "key": "xk"})
     assert await availability.xai_call_bearer(store) == "xk"

@@ -12,6 +12,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from local_operator.clients._http import APIError
@@ -372,6 +373,41 @@ async def test_the_walk_dispatches_the_openrouter_rung(
 
     assert calls == [ImageRoute.OPENROUTER]
     assert outcome.route == ImageRoute.OPENROUTER
+
+
+@pytest.mark.asyncio
+async def test_the_subscription_rung_refuses_a_platform_key_credential(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Reviewer round 1 F1 / QA Q1: ``get_oauth_access`` rotates to a sibling
+    # ``api_key`` row when a grant cannot mint a bearer — right for chat, a
+    # leak here, because that key must never reach chatgpt.com. An api_key
+    # credential therefore reads as unauthorized and fails forward, and the
+    # transport (a recorder) must never see a request.
+    from local_operator.providers.auth_store import AuthStore
+
+    _pin_probes(monkeypatch, openai_sub=True)
+    store = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path)
+    store.upsert_credential(
+        "openai", {"type": "api_key", "source": "login", "key": "sk-synthetic-not-real"}
+    )
+    store.close()
+
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        sent.append(request)
+        return httpx.Response(200)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
+        await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path, client=client)
+    await client.aclose()
+
+    assert sent == [], "the platform key must never reach the chat backend"
+    assert [(str(attempt.route), attempt.reason_class) for attempt in caught.value.attempts] == [
+        ("openai-sub", "unauthorized")
+    ]
 
 
 @pytest.mark.asyncio

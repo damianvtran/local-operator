@@ -129,6 +129,9 @@ async def test_the_streamed_call_shape_and_the_decoded_asset(
     assert request.headers["openai-beta"] == rung_mod.CODEX_BETA_HEADER
     body = recorder.bodies[0]
     assert body["model"] == "host-model"
+    # Review round 1 F2: the top-level instructions follow the chat client's
+    # same-backend shape (tier: open risk until the live probe).
+    assert body["instructions"] == rung_mod.OPENAI_SUB_INSTRUCTIONS
     assert body["input"] == [
         {
             "type": "message",
@@ -235,6 +238,9 @@ async def test_progress_frames_are_canonical_and_labelled() -> None:
     )
 
     assert updates, "the stream should emit at least one in-progress frame"
+    # The initial frame leads (review round 1 nit): a surface shows the rung
+    # running from the first moment, before any SSE event lands.
+    assert updates[0][0].endswith("running — 0s")
     canonical = {"stage", "queue_position", "progress_fraction", "log_lines", "error", "error_type"}
     for text, details in updates:
         assert details["provider"] == "openai-sub"

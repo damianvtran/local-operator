@@ -163,8 +163,9 @@ RUNG_SPECS: dict[str, RungSpec] = {
         kinds=frozenset({"image"}),
         capabilities=frozenset({"t2i"}),
         cancel_support=CancelSupport.NONE,
-        # REPORTED, not a rate table: the official OpenAPI schema requires
-        # ``usage.cost_in_usd_ticks`` on the response, so a figure a provider
+        # REPORTED, not a rate table: the official OpenAPI schema's ``usage``
+        # object (``oneOf [null, MediaUsage]``) REQUIRES
+        # ``cost_in_usd_ticks`` whenever it is present, so a figure a provider
         # reported may ride ``cost_usd`` (design D8). This supersedes the
         # wave's initial ``rate_table`` pencil, taken before the schema was
         # read at implement time (2026-10-09).
@@ -427,8 +428,16 @@ async def _run_route(
         # (which returns a bare string). Same rule as every other rung: the
         # resolution happens HERE, at call time, and a missing or dead grant
         # surfaces as a rung failure that fails forward.
+        #
+        # The ``kind`` gate is load-bearing (reviewer round 1 F1 / QA Q1):
+        # ``get_oauth_access`` is the chat path's CASCADE, and when an OAuth
+        # row cannot mint a bearer it rotates to a sibling ``api_key`` row —
+        # correct for chat, a leak for this rung, because that platform key
+        # must never reach chatgpt.com (the whole point of the rung is that
+        # the two credential classes stay delimited). Only a grant funds
+        # this route; anything else is unauthorized and fails forward.
         access = await image_availability.openai_sub_access(store)
-        if access is None or not access.access_token:
+        if access is None or not access.access_token or access.kind != "oauth":
             raise APIError(
                 "No ChatGPT subscription sign-in is available.",
                 status_code=None,

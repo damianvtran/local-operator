@@ -56,8 +56,9 @@ Provider-by-provider provenance, wire shapes and verified-at dates:
   is shut down in this API.
 - **xAI**: `lop login xai` (API key) or `lop login xai-oauth` (the Grok
   sign-in). xAI tiers its OAuth surface — a subscription sign-in can be
-  refused with an HTTP 403 even while active; the key path is the reliable
-  one.
+  refused with an HTTP 403 even while active, so the **stored key is used
+  first and the Grok sign-in is the fallback** (an exported `XAI_API_KEY`
+  counts as a key and is honoured last).
 - **OpenRouter**: `lop login openrouter` — one key fronts most of the public
   image catalogue. An exported `OPENROUTER_API_KEY` also works.
 

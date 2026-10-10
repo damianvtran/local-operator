@@ -295,8 +295,14 @@ async def openai_sub_access(store: AuthStore, session_id: str | None = None) -> 
     The ASYNC twin of :func:`openai_subscription_grant`, and deliberately the
     chat path's own resolver (``get_oauth_access``) so refresh, rotation and
     backoff behave exactly as a chat turn's credential would — one place for
-    those rules. ``None`` means "no grant"; a stored grant that cannot mint a
-    bearer surfaces as a rung failure and fails forward. Never raises.
+    those rules. **It returns the resolver's pick VERBATIM, including
+    ``kind="api_key"`` picks**: when a grant cannot mint a bearer the chat
+    cascade rotates to a sibling ``api_key`` row, and that choice is right
+    for chat but forbidden for this rung — callers must gate on
+    ``kind == "oauth"`` before sending anything to the chat backend
+    (reviewer round 1 F1). ``None`` means "no credential"; a stored grant
+    that cannot mint a bearer surfaces as a rung failure and fails forward.
+    Never raises.
     """
     try:
         return await store.get_oauth_access("openai", session_id)
@@ -323,21 +329,30 @@ async def google_call_key(store: AuthStore, session_id: str | None = None) -> st
 
 
 async def xai_call_bearer(store: AuthStore, session_id: str | None = None) -> str | None:
-    """The bearer the xAI rung would send: the store's own pick, then env.
+    """The bearer the xAI rung would send: a stored KEY first, then the grant.
 
-    Deliberately ``get_oauth_access``: it resolves EITHER row class (the
-    ``xai`` and ``xai-oauth`` logins share one namespace) with refresh,
-    rotation and backoff exactly as a chat turn's credential would — one
-    place for those rules. ``None`` means "no credential"; a stored row that
-    cannot mint a bearer surfaces as a rung failure and fails forward. Never
-    raises.
+    Order (reviewer round 1 F4): the API key is the reliable path — xAI tiers
+    its OAuth surface and the 403 class is unprobed — so a stored ``api_key``
+    row wins, the OAuth grant is the fallback (refresh, rotation and backoff
+    via ``get_oauth_access`` exactly as a chat turn's credential would — one
+    place for those rules), and an exported ``XAI_API_KEY`` is honoured last
+    (persisted rows beat ambient env, the lane's rule). ``None`` means "no
+    credential"; a stored row that cannot mint a bearer surfaces as a rung
+    failure and fails forward. Never raises.
     """
+    try:
+        key = await store.get_persisted_api_key("xai", session_id, kinds={"api_key"})
+    except Exception:  # noqa: BLE001 - a probe must never take its caller down
+        logger.warning("xai key-row read failed; trying the grant")
+        key = None
+    if key:
+        return key
     try:
         access = await store.get_oauth_access("xai", session_id)
     except Exception:  # noqa: BLE001 - a probe must never take its caller down
         logger.warning("xai credential read failed; reporting none")
         access = None
-    if access is not None and access.access_token:
+    if access is not None and access.kind == "oauth" and access.access_token:
         return access.access_token
     exported = os.environ.get(XAI_ENV_KEY)
     return exported or None

@@ -121,6 +121,12 @@ async def run_google(
     client: httpx.AsyncClient | None = None,
 ) -> RungResult:
     """Run one Google image generation. See the module docstring."""
+    # Observe a pre-aborted signal before anything else happens (reviewer
+    # round 1 Q6): a single-request rung has no poll loop for the abort to
+    # land in, so this zero-length wait is the only place the user's stop can
+    # take effect before the spend. A no-op without a signal.
+    if pause is not None:
+        await pause(0.0)
     if source_url is not None:
         raise RungSkipped(
             "Google has no wired image-to-image route in this rung.",
