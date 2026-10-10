@@ -811,6 +811,10 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: BUILDS from those keys on every request. The end-to-end half was measured on
 #: a running daemon: a write through ``settings_io.write_setting`` landed in the
 #: hub request body on the next call, with no restart (voicing S2 QA round 1).
+#: ``static`` is host-owned the same way: ``static.roots`` is read PER REQUEST by the
+#: ``/v1/static/*`` routes straight off ``config.yml`` (``read_config_values``) and no
+#: ``Session`` holds it. Proven in ``tests/unit/server/test_static_roots.py::
+#: test_a_write_from_another_process_takes_effect_without_a_restart``.
 HOST_OWNED_LIVE_SECTIONS = {
     "hub",
     "appearance",
@@ -822,6 +826,7 @@ HOST_OWNED_LIVE_SECTIONS = {
     "aida",
     "wakes",
     "speech",
+    "static",
 }
 
 

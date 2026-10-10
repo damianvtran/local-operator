@@ -174,6 +174,24 @@ an unauthenticated local caller can still reach them either way. Widening the
 gate to cover them is a separate, larger decision and is recorded rather than
 made here.
 
+`/v1/static/*` is the one of those four that now carries its own hardening
+(`server/utils/static_roots.py`), because it is the one that reads arbitrary files:
+
+- **Served roots.** `path` must resolve (symlinks followed) to a regular file inside
+  the agent home, `<config>/sessions`, `<config>/uploads`, the working directory of a
+  registered agent or a running session, or a root added through `static.roots`
+  (settings page / `config.yml`) or `LOCAL_OPERATOR_STATIC_ROOTS`. Anything else is a
+  `403` that does not say whether the file exists; `..` is refused outright, and a
+  dot-directory below a root (`~/.ssh` under a session rooted at `~`) is never served.
+- **Response policy.** Every response, errors included, carries `nosniff` and a
+  `Content-Security-Policy` ending in `frame-ancestors` (the app only), and no CORS
+  grant is made to an origin that is not on the admitted allowlist -- including, unlike
+  the rest of the legacy surface, on an allowlist-less daemon, because nothing reads
+  these routes with `fetch` (`<img>`/`<video>`/`<iframe src>` are not CORS-gated).
+- **Still open:** the routes are unauthenticated. The UI embeds them by `src`, which
+  cannot carry a bearer; the fix is a short-lived signed query token minted by an
+  authenticated endpoint and checked here, and it needs the UI to request it.
+
 The deprecated `/v1/ws` socket surface was also in that ungated set and is now
 **gone** — route, mount and fan-out — so it is no longer listed. This is a
 wire-protocol change, not a widening of the gate: an installed desktop build
