@@ -1370,7 +1370,35 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: would re-ship the silent-T2I class this lane exists to kill. The ratchet
 #: moves to the file's 55-token band (measured head + 55) so the next
 #: addition finds it as tight as this one did.
-BUDGET_BILLED_TOKENS = 27_270
+#:
+#: RAISED 27,270 -> 28,159 for the VIDEO PHASE's harness lane
+#: (``feat/video-generation``, #2191): the two new createIf tools
+#: (``generate_video`` + ``video_status``) land their schemas on every session
+#: whose machine carries a video credential — the same machinery
+#: ``generate_image`` has. Measured with THIS script on the clean arm
+#: (``env -i`` HOME + config dir, the arm CI renders), both trees on the
+#: merge base (``origin/main`` 8b6ed6b854):
+#:
+#:   base  75,756 chars = ~27,250   (20 tokens of headroom at the old ratchet)
+#:   head  78,128 chars = ~28,104   (this branch)
+#:   delta     +2,372 chars = ~+854
+#:
+#: Components, each measured and closed exactly: +2,340 chars in
+#: ``tool_schemas`` (the two parameter schemas) and +32 chars in
+#: ``tool_inventory`` (the two names on the listing lines); every other
+#: counter byte-identical to base. The child arm moves by the SAME +2,372
+#: chars (below), which is the check that the delta is these two tools and
+#: nothing else — both are createIf-gated on the credential, not on the
+#: parent session.
+#:
+#: The raise is the capability's honest cost, not a regression to trim: one
+#: tool is what a model must SEE to start a generation at all (modes, source
+#: fields, the knobs), the other is the only callable that answers a pending
+#: job after a restart. Deferral was considered and rejected in the PR: it
+#: needs its measured adoption bar (``tools/deferral.py``) and a brand-new
+#: tool has no measurement to sit on. Band normalized to the 55-token band
+#: (measured head + 55).
+BUDGET_BILLED_TOKENS = 28_159
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1410,7 +1438,17 @@ BUDGET_BILLED_TOKENS = 27_270
 #:   delta      +94 chars = ~+34
 #:
 #: Band normalized to the 55-token band, as the top arm's entry states.
-BUDGET_CHILD_BILLED_TOKENS = 24_315
+#:
+#: RAISED (with the top arm, same day, same trees) 24,315 -> 25,203: the
+#: child arm carries the video pair too (createIf on the machine, not the
+#: parent) and moves by the SAME +2,372 chars = ~+853:
+#:
+#:   base  67,539 chars = ~24,295   (20 tokens of headroom at the old ratchet)
+#:   head  69,911 chars = ~25,148
+#:   delta     +2,372 chars = ~+853
+#:
+#: Band normalized to the 55-token band, as the top arm's entry states.
+BUDGET_CHILD_BILLED_TOKENS = 25_203
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
