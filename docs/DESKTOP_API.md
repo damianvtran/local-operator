@@ -249,8 +249,9 @@ record that carried it are classifiable against each other.
 invalid or stale one is treated as ABSENT -- never a refusal, and every
 malformed shape classifies as invalid rather than erroring -- and the first
 sighting of each stale generation logs one WARNING line (visible at the
-daemon's default log level). Rooted-mode requests do not read tokens at all
-(rooted is unaffected by token handling in these phases). A surface
+daemon's default log level). Rooted-mode STATIC reads ignore tokens -- the
+observation rides the general posture -- while the sign door accepts them in
+every mode (a valid token opens it on a rooted connection too). A surface
 can compare its token's generation prefix (or the `boot_generation` it cached)
 against the record and re-read on a mismatch. The later phases turn a missing
 or invalid token on a static GET into `401` with the stable code
