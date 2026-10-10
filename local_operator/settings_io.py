@@ -54,6 +54,7 @@ import logging
 import math
 import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
@@ -1316,23 +1317,35 @@ def _validate_delegated_max_age_hours(value: Any) -> None:
 
 
 def _validate_static_roots(value: Any) -> None:
-    """``static.roots`` entries are absolute directories, never the filesystem root.
+    """``static.roots`` entries are absolute directories that do not contain ``$HOME``.
 
     Enforced at the write facade so a typo cannot silently widen the file-serving
     boundary: a relative entry would be resolved against the DAEMON's cwd (the
-    reader drops it, so it would be a root that quietly does nothing), and ``/``
-    would turn the allowlist back into "anywhere on disk".
+    reader drops it, so it would be a root that quietly does nothing), and ``/``,
+    ``/Users`` or ``~/..`` would turn the allowlist back into "anywhere on disk".
+    The ancestor test is the reader's own predicate (``root_refusal``), imported
+    here rather than restated so the two cannot disagree -- the reader applies it
+    to the environment variable too, which never passes through this facade.
     """
     if not isinstance(value, list):
         return
+    # Imported here: the settings registry is imported by every entry point and the
+    # server package is not needed until a value is actually being written.
+    from local_operator.server.utils.static_roots import root_refusal
+
     for item in value:
         if not isinstance(item, str):
-            continue
+            raise ValueError(f"{item!r} is not a path; each entry must be a directory string")
         expanded = os.path.expanduser(item.strip())
         if not os.path.isabs(expanded):
             raise ValueError(f"{item!r} is not an absolute path (use /abs/path or ~/path)")
-        if os.path.normpath(expanded) == os.path.abspath(os.sep):
-            raise ValueError("the filesystem root cannot be a served root")
+        try:
+            real = Path(os.path.realpath(expanded))
+        except (OSError, RuntimeError, ValueError):
+            raise ValueError(f"{item!r} cannot be resolved to a directory") from None
+        reason = root_refusal(real)
+        if reason is not None:
+            raise ValueError(f"{item!r}: {reason}")
 
 
 def _validate_aida_name(value: Any) -> None:

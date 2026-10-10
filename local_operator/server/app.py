@@ -72,7 +72,11 @@ from local_operator.server.routes import (
     tts,
 )
 from local_operator.server.utils.event_broker import EventBroker
-from local_operator.server.utils.static_roots import is_static_path, response_policy
+from local_operator.server.utils.static_roots import (
+    host_is_acceptable,
+    is_static_path,
+    response_policy,
+)
 
 # Annotating the lifespan's record publisher (`None` on a boot that was not
 # announced) needs the shared publisher's type. Zero runtime cost where it
@@ -919,11 +923,27 @@ async def static_response_policy(request: Request, call_next):
     longer *read* the answer, and the root allowlist
     (``utils/static_roots.py``) bounds what it could have caused.
 
+    THE HOST CHECK is the one thing here that is not about headers: a DNS-rebinding
+    page is same-origin with the daemon, so no CORS decision reaches it (review R8).
+    The ``Host`` it sends is its own name; see
+    :func:`~local_operator.server.utils.static_roots.host_is_acceptable` for what is
+    admitted and why the app's renderer is unaffected. It is answered HERE, before
+    the router, so the refusal cannot become a file-existence signal.
+
     The policy is in ``utils/static_roots.py`` so it is testable without an app.
     """
-    response = await call_next(request)
     if not is_static_path(request.url.path):
-        return response
+        return await call_next(request)
+    # Absent in a `--reload` child (the address arrives by environment and is
+    # consumed): the check then admits only IP literals and `localhost`, which is
+    # what a dev server is reached by.
+    announced = getattr(request.app.state, serve_registry.ANNOUNCED_STATE_ATTR, None)
+    if host_is_acceptable(request.headers.get("host"), announced[0] if announced else None):
+        response = await call_next(request)
+    else:
+        response = JSONResponse(
+            status_code=403, content={"detail": "This Host is not allowed to reach this server."}
+        )
     allowed = desktop_posture().origins
     for name, value in response_policy(request.url.path, allowed).items():
         response.headers[name] = value

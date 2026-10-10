@@ -91,11 +91,6 @@ def _servable_path(request: Request, path: str) -> Path:
     """
     state = request.app.state
     config_manager = state.config_manager
-    agent_cwds = [
-        agent.current_working_directory
-        for agent in state.agent_registry.list_agents()
-        if agent.current_working_directory
-    ]
     # The file as it is on disk NOW, not ``config_manager.get_config()``: the
     # server's manager holds the snapshot it loaded at startup, so a
     # ``static.roots`` written by the settings page or ``lop config edit`` (another
@@ -105,7 +100,7 @@ def _servable_path(request: Request, path: str) -> Path:
     values = read_config_values(config_manager.config_dir)
     if values is None:
         values = config_manager.get_config().values
-    roots = build_roots(config_manager.config_dir, values, agent_cwds)
+    roots = build_roots(config_manager.config_dir, values)
     try:
         return resolve_servable(path, roots)
     except StaticPathDenied as denied:
