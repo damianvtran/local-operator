@@ -1058,13 +1058,32 @@ def test_the_checkpoint_makes_no_access_claim() -> None:
     class _Transcript:
         def __init__(self) -> None:
             self.appended: list[tuple[str, dict[str, Any]]] = []
+            self.preserved: list[bool] = []
 
-        async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+        async def append_custom(
+            self,
+            custom_type: str,
+            payload: dict[str, Any],
+            *,
+            preserve_mtime: bool = False,
+        ) -> None:
+            # THE REAL WRITER'S SIGNATURE, and the request RECORDED rather than
+            # swallowed: ``FrontendStateStore.checkpoint`` forwards
+            # ``preserve_mtime``, so a double that accepts the keyword and drops it
+            # would pass whether or not the request is right — and a fake that
+            # swallows an argument proves nothing about it.
             self.appended.append((custom_type, payload))
+            self.preserved.append(preserve_mtime)
 
     transcript = _Transcript()
     asyncio.run(store.checkpoint(transcript))
     ((_, payload),) = transcript.appended
+    assert transcript.preserved == [False], (
+        "an [redacted] checkpoint asked the writer to hold the journal's mtime "
+        "still: this row IS activity, and preserving the clock would hide it from "
+        "retention (``preserve_mtime`` is the CLOSING checkpoint's request, "
+        "asserted where that path is tested)"
+    )
     # ABSENT, not null: the serializer drops an idle claim from the wire so the
     # attach frame does not spend its null (QA round 1, Q3), and absence is the
     # same "no claim" the durable fold means.
@@ -2607,9 +2626,11 @@ def test_the_closing_merge_leaves_a_cleared_goal_and_a_released_latch_alone():
     that has OBSERVED the release — a runtime that was merely restored carries the
     durable values as its own, because the checkpoint restore seeds them.
 
-    Verified failing with those two branches restored: the first assertion raises
-    ``KeyError: 'conversation_title_user_set'``, which is why they were removed
-    rather than reordered.
+    Verified failing with those two branches restored: the first assertion fails with
+    ``AssertionError`` (visible in ``overrides``). The ``KeyError:
+    'conversation_title_user_set'`` that review round 3 quoted belongs to the ROUND-2
+    assertion style — ``overrides["conversation_title_user_set"]`` — run against this
+    merge, which is a different discriminator and not the one written here.
     """
     durable = FrontendSessionState(
         session_id="conv",
