@@ -159,6 +159,14 @@ OUTPUT_LIMIT_ARGUMENTS = "arguments"
 #: (review F1 == QA Q1).
 OUTPUT_LIMIT_TURN = "turn"
 
+#: THE QUIET-TURN MARKER (``docs/design/quiet-turns.md`` §4): stamped on the
+#: ``no_reply`` tool's successful result's ``details``, and the single fact the
+#: loop's batch-end check (``_batch_ends_quiet``) and the session's quiet
+#: predicate (``Session._run_ended_quiet``) read. A consumer keys on the
+#: MARKER, never on the result's "Quiet." wording, so a later reword of the
+#: model-facing text cannot change what a reader decides.
+QUIET_TURN_KEY = "__quiet_turn"
+
 
 class InvalidToolArgumentsError(ValueError):
     """The model emitted an argument this tool cannot parse.
@@ -1598,6 +1606,21 @@ class ToolContext(BaseModel):
     #: tool-side guard around the await is the last line so even a contract
     #: breach cannot lose the ask (design §2.2's failure-semantics table).
     gate_ask: Callable[..., Awaitable[Mapping[str, Any] | None]] | None = None
+    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async, mirroring
+    #: :attr:`gate_ask`: the ``no_reply`` tool awaits it for the run's refusal
+    #: decision, and its presence IS the fact that this session may end a turn
+    #: quietly — ``build_no_reply_tool`` returns ``None`` without it
+    #: (footprint ladder rung 3: the tool is absent, not inert, where a quiet
+    #: end cannot be honoured). The session binds it per turn; ``None`` for a
+    #: subagent child (a parent's ``wait`` reads the child's final text as the
+    #: report), a one-shot/headless host (the final text is the product), a
+    #: session with an output contract (the gate reads a textless end as a
+    #: missing final response), and under the ``LOP_NO_REPLY`` kill switch.
+    #:
+    #: TOTAL by contract, like the door pair above: it returns either a refusal
+    #: SENTENCE the model must act on (write text instead) or ``None`` when the
+    #: quiet end is allowed. A refusal is never coerced into a message.
+    quiet_end: Callable[[], Awaitable[str | None]] | None = None
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per

@@ -58,6 +58,7 @@ from local_operator.harness.types import (
     OUTPUT_LIMIT_ARGUMENTS,
     OUTPUT_LIMIT_KEY,
     OUTPUT_LIMIT_TURN,
+    QUIET_TURN_KEY,
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
@@ -2265,7 +2266,23 @@ class AgentLoop:
                             text="Repeated tool errors — requesting a different approach.",
                             kind="warning",
                         )
-                    has_more_tool_calls = bool(assistant.tool_calls)
+                    # THE QUIET-TURN END (docs/design/quiet-turns.md §4): a
+                    # ``no_reply`` call is an affirmative way to end the turn,
+                    # so a batch whose LAST result carries the quiet marker ends
+                    # it — with no further model call — exactly like a message
+                    # with no tool calls. LAST result only (review R8): an
+                    # earlier ``no_reply`` in a batch must never shorten the
+                    # turn, because its siblings' results would then never be
+                    # fed back and the model would continue blind. Everything
+                    # after runs as for any end: the boundary hooks, the yield
+                    # injections (an open todo, a late steer or peer message
+                    # still re-enters, so no inbound message is lost) and the
+                    # output-contract gate, which cannot misread silence here
+                    # because the tool is absent from contract sessions (see
+                    # ``Session._quiet_end_callable``).
+                    has_more_tool_calls = bool(assistant.tool_calls) and not _batch_ends_quiet(
+                        tool_results
+                    )
                     if has_more_tool_calls and config.on_turn_end is not None:
                         # The boundary hook fires only when the loop will
                         # CONTINUE — a terminal boundary is the post-turn
@@ -4995,6 +5012,25 @@ def _last_assistant_text(messages: Sequence[AgentMessage]) -> str | None:
         if isinstance(message, Message) and message.role == "assistant":
             return message.text
     return None
+
+
+def _batch_ends_quiet(results: Sequence[ToolResult]) -> bool:
+    """Whether the batch's LAST result is the quiet-turn marker.
+
+    THE LAST RESULT ONLY, and that is load-bearing twice over (review R8): a
+    ``no_reply`` earlier in a batch must never shorten the turn — its siblings'
+    results would otherwise never be fed back to the model — so only a batch
+    that ENDS in the quiet result may end the turn here. An empty batch (the
+    length-limit arm pairs its placeholders outside ``results``) never
+    qualifies. Marker-based, never tool-name-based: the marker is what the
+    tool's own result stamps, so a call that was refused (an ``is_error``
+    result without the marker) leaves the turn running for the answer the
+    refusal asked for.
+    """
+    if not results:
+        return False
+    details = results[-1].details
+    return bool(details) and details.get(QUIET_TURN_KEY) is True
 
 
 def validate_tool_arguments(
