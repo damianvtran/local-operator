@@ -49,6 +49,7 @@ from local_operator.code_requests.detect import (
     KIND_HINT,
     KIND_OPENED,
     KIND_UNKNOWN,
+    SELF_TOOL_NAME,
     Detection,
     McpServer,
     could_matter,
@@ -443,6 +444,13 @@ def _consume_tool_row(
     args = call[1] if call else {}
     if call is not None:
         at = call[2]
+    if name == SELF_TOOL_NAME:
+        # The session's OWN ``code_requests`` output must never be re-parsed: it
+        # prints row keys (``gitlab.com/group/project!57``) by design, and a
+        # mention scan over them seeded a phantom tool-only row for a ref the
+        # session never saw (QA round 1, Q6). ``could_matter`` refuses the tool
+        # by name too — this refuses it for the MENTION scan, which runs first.
+        return
     if text:
         for ref in iter_refs(text, context):
             row_for(ref).mention(SOURCE_TOOL, _event_at(payload, at))
