@@ -14270,7 +14270,12 @@ class OperatorApp(App[None]):
         # this notice (design §5, S5): it follows the same ``more`` truth the
         # copy is reconciled against, so a fold cannot claim "at least N" over
         # a head this row itself calls the conversation's start.
-        notice.set_quiet_group_head_cut(more)
+        # The declared type is the wider `NoticeBlock` (a reduced presentation
+        # can seat a plain notice here), but the flip only exists on the real
+        # control — the same concrete-type test, for the same reason, as the
+        # interactivity correction below.
+        if isinstance(notice, OlderHistoryNotice):
+            notice.set_quiet_group_head_cut(more)
         # Which VOCABULARY the two "more exists" states use. Once the context
         # replay is drained, what remains above is pre-compaction history — a
         # different kind of row, not merely an older one — so the copy says

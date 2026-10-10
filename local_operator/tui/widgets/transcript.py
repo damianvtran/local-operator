@@ -3612,6 +3612,14 @@ def quiet_group_record_of(
         return QuietGroupRecord(kind="peer", id=record_id, sender=block._sender)
     if isinstance(block, MonitorDeltaBlock):
         return QuietGroupRecord(kind="monitor", id=record_id)
+    if isinstance(block, AskResponseBlock):
+        # An ask receipt is a QUESTION to the reader — the row they come back
+        # to answer ("what did I tell it, and when?") — so it is a boundary,
+        # never a group member a collapse could hide. It sits HERE, before the
+        # ``WakeBlock`` check, because it is a ``WakeBlock`` by inheritance
+        # (the shared ledger contract) and not by meaning; the relay port's
+        # splitter switch names ``ask_response``/``ask_timeout`` the same way.
+        return QuietGroupRecord(kind="ask", id=record_id)
     if isinstance(block, WakeBlock):
         return QuietGroupRecord(kind="wake", id=record_id)
     if isinstance(block, ToolCard):
@@ -3635,6 +3643,21 @@ class PlannedQuietGroup(NamedTuple):
     span: tuple[int, int]
     group: QuietGroup
     span_head_loaded: bool
+
+
+def _quiet_fold_boundary(block: TranscriptBlock, *, prev_kind: str | None = None) -> bool:
+    """Whether ``block`` is a boundary a span may fold against.
+
+    A splitter is; another group's BAR is not: the bar stands for rows that are
+    still on screen (its hidden members), so a span touching it is the
+    continuation of a folded group — folding it would put two bars over one
+    logical run (the drain seam the round-1 review named). The module's
+    whole-span refusal, applied across a seam. ``prev_kind`` is the fold's
+    context for a context-dependent row only (an image beside the run).
+    """
+    if isinstance(block, QuietGroupBlock):
+        return False
+    return group_splitter_of(quiet_group_record_of(block, prev_kind=prev_kind))
 
 
 def quiet_group_plan(
@@ -3683,8 +3706,7 @@ def quiet_group_plan(
         span_head_loaded = True
         if span_from == 0:
             if prev_block is not None:
-                above = quiet_group_record_of(prev_block)
-                if not group_splitter_of(above):
+                if not _quiet_fold_boundary(prev_block):
                     continue  # fragment: the span continues into rows on hand
                 if getattr(prev_block, "QUIET_GROUP_HEAD_CUT", False):
                     span_head_loaded = False  # the same "at least N" marker
@@ -3693,8 +3715,7 @@ def quiet_group_plan(
         open_below = True
         if span_to == len(records) - 1:
             if next_block is not None:
-                below = quiet_group_record_of(next_block, prev_kind=records[-1].kind)
-                if not group_splitter_of(below):
+                if not _quiet_fold_boundary(next_block, prev_kind=records[-1].kind):
                     continue  # fragment: the span continues into rows below
                 open_below = False
         else:
@@ -3769,10 +3790,12 @@ class QuietGroupTracker:
     else (a user row, a notice, visible prose) clears them, which is the
     boundary vocabulary ``tui/quiet_groups.py`` owns.
 
-    A resync exists for the joins between the incremental stream and the
-    batch seams: after a replay pass (whose appends are folded in one plan
-    once the batch has mounted) and after a clear, ``resync`` re-derives the
-    state from the transcript's own tail. It reads the trailing stretch back
+    A resync exists for the join between the incremental stream and a
+    clear: ``reset`` calls it, re-deriving the state from the transcript's
+    own tail. Replay and page appends need no call — replay streams through
+    ``note_append`` like any other append, and a collected page is folded in
+    one plan BEFORE it mounts, so no seam re-derives after the fact. The
+    resync reads the trailing stretch back
     — a bar means the open group is the one on screen, a lone trigger means
     the stretch is a candidate — and never creates a bar itself: an unbarred
     stretch with two or more triggers is left alone (it is either already
@@ -3946,7 +3969,7 @@ class QuietGroupTracker:
         previous = self._view._quiet_neighbour(first_index - 1, -1)
         if previous is None or getattr(previous, "QUIET_GROUP_HEAD_CUT", False):
             return True
-        return group_splitter_of(quiet_group_record_of(previous))
+        return _quiet_fold_boundary(previous)
 
     def _view_index(self, block: TranscriptBlock) -> int | None:
         for index, candidate in enumerate(self._view._blocks):
@@ -3959,8 +3982,8 @@ class QuietGroupTracker:
     def resync(self, *, head_cut: bool) -> None:
         """Re-derive the tracker state from the transcript's own tail.
 
-        Called after the batch folds (a replay pass, a page) and after a
-        clear; a caller with no windowed head passes ``head_cut=False``.
+        Called on a clear (there is nothing on hand); a rebuilt view with a
+        windowed head passes the caller's ``head_cut`` verdict.
         """
         self._open = None
         self._open_records = []
@@ -6234,8 +6257,10 @@ class TranscriptView(ScrollableContainer):
 
         The caller's verdict for a windowed view (a resume whose older rows
         are deferred): a span beginning at index zero then states a MINIMUM
-        ("at least N") instead of an exact count. Set around a projection pass
-        by the app and cleared to the window's post-pass state afterwards.
+        ("at least N") instead of an exact count. The app sets it once per
+        projection pass — already to the pass's own post-pass verdict (see
+        ``OperatorApp._quiet_head_cut_for``) — and ``reset`` clears it with
+        the view.
         """
         self._quiet_groups.set_head_cut(cut)
 

@@ -115,7 +115,8 @@ class QuietGroupRecord:
     firstTs/lastTs").
 
     ``kind`` is the surface's positive classification. This surface can say:
-    ``peer``, ``wake``, ``monitor`` (its three receipt kinds), ``tool`` (a
+    ``peer``, ``wake``, ``monitor`` (its three receipt kinds), ``ask`` (an ask
+    receipt — a question to the reader, classified as a boundary), ``tool`` (a
     ledger row), ``assistant`` (a prose row), and ``inside`` — its own kind for
     a row that is neither a trigger nor countable work but may sit inside a
     group (an image a folded tool row produced). Everything else — ``user``, a
