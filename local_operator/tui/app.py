@@ -4731,6 +4731,14 @@ class OperatorApp(App[None]):
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
         self._setup_state_flag = False
+        #: ``/model --all`` — show the whole registry in the picker, including
+        #: rows this user has no credential for, so a model they are about to
+        #: sign in for is still findable. OFF is the shipped default view: the
+        #: filtered list is the one that costs no keystrokes on a miss, and its
+        #: footer says how many are hidden. An app-level view preference
+        #: (``/model`` chooses a model, not a session), so it survives session
+        #: switches and resets with the process.
+        self._model_show_all = False
         self._model_activation_generation = 0
         self._model_activation_pending: int | None = None
         #: The unknown provider id that put us in the setup state, when that is
@@ -7879,6 +7887,15 @@ class OperatorApp(App[None]):
                 bound=_viewport_message_budget(self.size.height),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
                 live_call_ids=live_projection_call_ids(session),
+                # The width the revealed view WILL have, asked of the view it
+                # replaces: both are `1fr` children of `#session-conversation`
+                # with the same stylesheet, so the on-screen view's scrollable
+                # content width is this one's to the cell. Without it every
+                # block folded at the 80-column fallback and refolded after the
+                # reveal — the 3-to-6 painted states of a sidebar switch. A
+                # hidden on-screen view (subagent page open) reports 0, which
+                # keeps the fallback rather than guessing.
+                fold_width=self._transcript_view().scrollable_content_region.width,
             )
             preview_unavailable = (
                 not replay.blocks
@@ -7967,10 +7984,30 @@ class OperatorApp(App[None]):
                 )
                 welcome.set_navigation_visible(False)
                 await replay.view.mount(welcome)
+            # A SAVED POSITION IS NOT A TAIL OPEN, and the difference is a
+            # frame the reader sees. `follow_tail()` does two jobs: it arms the
+            # follower and queues a scroll to the end. For a source the reader
+            # left mid-conversation the second one is a POSITION it must not
+            # take, and it is why a `display_only` saved-anchor return painted
+            # the tail one frame after the commit's own restore put the viewport
+            # at the saved anchor (QA round 2, Q8: state-104ms at the top,
+            # state-146ms at the tail, settled at the saved position — three
+            # frames, two of them content, neither final). So the position is
+            # ARMED instead, before the batch mounts, and `arrange` takes it in
+            # the pass that gives the anchor its rows — the reveal's first frame
+            # is then already the reader's own position.
+            saved_position = not source.draft.following_tail and bool(source.draft.scroll_anchor_id)
+            if saved_position:
+                replay.view.arm_navigation_anchor(
+                    source.draft.scroll_anchor_id,
+                    source.draft.scroll_anchor_part,
+                    source.draft.scroll_offset,
+                )
             with replay.view.batch_append():
                 for block in replay.blocks:
                     replay.view.append_block(block)
-            replay.view.follow_tail()
+            if not saved_position:
+                replay.view.follow_tail()
             # Retained/canonical views benefit from a measured parked layout.
             # A first saved view has no existing geometry to preserve: painting
             # it offscreen first adds a whole extra layout/frame before useful
@@ -9510,6 +9547,50 @@ class OperatorApp(App[None]):
         if incoming.welcome is not None:
             incoming.welcome.set_navigation_visible(True)
         incoming.replay.view.styles.height = "1fr"
+        # A FOLLOWER IS PLACED AT THE TAIL IN THE REVEAL FRAME ITSELF. The view
+        # comes out of its park at a new height (the parked copy is sized to
+        # the old composer), so the reveal is a reflow whose tail scroll lands
+        # in `_size_updated` — AFTER the compositor placed the rows. Measured on
+        # S1 at 160x45: the first painted frame of every switch showed the rows
+        # 15 lines low (and, once the prepared transcript was authored at the
+        # destination width, that was the last state left to remove). One extra
+        # visual state per switch, gone.
+        #
+        # A SAVED POSITION IS THE OPPOSITE CASE AND IS ASKED FIRST. The hold is
+        # about the TAIL, and a source the reader left mid-conversation is not
+        # going to the tail — it is going back to its own anchor. The two cannot
+        # both win: `_prepare_sidebar_session` calls ``follow_tail()``
+        # unconditionally (the parked view has no saved geometry to hold), so a
+        # `display_only` source with a saved anchor arrives here with
+        # ``following`` armed, and the reveal would paint the end of a
+        # conversation whose reader is somewhere in the middle before
+        # ``restore_revealed_anchor`` walks it back — the two painted states.
+        # So the anchor is restored on the revealed geometry HERE, in the same
+        # synchronous section, and the post-reveal restore stays as the net it
+        # has always been (it exists because a parked measurement is not the
+        # final geometry for wrapped content; where the offset already agrees it
+        # changes nothing, so the frame count is unaffected).
+        saved_position = not source.draft.following_tail and bool(source.draft.scroll_anchor_id)
+        if saved_position:
+            # ONLY PLACE IT IF THE ANCHOR IS MEASURED, and this is the whole
+            # correctness of the saved-position reveal. A ``display_only`` first
+            # visit skips the prepare-time layout (see the comment in
+            # ``_prepare_sidebar_session``), so every block's region is still a
+            # zero one here: the restore would clamp to the TOP of the
+            # conversation, and the reveal would paint the first message of a
+            # conversation the reader left in the middle — worse than the
+            # tail-first frame it replaced, which at least shared the reader's
+            # end of the transcript. ``restore_revealed_anchor`` below is the net
+            # that places it on the revealed geometry, and the F2 guarantee (no
+            # tail hold for a saved position) is unaffected either way.
+            incoming.replay.view.restore_navigation_anchor(
+                source.draft.scroll_anchor_id,
+                source.draft.scroll_anchor_part,
+                source.draft.scroll_offset,
+                only_when_measured=True,
+            )
+        else:
+            self._hold_tail_for_reveal(incoming.replay.view)
         incoming.replay.view.set_on_clear(self._on_transcript_cleared)
         incoming.replay.view.set_on_user_scroll(self._transcript_scrolled)
         incoming.replay.view.set_on_tail_requested(self._jump_newer_resume_tail)
@@ -12615,6 +12696,11 @@ class OperatorApp(App[None]):
             streaming=False,
         )
         self._wire_mcp_status(session)
+        # Both adoption paths publish (the claim `_adopt_session`'s own comment
+        # makes, QA round 1 Q2): a takeover replaces the owner whose credentials
+        # the catalogue and the access claim describe, so the new owner's rows
+        # are republished here too. Previously only the boot path did.
+        self._publish_model_catalogue(session)
         # The durable ledger carries the conversation's true cost/context
         # across the rotation. Seeding the band directly from the canonical
         # snapshot (not only from restored turn usage, which is one turn's
@@ -13596,6 +13682,10 @@ class OperatorApp(App[None]):
         screenful = _viewport_message_budget(self.size.height)
         first_cut = _resume_tail_start(history, screenful) if len(history) > screenful else 0
         if first_cut <= full_cut:
+            # The same first-frame tail placement the split branch below gets
+            # from its hold: without it a short conversation's first frame is
+            # placed at scroll 0 and moved to the tail one frame later.
+            self._hold_tail_for_reveal(self._transcript_view())
             self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
             # A message budget is a PROXY for height, and a poor one. Whether the
             # first frame can be scrolled is a question about ROWS, and only the
@@ -13624,6 +13714,36 @@ class OperatorApp(App[None]):
         view.hold_tail_through_layout(True)
         self._project_settled_rows(history, start=first_cut)
         self._backfill_resume_window(first_cut - full_cut, drop_notice=full_cut == 0)
+
+    @staticmethod
+    def _hold_tail_for_reveal(view: TranscriptView | None) -> None:
+        """Place a FOLLOWING view at its tail BEFORE the next layout, then let go.
+
+        For the frames that change the transcript's own geometry with rows
+        already on it, where the tail scroll otherwise runs after the compositor
+        has placed the rows — the frame the user sees as the conversation
+        jumping:
+
+        * a sidebar reveal, where the parked view comes back at the visible
+          height (measured at 160x45: the first painted frame of every switch
+          showed the rows 15 lines low, and the next frame moved them up, one
+          extra visual state per switch);
+        * a short resume, which fills in one go and would otherwise place its
+          first frame at scroll 0 and move to the tail a frame later (the long
+          case already holds through its backfill page).
+
+        ``TranscriptView.hold_tail_through_layout`` is the pre-placement seam,
+        and the release is scheduled for the refresh after, because a hold that
+        outlived its frame would re-land the tail on layouts the READER caused
+        by scrolling away. A view that is not following is never touched: a
+        restored scroll anchor must not be overridden (see
+        ``TranscriptView.arrange``).
+        """
+        if view is None or not view.is_following_tail:
+            return
+        view.hold_tail_through_layout(True)
+        if not view.call_after_refresh(view.hold_tail_through_layout, False):
+            view.hold_tail_through_layout(False)
 
     def _backfill_resume_window(self, count: int, *, drop_notice: bool) -> None:
         """Mount the newest ``count`` held messages as one page, after the paint.
@@ -27849,6 +27969,15 @@ class OperatorApp(App[None]):
         # refresh of delay is one painted frame of the question overhanging the
         # composer — the exact artifact this fixes, merely briefer.
         self._sync_boot_layout()
+        # THE READER DOES NOT MOVE BECAUSE A QUESTION APPEARED. The host is a
+        # dock child under the transcript, so its rows come out of the
+        # transcript's own height: a card mounting while the reader is at the
+        # tail pushed every visible row up by the card's height, one frame
+        # after the rows had already been placed and painted (measured on S4's
+        # live open: the card mounts ~600 ms after the first rows and the
+        # transcript shortens from 38 rows to 23). A follower is therefore held
+        # to the tail THROUGH the new layout, so the frame that carries the
+        # card already carries the reader at the end of the conversation.
         # ...and only while that something can actually be drawn. On a terminal
         # too short for even the card's footer the card hides itself, and a host
         # left visible would keep its own separation row for a prompt painting
@@ -35348,7 +35477,9 @@ class OperatorApp(App[None]):
         """
         try:
             rows, _note = self._catalogue_rows(
-                self._providers.static_catalogue() if self._providers else []
+                self._providers.static_catalogue() if self._providers else [],
+                # The picker toggle is the picker's; see ``_catalogue_rows``.
+                show_all=False,
             )
             return rows
         except Exception:  # noqa: BLE001 — the page must open without a catalogue
@@ -39838,6 +39969,16 @@ class OperatorApp(App[None]):
         if lowered == "saved":
             self._cmd_model_saved(notice)
             return
+        # ``/model --all`` — toggle the show-all view (see ``_model_show_all``).
+        # A command WORD like ``saved``, and for the same reason: it is consumed
+        # here rather than ranked as a selector, so the picker's empty state can
+        # name it (``_PERSIST_KEYWORDS``). The reopen is what repaints the rows
+        # under the new mode; the buffer route is the single authority on which
+        # picker shows.
+        if lowered == "--all":
+            self._model_show_all = not self._model_show_all
+            self._open_model_picker()
+            return
         if (
             persist_default
             and not target
@@ -40369,6 +40510,11 @@ class OperatorApp(App[None]):
         # a row that is already three lines at 50 columns (UX review U7) and
         # the login warning would be about a provider already serving the
         # session.
+        if not write_only:
+            # The session's model just moved, so the published access claim must
+            # move with it: a typed `/model provider/id` is exactly the route
+            # that can land on a provider this host has no credential for.
+            self._publish_model_access(session)
         suffix, warning = ("", None) if write_only else self._model_access_note(provider)
         if persist_result is not None:
             notice(persist_result, "warning")
@@ -42231,6 +42377,54 @@ class OperatorApp(App[None]):
         # where the reader most needs it whole.
         return "partial list — not all models"
 
+    def _publish_model_access(self, session: Any) -> None:
+        """Publish "can the session's model actually run here" (PR2, additive).
+
+        The desktop band and any external reader answer "is this session on a
+        model its host is signed in for" from canonical state; the TUI is the
+        host that KNOWS (its controller's ``usable_providers`` is the one
+        predicate every picker already filters by), so it publishes the claim
+        rather than letting each reader re-read a credential store.
+
+        A ``None`` claim is published rather than nothing when the store cannot
+        be read or the session has no model yet: ``signed_out`` would be an
+        accusation the app failed to establish, and a stale claim from before
+        the store became unreadable is worse than no claim at all.
+        """
+        store = getattr(session, "_frontend_state_store", None) if session is not None else None
+        if store is None:
+            return
+        # NEVER RAISES, on any edge (agent review round 1, R1-2/R1-1 fallout):
+        # the same call runs on the boot path, on logins, on local switches and
+        # now on routed switches, and an additive state field is never worth
+        # failing the keystroke it rode in on. One guard here rather than a
+        # try/except around every call site, which is how the routed lane came
+        # to be missed in the first place.
+        try:
+            from local_operator.session.frontend_state import FrontendModelAccess
+
+            selector = self._current_selector()
+            if not selector:
+                store.refresh_model_access(None)
+                return
+            provider = selector.partition("/")[0]
+            usable = self._usable_providers()
+            if usable is None:
+                store.refresh_model_access(None)
+                return
+            from local_operator.providers.registry import get_provider_definition
+
+            definition = get_provider_definition(provider)
+            store.refresh_model_access(
+                FrontendModelAccess(
+                    state="ok" if provider in usable else "signed_out",
+                    provider=provider,
+                    label=definition.name if definition is not None else provider,
+                )
+            )
+        except Exception:
+            logger.debug("model access publication failed", exc_info=True)
+
     def _publish_model_catalogue(self, session: Any) -> None:
         """Push the owner's offerable models into canonical state (D3).
 
@@ -42253,8 +42447,15 @@ class OperatorApp(App[None]):
             store.refresh_model_catalogue(entries)
         except Exception:
             logger.debug("model catalogue publication failed", exc_info=True)
+        # The access claim rides the SAME edges as the catalogue — a login or a
+        # re-adoption is exactly when either fact changes, and both are reads
+        # this app already pays for on those edges. `_publish_model_access`
+        # carries its own never-raises guard.
+        self._publish_model_access(session)
 
-    def _catalogue_rows(self, entries: list["CatalogueEntry"]) -> tuple[list[ModelRow], str]:
+    def _catalogue_rows(
+        self, entries: list["CatalogueEntry"], *, show_all: bool | None = None
+    ) -> tuple[list[ModelRow], str]:
         """``(rows, note)`` — the models this user can actually run, and what was cut.
 
         HIDDEN, not demoted. The list used to be the whole registry with the
@@ -42290,6 +42491,12 @@ class OperatorApp(App[None]):
             settings if settings is not None else self._config_values()
         )
         usable = self._usable_providers()
+        # ``show_all`` is the ``/model --all`` toggle. ``None`` means "the
+        # picker's current mode"; the settings page's Default-model dropdown
+        # passes ``show_all=False`` explicitly, because that surface is a boot
+        # preference rather than this picker, and the two must not change
+        # together behind a key the settings page does not show.
+        show_all = self._model_show_all if show_all is None else show_all
         current = self._current_selector()
         # A follower merges the OWNER's published catalogue: the session runs
         # on the owner's credentials, so the owner's rows are the offerable
@@ -42357,9 +42564,14 @@ class OperatorApp(App[None]):
         # serving spec and no runtime catalogue to merge.
         from local_operator.providers.catalogue import picker_rows
 
+        # ``usable=None`` is picker_rows' own "show everything" spelling, so
+        # the show-all view is the same code path with the filter removed —
+        # unusable rows arrive with ``connected=False`` and render dim with
+        # their "login required" tag exactly as they do today wherever the
+        # unfiltered view shows them (a rescue row, an unreadable store).
         rows, _hidden = picker_rows(
             entries,
-            usable=usable,
+            usable=None if show_all else usable,
             current=current,
             use_max_context=use_max_context,
         )
@@ -42389,7 +42601,36 @@ class OperatorApp(App[None]):
         rows = self._with_current_row(rows, current)
         if usable is None:
             return rows, "credential check unavailable — showing every model"
-        return rows, (f"{hidden} hidden — /login <provider>" if hidden else "")
+        if show_all:
+            # Count what the DEFAULT view would withhold, from the same
+            # predicate, so the footer can still say how many rows need a
+            # sign-in while every one of them is on screen.
+            from local_operator.providers.catalogue import split_by_access
+
+            _, withheld = split_by_access(entries, usable=usable, current=current)
+            # Agreement is not nit-fodder here: the count is 1 in exactly the
+            # state the clause was added to teach (one unusable provider), so
+            # `1 need sign-in` was the commonest reading of the line.
+            needs = "needs" if withheld == 1 else "need"
+            # DROPPABLE CLAUSES, deliberately (UX review round 2, U4): the
+            # agreement fix added one cell and the DASH-CHAIN form overflowed
+            # the footer in the miss states, where the picker prepends its own
+            # clause — `no matching models · showing all — 1 needs sign-in —
+            # /model --all hid…`, cut mid-word. The picker drops TRAILING
+            # clauses at the app's ` · ` seam before it ever cuts one, so the
+            # sentence is written as three clauses and degrades by dropping,
+            # never by truncating. Measured at 110x30, 90x24 and the 60x20
+            # floor (no-match, partial-keyword and settled states): no miss
+            # renders an ellipsis at any of them.
+            return rows, (
+                f"showing all · {withheld} {needs} sign-in · /model --all hides" if withheld else ""
+            )
+        # The `--all` clause is a TRAILING clause on purpose (design review
+        # round 1, D1): `_fit_clauses` drops trailing clauses before it
+        # truncates the leading one, so a narrow picker loses the teaching
+        # hint and keeps the actionable `/login` path. 49 cells at N=1 fits
+        # the 53-cell body of the 56-cell minimum card and every wider one.
+        return rows, (f"{hidden} hidden — /login <provider> · /model --all shows" if hidden else "")
 
     def _with_current_row(self, rows: list[ModelRow], current: str | None) -> list[ModelRow]:
         """``rows`` guaranteed to contain the session's own model.
@@ -51277,6 +51518,14 @@ class OperatorApp(App[None]):
         self._probe_quota_after_switch(session)
         self._effort_refusal_shown = None
         self._warm_usage_background()
+        # The routed lane is a REAL switch on the owner session — it is where a
+        # phone or any remote follower's `/model <selector>` lands
+        # (`may_run_slash_in_the_owners_terminal` routes them here) — so the
+        # canonical access claim has to move with it. Without this the claim
+        # kept describing the PREVIOUS model, which is the stale claim
+        # ``FrontendModelAccess``'s own docstring calls worse than none (agent
+        # review round 1, R1-2).
+        self._publish_model_access(session)
         suffix, warning = self._model_access_note(provider)
         # The switch lands on the SHARED session, so every terminal's band
         # repaints from the canonical update — the receipt below only has to

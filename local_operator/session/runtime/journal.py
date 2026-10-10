@@ -366,8 +366,8 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     ``SessionRecord`` every 15 s, while a ``BootRecord`` is a boot-time snapshot
     by design (see its docstring) and nothing ever refreshes its heartbeat. So
     every record of a runtime that has been up longer than 22.5 s is "quiet", and
-    deriving the probe from that age here would fork ``ps`` (~2.4-4.6 ms, see
-    ``procstate.is_zombie``) once per LIVE runtime at every boot — ~100-200 ms
+    deriving the probe from that age here would spend the zombie probe (see
+    ``procstate.is_zombie`` for its measured cost) once per LIVE runtime at every boot — ~100-200 ms
     for a forty-session fleet, on the path this design measured at ~1.2 s.
 
     The consequence is bounded and in the safe direction: a record whose pid has

@@ -37,8 +37,8 @@ CONSTRAINTS.
   reported verbatim from the ``Reviewer:`` field and no independence claim is
   derived from it.
 * **Bounded work.** Fields are scanned in the first :data:`FIELD_SCAN_LINES` lines
-  and every regex is linear. Fixture bodies are a few KB; a huge comment costs one
-  pass, not a backtracking blowup.
+  (the verdict alone also past them) and every regex is linear. Fixture bodies are a
+  few KB; a huge comment costs one pass, not a backtracking blowup.
 """
 
 from __future__ import annotations
@@ -79,6 +79,8 @@ MIN_SHA_PREFIX = 7
 
 #: Fields are read from the top of the comment. Real ones put them in the first
 #: six lines; 40 leaves room for a preamble without scanning a whole review body.
+#: The ``Verdict`` is the one field also read past this window (see
+#: ``_scan_fields``): a long review closes with it.
 FIELD_SCAN_LINES = 40
 
 _DASH = "\u2014\u2013\\-:"
@@ -109,7 +111,14 @@ _FIELD = re.compile(
     rf"{_DASH}]\s*(?P<value>.*)$",
     re.IGNORECASE,
 )
-_VERDICT_HEADING = re.compile(r"^\s*#{3,4}\s*\**\s*verdict\s*\**\s*:?\s*$", re.IGNORECASE)
+#: ``##`` is accepted beside ``###``/``####``: #2112's agent reviews r1-r3 (the
+#: first three of the four rounds) head their verdict ``## Verdict`` and read as
+#: ``unstated`` without it. A survey of the 27 real convention comments on
+#: #2094/#2106/#2112 found ``## Verdict`` only ever as the verdict section (never
+#: as an unrelated heading); the match stays exact-line, and the classifier still
+#: reads only a recognised leading token of the line that follows, so a
+#: misplaced heading degrades to ``unstated`` rather than inventing a verdict.
+_VERDICT_HEADING = re.compile(r"^\s*#{2,4}\s*\**\s*verdict\s*\**\s*:?\s*$", re.IGNORECASE)
 
 #: ``base..head``, with or without backticks. Both sides must be hex for the END
 #: to be a reviewed head; a symbolic base (``main..72bea95``) is fine.
@@ -236,9 +245,57 @@ class ReviewPass:
             value = getattr(self, name)
             if value:
                 payload[name] = value
+        if self.created_at:
+            # Carried so per-piece stored parses can be re-ordered into ONE
+            # union by the same key ``merge_comments`` sorts on (N2); the
+            # parser's own ordering contract is created_at, so the replay can
+            # reproduce it exactly.
+            payload["created_at"] = self.created_at
         if self.remediation:
             payload["remediation"] = [item.to_payload() for item in self.remediation]
         return payload
+
+    @staticmethod
+    def from_payload(raw: object) -> "ReviewPass | None":
+        """Reconstruct one pass from :meth:`to_payload` — a fetch-time parse, replayed.
+
+        The service parses comment bodies ONCE, at fetch time, from the full
+        text and stores the result; a later rebuild that did not refetch the
+        comments re-reads this payload instead of re-parsing bodies the size
+        bound has since truncated (cross-round finding X1: a verdict past the
+        4 KiB cap used to degrade to ``unstated`` on the next 304)."""
+        if not isinstance(raw, Mapping):
+            return None
+        lane = str(raw.get("lane") or "")
+        kind = str(raw.get("kind") or "")
+        if not lane or not kind:
+            return None
+        remediation = tuple(
+            Remediation(
+                finding=str(item.get("finding") or ""),
+                disposition=str(item.get("disposition") or ""),
+                sha=str(item["sha"]) if item.get("sha") else None,
+                verbatim=str(item.get("verbatim") or ""),
+            )
+            for item in raw.get("remediation") or ()
+            if isinstance(item, Mapping)
+        )
+        round_value = raw.get("round")
+        sequence_value = raw.get("sequence")
+        return ReviewPass(
+            lane=lane,
+            kind=kind,
+            round=int(round_value) if isinstance(round_value, (int, float)) else None,
+            qualifier=str(raw.get("qualifier") or ""),
+            sequence=int(sequence_value) if isinstance(sequence_value, (int, float)) else 0,
+            reviewer=str(raw.get("reviewer") or ""),
+            reviewed_head=str(raw["reviewed_head"]) if raw.get("reviewed_head") else None,
+            verdict=str(raw.get("verdict") or ""),
+            verdict_class=str(raw.get("verdict_class") or STATE_UNSTATED),
+            remediation=remediation,
+            comment_id=str(raw.get("comment_id") or ""),
+            created_at=str(raw.get("created_at") or ""),
+        )
 
 
 @dataclass(frozen=True)
@@ -295,6 +352,39 @@ class RoundReport:
 
     def lane_passes(self, lane: str) -> list[ReviewPass]:
         return [item for item in self.passes if item.lane == lane]
+
+    @classmethod
+    def from_payload(cls, raw: object) -> "RoundReport | None":
+        """Reconstruct a report from ``{passes, ignored}`` — see ``ReviewPass.from_payload``."""
+        if not isinstance(raw, Mapping):
+            return None
+        passes = [ReviewPass.from_payload(item) for item in raw.get("passes") or ()]
+        return cls(
+            passes=[item for item in passes if item is not None],
+            ignored=[str(item) for item in raw.get("ignored") or ()],
+        )
+
+    @classmethod
+    def combine(cls, groups: "Iterable[Sequence[ReviewPass]]") -> "RoundReport":
+        """Merge per-piece pass groups into the report a one-shot parse would give.
+
+        ``parse``'s order contract is ``created_at`` (the adapter's own
+        ``merge_comments`` sort), and the stored passes carry it, so sorting
+        the union by ``(created_at, comment_id)`` and re-numbering reproduces
+        the exact one-shot result. This is what lets a fetcher keep ONE stored
+        parse per comment PIECE: the piece that answered 304 replays its
+        full-body passes while only the refetched piece is re-parsed (review
+        round 2, N2).
+        """
+        flat = [item for group in groups for item in group]
+        flat.sort(key=lambda item: (item.created_at, item.comment_id))
+        counters: dict[tuple[str, int | None, str], int] = {}
+        passes: list[ReviewPass] = []
+        for item in flat:
+            key = (item.lane, item.round, item.kind)
+            counters[key] = counters.get(key, 0) + 1
+            passes.append(_with_sequence(item, counters[key]))
+        return cls(passes=passes)
 
     def states(self, head_sha: str | None = None, *, is_open: bool = True) -> list[LaneState]:
         """One :class:`LaneState` per lane that has a comment (plus ``agent`` on an open PR).
@@ -465,6 +555,22 @@ def _strip_wrapping_parens(text: str) -> str:
     return text
 
 
+def _quoted_lines(lines: Sequence[str]) -> list[bool]:
+    """Per line: is it inside a ``` fence or a ``>`` blockquote (text that is not
+    the comment's own words)? The fence state is tracked from line 0, so a fence
+    opened inside the field window still covers lines past it."""
+    flags: list[bool] = []
+    fenced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            fenced = not fenced
+            flags.append(True)
+            continue
+        flags.append(fenced or stripped.startswith(">"))
+    return flags
+
+
 def _scan_fields(lines: Sequence[str]) -> dict[str, str]:
     """The ``Reviewer:``/``Scope:``/``Head:``/``Verdict:`` fields, first spelling wins.
 
@@ -473,6 +579,7 @@ def _scan_fields(lines: Sequence[str]) -> dict[str, str]:
     the real comments always put the fields at the top.
     """
     fields: dict[str, str] = {}
+    quoted = _quoted_lines(lines)
     for line in lines[1:FIELD_SCAN_LINES]:
         stripped = line.strip()
         if _VERDICT_HEADING.match(stripped) is not None:
@@ -514,6 +621,32 @@ def _scan_fields(lines: Sequence[str]) -> dict[str, str]:
             bare = _strip_markup(stripped)
             if _BARE_VERDICT.match(bare):
                 fields["verdict"] = stripped
+                break
+    if "verdict" not in fields:
+        # A LABELLED verdict past the field window: the closing summary of a long
+        # review. ``damianvtran/local-operator#2112``'s round-4 agent review keeps
+        # ``**Verdict: `clean` — … TERMINAL …**`` on line 44 of 46, and the bounded
+        # scan above read that whole round as ``unstated`` even from the FULL body
+        # (so parsing before the size trim was necessary but not sufficient).
+        #
+        # Fail-closed constraints (review round 1, F1/Q1), because the classifier
+        # reads the leading token of WHATEVER line it is handed, so a quoted
+        # ``Verdict: clean`` is as good as a real one to it:
+        # * it runs LAST, after the bare-bold fallback: a review's own in-window
+        #   verdict outranks anything quoted further down;
+        # * blockquote (``>``) and fenced lines are skipped: a round-2+ review
+        #   quotes the previous round's verdict in its fix-verification section;
+        # * the LAST labelled line wins, not the first: the closing summary is the
+        #   comment's own, whatever it quotes above it.
+        # Only the verdict is rescued: ``Reviewer``/``Scope``/``Head`` stay
+        # window-bound because a review quotes its own prompt further down, and a
+        # quoted ``Scope:`` there would move the reviewed head.
+        for index in reversed(range(FIELD_SCAN_LINES, len(lines))):
+            if quoted[index]:
+                continue
+            match = _FIELD.match(lines[index].strip())
+            if match is not None and match.group("name").lower() == "verdict":
+                fields["verdict"] = match.group("value").strip()
                 break
     return fields
 

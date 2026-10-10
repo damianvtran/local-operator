@@ -134,7 +134,9 @@ def marker(
     }
     if kind is not None and eligible:
         details["kind"] = kind
-        details["anchor"] = "a-anchor"
+        # THE PRODUCER'S ANCHOR (``attention.py``: ``completion-<token>``), which
+        # is the id the desktop's reducer keys the record by — see QA round 2, Q5.
+        details["anchor"] = f"completion-{token}"
     return {
         "id": id_,
         "ts": ts,
@@ -1261,3 +1263,636 @@ def test_a_build_sweeps_the_cache_of_a_deleted_session(tmp_path, monkeypatch):
     assert calls == {"full": 1, "incremental": 0}
     assert not ti.index_path(tmp_path, gone).exists()
     assert ti.index_path(tmp_path, SID).exists()  # a live session keeps its cache
+
+
+# ---------------------------------------------------------------------------
+# Runs: the open frame's per-run facts
+# ---------------------------------------------------------------------------
+
+
+def tool_row(
+    id_: str,
+    ts: float,
+    *,
+    text: str = "tool output",
+    is_error: bool = False,
+    duration_s: float | None = 2.0,
+    fault: str | None = None,
+    delivery: str | None = None,
+    tool_name: str = "bash",
+) -> dict[str, Any]:
+    """A tool row with the provider envelope the counters read."""
+    details: dict[str, Any] = {}
+    if fault is not None:
+        details["__fault"] = fault
+    if delivery is not None:
+        # THE PRODUCER'S OWN SHAPE (``builtin.py`` writes ``{"state": ...}``);
+        # the desktop reads ``details.delivery.state``. A string here would test a
+        # row no writer produces, which is exactly how a live defect hid behind a
+        # green unit test in review round 1.
+        details["delivery"] = {"state": delivery}
+    provider: dict[str, Any] = {"details": details, "useless": False}
+    if duration_s is not None:
+        provider["duration_s"] = duration_s
+    return {
+        "id": id_,
+        "ts": ts,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "tool",
+            "content": [{"text": text}],
+            "is_error": is_error,
+            "tool_name": tool_name,
+            "provider_payload": provider,
+        },
+    }
+
+
+def incident(id_: str, ts: float, detail: str = "the turn died") -> dict[str, Any]:
+    """The error-level custom the renderer paints as a terminal marker."""
+    return {
+        "id": id_,
+        "ts": ts,
+        "type": "message",
+        "payload": {
+            "kind": "custom",
+            "custom_type": "session_incident",
+            "details": {"text": detail},
+        },
+    }
+
+
+def runs_of(index: ti.TranscriptIndex) -> list[tuple[str, str, int, int, float, bool]]:
+    """Each run as (opening user, closing answer, actions, failed, worked, settled)."""
+    return [
+        (
+            run.opening_user_id,
+            run.closing_answer_id,
+            run.action_count,
+            run.failed_count,
+            run.worked_seconds,
+            run.settled,
+        )
+        for run in index.runs
+    ]
+
+
+def test_runs_partition_two_turns_and_count_their_tools(tmp_path):
+    """The two-turn shape: counts, worked seconds and outcomes per run."""
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "do the thing"),
+            assistant("a1", 1.2, "working", tool_calls=True),
+            tool_row("x1", 1.3, duration_s=3.0),
+            tool_row("x2", 1.4, duration_s=1.5, is_error=True),
+            assistant("a2", 1.5, "done"),
+            marker("m1", 1.6, "t1"),
+            start("s2", 2.0, "t2"),
+            user("u2", 2.1, "again"),
+            assistant("a3", 2.2, "working", tool_calls=True),
+            tool_row("x3", 2.3, duration_s=0.5),
+            assistant("a4", 2.4, "done"),
+            marker("m2", 2.5, "t2"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert runs_of(index) == [
+        ("u1", "a2", 2, 1, 4.5, True),
+        ("u2", "a4", 1, 0, 0.5, True),
+    ]
+    assert [run.outcome for run in index.runs] == ["complete", "complete"]
+    # The span is the run's FIRST and LAST rows, on the journal's clock — the
+    # last row, not the answer, because that is what the page's cut is measured
+    # in (a trailing receipt belongs to the run it follows).
+    assert index.runs[0].start_ts == 1.1 and index.runs[0].end_ts == 1.6
+
+
+def test_a_steer_stays_inside_its_run(tmp_path):
+    """The client's own rule, and the reason a count is a run's, not a turn's.
+
+    A user row that arrives while the run is open and the run's last painting row
+    is a TOOL row is a steer: the run keeps its identity — its FIRST user row —
+    and its counts span both of the turn's cycles. A partition that cut here would
+    report two half-runs where the bar draws one.
+    """
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "start"),
+            assistant("a1", 1.2, "working", tool_calls=True),
+            tool_row("x1", 1.3, duration_s=2.0),
+            user("u2", 1.4, "actually, also this"),
+            assistant("a2", 1.5, "working", tool_calls=True),
+            tool_row("x2", 1.6, duration_s=3.0),
+            assistant("a3", 1.7, "done"),
+            marker("m1", 1.8, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert runs_of(index) == [("u1", "a3", 2, 0, 5.0, True)]
+
+
+def test_a_settled_answer_lets_the_next_user_row_open_a_run(tmp_path):
+    """The closure's second arm: a run whose tail is a settled assistant row."""
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.1, "one"),
+            assistant("a1", 1.2, "answer one"),
+            user("u2", 1.3, "two"),
+            assistant("a2", 1.4, "answer two"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert runs_of(index) == [
+        ("u1", "a1", 0, 0, 0.0, True),
+        ("u2", "a2", 0, 0, 0.0, False),
+    ]
+    # The tail run has no marker, so it is LIVE — not settled with an empty
+    # outcome, and that difference is what the wire's counts are gated on.
+    assert index.runs[-1].outcome == ti.OUTCOME_OPEN
+    assert index.runs[0].outcome is None
+
+
+def test_a_session_incident_closes_the_run_before_the_next_user_row(tmp_path):
+    """The renderer's second terminal marker, honoured by the partition."""
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "start"),
+            assistant("a1", 1.2, "working", tool_calls=True),
+            tool_row("x1", 1.3),
+            incident("i1", 1.4),
+            start("s2", 2.0, "t2"),
+            user("u2", 2.1, "try again"),
+            assistant("a2", 2.2, "done"),
+            marker("m2", 2.3, "t2"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert [run.opening_user_id for run in index.runs] == ["u1", "u2"]
+    assert index.runs[0].action_count == 1
+
+
+def test_the_failure_count_excludes_the_settled_non_failures(tmp_path):
+    """A stopped call, a never-run call and a partial delivery are not failures.
+
+    The count is only useful if it states what the client's own ``isFailedCall``
+    would have derived from the same rows, so the three exclusions are pinned
+    here: an ``is_error`` row that was aborted, one whose ``send`` delivery is
+    partial, and one that never ran. A bar reading "3 failed" for that journal is
+    a bar reporting work that did not happen.
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.1, "go"),
+            assistant("a1", 1.2, "working", tool_calls=True),
+            tool_row("x1", 1.3, is_error=True, fault="aborted"),
+            tool_row("x2", 1.4, is_error=True, fault="skipped"),
+            tool_row("x3", 1.5, is_error=True, delivery="mailbox"),
+            tool_row("x4", 1.6, is_error=True, delivery="unconfirmed"),
+            tool_row("x5", 1.7, is_error=True),
+            assistant("a2", 1.8, "done"),
+            marker("m1", 1.9, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    run = index.runs[0]
+    assert run.action_count == 5
+    assert run.failed_count == 1
+
+
+def test_a_dropped_row_body_marks_the_run_incomplete(tmp_path):
+    """A row the scanner had to drop leaves a lower bound, and the run says so."""
+    big = "z" * (3 << 20)
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.1, "go"),
+            tool_row("x1", 1.2, text=big, duration_s=4.0),
+            tool_row("x2", 1.3, duration_s=1.0),
+        ],
+    )
+    index = refreshed(tmp_path)
+    run = index.runs[0]
+    assert run.action_count == 2  # the head names the role, so it still counts
+    assert run.complete is False
+    assert run.worked_seconds == 1.0  # the dropped row's duration is unknowable
+
+
+def test_incremental_appends_agree_with_a_full_rescan(tmp_path):
+    """THE INVARIANT THE CARRIED RUN EXISTS FOR: append, refresh, rescan, equal.
+
+    An incremental scan re-derives from a resume window that can sit INSIDE a
+    run (a steer's own ``attention_started``), so the run straddling that window
+    is carried rather than re-opened. Cutting the keeps at the window instead
+    emitted the straddling run twice — once truncated, once head-cut — and the
+    two counts reconciled with nothing. This asserts the only property that
+    matters: the incremental answer equals the one a full scan of the same
+    journal gives.
+    """
+    first = [
+        start("s1", 1.0, "t1"),
+        user("u1", 1.1, "start"),
+        assistant("a1", 1.2, "working", tool_calls=True),
+        tool_row("x1", 1.3, duration_s=2.0),
+        user("u2", 1.4, "and also this"),
+        assistant("a2", 1.5, "working", tool_calls=True),
+        tool_row("x2", 1.6, duration_s=3.0),
+    ]
+    write_rows(tmp_path, first)
+    initial = refreshed(tmp_path)
+    assert len(initial.runs) == 1
+    write_rows(
+        tmp_path,
+        [
+            assistant("a3", 1.7, "done"),
+            marker("m1", 1.8, "t1"),
+            start("s2", 2.0, "t2"),
+            user("u3", 2.1, "next"),
+            assistant("a4", 2.2, "answer"),
+        ],
+    )
+    incremental = refreshed(tmp_path)
+    full = ti._scan_full(journal_path(tmp_path), None)
+    assert runs_of(incremental) == runs_of(full)
+    assert [run.opening_user_id for run in incremental.runs] == ["u1", "u3"]
+
+
+def test_version_three_cache_is_discarded_so_runs_are_never_missing(tmp_path):
+    """A cache without the runs section must not be served as "no runs here"."""
+    write_rows(tmp_path, [user("u1", 1.1, "hi"), assistant("a1", 1.2, "hello")])
+    index = refreshed(tmp_path)
+    payload = json.loads(ti.index_path(tmp_path, SID).read_text())
+    payload["version"] = 3
+    payload.pop("runs", None)
+    ti.index_path(tmp_path, SID).write_text(json.dumps(payload))
+    raw = ti._read_raw(tmp_path, SID)
+    assert raw is not None and raw["version"] == 3
+    assert ti._index_from_raw(raw) is None
+    assert len(index.runs) == 1
+
+
+def patience_row(id_: str, ts: float, duration_s: float = 0.5) -> dict[str, Any]:
+    """The ``patience`` arm's ledger row: a hidden tool result the client hides."""
+    return {
+        "id": id_,
+        "ts": ts,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "tool",
+            "content": [{"text": "waiting"}],
+            "tool_name": "patience",
+            "provider_payload": {"details": {}, "useless": False, "duration_s": duration_s},
+        },
+    }
+
+
+def divert_row(id_: str, ts: float, duration_s: float = 4.0) -> dict[str, Any]:
+    """A diverted ask's result row: the gate's marker, hidden from every surface."""
+    return {
+        "id": id_,
+        "ts": ts,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "tool",
+            "content": [{"text": "denied"}],
+            "is_error": True,
+            "provider_payload": {
+                "details": {"ask_gate": {"hidden": True, "verdict": "denied"}},
+                "useless": False,
+                "duration_s": duration_s,
+            },
+        },
+    }
+
+
+def test_hidden_and_diverted_rows_are_not_work(tmp_path):
+    """F5: the counters describe what the client RECEIVES, not what is on disk.
+
+    The page is filtered through ``harness.rows.visible_transcript_rows`` before
+    any client sees it, so a count including a hidden ``patience`` ledger row or a
+    diverted ask's result states work the reader cannot see — and it is exactly
+    the number the client's own fold contradicts.
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u0", 1.1, "go"),
+            patience_row("p1", 1.2, duration_s=0.5),
+            tool_row("x1", 1.3, duration_s=3.0),
+            divert_row("d1", 1.4, duration_s=4.0),
+            assistant("a0", 1.5, "done"),
+            marker("m0", 1.6, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    run = index.runs[0]
+    assert run.action_count == 1
+    assert run.failed_count == 0
+    assert run.worked_seconds == 3.0
+
+
+def test_the_counted_work_matches_the_rows_the_client_receives(tmp_path):
+    """F5, as an invariant rather than a case: facts == the served rows' tools.
+
+    The comparison is made against the SAME predicate the page uses
+    (``visible_transcript_rows``), so a future row class that one side learns
+    about and the other does not fails here rather than in a bar nobody can
+    explain.
+    """
+    from local_operator.harness.rows import visible_transcript_rows
+
+    rows = [
+        user("u0", 1.1, "go"),
+        patience_row("p1", 1.2),
+        tool_row("x1", 1.3, duration_s=3.0),
+        tool_row("x2", 1.4, duration_s=1.0, is_error=True),
+        divert_row("d1", 1.5),
+        assistant("a0", 1.6, "done"),
+        tool_row("x3", 1.7, duration_s=2.0),
+        marker("m0", 1.8, "t1"),
+    ]
+    write_rows(tmp_path, rows)
+    index = refreshed(tmp_path)
+    served = visible_transcript_rows([dict(row) for row in rows])
+    from local_operator.harness.rows import HIDDEN_TOOL_NAMES
+
+    served_tools = [
+        row
+        for row in served
+        if row["payload"].get("role") == "tool"
+        and row["payload"].get("tool_name") not in HIDDEN_TOOL_NAMES
+    ]
+    served_failures = [row for row in served_tools if row["payload"].get("is_error")]
+    run = index.runs[0]
+    assert run.action_count == len(served_tools) == 3
+    assert run.failed_count == len(served_failures) == 1
+    assert run.worked_seconds == 6.0
+
+
+def test_a_wake_turn_after_a_marker_leaves_the_tail_live(tmp_path):
+    """F4: a run that is resolved and then CONTINUED must not read as settled.
+
+    The wake/hub follow-up appends without a user row, so the run keeps its
+    identity in the index and in the client's ``walkTurns`` — and a count stated
+    for it would move on every row that lands after the paint. This is the shape
+    the review reproduced: settled, actions=1, then actions=3 with the same key.
+    """
+    write_rows(
+        tmp_path,
+        [
+            start("k0", 1.0, "t0"),
+            user("u0", 1.1, "go"),
+            tool_row("x1", 1.2, duration_s=1.0),
+            assistant("a0", 1.3, "done"),
+            marker("m0", 1.4, "t0"),
+        ],
+    )
+    first = refreshed(tmp_path)
+    assert first.runs[-1].settled is True
+    write_rows(
+        tmp_path,
+        [
+            start("k1", 2.0, "t1"),
+            inject("w1", 2.1, custom_type="wake_prompt"),
+            tool_row("x2", 2.2, duration_s=2.0),
+            tool_row("x3", 2.3, duration_s=3.0),
+        ],
+    )
+    grown = refreshed(tmp_path)
+    tail = grown.runs[-1]
+    assert tail.opening_user_id == "u0"
+    assert tail.action_count == 3
+    assert tail.settled is False, "a run that is still taking work may not be settled"
+    # The next row keeps it live: nothing about a wake turn closes a run.
+    write_rows(tmp_path, [tool_row("x4", 2.4, duration_s=4.0)])
+    later = refreshed(tmp_path)
+    assert later.runs[-1].settled is False
+    assert later.runs[-1].action_count == 4
+
+
+def test_a_marker_after_the_last_work_row_settles_the_tail(tmp_path):
+    """The other arm of F4: a marker newer than the run's last work row settles it."""
+    write_rows(
+        tmp_path,
+        [
+            start("k0", 1.0, "t0"),
+            user("u0", 1.1, "go"),
+            tool_row("x1", 1.2, duration_s=1.0),
+            assistant("a0", 1.3, "done"),
+            marker("m0", 1.4, "t0"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    tail = index.runs[-1]
+    assert tail.settled is True and tail.outcome == "complete"
+    assert tail.action_count == 1
+
+
+def test_the_delivery_state_is_read_from_the_producers_dict(tmp_path):
+    """Q1: ``details.delivery`` is a dict; its ``state`` is what excludes a row.
+
+    Reading it as a string made the value the repr of the mapping, so every
+    partial ``send`` counted as a genuine failure — the server said 3 where the
+    desktop's own fold said 1.
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u0", 1.1, "go"),
+            tool_row("x1", 1.2, is_error=True, delivery="mailbox", duration_s=1.0),
+            tool_row("x2", 1.3, is_error=True, delivery="unconfirmed", duration_s=1.0),
+            tool_row("x3", 1.4, is_error=True, delivery="delivered", duration_s=1.0),
+            assistant("a0", 1.5, "done"),
+            marker("m0", 1.6, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    # mailbox and unconfirmed are the amber partial states (not failures);
+    # ``delivered`` with ``is_error`` IS one.
+    assert index.runs[0].failed_count == 1
+    assert index.runs[0].action_count == 3
+
+
+def test_worked_seconds_is_unstated_when_no_row_reported_one(tmp_path):
+    """Q4: the client states ``null``, never ``0s``, and the wire must match."""
+    from local_operator.session.open_frame import run_payload
+
+    write_rows(
+        tmp_path,
+        [
+            start("k0", 1.0, "t1"),
+            user("u0", 1.1, "go"),
+            tool_row("x1", 1.2, duration_s=None),
+            assistant("a0", 1.3, "done"),
+            marker("m0", 1.4, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    run = index.runs[0]
+    assert run.worked_any is False
+    assert run.worked_seconds == 0.0  # the record's own sum
+    assert run_payload(run)["worked_seconds"] is None  # what a client is told
+    # Work after the marker leaves the run LIVE, and a live run states no counts
+    # at all (the settled rule), so the number is what a SETTLED run states:
+    write_rows(tmp_path, [tool_row("x2", 2.2, duration_s=2.5), marker("m1", 2.3, "t1")])
+    grown = refreshed(tmp_path)
+    assert grown.runs[0].settled is True
+    assert run_payload(grown.runs[0])["worked_seconds"] == 2.5
+
+
+def test_cross_session_actions_are_counted_separately(tmp_path):
+    """UI review F2: the desktop hides ``send`` rows when the setting is on, so
+    the counts it reads must be splittable along the same arm."""
+    write_rows(
+        tmp_path,
+        [
+            start("k0", 1.0, "t1"),
+            user("u0", 1.1, "go"),
+            tool_row("x1", 1.2, duration_s=3.0),
+            tool_name_row("x2", 1.3, "send", "call-2b", duration_s=1.0),
+            tool_name_row("x3", 1.4, "send", "call-3", duration_s=2.0),
+            assistant("a0", 1.5, "done"),
+            marker("m0", 1.6, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    run = index.runs[0]
+    assert (run.action_count, run.worked_seconds) == (3, 6.0)
+    assert (run.cross_actions, run.cross_worked) == (2, 3.0)
+    from local_operator.session.open_frame import run_payload
+
+    payload = run_payload(run)
+    # With the setting ON a client shows these; with it off it shows the totals.
+    assert payload["cross_session_action_count"] == 2
+    assert payload["cross_session_worked_seconds"] == 3.0
+    assert payload["action_count"] - payload["cross_session_action_count"] == 1
+
+
+def test_the_run_key_is_the_clients_own_key_for_every_terminator(tmp_path):
+    """Q2: ``run_key`` is a record KEY, not an entry id.
+
+    A client matches a fact to a run it already holds by this string
+    (``walkTurns``: ``tool:<call_id>`` for a tool result, ``prov-<token>`` for a
+    completion notice, the entry id otherwise). An entry id on a
+    marker-terminated run never matched, and the bar fell back to its placeholder
+    — the review's "50+" for a 150-action run.
+    """
+    write_rows(
+        tmp_path,
+        [
+            start("k0", 1.0, "t1"),
+            user("u0", 1.1, "go"),
+            tool_row("x1", 1.2, duration_s=1.0),
+            assistant("a0", 1.3, "done"),
+            marker("m0", 1.4, "t1"),
+        ],
+    )
+    marker_run = refreshed(tmp_path).runs[0]
+    # Q5: the anchor the PRODUCER writes, not a spelling invented here — the
+    # client derives ``completion-<token>`` (``attention.py``) and matched nothing
+    # against ``prov-<token>``, which is why a head-cut interrupted run kept its
+    # loaded span (99 of 400 actions).
+    assert marker_run.key_id == "completion-t1"
+
+    # ... and a marker row with NO anchor at all still keys by its token, so an
+    # old journal does not lose its run_key entirely.
+    write_rows(
+        tmp_path,
+        [
+            {
+                "id": "m2",
+                "ts": 3.0,
+                "type": "custom",
+                "payload": {
+                    "custom_type": "completion_attention",
+                    "details": {"token": "t3", "kind": "complete", "eligible": True},
+                },
+            },
+        ],
+    )
+    bare = refreshed(tmp_path)
+    assert bare.runs[-1].key_id == "prov-t3", bare.runs[-1].key_id
+
+    write_rows(
+        tmp_path,
+        [
+            start("k1", 2.0, "t2"),
+            user("u1", 2.1, "and more"),
+            tool_name_row("x2", 2.2, "bash", "call-2", duration_s=1.0),
+        ],
+    )
+    tool_run = refreshed(tmp_path).runs[-1]
+    assert tool_run.key_id == "tool:call-2", tool_run.key_id
+
+
+def tool_name_row(id_: str, ts: float, name: str, call_id: str, duration_s: float = 1.0):
+    """A tool row that CARRIES a name and a call id (the client keys it by them)."""
+    return {
+        "id": id_,
+        "ts": ts,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "tool",
+            "content": [{"text": "out"}],
+            "tool_name": name,
+            "tool_call_id": call_id,
+            "provider_payload": {"details": {}, "useless": False, "duration_s": duration_s},
+        },
+    }
+
+
+def test_a_dropped_send_row_is_still_counted_cross_session(tmp_path):
+    """UI review round 2, M2: the desktop hides the ROW, not its body.
+
+    A ``send`` result larger than ``_MAX_KEPT_LINE_BYTES`` is clamped to its head
+    on the read, and its ``tool_name`` rides BEYOND that head — so the name cannot
+    come from a parsed payload. The reader catches the marker while the bytes
+    stream past (they are read either way), and the cross-session split is applied
+    outside the ``body_dropped`` test, because the client's subtraction happens on
+    a row it still receives. Before this, the facts counted an action the desktop
+    hid: ``action_count`` 1 with ``cross_session_action_count`` 0, so the bar kept
+    one hidden action.
+    """
+    from local_operator.session.open_frame import run_payload
+
+    big = {
+        "id": "x1",
+        "ts": 1.2,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "tool",
+            "content": [{"type": "text", "text": "z" * (3 << 20)}],
+            "tool_name": "send",
+            "tool_call_id": "c1",
+            "provider_payload": {"details": {}, "duration_s": 2.0},
+        },
+    }
+    write_rows(
+        tmp_path,
+        [
+            start("k0", 1.0, "t1"),
+            user("u0", 1.1, "go"),
+            big,
+            assistant("a0", 1.3, "done"),
+            marker("m0", 1.4, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    run = index.runs[0]
+    # The body really was dropped (otherwise the test proves nothing about it).
+    assert run.complete is False
+    assert run.action_count == 1
+    assert run.cross_actions == 1, "a dropped send row is cross-session"
+    assert run_payload(run)["cross_session_action_count"] == 1

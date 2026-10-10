@@ -5676,10 +5676,20 @@ class RelayServer:
         # pair before this was fixed, and caught by the e2e test rather than by
         # review).
         if result is None:
-            return {"op": "ack", "req": req, "detail": ""}
-        if result.get("op") in ("ack", "error"):
-            return result
-        return {"op": "ack", "req": req, "detail": result}
+            reply: dict[str, Any] = {"op": "ack", "req": req, "detail": ""}
+        elif result.get("op") in ("ack", "error"):
+            reply = result
+        else:
+            reply = {"op": "ack", "req": req, "detail": result}
+        # EVERY REPLY LEAVES THROUGH ONE WRAP (agent review round 1, R1-2), the empty
+        # ack above included. A reply carrying SECRET material — the broker's `copy`
+        # value, the epoch-rotation answers, the reconcile catch-up — is an ack with
+        # no op of its own for `seal` to key on, so the GRANTED action is the marker:
+        # compressing it would put the secret's compressibility on the wire in the
+        # record length (see wire.py "Record compression").
+        if granted.action in wire.NEVER_COMPRESS_OPS:
+            return wire.UncompressedFrame(reply)
+        return reply
 
     # -- slow ops (build plan §0 finding 4) ---------------------------------
 
