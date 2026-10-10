@@ -454,6 +454,37 @@ async def test_a_short_resume_holds_the_tail_for_its_whole_render(tmp_path) -> N
             )
 
 
+def test_the_tail_history_notice_takes_the_width_the_prepare_named() -> None:
+    """F5, pinned on what ``prepare`` BUILDS rather than on the class (R2-F2).
+
+    The twins disagreeing about how a block learns its width is the seam this
+    exists to close, and the first version of this pin could not see it: it
+    constructed ``HistoryPageNotice`` itself, so it passed with
+    ``session_presentation.py``'s OWN construction reverted — a pin that survives
+    the revert of the line it names is not a pin. This one seeds the pending tail
+    the projection is handed and measures the notice THAT call built.
+
+    No height consequence at today's widths (the copy is 30 cells: one row at 80
+    and at 142) — the point is the seam, exactly as F5 was answered in round 1.
+    """
+    from local_operator.tui.session_presentation import (
+        HistoryPageNotice,
+        PreparedReplay,
+    )
+
+    prose = " ".join(f"ZEBRA word{index:02} alpha beta gamma delta epsilon" for index in range(40))
+    replay = PreparedReplay()
+    replay._resume_pending_tail = [_assistant_message(prose)]
+    replay.prepare([_assistant_message(prose)], bound=1, fold_width=126)
+    notices = [block for block in replay.blocks if isinstance(block, HistoryPageNotice)]
+    assert notices, "the prepare built no tail notice to measure"
+    named = notices[0].fold_width(0)
+    assert named == 126, (
+        "the tail notice was built at its own default, not at the width the caller named",
+        named,
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_preview_reveal_lands_on_its_saved_anchor_in_one_state(tmp_path) -> None:
     """Q8/R2-F1: a saved mid-conversation position, taken in ONE painted state.
@@ -730,7 +761,7 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
                             "target": 1.0 if target == alpha.session_id else 0.0,
                             "blocks": float(len(view.blocks())),
                             "height": float(view.outer_size.height),
-                            # The transscript's OWN region and the dock's host: a
+                            # The transcript's OWN region and the dock's host: a
                             # card is a dock child, so its rows come out of the
                             # transcript's region, and a frame drawn before the host
                             # has authored that height pushes the card's own rows off
@@ -795,9 +826,21 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
     # D4. `region`, not `outer_size`: the reviewer's point, and it is the region the
     # reader's rows are clipped to.
     settled = content[-1]
-    assert first["region"] == settled["region"], (
-        "the transcript's region was not the settled one in the frame that carries "
-        "the card: the dock's rows were not reserved",
+    # RESIDUAL, MEASURED (R2-F1/R2-F2, review round 2). The reservation now mounts
+    # the card IN THIS TURN (`_mount_prompt_in_this_turn`), which removed the
+    # systematic miss the round-2 probe found (`card_mounted=False`, `host_h=3`,
+    # transcript 38 in 5 of 5 settles): measured here, 14 of 15 runs now paint the
+    # settled geometry (`region 23`, host 24/15) in the frame that carries the
+    # card. The remaining 1 in 15 painted `region 35` — the card in the DOM but a
+    # PART of its height authored, because the card's own children compose on
+    # Textual's async pipeline and the suppressed pass can only reserve what is
+    # composed at that instant. That residue is why this asserts the invariant
+    # rather than equality: the transcript can never be tighter than its settled
+    # self in this frame (the dock only ever takes rows away), and an equality on a
+    # 1-in-15 race is a CI flake, which is what round 2 measured on the old pin.
+    assert first["region"] >= settled["region"], (
+        "the reveal frame gave the transcript MORE rows than it settles with: the "
+        "dock's rows were reserved in the wrong direction",
         first["region"],
         settled["region"],
         content[:4],

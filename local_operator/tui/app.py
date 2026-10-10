@@ -8213,10 +8213,7 @@ class OperatorApp(App[None]):
             # decision to make.
             prearmed = self._prearmed_approval
             if prearmed is not None:
-                self._unmount_prompt(prearmed)
-                self._prearmed_approval = None
-                if self._approval is prearmed:
-                    self._approval = None
+                self._take_down_prearmed(prearmed)
             return
         if (
             self._sidebar_navigation.requested_id
@@ -25969,10 +25966,7 @@ class OperatorApp(App[None]):
             # behind it (F4, round 1). Unmounting it here restores "one live
             # card" for the loop that follows.
             if prearmed is not None:
-                self._unmount_prompt(prearmed)
-                self._prearmed_approval = None
-                if self._approval is prearmed:
-                    self._approval = None
+                self._take_down_prearmed(prearmed)
             prearmed = None
         while self._approval is not None and not self._approval.answered:
             await self._approval.wait()
@@ -27996,6 +27990,20 @@ class OperatorApp(App[None]):
         self._restore_gate_draft(source, prompt)
         return prompt
 
+    def _take_down_prearmed(self, card: ApprovalPrompt) -> None:
+        """Unmount a speculative card and forget it, leaving any other card alone.
+
+        One behaviour with two callers (the adoption mismatch and a reconcile that
+        finds the gate gone), so a card can never be half-forgotten: rounded up in
+        both the app's registry and the dock, and `_approval` cleared only when the
+        card being taken down IS the live one — an adopted card is never touched
+        here, because adoption nulls `_prearmed_approval` first.
+        """
+        self._unmount_prompt(card)
+        self._prearmed_approval = None
+        if self._approval is card:
+            self._approval = None
+
     def _settle_dock_rows_before_reveal(self) -> None:
         """Author the dock's rows before the reveal paints — see the caller.
 
@@ -28003,6 +28011,14 @@ class OperatorApp(App[None]):
         layout pass that would otherwise paint mid-commit) has one home, next to
         the same suppression the resume path already uses.
         """
+        # GUARDED ON THE CARD, not only on the call site: this is a synchronous
+        # full reflow on a path whose whole target is first-paint time, and a
+        # switch with no pre-armed card (no gate, a cold lease, a follower with
+        # nothing owed) has no dock rows to reserve — the host's own height is
+        # the only thing that would move, and it moves on the next paint anyway
+        # (review round 2, M3).
+        if self._prearmed_approval is None:
+            return
         screen = self.screen
         paint = screen._compositor_refresh
         screen._compositor_refresh = _suppress_intermediate_paint
@@ -28081,7 +28097,47 @@ class OperatorApp(App[None]):
         )
         self._prearmed_approval = prompt
         self._approval = prompt
-        self._mount_prompt(prompt)
+        # IN THIS TURN, not the next one: the reveal's frame is laid out at the
+        # end of this turn (see `_mount_prompt_in_this_turn`).
+        self._mount_prompt_in_this_turn(prompt)
+
+    def _mount_prompt_in_this_turn(self, card: Widget) -> None:
+        """Register a prompt in the dock NOW, not on the next message-loop turn.
+
+        WHY NOT ``_mount_prompt``. `Widget.mount` ends in ``call_next(await_mount)``:
+        the widget is registered at once but its composition — and therefore the
+        height it takes out of the transcript — waits for the next turn. The
+        reveal's frame is painted at the END of this turn, so a card mounted the
+        ordinary way is not in the layout that frame uses. Review round 2 measured
+        it: `_settle_dock_rows_before_reveal` saw `card_mounted=False` and
+        `host_h=3` (the host's own chrome, not the card's 15 rows) in 5 of 5 runs,
+        and the frame came out at 38 rows 3 times in 9 at fleet load.
+
+        ``App._register`` is the call ``mount`` makes for the DOM half, minus the
+        deferred await; the app already reaches into the screen's privates for
+        what the first-paint target needs (`screen._refresh_layout`,
+        `screen._compositor_refresh`). The remaining halves of ``mount`` are the
+        ones that do not matter here: the order-style refresh (no `before`/`after`
+        is used) and the ``AwaitMount`` (nothing awaits a speculative card — the
+        ladder ADOPTS it).
+
+        WHAT THIS DOES NOT GUARANTEE, measured: 14 of 15 runs now reserve the
+        card's own rows in this turn's frame (`region 23`, host `24/15` at 160x45);
+        the fifteenth reserved PART of them (`region 35`), because the card's own
+        children compose on Textual's async pipeline and the suppressed pass can
+        only reserve what is composed at that instant. The systematic miss — the
+        card not mounted at all, transcript at its pre-card height — is what this
+        removes; the residue is recorded with the pin rather than papered over.
+        """
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - only before the dock is composed
+            logger.debug("prompt host is not mounted yet", exc_info=True)
+            return
+        self.app._register(host, card)
+        card.refresh(layout=True)
+        host.display = True
+        self._sync_boot_layout()
 
     def _mount_prompt(self, card: Widget) -> None:
         """Put a prompt into the dock's prompt host, above the status band.
