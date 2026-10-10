@@ -22,11 +22,18 @@ Every row and claim carries one of three tiers, stated where it matters:
   a harness-driven request is accepted); the live probe listed under
   *Live validation status* is what closes it.
 
+### Evidence tiers
+
 Every implementation claim below was tiered at reviewer round 1 (F3): the
 openai-sub wire facts (``stream``/``store`` flags, SSE event shapes, the
 ``result`` field) are **Observed** — the sources are OpenAI's shipped skill
-asset plus two OSS implementations, not a published wire spec — and its
-acceptance is an **open risk**; everything else in the matrix is **Contract**.
+asset plus two OSS implementations, not a published wire spec — and two
+claims are **open risk**: the harness-driven request's acceptance at all,
+and specifically the top-level ``instructions`` field the harness sends (the
+chat client's same-backend shape — a fixed one-liner here; no published
+document covers it for the Codex image tool, and it is labelled in the code
+at ``OPENAI_SUB_INSTRUCTIONS``). The live probe under *Live validation
+status* settles both. Everything else in the matrix is **Contract**.
 
 ## The shipped rungs (7) — provider × auth × models × cost
 
