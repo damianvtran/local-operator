@@ -749,6 +749,35 @@ async def test_a_strength_taking_provider_records_no_ignored_marker(
 
 
 @pytest.mark.asyncio
+async def test_a_radient_edit_records_no_ignored_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The policy half of the N1 pin (agent review round 1): Radient is IN
+    ``STRENGTH_ROUTES``, so a strength-carrying Radient edit must not surface
+    an ignored claim — dropping RADIENT from the set flips this test's
+    assertion (the route-level arm would then say "was ignored")."""
+    source = tmp_path / "in.png"
+    source.write_bytes(PNG_1X1)
+
+    async def fake_cascade(**kwargs):
+        return _outcome(route=ImageRoute.RADIENT)
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1",
+        {"prompt": "x", "source_image_path": str(source), "strength": 0.6},
+        None,
+        None,
+        ToolContext(cwd=str(tmp_path)),
+    )
+
+    details = result.details or {}
+    assert details["strength"] == 0.6
+    assert "strength_ignored" not in details
+    assert "was ignored" not in result.content[0].text  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
 async def test_a_usage_record_id_reaches_details_when_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

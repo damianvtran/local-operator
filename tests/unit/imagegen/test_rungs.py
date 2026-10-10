@@ -489,6 +489,50 @@ async def test_a_caller_pinned_model_passes_verbatim_on_an_edit() -> None:
     assert generate_body["image_url"] == _EDIT_SOURCE
 
 
+@pytest.mark.asyncio
+async def test_a_radient_edit_carries_strength_verbatim_and_never_flags_ignored() -> None:
+    """The wire half of the N1 pin (agent review round 1): the passthrough
+    the ``STRENGTH_ROUTES`` membership rests on.
+
+    ``strength`` rides the hub's verbatim body passthrough (the sunburst
+    schema is silent on it; no drop signal exists), so an edit must CARRY it
+    and the result must not synthesize an ignored claim. Dropping the body
+    line fails here; dropping RADIENT from ``STRENGTH_ROUTES`` fails the
+    image_tool sibling (``test_a_radient_edit_records_no_ignored_marker``).
+    """
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(
+            recorder,
+            models=_EDIT_MODELS,
+            statuses=[{"status": "COMPLETED", "settled": True, "cost_usd": 0.08, "units": 1}],
+        )
+    ) as client:
+        result = await image_rungs.run_radient(
+            prompt="Change the headline to Q3",
+            base_url="https://hub.test",
+            credential="cred",
+            num_images=1,
+            image_size="square_hd",
+            seed=None,
+            strength=0.6,
+            source_url=_EDIT_SOURCE,
+            model=None,
+            handle=image_rungs.CancelHandle(),
+            emit=None,
+            pause=_no_pause,
+            client=client,
+        )
+    assert result.strength_ignored is False, "Radient must never synthesize a drop it cannot see"
+    generate_body = next(
+        body
+        for request, body in zip(recorder.requests, recorder.bodies)
+        if request.url.path.endswith("/tools/media/generate")
+    )
+    assert generate_body["strength"] == 0.6, "the passthrough line is load-bearing"
+    assert generate_body["image_url"] == _EDIT_SOURCE
+
+
 def test_emit_progress_swallows_a_raising_emitter() -> None:
     """The rungs' guard (reviewer round-1 pin): progress never rides control flow.
 
