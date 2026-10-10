@@ -46,6 +46,7 @@ from local_operator.session.frontend_state import (
     TodoItemState,
     TodoPhaseState,
     WakeState,
+    closing_state_overrides,
     sync_wire_payload,
 )
 
@@ -971,7 +972,17 @@ def test_checkpoint_strips_trajectories_and_live_events() -> None:
         def __init__(self) -> None:
             self.appended: list[tuple[str, dict[str, Any]]] = []
 
-        async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+        async def append_custom(
+            self,
+            custom_type: str,
+            payload: dict[str, Any],
+            *,
+            preserve_mtime: bool = False,
+        ) -> None:
+            # The real writer's signature: ``checkpoint`` forwards the
+            # bookkeeping-mtime request, so a double that omits the keyword
+            # would fail on the parameter rather than on the behaviour under
+            # test (the closing checkpoint passes it; a turn-end one does not).
             self.appended.append((custom_type, payload))
 
     transcript = _Transcript()
@@ -1047,13 +1058,32 @@ def test_the_checkpoint_makes_no_access_claim() -> None:
     class _Transcript:
         def __init__(self) -> None:
             self.appended: list[tuple[str, dict[str, Any]]] = []
+            self.preserved: list[bool] = []
 
-        async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+        async def append_custom(
+            self,
+            custom_type: str,
+            payload: dict[str, Any],
+            *,
+            preserve_mtime: bool = False,
+        ) -> None:
+            # THE REAL WRITER'S SIGNATURE, and the request RECORDED rather than
+            # swallowed: ``FrontendStateStore.checkpoint`` forwards
+            # ``preserve_mtime``, so a double that accepts the keyword and drops it
+            # would pass whether or not the request is right — and a fake that
+            # swallows an argument proves nothing about it.
             self.appended.append((custom_type, payload))
+            self.preserved.append(preserve_mtime)
 
     transcript = _Transcript()
     asyncio.run(store.checkpoint(transcript))
     ((_, payload),) = transcript.appended
+    assert transcript.preserved == [False], (
+        "an [redacted] checkpoint asked the writer to hold the journal's mtime "
+        "still: this row IS activity, and preserving the clock would hide it from "
+        "retention (``preserve_mtime`` is the CLOSING checkpoint's request, "
+        "asserted where that path is tested)"
+    )
     # ABSENT, not null: the serializer drops an idle claim from the wire so the
     # attach frame does not spend its null (QA round 1, Q3), and absence is the
     # same "no claim" the durable fold means.
@@ -2031,7 +2061,17 @@ def test_the_phase_pair_rides_the_wire_and_is_not_durable() -> None:
         def __init__(self) -> None:
             self.appended: list[tuple[str, dict[str, Any]]] = []
 
-        async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+        async def append_custom(
+            self,
+            custom_type: str,
+            payload: dict[str, Any],
+            *,
+            preserve_mtime: bool = False,
+        ) -> None:
+            # The real writer's signature: ``checkpoint`` forwards the
+            # bookkeeping-mtime request, so a double that omits the keyword
+            # would fail on the parameter rather than on the behaviour under
+            # test (the closing checkpoint passes it; a turn-end one does not).
             self.appended.append((custom_type, payload))
 
     transcript = _Transcript()
@@ -2564,3 +2604,92 @@ def test_monitor_state_carries_the_health_fields() -> None:
     # Declared, not merely allowed through: a viewer reading the model's fields
     # must see them rather than falling back to ``extra``.
     assert {"unavailable_since", "last_error"} <= set(type(row).model_fields)
+
+
+def test_the_closing_merge_never_overrules_a_shrinking_context_reading():
+    """F7 at the rule: ``context_tokens`` is not monotonic.
+
+    The merge this test covers makes a closing checkpoint REPLACEMENT state for
+    every reader, so a rule that keeps "the larger reading" is right for money and
+    duration — and wrong for the context figure, which a compaction legitimately
+    SHRINKS. Holding the larger of the two pins a stale pre-compaction reading
+    above the runtime's current one, and because a cold restore seeds the next
+    runtime's own reading from that row, the figure never comes back down.
+
+    Asserted directly rather than through a session fixture: the session-driven
+    test cannot see it, because ``_restore_cold_details`` seeds the running
+    runtime's reading from the same durable row, so the two agree whatever the
+    rule is. That is why round 1's rule survived a green suite.
+    """
+    durable = FrontendSessionState(
+        session_id="conv",
+        epoch="tui-epoch",
+        context_tokens=48_000,
+        cumulative_parent_cost=12.34,
+        active_duration_s=300.0,
+    )
+    live = FrontendSessionState(
+        session_id="conv",
+        epoch="cli-epoch",
+        context_tokens=12_000,
+        cumulative_parent_cost=1.0,
+        active_duration_s=5.0,
+    )
+
+    overrides = closing_state_overrides(live, durable)
+
+    assert "context_tokens" not in overrides, "a compaction's smaller reading was overruled"
+    # The accumulating fields still take the larger value, and the duration is one
+    # of them (F8): both readings here are real elapsed time.
+    assert overrides["cumulative_parent_cost"] == 12.34
+    assert overrides["active_duration_s"] == 300.0
+
+    # With no reading of its own, the durable figure is the only one there is.
+    quiet = FrontendSessionState(session_id="conv", epoch="cli-epoch")
+    assert closing_state_overrides(quiet, durable)["context_tokens"] == 48_000
+
+
+def test_the_closing_merge_leaves_a_cleared_goal_and_a_released_latch_alone():
+    """F13: both fields legitimately GO BACKWARDS, so the merge must not carry them.
+
+    ``/goal --clear`` (``set_goal("")`` -> ``delete_goal``) and ``/title refresh``
+    (``release_user_set``) are real user actions, and both produce exactly the shape
+    round 2's rule overruled: a blank live value against a set durable one. Carrying
+    the durable value over therefore resurrected a goal the user cleared and re-set a
+    latch the user released, in every later closing row.
+
+    What makes that shape unambiguous is that the runtime's own view is the only one
+    that has OBSERVED the release — a runtime that was merely restored carries the
+    durable values as its own, because the checkpoint restore seeds them.
+
+    Verified failing with those two branches restored: the first assertion fails with
+    ``AssertionError`` (visible in ``overrides``). The ``KeyError:
+    'conversation_title_user_set'`` that review round 3 quoted belongs to the ROUND-2
+    assertion style — ``overrides["conversation_title_user_set"]`` — run against this
+    merge, which is a different discriminator and not the one written here.
+    """
+    durable = FrontendSessionState(
+        session_id="conv",
+        epoch="tui-epoch",
+        conversation_title="Real title",
+        conversation_title_user_set=True,
+        goal="ship it",
+        cumulative_parent_cost=12.34,
+    )
+    live = FrontendSessionState(
+        session_id="conv",
+        epoch="cli-epoch",
+        conversation_title="Real title (auto)",
+        conversation_title_user_set=False,
+        goal="",
+        cumulative_parent_cost=1.0,
+    )
+
+    overrides = closing_state_overrides(live, durable)
+
+    assert "conversation_title_user_set" not in overrides, "a released latch was re-set"
+    assert "goal" not in overrides, "a cleared goal was brought back"
+    assert "conversation_title" not in overrides, "the title text is this runtime's"
+    # The accumulating fields still take the larger value, which is the rule those
+    # two branches were wrongly copied from.
+    assert overrides["cumulative_parent_cost"] == 12.34

@@ -157,6 +157,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from local_operator.paths import config_dir as resolve_config_dir
 
     config_dir = resolve_config_dir()
+
+    # THE INDEX CACHE WARM, and why it is the daemon that owes it. The open
+    # frame's first read answers "building" while the transcript index is not
+    # current — measured on this machine, 0 of 13,812 journals carry a current
+    # cache, and the scan costs 28-32 ms at 5.9 MB, 169 ms at 35 MB and 559 ms at
+    # 118 MB against a 120 ms budget — so the bars it needs settle a frame late on
+    # anything above roughly 20 MB. The journals someone opens next are the ones
+    # they touched last, so a bounded warm of the K newest (K = 32; ~277 MB
+    # scanned, ~25 MB of cache) removes that for the sessions that will actually
+    # be opened, at a moment when nobody is waiting.
+    #
+    # FIRE AND FORGET, AND WRAPPED INCLUDING THE IMPORT — the same two rules as
+    # the tokenizer and bytecode warms above: awaiting it would move the scan into
+    # daemon STARTUP (the thing an attach waits on), and a raise inside a FastAPI
+    # ``lifespan`` fails startup. The warm skips itself on a full disk or a busy
+    # host, and drops the rest of its queue when the host gets busy mid-warm.
+    try:
+        from local_operator.session.index_prewarm import start_index_prewarm
+
+        start_index_prewarm(config_dir)
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("index prewarm unavailable at startup", exc_info=True)
+
     # Honour LOCAL_OPERATOR_HOME and create it at the point of use, matching the
     # CLI session path. The literal ``~/local-operator-home`` here ignored the
     # override, so a relocated home still had a stray workspace created in the

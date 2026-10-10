@@ -3287,6 +3287,14 @@ class Session:
         #: spec) — session state, like the tool declaration, never persisted.
         self._output_contract: OutputContract | None = None
         self._has_ui = has_ui
+        #: Whether a TURN has ended on this runtime. Set at the turn-end
+        #: bookkeeping boundary, read by :meth:`dispose` to decide whether the
+        #: runtime owes the journal a closing checkpoint (see
+        #: :meth:`_write_closing_checkpoint`). Deliberately not "the store holds
+        #: state": a store restored from a previous runtime holds plenty and has
+        #: observed nothing, and a session a user only looked at must not gain a
+        #: row for it.
+        self._turn_ended_since_engage = False
         self._cwd = cwd or "."
         # ``tool://`` is chained AHEAD of the factory's knowledge resolver in
         # the ONE place every session must pass through — root or subagent,
@@ -13971,6 +13979,9 @@ class Session:
             # ``from_checkpoint`` — clobber the richer checkpoint a TUI wrote.
             if self._has_ui or self._frontend_state_store.has_subscribers:
                 await self._frontend_state_store.checkpoint(self._transcript)
+            # A turn ENDED here, which is what the closing checkpoint's gate
+            # reads (dispose is reached by runtimes that never ran one too).
+            self._turn_ended_since_engage = True
 
             # Child events reach the shared comms watcher before either durable
             # append. Notify only after messages AND todos are stable, including
@@ -21374,6 +21385,126 @@ class Session:
                 self._subagent_roster_writer = writer
             await asyncio.shield(writer)
 
+    async def _write_closing_checkpoint(self) -> None:
+        """Leave the tail anchor that bounds the NEXT cold open of this session.
+
+        WHY IT EXISTS. Without a checkpoint row, ``read_replay_suffix`` has no
+        compaction boundary to stop at and scans the journal to BOF on every
+        request: 200 ms per snapshot/``/history``/``/events`` on a 35.5 MB
+        journal, paid three times per open and again on every reconnect. 15 of
+        the 40 largest real journals carry no checkpoint, and the reason is this
+        method's absence rather than a bug: the only writer runs at turn end and
+        only "for any session with a UI or an attach subscriber"
+        (``FrontendStateStore.checkpoint``), so a session driven headlessly —
+        ``lop exec``, a scheduled job, a scripted run — was never anchored at
+        all. One row per RUNTIME LIFE is the whole cost, against a per-turn row
+        for a session a user is watching.
+
+        AND IT IS WRITTEN BY EVERY RUNTIME, not once per session (review round 1,
+        F1). The first revision skipped a journal that already carried a row its
+        session recognised, which fixed the N1 lowering but froze the row: after
+        one headless runtime the newest checkpoint stayed at that runtime's
+        reading — a cold open painted ``context_tokens: 51000`` while the journal's
+        own receipts said 121000 — and, because the reader must reach the newest
+        checkpoint row, the C3(b) bound decayed with every later runtime and was
+        gone entirely after a compaction (measured: 100% of a 5.08 MB journal read
+        again). The row is therefore written every time and MERGED over the row it
+        read (``frontend_state.closing_state_overrides``), so nothing is lowered
+        while what this runtime observed is current.
+
+        WHY THE CLOCK IS HELD STILL. The row is appended with
+        ``preserve_mtime=True``, so it does not move
+        ``retention.session_activity`` — the one ranking clock the picker and
+        ``session.cleanup`` share. A runtime closing hours after the user's last
+        turn must not rank the conversation as freshly worked; the transcript
+        layer validates the request against ``BOOKKEEPING_CUSTOM_TYPES`` (which
+        this type is now a member of) rather than taking the caller's word for
+        it.
+
+        FOUR GATES, each of which is a case that must not write:
+
+        * **A child session is skipped.** Subagent transcripts are read through
+          page reads (the child panel, ``subagent_view``), never through the
+          cold replay this row would bound, and a wide roster would pay one
+          checkpoint per child per run for nothing.
+        * **A runtime that ended no turn is skipped.** ``dispose`` is reached by
+          runtimes that only looked at a conversation, and a session a user
+          merely opened must not gain a row for it (the same principle the cold
+          viewer states: opening a terminal is not work).
+        * **Nothing the durable row already holds richer is lowered.** Readers
+          take the NEWEST row, so this write is replacement state: the row it read
+          is merged UNDER this runtime's view field by field
+          (``frontend_state.closing_state_overrides`` — money and tokens take the
+          larger, a blank title or todo list never overwrites a set one, the
+          attached operator's ``active_duration_s`` survives a headless turn, and
+          identity fields stay this runtime's so a fork cannot inherit a parent's
+          children back).
+        * **The write is bounded and best-effort**, like every other teardown
+          transcript write: a wedged mount must not hang disposal, and a lost
+          closing row costs one open the cost this method exists to remove —
+          never the conversation, which is already on disk.
+        """
+        if self._job_id is not None or not self._turn_ended_since_engage:
+            return
+        store = getattr(self, "_frontend_state_store", None)
+        transcript = getattr(self, "_transcript", None)
+        if store is None or transcript is None:
+            return
+        self._merge_closing_state(store, transcript)
+        try:
+            await asyncio.wait_for(
+                store.checkpoint(transcript, preserve_mtime=True),
+                timeout=_NAME_FLUSH_TIMEOUT_S,
+            )
+        except (Exception, asyncio.TimeoutError):  # noqa: BLE001 — teardown must proceed
+            logger.warning("closing checkpoint did not land", exc_info=True)
+
+    def _merge_closing_state(self, store: Any, transcript: Any) -> None:
+        """Carry the durable row's richer fields into this runtime's state.
+
+        Reads the NEWEST checkpoint row through ``read_latest_custom_entry`` — a
+        byte scan of the journal's chunks, not a parse (measured 66 ms on the
+        118 MB reference journal) — and applies
+        ``frontend_state.closing_state_overrides`` through the store's own
+        ``mutate``, so the row that follows is current where this runtime observed
+        something newer and unchanged where the durable row was richer. Silent on
+        every failure: a status row is never worth failing a teardown for, and the
+        row that follows is this runtime's own view — the pre-merge behaviour.
+        """
+        from local_operator.session.frontend_state import (
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            FrontendSessionState,
+            closing_state_overrides,
+        )
+        from local_operator.session.transcript import read_latest_custom_entry
+
+        try:
+            # THE TRANSCRIPT'S OWN DIRECTORY, not a path rebuilt from the config
+            # dir: they are the same thing for a session this process owns
+            # (``<config>/sessions/<id>``), but a session built on a transcript
+            # somewhere else — a relocated home, a test's tmp tree, a
+            # ``--session-dir`` run — writes its rows where its transcript is, and
+            # a lookup against the config path would then read a DIFFERENT journal
+            # (or none) and merge nothing. ``Transcript.directory`` is the writer's
+            # answer to "where does this session live", which is the only one that
+            # can be right.
+            directory = Path(getattr(transcript, "directory", "") or "")
+            if not directory:
+                directory = self._config_dir / "sessions" / self._session_id
+            entry = read_latest_custom_entry(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+            if entry is None:
+                return
+            details = entry.payload.get("details") or {}
+            payload = details.get("state")
+            if not isinstance(payload, dict):
+                return
+            durable = FrontendSessionState.model_validate(payload)
+            overrides = closing_state_overrides(store.state, durable)
+            if overrides:
+                store.mutate(**overrides)
+        except Exception:  # noqa: BLE001 — a merge is not worth failing a teardown for
+            logger.debug("closing checkpoint merge skipped", exc_info=True)
+
     async def _final_persist_snapshots(self) -> None:
         """Write the last roster and todo snapshots at teardown, in order.
 
@@ -23814,6 +23945,10 @@ class Session:
             # through a host path without a turn task.
             if self._pending_shell_records:
                 await self._flush_shell_records()
+            # C3: THE CLOSING CHECKPOINT. Written once per runtime that ended a
+            # turn, UI or not — see :meth:`_write_closing_checkpoint` for why
+            # this is what keeps the next cold open bounded rather than O(file).
+            await self._write_closing_checkpoint()
             self._transcript.flush()
         finally:
             # Drop the retention claim FIRST in the finally: everything in the
