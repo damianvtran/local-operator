@@ -279,13 +279,17 @@ async def test_the_queued_move_pauses_at_the_boundary_carries_the_wake_and_lets_
         # happened, and the read below is the product claim itself ("rebuilt by the
         # time B reports the move committed") with no timing in it. Waiting on the
         # index file instead would also pass a rebuild that landed late.
-        assert await _wait(
-            lambda: "committed"
-            in [
+        def destination_phases() -> list[str]:
+            return [
                 str(stamp.get("phase")) for stamp in mobility.progress_for(server_b).phases(SESSION)
-            ],
-            timeout=30.0,
-        ), "the destination never reported the move committed"
+            ]
+
+        # The message is built only when the assert fails, so it reads B's phases
+        # AT the timeout: a stall shows how far B got (e.g. no phase at all vs
+        # stuck short of `committed`) rather than just that it never finished.
+        assert await _wait(
+            lambda: "committed" in destination_phases(), timeout=30.0
+        ), f"the destination never reported the move committed (its phases: {destination_phases()})"
         destination_entry = wake_store.read_entry(server_b.root, SESSION)
         assert destination_entry is not None, "the destination index was not rebuilt"
         carried = destination_entry["schedules"][0]
