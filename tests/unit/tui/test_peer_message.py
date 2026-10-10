@@ -38,7 +38,9 @@ from local_operator.tui.widgets.transcript import (
     ExpandableActionBlock,
     NoticeBlock,
     PeerMessageBlock,
+    QuietGroupBlock,
     TranscriptView,
+    UserBlock,
     wrap_cells,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -1061,6 +1063,14 @@ async def test_the_card_paints_exactly_as_many_rows_as_it_reports() -> None:
             await pilot.pause()
             await pilot.pause()
             assert block.size.height == block._row_count == block.settled_rows(), label
+            # SEPARATE THE CASES with a splitter: consecutive peer receipts
+            # collapse under one quiet-group bar (design §5, S5), and a card
+            # folded inside a collapsed bar has no painted size to measure —
+            # which is the fold working, not the row-count property failing.
+            # The notice is the boundary the next case's card starts fresh
+            # below (the same rule the fixture pins).
+            app._append_block(NoticeBlock("·"))
+            await pilot.pause()
 
             block.toggle_expanded()
             await pilot.pause()
@@ -1143,3 +1153,283 @@ async def test_a_repaint_does_not_rescan_the_whole_body() -> None:
         transcript_mod._sanitize_line = original  # type: ignore[assignment]
     assert calls, "construction did not sanitize at all"
     assert max(calls) <= transcript_mod._SNIPPET_SOURCE_MAX_CHARS, calls
+
+
+# -- the quiet-group fold (design §5, slice S5) ------------------------------
+
+
+def _quiet_bars(app) -> list[QuietGroupBlock]:
+    view = app.query_one(TranscriptView)
+    return [b for b in view.blocks() if isinstance(b, QuietGroupBlock)]
+
+
+async def _settle_for_quiet_bars(pilot, app, *, want: int = 1) -> None:
+    """Pump until ``want`` group bars are mounted.
+
+    Same two-hop discipline as ``_settle_for_peer_block``: the receipt event
+    and the fold both land across pauses, and one frame is not reliably
+    enough.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if len(_quiet_bars(app)) >= want:
+            return
+
+
+async def _deliver(pilot, app, session, body: str, message_id: str) -> None:
+    """Deliver one live peer receipt and wait until it has mounted."""
+    before = len(_peer_blocks(app))
+    session.emit(
+        PeerMessageDeliveredEvent(
+            body=body,
+            sender={"pid": 4242, "conversation_name": "peer-a"},
+            message_id=message_id,
+        )
+    )
+    for _ in range(200):
+        await pilot.pause()
+        if len(_peer_blocks(app)) > before:
+            return
+
+
+def _persisted_peer(body: str, entry_id: str):
+    return SimpleNamespace(
+        role=None,
+        custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+        id=entry_id,
+        text="",
+        tool_calls=None,
+        content=[],
+        details={"body": body, "sender": {"pid": 9, "conversation_name": "other"}},
+    )
+
+
+class TestQuietGroupFold:
+    """Consecutive peer receipts collapse under one bar (design §5, S5).
+
+    The definition and its cross-client parity fixture live in
+    ``tui/quiet_groups.py`` (replayed by ``test_quiet_groups.py``); these cells
+    pin the WIDGET layer: the bar the TUI draws, which rows it hides and
+    reveals, and the boundaries the live stream and the replay must both
+    honour.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_consecutive_receipts_collapse_into_one_bar(self) -> None:
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            blocks = app.query_one(TranscriptView).blocks()
+            bars = [b for b in blocks if isinstance(b, QuietGroupBlock)]
+            assert len(bars) == 1
+            bar = bars[0]
+            assert bar.group.family == "peer"
+            assert bar.group.count == 2
+            assert bar.group.open is True
+            row = bar._build_row(100).plain
+            assert "peer" in row and "messages · 2" in row
+            peers = _peer_blocks(app)
+            assert len(peers) == 2
+            assert blocks.index(bar) < blocks.index(peers[0]), "the bar sits above its members"
+            assert all(not peer.display for peer in peers), "members fold while collapsed"
+
+    @pytest.mark.asyncio
+    async def test_a_lone_receipt_keeps_its_ordinary_card(self) -> None:
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "solo", "p1")
+            await pilot.pause()
+            assert _quiet_bars(app) == [], "one receipt is not a group"
+            (peer,) = _peer_blocks(app)
+            assert peer.display, "the lone receipt stays visible as its own card"
+
+    @pytest.mark.asyncio
+    async def test_the_open_tail_grows_on_the_same_bar_without_re_collapsing(self) -> None:
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            await _deliver(pilot, app, session, "three", "p3")
+            await pilot.pause()
+            bars = _quiet_bars(app)
+            assert bars == [bar], "the growing tail keeps one bar (stable identity)"
+            assert bar.group.count == 3
+            assert "messages · 3" in bar._build_row(100).plain
+            assert bar._expanded is False, "growth never opens the reader's fold"
+            assert all(not peer.display for peer in _peer_blocks(app))
+
+    @pytest.mark.asyncio
+    async def test_expanding_reveals_members_and_collapsing_folds_them_again(self) -> None:
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            peers = _peer_blocks(app)
+            bar.toggle_expanded()
+            await pilot.pause()
+            assert all(peer.display for peer in peers), "opening lists the receipts in place"
+            bar.toggle_expanded()
+            await pilot.pause()
+            assert all(not peer.display for peer in peers), "closing folds them away again"
+
+    @pytest.mark.asyncio
+    async def test_tool_rows_between_receipts_sit_inside_the_group(self) -> None:
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            card = ToolCard("t1", "bash", {"command": "ls"})
+            app._append_block(card)
+            await pilot.pause()
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            assert bar.group.count == 2
+            assert bar.group.actions == 1, "the tool row sits inside and is counted"
+            assert not card.display, "the work folds with the receipts"
+            bar.toggle_expanded()
+            await pilot.pause()
+            assert card.display, "opening the bar lists the work it triggered"
+
+    @pytest.mark.asyncio
+    async def test_a_user_row_closes_the_run_and_later_receipts_form_another_group(self) -> None:
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            (first,) = _quiet_bars(app)
+            app._append_block(UserBlock("steer"))
+            await pilot.pause()
+            await _deliver(pilot, app, session, "three", "p3")
+            await _deliver(pilot, app, session, "four", "p4")
+            await _settle_for_quiet_bars(pilot, app, want=2)
+            bars = _quiet_bars(app)
+            assert [b.group.count for b in bars] == [2, 2]
+            assert first.group.count == 2, "the closed group's facts froze (the latch)"
+            assert bars[0] is first
+
+    @pytest.mark.asyncio
+    async def test_a_resumed_run_of_receipts_replays_as_one_bar(self) -> None:
+        session = FakeSession()
+        session._history = [
+            _persisted_peer("one", "p1"),
+            _persisted_peer("two", "p2"),
+        ]
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            assert bar.group.count == 2
+            assert bar.group.family == "peer"
+            assert all(not peer.display for peer in _peer_blocks(app))
+
+    @pytest.mark.asyncio
+    async def test_the_quiet_pair_folds_away_without_entering_the_counts(self) -> None:
+        """S1 and S5 together: the persisted pair paints no row, and the group
+        it sits inside counts the work beside it and never the sentinel."""
+        from local_operator.harness.types import (
+            QUIET_TURN_KEY,
+            Message,
+            TextContent,
+            ToolCall,
+            ToolResult,
+        )
+
+        session = FakeSession()
+        session._history = [
+            _persisted_peer("one", "p1"),
+            Message.assistant("", tool_calls=[ToolCall(id="q1", name="no_reply", arguments={})]),
+            Message.tool_result(
+                ToolResult(
+                    tool_call_id="q1",
+                    tool_name="no_reply",
+                    content=[TextContent(text="Quiet.")],
+                    details={QUIET_TURN_KEY: True},
+                )
+            ),
+            Message.assistant(
+                "", tool_calls=[ToolCall(id="r1", name="read", arguments={"p": "f"})]
+            ),
+            Message.tool_result(
+                ToolResult(
+                    tool_call_id="r1",
+                    tool_name="read",
+                    content=[TextContent(text="file body")],
+                )
+            ),
+            _persisted_peer("two", "p2"),
+        ]
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            assert bar.group.count == 2
+            assert bar.group.actions == 1, "the quiet call must not count as work"
+            cards = [card for card in app.query(ToolCard)]
+            assert [card.tool_call_id for card in cards] == ["r1"]
+            assert all(card.tool_name != "no_reply" for card in cards)
+
+    @pytest.mark.asyncio
+    async def test_a_head_cut_run_states_a_minimum(self) -> None:
+        """A windowed pass that cuts older rows off the top: the leading span
+        states "at least N" (the trailing ``+``), because rows above may belong
+        to it — the head-cut rule, mirrored from the other clients."""
+        session = FakeSession()
+        session._history = []
+        app = OperatorApp(lambda: _factory(session))
+        history = [_persisted_peer(f"m{i}", f"p{i}") for i in range(4)]
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            app._project_settled_rows(list(history), start=1)
+            await pilot.pause()
+            (bar,) = _quiet_bars(app)
+            assert bar.partial is True
+            assert bar.group.count == 3
+            assert "3+" in bar._build_row(100).plain
+
+    @pytest.mark.asyncio
+    async def test_a_page_span_touching_a_folded_bar_stays_cards(self) -> None:
+        """The drain seam (review round 1, MINOR-1): when the deferred head
+        later drains, a page's bottom stretch can end AT the bar standing for
+        the frozen head-cut run. The bar is not a boundary — such a stretch
+        continues into a folded group — so the page keeps its cards; folding
+        it would put two bars over one logical run. Pins
+        ``fold_quiet_group_page`` and its boundary read, which no other cell
+        reached."""
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            view = app.query_one(TranscriptView)
+            index = view.blocks().index(bar)
+            page = [
+                PeerMessageBlock("older one", LONG_SENDER),
+                PeerMessageBlock("older two", LONG_SENDER),
+            ]
+            folded = view.fold_quiet_group_page(page, index, head_cut=True)
+            assert folded == page, "cards — never a second bar beside the folded group"
+            assert all(block.display for block in page)

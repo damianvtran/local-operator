@@ -14266,6 +14266,16 @@ class OperatorApp(App[None]):
         more = bool(self._resume_pending_head) or bool(
             session is not None and getattr(session, "history_before_token", None)
         )
+        # The quiet-group fold's head verdict for a span beginning right below
+        # this notice (design §5, S5): it follows the same ``more`` truth the
+        # copy is reconciled against, so a fold cannot claim "at least N" over
+        # a head this row itself calls the conversation's start.
+        # The declared type is the wider `NoticeBlock` (a reduced presentation
+        # can seat a plain notice here), but the flip only exists on the real
+        # control — the same concrete-type test, for the same reason, as the
+        # interactivity correction below.
+        if isinstance(notice, OlderHistoryNotice):
+            notice.set_quiet_group_head_cut(more)
         # Which VOCABULARY the two "more exists" states use. Once the context
         # replay is drained, what remains above is pre-compaction history — a
         # different kind of row, not merely an older one — so the copy says
@@ -14571,6 +14581,24 @@ class OperatorApp(App[None]):
                     # when the turn dies instead of returning a result.
                     live_cards[block.tool_call_id] = block
 
+    def _quiet_head_cut_for(self, history: list[Any], bound: int | None, start: int | None) -> bool:
+        """Whether this projection pass cuts older rows off the view's top.
+
+        Mirrors the slice ``project_settled_rows`` is about to take — an
+        explicit ``start`` defers ``history[:start]``; a ``bound`` defers
+        whatever the tail snap leaves above it — and feeds the quiet-group
+        fold (design §5, S5), whose rows stream through the view as the pass
+        appends: a group forming at the view's first row states a minimum
+        ("at least N") when older rows exist but are not on hand, and an
+        exact count when the window truly starts at the conversation's first
+        row.
+        """
+        if start is not None:
+            return start > 0
+        if bound is not None and len(history) > bound:
+            return _resume_tail_start(history, bound) > 0
+        return bool(self._resume_pending_head)
+
     def _project_settled_rows(
         self, history: list[Any], *, bound: int | None = None, start: int | None = None
     ) -> bool:
@@ -14653,6 +14681,15 @@ class OperatorApp(App[None]):
             # `_stop_multiplexer_broadcast` instead. A line number in a comment
             # survives only until the next edit above it.
             fold_width = self._transcript_view().scrollable_content_region.width
+            # The quiet-group fold streams with this pass's appends (design
+            # §5, S5), so the window's head verdict has to be in place BEFORE
+            # the first row lands — a group forming at the view's first row
+            # must state a minimum when this pass cuts older rows off the top.
+            # `_quiet_head_cut_for` mirrors the slice below, so the verdict
+            # this sets is the window's post-pass state as well.
+            self._transcript_view().set_quiet_head_cut(
+                self._quiet_head_cut_for(history, bound, start)
+            )
             projected = project_settled_rows(
                 self, history, bound=bound, start=start, fold_width=fold_width
             )
@@ -15549,6 +15586,16 @@ class OperatorApp(App[None]):
             # stays the top row and the conversation keeps its order.
             mounted = transcript.blocks()
             index = 1 if mounted and notice is not None and mounted[0] is notice else 0
+            # THE QUIET-GROUP FOLD, before the mount (design §5, S5): a page
+            # is built off-screen and inserted positionally, so its groups
+            # fold into the list here — and the head verdict is the window's
+            # own remaining state, so a leading span below the head notice
+            # (or at the view's old top) states a minimum while older pages
+            # remain. `fold_quiet_group_page` only rewrites this list; the
+            # insert below still owns the mount, the anchor and the lease.
+            blocks = transcript.fold_quiet_group_page(
+                blocks, index, head_cut=bool(self._resume_pending_head)
+            )
             # Flag BEFORE the insert's settle: a click arriving while gaps
             # are still answering must see a working transaction, not a
             # wedge. Mutated on this object so identity (F1) is unchanged.
