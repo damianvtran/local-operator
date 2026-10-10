@@ -286,7 +286,7 @@ def _progress_emitter(
 
     The emitter never raises (same contract as the rungs' own wrapper): a
     progress line is presentation, and — because the terminal ``cancelling``/
-    ``[redacted]`` lines emit from inside cancellation handlers — an
+    ``cancelled`` lines emit from inside cancellation handlers — an
     emitter failure must never replace the ``CancelledError`` being handled.
     Updates are LIVE-ONLY by design (design §4.4): the transcript receives the
     final result, and no surface should expect historical progress rows.
@@ -309,7 +309,7 @@ def _emit_cancel_stage(
     stage: str,
     text: str,
 ) -> None:
-    """A cancel-phase update (``cancelling`` → ``[redacted]``).
+    """A cancel-phase update (``cancelling`` → ``cancelled``).
 
     ``provider``/``model`` come off the handle: a cancel can land before any
     submit (both absent — honest nulls) or after one (both set).

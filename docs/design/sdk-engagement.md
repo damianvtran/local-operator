@@ -408,7 +408,7 @@ async with open_session(spec, roots=roots) as session:
 
 - `local_operator/evaluation/session_arm.py` — `declare_action_server` (writes
   the per-session MCP declaration into the episode's scoped config dir, cwd
-  asserted inside the scratch by [redacted] path), `ObservationRenderer`
+  asserted inside the scratch by resolved path), `ObservationRenderer`
   (frames published through the adapter's `verify_artifact`, returned as
   image content), `ActionBridge` (UNIX socket inside the scratch; one rendered
   observation per batch; `finish` terminal and non-executing; step budget;

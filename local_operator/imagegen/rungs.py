@@ -22,7 +22,7 @@ generate, status, result, cancel, all under ``/v1/tools/media/*`` with a
 bearer. FAL rides its queue API natively (``sync_mode: false``) and we use the
 response-carried ``status_url``/``response_url``/``cancel_url`` — with
 fallback derivation from the app path, which reproduces the OLD client's
-hardcoded ``[redacted]…`` exactly (verified: ``clients/fal.py:170,198``
+hardcoded ``fal-ai/flux/requests…`` exactly (verified: ``clients/fal.py:170,198``
 hardcode ``fal-ai/flux`` while posting to ``model_path`` — a latent bug for
 any other model; the response-carried URLs are the fix, and the fallback
 derives from the model actually used). OpenAI is a single synchronous request

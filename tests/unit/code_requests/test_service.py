@@ -779,9 +779,9 @@ def test_link_only_hints_name_the_right_cli_per_forge() -> None:
 
 def test_the_wire_row_carries_the_hint() -> None:
     raw = {
-        "key": "[redacted]",
+        "key": "codeberg.org/o/r#3",
         "ref": {
-            "key": "[redacted]",
+            "key": "codeberg.org/o/r#3",
             "forge": "gitea",
             "host": "codeberg.org",
             "project": "o/r",
