@@ -2491,6 +2491,44 @@ def _big_ping(pad_bytes: int = 200_000) -> dict[str, Any]:
     return {"op": "ping", "req": 77, "pad": "lorem ipsum dolor sit amet " * (pad_bytes // 27)}
 
 
+def _sealed_bytes_of_a_big_ping(link: relay.PeerLink) -> tuple[int, int]:
+    """Send ``_big_ping`` over ``link``; return ``(plaintext_bytes, sealed_bytes)``.
+
+    ``sealed_bytes`` is what the writer thread put on the wire FOR THAT FRAME, read
+    from inside the writer's own ``_write`` rather than from ``link.bytes_out`` after
+    the reply. ``_write`` bumps ``bytes_out`` only AFTER ``sendall`` returns (the
+    counter means "bytes that left", so a failed send must not count), and the peer
+    answers as soon as the bytes arrive — so the ack can reach ``request`` before the
+    writer thread has run its increment. CI measured exactly that (shard 3.12/1, run
+    38030597356: ``assert (72 - 72) >= 200020`` — the counter had not moved yet), and
+    the compressed cell's ``< plaintext // 5`` passed VACUOUSLY in the same window
+    (a delta of 0 is below any bound). Wrapping ``_write`` closes both: the wrapper
+    returns only after the real ``_write`` has finished its increment, and the writer
+    is a single thread, so the ``bytes_out`` movement inside one call is exactly that
+    frame's sealed size — nothing else's (the establishment ``net_member_list`` pull
+    writes through the same method and would otherwise bleed into a window delta).
+    The wait is on that event, not on a clock; the deadline is a hang backstop.
+    """
+    sealed: dict[str, int] = {}
+    written = threading.Event()
+    flush = link._write  # noqa: SLF001 — the writer's own write path, wrapped below
+
+    def _record(frame: dict[str, Any]) -> None:
+        before = link.bytes_out
+        flush(frame)
+        if frame.get("req") == 77 and "size" not in sealed:
+            sealed["size"] = link.bytes_out - before
+            written.set()
+
+    link._write = _record  # type: ignore[method-assign]  # noqa: SLF001
+    frame = _big_ping()
+    plaintext = len(json.dumps(frame, separators=(",", ":")).encode())
+    reply = link.request(frame, timeout=10.0)
+    assert reply is not None and reply["op"] == "ack", reply
+    assert written.wait(timeout=10.0), "the writer never finished sealing the big ping"
+    return plaintext, sealed["size"]
+
+
 def test_a_big_frame_crosses_a_real_link_compressed_when_both_ends_negotiate_it(
     devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
     monkeypatch: pytest.MonkeyPatch,
@@ -2499,13 +2537,9 @@ def test_a_big_frame_crosses_a_real_link_compressed_when_both_ends_negotiate_it(
     try:
         assert link.codec.compression is True
         assert wire.ZLIB_RECORDS_V1 in link.capabilities
-        before = link.bytes_out
-        frame = _big_ping()
-        plaintext = len(json.dumps(frame, separators=(",", ":")).encode())
-        reply = link.request(frame, timeout=10.0)
-        assert reply is not None and reply["op"] == "ack", reply
         # The peer's read loop decoded it (it answered), and far fewer bytes crossed.
-        assert link.bytes_out - before < plaintext // 5
+        plaintext, sealed = _sealed_bytes_of_a_big_ping(link)
+        assert 0 < sealed < plaintext // 5
     finally:
         link.close("test")
 
@@ -2525,11 +2559,7 @@ def test_a_link_to_a_peer_without_the_capability_carries_the_plain_bytes(
     _record, link = _live_link(devices, monkeypatch)
     try:
         assert link.codec.compression is False
-        before = link.bytes_out
-        frame = _big_ping()
-        plaintext = len(json.dumps(frame, separators=(",", ":")).encode())
-        reply = link.request(frame, timeout=10.0)
-        assert reply is not None and reply["op"] == "ack", reply
-        assert link.bytes_out - before >= plaintext
+        plaintext, sealed = _sealed_bytes_of_a_big_ping(link)
+        assert sealed >= plaintext
     finally:
         link.close("test")
