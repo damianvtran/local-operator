@@ -1982,6 +1982,13 @@ _VENDOR_TAIL_IS_A_NAME = re.compile(r"[a-z]+(?:[-_/][a-z]+)+(?:=\S*)?")
 #: masked and so still carries the copy-the-mask risk; the spaced spelling
 #: (``<prefix>_<word> = True``) and every other position are released.
 #:
+#: **One exception to "masked whole", measured (QA round 2, Q-5).** When the glued VALUE
+#: contains a dot (``1.2.3``, ``a.b.c``, ``host.example.com``), the vendor pattern's
+#: ``(?![A-Za-z0-9.])`` lookahead makes the match BACKTRACK to just the bare word, which
+#: this form then releases: the NAME half is readable and ``f(<prefix>_<word>=1.5)`` is
+#: released. No exposure is added: such a value is never part of the match and is
+#: visible on ``origin/main`` too (there the NAME half was the part masked).
+#:
 #: **Accepted residuals, recorded rather than closed.** (1) A real credential that is
 #: genuinely 8-15 lowercase letters (``sk-`` plus a short English word) is now readable by
 #: this rule. Every such string in this repo and in the sibling checkouts surveyed
