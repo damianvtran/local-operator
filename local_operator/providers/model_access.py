@@ -312,8 +312,14 @@ def rehome_deferred_notice(old_label: str, count: int = 1) -> str:
     to end: the receipts around the sign-in read as "fixed" while the
     conversation keeps using the model the app has just established this user
     cannot run. So the refusal is said, once, where it is recorded — with the one
-    route out of the state named, because the repair will not retry by itself on
-    every surface.
+    route out of the state named.
+
+    "UNTIL THE TURN ENDS" IS A PROMISE THE OWNER KEEPS (round-2 M1/D6/Q2): every
+    owner retries at its own turn end — the TUI in ``_settle_deferred_rehome``
+    and a serve-side runtime in ``ServingSessionHandle._retry_deferred_rehome``
+    — so the sentence describes a wait, not a dead end, on both surfaces. From
+    the moment both retried, the word "current" only bought the row a one-word
+    widow at 100 columns (design round 2, D8), so it is gone.
 
     Named per conversation rather than in the aggregate for ``count == 1`` (the
     common case); a multi-session receipt says the count without picking one
@@ -321,11 +327,10 @@ def rehome_deferred_notice(old_label: str, count: int = 1) -> str:
     """
     if count == 1:
         return (
-            f"This conversation stays on {old_label} until the current turn ends — "
-            "/model switches it now."
+            f"This conversation stays on {old_label} until the turn ends — /model switches it now."
         )
     return (
-        f"{count} conversations stay on their current model until their turns end — "
+        f"{count} conversations stay on their model until their turns end — "
         "/model switches each one now."
     )
 
@@ -334,9 +339,13 @@ def rehome_still_stranded_notice(old_label: str) -> str:
     """The sentence for a deferred re-home that could not complete at turn end.
 
     The other half of :func:`rehome_deferred_notice`'s promise: a deferral the
-    TUI retries when the turn settles either moves the conversation or says it is
-    still where it was, because a pending repair that can silently evaporate is
-    the same silence one turn later.
+    owner retries when the turn settles either moves the conversation or says it
+    is still where it was, because a pending repair that can silently evaporate
+    is the same silence one turn later. Spoken by BOTH owners — the TUI's
+    ``_settle_deferred_rehome`` close-out and the runtime's
+    ``_close_deferred_rehome`` — and only when the repair is still NEEDED: a
+    conversation whose old provider works again, or that the user moved
+    themselves, is closed in silence (nothing is wrong to complain about).
     """
     return f"This conversation is still on {old_label} — /model switches it when you are ready."
 
