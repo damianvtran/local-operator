@@ -771,12 +771,34 @@ def test_the_approval_label_skips_edit_incapable_rungs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The same filter the cascade applies: an edit prompt must never name a
-    # provider that cannot run it (Radient is available here, and skipped).
+    # provider that cannot run it — and post-hub-slice Radient CAN, so an
+    # available Radient now names itself for BOTH shapes.
     monkeypatch.setattr(image_tool.image_availability, "radient_available", lambda *a: True)
     monkeypatch.setattr(image_tool.image_availability, "fal_key", lambda *a: "fk")
 
     assert image_tool._preferred_route_label() == "Radient"
-    assert image_tool._preferred_route_label(editing=True) == "FAL"
+    assert image_tool._preferred_route_label(editing=True) == "Radient"
+
+
+def test_the_approval_label_still_skips_an_edit_incapable_rung(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The filter keeps its negative case: the ChatGPT-plan rung is
+    # edit-incapable (its edit path is deliberately not wired in v1), so an
+    # edit prompt must skip it and name the next capable provider — while a
+    # generation still names it first.
+    monkeypatch.setattr(image_tool.image_availability, "radient_available", lambda *a: False)
+    monkeypatch.setattr(image_tool.image_availability, "fal_key", lambda *a: None)
+    monkeypatch.setattr(image_tool.image_availability, "openai_images_key", lambda *a: None)
+    monkeypatch.setattr(
+        image_tool.image_availability, "openai_subscription_grant", lambda *a: object()
+    )
+    monkeypatch.setattr(image_tool.image_availability, "google_key", lambda *a: "gk")
+    monkeypatch.setattr(image_tool.image_availability, "xai_available", lambda *a: False)
+    monkeypatch.setattr(image_tool.image_availability, "openrouter_key", lambda *a: None)
+
+    assert image_tool._preferred_route_label() == "ChatGPT plan"
+    assert image_tool._preferred_route_label(editing=True) == "Google"
 
 
 @pytest.mark.asyncio
