@@ -2694,7 +2694,7 @@ def test_durable_projection_carries_supplement_rows_per_anchor(tmp_path, monkeyp
     root_dir.mkdir(parents=True)
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
 
-    def row(anchor: str, version: int, state: str) -> dict:
+    def row(anchor: str, version: int, state: str) -> dict[str, Any]:
         return {
             "anchor": anchor,
             "job": "3f9c1a7e5b20",

@@ -215,7 +215,7 @@ def _blob(cfg, blob: str = COMPONENT) -> str:
     return ref.digest
 
 
-def _journal(cfg, session_id: str, rows: list[dict]) -> None:
+def _journal(cfg, session_id: str, rows: list[dict[str, Any]]) -> None:
     directory = cfg / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "transcript.jsonl").write_text(
@@ -224,9 +224,9 @@ def _journal(cfg, session_id: str, rows: list[dict]) -> None:
 
 
 def _row(
-    *, job: str = RELAY_JOB, files: list[dict] | None = None, digest: str | None = None
-) -> dict:
-    details: dict = {
+    *, job: str = RELAY_JOB, files: list[dict[str, Any]] | None = None, digest: str | None = None
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
         "anchor": "a" * 32,
         "job": job,
         "version": 1,
@@ -343,7 +343,7 @@ def test_the_relay_document_route_is_digest_only(tmp_path, monkeypatch) -> None:
     ).status_code in (404, 400)
 
 
-def _file_row(path: str) -> dict:
+def _file_row(path: str) -> dict[str, Any]:
     return _row(
         files=[
             {
