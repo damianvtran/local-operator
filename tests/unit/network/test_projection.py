@@ -240,14 +240,19 @@ def test_a_slow_peer_wake_does_not_stall_the_daemon_loop(
     ``engage`` is a coroutine on the daemon's one loop, which serves every HTTP
     route, local sessions included; its relay round trip is a blocking socket
     call bounded by ``relay.engage_client_bound_s()`` (85 s). Run inline it froze
-    the loop for the whole wake (measured: a relay answering after 2.0 s stalled a
-    10 ms ticker 2.17 s; audit H2). Two assertions, one deterministic and one
-    behavioural: the blocking call ran on a worker thread, and a concurrent
-    ticker never saw a gap anywhere near the relay's delay. The delay is short
-    (0.8 s) and the ceiling generous (0.4 s) so a loaded CI host cannot flake it
-    while the inline version still fails by 2x.
+    the loop for the whole wake (the remote-session audit measured a relay
+    answering after 2.0 s stalling a 10 ms ticker for 2.17 s; the harness and
+    numbers are in #2136).
+
+    THE ASSERTION IS STRUCTURAL, deliberately: the blocking call must run on a
+    thread other than the event loop's. That fails deterministically on the
+    inline spelling and cannot be perturbed by host load. A wall-clock "the
+    ticker never gapped" assertion was dropped because a loaded runner can starve
+    even an idle loop for longer than any ceiling short of seconds (AGENTS.md
+    records 525-668 ms gaps), so it would trade a real signal for flake risk; the
+    lag measurement lives in the PR evidence instead.
     """
-    delay_s = 0.8
+    delay_s = 0.05  # only needs to be a real blocking call, not a long one
     seen: dict[str, Any] = {}
 
     def _slow_relay(record: Any, op: str, **fields: Any) -> dict[str, Any]:
@@ -277,28 +282,10 @@ def test_a_slow_peer_wake_does_not_stall_the_daemon_loop(
     )
     owner = projection.RemoteOwner(config_dir=root, session_id=SESSION, facts=facts, root=root)
 
-    async def _run() -> float:
-        worst = 0.0
-        done = asyncio.Event()
-
-        async def _ticker() -> None:
-            nonlocal worst
-            last = time.perf_counter()
-            while not done.is_set():
-                await asyncio.sleep(0.01)
-                now = time.perf_counter()
-                worst = max(worst, now - last)
-                last = now
-
-        ticker = asyncio.create_task(_ticker())
-        await asyncio.sleep(0.05)  # let the ticker settle before the engage starts
+    async def _run() -> None:
         await owner.engage(cwd="")
-        done.set()
-        await ticker
-        return worst
 
     main_thread = threading.get_ident()
-    worst_gap = asyncio.run(_run())
+    asyncio.run(_run())
 
     assert seen["thread"] != main_thread, "the relay round trip ran on the event-loop thread"
-    assert worst_gap < delay_s / 2, f"the loop stalled {worst_gap:.2f}s behind a slow relay"

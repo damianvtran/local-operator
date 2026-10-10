@@ -1014,7 +1014,13 @@ class RemoteOwner:
         # wake's duration — still strictly better than the inline call, which
         # froze every route for one wake; one wake per distinct remote session
         # (the lease-warm loop is single-flight per pane) keeps real bursts far
-        # under the cap. Audit H2 (remote-audit.md); no timeout or contract change.
+        # under the cap. Shutdown trade-off: the default executor is joined when
+        # the loop closes or the interpreter exits, so a wake still in flight at
+        # daemon exit can hold a clean stop for up to ``bound`` — no worse than
+        # the inline call, which blocked for the same time. The 2.0 s -> 2.17 s
+        # stall figure comes from the remote-session audit's own harness (a fake
+        # relay answering after 2.0 s; reproduced in the PR that introduced this
+        # line, #2136). No timeout or contract change.
         detail = await asyncio.to_thread(
             _relay_call,
             self._root,
