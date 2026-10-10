@@ -263,6 +263,22 @@ async def test_a_models_read_that_cannot_answer_raises_instead_of_guessing() -> 
 
 
 @pytest.mark.asyncio
+async def test_a_mangled_models_200_raises_instead_of_reporting_unlisted() -> None:
+    """A body the client cannot read is "cannot answer", not the
+    deterministic "not listed" negative (review round 1, R4)."""
+    recorder = _Recorder()
+    handler = _edit_handler(
+        recorder,
+        models=httpx.Response(200, json={"data": "not-a-list"}),
+        generation=_ok_response(),
+    )
+
+    with pytest.raises(APIError):
+        await _run(recorder, source_url="data:image/png;base64,AAAA", client=_client(handler))
+    assert len(recorder.requests) == 1, "the generation was never reached"
+
+
+@pytest.mark.asyncio
 async def test_a_502_failure_maps_to_upstream_and_scrubs_the_bearer() -> None:
     recorder = _Recorder()
     response = httpx.Response(502, json={"error": {"message": "generation failed"}})

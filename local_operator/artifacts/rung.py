@@ -186,3 +186,10 @@ class RungResult:
     #: this ``None`` — it is an identifier a consumer can cite, never an
     #: amount.
     usage_record_id: str | None = None
+    #: Set when the caller supplied ``strength`` and THIS rung's edit path
+    #: dropped it (FAL's multi-reference editors document no strength
+    #: field). Which sub-schema an edit routes through is decided INSIDE the
+    #: rung, so the cascade cannot pre-record this the way it pre-records a
+    #: capability; the tool folds the flag into ``details["strength_ignored"]``
+    #: and the caption note so the drop is recorded, never silent.
+    strength_ignored: bool = False

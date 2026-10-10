@@ -19,6 +19,7 @@ from typing import Any, Callable
 import httpx
 import pytest
 
+from local_operator.artifacts.rung import RungSkipped
 from local_operator.clients._http import APIError
 from local_operator.imagegen import rungs_xai as rung_mod
 
@@ -211,6 +212,26 @@ async def test_an_edit_uses_the_single_image_shape_and_keeps_reported_ticks() ->
     # only figure, and the generations flat rate is never reused.
     assert result.cost_usd == pytest.approx(4.0)
     assert result.cost_source == "reported"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_image_edit_is_a_recorded_skip() -> None:
+    """No silently smaller delivery (review round 1, R2): the edit shape
+    carries no count, so a larger request is a skip BEFORE the wire."""
+    recorder = _Recorder()
+    http = _client(recorder.handler(_ok_response()))
+
+    with pytest.raises(RungSkipped) as caught:
+        await _run(
+            recorder,
+            num_images=2,
+            source_url=f"data:image/png;base64,{PNG_B64}",
+            client=http,
+        )
+
+    assert caught.value.reason_class == "unsupported"
+    assert "no image count" in str(caught.value)
+    assert recorder.requests == [], "skipped before the wire"
 
 
 @pytest.mark.asyncio

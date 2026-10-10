@@ -233,3 +233,7 @@ class JobOutcome:
     #: ``None`` everywhere else. The tool surfaces it as
     #: ``details["usage_record_id"]`` — absent-safe, and never an amount.
     usage_record_id: str | None = None
+    #: Set when the winning rung dropped a caller-supplied ``strength``
+    #: (see ``RungResult.strength_ignored``); the tool folds it into
+    #: ``details["strength_ignored"]`` + the caption note.
+    strength_ignored: bool = False

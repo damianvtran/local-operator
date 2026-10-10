@@ -41,7 +41,8 @@ generations. Edits bill input AND output (the pricing page says so
 explicitly), so the generations flat rate must never be reused as an edit
 cost: the reported ``usage.cost_in_usd_ticks`` stays the only figure, and
 nothing replaces it when absent. Up to 5 references are documented for
-multi-image editing; that shape arrives with the multi-source wire.
+multi-image editing; that shape arrives with the multi-source wire, and
+``num_images > 1`` on the single-image shape is a recorded skip.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ import httpx
 
 from local_operator.artifacts import BillingBasis
 from local_operator.artifacts.progress import ProgressFn
-from local_operator.artifacts.rung import RungResult
+from local_operator.artifacts.rung import RungResult, RungSkipped
 from local_operator.artifacts.walk import PauseFn
 from local_operator.clients._http import APIError
 from local_operator.imagegen import MediaAsset
@@ -125,9 +126,16 @@ async def run_xai(
     if source_url is not None:
         # The wired edit shape is the single-image one (docs fetched
         # 2026-10-10): an ``image`` object whose ``url`` takes the data URI;
-        # ``n`` is a generations-only parameter, so an edit sends no count
+        # ``n`` is a generations-only parameter, so an edit carries no count
         # (the multi-image page's 1..5 references arrive with the
-        # multi-source wire).
+        # multi-source wire). A larger request is a recorded SKIP rather
+        # than silently delivering one image (review round 1, R2).
+        if num_images > 1:
+            raise RungSkipped(
+                "xAI's edit endpoint documents no image count; a multi-image "
+                "request is skipped rather than silently delivering fewer.",
+                reason_class="unsupported",
+            )
         body["image"] = {"url": source_url, "type": "image_url"}
         path = XAI_IMAGES_EDITS_PATH
     else:

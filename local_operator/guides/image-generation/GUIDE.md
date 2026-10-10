@@ -5,8 +5,9 @@ description: Generate or edit images via the configured provider — setup, cred
 
 # Generating and editing images
 
-`generate_image` turns a prompt into an image (or, with `source_image_path`,
-edits one) and attaches the result to the session. You do not save files or
+`generate_image` turns a prompt into an image (or, with a source —
+`source_image_path` or `source_attachment` — edits one) and attaches the
+result to the session. You do not save files or
 move bytes around: the harness registers each image in the session's
 attachment store, surfaces render it, and the caption carries the digests.
 
@@ -137,8 +138,9 @@ Pass a source and the call becomes an edit. Two ways to name it:
   pass that digest back to edit the image the harness just made.
 
 `strength` (0..1) tunes how far the edit may move from the source, where the
-provider supports it (FAL's image-to-image apps); on providers that do not
-honour it, the result says it was ignored rather than dropping it silently.
+provider supports it (FAL's flux-class image-to-image apps; its
+multi-reference editors document no strength field). Wherever it cannot be
+honoured, the result says it was ignored rather than dropping it silently.
 `strength` without a source is rejected.
 
 Edits run on FAL, OpenAI, Google, xAI and OpenRouter. The ChatGPT-plan rung —

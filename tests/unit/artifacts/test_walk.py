@@ -39,6 +39,7 @@ def _result(
     basis: BillingBasis | None = None,
     provenance: str | None = None,
     usage_record_id: str | None = None,
+    strength_ignored: bool = False,
 ) -> RungResult:
     return RungResult(
         assets=[MediaAsset(data=b"png", content_type="image/png", source_url="https://x/1.png")],
@@ -49,6 +50,7 @@ def _result(
         billing_basis=basis,
         cost_provenance=provenance,
         usage_record_id=usage_record_id,
+        strength_ignored=strength_ignored,
     )
 
 
@@ -439,6 +441,16 @@ async def test_usage_record_id_rides_a_successful_outcome() -> None:
     # And it stays None when no rung set one (the absent-safe default).
     plain, _, _ = await _run({"alpha": _result()})
     assert plain.usage_record_id is None
+
+
+@pytest.mark.asyncio
+async def test_the_strength_ignored_flag_rides_a_successful_outcome() -> None:
+    outcome, _, _ = await _run({"alpha": _result(strength_ignored=True)})
+
+    assert outcome.strength_ignored is True
+    # Default-off: a rung that honoured strength must not claim otherwise.
+    plain, _, _ = await _run({"alpha": _result()})
+    assert plain.strength_ignored is False
 
 
 # ---------------------------------------------------------------------------
