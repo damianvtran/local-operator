@@ -1524,6 +1524,19 @@ class ProviderController:
                 labels.append(f"cred:{row.id}")
         return labels
 
+    def expected_oauth_identities(self, provider: str) -> list[str]:
+        """Public spelling of :meth:`_expected_oauth_identities`.
+
+        The pre-emptive quota notice (``providers/quota_notice.py``) applies
+        the loader's own per-account rule — "one fresh report per account, or
+        say nothing" — so it must enumerate accounts the SAME way the fetcher
+        does (:meth:`_fetch_provider`), from the same source. A second
+        derivation (reading the store directly, say) would drift the two
+        coverage checks apart, and a missing account would read as a dead
+        one exactly when the notice must stay silent.
+        """
+        return self._expected_oauth_identities(provider)
+
     @staticmethod
     def _account_in_backoff(previous: UsageReport | None, now_ms: int, *, force: bool) -> bool:
         """Whether this account should be served from last-good, not re-probed.
