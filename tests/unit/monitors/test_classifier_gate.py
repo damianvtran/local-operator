@@ -34,6 +34,7 @@ from local_operator.monitors.scheduler import MonitorScheduler
 from local_operator.monitors.settings import MonitorSettings
 from local_operator.monitors.spec import MonitorSpec
 from tests.unit.classification.support import LegBehaviour, leg_class
+from tests.unit.monitors.support import drain_checks
 
 NOW = 1_756_000_000_000
 
@@ -127,14 +128,10 @@ class Harness:
     async def ripe(self, *, advance: int = 10**9) -> None:
         self.now_ms += advance
         await self.scheduler.pump()
-        for _ in range(20):
-            await asyncio.sleep(0)
-        if self.delay_s:
-            # A scripted gate delay is real wall time: give the serialised
-            # second call room to land before asserting.
-            await asyncio.sleep(self.delay_s * 3 + 0.05)
-            for _ in range(20):
-                await asyncio.sleep(0)
+        # Drain the check tasks rather than count loop turns or sleep a guessed
+        # multiple of the gate delay: the serialised second gate call is awaited
+        # INSIDE its check task, so completion of the tasks is the landing.
+        await drain_checks(self.scheduler)
 
     def counters(self, monitor_id: str = "m1") -> dict[str, Any]:
         found = monitor_state.read_counters(self.config_dir, "sess", monitor_id)

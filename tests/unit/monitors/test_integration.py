@@ -10,7 +10,7 @@ lines the monitor was told to ignore (and in timestamps) must stay silent.
 
 from __future__ import annotations
 
-import asyncio
+import asyncio  # noqa: F401 — kept for a content-identical merge; main's tests use it
 import json
 import os
 import re
@@ -33,6 +33,7 @@ from local_operator.monitors import store as monitor_store
 from local_operator.monitors.spec import MonitorSpec
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
+from tests.unit.monitors.support import drain_checks
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -193,8 +194,7 @@ async def test_arm_kill_reopen_delivers_one_consolidated_delta(
     watch.write_text("A\nB\nC\nD\nE\n", encoding="utf-8")  # several changes, one gap
     try:
         await reopened._monitors.pump(now_ms=clock[0] + 30_000)
-        for _ in range(30):
-            await asyncio.sleep(0)
+        await drain_checks(reopened._monitors, reopened)
         deltas = [event for event in events if getattr(event, "type", "") == "monitor_delta"]
         assert len(deltas) == 1, "one consolidated delta, never one per missed tick"
         text = deltas[0].text
@@ -233,15 +233,13 @@ async def test_a_normalized_quiet_tick_is_silent(tmp_path: Path, config_dir: Pat
     try:
         await session.set_monitor_schedules([spec])
         await session._monitors.pump(now_ms=clock[0] + 5_000)  # baseline
-        for _ in range(20):
-            await asyncio.sleep(0)
+        await drain_checks(session._monitors, session)
 
         # Only ignored lines and the timestamp changed.
         clock[0] += 60_000
         watch.write_text("keep\nnoise 555\nupdated 2026-09-29T09:00:00Z\n", encoding="utf-8")
         await session._monitors.pump(now_ms=clock[0] + 15_000)
-        for _ in range(30):
-            await asyncio.sleep(0)
+        await drain_checks(session._monitors, session)
 
         deltas = [event for event in events if getattr(event, "type", "") == "monitor_delta"]
         assert deltas == [], "normalization must absorb timestamp and ignore-line churn"
@@ -301,16 +299,14 @@ async def test_a_session_gate_suppresses_a_non_material_change(
     try:
         await session.set_monitor_schedules([spec])
         await session._monitors.pump(now_ms=clock[0] + 5_000)  # baseline
-        for _ in range(20):
-            await asyncio.sleep(0)
+        await drain_checks(session._monitors, session)
 
         clock[0] += 70_000  # past the interval plus the scheduler's jitter
         # An EDIT, not an append: a pure addition skips the gate by design
         # (``is_pure_addition``), so only a changed line proves this plumbing.
         watch.write_text("A\nC\n", encoding="utf-8")
         await session._monitors.pump(now_ms=clock[0] + 5_000)
-        for _ in range(30):
-            await asyncio.sleep(0)
+        await drain_checks(session._monitors, session)
 
         deltas = [event for event in events if getattr(event, "type", "") == "monitor_delta"]
         assert deltas == [], "a suppressed change must not reach the conversation"
