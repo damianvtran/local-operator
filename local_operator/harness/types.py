@@ -89,6 +89,7 @@ from local_operator.harness.wake_types import WakeSchedule
 # loop on this module's path for every entry point — the same mistake the
 # ``wake_types`` split above records.
 from local_operator.monitors.spec import MonitorSpec
+from local_operator.supplements.contract import SupplementState
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -2539,6 +2540,41 @@ class OutputValidationEvent(AgentEvent[Literal["output_validation"]]):
     exhausted: bool = False
     error: str = ""
     payload_text: str = ""
+
+
+class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
+    """One beat of a turn supplement's ("Highlights") life, AFTER the turn's ``agent_end``.
+
+    Contract frozen by lane C0 of ``docs/design/turn-supplements.md`` (§2.7); nothing
+    emits it yet (the runner is lane C1). A NEW event family rather than a synthetic tool
+    call on purpose: a tool row after the answer would break the UI fold and native
+    condensing, risk ``lop exec --json`` consumers reading it as part of the turn, and
+    inherit turn-interrupt cancel, which is precisely wrong for a background errand.
+
+    ``anchor`` is the final assistant message id the supplement attaches to, so a late
+    event (the next turn already started) still lands on the right answer. ``state`` is
+    the image-gen vocabulary plus ``decided`` ("files known, graphics queued", painted as
+    ``queued``); ``running``/``cancelling`` are LIVE-ONLY and never journaled (see
+    :mod:`local_operator.supplements.contract`). ``files`` rides only ``decided``/``done``
+    and ``components`` only ``done``, in the row's own shapes.
+
+    Additive on a tolerant frame (``AgentEvent`` is ``extra="allow"``), the
+    ``AgentEndEvent.cut_off`` precedent: no ``PROTOCOL_VERSION`` bump. The runtime sends it
+    only to viewers that negotiated ``supplements-v1``.
+    """
+
+    type: Literal["supplement_progress"] = "supplement_progress"
+    anchor: str
+    job: str
+    version: int
+    state: SupplementState
+    #: "deciding" | "generating" | "validating" | "repairing"; "" outside ``running``.
+    stage: str = ""
+    elapsed_s: float = 0.0
+    files: list[dict[str, Any]] = Field(default_factory=list)
+    components: list[dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+    error_type: str = ""
 
 
 EventHandler = Callable[[AgentEvent], Awaitable[None] | None]

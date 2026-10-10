@@ -126,6 +126,12 @@ from local_operator.session.transcript import (
     ATTACHMENT_KEY,
     durable_conversation_path,
 )
+from local_operator.supplements.contract import (
+    SUPPLEMENTS_AUTH_FIELD,
+    SUPPLEMENTS_CAPABILITY,
+    SUPPLEMENTS_READ_OP,
+    negotiated,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1649,6 +1655,12 @@ class _ClientConn:
     #: message (nulls included) and a pre-carriage viewer's ``Message`` forbids
     #: extras, so an unstripped frame is a failed attach, not a degrade.
     input_metadata: bool = False
+    #: This viewer negotiated ``supplements-v1`` (``contract.negotiated``): the owner
+    #: advertised it AND the viewer declared ``supplements`` on its auth frame. Only
+    #: then may the runtime send it ``supplement_progress`` events or project
+    #: ``supplement`` entries; rows are journaled either way. Nothing reads this until
+    #: the runner lane (C1) sends the first event.
+    supplements: bool = False
     frontend_ready: bool = False
     #: True only while ``_push_to`` is writing THIS connection's welcome. It is
     #: what tells ``_readable_frame`` whether an unreadable projection has a
@@ -2173,6 +2185,15 @@ class RuntimeServer:
                 # validation outright. See
                 # ``DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY``.
                 + (["display-history-entry-times-v1"] if hasattr(handle, "history_page") else [])
+                # TURN SUPPLEMENTS ("Highlights"): advertised only by a handle that
+                # implements the lazy read op, for the reason every entry here is
+                # gated on what the handle can honour. The attach gate is TWO halves --
+                # this string ANDed with the viewer's own ``supplements`` auth boolean
+                # (``contract.negotiated``) -- so an older viewer never receives a
+                # ``supplement_progress`` event or a ``supplement`` entry it would
+                # paint as an unknown kind. No handle implements the op in the
+                # contract lane (C0), so no owner advertises it yet.
+                + ([SUPPLEMENTS_CAPABILITY] if hasattr(handle, SUPPLEMENTS_READ_OP) else [])
                 # INPUT-MODE CARRIAGE, gated on the handle that would HONOUR it
                 # rather than advertised unconditionally: the reader of this
                 # string (the mobile stream) must never send the fields to an
@@ -3777,6 +3798,14 @@ class RuntimeServer:
             # ``_ClientConn.input_metadata``).
             conn.input_metadata = bool(frame.get("input_mode")) and (
                 INPUT_MODE_CAPABILITY in self._record.capabilities
+            )
+            # The supplements twin: both halves of the gate, never the viewer's
+            # word alone. ``is True``, not truthiness, on purpose: a declaration is
+            # the JSON boolean, and a stray "false"/"0" string from a buggy client
+            # must fail CLOSED (it would otherwise opt that viewer into an event
+            # kind it may paint as unknown).
+            conn.supplements = negotiated(
+                self._record.capabilities, frame.get(SUPPLEMENTS_AUTH_FIELD) is True
             )
 
             # THE FRONTEND BIND IS A SESSION-LOOP CALL, for a stronger reason
