@@ -2292,7 +2292,9 @@ def test_the_open_frame_compat_matrix_across_builds(peer_pair: Devices, monkeypa
 
     The three directions, one contract: an owner that does not know the flag
     answers today's page; a viewer that does not ask sends today's frame; both
-    new is tolerated and also answers today's page until the facts half lands.
+    new serves the owner's BUILT frame — the flag's three keys ride the answer,
+    and a viewer that does not read them tolerates them exactly as it tolerates
+    their absence (the client contract already agrees on both).
     """
     server_a, server_b, _h, _p = peer_pair
     ids = _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
@@ -2301,7 +2303,8 @@ def test_the_open_frame_compat_matrix_across_builds(peer_pair: Devices, monkeypa
     link = _dial_to(server_a, record, host_b, port_b)
     today_keys = {"entries", "has_more", "cursor_missing", "has_newer"}
     try:
-        # NEW VIEWER -> NEW OWNER: the flag is tolerated; the answer is today's.
+        # NEW VIEWER -> NEW OWNER: the frame is BUILT (the facts half landed);
+        # its three keys ride the answer and the page keeps the journal's ids.
         new_new = _call(
             server_a.root,
             "peer_session_history",
@@ -2311,7 +2314,12 @@ def test_the_open_frame_compat_matrix_across_builds(peer_pair: Devices, monkeypa
             limit=50,
         )
         assert new_new.get("op") == "ack", new_new
-        assert set(new_new["detail"]) == today_keys, new_new["detail"]
+        assert set(new_new["detail"]) == today_keys | {
+            "runs",
+            "runs_state",
+            "head_cut",
+        }, new_new["detail"]
+        assert new_new["detail"]["runs_state"] in {"ready", "building"}, new_new["detail"]
         assert [entry["id"] for entry in new_new["detail"]["entries"]] == ids
 
         # OLD VIEWER -> NEW OWNER: no key on the frame, the same answer.
@@ -2361,13 +2369,16 @@ def test_the_open_frame_reply_fields_pass_through_the_whole_read_unchanged(
 ) -> None:
     """The reply's optional run facts cross both hops verbatim — or not at all.
 
-    NO OWNER BUILDS THE FACTS YET (the owner-side strip is the next half of this
-    series), so the owner's participation is simulated at the last honest place:
-    the handler's own answer. Everything the reply then crosses — the link, the
-    viewer relay's control socket, and the whole of
-    ``projection.peer_stored_history_page`` — is the real code path. The two
-    properties: fields the contract names are carried UNCHANGED when present,
-    and absent fields leave today's answer exactly as it is.
+    THE OWNER'S BUILD NOW EXISTS (``RelayServer._open_frame_detail``, the cells
+    beside this one), so what this cell keeps pinning is the OTHER half of the
+    contract: whatever an owner's answer carries crosses the link, the viewer
+    relay's control socket, and the whole of
+    ``projection.peer_stored_history_page`` VERBATIM when present. The owner's
+    participation is simulated at the last honest place — the handler's own
+    answer — so a future change to the build's field shapes cannot pass by
+    quietly changing what the crossing does with them. The two properties:
+    fields the contract names are carried UNCHANGED when present, and absent
+    fields leave today's answer exactly as it is.
     """
     from local_operator.network import projection
 
@@ -2436,6 +2447,420 @@ def test_the_open_frame_reply_fields_pass_through_the_whole_read_unchanged(
         assert set(plain) == today_keys, plain
         assert [entry["id"] for entry in plain["entries"]] == ids
         assert seen_frames and "open_frame" not in seen_frames[0], seen_frames
+    finally:
+        link.close("test")
+
+
+# ---------------------------------------------------------------------------
+# The open frame's FACTS half: the owner's build over the stored read, and the
+# viewer that surfaces it (``docs/DESKTOP_API.md`` §"The open frame")
+# ---------------------------------------------------------------------------
+
+
+def _frame_conversation(turns: int = 3, *, per_turn_tools: int = 2, long_run: int = 0) -> list[Any]:
+    """A journal with the rows an open frame distinguishes (the desktop twin's shape).
+
+    ``ckpt`` rows are what ``page_seq_bounds`` maps a page's ordinals through,
+    ``spend`` rows are what the strip must drop (so the unit of ``limit`` is
+    visible in the served page), and the tools carry ``provider_payload`` keys
+    no surface paints — so the strip's provider arm is exercised on real rows.
+    ``long_run`` replaces the LAST turn's tool count, for the head-cut cells.
+    """
+    from local_operator.session.transcript import ENTRY_MESSAGE, TranscriptEntry
+
+    rows: list[Any] = []
+    ts = 1000.0
+
+    def add(id_: str, type_: str, payload: dict[str, Any]) -> None:
+        nonlocal ts
+        ts += 1
+        rows.append(TranscriptEntry(id_, ts, type_, payload))
+
+    for turn in range(turns):
+        add(
+            f"user{turn:02d}",
+            ENTRY_MESSAGE,
+            {"kind": "message", "role": "user", "content": [{"text": f"turn {turn}"}]},
+        )
+        count = long_run if (long_run and turn == turns - 1) else per_turn_tools
+        for call in range(count):
+            add(
+                f"tool{turn:02d}{call:02d}",
+                ENTRY_MESSAGE,
+                {
+                    "kind": "message",
+                    "role": "tool",
+                    "content": [{"text": "output"}],
+                    "provider_payload": {
+                        "details": {},
+                        "duration_s": 2.5,
+                        "native_replay": "r" * 64,
+                    },
+                },
+            )
+        add(
+            f"ans{turn:02d}",
+            ENTRY_MESSAGE,
+            {"kind": "message", "role": "assistant", "content": [{"text": f"answer {turn}"}]},
+        )
+        add(f"spend{turn:02d}", "custom", {"custom_type": "session_spend.v1", "details": {}})
+        add(
+            f"ckpt{turn:02d}",
+            "custom",
+            {
+                "custom_type": "frontend_state_checkpoint_v1",
+                "details": {"state": {"session_id": "seed", "sequence": turn}},
+            },
+        )
+    return rows
+
+
+def _write_frame_journal(root: Path, session_id: str, rows: list[Any]) -> list[str]:
+    """Write ``rows`` as a real journal and answer their ids, in order."""
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / TRANSCRIPT_FILENAME).write_text(
+        "\n".join(row.to_json() for row in rows) + "\n", encoding="utf-8"
+    )
+    return [str(row.id) for row in rows]
+
+
+def _warm_frame_index(root: Path, session_id: str) -> None:
+    """Publish a RESIDENT index for ``root``/``session_id``, the product's own way.
+
+    Through ``start_refresh`` rather than ``refresh_index``: the frame's fast path
+    reads the RESIDENT index, which only the refresh task publishes (the desktop
+    twin's ``_Harness.warm`` makes the same choice for the same reason).
+    """
+
+    async def _warm() -> None:
+        from local_operator.session import transcript_index as ti
+
+        task, _started = ti.start_refresh(root, session_id)
+        assert await task is not None
+
+    asyncio.run(_warm())
+
+
+def _owner_frame(
+    server: relay.RelayServer,
+    *,
+    limit: int = 50,
+    before_id: str | None = None,
+    open_frame: bool = True,
+) -> dict[str, Any]:
+    """One owner-side stored read, answered by the owner's handler DIRECTLY.
+
+    The fine-grained owner cells do not need a link: ``_op_session_history`` is
+    the reader (a link only carries its answer), and calling it directly makes
+    each cell about ONE property — the page's unit, the cut, the caps — with no
+    handshake between the assertion and the code under test. ``open_frame=False``
+    is the same read WITHOUT the flag, for the contrast cells. The link-level
+    cells around these carry the transport.
+    """
+    frame: dict[str, Any] = {"req": 1, "session_id": SESSION, "limit": limit}
+    if before_id is not None:
+        frame["before_id"] = before_id
+    if open_frame:
+        frame["open_frame"] = 1
+    return server._op_session_history(object(), frame)
+
+
+def test_the_owner_open_frame_strips_and_counts_paintable_rows(peer_pair: Devices) -> None:
+    """THE UNIT CHANGE, owner side: ``limit`` counts PAINTABLE rows, not journal entries.
+
+    The same journal the plain page spends slots on — spend and checkpoint rows
+    are journal entries a surface cannot paint — is read as a frame: no served
+    entry is a row the desktop cannot draw, the page still begins at a user row
+    (the alignment rule), and the provider replay material inside a kept row is
+    gone with the rest of the strip.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=3, per_turn_tools=2))
+
+    frame = _owner_frame(server_b, limit=6)
+    served_types = [str(entry["payload"].get("custom_type") or "") for entry in frame["entries"]]
+    assert "session_spend.v1" not in served_types, frame["entries"]
+    assert "frontend_state_checkpoint_v1" not in served_types, frame["entries"]
+    roles = [entry["payload"].get("role") for entry in frame["entries"]]
+    assert len(frame["entries"]) >= 6, frame
+    assert roles[0] == "user", frame["entries"][:1]
+    for entry in frame["entries"]:
+        provider = entry["payload"].get("provider_payload")
+        if provider is not None:
+            assert "native_replay" not in provider, entry
+
+    # THE CONTRAST, same journal and same limit: the plain page spends its slots
+    # on those very rows, which is the unit change this flag is for.
+    plain = _owner_frame(server_b, limit=6, open_frame=False)
+    plain_types = [str(entry["payload"].get("custom_type") or "") for entry in plain["entries"]]
+    assert "session_spend.v1" in plain_types, plain["entries"]
+
+
+def test_the_owner_open_frame_extends_to_a_runs_head_and_says_when_cut(
+    peer_pair: Devices,
+) -> None:
+    """The run-aligned extension, and ``head_cut`` when a cap refuses it.
+
+    LEFT: a page whose ``limit`` lands mid-run is extended back to the run's
+    opening user row — the rows the hunt added are the point, because a page
+    that began at a tool row would make the client condense a turn, then
+    re-condense it as the next page arrives.
+
+    RIGHT: a run longer than the hunt's whole row budget gets exactly ``limit``
+    rows and ``head_cut: true`` — the fragment is admitted rather than paid for
+    in bytes, and ``runs`` carries the true size instead.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+
+    # LEFT: two turns of two tools; limit 3 lands inside turn 1.
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=2, per_turn_tools=2))
+    frame = _owner_frame(server_b, limit=3)
+    assert frame["head_cut"] is False, frame
+    assert [entry["id"] for entry in frame["entries"]] == [
+        "user01",
+        "tool0100",
+        "tool0101",
+        "ans01",
+    ], frame["entries"]
+    # The cut dropped rows the read HAD fetched (turn 0), so the fold owes the
+    # reader a "there is more above this page".
+    assert frame["has_more"] is True, frame
+
+    # RIGHT: a 300-tool run; the head hunt cannot reach its user row, and the
+    # resident index says so in one subtraction before the reads are paid.
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=1, long_run=300))
+    _warm_frame_index(server_b.root, SESSION)
+    frame = _owner_frame(server_b, limit=5)
+    assert len(frame["entries"]) == 5, frame["entries"]
+    assert frame["entries"][0]["payload"].get("role") == "tool", frame["entries"]
+    assert frame["head_cut"] is True, frame
+    assert frame["has_more"] is True, frame
+    assert frame["runs_state"] == "ready" and frame["runs"], frame
+
+
+def test_the_owner_open_frame_caps_the_page_and_folds_the_flags(peer_pair: Devices) -> None:
+    """The hard caps: a page cannot grow past its row budget, and the flags fold.
+
+    ``limit`` 500 (the contract's ceiling) asks for more PAINTABLE rows than a
+    frame may hold: the served page is capped at ``OPEN_FRAME_MAX_ROWS`` (400)
+    regardless, the rows the cap refused are admitted through ``has_more`` (they
+    were READ — a reader must be able to page back), and ``head_cut`` says the
+    oldest served run is a fragment: the cap dropped its opening user row, which
+    is the exact state ``head_cut`` exists to admit (the desktop twin's F2). The
+    journal is sized so the cap BINDS — 4 tools per turn make the aligned window
+    carry 450 paintable rows against the 400-row budget.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=130, per_turn_tools=4))
+
+    frame = _owner_frame(server_b, limit=500)
+    assert len(frame["entries"]) == 400, len(frame["entries"])
+    assert frame["has_more"] is True, frame
+    assert frame["head_cut"] is True, frame
+
+
+def test_the_owner_open_frame_facts_are_ready_when_resident_and_building_when_cold(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two fact states the owner can answer without a wait — and the work each does.
+
+    COLD: ``runs: []`` with ``building``, and the refresh is ENSURED (the cold
+    branch is held still with the refresh recorder standing in for the scan, so
+    the state cannot race the assertion) rather than scanned on the reader
+    thread. The recorder's calls are the proof the read asked the page loop for
+    the work.
+
+    READY: a resident index — built through the REAL engine, ``start_refresh``
+    and its publication — answers with run facts, and no new refresh is
+    scheduled for a read whose facts are already there.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    ids = _write_frame_journal(
+        server_b.root, SESSION, _frame_conversation(turns=3, per_turn_tools=2)
+    )
+
+    from local_operator.session import transcript_index as ti
+
+    started: list[str] = []
+    original = ti.start_refresh
+
+    # COLD, the state held still: the recorder STANDS IN for the scan (the real
+    # one would race the assertion below), and its calls are the proof the read
+    # asked the page loop for the work rather than doing it here.
+    def _recorder(root: Path, session_id: str) -> Any:
+        started.append(session_id)
+        return None
+
+    monkeypatch.setattr(ti, "start_refresh", _recorder)
+    cold = _owner_frame(server_b)
+    assert cold["runs"] == [], cold
+    assert cold["runs_state"] == "building", cold
+    assert started.count(SESSION) >= 1, started
+
+    # REAL SCHEDULING, the half the recorder cannot prove: with the engine
+    # restored, the read's ensure must actually LAND a refresh — on the page
+    # loop, off the reader thread — for the client's next read to carry facts.
+    monkeypatch.setattr(ti, "start_refresh", original)
+    asked = _owner_frame(server_b)
+    assert asked["runs_state"] in {"ready", "building"}, asked
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and ti.fresh_resident(server_b.root, SESSION) is None:
+        time.sleep(0.02)
+    assert (
+        ti.fresh_resident(server_b.root, SESSION) is not None
+    ), "the refresh the read ensured never landed"
+
+    # READY: a resident index answers with run facts, and no second scan is
+    # scheduled for facts that are already there.
+    seen: list[str] = []
+
+    def _watcher(root: Path, session_id: str) -> Any:
+        seen.append(session_id)
+        return None
+
+    monkeypatch.setattr(ti, "start_refresh", _watcher)
+    ready = _owner_frame(server_b)
+    assert seen == [], "a resident index must not pay a new refresh"
+    assert ready["runs_state"] == "ready", ready
+    assert ready["runs"], ready
+    user_ids = {rid for rid in ids if rid.startswith("user")}
+    assert ready["runs"][-1]["opening_user_id"] == "user02", ready["runs"]
+    assert all(run["opening_user_id"] in user_ids for run in ready["runs"]), ready["runs"]
+
+
+def test_the_owner_open_frame_without_a_journal_is_empty_and_unsupported(
+    peer_pair: Devices,
+) -> None:
+    """A session directory with no journal: the empty page, ``unsupported`` facts.
+
+    A draft's directory exists before its first row is written. The frame cannot
+    promise run facts about nothing, so the arm mirrors the desktop twin's: the
+    empty page with ``cursor_missing`` taken from the request, and the
+    ``unsupported`` triple on it.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    (server_b.root / "sessions" / SESSION).mkdir(parents=True, exist_ok=True)
+
+    frame = _owner_frame(server_b)
+    assert frame == {
+        "entries": [],
+        "has_more": False,
+        "cursor_missing": False,
+        "has_newer": None,
+        "runs": [],
+        "runs_state": "unsupported",
+        "head_cut": False,
+    }, frame
+    # And a cursor read says the cursor MISSED rather than inventing an empty tail.
+    cursored = _owner_frame(server_b, before_id="does-not-exist")
+    assert cursored["cursor_missing"] is True, cursored
+    assert cursored["runs_state"] == "unsupported", cursored
+
+
+def test_the_owner_open_frame_sizes_the_reply_with_its_runs_included(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The size-fit sees the WHOLE frame — ``runs`` included — and keeps the newest rows.
+
+    With room, a frame carrying run facts fits the link budget untouched. Sized
+    down to nearly one row, the trim keeps the NEWEST rows, says ``has_more``,
+    and — the point of this cell — the trim is measured against a frame whose
+    ``runs`` are already on it, so the facts survive the bound rather than
+    being spelled off the reply or making it unfittable.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=4, per_turn_tools=2))
+    _warm_frame_index(server_b.root, SESSION)
+
+    full = _owner_frame(server_b, limit=50)
+    assert full["runs_state"] == "ready" and full["runs"], full
+    assert (
+        relay.session_history_reply_bytes(1, full) <= relay.SESSION_HISTORY_REPLY_BUDGET_BYTES
+    ), "the frame exceeded the link budget without a cap binding"
+
+    # Sized so that ONE row fits beside the runs: the largest suffix is exactly one.
+    one = relay.session_history_reply_bytes(
+        1, {**full, "entries": full["entries"][-1:], "has_more": True}
+    )
+    monkeypatch.setattr(relay, "SESSION_HISTORY_REPLY_BUDGET_BYTES", one)
+    trimmed = _owner_frame(server_b, limit=50)
+    assert len(trimmed["entries"]) == 1, trimmed["entries"]
+    assert trimmed["entries"][0]["id"] == full["entries"][-1]["id"], trimmed["entries"]
+    assert trimmed["has_more"] is True, trimmed
+    assert trimmed["runs_state"] == "ready", trimmed
+    assert trimmed["runs"] == full["runs"], trimmed
+    assert relay.session_history_reply_bytes(1, trimmed) <= one
+
+
+@pytest.mark.asyncio
+async def test_the_viewer_surfaces_the_owners_frame_for_a_peer_row(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole viewer path: bridge -> control socket -> owner build -> back.
+
+    The desktop bridge's peer arm threads the flag into the stored read, so the
+    OWNER's facts arrive on the page the desktop returns — over the real pair of
+    relays and the real control socket. Then the same page WITHOUT the owner's
+    build (the old-owner shape, the key dropped before the handler) falls back
+    to the documented unsupported triple, and a flagless read keeps today's four
+    keys and today's unstripped rows.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.server.utils.desktop_sessions import DesktopSessionBridge
+
+    server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=3, per_turn_tools=2))
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    row = SessionRow(
+        id=SESSION,
+        mtime=1_700_000_000.0,
+        name="frame probe",
+        live_state="idle",
+        locality="remote",
+        owner_device=server_b.identity.device_id,
+        owner_device_name="device-b",
+        reachable=True,
+        unreachable_reason="",
+    )
+    bridge = DesktopSessionBridge(server_a.root, SESSION, "", remote_row=row)
+    try:
+        page = await bridge.history(open_frame=True, limit=50)
+        assert {"runs", "runs_state", "head_cut"} <= set(page), page
+        assert page["runs_state"] in {"ready", "building"}, page
+        served_types = [str(entry["payload"].get("custom_type") or "") for entry in page["entries"]]
+        assert "session_spend.v1" not in served_types, page["entries"]
+        assert "frontend_state_checkpoint_v1" not in served_types, page["entries"]
+        # THE STORED DOOR STILL STAMPS ITS OWN VOCABULARY, frame or not.
+        assert {entry["ts_source"] for entry in page["entries"]} == {"entry"}, page["entries"]
+
+        # FLAGLESS: today's page, exactly four keys, nothing stripped.
+        plain = await bridge.history(limit=50)
+        assert set(plain) == {"entries", "has_more", "cursor_missing", "has_newer"}, plain
+        plain_types = [str(entry["payload"].get("custom_type") or "") for entry in plain["entries"]]
+        assert "session_spend.v1" in plain_types, plain["entries"]
+
+        # THE OLD OWNER: the key dropped before the handler (the compat matrix's
+        # own simulation). The bridge defaults the three fields — the documented
+        # triple — and the page falls back to today's unstripped rows.
+        original = server_b._handlers["net_session_history"]
+
+        def _owner_older_than_the_facts_half(link_: Any, frame: dict[str, Any]) -> Any:
+            return original(link_, {k: v for k, v in frame.items() if k != "open_frame"})
+
+        monkeypatch.setitem(
+            server_b._handlers, "net_session_history", _owner_older_than_the_facts_half
+        )
+        aged = await bridge.history(open_frame=True, limit=50)
+        assert aged["runs"] == [], aged
+        assert aged["runs_state"] == "unsupported", aged
+        assert aged["head_cut"] is False, aged
+        aged_types = [str(entry["payload"].get("custom_type") or "") for entry in aged["entries"]]
+        assert "session_spend.v1" in aged_types, aged["entries"]
     finally:
         link.close("test")
 
