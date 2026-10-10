@@ -5240,6 +5240,22 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
+    async def api_supplement_stub(request: Request) -> Response:
+        """The two turn-supplement read routes, as C0 STUBS: auth, then 404.
+
+        ``GET /api/sessions/{id}/supplements/{digest}/document`` (the assembled component
+        as ``{html}``) and ``GET /api/sessions/{id}/supplements/{job}/file?i=<n>`` (a file
+        callout's bytes, allowlisted ``Content-Type``) are frozen here so the route table
+        and the auth ordering are settled before lane C2 implements them
+        (``docs/design/turn-supplements.md`` §2.7). ``gate()`` runs FIRST on purpose: an
+        unauthenticated caller must get the 401 and learn nothing about whether the route
+        is real, which is the ordering the real routes have to keep.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        return JSONResponse({"error": "supplement not available"}, status_code=404)
+
     async def api_command(request: Request) -> Response:
         """The one mutation endpoint: {op, ...} → control frame. Keeping
         mutations on one route mirrors the registrant's dispatch and keeps
@@ -6699,6 +6715,14 @@ def build_app(daemon: MobileDaemon):
             methods=["POST"],
         ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
+        Route(
+            "/api/sessions/{session_id:str}/supplements/{digest:str}/document",
+            api_supplement_stub,
+        ),
+        Route(
+            "/api/sessions/{session_id:str}/supplements/{job:str}/file",
+            api_supplement_stub,
+        ),
         Route("/api/sessions/{session_id:str}/command", api_command, methods=["POST"]),
         Route(
             "/api/sessions/{session_id:str}/operator/challenge",
