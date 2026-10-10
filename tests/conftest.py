@@ -177,6 +177,16 @@ _AMBIENT_VARS = (
     # SAS-mismatch arm would never be exercised. Scrubbed here, and a test that
     # needs the seam sets it explicitly.
     "LOP_NETWORK_TEST_MODE",
+    # The spawn-lineage record (``macos_disclaim.ENV_SPAWN_CHAIN``): written into
+    # every long-lived child's environment by ``spawn_disclaimed`` and read back
+    # by the child's boot record and signal receipt. It names real processes (the
+    # spawner and its ancestors), so a value inherited from the developer's shell
+    # -- or from a lop session that launched pytest, which is the COMMON case,
+    # since every runtime is born with one -- would be prepended to by every test
+    # that spawns and asserted on by every test that reads a chain, making the
+    # recorded lineage depend on who ran the suite. Tests that need a chain set it
+    # explicitly.
+    "LOP_SPAWN_CHAIN",
     # The delegation allowance the guard reads beside them: set by the `bash`
     # tool on commands run by a session that HOLDS `task`, and the second route
     # by which an agent's shell may legitimately open a session. An inherited
