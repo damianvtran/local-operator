@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -264,7 +265,7 @@ def test_prewarm_builds_synchronously_and_never_raises(
 
 
 @pytest.fixture
-def fake_notify_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+def fake_notify_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """A real file standing in for notify-send (the probe keys on its stat), and
     an isolated config dir for the persisted answer."""
     binary = tmp_path / "notify-send"
