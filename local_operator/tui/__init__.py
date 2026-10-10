@@ -190,17 +190,20 @@ def _schedule_click_preparation(app: Any) -> "asyncio.Task[None]":
 
     SCHEDULED, NEVER AWAITED, for the reason ``_schedule_aida_boot_ensure``
     gives: a first-run compile of the macOS bundle is seconds of work that
-    belongs nowhere near the first paint. ``to_thread`` because the compile
-    BLOCKS; held on the app so the task cannot be collected mid-flight. The TUI
-    is the surface where terminal markers exist, which is the only reason the
-    remembered-terminal half can run here and not in the click.
+    belongs nowhere near the first paint. It runs on a daemon thread rather than
+    ``asyncio.to_thread`` so that quitting mid-compile does not wait for it
+    (``resume_click.prepare_for_clicks_detached`` has the measurement). Held on
+    the app so the task cannot be collected mid-flight. The TUI is the surface
+    where terminal markers exist, which is the only reason the
+    remembered-terminal half can run here and not in the click — and why it
+    alone passes ``attended_terminal``.
     """
 
     async def _prepare() -> None:
         try:
-            from local_operator.tui.resume_click import prepare_for_clicks
+            from local_operator.tui.resume_click import prepare_for_clicks_detached
 
-            await asyncio.to_thread(prepare_for_clicks)
+            await prepare_for_clicks_detached(attended_terminal=True)
         except Exception:  # noqa: BLE001 — never the boot's failure
             logger.debug("click preparation failed", exc_info=True)
 

@@ -549,7 +549,7 @@ def _route_to_viewer(session_id: str, *, surface: str | None = None) -> bool:
     return False
 
 
-def prepare_for_clicks() -> None:
+def prepare_for_clicks(*, attended_terminal: bool = False) -> None:
     """Make the NEXT banner's click work, from a moment a person is present.
 
     Called off the event loop by the surfaces a human is looking at (the TUI at
@@ -563,6 +563,12 @@ def prepare_for_clicks() -> None:
       cold machine the first banner otherwise goes out through ``osascript``,
       which cannot be clicked, and Aida's check-in — a one-turn runtime's only
       banner — is always that first one.
+
+    ``attended_terminal`` is True only from a caller that IS a person's terminal
+    (the TUI): it lets "I booted somewhere I cannot name" clear an older memory.
+    The desktop daemon passes the default, because it has no emulator markers
+    for the reason that it has no emulator (``spawn.remembered`` explains why
+    forgetting there would be wrong).
 
     Gated on the same two questions every banner asks first, so a user who
     turned notifications off, or a rig under a redirected HOME, pays no compile
@@ -584,10 +590,49 @@ def prepare_for_clicks() -> None:
         root = config_dir()
         from local_operator.spawn import remembered
 
-        remembered.remember_current(root)
+        remembered.remember_current(root, forget_if_undetected=attended_terminal)
         notifier_app.prewarm(root)
     except Exception:  # noqa: BLE001 — see the docstring
         logger.debug("could not prepare the click path", exc_info=True)
+
+
+async def prepare_for_clicks_detached(*, attended_terminal: bool = False) -> None:
+    """Run :func:`prepare_for_clicks` on a DAEMON thread and await it.
+
+    **NOT ``asyncio.to_thread``.** That runs in the loop's default executor, and
+    ``asyncio.run`` JOINS the default executor when the loop shuts down, so
+    quitting during the first run after a ``BUILD_STAMP`` bump would wait for
+    ``clang`` (up to its 120 s timeout) before the process could exit. Measured
+    against a plain ``to_thread`` sleep of 4 s: ``asyncio.run`` returned after
+    4.2 s; with a daemon thread, after 0.1 s. A daemon thread is abandoned at
+    exit instead, which is safe here: the build is guarded by the single-builder
+    marker, ``is_built`` trusts only a complete stamp, and a killed build is
+    reclaimed by the marker's stale window — the contract
+    ``notifier_app._build_in_background`` already relies on.
+
+    Shared by the TUI boot hook and the daemon's lifespan so the two cannot
+    drift into one that joins and one that does not. Never raises.
+    """
+    import asyncio
+    import threading
+
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future[None] = loop.create_future()
+
+    def _work() -> None:
+        try:
+            prepare_for_clicks(attended_terminal=attended_terminal)
+        except Exception:  # noqa: BLE001 — never the boot's failure
+            logger.debug("click preparation failed", exc_info=True)
+        finally:
+            # The loop may already be closed by an exit that did not wait.
+            try:
+                loop.call_soon_threadsafe(lambda: done.done() or done.set_result(None))
+            except RuntimeError:
+                pass
+
+    threading.Thread(target=_work, name="click-preparation", daemon=True).start()
+    await done
 
 
 def _remembered_backend(env: EnvMap, already: list[SpawnBackend]) -> SpawnBackend | None:
@@ -600,10 +645,16 @@ def _remembered_backend(env: EnvMap, already: list[SpawnBackend]) -> SpawnBacken
     happened. Withheld when it is the candidate detection already chose, so a
     refusal is not reported twice and the failure is not delayed.
 
-    Nothing here checks that the terminal is installed: each backend's ``spawn``
-    answers False for a missing binary, and the loop in
-    :func:`_spawn_terminal` then moves on to the next candidate, so a stale
-    memory costs one refused spawn, never the click.
+    Nothing here checks that the terminal is installed. That is safe only
+    because every backend's ``spawn`` answers FALSE for a terminal that is not
+    there, and the loop in :func:`_spawn_terminal` then moves on to
+    Terminal.app: kitty/WezTerm/Ghostty-on-Linux by ``shutil.which``, the
+    AppleScript backends by ``osascript``'s exit status, and Ghostty on macOS —
+    which is ``open -na Ghostty.app`` and used to answer True the moment ``open``
+    STARTED, even for a missing bundle — by ``open``'s own exit status (see
+    ``spawn.ghostty``). The memory is also dropped when it is stale
+    (``spawn.remembered.MAX_AGE_S``) or when the TUI later boots somewhere it
+    cannot name.
     """
     try:
         from local_operator import terminals
