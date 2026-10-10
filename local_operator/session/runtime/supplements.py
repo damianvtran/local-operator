@@ -479,7 +479,17 @@ class SupplementRunner:
                     )
                 )
 
-            await self._commit_row(anchor=anchor, build=build_done)
+            final = await self._commit_row(anchor=anchor, build=build_done)
+            if final is not None:
+                # THE FILES-ONLY BEAT. The graphics path beats `decided` before it runs;
+                # the files half is the DEFAULT half (graphics ship off), and a surface's
+                # live path learns every row from this family — so without this beat a
+                # files-only callout was visible only after a reload, on every surface.
+                # `decided`/`done` are the only states that carry `files` (§2.7), so the
+                # terminal state is the correct beat here: the row is terminal on arrival.
+                # (Added by the TUI lane; the design's §2.4 rule is "file callouts appear
+                # without waiting for the generator".)
+                await self._progress(final, "done")
         finally:
             self._live_jobs.discard(job)
 
