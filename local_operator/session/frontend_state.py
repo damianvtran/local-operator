@@ -20,6 +20,7 @@ import weakref
 from collections import deque
 from collections.abc import (
     Callable,
+    Collection,
     Iterable,
     Iterator,
     Mapping,
@@ -2802,6 +2803,34 @@ class FrontendModelAccess(BaseModel):
     #: has no provider registry, and a client inventing one is how the two
     #: surfaces start describing one situation with two vocabularies.
     label: str
+
+
+def model_access_claim(
+    selector: str | None, usable: Collection[str] | None
+) -> FrontendModelAccess | None:
+    """The claim a host publishes for ``selector``, or ``None`` for "no claim".
+
+    ONE spelling of the mapping, shared by every publishing host, so the TUI and
+    a serve-side runtime cannot describe the same store with two answers: the
+    inputs are the session's selector (``provider/model_id``) and the WIDE
+    usable-providers set (``ProviderController.usable_providers`` — keyless
+    locals included, because that is the set the pickers filter by).
+
+    ``None`` in either input is "cannot tell": a selectorless session has no
+    model to speak about, and an unreadable store must not present as
+    ``signed_out`` (an accusation nobody established).
+    """
+    if not selector or usable is None:
+        return None
+    from local_operator.providers.registry import get_provider_definition
+
+    provider = selector.partition("/")[0]
+    definition = get_provider_definition(provider)
+    return FrontendModelAccess(
+        state="ok" if provider in usable else "signed_out",
+        provider=provider,
+        label=definition.name if definition is not None else provider,
+    )
 
 
 class FrontendUsage(Usage):

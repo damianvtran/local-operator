@@ -2394,6 +2394,22 @@ class AttachClient:
     async def set_effort(self, effort: str) -> str:
         return await self._request("set_effort", effort=effort)
 
+    async def rehome_if_current(self, expected: str, provider: str, model_id: str) -> str:
+        """Move the owner off ``expected`` only if it is STILL exactly ``expected``.
+
+        The sign-in re-home's client half: the desktop has already decided this
+        session is a candidate from its own mirror, and the owner re-checks every
+        term under its own state (``rehome_if_current`` beside ``set_model_effort``)
+        because the mirror is a snapshot and the user may have picked a model in
+        between. The answer is the owner's own word — ``rehomed: <old> → <new>``
+        or ``kept: <why>`` — and an owner too old to know the op answers the
+        standard unknown-op error, which the caller reports as "this session
+        cannot be re-homed" rather than as a failure.
+        """
+        return await self._request(
+            "rehome_if_current", expected=expected, provider=provider, model_id=model_id
+        )
+
     async def approval_answer(
         self, request_id: str, approved: bool, *, deadline_s: float = ACK_TIMEOUT_S
     ) -> str:

@@ -712,6 +712,83 @@ async def test_an_owner_without_the_effort_capability_keeps_its_plain_switch() -
 
 
 @pytest.mark.asyncio
+async def test_a_rehome_frame_reaches_the_optional_capability_with_all_three_fields() -> None:
+    """``rehome_if_current`` dispatch: three fields, and a probe for the method.
+
+    The op is new in this build, so unlike ``set_model`` there is no older
+    two-argument shape to degrade to — but the HANDLE is duck-typed across
+    several owners (the serving session, a TUI-hosted one, a long tail of test
+    doubles), so the arm getattr-probes and answers a sentence rather than an
+    AttributeError. Both halves are pinned here: the fields reach an owner that
+    has the method, and an owner without it is refused in words the caller can
+    read as "this session cannot be re-homed".
+    """
+
+    class RehomeHandle(FakeHandle):
+        async def rehome_if_current(self, expected, provider, model_id):  # noqa: ANN001, ANN202
+            return await self._record("rehome_if_current", expected, provider, model_id)
+
+    handle = RehomeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps(
+                {
+                    "op": "rehome_if_current",
+                    "req": 24,
+                    "expected": "radient/auto",
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        assert (await _until(reader, "ack", 24))["detail"] == "rehome_if_current ok"
+        assert handle.calls[-1][0:2] == (
+            "rehome_if_current",
+            ("radient/auto", "deepseek", "deepseek-flash"),
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+    class NoRehomeHandle(FakeHandle):
+        rehome_if_current = None  # type: ignore[assignment]
+
+    runtime = RuntimeServer(NoRehomeHandle(), kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps(
+                {
+                    "op": "rehome_if_current",
+                    "req": 25,
+                    "expected": "radient/auto",
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        frame = await _until(reader, "error", 25)
+        assert "cannot be re-homed" in frame["message"]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_peer_message_to_an_unengaged_session_is_refused() -> None:
     """THE NEW RULE, receive side: a runtime whose record says ``started=False``
     (a fresh ``/new`` in the composer) refuses a ``peer_message`` op.
