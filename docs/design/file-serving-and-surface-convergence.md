@@ -45,7 +45,7 @@ No root allowlist in the default mode. Keep: raw `..` refusal, `expanduser`/reso
 
 **D3 — The Host check stays and is promoted to the load-bearing rebinding control on these routes; the wildcard-bind bypass is DELETED and a wildcard/empty announced host is fail-closed (IP literals and `localhost` only; DNS names refused).** Parser hardening (`:535-537`) kept. Extending the check beyond `/v1/static/*` (follow-up d) is §3.6.
 
-**D4 — The response policy is untouched**: CSP (media/HTML), `frame-ancestors`, `nosniff`, CORS-grant strip — every static response, errors included (`static_roots.py:152-196, 482-490, 554-565`; `app.py:941-994`). **The document CSP's network-off directives are a security invariant of the executing-frame contract, not a current value**: `connect-src https:`, `worker-src blob:`, `img-src`/`media-src`/`font-src` limited to `data: blob: https:`, and `default-src 'none'` (`HTML_CSP`, `static_roots.py:152-166`) are what keep a previewed document from reaching this daemon or any other local service over plain http. Any future widening of those directives is a security change for the executing-frame contract and requires the supplements-lane review; a core-side test pins them against widening (§3.7 item 10). The UI-side `PREVIEW_CSP` equivalent (`window-guards.ts:643-654`) stays supplements-owned.
+**D4 — The response policy is untouched**: CSP (media/HTML), `frame-ancestors`, `nosniff`, CORS-grant strip — every static response, errors included (`static_roots.py:152-196, 482-490, 554-565`; `app.py:941-994`). **The document CSP's network-off directives are a security invariant of the executing-frame contract, not a current value**: `connect-src https:`, `worker-src blob:`, `img-src`/`media-src` limited to `data: blob: https:`, `font-src` limited to `data: https:`, and `default-src 'none'` (`HTML_CSP`, `static_roots.py:152-166`) are what keep a previewed document from reaching this daemon or any other local service over plain http. Any future widening of those directives is a security change for the executing-frame contract and requires the supplements-lane review; a core-side test pins them against widening (§3.7 item 10). The UI-side `PREVIEW_CSP` equivalent (`window-guards.ts:643-654`) stays supplements-owned.
 
 **D5 — Route families are explicit, because the clamp's removal must not widen what an executing document can reach** (supplements lane constraint, verbatim requirement): *"a DISTINCT route family for executable generated documents, not reuse of the general file route"* and *"nothing we ship weakens the sandbox on a page that executes."* The family map:
    - `/v1/static/images|videos|audio` — bytes embedded or streamed by the app (media CSP). **These never serve `text/html` or any document type** (mime allowlists already enforce it; pinned by test).
@@ -113,7 +113,7 @@ Unit + integration (isolated `HOME`, `env -i`, loopback ephemeral port; patterns
 7. Response policy on every status (CSP variants, nosniff, no ACAO for foreign origin) re-run from the `test_server_static.py` matrix; `turn-supplements`' copy of the attack matrix is the reference.
 8. A test pins that `/v1/static/images|videos|audio` cannot serve `text/html` or `*/*` bytes (D5's "no executable document under the general family").
 9. Docs tests (if the repo has any for DESKTOP_API/turn-supplements status) — else manual review checklist.
-10. **Core-side CSP invariant**: a test pins `HTML_CSP`'s network-off directives (`connect-src https:`, `worker-src blob:`, `img-src`/`media-src`/`font-src` = `data: blob: https:`, `default-src 'none'`) against widening — any change fails the test so it must go through the supplements-lane review (D4). The UI-side `PREVIEW_CSP` equivalent stays supplements-owned; not tested here.
+10. **Core-side CSP invariant**: a test pins `HTML_CSP`'s network-off directives (`connect-src https:`, `worker-src blob:`, `img-src`/`media-src` = `data: blob: https:`, `font-src` = `data: https:`, `default-src 'none'`) against widening — any change fails the test so it must go through the supplements-lane review (D4). The UI-side `PREVIEW_CSP` equivalent stays supplements-owned; not tested here.
 
 ## 4. The auth design (phased, abstracted, automatic)
 
@@ -251,7 +251,7 @@ One file-serving semantics, owned by core: predicate + mime policy + size policy
 
 ## 11. Manager rulings (2026-10-10)
 
-Folded into v2; recorded here so reviewers see dispositions without re-reading the thread.
+Folded into v2 and v3; recorded here so reviewers see dispositions without re-reading the thread.
 
 | # | Item | Ruling |
 |---|---|---|
