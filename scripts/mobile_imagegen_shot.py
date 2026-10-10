@@ -12,11 +12,14 @@ state lines' text, the transcript scroller's box and the body's scroll width.
 So "the control is a 44px target" and "nothing overflows sideways" are
 measured statements rather than claims about a PNG.
 
-ONE EXTRA GESTURE: on the running session the script presses the card's own
+TWO EXTRA GESTURES. On the running session the script presses the card's own
 Cancel and photographs the ``cancelling…`` hold — the state the frozen
 contract says must never be skipped optimistically — and takes a second
 running frame ~450 ms later so the tile's shimmer is evidenced as MOTION (the
-two frames differ) rather than asserted from one still.
+two frames differ) rather than asserted from one still. On the queue-position
+session it presses the queued card's own cancel (wave-2 conformance: queued
+cards offer one) and photographs the reduced hold that must carry NO
+generating body — neither tile nor bar — because nothing had started.
 
 ``Chrome``/``Page`` are reused from ``scripts/mobile_overflow_capture.py``:
 one throwaway ``--headless=new`` browser per run, its own profile,
@@ -47,7 +50,9 @@ VIEWPORTS = ((390, 844), (360, 780))
 #: The sessions to photograph, keyed by the row label the list shows. The value
 #: is the prefix used for the frame's file name. Order is the reading order of
 #: the state machine. The running row ALSO yields the press-driven
-#: ``cancelling-<vw>`` frame below; ``cancelling-wire`` is the feed-driven hold
+#: ``cancelling-<vw>`` frame below, and the queue-position row the press-driven
+#: ``cancelling-queued-<vw>`` frame (the F3 reduced hold: no generating body);
+#: ``cancelling-wire`` is the feed-driven hold
 #: (``stage: "cancelling"`` with no click) and ``mid-walk`` the
 #: ``stage: None`` failure beat — the two canonical inputs added with the wire
 #: freeze, photographed rather than argued from the adapter tests alone.
@@ -217,6 +222,20 @@ def main() -> None:
                     # The cancel press, held in the fixture (no confirmation
                     # ever lands), photographed as the state under test.
                     hold = f"cancelling-{vw}x{vh}"
+                    report[hold] = {"click": json.loads(page.js(_click_button_js("cancel")))}
+                    time.sleep(0.8)
+                    report[hold].update(json.loads(page.js(GEOMETRY_JS)))
+                    page.shot(outdir / f"{hold}.png")
+                    print(f"{hold}: {json.dumps(report[hold], indent=1)}", flush=True)
+                if prefix == "queued-pos":
+                    # THE QUEUED PRESS (wave-2 conformance): the queued card's
+                    # own cancel, pressed and photographed as its hold — the
+                    # state that must carry NO generating body (no tile, no
+                    # bar), because nothing had started. Before this round the
+                    # control did not exist on a queued card (the dead end the
+                    # audit names); the geometry dump proves the hold's shape
+                    # (tile: null, bar: null, the hold line) beside the frame.
+                    hold = f"cancelling-queued-{vw}x{vh}"
                     report[hold] = {"click": json.loads(page.js(_click_button_js("cancel")))}
                     time.sleep(0.8)
                     report[hold].update(json.loads(page.js(GEOMETRY_JS)))
