@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Iterator
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -254,6 +254,23 @@ def test_the_policy_refusal_happens_before_anything_binds(
     mock_bind.assert_not_called()
     assert captured_server == {}
     assert "loopback-only by policy" in capsys.readouterr().err
+
+
+def test_an_adopted_listener_bound_wide_is_refused_and_closed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RFC §3.1: the adopt path checks the socket's REAL bound address, not the
+    ``--host`` argument (which passed the policy above). A descriptor bound by
+    an older build while waiting must not be served on wide, and an unadopted
+    wide listener must not sit open either.
+    """
+    fake = MagicMock()
+    fake.getsockname.return_value = ("0.0.0.0", 41234)
+    with patch.object(cli, "adopt_serve_socket", return_value=fake) as mock_adopt:
+        assert serve_command("127.0.0.1", 0, False, listener_fd=999) == 1
+    mock_adopt.assert_called_once_with(999, "127.0.0.1")
+    fake.close.assert_called_once()
+    assert "cannot adopt a listener bound to 0.0.0.0" in capsys.readouterr().err
 
 
 def _recorded_bind_options(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
