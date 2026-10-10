@@ -9,6 +9,7 @@ registration returns a fake id without executing the runner.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,25 +24,35 @@ from local_operator.video import records as video_records
 
 class _FakeJobs:
     """Minimal structural stand-in for ``JobManagerProtocol`` (runtime_checkable:
-    the protocol members must EXIST for pydantic to accept it) plus the two
-    methods the video tool actually uses."""
+    the protocol members must EXIST for pydantic to accept it) plus the methods
+    the video tool actually uses.
+
+    Registered ids read back as LIVE jobs via ``get``/``list`` — the
+    watcher-dedupe contract needs a second ``video_status`` call to SEE the
+    watcher the first one registered.
+    """
 
     def __init__(self) -> None:
         self.registered: list[dict[str, Any]] = []
         self.outputs: list[tuple[str, str]] = []
+        self.live: dict[str, Any] = {}
+        self._next = 0
 
     def get(self, job_id: str, *, registrant_id: str | None = None) -> Any:
-        return None
+        return self.live.get(job_id)
 
     def list(self, *, registrant_id: str | None = None) -> list[Any]:
-        return []
+        return list(self.live.values())
 
     async def cancel(self, job_id: str, *, registrant_id: str | None = None) -> bool:
         return False
 
     def register(self, *, type: str, label: str, run: Any, **_kwargs: Any) -> str:
-        self.registered.append({"type": type, "label": label, "run": run})
-        return "job-1"
+        self._next += 1
+        job_id = f"job-{self._next}"
+        self.registered.append({"type": type, "label": label, "run": run, "id": job_id})
+        self.live[job_id] = SimpleNamespace(id=job_id, status="running")
+        return job_id
 
     def append_output(self, job_id: str, text: str) -> None:
         self.outputs.append((job_id, text))
@@ -375,3 +386,144 @@ async def test_video_status_unknown_and_pending(
     assert "still running" in text
     assert "observation resumed" in text
     assert runner_seen, "the watcher runner must be built for the pending record"
+
+
+@pytest.mark.asyncio
+async def test_video_status_dedupes_the_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second ``video_status`` on the same pending record must NOT register
+    a twin watcher (round-1 review V1): each watcher settles through the
+    ordinary delivery path, so N registrations deliver N completion rows for
+    one generation.
+
+    The dedupe rides the record itself — the watcher's id is journaled on a
+    revision — so the journal here APPENDS the row to the same transcript the
+    scanner reads, exactly as ``Session.journal_video_job`` does.
+    """
+    import json
+
+    from local_operator.session import transcript as transcript_module
+
+    _write_records(
+        tmp_path,
+        [
+            {
+                "job": "www",
+                "v": 1,
+                "at": "2026-10-10T10:00:00+00:00",
+                "state": "running",
+                "provider": "fal",
+                "model": "m",
+                "mode": "t2v",
+                "provider_ref": {"request_id": "r"},
+            }
+        ],
+    )
+
+    import local_operator.video.rungs as video_rungs
+
+    async def fake_poll_once(**_kwargs: Any) -> Any:
+        return video_rungs.VideoPollOutcome(state="running")
+
+    stamped: list[dict[str, Any]] = []
+
+    async def fake_journal(record: dict[str, Any]) -> None:
+        stamped.append(record)
+        path = tmp_path / "transcript.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        line = json.dumps(
+            {
+                "id": f"r{len(lines)}",
+                "ts": float(len(lines)),
+                "type": transcript_module.ENTRY_CUSTOM,
+                "payload": {
+                    "custom_type": video_records.VIDEO_JOB_CUSTOM_TYPE,
+                    "details": record,
+                },
+            },
+            separators=(",", ":"),
+        )
+        path.write_text("\n".join([*lines, line]) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(video_tool, "poll_video_once", fake_poll_once)
+    monkeypatch.setattr(
+        video_tool, "make_video_watcher_runner", lambda **kw: (lambda *a, **k: None)
+    )
+    jobs = _FakeJobs()
+    ctx = ToolContext(
+        cwd=str(tmp_path),
+        session_dir=str(tmp_path),
+        jobs=jobs,  # type: ignore[arg-type]
+        journal_video_job=fake_journal,
+    )
+
+    first = await video_tool.execute_video_status("call-6", {}, context=ctx)
+    assert not first.is_error
+    assert len(jobs.registered) == 1
+    assert stamped and stamped[0].get("watcher") == "job-1"
+    assert stamped[0].get("provider_ref") == {"request_id": "r"}
+
+    second = await video_tool.execute_video_status("call-7", {}, context=ctx)
+    assert not second.is_error
+    assert len(jobs.registered) == 1, "a second status call registered a twin watcher"
+    second_text = second.content[0].text
+    assert "already resumed as job job-1" in second_text
+    assert "jobs op='cancel', job_id='job-1'" in second_text
+
+
+def test_terminal_text_conflict_branch_uses_the_frozen_sentence() -> None:
+    """The record's conflict pair renders as the frozen "already finished"
+    sentence, and a plain cancel renders the note as its own sentence — no
+    ``(cancelled — ….).`` nesting (round-1 design D1/D2)."""
+    from local_operator.video import jobs as video_jobs
+
+    conflict = {
+        "state": "cancelled",
+        "error_type": "media_already_completed",
+        "error": video_jobs._CANCEL_CONFLICT_SENTENCE,
+        "outcome_note": (
+            "Provider job not cancelled — it had already completed; its result was discarded."
+        ),
+    }
+    assert video_tool._terminal_text(conflict, "jjj") == (
+        "Video job jjj was cancelled. The generation had already completed when the "
+        "cancel arrived; its result was discarded."
+    )
+    assert (
+        video_tool._terminal_text(
+            {"state": "cancelled", "outcome_note": "Provider job cancelled."}, "kkk"
+        )
+        == "Video job kkk was cancelled. Provider job cancelled."
+    )
+    assert video_tool._terminal_text({"state": "cancelled"}, "mmm") == (
+        "Video job mmm was cancelled."
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_settle_carries_the_provider_ref_forward(tmp_path: Path) -> None:
+    """V2 (the ``video_status`` half): a settle row must keep the record's
+    ``provider_ref`` — the §1.5 refetch exists precisely for a terminal row
+    that could not register, and it cannot poll without the ref."""
+    journal: list[dict[str, Any]] = []
+
+    async def fake_journal(record: dict[str, Any]) -> None:
+        journal.append(record)
+
+    ctx = ToolContext(
+        cwd=str(tmp_path),
+        session_dir=str(tmp_path),
+        journal_video_job=fake_journal,
+    )
+    record = {
+        "job": "sss",
+        "state": "running",
+        "provider": "fal",
+        "model": "m",
+        "provider_ref": {"request_id": "r"},
+    }
+    await video_tool._write_settle(ctx, "sss", record, state="failed", outcome_note="boom")
+    assert journal and journal[0]["provider_ref"] == {"request_id": "r"}
+    assert journal[0]["state"] == "failed"
+    assert journal[0]["outcome_note"] == "boom"

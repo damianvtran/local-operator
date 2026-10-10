@@ -47,10 +47,7 @@ from typing import Any
 import httpx
 from pydantic import SecretStr
 
-from local_operator.artifacts.progress import (
-    ProgressFn,
-    emit_progress,
-)
+from local_operator.artifacts.progress import ProgressFn, emit_progress
 from local_operator.artifacts.progress import (
     progress_details as _generic_progress_details,
 )
@@ -94,6 +91,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "CancelHandle",
+    "PROVIDER_GONE_NOTE",
     "RADIENT_VIDEO_SOURCE_SKIP_MESSAGE",
     "VIDEO_FAL_QUEUE_BASE_URL",
     "VideoPollOutcome",
@@ -102,6 +100,15 @@ __all__ = [
     "run_fal_video",
     "run_radient_video",
 ]
+
+#: The provider-gone sentence — ONE home for all three sites that report a
+#: 404 (the one-shot poll's ``gone`` note, the watcher's settle note, the
+#: observation raise), so a user-visible sentence exists once (D4: the lane
+#: shipped "(404)", "(HTTP 404)" and a third variant of the same fact).
+PROVIDER_GONE_NOTE = (
+    "the provider no longer knows this job (HTTP 404) — it was cancelled or "
+    "reaped upstream; the result is not retrievable"
+)
 
 #: Radient's source refusal for video requests — ONE home, shared by the
 #: rung's own defence-in-depth skip and the cascade's capability pre-record
@@ -1162,7 +1169,7 @@ async def resume_video_observation(
             )
         if outcome.state == "gone":
             raise APIError(
-                "The provider no longer knows this job (HTTP 404).",
+                PROVIDER_GONE_NOTE,
                 status_code=404,
                 code="not_found",
             )

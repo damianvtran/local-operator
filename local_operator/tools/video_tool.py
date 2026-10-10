@@ -83,21 +83,21 @@ from local_operator.video.records import (
     read_video_records,
     record_is_terminal,
 )
-from local_operator.video.rungs import poll_video_once
+from local_operator.video.rungs import PROVIDER_GONE_NOTE, poll_video_once
 
 logger = logging.getLogger(__name__)
 
 #: Wire description (the ``generate_image`` shape: classification reads ONLY
-#: the first sentence, 160 chars; deeper docs live behind the pointers).
+#: the first sentence, 160 chars; deeper docs live behind the pointers). The
+#: first sentence is the contract §2.3 quoted string verbatim.
 _DESCRIPTION = (
-    "Generate a video asynchronously via the configured provider; it runs as a background "
-    "job and the result is attached when it settles. Docs: `tool://generate_video`; "
-    "playbook: `guide://video-generation`."
+    "Generate a video from text, an image, or a video clip; runs in the background and "
+    "reports back. Docs: `tool://generate_video`; playbook: `guide://video-generation`."
 )
 
 #: The status tool's wire description (same shape and bounds).
 _STATUS_DESCRIPTION = (
-    "Report a video generation job's status (running, settled, failed or cancelled) and "
+    "Report a video generation job's status (running, completed, failed or cancelled) and "
     "register its result once. Docs: `guide://video-generation`."
 )
 
@@ -565,7 +565,13 @@ def _terminal_text(record: dict[str, Any], job_id: str) -> str:
             pieces.append("the result is not registered in the attachment store")
         return " — ".join(pieces) + "."
     if state == "cancelled":
-        return f"Video job {job_id} was cancelled" + (f" ({note})." if note else ".")
+        if record.get("error_type") == "media_already_completed" and record.get("error"):
+            # The frozen conflict branch (contract §1.6/§4.1): the cancel
+            # arrived after the generation finished, and the surfaces render
+            # it as "already finished" — the record's own sentence, never an
+            # invented error's ink.
+            return f"Video job {job_id} was cancelled. {record['error']}"
+        return f"Video job {job_id} was cancelled." + (f" {note}" if note else "")
     if state == "failed":
         return f"Video job {job_id} failed" + (f": {note}" if note else ".")
     return f"Video job {job_id} is {state or 'in an unknown state'}."
@@ -665,10 +671,17 @@ def _answer_live(tool_call_id: str, job_id: str, record: dict[str, Any], live: A
     )
 
 
-def _spawn_watcher(
+async def _spawn_watcher(
     context: ToolContext | None, jobs: Any, job_id: str, record: dict[str, Any]
 ) -> str | None:
-    """Register the cold-follow watcher; ``None`` when capacity refuses."""
+    """Register the cold-follow watcher; ``None`` when capacity refuses.
+
+    The watcher's job id is then journaled on a record revision (same state,
+    same refs): a SECOND ``video_status`` on the same record sees it and
+    answers instead of registering a twin. Each watcher settles through the
+    ordinary delivery path, so N registrations would deliver N completion
+    rows for one generation.
+    """
     from local_operator.paths import config_dir
 
     scheduler = getattr(context, "wake_scheduler", None)
@@ -688,9 +701,44 @@ def _spawn_watcher(
         route_label=VIDEO_RUNG_LABELS.get(provider, provider or "provider"),
     )
     try:
-        return jobs.register(type="video", label=label, run=watcher)
+        watcher_id = jobs.register(type="video", label=label, run=watcher)
     except RuntimeError:
         return None
+    await _journal_watcher_stamp(context, job_id, record, watcher_id)
+    return watcher_id
+
+
+async def _journal_watcher_stamp(
+    context: ToolContext | None, job_id: str, record: dict[str, Any], watcher_id: str
+) -> None:
+    """Append the record revision that carries the watcher's id (best-effort)."""
+    journal = getattr(context, "journal_video_job", None) if context is not None else None
+    if journal is None:
+        return
+    params = record.get("params") if isinstance(record.get("params"), Mapping) else None
+    sources = record.get("sources") if isinstance(record.get("sources"), list) else None
+    provider = str(record.get("provider") or "")
+    try:
+        await journal(
+            build_record(
+                job_id=job_id,
+                state=str(record.get("state") or "running"),
+                provider=provider or None,
+                route_label=VIDEO_RUNG_LABELS.get(provider, None),
+                model=str(record.get("model") or "") or None,
+                mode=str(record.get("mode") or "") or None,
+                params=params,
+                sources=sources,
+                provider_ref=(
+                    record.get("provider_ref")
+                    if isinstance(record.get("provider_ref"), Mapping)
+                    else None
+                ),
+                watcher=watcher_id,
+            )
+        )
+    except Exception:  # noqa: BLE001 — the watcher is already running
+        logger.warning("video watcher stamp write failed", exc_info=True)
 
 
 async def _cold_follow(
@@ -733,10 +781,7 @@ async def _cold_follow(
         note = {
             "cancelled": "the provider reported the generation as CANCELLED",
             "failed": outcome.detail or "the provider reported the generation as FAILED",
-            "gone": (
-                "the provider no longer knows this job (404) — it was cancelled "
-                "or reaped upstream; the result is not retrievable"
-            ),
+            "gone": PROVIDER_GONE_NOTE,
         }[outcome.state]
         state = "cancelled" if outcome.state == "cancelled" else "failed"
         await _write_settle(context, job_id, record, state=state, outcome_note=note)
@@ -747,16 +792,43 @@ async def _cold_follow(
             f"Video job {job_id} {'was cancelled' if state == 'cancelled' else 'failed'}: {note}.",
             details={"job_id": job_id, "state": state, "error": note},
         )
+    # Observation identity (V1): a live watcher already watching this record
+    # owns the polls — a second registration would settle a SECOND completion
+    # row for the same generation. The watcher's id is journaled on the record
+    # by ``_spawn_watcher``; a terminal/absent row here means the watcher is
+    # gone (crash, cancel, settle), so falling through to a fresh spawn is the
+    # honest read.
+    known_watcher = record.get("watcher") if isinstance(record.get("watcher"), str) else None
+    if known_watcher and jobs is not None:
+        watcher = jobs.get(known_watcher)
+        if watcher is not None and watcher.status in ("running", "queued"):
+            return _text(
+                tool_call_id,
+                "video_status",
+                f"Video job {job_id} is still running on "
+                f"{VIDEO_RUNG_LABELS.get(str(record.get('provider')), 'its provider')}; "
+                f"observation is already resumed as job {known_watcher} — the completion "
+                f"will be delivered. To cancel the provider generation, cancel that "
+                f"job: `jobs op='cancel', job_id='{known_watcher}'`.",
+                details={
+                    "job_id": job_id,
+                    "state": "running",
+                    "provider": record.get("provider"),
+                    "watcher_job_id": known_watcher,
+                },
+            )
     # Still running: a watcher job keeps the runtime resident and hands the
     # completion to the ordinary settle/delivery path.
-    watcher_id = _spawn_watcher(context, jobs, job_id, record) if jobs is not None else None
+    watcher_id = await _spawn_watcher(context, jobs, job_id, record) if jobs is not None else None
     wake = VideoWakeHandle(getattr(context, "wake_scheduler", None), job_id)
     if watcher_id is not None:
         await wake.cancel()
         text = (
             f"Video job {job_id} is still running on "
             f"{VIDEO_RUNG_LABELS.get(str(record.get('provider')), 'its provider')}; "
-            f"observation resumed as job {watcher_id} — the completion will be delivered."
+            f"observation resumed as job {watcher_id} — the completion will be "
+            f"delivered. To cancel the provider generation, cancel that job: "
+            f"`jobs op='cancel', job_id='{watcher_id}'`."
         )
         return _text(
             tool_call_id,
@@ -793,6 +865,9 @@ async def _write_settle(
         return
     params = record.get("params") if isinstance(record.get("params"), Mapping) else None
     sources = record.get("sources") if isinstance(record.get("sources"), list) else None
+    provider_ref = (
+        record.get("provider_ref") if isinstance(record.get("provider_ref"), Mapping) else None
+    )
     try:
         await journal(
             build_record(
@@ -804,6 +879,7 @@ async def _write_settle(
                 mode=str(record.get("mode") or "") or None,
                 params=params,
                 sources=sources,
+                provider_ref=provider_ref,
                 result=result,
                 outcome_note=outcome_note,
             )

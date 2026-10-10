@@ -1384,7 +1384,9 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:   delta     +2,372 chars = ~+854
 #:
 #: Components, each measured and closed exactly: +2,340 chars in
-#: ``tool_schemas`` (the two parameter schemas) and +32 chars in
+#: ``tool_schemas`` (the two new parameter schemas — ``generate_video``
+#: 1,844 + ``video_status`` 490 — plus +6 from the ``jobs`` description's new
+#: "(task/bash/video)" word, per round-1 review O2) and +32 chars in
 #: ``tool_inventory`` (the two names on the listing lines); every other
 #: counter byte-identical to base. The child arm moves by the SAME +2,372
 #: chars (below), which is the check that the delta is these two tools and
