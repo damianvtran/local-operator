@@ -54,6 +54,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from local_operator.session.tail_anchor import (
+    build_anchor,
+    read_anchor,
+    validate_anchor,
+    write_anchor,
+)
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 from local_operator.session.transcript_index import probe_index, start_refresh
 
@@ -345,13 +351,6 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
     journal warmed twice in one day costs one stat the second time. Returns
     whether a NEW record was written.
     """
-    from local_operator.session.tail_anchor import (
-        build_anchor,
-        read_anchor,
-        validate_anchor,
-        write_anchor,
-    )
-
     directory = Path(root) / "sessions" / session_id
     if validate_anchor(directory, read_anchor(directory)) is not None:
         return False

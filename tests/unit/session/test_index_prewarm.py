@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -220,3 +221,95 @@ async def test_starting_the_warm_never_blocks_and_never_raises(tmp_path, monkeyp
     )
     journal(root, "s9", mtime=9_000.0)
     assert await prewarm.warm_index_cache(root, limit=1) == 0
+
+
+async def journal_with_checkpoint_row(root: Path, session_id: str, *, mtime: float) -> None:
+    """A journal that HAS a checkpoint row — the shape the anchor never describes.
+
+    ``build_anchor`` returns ``None`` for it by design (there is nothing to prove),
+    so before F11 the selector called it "not current" forever.
+    """
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    transcript = Transcript(directory, defer_materialise=False)
+    await transcript.append_message(Message(role="user", content=[TextContent(text="hi")]))
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"state": {"session_id": session_id, "sequence": 1}}
+    )
+    os.utime(directory / "transcript.jsonl", (mtime, mtime))
+
+
+@pytest.mark.asyncio
+async def test_a_journal_that_needs_no_anchor_stops_being_a_candidate(tmp_path, monkeypatch):
+    """F11: the degraded pass must reach the journal the anchor exists for.
+
+    With one slot per pass, a newest journal that already carries the checkpoint row
+    and whose index is current consumed the slot EVERY pass — the reviewer measured
+    three passes in a row with the same candidate and the checkpointless journal never
+    reached. Settling the answer in-process is what unblocks the queue.
+    """
+    root = tmp_path
+    mtime = 1_000.0
+    for name in ("older", "newest"):
+        directory = root / "sessions" / name
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+        os.utime(directory / "transcript.jsonl", (mtime, mtime))
+        mtime += 1_000.0
+    await journal_with_checkpoint_row(root, "newest", mtime=3_000.0)
+    # Its INDEX is current too, so the ANCHOR is the only reason it could be a
+    # candidate — which is exactly F11's condition.
+    await build_index(root, "newest")
+
+    monkeypatch.setattr(prewarm, "load_per_cpu", lambda: prewarm.PREWARM_MAX_LOAD_PER_CPU)
+    # The REAL anchor writer runs (the fixture journals are tiny): settling the
+    # answer is what this test is about, and a stub would not settle it. The index
+    # refresh is stubbed because the scan is not the subject here.
+    # A joinable task with ``was_started=True``: the counter this asserts on is the
+    # refresh's, and ``warm_index_cache`` awaits the task it is handed.
+    monkeypatch.setattr(prewarm, "start_refresh", lambda _root, _sid: (asyncio.sleep(0), True))
+
+    first = await prewarm.warm_index_cache(root, limit=3)
+    assert first == 1
+    newest = root / "sessions" / "newest"
+    stat = (newest / "transcript.jsonl").stat()
+    assert prewarm._NO_ANCHOR_NEEDED.get(str(newest)) == (
+        stat.st_ino,
+        stat.st_size,
+    ), "the journal that needs no anchor was not settled"
+    # The settled journal is no longer a candidate: the queue moves on to the older,
+    # checkpointless one instead of spinning on the newest again.
+    assert prewarm.sessions_needing_warm(root, limit=3)[0] == "older"
+
+
+def test_the_anchor_write_is_single_flight(tmp_path, monkeypatch):
+    """F15: two callers, one scan.
+
+    The write is reachable from the startup queue AND from a warm request, and its
+    expensive half is a whole-file scan for a checkpointless journal — the very scan
+    the record exists to make unnecessary.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    root = tmp_path
+    directory = root / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text('{"id":"a"}\n', encoding="utf-8")
+    scans: list[Path] = []
+
+    def slow_build(target):
+        scans.append(Path(target))
+        threading.Event().wait(0.05)
+        return None
+
+    monkeypatch.setattr(prewarm, "build_anchor", slow_build)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _i: prewarm.write_tail_anchor(root, "s1"), range(2)))
+
+    assert len(scans) == 1, f"the scan ran {len(scans)} times"
+    assert results == [False, False], "no sidecar belongs on this journal"
