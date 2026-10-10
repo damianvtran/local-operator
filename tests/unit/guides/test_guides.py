@@ -47,6 +47,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "qwencloud",
         "scratchpad",
         "sessions",
+        "skills",
         "system-tools",
         "teams",
         "tunnel",
@@ -118,6 +119,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
         (
             "check the review rounds and CI on this pull request",
             "code-requests",
+        ),
+        (
+            "how do skills work and how do I add one for a user",
+            "skills",
         ),
     ],
 )
