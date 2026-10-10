@@ -934,3 +934,33 @@ async def test_a_quiet_end_leaves_the_runtime_nothing_to_announce(
         assert count == 0, "no completion row exists to announce"
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hers", [True, False])
+async def test_only_her_banner_asks_for_a_durable_click(
+    tmp_path: Path, monkeypatch, hers: bool
+) -> None:
+    """Her check-in is answered hours later, so only hers pays for a long-lived
+    click helper / a synchronously-built bundle. Every other session's call must
+    stay the call it was (no keyword), or the cost lands on every banner."""
+    seen: list[dict[str, Any]] = []
+
+    def fake(title: str, body: str, **kwargs: Any) -> bool:
+        seen.append(kwargs)
+        return True
+
+    monkeypatch.setattr(notify_module, "detached_notify", fake)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    session._aida_duty = hers
+    try:
+        await _arm(handle, handle._session_id_for_resume())
+    finally:
+        await session.dispose()
+
+    assert len(seen) == 1, seen
+    if hers:
+        assert seen[0]["durable_click_s"] == notify_module.DURABLE_CLICK_WINDOW_S
+        assert seen[0]["durable_click_s"] > 3600, "must outlive a morning"
+    else:
+        assert "durable_click_s" not in seen[0]

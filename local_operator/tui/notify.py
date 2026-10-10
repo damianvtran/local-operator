@@ -1095,7 +1095,22 @@ def osascript_command(title: str, body: str) -> list[str]:
     return ["osascript", "-e", script]
 
 
-def detached_notify(title: str, body: str, *, session_id: str = "", subtitle: str = "") -> bool:
+#: How long a DURABLE banner's click stays live (seconds). See
+#: ``detached_notify(durable_click_s=...)``. Equal to the helper's own ceiling
+#: (``notifier_app.MAX_ACTIVATION_WINDOW_S``) on purpose: the only caller is
+#: Aida's check-in, which is capped at a few per rolling 24 h, so the resident
+#: helpers this buys are bounded by that cap and nothing else needs tuning.
+DURABLE_CLICK_WINDOW_S = 24.0 * 60.0 * 60.0
+
+
+def detached_notify(
+    title: str,
+    body: str,
+    *,
+    session_id: str = "",
+    subtitle: str = "",
+    durable_click_s: float | None = None,
+) -> bool:
     """Tell the user out of band about a session they are not looking at.
 
     The in-band paths above write escape sequences to a TERMINAL, which is
@@ -1113,6 +1128,37 @@ def detached_notify(title: str, body: str, *, session_id: str = "", subtitle: st
     Delivery is a detached spawn that is never waited on (``spawn_detached``
     documents the three properties that makes safe), every failure is
     swallowed, and the return value reports only whether a child was STARTED.
+
+    ``durable_click_s`` is for a banner the user answers LATER — hours, not
+    seconds — and it changes three things, so it is an explicit opt-in rather
+    than a default:
+
+    - **macOS:** the click helper stays alive that long (default 30 s). A click
+      after the helper exits does nothing and says nothing, which for Aida's
+      08:30 check-in clicked at 10:00 was the normal case.
+    - **macOS, cold machine:** the identity bundle is built SYNCHRONOUSLY
+      instead of behind the first banner. Without the bundle the banner goes
+      out through ``osascript``, which is not clickable, and a one-turn runtime
+      (Aida's) makes every banner of its process "the first one".
+    - **Linux:** the ``--action`` support probe runs synchronously when its
+      result is not already known, for the same first-banner reason.
+
+    **PASSING IT DECLARES THAT THE CALLER IS OFF THE EVENT LOOP** — both
+    synchronous steps can take seconds (a compile; a 2 s probe timeout). The
+    gate path, which calls this ON the loop, must not pass it.
+
+    **WINDOWS HAS NO RUNTIME BANNER, AND THAT IS STATED RATHER THAN GUESSED.**
+    There is no Windows branch below: ``notify-send`` does not exist there, so
+    this function returns False and the ladder behind a click is never reached
+    from a runtime banner. What a Windows user gets today is the desktop app's
+    own Electron toast (``local-operator-ui``'s ``desktop-notifier.ts``), and
+    only while the app is running; its click is handled inside that app and
+    never touches ``lop resume-click``. A click-to-open path for a runtime
+    banner would need a registered toast activator (an AppUserModelID shortcut
+    and a protocol or COM handler) and a Windows host to test it on; neither is
+    available to this repository's CI or to the machine this was written on, so
+    none is attempted. Recorded as a limitation, not as a TODO with a guess in
+    it.
     """
     if not notifications_enabled():
         return False
@@ -1130,7 +1176,7 @@ def detached_notify(title: str, body: str, *, session_id: str = "", subtitle: st
             # background, so this notification goes out the old way rather
             # than waiting on a compiler in a gate path, and the next one
             # carries the identity.
-            bundled = _identity_notifier(title, body, session_id, subtitle)
+            bundled = _identity_notifier(title, body, session_id, subtitle, durable_click_s)
             if bundled is not None:
                 return _spawn_detached_ok(bundled)
             if not shutil.which("osascript"):
@@ -1155,7 +1201,9 @@ def detached_notify(title: str, body: str, *, session_id: str = "", subtitle: st
         # invoked action's key on stdout, so a tiny waiter turns a click into
         # the resume launch. Only when a session was named — a toast with no
         # session has nothing to reopen.
-        if session_id and _notify_send_supports_actions(notifier):
+        if session_id and _notify_send_supports_actions(
+            notifier, block=durable_click_s is not None
+        ):
             return _spawn_detached_ok(_clickable_notify_command(notifier, title, body, session_id))
         return _spawn_detached_ok(desktop_notify_command(notifier, title, body, URGENCY))
     except Exception:  # noqa: BLE001 — a toast must never affect its caller
@@ -1169,25 +1217,34 @@ def _spawn_detached_ok(argv: list[str]) -> bool:
 
 
 def _identity_notifier(
-    title: str, body: str, session_id: str, subtitle: str = ""
+    title: str,
+    body: str,
+    session_id: str,
+    subtitle: str = "",
+    durable_click_s: float | None = None,
 ) -> list[str] | None:
     """argv posting through our own bundle, or None to use the plain route.
 
-    Never raises and never blocks: a missing config dir, an unbuilt bundle or
-    an unbuildable machine all answer None, which is the caller's cue to fall
-    back to the behaviour that shipped before this existed.
+    Never raises. It does not block either, EXCEPT for a durable banner
+    (``durable_click_s`` set), whose caller has declared it is off the event
+    loop and wants a clickable first banner: that one builds a cold bundle
+    synchronously. Every other caller gets None on a cold machine, which is its
+    cue to fall back to the behaviour that shipped before this existed.
     """
     try:
         from local_operator.paths import config_dir
         from local_operator.tui import notifier_app
 
-        app = notifier_app.ensure_bundle(config_dir())
+        app = notifier_app.ensure_bundle(config_dir(), block=durable_click_s is not None)
         if app is None:
             return None
         click = ""
         if session_id:
             click = " ".join(shlex.quote(part) for part in resume_click_command(session_id))
-        return notifier_app.notify_command(app, title, body, click, subtitle)
+        # A window means nothing without a click to wait for, so it is only
+        # forwarded when there is one (the helper ignores it otherwise anyway).
+        window = durable_click_s if click else None
+        return notifier_app.notify_command(app, title, body, click, subtitle, window)
     except Exception:  # noqa: BLE001 — identity is a nicety; delivery is not
         logger.debug("identity notifier unavailable", exc_info=True)
         return None
@@ -1199,9 +1256,100 @@ def _identity_notifier(
 #: notification (round 3, B3).
 _ACTION_SUPPORT: dict[str, bool] = {}
 
+#: Where the probe's answer outlives the process. See
+#: :func:`_notify_send_supports_actions` for why an in-memory cache alone is not
+#: enough for a one-turn runtime.
+_ACTION_PROBE_FILE = "notify-send-actions.json"
 
-def _notify_send_supports_actions(notifier: str) -> bool:
-    """Whether this ``notify-send`` understands ``--action``, WITHOUT blocking.
+#: How long a SYNCHRONOUS probe may take. A ``--help`` that has not answered in
+#: this long is treated as an old binary (the toast then goes out plain, which
+#: is always safe), the same verdict the background probe reaches.
+_ACTION_PROBE_TIMEOUT_S = 2.0
+
+
+def _action_probe_identity(notifier: str) -> dict[str, object] | None:
+    """What a persisted answer is keyed on, or None when it cannot be taken.
+
+    ``(path, mtime_ns, size)``: a distribution upgrade of libnotify replaces the
+    binary, which is exactly when ``--action`` can appear, and replacing it moves
+    the mtime. A stat failure answers None — an unkeyed answer must not be
+    persisted, because it could outlive the binary it described.
+    """
+    try:
+        st = os.stat(notifier)
+    except OSError:
+        return None
+    return {"path": notifier, "mtime_ns": st.st_mtime_ns, "size": st.st_size}
+
+
+def _action_probe_file() -> Path | None:
+    try:
+        from local_operator.paths import config_dir
+
+        return config_dir() / "notifier" / _ACTION_PROBE_FILE
+    except Exception:  # noqa: BLE001 — a persisted hint is never worth an exception
+        return None
+
+
+def _read_persisted_action_support(notifier: str) -> bool | None:
+    """The persisted answer for THIS binary, or None when absent or stale."""
+    import json
+
+    identity = _action_probe_identity(notifier)
+    path = _action_probe_file()
+    if identity is None or path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or any(data.get(k) != v for k, v in identity.items()):
+        return None
+    supports = data.get("supports")
+    return supports if isinstance(supports, bool) else None
+
+
+def _write_persisted_action_support(notifier: str, supports: bool) -> None:
+    """Best-effort atomic write; a failure just means the next process probes."""
+    import json
+
+    identity = _action_probe_identity(notifier)
+    path = _action_probe_file()
+    if identity is None or path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Unique temp name + replace: two runtimes probing at once must never
+        # leave a half-written file for a third to misread (a torn read is
+        # already treated as "absent", but a clean write is cheaper than relying
+        # on that).
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        tmp.write_text(json.dumps({**identity, "supports": supports}), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logger.debug("could not persist the notify-send probe", exc_info=True)
+
+
+def _run_action_probe(notifier: str) -> bool:
+    """Ask the binary, record the answer in memory AND on disk."""
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [notifier, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=_ACTION_PROBE_TIMEOUT_S,
+            check=False,
+        )
+        supports = "--action" in (result.stdout + result.stderr)
+    except Exception:  # noqa: BLE001 — an unprobeable notifier is an old one
+        supports = False
+    _ACTION_SUPPORT[notifier] = supports
+    _write_persisted_action_support(notifier, supports)
+    return supports
+
+
+def _notify_send_supports_actions(notifier: str, *, block: bool = False) -> bool:
+    """Whether this ``notify-send`` understands ``--action``.
 
     The flag is a recent (libnotify 0.8) addition, and an older binary treats
     it as an unknown option and delivers NOTHING — so a version probe is the
@@ -1214,32 +1362,40 @@ def _notify_send_supports_actions(notifier: str) -> bool:
     loop for a measured 2.03 s with a slow notifier — stalling every other
     session surface, heartbeat and socket read in the process, and directly
     contradicting `detached_notify`'s "must never block the event loop"
-    contract (#401 class).
+    contract (#401 class). So the default never waits.
 
-    So the first call NEVER waits: it answers False (the plain, always-safe
-    toast) and probes on a background thread, and every later notification
-    reads the cache. The cost of that is one un-clickable first toast on a
-    Linux machine, which is the same shape as the identity bundle's
-    build-behind-the-first-notification trade.
+    **THE ANSWER IS PERSISTED, keyed by ``(path, mtime, size)``**, because an
+    in-memory cache cannot help the process that matters. The first version
+    answered False and probed on a thread, "the same shape as the identity
+    bundle's build-behind-the-first-notification trade" — a fine trade for a
+    long-lived TUI, whose second toast is clickable. Aida's check-in comes from
+    a ONE-TURN runtime that posts a single banner and exits: every banner of
+    hers was "the first of its process", so on Linux none was ever clickable.
+    With the answer on disk the first banner of a fresh process reads it and is
+    clickable from the start; only the very first probe on a machine (or the
+    first after libnotify is upgraded) is plain.
+
+    Resolution order: memory, disk, then — only if ``block`` — a synchronous
+    probe. ``block=True`` is for a caller that has declared it is off the event
+    loop and wants its one banner clickable even on a cold machine
+    (``detached_notify(durable_click_s=...)``); everyone else probes in the
+    background and answers False this once.
     """
     cached = _ACTION_SUPPORT.get(notifier)
     if cached is not None:
         return cached
 
-    def _probe() -> None:
-        try:
-            result = subprocess.run(  # noqa: S603 — fixed argv, no shell
-                [notifier, "--help"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            _ACTION_SUPPORT[notifier] = "--action" in (result.stdout + result.stderr)
-        except Exception:  # noqa: BLE001 — an unprobeable notifier is an old one
-            _ACTION_SUPPORT[notifier] = False
+    persisted = _read_persisted_action_support(notifier)
+    if persisted is not None:
+        _ACTION_SUPPORT[notifier] = persisted
+        return persisted
 
-    threading.Thread(target=_probe, name="notify-action-probe", daemon=True).start()
+    if block:
+        return _run_action_probe(notifier)
+
+    threading.Thread(
+        target=_run_action_probe, args=(notifier,), name="notify-action-probe", daemon=True
+    ).start()
     return False
 
 
