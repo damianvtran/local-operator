@@ -96,6 +96,36 @@ def _quiesce_sidebar_refresh(app: OperatorApp) -> None:
     app._sidebar_refresh_generation += 1
 
 
+async def _await_first_attach(app: OperatorApp, pilot) -> None:
+    """Pause until boot has bound the session, then return.
+
+    ``app._session`` is bound by the ``session`` boot worker, not by
+    ``run_test``'s entry: the app paints first and awaits the factory in a
+    worker (``OperatorApp.on_mount`` -> ``_boot_session``). A test that goes on
+    to read or patch ``type(app._session)`` after ONE ``pilot.pause()`` is
+    therefore racing that worker. On a cold first boot of a fresh process under
+    fleet load (CI shard ``test (3.12, 2)``; load 87-140 locally) the bind took
+    up to 17 pauses (~8.5 s) — ``test_a_hop_the_pool_starts_late_is_refused_
+    rather_than_fenced`` failed with ``app._session`` still ``None`` — while
+    every later boot in the same process binds in one, which is why it passes
+    alone and in warm runs.
+
+    There is no handle to await: the worker is created inline in ``on_mount`` and
+    the app publishes no "session attached" event, so this polls the state the
+    test depends on, bounded by pause COUNT (a turn count survives contention a
+    wall-clock budget does not — AGENTS.md "Wait on the event, never on the
+    clock") and ending in a loud assert so a boot that never binds fails as
+    that, not as an ``AttributeError`` on ``None`` three lines later. Same shape
+    as ``test_app_pilot._await_session`` and ``test_band_panels``'s wait, which
+    this file's neighbours already use for the same race.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if app._session is not None:
+            return
+    raise AssertionError("boot never attached the session (app._session is still None)")
+
+
 def test_urgency_ranking_keeps_gates_independent_of_acknowledgement():
     rows = [
         CatalogEntry(SessionRow("recent", 100, "Recent", created_at=100)),
@@ -438,7 +468,7 @@ async def test_switch_session_attaches_from_the_composer_and_wraps(position):
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         attached: list[str] = []
         app._sidebar_settings = SidebarSettings(False, position)
         await pilot.press("ctrl+b")
@@ -955,7 +985,7 @@ async def test_closing_the_sidebar_drains_leased_sources_but_keeps_local_work():
     cycles = 8
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         current = str(getattr(app._session, "session_id", ""))
         keep = lease(app, "local-work", kind="local-work")
 
@@ -2108,7 +2138,7 @@ async def test_a_notification_click_switches_by_the_sidebars_own_route():
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         selected: list[str] = []
         commands: list[str] = []
 
@@ -2155,7 +2185,7 @@ async def test_a_click_on_a_session_that_cannot_open_does_not_claim_success():
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
 
         def settle(session_id: str):
             # The navigation runs and finishes; the binding never moves, which
@@ -2336,7 +2366,7 @@ async def test_a_switch_that_overruns_the_bound_cannot_also_commit():
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         committed: list[str] = []
 
         async def slow_prepare(session_id: str, *args, **kwargs):
@@ -2427,7 +2457,7 @@ async def test_abandoning_an_overrun_click_leaves_the_outgoing_session_whole():
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         app._editor().load_text("half-typed thought")
         await pilot.pause()
         released: list[str] = []
@@ -2520,7 +2550,7 @@ async def test_a_click_the_app_services_late_cannot_start_a_switch_at_all():
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         committed: list[str] = []
 
         async def prepare(session_id: str, *args, **kwargs):
@@ -2694,7 +2724,7 @@ async def test_a_hop_the_pool_starts_late_is_refused_rather_than_fenced():
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         committed: list[str] = []
 
         async def prepare(session_id: str, *args, **kwargs):
@@ -2785,7 +2815,7 @@ async def test_a_click_superseded_by_a_click_for_the_same_session_does_not_spawn
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         committed: list[str] = []
 
         async def prepare(session_id: str, *args, **kwargs):
