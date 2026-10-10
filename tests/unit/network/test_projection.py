@@ -29,7 +29,10 @@ five seconds, so the deadline is asserted at the seam instead.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -227,3 +230,62 @@ def test_the_catalogue_reads_a_refusal_rather_than_raising(
     catalog = projection.RelayPeerCatalog(root)
     assert catalog.peers() == []
     assert catalog.rows() == []
+
+
+def test_a_slow_peer_wake_does_not_stall_the_daemon_loop(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``RemoteOwner.engage`` waits out a slow relay WITHOUT holding the event loop.
+
+    ``engage`` is a coroutine on the daemon's one loop, which serves every HTTP
+    route, local sessions included; its relay round trip is a blocking socket
+    call bounded by ``relay.engage_client_bound_s()`` (85 s). Run inline it froze
+    the loop for the whole wake (the remote-session audit measured a relay
+    answering after 2.0 s stalling a 10 ms ticker for 2.17 s; the harness and
+    numbers are in #2136).
+
+    THE ASSERTION IS STRUCTURAL, deliberately: the blocking call must run on a
+    thread other than the event loop's. That fails deterministically on the
+    inline spelling and cannot be perturbed by host load. A wall-clock "the
+    ticker never gapped" assertion was dropped because a loaded runner can starve
+    even an idle loop for longer than any ceiling short of seconds (AGENTS.md
+    records 525-668 ms gaps), so it would trade a real signal for flake risk; the
+    lag measurement lives in the PR evidence instead.
+    """
+    delay_s = 0.05  # only needs to be a real blocking call, not a long one
+    seen: dict[str, Any] = {}
+
+    def _slow_relay(record: Any, op: str, **fields: Any) -> dict[str, Any]:
+        seen["thread"] = threading.get_ident()
+        time.sleep(delay_s)
+        return {"op": "ack", "req": 1, "detail": {"engaged": True}}
+
+    monkeypatch.setattr(relay, "control_request", _slow_relay)
+    monkeypatch.setattr(
+        store,
+        "find_own_relay",
+        lambda _root=None: types.PeerRecord(
+            pid=os.getpid(), control_port=1, control_key="probe-key"
+        ),
+    )
+    facts = projection.RemoteSessionFacts.from_row(
+        projection.PeerRow(
+            session_id=SESSION,
+            device_id="peer-device",
+            device_name="peer",
+            conversation_name="c",
+            reachable=True,
+        ),
+        relay_port=1,
+        relay_key="probe-key",
+        relay_device="self-device",
+    )
+    owner = projection.RemoteOwner(config_dir=root, session_id=SESSION, facts=facts, root=root)
+
+    async def _run() -> None:
+        await owner.engage(cwd="")
+
+    main_thread = threading.get_ident()
+    asyncio.run(_run())
+
+    assert seen["thread"] != main_thread, "the relay round trip ran on the event-loop thread"

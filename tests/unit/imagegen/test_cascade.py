@@ -362,6 +362,55 @@ async def test_the_walk_dispatches_the_xai_rung(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("credential", "expected_basis"),
+    [
+        ({"type": "api_key", "source": "login", "key": "xk-1"}, "billed"),
+        (
+            {"type": "oauth", "refresh": "r", "access": "grant", "expires": 4_000_000_000_000},
+            "subscription-api-equivalent",
+        ),
+    ],
+)
+async def test_the_xai_rung_labels_its_basis_by_credential_class(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    credential: dict[str, Any],
+    expected_basis: str,
+) -> None:
+    # Real ``_run_route`` + real AuthStore + MockTransport: the credential
+    # class resolved at call time must reach the rung and label the figure.
+    import base64
+
+    from local_operator.providers.auth_store import AuthStore
+
+    _pin_probes(monkeypatch, xai=True)
+    store = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path)
+    store.upsert_credential("xai", credential)
+    store.close()
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 16).decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"b64_json": png, "mime_type": "image/png"}],
+                "usage": {"cost_in_usd_ticks": 400_000_000},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    outcome = await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path, client=client)
+    await client.aclose()
+
+    assert outcome.route == ImageRoute.XAI
+    assert outcome.cost_usd == pytest.approx(0.04)
+    assert outcome.cost_source == "reported"
+    assert outcome.billing_basis == expected_basis
+
+
+@pytest.mark.asyncio
 async def test_the_walk_dispatches_the_openrouter_rung(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

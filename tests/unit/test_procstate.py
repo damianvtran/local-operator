@@ -62,6 +62,9 @@ def test_an_unprobeable_pid_fails_closed(monkeypatch: pytest.MonkeyPatch) -> Non
         raise OSError("cannot probe")
 
     monkeypatch.setattr(procstate.subprocess, "run", _boom)
+    # macOS answers through sysctl first; make it decline so the `ps` fallback
+    # is the path taken into the failure, as it is on any host sysctl cannot read.
+    monkeypatch.setattr(procstate, "_sysctl_samples", lambda _pids: None)
     # A pid with no /proc entry (and none on macOS), so the POSIX fork is the
     # path taken into the failure.
     assert procstate.is_zombie(2_147_483_600) is False
@@ -103,3 +106,63 @@ def test_the_lease_the_scan_and_the_attach_guard_agree_about_a_zombie(
         assert _pid_state(pid) == "dead"
         # The attach guard: nobody is running it, so offer the session.
         assert live_runtime_pid(tmp_path, session_id) is None
+
+
+# ---------------------------------------------------------------------------
+# macOS: the sysctl probe answers what `ps` answers, without spawning anything
+# ---------------------------------------------------------------------------
+#
+# Why these exist: a `ps` spawn measured 255-300 ms under fleet load (2026-10-09)
+# and every user-facing open of a conversation with a live owner paid it inside
+# `resume.live_runtime_pid`. `_sysctl_samples` reads the same `kinfo_proc` fields
+# instead. The tokens it produces are compared against claims `ps` already wrote,
+# so the equivalence below is a correctness property: a differing token for a
+# live writer reads as "the writer is gone".
+
+darwin_only = pytest.mark.skipif(procstate._PLATFORM != "darwin", reason="macOS sysctl probe")
+
+
+class _NoSpawn:
+    """Stands in for `procstate.subprocess`: any spawn is a test failure."""
+
+    def run(self, argv: object, **_kwargs: object) -> object:
+        raise AssertionError(f"the macOS probe must not spawn a process: {argv}")
+
+
+@darwin_only
+def test_sysctl_and_ps_give_identical_samples_for_live_and_zombie_pids() -> None:
+    with unreaped_child() as corpse:
+        pids = [os.getpid(), os.getppid(), 1, corpse]
+        by_ps = procstate._ps_samples(pids)
+        by_sysctl = procstate._sysctl_samples(pids)
+        assert by_sysctl is not None
+        assert by_ps[corpse].zombie is True
+        assert by_sysctl == by_ps, "a token that differs from ps's reads as a dead writer"
+
+
+@darwin_only
+def test_the_macos_probe_answers_without_spawning(monkeypatch: pytest.MonkeyPatch) -> None:
+    with unreaped_child() as corpse:
+        monkeypatch.setattr(procstate, "subprocess", _NoSpawn())
+        assert procstate.is_zombie(corpse) is True
+        assert procstate.is_zombie(os.getpid()) is False
+        assert procstate.birth_token(os.getpid()) == procstate.self_birth_token()
+        # A pid with no process is ABSENT, the same contract `ps` honours.
+        assert procstate.process_samples([2_147_483_600]) == {}
+
+
+@darwin_only
+def test_a_declining_sysctl_probe_falls_back_to_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Doubt degrades to the old cost, never to a guess about the pid."""
+    monkeypatch.setattr(procstate, "_sysctl_samples", lambda _pids: None)
+    asked: list[object] = []
+    real_run = procstate.subprocess.run
+
+    def _spy(argv: object, **kwargs: object) -> object:
+        asked.append(argv)
+        return real_run(argv, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(procstate.subprocess, "run", _spy)
+    sample = procstate.process_sample(os.getpid())
+    assert sample is not None and sample.zombie is False
+    assert asked and asked[0][0] == "/bin/ps"  # type: ignore[index]
