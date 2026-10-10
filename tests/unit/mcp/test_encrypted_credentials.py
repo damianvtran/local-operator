@@ -131,6 +131,29 @@ async def test_real_split_child_stderr_is_scrubbed(isolated, caplog):
     assert variables.redact(sentinel) == "[redacted]"
 
 
+def test_the_stderr_redactor_masks_a_word_like_value_on_word_boundaries() -> None:
+    """A letters-only credential in a child's stderr masks as a TOKEN, never inside a word.
+
+    The stderr redactor takes the shared value pass now (agent review round 1, R1), so a
+    word-like value behaves as it does on every other surface: the standalone token is
+    masked, and an ordinary word that merely CONTAINS it stays readable — the over-mask
+    this pass exists to remove, on the one sink that runs before a tool result exists.
+    """
+    from local_operator.mcp.redaction import StderrRedactor
+
+    word = "syn" + "thetic"
+    redactor = StderrRedactor([word])
+    out = redactor.feed(("un" + word + "ally and a " + word + " store\n").encode())
+    assert "un" + word + "ally" in out, "the embedded word must stay readable"
+    assert f"a {word} store" not in out, "the standalone token must stay masked"
+    assert "[redacted]" in out
+    # ...and a cut inside the line must not publish the standalone token either.
+    second = StderrRedactor([word])
+    payload = f"pre {word} post\n".encode()
+    joined = second.feed(payload[:8]) + second.feed(payload[8:]) + second.feed(b"", final=True)
+    assert word not in joined.replace("[redacted]", ""), joined
+
+
 def _chain_text(exc: BaseException) -> str:
     """``str()`` of an exception and everything it is chained to.
 

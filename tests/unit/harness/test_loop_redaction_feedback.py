@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,28 @@ IDENT = "xai_" + "availab" + "le"
 #: ``xai`` test.
 OTHER_IDENTS = ("hf_" + "ready" + "probe", "tvly_" + "supports" + "streams", "npm_" + "installed")
 
+#: A plain English word registered as a secret (``PASSWORD=<word>``). Assembled from parts for
+#: the same reason as ``IDENT``. The exact-value pass matches it on LETTER-RUN BOUNDARIES, so
+#: ordinary words that merely contain it (``un<word>ally``) stay readable; the standalone
+#: token stays masked.
+PLAIN_WORD = "synth" + "etic"
+EMBEDDED_WORD = "un" + PLAIN_WORD + "ally"
+
+
+def _store_that_has_scrubbed_the_word(tmp_path: Path) -> Any:
+    """A real ``VariableStore`` that REGISTERED the word the way production does.
+
+    Through the shape pass (``PASSWORD=<word>``), never ``register_redaction`` by hand: the
+    over-match this class pins only exists on the registration path the store really takes.
+    """
+    from local_operator.variables import VariableStore
+
+    store = VariableStore(cwd=str(tmp_path))
+    store.redact_with_report(f"PASSWORD={PLAIN_WORD}")
+    assert PLAIN_WORD in store.redaction_values(), "premise: the word is a registered value"
+    return store
+
+
 #: A realistic xAI-shaped key (mixed case + digits). It is REAL-SHAPED, not a real secret.
 REAL_KEY = "xai-" + "Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6kM9nP2rS5tU8wX1yA4cD7fG0iL3oQ6"
 
@@ -74,8 +97,10 @@ class _MechanicalModel:
 
     ``plan`` receives the text of the read result exactly as the model would see it (after
     the session's redaction function) and returns the next tool call's ``(name, args)``.
-    Because it can only copy what is in front of it, a mask in the read result is a mask
-    in its call, which is the defect.
+    ``args`` is normally a dict, JSON-encoded here into the call's raw argument text; a
+    ``str`` is used VERBATIM as that text instead, for the tests that dictate a spelling
+    ``json.dumps`` cannot produce (``\u000a``). Because it can only copy what is in front of
+    it, a mask in the read result is a mask in its call, which is the defect.
     """
 
     def __init__(self, read_path: Path, plan: Any) -> None:
@@ -105,8 +130,9 @@ class _MechanicalModel:
                 for block in message.content
             )
             name, args = self.plan(self.seen_by_model)
+            raw = args if isinstance(args, str) else json.dumps(args)
             turn = [
-                StreamToolCallDelta(index=0, id="w1", name=name, argument_delta=json.dumps(args)),
+                StreamToolCallDelta(index=0, id="w1", name=name, argument_delta=raw),
                 StreamEndEvent(stop_reason="toolUse"),
             ]
         else:
@@ -294,6 +320,65 @@ class TestDiskBytes:
         ]
         assert stored_calls
         assert REAL_KEY not in json.dumps(stored_calls[0].arguments)
+
+
+class TestPlainWordOnDisk:
+    """DISK for the plain-word over-match: prose copied from a result is written intact.
+
+    The second half of the loop in the module docstring. The read result masks only the
+    STANDALONE registered word, so a model copying the surrounding prose (which contains the
+    word inside longer words) copies real text; before the boundary rule it copied the mask
+    in place of ``un<word>ally`` and the writer put it on disk. Byte-level, by design.
+    """
+
+    @pytest.mark.asyncio
+    async def test_edit_copying_prose_with_longer_words_writes_them_intact(
+        self, tmp_path: Path
+    ) -> None:
+        store = _store_that_has_scrubbed_the_word(tmp_path)
+        src = tmp_path / "notes.md"
+        src.write_bytes(f"a {PLAIN_WORD} store\n{EMBEDDED_WORD} odd\n".encode())
+
+        def plan(seen: str):
+            # The mechanical model copies the longer word exactly as it SAW it.
+            copied = re.search(r"un\S*?ally", seen)
+            assert copied is not None, seen
+            return "edit", {
+                "path": str(src),
+                "old_text": "odd",
+                "new_text": f"odd and {copied.group(0)} again",
+            }
+
+        model = _MechanicalModel(src, plan)
+        await _drive(model, redact=lambda text: store.redact_with_report(text)[0])
+
+        # What the model saw: the standalone token masked, the longer word readable.
+        assert EMBEDDED_WORD in model.seen_by_model
+        assert model.seen_by_model.count(REDACTION_MARKER) == 1
+        assert f"a {PLAIN_WORD} store" not in model.seen_by_model
+        disk = src.read_bytes()
+        assert disk.count(EMBEDDED_WORD.encode()) == 2, disk
+        assert disk.count(MARKER_BYTES) == 0, disk
+
+    @pytest.mark.asyncio
+    async def test_write_of_a_prose_document_keeps_longer_words_intact(
+        self, tmp_path: Path
+    ) -> None:
+        store = _store_that_has_scrubbed_the_word(tmp_path)
+        src = tmp_path / "readme.md"
+        src.write_bytes(f"# T\n\n{EMBEDDED_WORD} and {PLAIN_WORD.upper()} and more\n".encode())
+
+        def plan(seen: str):
+            copied = re.search(r"un\S*?ally", seen)
+            assert copied is not None, seen
+            return "write", {"path": str(src), "content": f"# T\n\n{copied.group(0)} again\n"}
+
+        await _drive(
+            _MechanicalModel(src, plan), redact=lambda text: store.redact_with_report(text)[0]
+        )
+        disk = src.read_bytes()
+        assert disk == f"# T\n\n{EMBEDDED_WORD} again\n".encode(), disk
+        assert MARKER_BYTES not in disk
 
 
 # --- the net under the fix: edit/write say so when they put the marker on disk --------
@@ -517,3 +602,212 @@ class TestDisplayStillMasksSecrets:
             ]
         )
         assert value not in persisted, "persisted transcript (content + call arguments)"
+
+
+class TestDisplayMasksARegisteredPlainWordAsAToken:
+    """DISPLAY for a registered plain word: masked as a standalone token, never inside a word.
+
+    Separate from :class:`TestPlainWordOnDisk` on purpose (see the module docstring): the
+    operator's rule that a real value stays scrubbed from results, history and transcript
+    must hold at the same time as the prose staying readable, and neither may pass by
+    weakening the other.
+    """
+
+    @pytest.mark.asyncio
+    async def test_results_history_and_transcript(self, tmp_path: Path) -> None:
+        from local_operator.session.transcript import Transcript
+
+        store = _store_that_has_scrubbed_the_word(tmp_path)
+        src = tmp_path / "notes.txt"
+        src.write_text(f"pw is {PLAIN_WORD} ok\nprose: {EMBEDDED_WORD}\n")
+        target = tmp_path / "out.txt"
+        content = f"copy {PLAIN_WORD} and {EMBEDDED_WORD}\n"
+        model = _MechanicalModel(
+            src, lambda seen: ("write", {"path": str(target), "content": content})
+        )
+        events = await _drive(model, redact=lambda text: store.redact_with_report(text)[0])
+
+        # The result the model reads.
+        assert f"pw is {REDACTION_MARKER} ok" in model.seen_by_model
+        assert f"prose: {EMBEDDED_WORD}" in model.seen_by_model
+
+        end = events[-1]
+        assert isinstance(end, AgentEndEvent)
+        stored = [
+            call
+            for m in end.messages
+            if isinstance(m, Message)
+            for call in (m.tool_calls or [])
+            if call.name == "write"
+        ][0]
+        # The history copy of the call: standalone masked, embedded intact.
+        assert stored.arguments["content"] == f"copy {REDACTION_MARKER} and {EMBEDDED_WORD}\n"
+        # The DISK write is still the original bytes (display never alters a writer's input).
+        assert target.read_text() == content
+
+        # The persisted transcript: message content and call arguments.
+        transcript = Transcript(tmp_path / "session")
+        for message in end.messages:
+            await transcript.append_message(message)
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "session" / "transcript.jsonl").read_text().splitlines()
+        ]
+        persisted = json.dumps(
+            [
+                {k: v for k, v in row.get("payload", {}).items() if k != "provider_payload"}
+                for row in rows
+            ]
+        )
+        assert f"{PLAIN_WORD} and" not in persisted, "the standalone word reached the transcript"
+        assert f"{REDACTION_MARKER} and {EMBEDDED_WORD}" in persisted, persisted
+
+    def test_a_non_word_registered_value_still_masks_inside_a_longer_token(
+        self, tmp_path: Path
+    ) -> None:
+        """The unchanged half: a value with a digit keeps the substring match everywhere."""
+        from local_operator.variables import VariableStore
+
+        value = "Zq8" + "Lm2Vb9Nk4"
+        store = VariableStore(cwd=str(tmp_path))
+        assert store.register_redaction(value)
+        for text in (f"x{value}y", f"un{value}ally", value):
+            masked = store.redact(text)
+            assert value not in masked, text
+            assert REDACTION_MARKER in masked
+
+
+# --- raw_arguments: a letter-ending escape is a boundary, not a letter (QA round 1, Q-1) --
+
+
+#: The escapes a JSON encoder can leave immediately before the token, and how each case is
+#: dictated: the five SHORT escapes come out of ``json.dumps`` when the content carries the
+#: real character, while the ``\uXXXX`` spellings it never emits for them are dictated as
+#: raw argument text. The ``\u`` cases whose last hex digit is a letter (``a``/``b``) are the
+#: class that regressed: on the raw string the character before the token was that hex
+#: letter, which the letter-run boundary read as a word character.
+ESCAPE_CASES = (
+    ("\\n", ("content", f"line1\n{PLAIN_WORD} here")),
+    ("\\t", ("content", f"line1\t{PLAIN_WORD} here")),
+    ("\\r", ("content", f"line1\r{PLAIN_WORD} here")),
+    ("\\b", ("content", f"line1\b{PLAIN_WORD} here")),
+    ("\\f", ("content", f"line1\f{PLAIN_WORD} here")),
+    ("\\u000a", ("raw", "line1\\u000a" + PLAIN_WORD + " here")),
+    ("\\u000b", ("raw", "line1\\u000b" + PLAIN_WORD + " here")),
+    ("\\u00ab", ("raw", "line1\\u00ab" + PLAIN_WORD + " here")),
+)
+
+
+class TestEscapedWordFormsStayMaskedThroughRawArguments:
+    """The raw provider string, its transcript row and BOTH wire replay shapes.
+
+    ``raw_arguments`` is the provider's verbatim JSON argument text. The loop scrubs it
+    (``_scrub_history_arguments``), the transcript persists it (when it does not round-trip
+    to the scrubbed ``arguments``) and the wire replays it verbatim
+    (``_replayable_tool_arguments_json``) or as its parsed object
+    (``_replayable_tool_arguments``). Reading an escape's last letter as a word character
+    released the token in all of these while the parsed ``arguments`` stayed masked — a
+    leak, not prose protection (QA round 1, Q-1).
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("escape_label", "case"), ESCAPE_CASES, ids=[case[0] for case in ESCAPE_CASES]
+    )
+    async def test_the_token_is_masked_in_the_stored_copy_transcript_and_replay(
+        self, tmp_path: Path, escape_label: str, case: tuple[str, str]
+    ) -> None:
+        from local_operator.providers.clients import (
+            _replayable_tool_arguments,
+            _replayable_tool_arguments_json,
+        )
+        from local_operator.session.transcript import Transcript
+
+        store = _store_that_has_scrubbed_the_word(tmp_path)
+        src = tmp_path / "seed.txt"
+        src.write_text("seed\n")
+        target = tmp_path / "out.md"
+        dictate, fragment = case
+
+        def plan(seen: str):
+            if dictate == "content":
+                return "write", {"path": str(target), "content": fragment}
+            return "write", '{"path": %s, "content": "%s"}' % (
+                json.dumps(str(target)),
+                fragment,
+            )
+
+        events = await _drive(
+            _MechanicalModel(src, plan), redact=lambda text: store.redact_with_report(text)[0]
+        )
+
+        end = events[-1]
+        assert isinstance(end, AgentEndEvent)
+        stored = [
+            call
+            for m in end.messages
+            if isinstance(m, Message)
+            for call in (m.tool_calls or [])
+            if call.name == "write"
+        ][0]
+        assert stored.raw_arguments is not None
+        assert PLAIN_WORD not in stored.raw_arguments, escape_label
+        assert PLAIN_WORD not in json.dumps(stored.arguments), escape_label
+        assert REDACTION_MARKER in stored.raw_arguments, escape_label
+        # BOTH wire replay shapes, exactly as the providers build them from the stored call.
+        assert PLAIN_WORD not in _replayable_tool_arguments_json(stored), escape_label
+        assert PLAIN_WORD not in json.dumps(_replayable_tool_arguments(stored)), escape_label
+
+        # The persisted transcript row, minus ``provider_payload`` (the executor's own
+        # record of the bytes it wrote — a separately-noted channel, not this one).
+        transcript = Transcript(tmp_path / "session")
+        for message in end.messages:
+            await transcript.append_message(message)
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "session" / "transcript.jsonl").read_text().splitlines()
+        ]
+        persisted = json.dumps(
+            [
+                {k: v for k, v in row.get("payload", {}).items() if k != "provider_payload"}
+                for row in rows
+            ]
+        )
+        assert PLAIN_WORD not in persisted, escape_label
+        assert REDACTION_MARKER in persisted, escape_label
+
+    @pytest.mark.asyncio
+    async def test_glued_and_backslash_neighbours_keep_their_behaviour(
+        self, tmp_path: Path
+    ) -> None:
+        """Both directions on the raw string: escapes separate, letter runs do not.
+
+        ``my_``- and backslash-glued occurrences stay masked (the escape is a separator,
+        not its last letter, and neither is an underscore); a word embedded in a longer
+        letter run stays readable — the accepted residual, on this surface too.
+        """
+        store = _store_that_has_scrubbed_the_word(tmp_path)
+        src = tmp_path / "seed.txt"
+        src.write_text("seed\n")
+        target = tmp_path / "out.md"
+        content = f"my_{PLAIN_WORD}\n\\{PLAIN_WORD}\n{EMBEDDED_WORD}\n"
+
+        model = _MechanicalModel(
+            src, lambda seen: ("write", {"path": str(target), "content": content})
+        )
+        events = await _drive(model, redact=lambda text: store.redact_with_report(text)[0])
+
+        end = events[-1]
+        assert isinstance(end, AgentEndEvent)
+        stored = [
+            call
+            for m in end.messages
+            if isinstance(m, Message)
+            for call in (m.tool_calls or [])
+            if call.name == "write"
+        ][0]
+        raw = stored.raw_arguments
+        assert raw is not None
+        assert json.loads(raw)["content"] == (
+            f"my_{REDACTION_MARKER}\n\\{REDACTION_MARKER}\n{EMBEDDED_WORD}\n"
+        )
