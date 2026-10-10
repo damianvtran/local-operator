@@ -13888,6 +13888,75 @@ class Session:
             # this process can decide it is finished -- a spawned write is precisely
             # what ``dispose`` cancels in flight.
             await self._deliver_deferred_job_results()
+            # ...and whatever a busy latch parked for "the next boundary" on a
+            # turn that never reached one again (see ``_flush_parked_deliveries``).
+            self._flush_parked_deliveries()
+
+    def _flush_parked_deliveries(self) -> None:
+        """Hand over what a busy latch parked, now that the turn has ended.
+
+        THE HOLE THIS CLOSES, measured on CI (run 37980552652, macos e2e).
+        The busy arms of the delivery paths (``deliver_ask_messages``,
+        ``_deliver_wake``, ``_deliver_monitor``) park their message on the
+        steering queue to ride "the next successful tool boundary" whenever
+        ``_is_streaming`` reads True. That latch is a SNAPSHOT: a turn already
+        past its LAST boundary drain -- the tail after
+        ``_persist_new_messages``, which a thread hop such as
+        ``_mark_code_requests_dirty`` can hold open long enough for a
+        reconcile to land inside it -- ends without ever draining again, and
+        the parked delivery then has no reader at all: nothing re-checks the
+        steering queue when a turn ends. The hand-off had reported success
+        (``deliver_ask_messages`` returned), the row never arrived, and
+        ``test_an_answer_racing_a_withdrawal_wins_in_both_orders`` timed out
+        with the ask folded ``answered``, NOT delivered, and no delivery task
+        pending.
+
+        The flush is the arrival-side twin of ``_deliver_deferred_job_results``
+        just above: what arrived while the turn was LIVE and could not ride it
+        is handed over the moment the turn stops being live, through the same
+        idle arm a delivery arriving one instant later would take. Only
+        ``CustomMessage`` deliveries are taken -- their receipt events are
+        emitted at hand-off, BEFORE the park, so opening a turn for them needs
+        no drain bookkeeping. A plain ``Message`` (a typed or spooled steer)
+        keeps its place: its ``SteeringDeliveredEvent`` and the UI's
+        recall-the-held-steer affordance live in ``_drain_steering``, which
+        stays its one consumer.
+
+        The leaving arms are skipped on purpose: a turn opened under
+        ``_leaving_deliveries`` or a one-shot exit could only ever be aborted
+        by the disposal that follows (see ``_deliver_job_results``' leaving
+        arm), and an ask is not lost to the skip -- its answer is durable in
+        the log and the next runtime's boot reconcile re-delivers it.
+        """
+        if self._disposed or self._leaving_deliveries or self._one_shot_exit:
+            return
+        drained: list[AgentMessage] = []
+        parked: list[AgentMessage] = []
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            drained.append(item)
+            if isinstance(item, CustomMessage):
+                parked.append(item)
+        if not parked:
+            for item in drained:
+                self._steering_queue.put_nowait(item)
+            return
+        task = self._spawn_background(self._prompt_messages(parked))
+        if task is None:
+            # Disposed between the guard above and the spawn: nothing was
+            # spawned, and ``_spawn_background`` closed the coroutine it was
+            # handed -- so the queue goes back exactly as it was.
+            for item in drained:
+                self._steering_queue.put_nowait(item)
+            return
+        for item in drained:
+            if not isinstance(item, CustomMessage):
+                self._steering_queue.put_nowait(item)
+        # The drain is a consumer, so courtesy counts held for the taken
+        # items must not survive to misclassify a later enqueue -- the same
+        # reset ``_drain_steering`` performs. What remains queued is plain
+        # steers, which are never counted as courtesy.
+        self._courtesy_wake_count = 0
 
     async def _drop_pre_aborted_turn(
         self,
