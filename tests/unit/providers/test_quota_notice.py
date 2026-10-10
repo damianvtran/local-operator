@@ -18,10 +18,19 @@ wide. Route-level behaviour (caching, live refresh, auth) is pinned in
 
 from __future__ import annotations
 
+import pytest
+
 from local_operator.providers.billing_links import BILLING_LINKS
 from local_operator.providers.controller import CatalogueEntry
 from local_operator.providers.quota_notice import evaluate_quota_notice
-from local_operator.providers.radient_recovery import RecoveryFacts, recovery_line
+from local_operator.providers.radient_recovery import (
+    CLAIM_URL,
+    FirstTopupFacts,
+    RecoveryFacts,
+    VerificationFacts,
+    account_state,
+    recovery_line,
+)
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.providers.usage_cache import USAGE_REPORT_TTL_MS
 
@@ -430,9 +439,6 @@ def test_routed_meta_route_is_never_free() -> None:
         model="radient/auto",
         reports=[_report("radient", _balance_row(0.0))],
         entry=_entry("radient", "radient/auto", input_price=0.0, output_price=0.0, routed=True),
-        radient_line=(
-            "Radient: check your account and credit balance at https://console.radienthq.com."
-        ),
         now_ms=NOW_MS,
     )
     assert verdict.model_free is False
@@ -473,7 +479,7 @@ def test_radient_body_is_the_shared_builder_sentence() -> None:
         provider="radient",
         model="radient/some-model",
         reports=[_report("radient", _balance_row(0.0))],
-        radient_line=line,
+        radient_facts=facts,
         now_ms=NOW_MS,
     )
     assert verdict.state == "depleted"
@@ -531,3 +537,133 @@ def test_age_ms_is_the_newest_report() -> None:
         now_ms=NOW_MS,
     )
     assert verdict.age_ms == 1_000
+
+
+# --- Radient account states (PR2) -------------------------------------------
+
+
+def _radient_verdict(
+    facts: RecoveryFacts | None, *, balance: float = 0.0, resend: bool = True, **extra
+):
+    return evaluate_quota_notice(
+        provider="radient",
+        model="radient/some-model",
+        reports=[_report("radient", _balance_row(balance))],
+        radient_facts=facts,
+        resend_available=resend,
+        now_ms=NOW_MS,
+        **extra,
+    )
+
+
+def _facts(**verification) -> RecoveryFacts:
+    return RecoveryFacts(signed_in=True, verification=VerificationFacts(**verification))
+
+
+@pytest.mark.parametrize(
+    "verification,expected",
+    [
+        (None, "unreadable"),
+        (VerificationFacts(signup_grant="claimed"), "verified"),
+        (VerificationFacts(email_verified=True), "verified"),
+        (VerificationFacts(signup_grant="pending"), "unverified"),
+        (VerificationFacts(signup_grant="expired"), "unverified"),
+        (VerificationFacts(email_verified=False), "unverified"),
+        (VerificationFacts(signup_grant="none"), "unreadable"),
+        (VerificationFacts(), "unreadable"),
+        # A claimed grant outranks a stale `email_verified: false`: the credits
+        # were claimed, so the account cannot be waiting on verification.
+        (VerificationFacts(signup_grant="claimed", email_verified=False), "verified"),
+    ],
+)
+def test_account_state_ladder(verification, expected) -> None:
+    assert account_state(RecoveryFacts(signed_in=True, verification=verification)) == expected
+
+
+@pytest.mark.parametrize("grant", ["pending", "expired"])
+def test_unverified_empty_account_says_verify_first_and_offers_resend(grant: str) -> None:
+    facts = _facts(signup_grant=grant, grant_amount=5.0)
+    verdict = _radient_verdict(facts)
+    assert verdict.state == "unverified"
+    assert verdict.kind == "radient"
+    assert verdict.body == recovery_line(facts)
+    assert [a.id for a in verdict.actions] == ["open_url", "resend_verification", "refresh"]
+    assert verdict.actions[0].url == CLAIM_URL
+
+
+def test_unverified_without_a_resend_capable_credential_degrades_to_the_link() -> None:
+    """An API-key-only account: the upstream route is JWT-only, so no button."""
+    verdict = _radient_verdict(_facts(signup_grant="pending"), resend=False)
+    assert verdict.state == "unverified"
+    assert [a.id for a in verdict.actions] == ["open_url", "refresh"]
+
+
+def test_unverified_with_no_grant_ticket_never_offers_resend() -> None:
+    """``email_verified: false`` with no ticket would only 409; open the page instead."""
+    verdict = _radient_verdict(_facts(email_verified=False))
+    assert verdict.state == "unverified"
+    assert "resend_verification" not in [a.id for a in verdict.actions]
+
+
+def test_unverified_uses_the_payloads_own_claim_url() -> None:
+    url = "https://console.radienthq.com/dashboard/verification?x=1"
+    verdict = _radient_verdict(_facts(signup_grant="pending", claim_url=url))
+    assert verdict.actions[0].url == url
+
+
+def test_verified_empty_account_is_a_topup_with_the_payloads_topup_url() -> None:
+    url = "https://console.radienthq.com/dashboard/billing?first=1"
+    facts = _facts(
+        signup_grant="claimed",
+        first_topup=FirstTopupFacts(
+            bonus_amount=5.0, minimum_purchase=5.0, bonus_received=False, topup_url=url
+        ),
+    )
+    verdict = _radient_verdict(facts)
+    assert verdict.state == "depleted"
+    assert verdict.body == recovery_line(facts)
+    assert verdict.actions[0].url == url
+    assert [a.id for a in verdict.actions] == ["open_url", "refresh"]
+
+
+@pytest.mark.parametrize("facts", [None, RecoveryFacts(signed_in=False), _facts()])
+def test_unreadable_radient_account_gets_the_neutral_topup_notice(facts) -> None:
+    """No claim about verification when the probe proved nothing."""
+    verdict = _radient_verdict(facts)
+    assert verdict.state == "depleted"
+    assert verdict.body == recovery_line(RecoveryFacts(signed_in=None))
+    assert verdict.actions[0].url == BILLING_LINKS["radient"].url
+
+
+def test_positive_radient_balance_is_silent_even_for_an_unverified_account() -> None:
+    """Unverified is a refinement of an EMPTY account, never a warning of its own."""
+    verdict = _radient_verdict(_facts(signup_grant="pending"), balance=3.0)
+    # A bare positive balance reads "unknown" (see the deepseek case above);
+    # what matters is that nothing is shown.
+    assert verdict.state in {"ok", "unknown"}
+    assert verdict.actions == ()
+    assert verdict.title == "" and verdict.body == ""
+
+
+def test_stale_radient_report_is_unknown_even_when_unverified() -> None:
+    verdict = evaluate_quota_notice(
+        provider="radient",
+        model="radient/some-model",
+        reports=[
+            _report("radient", _balance_row(0.0), fetched_at=NOW_MS - USAGE_REPORT_TTL_MS - 1)
+        ],
+        radient_facts=_facts(signup_grant="pending"),
+        resend_available=True,
+        now_ms=NOW_MS,
+    )
+    assert verdict.state == "unknown"
+    assert verdict.actions == ()
+
+
+def test_free_model_on_unverified_radient_is_not_applicable() -> None:
+    verdict = _radient_verdict(
+        _facts(signup_grant="pending"),
+        entry=_entry("radient", "radient/free", input_price=0.0, output_price=0.0),
+    )
+    assert verdict.state == "not_applicable"
+    assert verdict.model_free is True
