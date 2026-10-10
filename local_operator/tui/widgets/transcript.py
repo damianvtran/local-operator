@@ -5257,25 +5257,25 @@ class TranscriptView(ScrollableContainer):
     def hold_tail_through_layout(self, hold: bool) -> None:
         """Land a following reader on the tail BEFORE placement, while ``hold``.
 
-        For the viewport-first resume (``OperatorApp._render_resumed_history``):
-        from the first projection to the settle of the page that completes the
-        window, every layout pass keeps a follower on the newest row in the same
-        frame the extent moves, so neither the first paint nor the backfill
-        paints a frame off the tail. See :meth:`arrange`.
+        For a resume render, which holds this across the whole render
+        (``OperatorApp._hold_tail_through_resume_render``): every layout pass
+        keeps a follower on the newest row in the same frame the extent moves, so
+        neither the first paint nor the mounts the fill adds afterwards paint a
+        frame off the tail. See :meth:`arrange`.
         """
         self._hold_tail_placement = hold
 
     def reserve_name_col(self, names: Iterable[str]) -> None:
         """Hold the name column at least as wide as ``names`` need, before they mount.
 
-        For a caller that paints part of a window now and mounts the rest a
-        frame later — the viewport-first resume (``OperatorApp.
-        _backfill_resume_window``). The column is derived from the rows ON
-        SCREEN, so without this a longer tool name in the later page widens it
-        after the first paint and every ledger row in the viewport shifts
-        sideways: a reflow the reader sees as motion, on a frame that was
-        otherwise final. Reserving the width the finished window will have
-        makes the first paint already carry it.
+        KEPT although no caller does this today: its one user was the
+        viewport-first resume, removed in favour of projecting the whole window at
+        once, and this is the widget-level half of any future split (the field
+        sits at 0 and costs nothing until someone arms it — F5, review round 1).
+        The column is derived from the rows ON SCREEN, so without this a longer
+        tool name in a later page widens it after the first paint and every
+        ledger row in the viewport shifts sideways: a reflow the reader sees as
+        motion, on a frame that was otherwise final.
 
         The same clamp as the derivation, and a FLOOR rather than an override,
         so rows that genuinely need more still widen it.

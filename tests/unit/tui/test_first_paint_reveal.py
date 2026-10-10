@@ -33,7 +33,7 @@ from local_operator.harness.types import Message, TextContent
 from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import RESUME_RENDER_MESSAGES, OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
@@ -52,6 +52,25 @@ LONG_PROSE = " ".join(f"ZEBRA word{index:02} alpha beta gamma delta epsilon" for
 
 def _app() -> OperatorApp:
     return OperatorApp(lambda: _factory(FakeSession()))
+
+
+def _prompt_host_sample(app: OperatorApp) -> dict[str, float]:
+    """Where the dock's prompt host is, in the frame being sampled.
+
+    F2/Q2/D4 are all about the host's rows: the card is a dock child, so its
+    height comes out of the transcript's, and a frame drawn before the host has
+    authored that height puts the card's own rows off-screen. `outer_size` and
+    `region` are both recorded because the finding was about the difference.
+    """
+    try:
+        host = app.query_one("#prompt-host")
+        return {
+            "host_y": float(host.region.y),
+            "host_h": float(host.region.height),
+            "screen_h": float(app.size.height),
+        }
+    except Exception:  # noqa: BLE001 — no host yet is not a state
+        return {"host_y": -1.0, "host_h": -1.0, "screen_h": float(app.size.height)}
 
 
 def _frame_samples(app: OperatorApp, session=None) -> list[dict[str, float]]:
@@ -74,6 +93,12 @@ def _frame_samples(app: OperatorApp, session=None) -> list[dict[str, float]]:
                     "extent": float(view.max_scroll_y),
                     "blocks": float(len(view.blocks())),
                     "height": float(view.outer_size.height),
+                    # The transcript's OWN region, which is what the reader's rows
+                    # are clipped to: `outer_size` is the widget's size and can
+                    # differ from its region for a frame, which is exactly the
+                    # distinction F2 (round 1) asked this sampler to keep.
+                    "region": float(view.region.height),
+                    **_prompt_host_sample(app),
                     # "target": painted with THAT conversation in front of
                     # the reader (a switch's samples begin on the outgoing one,
                     # whose reader is wherever they were); "parked": the incoming
@@ -235,7 +260,14 @@ async def test_the_reveal_hold_is_taken_and_released_around_one_layout() -> None
 
 
 @asynccontextmanager
-async def _viewer(tmp_path, name: str):
+async def _viewer(tmp_path, name: str, *, rows: int = 6):
+    """``_viewer_session``, minus the handle: what most cells here need."""
+    async with _viewer_session(tmp_path, name, rows=rows) as (remote, _handle):
+        yield remote
+
+
+@asynccontextmanager
+async def _viewer_session(tmp_path, name: str, *, rows: int = 6):
     """A real owner runtime plus a real ``AttachedSession`` viewer over it.
 
     The saved-position cell needs the commit seam to run for real: a mocked
@@ -250,13 +282,13 @@ async def _viewer(tmp_path, name: str):
         "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
     )
     directory = config / "sessions" / f"synthetic-{name}"
-    rows = [
+    seed = [
         Message(
             id=f"switch-row-{index:04}", role="assistant", content=[TextContent(text=LONG_PROSE)]
         )
-        for index in range(6)
+        for index in range(rows)
     ]
-    await seed_transcript(directory, rows)
+    await seed_transcript(directory, seed)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
@@ -269,7 +301,7 @@ async def _viewer(tmp_path, name: str):
         display_window=True,
     )
     try:
-        yield remote
+        yield remote, handle
     finally:
         await remote.dispose()
         server.close()
@@ -374,15 +406,20 @@ async def test_a_saved_position_is_not_dragged_to_the_tail_by_the_reveal(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_short_resume_holds_the_tail_for_its_first_frame(tmp_path) -> None:
-    """The LAUNCH call site, pinned by a spy.
+async def test_a_short_resume_holds_the_tail_for_its_whole_render(tmp_path) -> None:
+    """The LAUNCH call site, pinned on the HOLD rather than on a call.
 
-    The reveal helper has two callers and each needs its own pin: the switch
-    commit is covered by the saved-position test above, and this is the resume's
-    short branch — a conversation whose whole history fits the render window, so
-    the viewport-first split (which holds through its backfill page) does not
-    apply and the first frame would otherwise be placed at scroll 0 and moved to
-    the tail a frame later. Without the call this fails on the assertion.
+    The reveal helpers have two callers and each needs its own pin: the switch
+    commit is covered by the saved-position test above, and this is the resume —
+    a conversation whose history fits the render window, where the first frame
+    would otherwise be placed at scroll 0 and moved to the tail a frame later.
+
+    BEHAVIOUR, not the call: review round 1's F3 showed the resume's frames
+    leaving the tail because the hold was released after one refresh while the
+    fill still had mounts to make, and a spy on the helper cannot see that. So
+    this asserts what the reader gets — every painted frame on the tail from the
+    render onward — plus the two ends of the hold itself: armed when the render
+    puts its rows up, released once the fill has nothing left to add.
     """
     async with _viewer(tmp_path, "short") as viewer:
         session = viewer
@@ -397,27 +434,24 @@ async def test_a_short_resume_holds_the_tail_for_its_first_frame(tmp_path) -> No
                 if app._session is not None:
                     break
 
-            calls: list[object] = []
-            real = OperatorApp._hold_tail_for_reveal
-
-            def spy(target):  # noqa: ANN001
-                calls.append(target)
-                return real(target)
-
-            OperatorApp._hold_tail_for_reveal = staticmethod(spy)  # type: ignore[method-assign]
-            try:
-                app._render_resumed_history(session)
-                for _ in range(4):
-                    await pilot.pause()
-            finally:
-                # `staticmethod`: the helper IS a staticmethod, and a plain
-                # reassignment would rebind it as an instance method, so the
-                # next production call would pass ``self`` as the view.
-                OperatorApp._hold_tail_for_reveal = staticmethod(  # type: ignore[method-assign]
-                    real
-                )
-
-            assert calls, "the resume's first frame was not held to the tail"
+            samples = _frame_samples(app)
+            start = len(samples)
+            app._render_resumed_history(session)
+            view = app._transcript_view()
+            assert view._hold_tail_placement, (
+                "the resume put its rows up without holding the tail: the first frame is "
+                "placed at scroll 0 and moved a frame later"
+            )
+            for _ in range(8):
+                await pilot.pause()
+            assert not _off_tail(samples, after=start), (
+                f"a painted frame left the tail during the render: "
+                f"{_off_tail(samples, after=start)}"
+            )
+            assert not view._hold_tail_placement, (
+                "the render's hold outlived the render: a later extent change would drag a "
+                "reader who has scrolled away"
+            )
 
 
 def test_the_tail_history_notice_takes_the_width_the_prepare_named() -> None:
@@ -595,3 +629,265 @@ async def _saved_preview(tmp_path, name: str, *, rows: int = 6):
         yield remote
     finally:
         await remote.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_launch_projects_the_whole_window_in_one_pass(tmp_path) -> None:
+    """(b) as a MECHANISM: one projection for the whole window, no backfill page.
+
+    The user-visible fact — "the launch paints ONE state" — is the bench's, and
+    its A/B (2 states -> 1 on S2/S3/S5/S6) lives in the bench run, because a
+    compositor-race unit test cannot reliably catch a frame that a fast boot
+    coalesces. What a unit test CAN pin exactly is the shape of the render: the
+    projection is called ONCE, for the whole render window, and no older page is
+    mounted during the launch. On a tree that splits again, the call carries the
+    screenful bound and the backfill page runs — this fails on both.
+    """
+    async with _viewer(tmp_path, "launch", rows=40) as viewer:
+
+        async def factory():
+            return viewer
+
+        app = OperatorApp(factory)
+        calls: list[dict[str, object]] = []
+        pages: list[dict[str, object]] = []
+        real_project = OperatorApp._project_settled_rows
+        real_page = OperatorApp._mount_older_resume_page
+
+        def project(_self, history, **kwargs):  # noqa: ANN001
+            calls.append(kwargs)
+            return real_project(_self, history, **kwargs)
+
+        def page(_self, *args, **kwargs):  # noqa: ANN001
+            pages.append(kwargs)
+            return real_page(_self, *args, **kwargs)
+
+        OperatorApp._project_settled_rows = project  # type: ignore[method-assign]
+        OperatorApp._mount_older_resume_page = page  # type: ignore[method-assign]
+        try:
+            async with app.run_test(size=FRAME) as pilot:
+                for _ in range(200):
+                    await pilot.pause()
+                    view = app._transcript_view()
+                    if view is not None and view.blocks():
+                        break
+                for _ in range(6):
+                    await pilot.pause()
+        finally:
+            OperatorApp._project_settled_rows = real_project  # type: ignore[method-assign]
+            OperatorApp._mount_older_resume_page = real_page  # type: ignore[method-assign]
+
+    assert calls, "the resume never projected a window"
+    assert [call.get("bound") for call in calls] == [RESUME_RENDER_MESSAGES], calls
+    assert pages == [], f"a page was mounted during the launch: {pages}"
+
+
+@pytest.mark.asyncio
+async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> None:
+    """(a): a known gate's card is part of the frame that reveals its rows.
+
+    The card is a dock child, so its rows come out of the transcript's own
+    height. Built a turn AFTER the reveal it takes those rows away then, and
+    every visible row moves up by them — measured on S4 at 160x45, the
+    transcript goes 38 -> 23 rows and the card's own frame is a second painted
+    state. For a source whose snapshot the app ALREADY holds — which is what a
+    switch back to a live conversation has, and what the paint-first resume's
+    attach-behind produces — the gate is known inside the commit's own
+    synchronous section, so the card is built and mounted there
+    (``_prearm_known_gate``) and the session's ladder adopts the same card when
+    it runs.
+
+    Without the pre-arm this fails on the first content frame: no card, and the
+    taller transcript — the frame the reader sees jump.
+    """
+    async with (
+        _viewer_session(tmp_path, "alpha") as (alpha, alpha_handle),
+        _viewer_session(tmp_path, "beta") as (beta, _beta_handle),
+    ):
+
+        async def factory():
+            return alpha
+
+        app = OperatorApp(factory)
+        gate_task: asyncio.Task[object] | None = None
+        async with app.run_test(size=FRAME) as pilot:
+            for _ in range(200):
+                await pilot.pause()
+                if app._session is alpha:
+                    break
+            beta_source = SessionInteraction(beta)
+            app._sidebar_sources[alpha.session_id] = app._interaction
+            app._sidebar_sources[beta.session_id] = beta_source
+            app._interactions[id(beta)] = beta_source
+
+            async def lease(session_id, *, speculative=False):
+                source = app._sidebar_sources[session_id]
+                source.preparations += 1
+                return source
+
+            app._lease_sidebar_source = lease  # type: ignore[method-assign]
+            # Without this an approval auto-answers and never mounts a card.
+            app._set_approve_all(False)
+            alpha_handle._auto_approve = False
+
+            async def visit(session_id: str) -> None:
+                prepared = await app._prepare_sidebar_session(session_id)
+                app._commit_sidebar_session(
+                    session_id, prepared, app._sidebar_navigation.generation
+                )
+                for _ in range(12):
+                    await pilot.pause()
+
+            gate_task = asyncio.create_task(alpha_handle._approval_gate("write", "Save one record"))
+            for _ in range(200):
+                await pilot.pause()
+                if app._approval is not None:
+                    break
+            assert app._approval is not None, "the gate never mounted on alpha"
+
+            await visit(beta.session_id)
+            assert app._approval is None, "the outgoing session's card is still on screen"
+
+            samples: list[dict[str, float]] = []
+            real_hook = app.post_display_hook
+
+            def hook() -> None:
+                try:
+                    view = app._transcript_view()
+                    host = app.query_one("#prompt-host")
+                    target = getattr(getattr(app, "_session", None), "session_id", "")
+                    samples.append(
+                        {
+                            "target": 1.0 if target == alpha.session_id else 0.0,
+                            "blocks": float(len(view.blocks())),
+                            "height": float(view.outer_size.height),
+                            # The transcript's OWN region and the dock's host: a
+                            # card is a dock child, so its rows come out of the
+                            # transcript's region, and a frame drawn before the host
+                            # has authored that height pushes the card's own rows off
+                            # the screen (F2/Q2/D4).
+                            "region": float(view.region.height),
+                            "host_y": float(host.region.y),
+                            "host_h": float(host.region.height),
+                            "screen_h": float(app.size.height),
+                            "prompt": float(bool(host.display and host.children)),
+                        }
+                    )
+                except Exception:  # noqa: BLE001 — a frame before the transcript exists
+                    pass
+                real_hook()
+
+            app.post_display_hook = hook  # type: ignore[method-assign]
+            try:
+                prepared = await app._prepare_sidebar_session(alpha.session_id)
+                app._commit_sidebar_session(
+                    alpha.session_id, prepared, app._sidebar_navigation.generation
+                )
+                # THE DISCRIMINATING MOMENT. The commit is one synchronous
+                # section, and the ladder's task cannot run inside it, so at this
+                # instant the card is either mounted BY the commit (the pre-arm)
+                # or not mounted at all — a later turn would be the frame the
+                # reader sees the transcript move on. Without the pre-arm this
+                # fails here with `_approval is None`.
+                assert app._approval is not None, (
+                    "the reveal's own commit did not mount the known gate's card: it "
+                    "arrives on a later turn, taking its rows out of the transcript then"
+                )
+                host = app.query_one("#prompt-host")
+                assert host.display and host.children, "the card is registered but not mounted"
+                for _ in range(12):
+                    await pilot.pause()
+            finally:
+                app.post_display_hook = real_hook  # type: ignore[method-assign]
+
+            assert gate_task is not None
+            gate_task.cancel()
+
+    # Only the INCOMING conversation's frames: the outgoing one paints until the
+    # swap, and its card-less frame is not what this test is about.
+    content = [
+        sample
+        for sample in samples
+        if sample["target"] == 1.0 and sample["blocks"] > 0 and sample["height"] > 0
+    ]
+    assert content, f"the return leg painted no rows: {samples}"
+    first = content[0]
+    assert first["prompt"] == 1, (
+        "the frame that revealed the rows carried no card, so its rows come out of "
+        "the transcript's height on a LATER frame",
+        content[:4],
+    )
+    # THE CARD IS IN THAT FRAME, and the equalities below are what say its rows
+    # came out of the transcript there and then. What this does NOT credit is the
+    # arrange-time settle: `OperatorApp._settle_dock_rows_before_reveal` runs its
+    # pass while the card is still composing (instrumented: `card_mounted=False` in
+    # every settle this lane and the reviewer took), so the pass cannot be the
+    # mechanism — see the comment under the equalities. Before the reservation,
+    # measured at this size: region 38, host `y=39` with its 15 rows on a 45-row
+    # screen (clipped), settling to 23 at +147 ms with the scroll moving by exactly
+    # the card's height — review round 1's F2, QA's Q2, design's D4. `region`, not
+    # `outer_size`: that is the box the reader's rows are clipped to.
+    #
+    # A ONE-FRAME TRACE WOULD PASS THIS SILENTLY, which is the class of defect this
+    # round is about (`settled` and `first` are then the same sample, so both
+    # equalities compare a value with itself). The guard is here to make that fail
+    # loudly instead: a reveal that composes a single frame has not shown that the
+    # card's rows were reserved in the frame that carries the card — it has shown
+    # nothing, and the pin is not allowed to call that green.
+    assert len(content) >= 2, (
+        "the trace holds a single frame, so the two equalities below compare a "
+        "sample with itself and cannot fail: measure two frames or do not claim "
+        "the reservation",
+        content,
+    )
+    settled = content[-1]
+    # THE ACCEPTANCE CRITERION FOR THIS FRAME, asserted as an equality and
+    # deliberately NOT one-sided. The frame that first carries the card must
+    # already have taken the CARD'S OWN ROWS out of the transcript: the
+    # transcript's region and the dock's own height both equal to their settled
+    # values. An earlier revision asserted `region >= settled`, which passes on
+    # both of the defects this exists to catch, because both of them give the
+    # transcript MORE rows than it settles with:
+    #
+    # * the round-1 shape — region `h=38` against a settled `23` with the dock
+    #   already at its full 15 rows, but placed BELOW the transcript (`host y=39`,
+    #   clipped off a 45-row screen): the card's rows were never taken out of the
+    #   transcript, and the second state at +147 ms is what took them;
+    # * the partial reserve — region `35`, the card in the dock with only part of
+    #   its height authored.
+    #
+    # Both are measured shapes (review rounds 2 and 3), so this pin must be RED on
+    # either, on the head without the reservation, and on a head whose reservation
+    # only half-lands.
+    assert first["region"] == settled["region"], (
+        "the frame that carries the card did not take the card's rows out of the "
+        "transcript: the region is not the settled one (round-1 shape 38 vs 23 "
+        "with the dock below the transcript; partial reserve 35 vs 23)",
+        first["region"],
+        settled["region"],
+        content[:4],
+    )
+    assert first["host_h"] == settled["host_h"], (
+        "the dock's own height is not the settled one in the frame that carries "
+        "the card: the card's rows are not reserved there",
+        first["host_h"],
+        settled["host_h"],
+        content[:4],
+    )
+    assert first["host_y"] + first["host_h"] <= first["screen_h"] + 0.5, (
+        "the card itself was pushed off the screen by its own late reservation",
+        first["host_y"],
+        first["host_h"],
+        first["screen_h"],
+    )
+    # WHAT THIS PINS: the card's rows are in the frame that carries the card, as
+    # one equality over the geometry a reader sees — not a claim about the code
+    # path. `_settle_dock_rows_before_reveal` runs its pass while the card is still
+    # composing (instrumented: `card_mounted=False` in every run the reviewer and
+    # this lane took), so the pass cannot be credited with the reservation; what
+    # decides the frame is the card's own composition landing before the reveal is
+    # painted. The rate therefore belongs to the pin, not to a comment: at matched
+    # load the reviewer measured 16 of 16 and 21 of 23 in the two arms, with no
+    # measurable gain from the in-turn mount helper, which is why that helper is
+    # gone from this branch — a mechanism that does not move the number is not kept
+    # for its name.

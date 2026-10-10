@@ -1826,6 +1826,17 @@ TERMINAL_GATE_TIMEOUT_S = 30.0
 #: measures actual laid-out rows and reserves a viewport above the reader.
 RESUME_RENDER_MESSAGES = 80
 
+#: How long a resume render may keep its follower pinned to the tail, in seconds.
+#:
+#: The real release is the FILL's own completion (`_release_resume_tail_hold`,
+#: called from `_fill_resume_attempt`), because that is when the render window
+#: stops growing. This bound exists only so a render that never concludes — a
+#: fill parked behind user input, a view whose callbacks stop arriving — cannot
+#: pin the reader to the tail for the life of the session; past it the view
+#: behaves as it always did and later extent changes are carried by
+#: `_size_updated`.
+RESUME_RENDER_TAIL_HOLD_S = 5.0
+
 #: How often a completion poller with no observed focus edge may re-ask the host
 #: whether this terminal is in the foreground.
 #:
@@ -5634,6 +5645,15 @@ class OperatorApp(App[None]):
         # stopped (a queued asker wakes when the front prompt settles, and
         # without the latch it would mount a fresh question for a dead turn).
         self._approval: ApprovalPrompt | None = None
+        #: A card the reveal pre-mounted for a gate the app already held
+        #: (``_prearm_known_gate``), waiting for the session's own ladder to
+        #: adopt it. Never a second live card: the ladder takes this reference
+        #: back out of ``self._approval`` and re-registers the SAME object.
+        self._prearmed_approval: ApprovalPrompt | None = None
+        #: ``(view, timer)`` while a resume render holds its follower at the tail
+        #: across every layout pass the fill causes — see
+        #: :meth:`_hold_tail_through_resume_render`.
+        self._resume_tail_hold: tuple[Any, Any] | None = None
         #: The composer's text as of the last Changed event, so a buffer that
         #: went empty can be told apart from one the app emptied. See
         #: `on_text_area_changed`.
@@ -8193,6 +8213,16 @@ class OperatorApp(App[None]):
         # The narrow accessor, never `frontend_state`: its clone was measured at
         # ~30 ms of a 135 ms cold frame, and this runs on every delta.
         if getattr(session, "pending_gate", None) is None:
+            # A SPECULATIVE CARD WHOSE QUESTION IS GONE LEAVES WITH IT. Same
+            # finding as the adoption mismatch above, reached by the other
+            # route: the pre-arm mounted a card in the reveal's frame, and the
+            # session's gate has since been answered or cleared. Only the
+            # PRE-ARMED card is touched here — the ladder owns every other
+            # card's lifetime, and taking one of those down is not this hook's
+            # decision to make.
+            prearmed = self._prearmed_approval
+            if prearmed is not None:
+                self._take_down_prearmed(prearmed)
             return
         if (
             self._sidebar_navigation.requested_id
@@ -9621,6 +9651,47 @@ class OperatorApp(App[None]):
             # straight back to.
             self._reset_band_for_swap(retire=False)
             self._adopt_session(session, replay_history=False, reuse_controller=True)
+            # ARM THE GATE BRIDGE HERE, IN THE REVEAL'S OWN SYNCHRONOUS SECTION,
+            # not at the end of the commit. A pending gate is a DOCK child, so
+            # its card takes its rows out of the transcript's own height: the
+            # card mounting a turn after the reveal moves every visible row up
+            # by its height (measured on S4 at 160x45: the transcript goes 38 ->
+            # 23 rows) and that is the "the transcript jumps when the card
+            # arrives" the first-paint audit reports. The ladder's card can only
+            # be in the frame the reveal paints if the bridge is armed BEFORE
+            # the refresh the reveal queues -- `self._interaction` has just
+            # moved to the incoming source, so the ladder's own "the card
+            # belongs to the source in front of the user" rule is satisfied
+            # here exactly as it was at the end of the commit.
+            #
+            # A source with no gate of its own is untouched: `_maybe_start_gate`
+            # reads the gate off the session (and returns without a card for a
+            # cold lease, whose snapshot has not arrived yet).
+            session.resume_viewer_gates()
+            # ...and the card the ladder is about to build for a gate this
+            # source already carries is mounted HERE, in the same synchronous
+            # section, so the reveal's own frame already excludes its rows
+            # (`_prearm_known_gate`; the ladder adopts the card when it runs).
+            self._prearm_known_gate(source)
+            # SETTLE THE DOCK'S GEOMETRY IN THE REVEAL'S OWN TURN. Mounting the
+            # card is not the same as taking its rows out of the transcript: a
+            # widget authors its height during a layout pass, and the pass that
+            # resolved the transcript's `1fr` ran before this mount. Without a
+            # pass here the compositor can paint the transcript at its pre-card
+            # height with the card's rows below it — measured at 160x45: region
+            # `1/38`, host at `y=39` (15 rows on a 45-row screen, i.e. clipped),
+            # settling to `1/23` a display later with the scroll moving 93 -> 108
+            # by exactly the card's height. That frame is review round 1's F2,
+            # QA's Q2 and design's D1/D4.
+            #
+            # WHAT THIS DOES NOT BUY, measured (rounds 2-3): the pass runs while
+            # the card is still composing (`card_mounted=False` in 23 of 23
+            # instrumented runs), so it does not itself reserve the card's rows —
+            # the pin on painted frames is what decides whether the reader got
+            # them. Same spelling as the resume's pre-reveal settle, for the same
+            # reason: `_refresh_layout()` ends in `_compositor_refresh()`, i.e. it
+            # PAINTS, so the paint is suppressed and only the layout is taken.
+            self._settle_dock_rows_before_reveal()
             # IMMEDIATELY AFTER the adopt, and never before it. `_adopt_session`
             # is the single place a source becomes current: it has just moved
             # `self._interaction` to the incoming source and lifted ITS mute, so
@@ -9752,7 +9823,6 @@ class OperatorApp(App[None]):
                 # clears the stash (``_submit_aida_prompt``), so the first
                 # landing takes it and later ones see None.
                 self._submit_aida_prompt(session)
-            session.resume_viewer_gates()
             self._session_sidebar.set_current(session_id)
             self._session_sidebar.refresh()
             if refreshing and focused_before_refresh is not None:
@@ -13653,67 +13723,89 @@ class OperatorApp(App[None]):
         # Re-armed with the rest of the resume state: a new conversation's
         # first arrival at the top owes a page (see `_resume_in_zone`).
         self._resume_in_zone = False
-        # VIEWPORT FIRST, THEN THE REST OF THE SAME WINDOW (B-F3). The 80-message
-        # frame is ~85 blocks, and building + mounting them before the first
-        # paint was the whole of a 0.6-1.3 s open: measured on the real app over
-        # a 2,000-message session, render CPU 93-147 ms at 80 messages against
-        # 34 ms at 20, first paint 386-478 ms against 91-133 ms. So the first
-        # paint carries only what one screen shows, and the remainder of the
-        # window mounts as ONE page after that paint.
+        # ONE PASS, ONE PAINTED FRAME. The projection is the WHOLE render
+        # window, mounted before the first paint, so the block list, the extent
+        # and the scrollbar the reader sees are final in the frame that arrives:
+        # no backfill page, no second state. The operator's target for this
+        # project is exactly that ("the first paint IS the final layout"). The
+        # jump this removed is not load-dependent; the STATE count is. Re-measured
+        # by review round 1 at fleet load (~50): the jump is 337/76/250/153 -> 0 on
+        # S2/S3/S5/S6, and 2 states survive on S2/S3 (1-2 on S5/S6) because the
+        # FILL below re-cuts the visible window after the first paint — a content
+        # replacement, not the chrome (status band, scrollbar thumb) this comment
+        # used to call it. At matched load the same code paints 1/1 (QA round 1:
+        # 9/9 opens at load 13-21). Both numbers belong in any claim about this
+        # path.
         #
-        # Both cuts come from the SAME snapping rule (`_resume_tail_start`), and
-        # the remainder is exactly `history[full_cut:first_cut]`, so once it has
-        # mounted the transcript holds the identical block list, the identical
-        # `_resume_pending_head`, and the identical head notice the one-shot
-        # projection produced — and the ordinary fill then runs from the state it
-        # always ran from. That identity is what makes the settled frame the
-        # frame main paints, rather than a lookalike built by a second rule.
+        # THIS REPLACES A VIEWPORT-FIRST SPLIT (B-F3), which painted one
+        # screenful and mounted the rest of the window as one page after that
+        # paint. What the split bought was pre-paint CPU, and it is small beside
+        # what it cost. Measured here (`PreparedReplay.prepare`, per-shape
+        # minimum of 3, fixtures r2, rows in the window at 160x45): projecting
+        # the 80-message window instead of one screenful is 12-66 ms more CPU,
+        # and the wall-clock open over the same shapes with the split disabled
+        # was not slower (3 opens/arm, interleaved). On a 2,000-message session
+        # the split was introduced on the back of 93-147 ms vs 34 ms of render
+        # CPU, i.e. the same shape of number at a larger row count; if a future
+        # measurement shows a real first-paint cost, the mitigation is SIZING
+        # THIS PROJECTION BY PROJECTED ROWS rather than by the message budget —
+        # a message count is a proxy these shapes routinely miss, and this file's
+        # own note says what the count is for (F6, review round 1). What it is
+        # NOT is a second painted frame: the split cannot come back without
+        # giving up the target.
         #
-        # `_viewport_message_budget` is the budget the sidebar's prepared window
-        # already uses for the same question ("enough messages for one
-        # screen"). The split is skipped when it would not paint less than the
-        # full window — a short conversation, or a terminal tall enough that one
-        # screen IS the window.
-        full_cut = (
-            _resume_tail_start(history, RESUME_RENDER_MESSAGES)
-            if len(history) > RESUME_RENDER_MESSAGES
-            else 0
-        )
-        screenful = _viewport_message_budget(self.size.height)
-        first_cut = _resume_tail_start(history, screenful) if len(history) > screenful else 0
-        if first_cut <= full_cut:
-            # The same first-frame tail placement the split branch below gets
-            # from its hold: without it a short conversation's first frame is
-            # placed at scroll 0 and moved to the tail one frame later.
-            self._hold_tail_for_reveal(self._transcript_view())
-            self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
-            # A message budget is a PROXY for height, and a poor one. Whether the
-            # first frame can be scrolled is a question about ROWS, and only the
-            # laid-out widgets can answer it — so ask them, once the mount has
-            # settled, and top up if the answer is "no".
-            #
-            # Marked active BEFORE the first attempt is scheduled, not inside it:
-            # the frames between this mount and that callback are the earliest
-            # ones a reader sees, and they are exactly as provisional as the ones
-            # between attempts.
-            self._start_resume_fill()
+        # The height top-up below STAYS, and answers a different question: a
+        # message budget is a PROXY for height, and whether the first frame can
+        # be scrolled at all is about ROWS, which only the laid-out widgets can
+        # answer.
+        self._hold_tail_through_resume_render(self._transcript_view())
+        self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
+        # Marked active BEFORE the first attempt is scheduled, not inside it:
+        # the frames between this mount and that callback are the earliest ones
+        # a reader sees, and they are exactly as provisional as the ones between
+        # attempts.
+        self._start_resume_fill()
+        return
+
+    def _hold_tail_through_resume_render(self, view: TranscriptView | None) -> None:
+        """Hold a following view at its tail for the WHOLE resume render.
+
+        WHY NOT ``_hold_tail_for_reveal``. That one releases on the next refresh,
+        which was right while a resume was one projection plus one backfill page:
+        one geometry change, one frame to protect. The render now projects the
+        whole window in one call and then the FILL tops it up across several
+        attempts, each of which mounts rows and re-lays-out the transcript. A
+        hold released after the first refresh therefore does not hold through
+        that render at all, and the frames between attempts are painted at the
+        previous extent: review round 1 measured 4 of 8 runs of
+        `tests/unit/tui/test_resume_render.py`'s [200] cell painting a frame off
+        the tail at fleet load, against 0 of 8 on the base (F3).
+
+        Released by the fill's completion — the moment the window stops growing —
+        with ``RESUME_RENDER_TAIL_HOLD_S`` as the bound for a render that never
+        concludes. A view that is not following is never touched: a restored
+        scroll anchor must not be overridden.
+        """
+        if view is None or not view.is_following_tail:
             return
-        # The rows the backfill will add must not widen the ledger's shared name
-        # column AFTER the first paint (see `TranscriptView.reserve_name_col`).
-        # Every call in the window counts, painted or not: a reserve wider than
-        # the rows need can only come from a name the finished frame shows.
-        view = self._transcript_view()
-        view.reserve_name_col(
-            str(getattr(call, "name", "") or "")
-            for message in history[full_cut:first_cut]
-            for call in (getattr(message, "tool_calls", None) or ())
-        )
-        # Held until the backfill settles, so no layout pass between the first
-        # paint and the finished window puts a following reader off the tail
-        # (`TranscriptView.hold_tail_through_layout`).
+        self._release_resume_tail_hold()
         view.hold_tail_through_layout(True)
-        self._project_settled_rows(history, start=first_cut)
-        self._backfill_resume_window(first_cut - full_cut, drop_notice=full_cut == 0)
+        timer = self.set_timer(RESUME_RENDER_TAIL_HOLD_S, self._release_resume_tail_hold)
+        self._resume_tail_hold = (view, timer)
+
+    def _release_resume_tail_hold(self) -> None:
+        """Hand a held follower back the ordinary release-on-next-frame rule."""
+        held = self._resume_tail_hold
+        if held is None:
+            return
+        self._resume_tail_hold = None
+        view, timer = held
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:  # noqa: BLE001 — a fired timer is already done
+                pass
+        view.hold_tail_through_layout(False)
 
     @staticmethod
     def _hold_tail_for_reveal(view: TranscriptView | None) -> None:
@@ -13730,7 +13822,9 @@ class OperatorApp(App[None]):
           extra visual state per switch);
         * a short resume, which fills in one go and would otherwise place its
           first frame at scroll 0 and move to the tail a frame later (the long
-          case already holds through its backfill page).
+          render is held across every pass by
+          ``_hold_tail_through_resume_render`` — a different tool for a different
+          job: this one protects ONE frame, that one protects a whole render).
 
         ``TranscriptView.hold_tail_through_layout`` is the pre-placement seam,
         and the release is scheduled for the refresh after, because a hold that
@@ -13744,98 +13838,6 @@ class OperatorApp(App[None]):
         view.hold_tail_through_layout(True)
         if not view.call_after_refresh(view.hold_tail_through_layout, False):
             view.hold_tail_through_layout(False)
-
-    def _backfill_resume_window(self, count: int, *, drop_notice: bool) -> None:
-        """Mount the newest ``count`` held messages as one page, after the paint.
-
-        The second half of the viewport-first resume (see
-        :meth:`_render_resumed_history`). The page goes through
-        :meth:`_mount_older_resume_page` — the one seam that inserts older rows
-        beneath the head notice with the anchor held — so the reader following
-        the tail stays on the tail across the insert, exactly as they do when
-        the ordinary fill mounts a page.
-
-        THE PAGING LEASE IS TAKEN NOW, before the paint, and handed to that
-        mount. Between this call and the page landing, a wheel notch or a click
-        on the head notice would otherwise page the held head by
-        :data:`RESUME_PAGE_MESSAGES` cuts, and the window would end on different
-        boundaries than the one-shot frame — still correct, but no longer the
-        same frame. With the lease held those gestures stand down against
-        ``_resume_paging`` for the one refresh this waits, and the head notice
-        reads its loading copy rather than an instruction nobody can carry out.
-
-        ``drop_notice`` is the case where the one-shot frame had NO head notice
-        (the whole conversation fit in :data:`RESUME_RENDER_MESSAGES`): the
-        first paint needed one because it held messages back, and once they
-        are mounted there is nothing above them to announce. Removing the row
-        — rather than letting it restate itself as "start of conversation" — is
-        what keeps that frame identical to main's.
-
-        Fenced to this exact source and view: a switch or a re-render between
-        the paint and the callback owns the transcript now, and the lease this
-        took is released rather than stranded.
-        """
-        view = self._transcript_view()
-        source = self._interaction
-        lease = self._acquire_paging_lease(source)
-        if lease is None:
-            # Unreachable today (`_render_resumed_history` pops this source's
-            # lease first); degrade to the ordinary fill rather than mounting
-            # a page against a gate someone else holds.
-            self._start_resume_fill()
-            return
-        self._resume_fill_active = True
-
-        def settled() -> None:
-            view.release_name_col_reserve()
-            if drop_notice and not self._resume_pending_head:
-                notice = self._resume_head_notice
-                if notice is not None:
-                    self._resume_head_notice = None
-                    view.remove_block(notice)
-            # Released only after the layout the removal above causes: that
-            # removal SHRINKS the extent by the notice's rows, and without the
-            # hold its first frame paints two rows off the tail (measured on
-            # the 50-message fixture). The hold is cleared on the refresh after.
-            if not view.call_after_refresh(view.hold_tail_through_layout, False):
-                view.hold_tail_through_layout(False)
-            # Handed back BEFORE the ordinary fill starts, which re-raises it:
-            # the flag is `_start_resume_fill`'s to own from here, and leaving
-            # it set would claim a fill in flight on any path where that start
-            # declines to run one.
-            self._resume_fill_active = False
-            self._start_resume_fill()
-
-        def mount() -> None:
-            if (
-                not self._is_current(source)
-                or self._transcript is not view
-                or self._paging_leases.get(source.token) is not lease
-            ):
-                self._release_paging_lease(lease)
-                view.release_name_col_reserve()
-                view.hold_tail_through_layout(False)
-                return
-            try:
-                self._mount_older_resume_page(
-                    on_settled=settled,
-                    lease=lease,
-                    start=max(0, len(self._resume_pending_head) - count),
-                )
-            except BaseException:
-                # The mount has already restored the head and released the
-                # lease (it re-raises by design); only this caller's two holds
-                # are left to drop, or the tail hold would outlive the resume.
-                view.release_name_col_reserve()
-                view.hold_tail_through_layout(False)
-                raise
-
-        # AFTER the refresh, which is the paint: `call_after_refresh` runs once
-        # the screen has composited the frame this projection produced. A pump
-        # that refuses the post (closing) will not paint either, so the page is
-        # mounted inline and the frame simply arrives whole.
-        if not view.call_after_refresh(mount):
-            mount()
 
     def _prefill_resume_before_reveal(self) -> None:
         """Fill the incoming projection to its goal INSIDE the commit.
@@ -14061,6 +14063,7 @@ class OperatorApp(App[None]):
                 return
             if self._sidebar_navigation.generation != generation:
                 self._resume_fill_active = False
+                self._release_resume_tail_hold()
                 self._reconcile_head_notice()
                 return
             if self._resume_fill_active:
@@ -14081,6 +14084,7 @@ class OperatorApp(App[None]):
             # the fill down and restating the row from the geometry that
             # actually exists is the honest answer.
             self._resume_fill_active = False
+            self._release_resume_tail_hold()
             self._reconcile_head_notice()
 
     def _fill_resume_until_scrollable(
@@ -14098,6 +14102,7 @@ class OperatorApp(App[None]):
             self._fill_resume_attempt(_attempt, target=target)
         except BaseException:
             self._resume_fill_active = False
+            self._release_resume_tail_hold()
             raise
 
     def _fill_resume_attempt(self, _attempt: int, *, target: float | None = None) -> None:
@@ -14119,6 +14124,9 @@ class OperatorApp(App[None]):
         goal = max(viewport + prefix, target or 0)
         if view.parent is None or not viewport or self._resume_paging or view.scroll_y >= goal:
             self._resume_fill_active = False
+            # The window stops growing HERE, so the render's own tail hold ends
+            # with it (F3). Every other exit from the fill releases it too.
+            self._release_resume_tail_hold()
             self._reconcile_head_notice()
             return
         source = self._interaction
@@ -15449,9 +15457,9 @@ class OperatorApp(App[None]):
         # a tool result whose call is still in the remaining head would
         # paint a reply with no question at the top of the newly revealed
         # history.
-        # ``start`` is a cut the CALLER already snapped: the viewport-first
-        # resume's backfill mounts the rest of the initial window at the exact
-        # boundary the one-shot frame would have used (`_backfill_resume_window`).
+        # ``start`` is a cut the CALLER already snapped, so a page mounts at the
+        # boundary the frame that cut it used rather than at a second rule's idea
+        # of where the unread head begins.
         if start is None:
             start = _resume_tail_start(head, RESUME_PAGE_MESSAGES)
         page, self._resume_pending_head = head[start:], head[:start]
@@ -25968,6 +25976,34 @@ class OperatorApp(App[None]):
             return False
         if bool(source.draft.approve_all):
             return True
+        # ADOPT THE CARD THE REVEAL ALREADY MOUNTED FOR THIS GATE, if there is
+        # one. It is not a competing prompt — it IS this gate's card, built by
+        # the same constructor with the same binding and the same question
+        # (`_prearm_known_gate`) — so it is taken out of the live slot BEFORE the
+        # serialization loop below can wait on it as though another asker owned
+        # it, and the construction section re-registers this same object as the
+        # one live card. Adopting rather than rebuilding is what keeps the
+        # answer path single: the card the reader saw is the card that answers.
+        prearmed = self._prearmed_approval
+        if (
+            prearmed is not None
+            and prearmed.source_binding == (source.token, gate_key, view_generation)
+            and getattr(prearmed, "gate_question", None) == (tool_name, description)
+        ):
+            self._prearmed_approval = None
+            self._approval = None
+        else:
+            # THE SPECULATIVE CARD COMES DOWN WITH ITS BINDING. The pre-arm
+            # exists so the reveal's frame can carry a gate the app already
+            # holds; when the gate it was built for is no longer the session's
+            # gate, the card on screen is asking a question nobody will answer —
+            # `_latch_source_approval_answer` drops an answer whose binding has
+            # moved — and the serialization loop below would park the REAL gate
+            # behind it (F4, round 1). Unmounting it here restores "one live
+            # card" for the loop that follows.
+            if prearmed is not None:
+                self._take_down_prearmed(prearmed)
+            prearmed = None
         while self._approval is not None and not self._approval.answered:
             await self._approval.wait()
             if not self._is_current(source):
@@ -25999,32 +26035,42 @@ class OperatorApp(App[None]):
         # while still taking focus off the composer the card is pointed at —
         # a turn parked on an answer the user can neither see nor reach.
         self._close_aside()
-        prompt = ApprovalPrompt(
-            tool_name,
-            description,
-            on_answer=partial(
-                self._latch_source_approval_answer, source, gate_key, view_generation
-            ),
-        )
-        # A gate on a PEER's session carries the hint that says where an allow
-        # happens: an allow from THIS origin would be refused by the owner's
-        # runtime by design (design note §3), and the reader must learn that
-        # from the card rather than from a refusal notice after the fact.
-        self._mark_remote_gate(prompt)
-        prompt.source_binding = (source.token, gate_key, view_generation)
-        self._restore_gate_draft(source, prompt)
-        self._approval = prompt
-        # The QUESTION goes in the dock, where it cannot scroll away from the
-        # turn it is blocking and where it reliably owns its own answer keys.
-        # The transcript gets a RECEIPT instead, and only once the answer is in
-        # (below): a receipt written up front would have to be rewritten, and a
-        # transcript block that changes after later blocks were appended is the
-        # one thing the transcript's finalize discipline forbids.
-        self._mount_prompt(prompt)
+        if prearmed is not None:
+            # Mounted by the reveal, so its rows are already out of the
+            # transcript's height and it is already in front of the reader.
+            # Everything below still runs for it, so this is the ladder's own
+            # path rather than a second one; a card the reader answered in the
+            # reveal window simply has its answer in hand (``wait()`` returns it
+            # at once) and is not advertised to the phone as newly pending.
+            prompt = prearmed
+            # Re-registered as the ONE live card, which the adoption arm
+            # deliberately vacated before the serialization loop: from here this
+            # is indistinguishable from a card this method built itself, and
+            # `_live_prompt`/`route_key_to_live_prompt` route its answer keys as
+            # they always did.
+            self._approval = prompt
+        else:
+            prompt = self._build_approval_prompt(
+                source,
+                gate_key=gate_key,
+                view_generation=view_generation,
+                tool_name=tool_name,
+                description=description,
+            )
+            self._approval = prompt
+            # The QUESTION goes in the dock, where it cannot scroll away from
+            # the turn it is blocking and where it reliably owns its own answer
+            # keys. The transcript gets a RECEIPT instead, and only once the
+            # answer is in (below): a receipt written up front would have to be
+            # rewritten, and a transcript block that changes after later blocks
+            # were appended is the one thing the transcript's finalize
+            # discipline forbids.
+            self._mount_prompt(prompt)
         # Same rewrite as the ask card's mount: the band must not offer a retry
         # while the question it is about is answerable above it (D1).
         self._show_sidebar_connection(source)
-        self._notify_mobile_approval_pending(prompt)
+        if not prompt.answered:
+            self._notify_mobile_approval_pending(prompt)
         # The turn is now parked on the user, and the working line says so —
         # this is the one wait in a turn that the agent is not responsible for.
         self._refresh_working_activity()
@@ -27943,6 +27989,161 @@ class OperatorApp(App[None]):
             # what makes the unmount below unable to double-answer.
             card.settle(None)
             self._unmount_prompt(card)
+
+    def _build_approval_prompt(
+        self,
+        source: SessionInteraction,
+        *,
+        gate_key: Any,
+        view_generation: int,
+        tool_name: str,
+        description: str,
+    ) -> ApprovalPrompt:
+        """Construct an approval card, wired to the latch the bridge answers through.
+
+        ONE construction with two callers — the session's own gate ladder
+        (``request_tool_approval``) and the reveal's pre-arm below. A second
+        construction beside it would be a card whose answer takes a different
+        path from the one the bridge owns, which is the defect class that leaves
+        a question on screen nobody can honour (UX round 1, U1). The question it
+        was built for rides on the card (``gate_question``) so an adoption can
+        prove it is adopting THIS gate's card and not a neighbour's.
+        """
+        prompt = ApprovalPrompt(
+            tool_name,
+            description,
+            on_answer=partial(
+                self._latch_source_approval_answer, source, gate_key, view_generation
+            ),
+        )
+        # A gate on a PEER's session carries the hint that says where an allow
+        # happens: an allow from THIS origin would be refused by the owner's
+        # runtime by design (design note §3), and the reader must learn that
+        # from the card rather than from a refusal notice after the fact.
+        self._mark_remote_gate(prompt)
+        prompt.source_binding = (source.token, gate_key, view_generation)
+        prompt.gate_question = (tool_name, description)
+        self._restore_gate_draft(source, prompt)
+        return prompt
+
+    def _take_down_prearmed(self, card: ApprovalPrompt) -> None:
+        """Unmount a speculative card and forget it, leaving any other card alone.
+
+        One behaviour with two callers (the adoption mismatch and a reconcile that
+        finds the gate gone), so a card can never be half-forgotten: rounded up in
+        both the app's registry and the dock, and `_approval` cleared only when the
+        card being taken down IS the live one — an adopted card is never touched
+        here, because adoption nulls `_prearmed_approval` first.
+        """
+        self._unmount_prompt(card)
+        self._prearmed_approval = None
+        if self._approval is card:
+            self._approval = None
+
+    def _settle_dock_rows_before_reveal(self) -> None:
+        """Run the dock's layout in the reveal's own turn — and what that is NOT.
+
+        MEASURED, review rounds 2 and 3: the pre-armed card is NOT composed when
+        this pass runs (23 of 23 instrumented runs: `card_mounted=False`, the host
+        at its 3 rows of chrome), so this pass does not reserve the card's rows
+        and must not be described as doing so. What it does is the thing its call
+        site needs: one layout pass inside the turn that reveals the transcript,
+        with the paint suppressed, so the compositor paints the arrangement that
+        exists rather than a half-arranged one.
+
+        The property the reader sees — the frame that carries the card carries the
+        settled geometry too — is asserted on PAINTED FRAMES by
+        `test_a_gate_the_app_already_holds_is_in_the_reveal_frame`, and it is the
+        card's own composition (Textual's async pipeline) that decides it: the
+        pin's rate is the honest measure of that, not this method's intent.
+        """
+        # GUARDED ON THE CARD, not only on the call site: this is a synchronous
+        # full reflow on a path whose whole target is first-paint time, and a
+        # switch with no pre-armed card (no gate, a cold lease, a follower with
+        # nothing owed) has no dock rows to reserve — the host's own height is
+        # the only thing that would move, and it moves on the next paint anyway
+        # (review round 2, M3).
+        if self._prearmed_approval is None:
+            return
+        screen = self.screen
+        paint = screen._compositor_refresh
+        screen._compositor_refresh = _suppress_intermediate_paint
+        try:
+            screen._refresh_layout()
+        finally:
+            screen._compositor_refresh = paint
+
+    def _prearm_known_gate(self, source: SessionInteraction) -> None:
+        """Mount a gate the app ALREADY has in hand IN the frame that reveals its conversation.
+
+        WHY. The card is a dock child, so its rows come out of the transcript's
+        own height: mounting it a turn after the reveal takes those rows away and
+        moves every visible row up by them — measured on S4 at 160x45, the
+        transcript goes 38 -> 23 rows and the card's own frame is a distinct
+        painted state. For a source whose snapshot the app already holds — a
+        bound viewer, which is what a switch back to a live conversation has,
+        and what the paint-first resume's attach-behind produces — the gate is
+        known in the same synchronous section that builds the reveal, so the
+        card can be part of that frame. Measured at both orders: with the bridge
+        armed early but the card still built by the ladder, the card lands on the
+        NEXT compositor display after the reveal (reveal 480.9 ms, card 532.0 ms
+        on S4) — the ladder's task cannot run inside a synchronous commit, so
+        the card has to be mounted here to be in the frame.
+
+        WHAT IT DOES NOT DO. It does not answer, deliver or decide anything: the
+        session's own ladder still decides whether a card is owed, and
+        ``request_tool_approval`` ADOPTS this card when it runs (see the
+        adoption arm there), so the answer path and the receipt stay the
+        bridge's. The guards below mirror the ladder's own early returns —
+        a latch denial and ``approve_all`` never reach a card, and a viewer that
+        can never bind is refused one level down (G6) — so a pre-armed card is
+        only ever mounted for a gate the ladder will take. A card that outlives
+        its gate is taken down by the ordinary writers: the next commit's swap
+        clears the live cards, and ``_suspend_sidebar_gates`` disables and
+        snapshots one on the way out of the conversation.
+
+        A COLD lease is left alone by construction: its snapshot has not
+        arrived, so ``pending_gate`` is ``None`` and there is nothing to read
+        (measured at the reveal of a first sidebar open: ``cold=True``,
+        ``pending_gate=None``, no ask rows). That is the residual this cannot
+        close from the app side.
+        """
+        if self._approval is not None or self._ask_screen is not None:
+            return
+        if source is not self._interaction or source.session is None:
+            return
+        if not _is_viewer(source.session):
+            return
+        # A ``display_only`` reveal is a SAVED PREVIEW, not the conversation's
+        # final state — the sticky flag the gate suite's display-only test names
+        # (a resync in flight at preparation time sets it, and only the
+        # connect/bind path clears it). The card inside such a frame would be a
+        # question asked over rows the app has already declared provisional, and
+        # the ladder refuses exactly that state one level down (G1,
+        # ``not _ready_for_events``): measured, pre-arming through it mounted a
+        # card the bridge would not answer. The reconcile re-arms the ladder the
+        # moment the display heals, so the card arrives with the real rows.
+        if source.display_only:
+            return
+        if bool(getattr(source, "can_never_bind", False)):
+            return
+        pending = getattr(source.session, "pending_gate", None)
+        if pending is None or getattr(pending, "kind", None) != "approval":
+            return
+        if bool(source.draft.approve_all):
+            return
+        if self._source_approvals_are_denied(source, source.turn.epoch):
+            return
+        prompt = self._build_approval_prompt(
+            source,
+            gate_key=self._sidebar_gate_identity(source),
+            view_generation=source.gate_view_generation,
+            tool_name=str(getattr(pending, "title", "") or ""),
+            description=str(getattr(pending, "detail", "") or ""),
+        )
+        self._prearmed_approval = prompt
+        self._approval = prompt
+        self._mount_prompt(prompt)
 
     def _mount_prompt(self, card: Widget) -> None:
         """Put a prompt into the dock's prompt host, above the status band.
