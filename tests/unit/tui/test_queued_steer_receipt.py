@@ -656,8 +656,20 @@ async def test_the_session_announces_the_drain_that_actually_took_messages(
     assert await session._drain_steering() == []
     assert [e for e in events if isinstance(e, SteeringDeliveredEvent)] == []
 
-    session.steer("first")
-    session.steer("second")
+    # MID-TURN SHAPE, MARKED EXPLICITLY (agent review round 1, MINOR-1). The
+    # receipt exists for a steer queued while a turn is already streaming, and
+    # the busy flag is that shape; it also keeps this cell race-free with the
+    # idle-admission wake (``_ensure_steering_wake``). An IDLE steer spawns a
+    # wake whose opening drain can race this manual drain for the second row
+    # on a slow runner, and the ``count == 2`` assertion needs BOTH rows in
+    # ONE drain -- so both are queued under the busy arm, where no wake exists
+    # to consume them.
+    session._is_streaming = True
+    try:
+        session.steer("first")
+        session.steer("second")
+    finally:
+        session._is_streaming = False
     drained = await session._drain_steering()
 
     # `getattr` rather than `.text`: the queue's element type is the union

@@ -39,7 +39,9 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import (
+    AgentEndEvent,
     AgentEvent,
+    AgentStartEvent,
     AgentTool,
     MessageStartEvent,
     SteeringDeliveredEvent,
@@ -581,6 +583,78 @@ async def test_two_wakes_for_one_steer_open_exactly_one_turn(headless_tui_env: P
             assert _transcript_count(session, "STEER-RACE") == 1
             assert stream.exhausted_at is None
     finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_a_wake_that_loses_its_row_before_the_opening_drain_opens_nothing(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retire-empty rule: a wake whose queue emptied first spends NOTHING.
+
+    THE WINDOW (agent review round 1, MINOR-1's mechanism): the wake's
+    under-lock guard can pass while another drain has already taken one row
+    and suspended mid-append; that in-flight drain then takes the rest, and
+    the wake's opening drain finds the queue empty. Forced deterministically
+    here -- the wake is held AFTER its guard (before the run), the test drains
+    the row itself, then releases -- so any runner speed sees the same order.
+
+    Without the retire the wake would continue to a first provider call
+    carrying nothing new (a paid no-op). With it: no provider request, no
+    ``agent_start``/``agent_end`` pair, and the row is durable regardless --
+    delivered by the drain that actually took it.
+    """
+    stream = ScriptedStream([text_turn("first answer")])
+    session = _session(headless_tui_env, "retire-empty", stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    held = asyncio.Event()
+    release = asyncio.Event()
+    state = {"armed": False}
+    original = Session._flush_shell_records
+
+    async def held_flush(self2: Session) -> None:
+        # ``_prompt_messages`` awaits this AFTER the under-lock guard and
+        # BEFORE the run: reaching the hold is proof the guard passed on a
+        # non-empty queue.
+        if state["armed"]:
+            state["armed"] = False
+            held.set()
+            await release.wait()
+        return await original(self2)
+
+    monkeypatch.setattr(Session, "_flush_shell_records", held_flush)
+    try:
+        with bounded(BOUND_S, "a wake losing its row before the opening drain"):
+            await session.prompt("say something")
+            await _until(lambda: not session._is_streaming, what="the first turn to end")
+            baseline = len(stream.requests)
+            mark = len(events)
+
+            state["armed"] = True
+            session.steer("STEER-RETIRE")
+            await asyncio.wait_for(held.wait(), 10.0)  # the wake passed its guard
+            assert session._steering_queue.qsize() == 1
+            drained = await session._drain_steering()  # the in-flight drain takes it
+            assert [getattr(message, "text", "") for message in drained] == ["STEER-RETIRE"]
+            release.set()
+
+            await _until(
+                lambda: not session._is_streaming and session._steering_queue.qsize() == 0,
+                what="the wake to retire",
+            )
+            await asyncio.sleep(0.2)
+            assert len(stream.requests) == baseline, "the retired wake must spend no provider call"
+            boundary = [
+                event
+                for event in events[mark:]
+                if isinstance(event, (AgentStartEvent, AgentEndEvent))
+            ]
+            assert boundary == [], "a run retired before it opened must emit no boundary pair"
+            assert _transcript_count(session, "STEER-RETIRE") == 1
+            assert stream.exhausted_at is None
+    finally:
+        release.set()
         await dispose_quietly(session)
 
 
