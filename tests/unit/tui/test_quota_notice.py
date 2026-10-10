@@ -34,6 +34,7 @@ from rich.cells import cell_len
 from rich.text import Text
 
 from local_operator.harness.types import ModelSpec
+from local_operator.providers import quota_notice as verdict_module
 from local_operator.providers import radient_recovery as rr
 from local_operator.providers import usage as usage_module
 from local_operator.providers.billing_links import BILLING_LINKS
@@ -55,7 +56,6 @@ from local_operator.providers.radient_recovery import (
 )
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.providers.usage_cache import USAGE_REPORT_TTL_MS, UsageCacheStore
-from local_operator.tui import quota_notice as tui_quota
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
 from local_operator.tui.widgets.welcome import (
@@ -335,7 +335,10 @@ def test_the_line_is_the_verdicts_copy_from_the_verdicts_inputs(
         captured.update(kwargs)
         return sentinel
 
-    monkeypatch.setattr(tui_quota, "evaluate_quota_notice", spy)
+    # Patched at its DEFINITION module: ``tui/quota_notice`` imports the
+    # verdict at its read (deferred, so the provider stack stays off the
+    # startup path), and the deferred import resolves this live attribute.
+    monkeypatch.setattr(verdict_module, "evaluate_quota_notice", spy)
     reports = [_report("deepseek", _balance_limit(0.0))]
     controller = QuotaController(reports=reports)
 
@@ -357,7 +360,9 @@ def test_the_line_is_the_verdicts_copy_from_the_verdicts_inputs(
 def test_an_empty_copy_verdict_shows_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """``ok``/``unknown``/``not_applicable`` are the verdict's own "say nothing"."""
     monkeypatch.setattr(
-        tui_quota, "evaluate_quota_notice", lambda **kwargs: QuotaVerdict("ok", "balance", False)
+        verdict_module,
+        "evaluate_quota_notice",
+        lambda **kwargs: QuotaVerdict("ok", "balance", False),
     )
     controller = QuotaController(reports=[_report("deepseek", _balance_limit(0.0))])
     assert quota_notice_line(QuotaSession(), controller, now_ms=NOW_MS) is None
@@ -370,7 +375,7 @@ def test_a_url_already_in_the_sentence_is_not_printed_twice(
     url = BILLING_LINKS["radient"].url
     assert url is not None  # the dashboard table always carries Radient's link
     monkeypatch.setattr(
-        tui_quota,
+        verdict_module,
         "evaluate_quota_notice",
         lambda **kwargs: QuotaVerdict(
             "depleted",
