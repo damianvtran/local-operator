@@ -1275,6 +1275,7 @@ def peer_stored_history_page(
     session_id: str,
     before_id: str | None = None,
     limit: int = 100,
+    open_frame: bool = False,
 ) -> dict[str, Any] | None:
     """One page of a PEER's stored journal, or ``None`` when it cannot be served.
 
@@ -1294,6 +1295,15 @@ def peer_stored_history_page(
     page did not arrive, and the peer's refusal sentence is not a sentence about
     this device's history.
 
+    ``open_frame`` ASKS FOR THE OPEN-FRAME PAGE of ``DESKTOP_API.md`` §"The open
+    frame" — the turn-aligned, paint-only page, built by the OWNER's read once
+    its facts half lands. The ask is the KEY'S PRESENCE, carried
+    only when true: a caller that did not ask sends today's frame byte-for-byte,
+    so an owner older than the flag reads its familiar request unchanged. The
+    reply's optional run facts (``runs``, ``runs_state``, ``head_cut``) are
+    passed through UNCHANGED when the owner produced them — and are absent
+    otherwise, which is the only shape any owner produces today.
+
     BLOCKING — it dials this device's relay's control socket. Callers on a loop
     must hand it to ``asyncio.to_thread``.
     """
@@ -1310,18 +1320,32 @@ def peer_stored_history_page(
         session_id=session_id,
         before_id=before_id or None,
         limit=int(limit),
+        # THE ASK IS THE KEY'S PRESENCE (``validate_open_frame`` in
+        # ``network/relay.py`` owns the spelling on both halves): a caller that
+        # did not ask sends today's frame, byte-for-byte.
+        **({"open_frame": True} if open_frame else {}),
     )
     if not reply or reply.get("refused"):
         return None
     entries = reply.get("entries")
     if not isinstance(entries, list):
         return None
-    return {
+    page: dict[str, Any] = {
         "entries": entries,
         "has_more": bool(reply.get("has_more")),
         "cursor_missing": bool(reply.get("cursor_missing")),
         "has_newer": reply.get("has_newer"),
     }
+    # THE OPTIONAL RUN FACTS: passed through UNCHANGED when the owner produced
+    # them, and absent otherwise (``runs``/``runs_state``/``head_cut`` of
+    # DESKTOP_API.md §"The open frame"). Absent keeps the answer's key set — and
+    # every byte — exactly today's; PRESENT means present, so an empty ``runs``
+    # list or ``head_cut: false`` is carried verbatim rather than dropped by a
+    # truthiness test.
+    for key in ("runs", "runs_state", "head_cut"):
+        if key in reply:
+            page[key] = reply[key]
+    return page
 
 
 def _relay_call(root: Path | None, op: str, **fields: Any) -> dict[str, Any] | None:

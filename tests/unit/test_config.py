@@ -395,7 +395,7 @@ def test_loading_a_config_is_read_only(tmp_path):
     assert not (tmp_path / LEGACY_STAMP_NAME).exists()
 
 
-def test_migration_pins_the_old_reapers_off_in_both_spellings(tmp_path, caplog):
+def test_migration_pins_the_old_reapers_off_in_both_spellings(tmp_path, caplog, monkeypatch):
     """The explicit migration WRITES ``session.reap_unused: false`` in the
     flat spelling the #576 reaper read AND the nested one ``/settings``
     wrote — it never removes them. An older runtime that can still start on
@@ -404,6 +404,12 @@ def test_migration_pins_the_old_reapers_off_in_both_spellings(tmp_path, caplog):
     what let the installed reaper fire during this PR's review."""
     from local_operator.config_migrations import migrate_session_cleanup
 
+    # The WARNING level belongs to the REAL-home shape (a human's install);
+    # under pytest HOME is redirected, which the migration deliberately
+    # DEMOTES to DEBUG (see the redirected-arm test below). Pin the input the
+    # same way every home-sensitive test does, rather than depending on the
+    # runner's HOME.
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: Path.home().resolve())
     _write_config(tmp_path, {"hosting": "anthropic", **_RETIRED})
     with caplog.at_level(logging.WARNING, logger="local_operator.config_migrations"):
         changes = migrate_session_cleanup(tmp_path)
@@ -463,6 +469,46 @@ def test_migration_is_a_no_op_on_a_final_shape_config(tmp_path):
     assert migrate_session_cleanup(tmp_path) == []
     assert path.read_bytes() == before
     assert not list(tmp_path.glob("config.yml.pre-cleanup-migration.*"))
+
+
+def test_migration_is_debug_only_under_a_redirected_home(tmp_path, caplog, monkeypatch):
+    """T7: the per-run home keeps the WORK and drops only the noise.
+
+    ``lop exec`` and agent-runtime-svc rewrite a run config per Execute, so
+    this migration fires on EVERY run; the WARNING was one stderr line per run
+    that the adapter persists as an audit event. The safety properties are
+    untouched — keys WRITTEN in both spellings, backup taken, unrelated keys
+    (the ``providers`` ZDR pin) byte-identical — and only the level moves.
+    Mutation: demote unconditionally (the real-home arm above goes red);
+    stop writing a key or skip the backup (this cell goes red).
+    """
+    from local_operator.config_migrations import migrate_session_cleanup
+
+    monkeypatch.setattr(
+        "local_operator.supervisors.real_home", lambda: Path("/nonexistent-foreign-home")
+    )
+    _write_config(
+        tmp_path,
+        {"hosting": "anthropic", "providers": {"radient": {"zdr": True}}, **_RETIRED},
+    )
+    with caplog.at_level(logging.DEBUG, logger="local_operator.config_migrations"):
+        changes = migrate_session_cleanup(tmp_path)
+    assert changes, "the migration still runs under a redirected HOME"
+
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert stored["session.reap_unused"] is False
+    assert stored["session"]["reap_unused"] is False
+    assert stored["providers"] == {"radient": {"zdr": True}}, "the ZDR pin moved"
+    assert (
+        len(list(tmp_path.glob("config.yml.pre-cleanup-migration.*"))) == 1
+    ), "the backup is a safety property, not a nicety"
+
+    levels = {
+        record.levelno
+        for record in caplog.records
+        if "config migration" in record.message and "reap_unused" in record.message
+    }
+    assert levels == {logging.DEBUG}, "an automation run must not warn per run"
 
 
 def test_startup_seam_is_gated_by_the_config_not_a_stamp(tmp_path, monkeypatch):

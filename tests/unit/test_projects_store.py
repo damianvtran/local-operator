@@ -1174,6 +1174,56 @@ def test_lifecycle_rows_written_before_the_extension_still_load(store) -> None:
         assert reader.get_project(project.id).status == legacy
 
 
+def test_the_done_gate_refusal_is_a_value_error_subclass_naming_the_open_milestones(store) -> None:
+    """The routes map this CLASS to `project_done_incomplete` (no prose matching),
+    and every pre-existing `except ValueError` arm must keep catching it with the
+    exact sentence the tool receipts and the UI's refusal-copy matcher read."""
+    from local_operator.projects import ProjectDoneGateError
+
+    project = create(
+        store,
+        milestones=[
+            ProjectMilestone(name="beta cut"),
+            ProjectMilestone(name="gamma review", completed_at="2026-01-01"),
+            ProjectMilestone(name="launch"),
+        ],
+    )
+    with pytest.raises(ProjectDoneGateError) as excinfo:
+        store.update_project(project.id, ProjectEdit(status="done"), reporter=SESSION_A)
+    assert isinstance(excinfo.value, ValueError)
+    assert excinfo.value.incomplete == ("beta cut", "launch")
+    assert str(excinfo.value) == (
+        "cannot set status 'done': 2 milestones still incomplete ('beta cut', 'launch') — "
+        "complete them, or pass force_done=true to close with them open"
+    )
+    # create's gate raises the same class.
+    with pytest.raises(ProjectDoneGateError):
+        store.create_project(
+            ProjectEdit(name="born-done", status="done", milestones=[ProjectMilestone(name="open")])
+        )
+
+
+def test_closed_with_open_milestones_is_true_only_for_a_real_force() -> None:
+    from local_operator.projects import Project, closed_with_open_milestones
+
+    def row(status: str, *milestones: ProjectMilestone) -> Project:
+        return Project(id="a" * 32, name="p", status=status, milestones=list(milestones))
+
+    open_ms = ProjectMilestone(name="open")
+    done_ms = ProjectMilestone(name="shipped", completed_at="2026-01-01")
+    assert closed_with_open_milestones(row("done", open_ms, done_ms), force_done=True) is True
+    assert closed_with_open_milestones(row("done", open_ms), force_done=False) is False
+    assert closed_with_open_milestones(row("paused", open_ms), force_done=True) is False
+    assert closed_with_open_milestones(row("done", done_ms), force_done=True) is False
+    # `was_done` narrows to the transition; the default keeps the tool's
+    # state-describing receipt as it always was.
+    assert (
+        closed_with_open_milestones(row("done", open_ms), force_done=True, was_done=True) is False
+    )
+    assert closed_with_open_milestones(row("done", open_ms), force_done=True) is True
+    assert closed_with_open_milestones(row("done"), force_done=True) is False
+
+
 def test_done_needs_complete_milestones_or_force_done(store) -> None:
     project = create(
         store,

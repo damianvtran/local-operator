@@ -33,6 +33,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -1807,6 +1808,14 @@ class _KnowledgeHooks:
     #: hooks object that never attaches carries ``()`` and behaves exactly as
     #: before the kind existed.
     tool_roster: tuple[Any, ...] = ()
+    #: Whether THIS session's code-request ledger has any rows, as a CALLABLE
+    #: because the answer moves during the session (the first PR opens it).
+    #: WRITTEN BY THE SESSION beside ``tool_roster`` (``set_knowledge_hooks`` /
+    #: ``_refresh_tool_roster``) — the factory's construction-time object has no
+    #: session directory to read the derived index from. ``None`` means the
+    #: deterministic trigger's vocabulary arm simply never fires, which is the
+    #: layer's pre-code-requests behaviour rather than a degraded one.
+    code_requests_ledger: Callable[[], bool] | None = None
     #: The classification seam (docs/design/classification-layer.md §7): an
     #: object exposing ``async recommend_resources(request) -> Recommendation``.
     #: ONE method — the seam used to publish ``notice(recommendation)`` as well, and
@@ -2569,6 +2578,7 @@ _TOOL_ROSTER_NAMES: tuple[str, ...] = (
     "wait",
     "jobs",
     "generate_image",
+    "code_requests",
 )
 
 #: One tool row's description bound — the same scannable-row precedent the
@@ -3021,6 +3031,86 @@ def _recommendation_line(resource: Any) -> str:
     return f"- {url}"
 
 
+@dataclass(frozen=True)
+class _DeterministicRecommendation:
+    """One message-triggered resource suggestion, rendered by the same block.
+
+    Structural twin of the package's ``Recommendation`` for the one attribute
+    the delivery loop reads (``resources``); the turn path must not import the
+    package (design §7), and a host-supplied classifier object is read by
+    attribute for the same reason.
+    """
+
+    resources: tuple[Any, ...] = ()
+
+
+#: Review/CI vocabulary for the ledger-gated arm of the trigger. Deliberately
+#: COMPOUND and specific — "review" alone would fire on "request a review from
+#: the doctor" and "merge" alone on "merge these two CSVs". The unambiguous
+#: tier fires on its own; the ambiguous tier needs the anchor window below.
+_CODE_REVIEW_VOCAB = re.compile(
+    r"(?i)\b(?:round\s+\d+|review\s+round|review\s+findings|agent\s+review|"
+    r"design\s+review|code\s+review|qa\s+report)\b"
+)
+
+#: Vocabulary that is ambiguous ALONE. ``ci``/``pipeline`` matched "fix the
+#: CI/CD pipeline docs" and "our data pipeline needs a retry"; bare "pull
+#: request" matched "what is a pull request" — all on unrelated turns, even
+#: with a non-empty ledger (review round 1, F9). These fire only when a
+#: build-status, review-outcome or PR/MR word sits within the same approximate
+#: sentence (40 characters either side): "is CI green on the PR" and "merge it
+#: once CI is green" fire; the negatives above do not.
+_AMBIGUOUS_VOCAB = re.compile(r"(?i)\b(?:ci|pipeline|pull\s+request|merge\s+request)\b")
+_AMBIGUOUS_ANCHOR = re.compile(
+    r"(?i)\b(?:green|red|pass(?:ed|es|ing)?|fail(?:ed|s|ing)?|clear|clean|waiting|pending|"
+    r"blocked|running|broken|status|checks?|rerun|re-run|ready|merg(?:e[ds]?|ing)|"
+    r"land(?:ed|ing)?|ship(?:ped|ping)?|approv\w*|pr\b|mr\b|round\s+\d+|"
+    r"review\s+round)\b"
+)
+
+
+def _ambiguous_vocab_fires(query: str) -> bool:
+    """Whether an ambiguous term is talking about THIS session's build/request."""
+    for match in _AMBIGUOUS_VOCAB.finditer(query):
+        window = query[max(0, match.start() - 40) : match.end() + 40]
+        if _AMBIGUOUS_ANCHOR.search(window):
+            return True
+    return False
+
+
+def _code_requests_recommendation(
+    query: str, hooks: _KnowledgeHooks
+) -> _ClassificationCandidate | None:
+    """The deterministic ``tool://code_requests`` suggestion for one message, or ``None``.
+
+    Two arms (design §F): a forge ref parsed by ``code_requests.refs`` — never
+    a loose regex, so ``/pull/new/…`` and issue URLs do not count — fires
+    unconditionally; review/CI vocabulary fires only when this session's ledger
+    is non-empty, because the ledger is the context that makes such words be
+    about pull requests at all.
+
+    The ref parse uses the EMPTY host context on purpose: this is a TRIGGER,
+    not a fetch. A self-hosted URL still means "the user is asking about a code
+    request"; the tool resolves the real host context when it runs, and a
+    trigger must not pay a host-context load (file reads plus a git call) on
+    every user message.
+    """
+    from local_operator.code_requests import refs as code_request_refs
+
+    if next(iter(code_request_refs.iter_refs(query)), None) is None:
+        if _CODE_REVIEW_VOCAB.search(query) is None and not _ambiguous_vocab_fires(query):
+            return None
+        probe = hooks.code_requests_ledger
+        if probe is None or not probe():
+            return None
+    return _ClassificationCandidate(
+        "tool",
+        "code_requests",
+        "This session's PRs/MRs with review rounds, CI and freshness.",
+        "tool://code_requests",
+    )
+
+
 def _classification_block(
     hooks: _KnowledgeHooks,
     recommendation: Any,
@@ -3273,6 +3363,15 @@ async def _select_knowledge_block(
                         str(item.file_path),
                     )
                 )
+        # THE DETERMINISTIC CODE-REQUESTS TRIGGER (design §F): a message that
+        # carries a forge ref, or asks about review/CI vocabulary while this
+        # session's ledger is non-empty, appends `tool://code_requests` beside
+        # the agents hint. It is computed ONCE per render (the frozen block
+        # carries it within a task) and delivered through the same advisory
+        # block below, so it shares its dedupe and its maxRecommendations cap.
+        deterministic_code_requests = _code_requests_recommendation(query, hooks)
+    else:
+        deterministic_code_requests = None
 
     from local_operator.skills.api import render_block
 
@@ -3298,7 +3397,16 @@ async def _select_knowledge_block(
     # step under the reply the user was reading. Delivery below is unchanged — the
     # block still reaches the prompt, and the cost line still reaches the log.
     pending, hooks.classification_pending = hooks.classification_pending, []
-    answers: list[Any] = list(pending)
+    # The message's own TRIGGERED suggestion goes FIRST, ahead of the vendor's
+    # answer and any late answers: it is the highest-precision one on the page
+    # (the user's own message named a pull request, or review vocabulary with a
+    # ledger behind it), and a chatty vendor answer filling every cap slot must
+    # not starve the line the trigger exists to deliver. Vendor answers keep
+    # their own late-first order after it.
+    answers: list[Any] = []
+    if deterministic_code_requests is not None:
+        answers.append(_DeterministicRecommendation(resources=(deterministic_code_requests,)))
+    answers.extend(pending)
     if recommendation is not None:
         answers.append(recommendation)
     carried: set[str] = set()
@@ -4007,17 +4115,56 @@ def _store_maintenance_thread_main(
                 )
             except Exception:  # noqa: BLE001 — housekeeping never fails session start
                 logger.debug("store maintenance worker failed", exc_info=True)
-                return
+                break
             if acquired:
-                return
+                break
             # Another process owns the lock. Back off rather than abandon retry
             # or spin. The next successful acquire checks the stamp while
             # holding the lock, and reset wakes this bounded wait immediately.
             if stop_event.wait(retry_delay):
                 return
             retry_delay = min(retry_delay * 2, _STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS)
+        # The launch pass is over: release anything awaiting it BEFORE the
+        # sweeps below, which run for the life of the process.
+        done_event.set()
+        _run_delegated_sweeps(config_manager, config_dir, live_dir, stop_event)
     finally:
         done_event.set()
+
+
+def _run_delegated_sweeps(
+    config_manager: ConfigManager,
+    config_dir: Path,
+    live_dir: Path | None,
+    stop_event: threading.Event,
+) -> None:
+    """The delegated-session class's drain and hourly sweep, on THIS daemon thread.
+
+    Not one of the six stamped passes above, deliberately: those are one-shot
+    and coalesced by a 60-second stamp, while this one must (a) CONTINUE a
+    backlog across passes, (b) recur hourly because a 48-hour window needs
+    steady-state sweeps in a runtime that lives for days, and (c) stop at the
+    next batch when the user switches it off. The loop, its own lock and its own
+    freshness stamp live in ``session.delegated_retention``; this thread is only
+    the host, so no new daemon exists. Housekeeping never fails a session.
+    """
+    if stop_event.is_set():
+        return
+    try:
+        from local_operator.session.delegated_retention import (
+            live_policy_provider,
+            run_sweeps,
+        )
+
+        run_sweeps(
+            config_dir,
+            live_policy_provider(config_manager, config_dir),
+            live_dir=live_dir,
+            should_stop=stop_event.is_set,
+            wait=stop_event.wait,
+        )
+    except Exception:  # noqa: BLE001 — housekeeping never fails session start
+        logger.debug("delegated session sweeps failed", exc_info=True)
 
 
 def _start_store_maintenance(
@@ -4386,6 +4533,15 @@ async def _prepare(
     tool_context = ToolContext(
         cwd=effective_cwd,
         session_id=transcript_dir.name,
+        # The session's own directory. This context is the WARM snapshot
+        # (``create_tools`` below), and a capability tool gated on the store
+        # root must see the same answer here as a live turn does: with
+        # ``session_dir`` missing, ``code_requests`` was built for the live
+        # session but not for this inventory, so the two surfaces disagreed
+        # (QA round 1, Q1: the model was shown the recommendation for a tool
+        # that was never in its tool list). Nothing is materialised here —
+        # only the path travels.
+        session_dir=str(transcript_dir),
         agent_id=agent_id,
         has_ui=has_ui,
         request_approval=request_approval,

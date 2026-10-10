@@ -449,10 +449,18 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         action="store_true",
         help="with --delete: actually delete it (without this the owner only rehearses)",
     )
+    # THE HELP SAYS ``stop``, NOT "signal": an already-leaving target is ended
+    # through its own socket — it answers by design, which is why its skip sits
+    # ahead of the socket rung — while only the mid-turn, socket-silent half is
+    # actually signalled (agent review round 4 on #2099, R4-1).
     net_sessions.add_argument(
         "--force",
         action="store_true",
-        help="with --stop: signal a target whose turn is in flight (as `lop stop --force`)",
+        help=(
+            "with --stop: stop a target the plain stop skipped — one already "
+            "leaving, or mid-turn with a socket that will not answer "
+            "(as `lop stop --force`)"
+        ),
     )
     # THE THREE PILOT ACTS. `--engage` warms a session elsewhere and `--stop`
     # kills one, but nothing in this family could put a TURN to a conversation
