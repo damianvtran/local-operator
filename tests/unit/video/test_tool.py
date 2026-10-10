@@ -404,6 +404,27 @@ async def test_video_status_unknown_and_pending(
 
 
 @pytest.mark.asyncio
+async def test_video_status_no_id_on_a_record_free_session(tmp_path: Path) -> None:
+    """QA round 3: a fresh session with NO records gets the honest absence,
+    not `max()`'s ValueError — that traceback would reach the model as the
+    tool's answer.
+
+    Repro (one line): ``execute_video_status("call", {}, …)`` on an empty
+    session dir used to raise ``ValueError: max() iterable argument is
+    empty`` at the newest-record pick.
+    """
+    ctx = ToolContext(
+        cwd=str(tmp_path), session_dir=str(tmp_path), jobs=_FakeJobs()  # type: ignore[arg-type]
+    )
+    result = await video_tool.execute_video_status("call-8", {}, None, None, ctx)
+    assert not result.is_error
+    no_job_block = result.content[0]
+    assert isinstance(no_job_block, TextContent)
+    assert no_job_block.text == "No video job is recorded for this session."
+    assert result.details and result.details["job_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_video_status_dedupes_the_watcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

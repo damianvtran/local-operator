@@ -625,6 +625,17 @@ async def execute_video_status(
     if job_id is None:
         pending = {jid: rec for jid, rec in records.items() if not record_is_terminal(rec)}
         pool = pending or records
+        if not pool:
+            # A session that never ran a video job (QA round 3): the SAME
+            # honest absence a named-but-unknown id gets — `max()` on an
+            # empty pool would instead raise, and that traceback would
+            # surface to the model as the tool's answer.
+            return _text(
+                tool_call_id,
+                "video_status",
+                "No video job is recorded for this session.",
+                details={"job_id": None, "state": None},
+            )
         job_id = max(pool, key=lambda jid: str(pool[jid].get("at") or ""))
     record = records[job_id]
     live = jobs.get(job_id) if jobs is not None else None
