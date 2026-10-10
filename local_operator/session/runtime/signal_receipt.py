@@ -20,14 +20,18 @@ WHAT IT CAN AND CANNOT SAY (stated here once, repeated in ``docs/EXEC.md``):
   discards it, so the receipt says ``sender: unavailable`` rather than guessing.
   The only path that NAMES a caller is a covering stop marker, and that comes from
   the acting party's own attestation, not from this module observing anything.
-  What the receipt CAN add about direction is the spawn chain this process was
-  born into (``LOP_SPAWN_CHAIN``, recorded by ``macos_disclaim``), snapshotted
-  with per-member liveness at arrival: nothing here names a sender, but the
-  renderer can say that the app at the root of that chain was already gone when
-  the signal landed (2026-10-09 incident), which is evidence the marker-less
-  case previously could not carry.
-  * SIGKILL, a crash or a power loss: NOTHING. The target is not executing. Those
+* SIGKILL, a crash or a power loss: NOTHING. The target is not executing. Those
   stay on the acting party's marker (SIGKILL rung) or on no evidence at all.
+
+STILL NO SENDER, BUT DIRECTION GAINS ONE HONEST FACT. The spawn chain this
+process was born into (``LOP_SPAWN_CHAIN``, recorded by ``macos_disclaim``)
+carries each member's liveness as recorded at spawn (``alive_at_spawn``), and
+this module adds a second, arrival reading (``alive_now``) when a signal lands.
+When the app at the root of that chain was RECORDED ALIVE and is GONE at
+arrival, the renderer says exactly that — the app was running when the runtime
+started and was no longer running when the signal arrived (2026-10-09
+incident) — and says nothing when the readings do not conspire, so the clause
+cannot read as the cause of a signal or as a named sender.
 
 PAIRING IS DECIDED AT WRITE TIME. The marker is staged BEFORE the signal by
 contract (control's "marker first, then the signal"), so it is on disk at receipt
@@ -296,10 +300,12 @@ def observe(
     entry = build_signal(
         name, number, at=at, in_flight=in_flight, action=action, marker=marker, covered=covered
     )
-    # The spawn chain with liveness AT THIS INSTANT: the one piece of direction
-    # evidence a target can honestly carry about an unmarked signal (its app
-    # ancestor already being gone). ``None`` when this process was not spawned
-    # with a chain — absent stays absent, and the renderer says nothing extra.
+    # The spawn chain with the arrival half of the renderer's gate: each
+    # member already carries its liveness as recorded at spawn
+    # (``macos_disclaim``); this snapshot adds the reading taken NOW, and
+    # ``incidents`` renders the clause only when the two conspire (recorded
+    # alive, gone at arrival). ``None`` when this process was not spawned with
+    # a chain — absent stays absent, and the renderer says nothing extra.
     chain = snapshot_spawn_chain()
     if chain is not None:
         entry["spawn_chain"] = chain

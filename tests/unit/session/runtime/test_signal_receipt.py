@@ -243,23 +243,25 @@ def test_an_install_shaped_caller_pairs_through_the_real_involuntary_writer(tmp_
     assert signal_receipt.stop_class_of(unmarked["signals"][0]) == "unattributed-signal"
 
 
-def test_a_recorded_spawn_chain_rides_the_receipt_with_liveness(
+def test_a_recorded_spawn_chain_rides_the_receipt_with_both_readings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The one direction fact a target can honestly carry: the chain it was born into.
+    """The direction fact a target can carry, both halves (design round 1, D1).
 
-    Liveness is measured AT ARRIVAL — a pid this process holds proves True, a pid
-    no process holds proves False. A disclaimed ancestor (the fix's whole point)
-    simply never appears as the app, because the chain was recorded at spawn.
+    Each entry keeps the liveness RECORDED at spawn (``alive_at_spawn``) and
+    gains the one measured at arrival (``alive_now``) — the renderer's clause
+    gates on both. A disclaimed ancestor (the fix's whole point) simply never
+    appears as the app, because the chain was recorded at spawn.
     """
     monkeypatch.setenv(
         ENV_SPAWN_CHAIN,
         json.dumps(
             [
-                {"pid": os.getpid(), "argv0": "lop exec"},
+                {"pid": os.getpid(), "argv0": "lop exec", "alive_at_spawn": True},
                 {
                     "pid": 2_147_483_600,
                     "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+                    "alive_at_spawn": True,
                 },
             ]
         ),
@@ -270,8 +272,8 @@ def test_a_recorded_spawn_chain_rides_the_receipt_with_liveness(
     assert receipt is not None
     chain = receipt["signals"][0].get("spawn_chain")
     assert isinstance(chain, list) and len(chain) == 2
-    assert chain[0]["alive"] is True
-    assert chain[1]["alive"] is False
+    assert chain[0]["alive_at_spawn"] is True and chain[0]["alive_now"] is True
+    assert chain[1]["alive_at_spawn"] is True and chain[1]["alive_now"] is False
 
 
 def test_a_receipt_without_a_chain_omits_the_field(
@@ -288,15 +290,16 @@ def test_a_receipt_without_a_chain_omits_the_field(
 def test_an_unattributed_verdict_names_a_gone_app_ancestor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """2026-10-09: the runtime cannot name the sender; it CAN say the app was gone."""
+    """2026-10-09: the runtime cannot name the sender; it CAN say the app outlived."""
     monkeypatch.setenv(
         ENV_SPAWN_CHAIN,
         json.dumps(
             [
-                {"pid": os.getpid(), "argv0": "lop"},
+                {"pid": os.getpid(), "argv0": "lop", "alive_at_spawn": True},
                 {
                     "pid": 2_147_483_600,
                     "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+                    "alive_at_spawn": True,
                 },
             ]
         ),
@@ -308,14 +311,20 @@ def test_an_unattributed_verdict_names_a_gone_app_ancestor(
     verdict = signal_receipt.cut_off_verdict(receipt["signals"][0], count=1)
     assert verdict is not None
     _cause, detail = verdict
-    assert "was no longer running when the signal arrived" in detail
-    assert "Local Operator.app/Contents/MacOS/Local Operator" in detail
+    assert (
+        "the app this runtime descends from (Local Operator.app, pid 2147483600)"
+        " was running when the runtime started and was no longer running when the signal arrived"
+    ) in detail
+    # The recorded command line is persisted nowhere the reader sees it (D3).
+    assert "/Applications/" not in detail
 
 
 def test_an_unattributed_verdict_without_the_clause_is_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An ALIVE app ancestor — or none at all — renders the pre-incident sentence."""
+    """An ALIVE app ancestor — or one already gone at spawn — renders the old sentence."""
+    directory = tmp_path / "alive"
+    directory.mkdir()
     monkeypatch.setenv(
         ENV_SPAWN_CHAIN,
         json.dumps(
@@ -323,12 +332,11 @@ def test_an_unattributed_verdict_without_the_clause_is_unchanged(
                 {
                     "pid": os.getpid(),
                     "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+                    "alive_at_spawn": True,
                 }
             ]
         ),
     )
-    directory = tmp_path / "alive"
-    directory.mkdir()
     receipt = _record(directory)
     assert receipt is not None
     verdict = signal_receipt.cut_off_verdict(receipt["signals"][0], count=1)
@@ -336,3 +344,26 @@ def test_an_unattributed_verdict_without_the_clause_is_unchanged(
     _cause, detail = verdict
     assert "was no longer running" not in detail
     assert "from an unidentified sender" in detail
+
+    # Already gone when the chain was written for this runtime: it did not
+    # outlive anything, so the gate stays shut (design round 1, D1).
+    gone_at_spawn = tmp_path / "gone-at-spawn"
+    gone_at_spawn.mkdir()
+    monkeypatch.setenv(
+        ENV_SPAWN_CHAIN,
+        json.dumps(
+            [
+                {
+                    "pid": 2_147_483_600,
+                    "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+                    "alive_at_spawn": False,
+                }
+            ]
+        ),
+    )
+    receipt = _record(gone_at_spawn)
+    assert receipt is not None
+    verdict = signal_receipt.cut_off_verdict(receipt["signals"][0], count=1)
+    assert verdict is not None
+    _cause, detail = verdict
+    assert "was no longer running" not in detail
