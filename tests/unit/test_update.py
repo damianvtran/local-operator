@@ -4009,7 +4009,7 @@ def test_from_snapshot_refuses_a_strictly_older_release_before_the_classifier(
             return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8", ref="v0.9.8"),
         ),
         patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
-        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")) as pypi,
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0),
     ):
@@ -4029,6 +4029,11 @@ def test_from_snapshot_refuses_a_strictly_older_release_before_the_classifier(
         "  To downgrade deliberately, re-run from the repository: "
         "`lop update --from-snapshot v0.9.8 --allow-downgrade`" in captured.err
     ), "the refusal names the explicit override, spelled as a runnable command"
+    # The classifier is what pays this consult for a release-tagged ref, so the
+    # pin is that the refusal lands BEFORE it — a gate moved after
+    # ``classify_snapshot_install`` consults PyPI here and fails this line
+    # (agent review round 1, F1).
+    pypi.assert_not_called()
 
 
 def test_from_snapshot_refuses_a_strictly_older_source_build(
@@ -4061,6 +4066,8 @@ def test_from_snapshot_refuses_a_strictly_older_source_build(
             return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8"),
         ),
         patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(update_mod, "_release_versions_at") as tags,
+        patch.object(update_mod, "_pypi_release_document") as pypi,
         patch.object(install_mod, "snapshot_bundle") as bundle,
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
@@ -4082,6 +4089,13 @@ def test_from_snapshot_refuses_a_strictly_older_source_build(
     assert (
         "`lop update --from-snapshot main --allow-downgrade`" in captured.err
     ), "the remedy names the ref the caller actually passed"
+    # The ordering pin for THIS route: a gate moved after
+    # ``classify_snapshot_install`` would run the classifier's first read, the
+    # tags lookup; the PyPI mock is the same pin for the routes that consult
+    # (an untagged ref never reaches that consult, so it cannot bite here —
+    # agent review round 1, F1).
+    tags.assert_not_called()
+    pypi.assert_not_called()
 
 
 def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_override(
