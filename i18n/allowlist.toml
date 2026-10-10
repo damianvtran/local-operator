@@ -1,0 +1,29 @@
+# i18n allowlist — file-level exemptions from the string ratchet (RFC §2.7).
+#
+# Every entry is a [path, reason] pair; the reason is REQUIRED and must say
+# what category of literal the file legitimately carries (commands/flags/
+# identifiers, dev logs, tool names, --json keys/event types, model-facing
+# prompts, code snippets/paths). `scripts/i18n/check.py` refuses the file —
+# and its unit test fails — when a reason is missing or empty, because an
+# unreasoned exemption is how a scanner gets allowlisted into uselessness
+# (RFC §10 risk 3). The list is PRUNED at P5: an entry is removed when its
+# file's literals are extracted or pragma'd per line.
+#
+# `path` is a repo-relative FILE path or a DIRECTORY prefix ending in `/`.
+# No globs, deliberately: fnmatch's `*` spans path separators, so a
+# narrow-looking pattern can exempt a whole subtree; a directory must be
+# written as one, where a reviewer sees it. Prefer the narrowest form.
+#
+# Inline exemptions (`# i18n: ignore <reason>`) may sit anywhere within the
+# call whose arguments carry the literal — its first through last line — so a
+# multi-line call takes one comment instead of one per argument. One-off sites
+# use a pragma; this file is for a file that is SYSTEMATICALLY not user copy.
+#
+# INTERPLAY WITH ENFORCEMENT (RFC §9: P1 ships ADVISORY). The ratchet FAILS
+# only for findings under the `enforced` list in i18n/baseline.json; findings
+# elsewhere print as `advisory:` lines and exit 0. Activation (adding an area's
+# prefix to `enforced`) is how an area becomes blocking; this file silences a
+# path EVERYWHERE, so for a path whose extraction is merely LATER, prefer
+# activation over a blanket exemption.
+
+entries = []

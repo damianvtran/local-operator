@@ -1131,6 +1131,7 @@ _SAMPLE_PATHS: dict[str, str] = {
     "deps_lock": "uv.lock",
     "gate_config": "Makefile",
     "docs": "docs/store/release-record.md",
+    "i18n": "i18n/ledger.json",
     "other": "newdir/unrecognised.bin",
 }
 

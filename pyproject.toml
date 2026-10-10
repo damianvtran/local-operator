@@ -226,6 +226,14 @@ local_operator = [
     "prompts_md/*.md",
     "guides/*/*.md",
     "tui/*.tcss",
+    # The i18n message catalogues and generated `Intl` tables (RFC §2.2): the
+    # backend serves catalogues from an INSTALLED package, so a wheel without
+    # these installs a daemon whose /v1/i18n route 404s and a runtime whose
+    # format layer has no data. `scripts/i18n/generate.py --check` regenerates
+    # them; the two-level glob is deliberate (package-data globbing does not
+    # recurse — see the note on the mobile/web sources below this list).
+    "i18n/catalogues/*/*.json",
+    "i18n/data/*.json",
     # The turn-supplement ("Highlights") prelude: the minified stylesheet and
     # script the document assembler injects into every generated component. Both
     # are read at runtime (``supplements/document.py``), so a wheel without them
