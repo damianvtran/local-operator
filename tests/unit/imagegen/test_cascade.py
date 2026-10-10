@@ -9,6 +9,7 @@ wire shapes — those live in ``test_rungs.py`` against ``httpx.MockTransport``.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -302,6 +303,126 @@ async def test_no_available_rungs_raises_the_remedy_not_an_empty_walk(
     assert caught.value.attempts == ()
 
 
+# ---------------------------------------------------------------------------
+# The edit capability filter (media wave-2 edit lane)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_edit_walk_pre_records_incapable_rungs_and_never_calls_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The mutation-style negative: radient is available but cannot edit, so it
+    # must NOT be dispatched (its models-list/balance probes must not run) and
+    # its skip must still land in the attempt list, at its cascade position.
+    _pin_probes(monkeypatch, radient=True, fal=True)
+    fake, calls = _make_route_script({ImageRoute.FAL: _result("fal-ai/flux/dev/edit")})
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    outcome = await cascade.run_image_cascade(
+        prompt="make it night",
+        config_dir=tmp_path,
+        source_url="data:image/png;base64,AAAA",
+    )
+
+    assert calls == [ImageRoute.FAL]
+    assert [attempt.route for attempt in outcome.attempts] == [
+        ImageRoute.RADIENT,
+        ImageRoute.FAL,
+    ]
+    skipped = outcome.attempts[0]
+    assert (skipped.outcome, skipped.reason_class) == ("skipped", "unsupported")
+    assert skipped.message == image_rungs.RADIENT_EDIT_SKIP_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_an_edit_with_no_capable_provider_never_runs_text_to_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, radient=True, openai_sub=True)
+    fake, calls = _make_route_script({})
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
+        await cascade.run_image_cascade(
+            prompt="make it night",
+            config_dir=tmp_path,
+            source_url="data:image/png;base64,AAAA",
+        )
+
+    assert calls == [], "no dispatch, ever — the walk never falls back to T2I"
+    assert str(caught.value) == (
+        "No available provider can edit images (capable: FAL, OpenAI, Google, "
+        "xAI, OpenRouter — sign in or add a key)"
+    )
+    assert caught.value.attempts == ()
+
+
+@pytest.mark.asyncio
+async def test_an_edit_with_nothing_configured_still_names_the_capable_ones(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch)
+    with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
+        await cascade.run_image_cascade(
+            prompt="x", config_dir=tmp_path, source_url="data:image/png;base64,AAAA"
+        )
+    assert "No available provider can edit images" in str(caught.value)
+    assert "sign in or add a key" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_an_edit_all_failed_header_says_editing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, fal=True, google=True)
+    fake, calls = _make_route_script(
+        {
+            ImageRoute.FAL: APIError("f down", status_code=500),
+            ImageRoute.GOOGLE: APIError("g down", status_code=500),
+        }
+    )
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
+        await cascade.run_image_cascade(
+            prompt="x", config_dir=tmp_path, source_url="data:image/png;base64,AAAA"
+        )
+
+    assert str(caught.value).startswith("Image editing failed on every available provider:")
+    assert "FAL: f down" in str(caught.value)
+    assert calls == [ImageRoute.FAL, ImageRoute.GOOGLE]
+
+
+@pytest.mark.asyncio
+async def test_an_edit_attempt_list_stays_in_cascade_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # radient (incapable) < fal (capable) < openai-sub (incapable): the
+    # pre-records interleave at their positions — not appended at one end.
+    _pin_probes(monkeypatch, radient=True, fal=True, openai_sub=True)
+    fake, calls = _make_route_script({ImageRoute.FAL: APIError("down", status_code=500)})
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
+        await cascade.run_image_cascade(
+            prompt="x", config_dir=tmp_path, source_url="data:image/png;base64,AAAA"
+        )
+
+    assert calls == [ImageRoute.FAL]
+    assert [attempt.route for attempt in caught.value.attempts] == [
+        ImageRoute.RADIENT,
+        ImageRoute.FAL,
+        ImageRoute.OPENAI_SUB,
+    ]
+    assert [attempt.outcome for attempt in caught.value.attempts] == [
+        "skipped",
+        "failed",
+        "skipped",
+    ]
+    assert caught.value.attempts[2].message == "ChatGPT plan cannot edit images."
+
+
 @pytest.mark.asyncio
 async def test_user_cancellation_stops_the_walk_without_failover(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -507,3 +628,61 @@ async def test_pause_returns_on_timeout_and_raises_on_abort() -> None:
     with pytest.raises(cascade.ImageGenerationCancelled):
         await fresh(30.0)
     await racer
+
+
+# ---------------------------------------------------------------------------
+# End to end: the REAL cascade + REAL executor over a mock transport
+# ---------------------------------------------------------------------------
+
+#: A 73-byte 1x1 PNG (real bytes: the download path sniffs the header).
+PNG_1X1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154789c626001000000ffff03000006000557bfabd4"
+    "0000000049454e44ae426082"
+)
+
+
+@pytest.mark.asyncio
+async def test_an_edit_end_to_end_reaches_a_real_rungs_wire(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No ``_run_route`` monkeypatch: the filter, the walk and the FAL
+    executor are the real ones, so "the edit request becomes an edit wire"
+    is proven at the seam the fakes cannot reach (the tool-built data URI
+    landing as ``image_url`` on the queue submit)."""
+    _pin_probes(monkeypatch, fal=True)
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": "r1",
+                    "status": "IN_QUEUE",
+                    "status_url": "https://queue.fal.test/app/requests/r1/status",
+                    "response_url": "https://queue.fal.test/app/requests/r1",
+                },
+            )
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"status": "COMPLETED"})
+        if request.url.host == "falimg.test":
+            return httpx.Response(200, content=PNG_1X1, headers={"content-type": "image/png"})
+        return httpx.Response(200, json={"images": [{"url": "https://falimg.test/a.png"}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        outcome = await cascade.run_image_cascade(
+            prompt="make it night",
+            config_dir=tmp_path,
+            source_url="data:image/png;base64,AAAA",
+            client=client,
+        )
+
+    assert outcome.route == ImageRoute.FAL
+    submit = seen[0]
+    assert submit.url.path == "/fal-ai/flux/dev/image-to-image"
+    body = json.loads(submit.content)
+    assert body["image_url"] == "data:image/png;base64,AAAA"
+    assert "image_size" not in body
+    assert outcome.assets[0].data == PNG_1X1

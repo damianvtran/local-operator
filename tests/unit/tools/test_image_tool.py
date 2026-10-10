@@ -47,6 +47,8 @@ def _outcome(
     cost_source: CostSource | None = None,
     billing_basis: BillingBasis | None = None,
     cost_provenance: str | None = None,
+    route: ImageRoute = ImageRoute.RADIENT,
+    usage_record_id: str | None = None,
 ) -> ImageOutcome:
     if assets is None:
         assets = (
@@ -60,8 +62,8 @@ def _outcome(
         )
     return ImageOutcome(
         assets=assets,
-        route=ImageRoute.RADIENT,
-        attempts=(ImageAttempt(route=ImageRoute.RADIENT, outcome="ok"),),
+        route=route,
+        attempts=(ImageAttempt(route=route, outcome="ok"),),
         model="flux/dev",
         prompt="a cat",
         seed=seed,
@@ -70,6 +72,7 @@ def _outcome(
         cost_source=cost_source,
         billing_basis=billing_basis,
         cost_provenance=cost_provenance,
+        usage_record_id=usage_record_id,
     )
 
 
@@ -133,7 +136,7 @@ def test_params_forbid_extra_and_bound_their_ranges() -> None:
 def test_approval_text_names_provider_quantity_and_size(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(image_tool, "_preferred_route_label", lambda: "Radient")
+    monkeypatch.setattr(image_tool, "_preferred_route_label", lambda **_: "Radient")
     text = image_tool._describe_generate_image_approval(
         {"prompt": "a cat", "num_images": 2, "image_size": "portrait_16_9"}, "."
     )
@@ -607,3 +610,162 @@ async def test_the_cancel_receipt_states_not_cancelled_reasons(
         "The generation had already completed when the cancel arrived; " "its result was discarded."
     )
     assert "not cancelled — it had already completed" in text
+
+
+# ---------------------------------------------------------------------------
+# Source by reference (media wave-2 edit lane)
+# ---------------------------------------------------------------------------
+
+
+def test_approval_text_abbreviates_an_attachment_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(image_tool, "_preferred_route_label", lambda **_: "Radient")
+    text = image_tool._describe_generate_image_approval(
+        {"prompt": "make it night", "source_attachment": "ab12" + "0" * 28}, "."
+    )
+    assert text == (
+        "Edit 1 image (attachment ab12…) at square HD via Radient — "
+        "a paid provider call on your account."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_source_attachment_resolves_through_the_session_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref = AttachmentStore().put_bytes(PNG_1X1, "image/png")
+    assert ref is not None
+    seen: dict[str, object] = {}
+
+    async def fake_cascade(**kwargs):
+        seen.update(kwargs)
+        return _outcome()
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1",
+        {"prompt": "make it night", "source_attachment": ref.digest, "strength": 0.4},
+        None,
+        None,
+        None,
+    )
+
+    assert result.is_error is False
+    assert str(seen["source_url"]).startswith("data:image/png;base64,")
+    assert seen["strength"] == 0.4
+    details = result.details or {}
+    assert details["source_attachment"] == ref.digest
+    assert details["strength"] == 0.4
+    assert "source_image_path" not in details
+
+
+@pytest.mark.asyncio
+async def test_a_bad_attachment_digest_is_refused_before_touching_the_store() -> None:
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "x", "source_attachment": "../etc/passwd"}, None, None, None
+    )
+    assert result.is_error is True
+    assert "32-character hex digest" in result.content[0].text  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_attachment_digest_is_an_argument_fault() -> None:
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "x", "source_attachment": "0" * 32}, None, None, None
+    )
+    assert result.is_error is True
+    assert "was not found" in result.content[0].text  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_both_sources_at_once_are_refused() -> None:
+    result = await image_tool.execute_generate_image(
+        "call-1",
+        {"prompt": "x", "source_image_path": "/a.png", "source_attachment": "a" * 32},
+        None,
+        None,
+        None,
+    )
+    assert result.is_error is True
+    text = result.content[0].text  # type: ignore[union-attr]
+    assert "exactly one of source_image_path or source_attachment" in text
+
+
+@pytest.mark.asyncio
+async def test_an_ignored_strength_is_recorded_not_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref = AttachmentStore().put_bytes(PNG_1X1, "image/png")
+    assert ref is not None
+
+    async def fake_cascade(**kwargs):
+        return _outcome(route=ImageRoute.GOOGLE)
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1",
+        {"prompt": "make it night", "source_attachment": ref.digest, "strength": 0.4},
+        None,
+        None,
+        None,
+    )
+
+    details = result.details or {}
+    assert details["strength_ignored"] is True
+    assert "Strength 0.4 was ignored" in result.content[0].text  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_a_strength_taking_provider_records_no_ignored_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "in.png"
+    source.write_bytes(PNG_1X1)
+
+    async def fake_cascade(**kwargs):
+        return _outcome(route=ImageRoute.FAL)
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1",
+        {"prompt": "x", "source_image_path": str(source), "strength": 0.4},
+        None,
+        None,
+        ToolContext(cwd=str(tmp_path)),
+    )
+
+    details = result.details or {}
+    assert "strength_ignored" not in details
+    assert "was ignored" not in result.content[0].text  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_a_usage_record_id_reaches_details_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_cascade(**kwargs):
+        return _outcome(usage_record_id="ur-9")
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image("call-1", {"prompt": "x"}, None, None, None)
+    assert (result.details or {})["usage_record_id"] == "ur-9"
+
+    async def fake_plain(**kwargs):
+        return _outcome()
+
+    _patch_cascade(monkeypatch, fake_plain)
+    plain = await image_tool.execute_generate_image("call-1", {"prompt": "x"}, None, None, None)
+    assert "usage_record_id" not in (plain.details or {})
+
+
+def test_the_approval_label_skips_edit_incapable_rungs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same filter the cascade applies: an edit prompt must never name a
+    # provider that cannot run it (Radient is available here, and skipped).
+    monkeypatch.setattr(image_tool.image_availability, "radient_available", lambda *a: True)
+    monkeypatch.setattr(image_tool.image_availability, "fal_key", lambda *a: "fk")
+
+    assert image_tool._preferred_route_label() == "Radient"
+    assert image_tool._preferred_route_label(editing=True) == "FAL"

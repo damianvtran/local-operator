@@ -12,6 +12,10 @@ extraction — the refactor's oracle is the unedited image suite):
   the walk continues.
 - ``RungSkipped`` records a skipped attempt and continues (no failure update —
   a skip is not a refusal).
+- a route named in ``pre_attempts`` is recorded as the supplied attempt and
+  NEVER dispatched — the caller's own before-the-walk filter (the image
+  lane's capability check); it is checked before the budget arm because a
+  capability is not time-dependent.
 - any other exception goes through :func:`~local_operator.artifacts.errors.
   failure_reason_class`, records a failed attempt, emits the mid-walk failure
   update, and continues.
@@ -103,14 +107,22 @@ def status_code_of(exc: BaseException) -> int | None:
 
 
 def all_failed_message(
-    kind: ArtifactKind, attempts: Sequence[JobAttempt], labels: Mapping[str, str]
+    kind: ArtifactKind,
+    attempts: Sequence[JobAttempt],
+    labels: Mapping[str, str],
+    *,
+    action: str = "generation",
 ) -> str:
     """The exhausted-walk sentence: one header plus one line per attempt.
 
     ``kind.value.capitalize()`` is the display word ("image" → "Image"); the
     kind vocabulary is closed, so capitalize() cannot mangle a name.
+    ``action`` is the kind's word for what failed — "generation" → "Image
+    generation failed…"; the image lane's edit path passes ``"editing"`` —
+    a parameter rather than a branch, so the generic layer stays blind to
+    every lane's request shapes.
     """
-    lines = [f"{kind.value.capitalize()} generation failed on every available provider:"]
+    lines = [f"{kind.value.capitalize()} {action} failed on every available provider:"]
     for attempt in attempts:
         label = labels.get(attempt.route, str(attempt.route))
         if attempt.outcome == "skipped":
@@ -168,6 +180,8 @@ async def run_job_walk(
     rung_timeout_s: float,
     overall_timeout_s: float,
     on_exhausted: Callable[[str, tuple[JobAttempt, ...]], BaseException],
+    pre_attempts: Mapping[str, JobAttempt] | None = None,
+    action: str = "generation",
 ) -> JobOutcome:
     """Run the walk. See the module docstring for the failure contract.
 
@@ -177,10 +191,25 @@ async def run_job_walk(
     what the kind's closure receives; the walk carries them for the interface
     (one submit/progress/cancel/steer/restart shape) without branching on
     them in v1.
+
+    ``pre_attempts`` maps a route to the attempt record its caller already
+    decided (e.g. the image lane's capability filter): the route is never
+    dispatched and the supplied record is appended at the route's position in
+    ``candidates``, so the attempt list stays in cascade order. Each
+    pre-recorded route still needs a ``candidates`` entry — that list is the
+    order. ``action`` is forwarded to :func:`all_failed_message`.
     """
     attempts: list[JobAttempt] = []
     deadline = time.monotonic() + overall_timeout_s
+    pre = pre_attempts or {}
     for route in candidates:
+        recorded = pre.get(route)
+        if recorded is not None:
+            # Pre-recorded before the walk (a capability the caller decided):
+            # log it in place and never call. Before the budget arm on
+            # purpose — see the module docstring.
+            attempts.append(recorded)
+            continue
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             attempts.append(
@@ -269,5 +298,6 @@ async def run_job_walk(
             cost_source=result.cost_source,
             billing_basis=result.billing_basis,
             cost_provenance=result.cost_provenance,
+            usage_record_id=result.usage_record_id,
         )
-    raise on_exhausted(all_failed_message(kind, attempts, labels), tuple(attempts))
+    raise on_exhausted(all_failed_message(kind, attempts, labels, action=action), tuple(attempts))
