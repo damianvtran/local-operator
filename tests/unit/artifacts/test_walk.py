@@ -17,6 +17,7 @@ import pytest
 
 from local_operator.artifacts import (
     ArtifactKind,
+    BillingBasis,
     JobAttempt,
     JobCancelled,
     JobSpec,
@@ -32,12 +33,20 @@ from local_operator.harness.types import AbortSignal
 LABELS = {"alpha": "Alpha", "beta": "Beta"}
 
 
-def _result(model: str = "flux/dev", cost: float | None = None) -> RungResult:
+def _result(
+    model: str = "flux/dev",
+    cost: float | None = None,
+    basis: BillingBasis | None = None,
+    provenance: str | None = None,
+) -> RungResult:
     return RungResult(
         assets=[MediaAsset(data=b"png", content_type="image/png", source_url="https://x/1.png")],
         model=model,
         generation_id="req-1",
         cost_usd=cost,
+        cost_source="reported" if cost is not None else None,
+        billing_basis=basis,
+        cost_provenance=provenance,
     )
 
 
@@ -102,13 +111,18 @@ async def _run(
 
 @pytest.mark.asyncio
 async def test_first_available_rung_wins_and_later_ones_never_run() -> None:
-    outcome, calls, _ = await _run({"alpha": _result("default-model", cost=0.08)})
+    outcome, calls, _ = await _run(
+        {"alpha": _result("default-model", cost=0.08, basis="billed", provenance="doc 2026-10-09")}
+    )
 
     assert calls == ["alpha"]
     assert outcome.route == "alpha"
     assert [attempt.outcome for attempt in outcome.attempts] == ["ok"]
     assert outcome.model == "default-model"
     assert outcome.cost_usd == 0.08
+    assert outcome.cost_source == "reported"
+    assert outcome.billing_basis == "billed"
+    assert outcome.cost_provenance == "doc 2026-10-09"
     assert outcome.generation_id == "req-1"
 
 

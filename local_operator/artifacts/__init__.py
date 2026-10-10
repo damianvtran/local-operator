@@ -28,9 +28,14 @@ Vocabulary notes that the types cannot carry:
   know any provider's name. Rung routes travel as the wire spellings their
   kind pins (``"radient"``, ``"fal"``, ...); a kind's resolver may type them
   with its own ``StrEnum`` because its members ARE ``str``.
-- ``cost_usd`` carries ONLY a figure a provider REPORTED; ``cost_source``
-  labels where a figure came from so an estimate or a quota-funded call can
-  never masquerade as a charge (design D8).
+- ``cost_usd`` carries a figure a provider REPORTED, or - for a
+  subscription-funded call only - the published API-equivalent price of what
+  the plan funded. ``cost_source`` labels where a figure came from and
+  ``billing_basis`` what it means in money terms (``billed`` /
+  ``subscription-api-equivalent`` / ``estimated``), with ``cost_provenance``
+  naming the doc or provider field, so an estimate or a quota-funded call can
+  never masquerade as a charge (design D8; the API-equivalent clause is the
+  wave-2 cost rule).
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ from typing import Literal
 __all__ = [
     "ArtifactKind",
     "AttemptOutcome",
+    "BillingBasis",
     "CostSource",
     "JobAttempt",
     "JobCancelled",
@@ -77,6 +83,17 @@ AttemptOutcome = Literal["ok", "failed", "skipped"]
 #: documented vendor price exists but the call returns no figure, so ``cost_usd``
 #: stays ``None``; ``subscription`` = quota-funded, no cash figure exists.
 CostSource = Literal["reported", "rate_table", "subscription"]
+
+#: What a ``cost_usd`` AMOUNT means in money terms (additive beside
+#: :data:`CostSource`, whose semantics are unchanged; ``None`` whenever there is
+#: no amount). ``billed`` = cash/credits the provider actually charged for this
+#: call; ``subscription-api-equivalent`` = the published API price of what a
+#: subscription (plan quota) funded, labelled so it is NEVER read as a charge —
+#: the same convention inference cost uses ("list price x usage", not an
+#: invoice); ``estimated`` = a modelled figure, neither reported nor billed.
+#: The operator's rule: a subscription-funded generation must still carry an
+#: API-equivalent cost so spend across funding classes is comparable.
+BillingBasis = Literal["billed", "subscription-api-equivalent", "estimated"]
 
 
 class JobCancelled(Exception):
@@ -200,3 +217,8 @@ class JobOutcome:
     generation_id: str | None = None
     cost_usd: float | None = None
     cost_source: CostSource | None = None
+    #: Money meaning of ``cost_usd`` (see :data:`BillingBasis`) and where the
+    #: figure comes from (doc source + date, or the provider field that
+    #: reported it). Both ``None`` when no amount exists.
+    billing_basis: BillingBasis | None = None
+    cost_provenance: str | None = None

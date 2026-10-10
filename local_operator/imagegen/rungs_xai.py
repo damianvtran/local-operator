@@ -46,6 +46,7 @@ from typing import Any
 
 import httpx
 
+from local_operator.artifacts import BillingBasis
 from local_operator.artifacts.progress import ProgressFn
 from local_operator.artifacts.rung import RungResult, RungSkipped
 from local_operator.artifacts.walk import PauseFn
@@ -91,8 +92,15 @@ async def run_xai(
     emit: ProgressFn | None,
     pause: PauseFn | None,
     client: httpx.AsyncClient | None = None,
+    credential_kind: str = "api_key",
 ) -> RungResult:
-    """Run one xAI image generation. See the module docstring."""
+    """Run one xAI image generation. See the module docstring.
+
+    ``credential_kind`` is the class of ``key`` (``"api_key"`` or ``"oauth"``,
+    from ``availability.xai_call_credential``); it decides only the result's
+    ``billing_basis``. Defaulting to ``api_key`` keeps every existing caller's
+    behaviour (a bare key is metered cash).
+    """
     # Observe a pre-aborted signal before anything else happens (reviewer
     # round 1 Q6): a single-request rung has no poll loop for the abort to
     # land in, so this zero-length wait is the only place the user's stop can
@@ -178,9 +186,36 @@ async def run_xai(
             ticks = usage.get("cost_in_usd_ticks")
             if isinstance(ticks, int) and not isinstance(ticks, bool):
                 cost_usd = ticks / XAI_USD_TICKS_PER_USD
+        # BILLING BASIS by credential class. The amount is the same field on
+        # both paths - xAI's own per-request ``cost_in_usd_ticks`` - so
+        # ``cost_source`` stays ``reported`` either way. What differs is who
+        # pays: an API key is metered against the account's prepaid credits
+        # (``billed``); a Grok sign-in grant draws on the SUBSCRIPTION's
+        # allotment, so the provider-reported price is what that usage WOULD
+        # cost at API rates, not a charge - exactly the meaning of
+        # ``subscription-api-equivalent`` (``estimated`` would wrongly say
+        # the figure is modelled; ``billed`` wrongly says cash moved). Caveat,
+        # recorded because no live OAuth call has run (see the module
+        # docstring's 403 note): whether ``usage`` is populated on the OAuth
+        # path is unverified - when absent there is no figure and no basis,
+        # never a synthesized one.
+        basis: BillingBasis | None = None
+        provenance: str | None = None
+        if cost_usd is not None:
+            if credential_kind == "oauth":
+                basis = "subscription-api-equivalent"
+                provenance = (
+                    "xAI response usage.cost_in_usd_ticks on a Grok sign-in (subscription): "
+                    "API-equivalent per-request cost, not billed"
+                )
+            else:
+                basis = "billed"
+                provenance = "xAI response usage.cost_in_usd_ticks (API key, metered)"
         return RungResult(
             assets=assets,
             model=model_id,
             cost_usd=cost_usd,
             cost_source="reported" if cost_usd is not None else None,
+            billing_basis=basis,
+            cost_provenance=provenance,
         )

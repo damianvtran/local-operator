@@ -143,8 +143,10 @@ RUNG_SPECS: dict[str, RungSpec] = {
         kinds=frozenset({"image"}),
         capabilities=frozenset({"t2i"}),
         cancel_support=CancelSupport.NONE,
-        # Quota-funded: no cash figure exists, and none is ever synthesized
-        # (design D8); the guide states the 3-5x quota burn.
+        # Quota-funded: no cash CHARGE exists. The rung carries one
+        # provenance-labelled API-equivalent amount instead (billing_basis
+        # "subscription-api-equivalent", never a charge - see
+        # ``OPENAI_SUB_API_EQUIVALENT_USD``); the guide states the 3-5x burn.
         cost="subscription",
     ),
     ImageRoute.GOOGLE: RungSpec(
@@ -384,13 +386,6 @@ async def _call_time_key(
                 "No Google AI Studio key is available.", status_code=None, code="unauthorized"
             )
         return key
-    if route == ImageRoute.XAI:
-        key = await image_availability.xai_call_bearer(store)
-        if not key:
-            raise APIError(
-                "No xAI key or sign-in is available.", status_code=None, code="unauthorized"
-            )
-        return key
     if route == ImageRoute.OPENROUTER:
         key = await image_availability.openrouter_call_key(store)
         if not key:
@@ -456,6 +451,28 @@ async def _run_route(
             pause=pause,
             client=client,
         )
+    if route == ImageRoute.XAI:
+        # Resolved here, not in ``_call_time_key``: the rung needs the
+        # credential CLASS (key vs Grok sign-in) to label the figure's billing
+        # basis, which a bare bearer string cannot carry.
+        credential = await image_availability.xai_call_credential(store)
+        if credential is None:
+            raise APIError(
+                "No xAI key or sign-in is available.", status_code=None, code="unauthorized"
+            )
+        return await image_rungs.run_xai(
+            prompt=prompt,
+            key=credential[0],
+            credential_kind=credential[1],
+            num_images=num_images,
+            image_size=image_size,
+            source_url=source_url,
+            seed=seed,
+            model=model,
+            emit=emit,
+            pause=pause,
+            client=client,
+        )
     key = await _call_time_key(route, config_dir=config_dir, radient_base=radient_base, store=store)
     if route == ImageRoute.RADIENT:
         return await image_rungs.run_radient(
@@ -503,19 +520,6 @@ async def _run_route(
         )
     if route == ImageRoute.OPENROUTER:
         return await image_rungs.run_openrouter(
-            prompt=prompt,
-            key=key,
-            num_images=num_images,
-            image_size=image_size,
-            source_url=source_url,
-            seed=seed,
-            model=model,
-            emit=emit,
-            pause=pause,
-            client=client,
-        )
-    if route == ImageRoute.XAI:
-        return await image_rungs.run_xai(
             prompt=prompt,
             key=key,
             num_images=num_images,

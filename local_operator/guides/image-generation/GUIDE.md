@@ -73,9 +73,18 @@ covers the general rules for handling them.
   skipped when the balance cannot fund the request.
 - **FAL**, **OpenAI** and **Google** bill the key you supplied at their
   published rates; **the ChatGPT-plan rung spends plan quota instead** — no
-  cash figure, and the 3–5× burn above is the price. Rate tables with
+  cash charge, and the 3–5× burn above is the price. Rate tables with
   provenance and dates: `docs/design/image-providers.md`; no prices are
-  duplicated into code.
+  duplicated into code, except the one labelled constant below.
+- Every figure carries a `billing_basis` (and `cost_source`, `cost_provenance`)
+  in the result details: `billed` (cash/credits charged — Radient's settled
+  figure, xAI on an API key, OpenRouter), `estimated` (a figure that may still
+  be a quote — Radient when the status never reports `settled`), or
+  `subscription-api-equivalent` (the **ChatGPT-plan** rung: ≈ $0.053 per image,
+  OpenAI's published `gpt-image-2` 1024×1024 medium price, fetched 2026-10-09 —
+  an assumption, since the route pins no size/quality; and xAI on a Grok
+  sign-in, using xAI's reported figure). An API-equivalent is what the same
+  call would list at on the API — **never a charge**.
 - `num_images` multiplies cost on every rung — it is the spend knob, and the
   approval prompt states the quantity before anything is spent. xAI accepts
   up to 10; OpenRouter models may return fewer than asked; the ChatGPT-plan
