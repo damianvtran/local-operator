@@ -1042,6 +1042,7 @@ def project_settled_rows(
         is_harness_chrome,
         is_harness_notice_row,
         is_hidden_tool_call,
+        is_quiet_turn_call,
         turn_cut_tool_call,
         user_row_text,
     )
@@ -1630,7 +1631,15 @@ def project_settled_rows(
                 # where its row came back on every reopen. The call STAYS in
                 # the context (the model reads what it armed) and its result
                 # is still paired; only the settled row is skipped.
-                if is_hidden_tool_call(call):
+                #
+                # THE QUIET PAIR joins it for the SAME reason at this seam
+                # (design docs/design/quiet-turns.md §5, S1): the pair is
+                # persisted and stays in the journal and display pages, but a
+                # resumed conversation must not paint the ``no_reply`` call
+                # as a ledger row — the sentinel is a turn door, not work.
+                # The name is the whole decision here (see ``harness.rows``
+                # for why it is not a ``HIDDEN_TOOL_NAMES`` entry).
+                if is_hidden_tool_call(call) or is_quiet_turn_call(call):
                     continue
                 # THE ASK GATE (design docs/design/ask-gate.md §3): a diverted
                 # ask paints NOTHING on replay — its result carries the hidden

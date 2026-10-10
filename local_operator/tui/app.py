@@ -14755,6 +14755,7 @@ class OperatorApp(App[None]):
         hide_cross_session = cross_session_hidden()
         from local_operator.harness.rows import (
             is_hidden_tool_call,
+            is_quiet_turn_call,
             is_settle_only_ask,
             queued_ask_engine_live,
         )
@@ -14773,8 +14774,12 @@ class OperatorApp(App[None]):
             # HIDDEN tools never paint a row on any seam: this one restores the
             # row for a call already in flight, so skipping it here is what
             # keeps a resumed ``patience`` call from appearing where the live
-            # path refuses to mount it (UX round 1, U2).
-            if is_hidden_tool_call(call):
+            # path refuses to mount it (UX round 1, U2). THE QUIET PAIR is the
+            # second member of that class (design docs/design/quiet-turns.md
+            # §5, S1): both live seams and the replay skip its call, so this
+            # restore painter must too, or a resumed quiet call would mount a
+            # row the rest of the app refuses to paint.
+            if is_hidden_tool_call(call) or is_quiet_turn_call(call):
                 continue
             if is_settle_only_ask(getattr(call, "name", ""), queued_engine=gate_settle_only):
                 continue
@@ -15647,9 +15652,12 @@ class OperatorApp(App[None]):
         The gate's ONE drop path (design docs/design/ask-gate.md §3): a
         diverted ask's row must vanish wherever a surface had mounted one
         before the mode could be read — the mixed-build fallback the design
-        records (today's mount, drop on the settle marker). Registries are
-        cleaned by IDENTITY first (the card may sit under a placeholder key),
-        then the view's ``remove_block`` takes the row off its retained list.
+        records (today's mount, drop on the settle marker). THE QUIET PAIR's
+        end frame rides the same path (design docs/design/quiet-turns.md §5,
+        S1): a card some seam older than the name gates could have mounted is
+        retired rather than settled. Registries are cleaned by IDENTITY first
+        (the card may sit under a placeholder key), then the view's
+        ``remove_block`` takes the row off its retained list.
         """
         for registry in (self._tool_cards, self._composing_cards):
             for key in [key for key, candidate in registry.items() if candidate is card]:
@@ -54606,10 +54614,19 @@ class OperatorApp(App[None]):
         # is where the row first exists, and suppressing it at the SOURCE —
         # before the supersede/rekey bookkeeping — is what keeps the later
         # start/end frames from finding a registry to adopt. The rows stay in
-        # the model's context; only the screen skips them.
-        from local_operator.harness.rows import is_hidden_tool_name, is_settle_only_ask
+        # the model's context; only the screen skips them. THE QUIET PAIR
+        # (design docs/design/quiet-turns.md §5, S1) is the same suppression
+        # class for the same reason: the announcement is the first frame that
+        # could mount its row.
+        from local_operator.harness.rows import (
+            is_hidden_tool_name,
+            is_quiet_turn_name,
+            is_settle_only_ask,
+        )
 
-        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+        if is_hidden_tool_name(getattr(event, "tool_name", None)) or is_quiet_turn_name(
+            getattr(event, "tool_name", None)
+        ):
             return
         # THE ASK GATE (design docs/design/ask-gate.md §3): while the queued
         # engine is live an `ask` call is SETTLE-ONLY — no row while it
@@ -54760,10 +54777,19 @@ class OperatorApp(App[None]):
         # composing gate above suppresses the announcement, and this one stops
         # a start frame from mounting a fresh card for a call with none — the
         # belt to that brace, because the two frames race and either can be a
-        # viewer's first sight of the call.
-        from local_operator.harness.rows import is_hidden_tool_name, is_settle_only_ask
+        # viewer's first sight of the call. THE QUIET PAIR (design
+        # docs/design/quiet-turns.md §5, S1) is gated here for exactly that
+        # race: suppressing only the composing seam would leave this one free
+        # to paint the ``no_reply`` card a moment later.
+        from local_operator.harness.rows import (
+            is_hidden_tool_name,
+            is_quiet_turn_name,
+            is_settle_only_ask,
+        )
 
-        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+        if is_hidden_tool_name(getattr(event, "tool_name", None)) or is_quiet_turn_name(
+            getattr(event, "tool_name", None)
+        ):
             return
         # THE ASK GATE's belt (design docs/design/ask-gate.md §3): the same
         # settle-only suppression the composing gate applies, because the two
@@ -54890,7 +54916,10 @@ class OperatorApp(App[None]):
         card.set_live_details(getattr(message.event.partial_result, "details", None))
 
     def on_tool_ended(self, message: ToolEnded) -> None:
-        from local_operator.harness.rows import is_ask_gate_divert_details
+        from local_operator.harness.rows import (
+            is_ask_gate_divert_details,
+            is_quiet_turn_result,
+        )
 
         event = message.event
         card = self._tool_cards.pop(event.tool_call_id, None)
@@ -54919,6 +54948,18 @@ class OperatorApp(App[None]):
             # The settle-mount's stash goes with it: a diverted ask never
             # reaches `_mount_settle_only_ask`, which is the other pop site.
             self._ask_gate_settled_calls.pop(event.tool_call_id, None)
+            if card is not None:
+                self._drop_tool_card(card)
+            self._refresh_working_activity()
+            return
+        # THE QUIET RESULT SETTLES NOTHING (design docs/design/quiet-turns.md
+        # §5, S1): the marker is the quiet end's own fact, read off the result
+        # at the same seam the divert check above reads its gate marker. The
+        # composing and started gates are the first doors for the pair's row;
+        # this drop half guarantees a card any seam older than the gates could
+        # have mounted is retired rather than settled — the pair's end can only
+        # ever paint nothing.
+        if is_quiet_turn_result(getattr(event, "result", None)):
             if card is not None:
                 self._drop_tool_card(card)
             self._refresh_working_activity()
