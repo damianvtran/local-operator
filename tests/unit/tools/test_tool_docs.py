@@ -215,6 +215,13 @@ _WALK_DEPTH_CAP = 2
 #: other entry is byte-identical to the diet's table above, and the same
 #: schema is the whole of ``scripts/bench_context_budget.py``'s raise — the
 #: two ledgers move together.
+#: RE-MEASURED 2026-10-09 (media wave-2 provider breadth,
+#: ``feat/media-provider-breadth``): ``generate_image`` 608 -> 730 is the
+#: ONLY entry that moved — the deliberate rewrite of the tool:// notes (seven
+#: provider rungs, per-provider cost posture, the one-image-per-call skips)
+#: in ``tool_docs.py``; the wire description SHRANK in the same wave (186 ->
+#: 160 chars), which is one reason both ``bench_context_budget.py`` arms
+#: still PASS. Every other entry is byte-identical.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 786,
     "ask": 1005,
@@ -224,7 +231,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "console": 1096,
     "edit": 351,
     "eval": 376,
-    "generate_image": 608,
+    "generate_image": 730,
     "glob": 91,
     "grep": 337,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
