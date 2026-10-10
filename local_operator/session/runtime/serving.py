@@ -107,6 +107,7 @@ from local_operator.session.transcript import (
     is_bookkeeping_message,
     transcript_is_bookkeeping_only,
 )
+from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE, newest_per_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -9338,6 +9339,67 @@ class ServingSessionHandle(SessionHandle):
             setter(running, queued)
         except Exception:  # noqa: BLE001 — a stale count is not worth a turn
             logger.debug("could not publish the subagent counts", exc_info=True)
+
+    # -- turn-supplement control ops (lane C1b; memo §2.7) --------------------------------
+
+    async def supplement_cancel(self, anchor: str, job: str) -> str:
+        """Cancel a running generator job. Idempotent; a settled job answers neutrally.
+
+        Every one of these four ops is getattr-probed by the dispatch, like ``cancel``: a
+        handle from before this feature answers the unknown-op error rather than a silent
+        no-op, and the probe is why no protocol version moved.
+        """
+        self._check_loop_thread()
+        return await self._supplements.cancel_job(anchor, job)
+
+    async def supplement_steer(self, anchor: str, job: str, text: str) -> str:
+        """Cut the in-flight attempt and start version + 1 with the user's instruction."""
+        self._check_loop_thread()
+        return await self._supplements.steer_job(anchor, job, text)
+
+    async def supplement_restart(self, anchor: str, job: str) -> str:
+        """Version + 1 with the previous instruction (or none): the Retry affordance."""
+        self._check_loop_thread()
+        return await self._supplements.restart_job(anchor, job)
+
+    async def supplement_dismiss(self, anchor: str) -> str:
+        """Hide the row for good and count it as a spam signal (memo §2.7, §5.2)."""
+        self._check_loop_thread()
+        return await self._supplements.dismiss(anchor)
+
+    async def supplements_for(self, anchors: list[str]) -> dict[str, dict[str, Any]]:
+        """``{anchor: newest row}`` for the given anchors (memo §2.7's lazy read op).
+
+        Implemented here because the capability that gates every live supplement event is
+        advertised only by a handle that HONOURS this op (``server.py``: "advertising what
+        the handle cannot honour is worse than omitting it"). A surface calls it when an
+        answer row mounts; rows it did not ask about are not returned.
+
+        Cost: one journal read per call, filtered to the requested anchors. That is the
+        documented price of the lazy-load rule (§2.11) and it is paid only by a viewer that
+        negotiated ``supplements-v1``; a byte-scan fast path is a follow-up (memo P9's
+        measurement is for the relay route, which is lane C2's).
+        """
+        self._check_loop_thread()
+        wanted = {str(anchor) for anchor in anchors or [] if str(anchor)}
+        if not wanted:
+            return {}
+        rows: list[dict[str, Any]] = []
+        try:
+            transcript = self._session.transcript
+            for entry in transcript.entries:
+                if entry.type != "custom":
+                    continue
+                payload = entry.payload if isinstance(entry.payload, dict) else {}
+                if payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
+                    continue
+                details = payload.get("details")
+                if isinstance(details, dict) and str(details.get("anchor", "")) in wanted:
+                    rows.append(details)
+        except Exception:  # noqa: BLE001 -- a read that fails returns nothing, never raises
+            logger.debug("supplements_for could not read the journal", exc_info=True)
+            return {}
+        return {anchor: dict(row) for anchor, row in newest_per_anchor(rows).items()}
 
     def _check_loop_thread(self) -> None:
         """Enforce that a body below this line is on the loop owning the session.

@@ -28,8 +28,17 @@ A cut job leaves at worst a non-terminal row that readers render as ``cancelled 
 SUPERSEDE. At most one job per session. A NEW eligible turn cancels the running one; if the
 cancelled job had already journaled a non-terminal row, :meth:`SupplementRunner.set_open_row`
 tells the runner so it can journal ``cancelled`` / ``error="superseded"`` (a row that renders
-nothing -- no Retry under an answer the user has moved past). C1a writes terminal rows only,
-so nothing registers one; the seam exists for the generator lane (C1b).
+nothing -- no Retry under an answer the user has moved past).
+
+THE GENERATOR TAIL (lane C1b). A graphics "yes" from the decision starts the fork
+(``supplements/generator.py``): the job writes a ``decided`` row first (files are known and do
+not wait for the model), emits ``supplement_progress`` beats as it runs, stores each accepted
+component as a content-addressed blob, and writes ONE terminal row (version + 1) that replaces
+the version a reader shows. The four control ops (``supplement_cancel/steer/restart/dismiss``)
+are methods here, dispatched by ``session/runtime/server.py`` -- the image-gen receipt rule
+(``"already finished"`` for a settled job) and the memo's semantics (§2.7). The row and the
+live events are SEPARATE on purpose: the row is durable and outside the model's context, the
+events are transient and go only to a viewer that negotiated ``supplements-v1``.
 
 EVERYTHING FAILS OPEN. An exception anywhere in the job is logged at DEBUG and swallowed: the
 worst outcome of this feature is "no callout".
@@ -38,20 +47,25 @@ worst outcome of this feature is "no callout".
 import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Final
 
-from local_operator.supplements import policy
+from local_operator.supplements import generator, policy
 from local_operator.supplements.candidates import prefilter
 from local_operator.supplements.contract import SupplementDetails
 from local_operator.supplements.decision import Decision
 from local_operator.supplements.decision import decide as decide_supplement
+from local_operator.supplements.evidence import Dataset
+from local_operator.supplements.generator import Component
 from local_operator.supplements.persistence import (
     append_row,
     build_details,
     new_job_id,
+    next_version,
     superseded,
 )
+from local_operator.supplements.prompt import MAX_INSTRUCTION_CHARS
 from local_operator.supplements.trigger import final_answer, refusal
 
 logger = logging.getLogger(__name__)
@@ -61,9 +75,40 @@ logger = logging.getLogger(__name__)
 #: swaps in after construction is the one that answers.
 SeamResolver = Callable[[], Any]
 
-#: Whether a generator exists to hand a graphics "yes" to. False until lane C1b: asking a paid
-#: question whose answer nothing can act on is waste (decision.decide docstring).
-GENERATOR_AVAILABLE: Final = False
+#: Whether a generator exists to hand a graphics "yes" to. TRUE since lane C1b: the fork in
+#: ``supplements/generator.py`` runs the errand, so a graphics question the decision answers
+#: "yes" now has something to act on. ``supplements.graphics`` is still OFF by default (memo
+#: §6: the flip ships in the window that carries the first renderer), so an operator who has
+#: not opted in sees no change at all -- and one who has gets the ROWS and the spend, not a
+#: picture, until a surface lane lands.
+GENERATOR_AVAILABLE: Final = True
+
+#: How many settled jobs keep their inputs for a later ``restart``/``steer`` (§2.7: both are
+#: allowed from ``failed``/``cancelled``/``done``). Bounded because the inputs hold the
+#: evidence datasets: a session that ran fifty jobs must not pin fifty of them in memory.
+_KEPT_INPUTS: Final = 3
+
+
+@dataclass
+class _JobInputs:
+    """What one job needs to run, and to be re-run by a steer or a restart.
+
+    Held in memory only: nothing here is journaled (the evidence datasets can hold a turn's
+    tool output, and the row carries the DIGEST of what was rendered instead -- §2.4's
+    "components are blobs" rule). A restart after a process restart therefore has no inputs
+    and answers the neutral receipt; a surface that wants Retry across restarts needs the
+    evidence in the row, which the memo deliberately does not do.
+    """
+
+    anchor: str
+    job: str
+    decision: Decision
+    datasets: tuple[Dataset, ...]
+    user_text: str
+    answer_text: str
+    instruction: str = ""
+    version: int = 1
+    details: SupplementDetails | None = None
 
 
 class SupplementRunner:
@@ -96,6 +141,8 @@ class SupplementRunner:
         #: Jobs this runtime is running right now: the runtime's half of the reader rule
         #: (``contract.reader_disposition(job_live=...)``).
         self._live_jobs: set[str] = set()
+        #: The inputs of the newest few jobs, newest last, for ``steer``/``restart`` (§2.7).
+        self._inputs: dict[str, _JobInputs] = {}
 
     # -- the synchronous trigger ----------------------------------------------------------
 
@@ -250,6 +297,19 @@ class SupplementRunner:
             decision.graphics,
             (time.perf_counter() - started) * 1000.0,
         )
+        if decision.graphics and want_graphics:
+            # Files AND graphics: the generator half runs on its own task so a steer can cut
+            # it without touching the decision's work, and so a slow model can never delay
+            # the turn that is already over (§2.9).
+            self._render(
+                answer.id,
+                decision,
+                pre.evidence.datasets,
+                provenance.user_text,
+                answer.text,
+                settings,
+            )
+            return
         await self._write(answer.id, decision)
 
     async def _write(self, anchor: str, decision: Decision) -> None:
@@ -267,9 +327,387 @@ class SupplementRunner:
             # Files-only: no generator is coming, so the first row is TERMINAL. A ``decided``
             # row would be read cold as "cancelled - Retry" under an answer with nothing to
             # retry (contract.reader_disposition).
-            details = build_details(
-                anchor=anchor, job=job, version=1, state="done", decision=decision
-            )
+            details = build_details(anchor=anchor, job=job, version=1, state="done", decision=decision)
             await append_row(self._session.transcript, details)
         finally:
             self._live_jobs.discard(job)
+
+    # -- the generator tail (lane C1b) ----------------------------------------------------
+
+    def _render(
+        self,
+        anchor: str,
+        decision: Decision,
+        datasets: tuple[Dataset, ...],
+        user_text: str,
+        answer_text: str,
+        settings: policy.SupplementSettings,
+    ) -> None:
+        """Schedule the fork for a graphics "yes" (memo §2.5).
+
+        A separate task from the decision's, because everything about this half is slower and
+        may be cancelled on its own (a steer cancels the IN-FLIGHT attempt and starts
+        version + 1); the decision's job is already finished by the time this is reachable.
+        """
+        inputs = _JobInputs(
+            anchor=anchor,
+            job=new_job_id(),
+            decision=decision,
+            datasets=tuple(datasets),
+            user_text=user_text,
+            answer_text=answer_text,
+        )
+        self._remember(inputs)
+        previous = self._task
+        if previous is not None and not previous.done():
+            previous.cancel()
+        self._task = asyncio.get_running_loop().create_task(
+            self._run_graphics(inputs, settings, previous)
+        )
+
+    def _remember(self, inputs: _JobInputs) -> None:
+        """Keep the newest few jobs' inputs for a later steer/restart (bounded, §2.7)."""
+        self._inputs[inputs.anchor] = inputs
+        while len(self._inputs) > _KEPT_INPUTS:
+            oldest = next(iter(self._inputs))
+            if oldest == inputs.anchor:
+                break
+            self._inputs.pop(oldest, None)
+
+    async def _run_graphics(
+        self,
+        inputs: _JobInputs,
+        settings: policy.SupplementSettings,
+        previous: asyncio.Task[None] | None,
+    ) -> None:
+        if previous is not None:
+            await asyncio.gather(previous, return_exceptions=True)
+        try:
+            await asyncio.wait_for(
+                self._attempt(inputs, settings), timeout=settings.timeout_s
+            )
+        except asyncio.CancelledError:
+            # A cancel is not a failure: the row for it is written by whoever cancelled
+            # (``cancel_job``/``steer_job``/``restart_job``), so a dispose or a supersede
+            # leaves the ``decided`` row in place and the stale-row rule renders it as
+            # "cancelled - Retry" -- the memo's own rule for a cut job (§2.9).
+            raise
+        except asyncio.TimeoutError:
+            await self._fail(inputs, f"bound:{generator.BOUND_TIME}")
+        except Exception:  # noqa: BLE001 -- fail open: the worst case is no figure
+            logger.debug("supplement generator job failed", exc_info=True)
+            await self._fail(inputs, "generator:unexpected")
+
+    async def _attempt(self, inputs: _JobInputs, settings: policy.SupplementSettings) -> None:
+        """The whole fork run: decided row, generator turns, blobs, terminal row."""
+        transcript = self._session.transcript
+        details = build_details(
+            anchor=inputs.anchor,
+            job=inputs.job,
+            version=inputs.version,
+            state="decided",
+            decision=inputs.decision,
+        )
+        inputs.details = details
+        self.set_open_row(details)
+        try:
+            await append_row(transcript, details)
+            await self._progress(details, "decided")
+            resolved = await asyncio.to_thread(self._resolve_model, settings)
+            if resolved is None:
+                await self._fail(inputs, "no-model")
+                return
+            await self._progress(details, "running", stage="generating")
+            outcome = await generator.generate(
+                complete=self._complete,
+                model=resolved,
+                datasets=inputs.datasets,
+                user_text=inputs.user_text,
+                answer_text=inputs.answer_text,
+                instruction=inputs.instruction,
+                max_turns=settings.max_turns,
+                max_output_tokens=settings.max_output_tokens,
+                max_cost_usd=settings.max_cost_usd,
+                price=lambda usage: self._price(usage, resolved),
+                on_progress=lambda stage, elapsed: self._progress(
+                    details, "running", stage=stage, elapsed_s=elapsed
+                ),
+                started=time.perf_counter(),
+            )
+            components = await self._store(outcome)
+            error = outcome.error if not components else ""
+            state = "failed" if error else "done"
+            final = next_version(details, state=state, error=error)
+            final["components"] = components
+            final["model"] = outcome.model
+            final["turns"] = outcome.turns
+            final["tokens_in"] = outcome.tokens_in
+            final["tokens_out"] = outcome.tokens_out
+            final["cost_usd"] = round(outcome.cost_usd, 6)
+            if outcome.instruction:
+                final["instruction"] = outcome.instruction[:MAX_INSTRUCTION_CHARS]
+            self.set_open_row(final)
+            await append_row(transcript, final)
+            self.set_open_row(None)
+            await self._progress(final, state)
+        finally:
+            self._live_jobs.discard(inputs.job)
+
+    async def _fail(self, inputs: _JobInputs, error: str) -> None:
+        """Terminal ``failed`` row for a job that never produced anything (bound or crash)."""
+        details = inputs.details or build_details(
+            anchor=inputs.anchor,
+            job=inputs.job,
+            version=inputs.version,
+            state="decided",
+            decision=inputs.decision,
+        )
+        final = next_version(details, state="failed", error=error)
+        try:
+            await append_row(self._session.transcript, final)
+            await self._progress(final, "failed")
+        except Exception:  # noqa: BLE001 -- a failed write is a missing callout, not a turn error
+            logger.debug("supplement failure row could not be written", exc_info=True)
+        finally:
+            self.set_open_row(None)
+
+    def _resolve_model(self, settings: policy.SupplementSettings) -> generator.DesignModel:
+        """Gather the live inputs ``generator.resolve_design_model`` needs (memo §2.5).
+
+        Runs on a worker thread (the auth store is SQLite), and every failure degrades to the
+        session's own model rather than to no job: a design figure on the conversation's
+        model is worse than a good one, and better than nothing.
+        """
+        from local_operator.model.registry import static_models
+        from local_operator.providers.model_access import usable_providers_here
+
+        session_spec = getattr(self._session, "effective_model", None) or getattr(
+            self._session, "model", None
+        )
+        usable: set[str] | None = None
+        try:
+            usable = usable_providers_here(config_dir=self._config_dir)
+        except Exception:  # noqa: BLE001 -- unknowable is the documented ``None``
+            logger.debug("supplements: usable providers could not be read", exc_info=True)
+        tier: Any = None
+        resolve_tier = getattr(self._session, "_resolve_subagent_model", None)
+        if callable(resolve_tier):
+            try:
+                tier = resolve_tier("task", "hi")
+            except Exception:  # noqa: BLE001 -- a bad tier is not a failed job
+                logger.debug("supplements: hi tier could not be resolved", exc_info=True)
+        return generator.resolve_design_model(
+            configured=settings.model,
+            session_spec=session_spec,
+            usable=usable,
+            static_models=static_models,
+            tier_spec=tier,
+        )
+
+    async def _complete(self, request: Any) -> tuple[str, Any]:
+        """One fork turn: text plus usage, drained from the session's own stream function.
+
+        The request is built by the generator (isolated, tools-free, ``supplement_render``),
+        so this is deliberately the same three lines ``Session._drain_errand`` uses: one
+        shape for every errand, and the usage event is what the cost cap is checked against.
+        """
+        from local_operator.harness.types import StreamTextDelta, StreamUsageEvent
+
+        parts: list[str] = []
+        usage: Any = None
+        async for event in self._session._stream_fn(request, None):
+            if isinstance(event, StreamTextDelta):
+                parts.append(event.delta)
+            elif isinstance(event, StreamUsageEvent):
+                usage = event.usage
+        return "".join(parts), usage
+
+    def _price(self, usage: Any, resolved: Any) -> float:
+        """What one fork turn cost, through THE money computation (``cost_for_usage``).
+
+        The same function the status band and the ledger writer use, so the cap cannot
+        disagree with ``/usage`` about what a job has spent. Never raises: a pricing failure
+        must not end a job (the ledger still prices it on its own background thread).
+        """
+        if usage is None:
+            return 0.0
+        try:
+            from local_operator.model.configure import cost_for_usage, resolve_model_info
+
+            spec = resolved.spec
+            info = resolve_model_info(spec.provider, spec.model_id)
+            return float(cost_for_usage(spec.provider, info, usage) or 0.0)
+        except Exception:  # noqa: BLE001 -- an unpriceable turn is not a failed job
+            logger.debug("supplement turn could not be priced", exc_info=True)
+            return 0.0
+
+    async def _store(self, outcome: Any) -> list[dict[str, Any]]:
+        """Store each accepted component as a blob and build the row's ``components[]``.
+
+        Content-addressed (memo §2.4): the row carries a 32-hex digest, so a large document
+        never enters the transcript payload and sync's existing ``"attachment":"<digest>"``
+        byte scan carries it with a moved conversation. A component the store refuses is
+        DROPPED, not rendered: ``put_bytes`` returning ``None`` means the bytes are not on
+        disk, and a row pointing at a digest that resolves to nothing would paint a
+        permanently broken frame.
+        """
+        if not outcome.components:
+            return []
+        from local_operator.session.attachments import AttachmentStore
+
+        store = AttachmentStore()
+        entries: list[dict[str, Any]] = []
+        for component in outcome.components:
+            ref = await asyncio.to_thread(
+                store.put_bytes, component.blob.encode("utf-8"), "text/html"
+            )
+            if ref is None:
+                logger.debug("supplement component could not be stored")
+                continue
+            entries.append(
+                {
+                    "attachment": ref.digest,
+                    "title": component.title,
+                    "source": component.source,
+                    "mime": "text/html",
+                    "height_hint": component.height_hint,
+                }
+            )
+        return entries
+
+    async def _progress(
+        self,
+        details: SupplementDetails,
+        state: str,
+        *,
+        stage: str = "",
+        elapsed_s: float = 0.0,
+    ) -> None:
+        """Emit one ``supplement_progress`` beat (memo §2.7). Never fails the job.
+
+        The event is the LIVE half: ``running``/``cancelling`` are never journaled, and only
+        ``decided``/``done`` carry the files/components (the row's own shapes, so a surface
+        can swap the indicator for the settled block without a second read).
+        """
+        try:
+            from local_operator.harness.types import SupplementProgressEvent
+
+            emit = getattr(self._session, "_emit", None)
+            if not callable(emit):
+                return
+            event = SupplementProgressEvent(
+                anchor=str(details.get("anchor", "")),
+                job=str(details.get("job", "")),
+                version=int(details.get("version", 1)),
+                state=state,
+                stage=stage,
+                elapsed_s=round(float(elapsed_s), 3),
+                files=list(details.get("files") or []) if state in ("decided", "done") else [],
+                components=list(details.get("components") or []) if state == "done" else [],
+                error=str(details.get("error", "") or ""),
+            )
+            await emit(event)
+        except Exception:  # noqa: BLE001 -- a missing beat is not a failed job
+            logger.debug("supplement progress could not be emitted", exc_info=True)
+
+    # -- the control ops (memo §2.7) -------------------------------------------------------
+
+    def recall(self, anchor: str, job: str) -> _JobInputs | None:
+        """The inputs for ``(anchor, job)``, live or recently settled. ``None`` = unknown."""
+        inputs = self._inputs.get(anchor)
+        if inputs is None or inputs.job != job:
+            return None
+        return inputs
+
+    async def _settle(self, inputs: _JobInputs, *, state: str, error: str = "") -> None:
+        """Write a terminal row for a job an op just cut, and emit its beat."""
+        if inputs.details is None:
+            return
+        final = next_version(inputs.details, state=state, error=error)
+        self.set_open_row(final)
+        try:
+            await append_row(self._session.transcript, final)
+            await self._progress(final, state)
+        finally:
+            self.set_open_row(None)
+
+    async def cancel_job(self, anchor: str, job: str) -> str:
+        """``supplement_cancel``: cancel the running attempt, write ``cancelled``.
+
+        Idempotent, and the receipt for a job that is not running is image-gen's neutral
+        "already finished" -- a surface that lost a race with the job's own end must not be
+        told something happened.
+        """
+        inputs = self.recall(anchor, job)
+        task = self._task
+        if inputs is None or task is None or task.done():
+            return "already finished"
+        await self._progress(inputs.details or {}, "cancelling")
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._task = None
+        await self._settle(inputs, state="cancelled")
+        return "cancelled"
+
+    async def steer_job(self, anchor: str, job: str, text: str) -> str:
+        """``supplement_steer``: cancel any in-flight attempt, start version + 1.
+
+        NOT a turn (memo §2.7): it never touches the session's turn lock, steering queue or
+        model context -- it starts a new GENERATOR version with the user's instruction.
+        """
+        inputs = self.recall(anchor, job)
+        if inputs is None:
+            return "already finished"
+        instruction = " ".join(str(text or "").split())[:MAX_INSTRUCTION_CHARS]
+        await self._cut_and_restart(inputs, instruction=instruction)
+        return "steering"
+
+    async def restart_job(self, anchor: str, job: str) -> str:
+        """``supplement_restart``: version + 1 with the previous instruction, or none."""
+        inputs = self.recall(anchor, job)
+        if inputs is None:
+            return "already finished"
+        await self._cut_and_restart(inputs, instruction=inputs.instruction)
+        return "restarting"
+
+    async def _cut_and_restart(self, inputs: _JobInputs, *, instruction: str) -> None:
+        """Cut the in-flight attempt (if any) and run the next version in its place."""
+        task = self._task
+        if task is not None and not task.done():
+            await self._progress(inputs.details or {}, "cancelling")
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._task = None
+        if inputs.details is not None:
+            # The cut attempt's row, so the versions a reader walks are honest: ``cancelled``
+            # renders "Highlights cancelled - Retry" and the next version immediately
+            # supersedes it by the newest-version-wins rule.
+            await self._settle(inputs, state="cancelled")
+        inputs.version += 1
+        inputs.instruction = instruction
+        self._remember(inputs)
+        self._task = asyncio.get_running_loop().create_task(
+            self._run_graphics(inputs, self._settings, None)
+        )
+
+    async def dismiss(self, anchor: str) -> str:
+        """``supplement_dismiss``: the operator's "not useful" signal (memo §2.7).
+
+        Writes ``state=skipped, dismissed=true`` on the anchor's newest version -- the spam
+        metric reads ``dismissed`` (§5.2) -- and cancels a live job for that anchor first, so
+        a dismissed row cannot be overwritten by the job it just hid.
+        """
+        task = self._task
+        inputs = self._inputs.get(anchor)
+        if inputs is not None and task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self._task = None
+        if inputs is None or inputs.details is None:
+            return "already finished"
+        final = next_version(inputs.details, state="skipped")
+        final["dismissed"] = True
+        self.set_open_row(None)
+        await append_row(self._session.transcript, final)
+        await self._progress(final, "skipped")
+        return "dismissed"
