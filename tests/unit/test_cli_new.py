@@ -277,6 +277,20 @@ def test_serve_defaults_preserved(parser: argparse.ArgumentParser) -> None:
     assert parser.parse_args(["serve", "--host", "0.0.0.0"]).host == "0.0.0.0"
 
 
+def test_serve_has_no_non_loopback_override(parser: argparse.ArgumentParser) -> None:
+    """RFC §3.1: the refusal is the product's policy, not a default -- there is no
+    flag that re-admits a wide bind (``--allow-non-loopback-api`` was removed with
+    the ruling).
+
+    The ADDRESS still parses (asserted above and below): the refusal happens at
+    RUNTIME in ``serve_command``, so nothing about the parser contract changes.
+    """
+    for flag in ("--allow-non-loopback-api", "--allow-non-loopback", "--allow-wide-bind"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["serve", flag, "0.0.0.0"])
+    assert parser.parse_args(["serve", "--host", "0.0.0.0"]).host == "0.0.0.0"
+
+
 def test_exec_legacy_shape(parser: argparse.ArgumentParser) -> None:
     args = parser.parse_args(["exec", "do the thing"])
     assert args.subcommand == "exec"
