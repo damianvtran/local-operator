@@ -55,7 +55,6 @@ classification moves off the wire entirely.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import time
@@ -86,6 +85,12 @@ UPDATE_OP_DEADLINE_S = 900.0
 #: before the member's own sentence arrives, and report a bare timeout for an
 #: install that was about to answer. The +30 is the control socket's own slack.
 UPDATE_CONTROL_TIMEOUT_S = UPDATE_OP_DEADLINE_S + 30.0
+
+#: How long the member waits for its own channel's answer about one version
+#: (seconds). The read is a single small JSON document; the bound exists so a
+#: hung index cannot stall the slow op before the idle gate, and it is the same
+#: 5 s the updater's own PyPI read uses.
+PUBLISHED_CHECK_TIMEOUT_S = 5.0
 
 #: Where the in-flight marker lives, under the config root.
 UPDATE_LOCK_RELPATH: tuple[str, ...] = ("network", "update.lock")
@@ -180,28 +185,40 @@ def build_target_from_stamp(stamp: Mapping[str, Any] | None) -> dict[str, str]:
     }
 
 
-def check_published(version: str) -> tuple[bool, str]:
+def check_published(version: str, *, client: Any | None = None) -> tuple[bool, str]:
     """Whether ``version`` is resolvable on THIS device's own channel.
 
-    Returns ``(present, why)``: ``present`` is ``True`` when the version must be
-    attempted, ``False`` only when the channel POSITIVELY says the version does
-    not exist (then ``why`` is the reason clause). An unreachable or unreadable
-    channel is ``True`` — inconclusive is not "absent": the installer itself is
-    the final authority, and its own tail is carried on ``failed``. That is a
-    deliberate asymmetry: refusing on an inconclusive read would make the whole
-    op depend on a second, weaker read of the same network the installer is
-    about to use anyway.
+    Returns ``(attempt, why)``: ``attempt`` is ``False`` ONLY when the channel
+    POSITIVELY says this exact version does not exist — the index answers 404 for
+    its per-version document — and then ``why`` is the reason clause. Every other
+    answer is ``(True, "")``: a 5xx, a transport error, an unreadable body. That
+    asymmetry is deliberate and is the whole shape of this function: an
+    INCONCLUSIVE read is not "absent", the installer is the final authority on
+    what it can resolve, and its own tail is what the failed receipt carries. A
+    refusal keyed on an inconclusive read would make the op depend on a second,
+    weaker read of the same network the installer is about to use anyway.
 
-    A module-level function so tests never touch the network.
+    THE CHECK IS ON THE STATUS CODE, not on a reason string: the updater's own
+    ``_pypi_release_document`` folds "not served" and "unreachable" into prose
+    and was never the right reader for a decision (agent review round 1, m3).
+    ``client`` is the test seam (an httpx-like object with ``get``); the real
+    import stays function-local, like the updater's, so this module's import
+    surface stays stdlib-only.
     """
     from local_operator import update as update_mod
 
+    url = update_mod.PYPI_VERSION_JSON_URL.format(version=version)
     try:
-        document, why = update_mod._pypi_release_document(version)  # noqa: SLF001 — the same read
-    except Exception:  # noqa: BLE001 — see above: inconclusive means "attempt it"
+        if client is None:
+            import httpx
+
+            response = httpx.get(url, timeout=PUBLISHED_CHECK_TIMEOUT_S)
+        else:
+            response = client.get(url, timeout=PUBLISHED_CHECK_TIMEOUT_S)
+    except Exception:  # noqa: BLE001 — inconclusive means "attempt it"
         return True, ""
-    if document is None and why == "PyPI does not serve it":
-        return False, why
+    if int(getattr(response, "status_code", 0)) == 404:
+        return False, "the member's channel does not serve this version"
     return True, ""
 
 
@@ -316,7 +333,23 @@ def update_lock(root: Path, target: UpdateTarget) -> Iterator[None]:
 
     The lock is taken BEFORE the busy probe, and the probe runs under it: two
     concurrent asks must not both observe idle and both install.
+
+    ``fcntl`` IS IMPORTED HERE, NOT AT MODULE SCOPE (agent review round 1,
+    B1/Q1): it is POSIX-only, and a module-level import made the whole SLICE
+    unloadable on Windows — ``_install_slices`` swallows a slice's import failure
+    by design, so the effect would have been silent (``net_update`` quietly
+    refusing as "not implemented" there). On a platform without it this device
+    cannot take the single-update lock at all, which is a refusal BY NAME rather
+    than an install without serialisation.
     """
+    try:
+        import fcntl
+    except ImportError as exc:  # pragma: no cover — exercised by a blocked-import probe
+        raise MeshRefusal(
+            "update_lock_unsupported",
+            "this platform has no advisory file locking (no ``fcntl`` here), so this "
+            "device cannot take the single-update lock; nothing was touched",
+        ) from exc
     path = root.joinpath(*UPDATE_LOCK_RELPATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, "a+", encoding="utf-8")  # noqa: SIM115 — held for the whole install
@@ -500,6 +533,23 @@ def _execute_validated(
             # STATE — the member was done by hand past the fleet and is left
             # alone until the origin catches up — so it answers in its own state
             # rather than through the ``refused`` arm.
+            #
+            # AND IT IS STILL A ROW ON THE MEMBER (agent review round 1, m4): the
+            # design's audit table lists "executor refusal by rule (ahead, not
+            # published, editable, in progress)" as ``update_refused``, and the
+            # member's own log is the only place an operator can see WHY a
+            # rollout skipped this device. ``already_on_target`` writes nothing —
+            # it is the idempotent no-op, and a row per re-ask would be exactly
+            # the per-poll log the taxonomy forbids.
+            _audit_member(
+                server,
+                link,
+                "update_refused",
+                target=target,
+                outcome="refused",
+                cause="policy",
+                detail={"code": "ahead_of_target"},
+            )
             return {
                 "state": "ahead_of_target",
                 "code": "",
@@ -512,6 +562,22 @@ def _execute_validated(
                 "sessions": {"moved": 0, "kept": 0},
                 "updated_at": time.time(),
             }
+
+    # TARGET VALIDATION RUNS FIRST, BEFORE ANY IDLE GATE, and that is RU §3's
+    # own order ("the no-action and refusal outcomes need no idle"). The channel
+    # check belongs to that validation, and it sits HERE rather than after the
+    # busy probe on purpose: a target this device's channel cannot serve is a
+    # TERMINAL refusal the origin should learn on its first ask, not a member
+    # that keeps answering ``busy`` for as long as it happens to be working. It
+    # costs one bounded read (``PUBLISHED_CHECK_TIMEOUT_S``) and only on a path
+    # that was going to install anyway.
+    published, why = check_published(target_version)
+    if not published:
+        raise MeshRefusal(
+            "target_not_published",
+            f"the target {target_version} is not resolvable on this device's channel "
+            f"({why}); nothing was installed",
+        )
 
     root = Path(server.root)
     with update_lock(root, target):
@@ -531,21 +597,6 @@ def _execute_validated(
                 "sessions": {"moved": 0, "kept": max(count, 0)},
                 "updated_at": time.time(),
             }
-        # THE CHANNEL CHECK COMES AFTER THE IDLE GATE, and that ordering is the
-        # reply-time contract: a busy member answers in milliseconds (RU §3)
-        # without an HTTP call, and the no-action branches above never pay one
-        # either. It goes LAST among the refusals because it is the only one that
-        # can be INCONCLUSIVE — see ``check_published``: only a positive "the
-        # channel does not serve this version" refuses; an unreachable index
-        # falls through to the installer, which is the authority on what it can
-        # resolve and whose own tail becomes the receipt.
-        published, why = check_published(target_version)
-        if not published:
-            raise MeshRefusal(
-                "target_not_published",
-                f"the target {target_version} is not resolvable on this device's channel "
-                f"({why}); nothing was installed",
-            )
         _audit_member(server, link, "update_started", target=target)
         try:
             method = install_build(target_version, runner=runner)
@@ -667,13 +718,22 @@ def update_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
     refusal it did not ask to make), send the target identity, and report the
     member's own words. It sends NO code, NO ref to fetch, and NO command.
     """
-    link = server._ensure_link(device_id)  # noqa: SLF001 — the one dial seam
+    # The one dial seam, and the reason it returns.
+    link, dial_reason = server._ensure_link_with_reason(device_id)  # noqa: SLF001
     label = server._member_name(device_id) or device_id  # noqa: SLF001 — the mesh's own name
     if link is None:
+        # THE SEAM'S OWN REASON RIDES THE SENTENCE (agent review round 1, m5):
+        # ``no_endpoint``, ``not_a_member`` and the dial's refusal code are
+        # different facts with different remedies, and dropping them left the
+        # operator to guess between "that device is off" and "this device was
+        # never told where it lives".
+        reason = f" ({dial_reason})" if dial_reason else ""
         return {
             "ok": False,
             "code": "unreachable",
-            "message": f"{label} is not answering right now, so it was not asked to update",
+            "message": (
+                f"{label} is not answering right now, so it was not asked to update{reason}"
+            ),
             "device_id": device_id,
             "name": label,
         }
@@ -689,23 +749,27 @@ def update_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
             "name": label,
         }
     target = build_target_from_stamp(origin_target())
+    if not target["version"]:
+        # NO DEAD SECOND CONDITION HERE (agent review round 1, nit): the branch
+        # used to read ``detect_install_kind() is not None and not version``,
+        # whose first clause is always true — the honest statement is simply
+        # "this device has no version to offer".
+        return {
+            "ok": False,
+            "code": "editable_install",
+            "message": (
+                "this device has no published version to offer (a development or "
+                "unreadable install); members are not asked to follow it"
+            ),
+            "device_id": device_id,
+            "name": label,
+        }
     if _version_tuple(target["version"]) is None:
-        if detect_install_kind() is not None and not target["version"]:
-            return {
-                "ok": False,
-                "code": "editable_install",
-                "message": (
-                    "this device has no published version to offer (a development or "
-                    "unreadable install); members are not asked to follow it"
-                ),
-                "device_id": device_id,
-                "name": label,
-            }
         return {
             "ok": False,
             "code": "target_not_published",
             "message": (
-                f"this device's own build reports {target['version'] or 'no version'}, which "
+                f"this device's own build reports {target['version']}, which "
                 "is not a resolvable target; nothing was sent"
             ),
             "device_id": device_id,

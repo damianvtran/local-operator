@@ -174,8 +174,10 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 #: device to install a strictly newer published build. It names the BOUND, not
 #: just the act — the peer never delivers code, never names a ref and never runs
 #: a command; it names a version this device resolves through its OWN channel.
-#: Like the two onboarding scopes it is granted PER MEMBER (no role carries it,
-#: so adding it to a role cannot silently widen every existing member) and it is
+#: Like the two onboarding scopes it is granted PER MEMBER — no NON-ADMIN role
+#: carries it (the blanket ``admin`` role holds the full vocabulary by
+#: construction, for every capability), so adding it to ``read``/``drive``
+#: cannot silently widen every existing member of those roles — and it is
 #: a :data:`SELF_DECIDED_SCOPES` member, because the decision governs this
 #: device's own install.
 CAPABILITIES: frozenset[str] = frozenset(
@@ -546,8 +548,10 @@ GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
         "broker_credential",
         "approve",
         "unattended",
-        # Per member, and NO role carries it: a role that carried ``update``
-        # would widen every existing member the day this table changed.
+        # Per member, and no NON-ADMIN role carries it: adding ``update`` to
+        # ``read`` or ``drive`` would widen every existing member of that role
+        # the day this table changed. The blanket ``admin`` role holds the full
+        # vocabulary by construction, as it does for every capability.
         "update",
     }
 )

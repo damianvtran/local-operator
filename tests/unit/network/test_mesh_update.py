@@ -16,14 +16,14 @@ with the guard removed, where that is a one-line neutralisation: the busy cell
 re-asks with ``busy_sessions`` neutralised and the install recorder then FIRES;
 the ungranted cell re-asks after the grant and the ask then REACHES the handler.
 A cell that cannot be shown red by removing its guard says so instead.
-
-NOT RUN YET: this file was drafted under a fleet disk hold (see the PR body);
-"what I ran" there names exactly which commands have and have not executed.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,6 +36,8 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by im
     _pair,
     devices,
 )
+
+REPO = Path(__file__).resolve().parents[3]
 
 Devices = tuple[Any, Any, str, int]
 
@@ -122,10 +124,13 @@ def _member_audit_rows(server_a: Any, event: str) -> list[dict[str, Any]]:
 def test_the_capability_and_its_ops_are_in_the_closed_tables() -> None:
     """``update`` is a capability of its own, per member, and its ops are total.
 
-    The words name the BOUND (RU §2), not just the act; no role carries it (a
-    role that did would silently widen every existing member); it is
-    self-decided (the grant governs THIS device's own install); and the two op
-    halves sit in the tables their totality rules demand.
+    The words name the BOUND (RU §2), not just the act; no NON-ADMIN role
+    carries it (read/drive gaining it would silently widen every existing member
+    of those roles — the blanket ``admin`` role holds the full vocabulary for
+    every capability by construction, which is why the exception is asserted
+    below rather than denied); it is self-decided (the grant governs THIS
+    device's own install); and the two op halves sit in the tables their
+    totality rules demand.
     """
     assert "update" in types.CAPABILITIES
     assert "update" in types.GRANTABLE_CAPABILITIES
@@ -137,7 +142,11 @@ def test_the_capability_and_its_ops_are_in_the_closed_tables() -> None:
     for role in ("read", "drive"):
         assert "update" not in types.capabilities_for_role(
             role
-        ), "a role that carried `update` would widen every existing member"
+        ), "a non-admin role that carried `update` would widen every existing member"
+    # ADMIN IS THE EXCEPTION, BY CONSTRUCTION (agent review round 1, m2):
+    # ``ROLE_CAPABILITIES["admin"] = CAPABILITIES``, so every capability is in
+    # it. Pinned so the claim in the docstring cannot rot in either direction.
+    assert "update" in types.ROLE_CAPABILITIES["admin"]
     assert "net_update" in types.NET_OPS
     assert types.OP_CAPABILITY["net_update"] == "update"
     assert "peer_update" in types.LOCAL_OPS
@@ -247,6 +256,9 @@ def test_a_busy_member_answers_busy_and_nothing_is_touched(
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
     _concrete_member(monkeypatch, current="0.0.1")
+    # The channel check runs BEFORE the idle gate (RU §3's order), so this cell
+    # must get past it without touching the network to reach the busy answer.
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
     calls = _record_installs(monkeypatch)
     registry.publish(
         SessionRecord(
@@ -275,7 +287,6 @@ def test_a_busy_member_answers_busy_and_nothing_is_touched(
 
     # TEETH: remove the gate and the very same ask tries the install.
     monkeypatch.setattr(meshupdate, "busy_sessions", lambda root: (0, ""))
-    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
     meshupdate.update_peer(server_b, server_a.identity.device_id)
     assert calls == ["0.99.0"], "the recorder did not fire with the gate removed"
 
@@ -316,11 +327,19 @@ def test_a_target_not_newer_than_the_member_is_a_skip_not_an_install(
     assert detail["state"] == "ahead_of_target", detail
     assert "never moves backwards" in detail["message"], detail
     assert calls == []
+    # m4: the skip IS a row — when it is a rule outcome, not the idempotent
+    # no-op; the design's audit table lists ahead beside the other rule refusals.
+    refused_rows = _member_audit_rows(server_a, "update_refused")
+    assert len(refused_rows) == 1, refused_rows
+    assert refused_rows[0]["detail"]["code"] == "ahead_of_target", refused_rows[0]
 
     ahead["current"] = "0.99.0"
     same = meshupdate.update_peer(server_b, server_a.identity.device_id)
     assert same["state"] == "already_on_target", same
     assert calls == []
+    assert (
+        len(_member_audit_rows(server_a, "update_refused")) == 1
+    ), "already_on_target is the idempotent no-op: it writes no row"
 
 
 def test_a_second_update_while_one_is_in_flight_is_refused_by_name(
@@ -336,6 +355,7 @@ def test_a_second_update_while_one_is_in_flight_is_refused_by_name(
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
     _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
     calls = _record_installs(monkeypatch)
 
     with meshupdate.update_lock(server_a.root, meshupdate.UpdateTarget(version="9.9.9")):
@@ -453,6 +473,7 @@ def test_an_unreadable_registry_refuses_rather_than_installing(
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
     _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
     calls = _record_installs(monkeypatch)
 
     def _explode(*args: Any, **kwargs: Any) -> Any:
@@ -495,3 +516,113 @@ def test_the_origin_reports_the_members_own_words_and_never_guesses_the_grant() 
     )
     assert "cloud-node-1 has not granted `update` to this device" in remedy
     assert "lop network member grant damian-mesh d_" + "a" * 32 + " update" in remedy
+
+
+def test_a_target_the_members_channel_cannot_serve_is_refused_by_name(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """ROW: ``target_not_published`` — refused before the idle gate, nothing touched.
+
+    The member's channel POSITIVELY said the version is absent (see
+    :func:`test_the_channel_check_refuses_only_on_a_confirmed_absence`), so the
+    answer is a terminal refusal rather than an install attempt — and it is
+    decided without consulting the session registry at all, which is RU §3's
+    "the no-action and refusal outcomes need no idle".
+    """
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    _concrete_member(monkeypatch, current="0.0.1")
+    calls = _record_installs(monkeypatch)
+    monkeypatch.setattr(
+        meshupdate,
+        "check_published",
+        lambda version: (False, "the member's channel does not serve this version"),
+    )
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "refused", detail
+    assert detail["code"] == "target_not_published", detail
+    assert calls == []
+    refused_rows = _member_audit_rows(server_a, "update_refused")
+    assert refused_rows and refused_rows[-1]["detail"]["code"] == "target_not_published"
+
+
+def test_the_channel_check_refuses_only_on_a_confirmed_absence() -> None:
+    """m3: the asymmetry that keeps the op from depending on a weaker read.
+
+    A 404 refuses; a 5xx, an auth error and a transport failure all mean
+    "attempt it" — the installer is the final authority and its own tail is what
+    the failed receipt carries. Driven through the client seam, so no network.
+    """
+
+    class _Response:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+    class _Client:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+        def get(self, url: str, timeout: float) -> _Response:
+            return _Response(self.status_code)
+
+    class _Broken:
+        def get(self, url: str, timeout: float) -> Any:
+            raise OSError("no route to the index")
+
+    assert meshupdate.check_published("9.9.9", client=_Client(404)) == (
+        False,
+        "the member's channel does not serve this version",
+    )
+    for status in (200, 403, 500, 503):
+        assert meshupdate.check_published("9.9.9", client=_Client(status)) == (True, ""), status
+    assert meshupdate.check_published("9.9.9", client=_Broken()) == (True, "")
+
+
+def test_the_unreachable_sentence_carries_the_dial_seams_reason(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """m5: ``no_endpoint`` / ``not_a_member`` must not collapse into one vague line."""
+    server_a, server_b, record = _rig(devices, monkeypatch)
+
+    def _no_link(device_id: str, **kwargs: Any) -> tuple[None, str]:
+        return None, "no_endpoint"
+
+    monkeypatch.setattr(server_b, "_ensure_link_with_reason", _no_link)
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["code"] == "unreachable", detail
+    assert "no_endpoint" in detail["message"], detail
+
+
+_PROBE = """
+import pathlib, sys, tempfile
+sys.modules["fcntl"] = None  # any later `import fcntl` raises ImportError
+from local_operator.network import meshupdate, types
+try:
+    with meshupdate.update_lock(
+        pathlib.Path(tempfile.mkdtemp()), meshupdate.UpdateTarget(version="0.0.1")
+    ):
+        print("NO-REFUSAL")
+except types.MeshRefusal as refusal:
+    print("ok", refusal.code)
+"""
+
+
+def test_the_module_imports_and_refuses_by_name_without_fcntl() -> None:
+    """B1/Q1: the POSIX import is function-local, and its absence refuses by name.
+
+    A FRESH interpreter with ``sys.modules['fcntl'] = None`` (importing a module
+    mapped to ``None`` raises ImportError), so a module-scope ``import fcntl``
+    would fail the import itself — which ``_install_slices`` swallows, making the
+    whole op silently absent on Windows. The repo's own subprocess-probe pattern
+    (``test_structure``): pytest has already imported half the tree, so an
+    in-process check could pass on a real regression.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _PROBE],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO),
+        timeout=180,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert proc.stdout.strip() == "ok update_lock_unsupported", proc.stdout
