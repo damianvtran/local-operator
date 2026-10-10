@@ -96,16 +96,21 @@ BILLING_LINKS: dict[str, BillingLink] = {
         kind="radient",
         url="https://console.radienthq.com/dashboard/billing",
         dashboard="the Radient console",
-        # The paths are constants in agent-server (`me_verification.go`:
-        # `signupClaimPath`, `topUpPath`). The live host redirects to login
-        # with the callback preserved, but unknown paths also redirect, so
-        # the paths are NOT independently proven — hence unverified. The
-        # sibling verification page is the constant radient_recovery already
-        # quotes as `CLAIM_URL`; it is not repeated here.
+        # The paths are constants in agent-server: ``/dashboard/billing`` is
+        # ``billingURL()``'s literal (internal/services/auto_reload_service.go:189)
+        # and ``/dashboard/verification`` is ``signupClaimPath``
+        # (internal/controllers/me_verification.go:24) — both on main ``add2e7e``.
+        # The live host redirects unknown paths to login with the callback
+        # preserved, and unknown paths redirect too, so the redirect alone
+        # proves nothing — hence unverified. The verification page is not
+        # repeated here: ``radient_recovery`` already quotes it as
+        # ``CLAIM_URL``.
         verified=False,
         note=(
-            "dashboard paths are agent-server constants; the live host redirects any "
-            "unknown path to login, so the redirect proves nothing (checked 2026-10-09)"
+            "dashboard paths are agent-server main constants "
+            "(auto_reload_service.go:189, me_verification.go:24); the live host "
+            "redirects any unknown path to login, so the redirect proves nothing "
+            "(checked 2026-10-09)"
         ),
     ),
     "anthropic": BillingLink(
@@ -231,11 +236,17 @@ BILLING_LINKS: dict[str, BillingLink] = {
         kind="subscription",
         # Quoted from the registry's own login URL rather than spelled again
         # (registry.py, the `alibaba-token-plan` login instruction), which is
-        # the page the product itself sends users to.
+        # the page the product itself sends users to — SHIPPED user-facing,
+        # but not independently verified: a bogus sibling path answers 200
+        # (the host is a catch-all SPA), so no probe can confirm it
+        # (round-1 m2, checked 2026-10-09).
         url="https://home.qwencloud.com/billing/subscription/token-plan-individual",
         dashboard="the QwenCloud console",
-        verified=True,
-        note="quoted from the registry's own token-plan login URL (shipped user-facing)",
+        verified=False,
+        note=(
+            "quoted from the registry's own token-plan login URL (shipped "
+            "user-facing); the host answers 200 for any path, so unverifiable"
+        ),
     ),
 }
 

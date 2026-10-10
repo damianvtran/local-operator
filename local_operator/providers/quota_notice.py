@@ -111,6 +111,21 @@ class QuotaVerdict:
     age_ms: int | None = None
 
 
+def report_is_fresh(report: UsageReport, now_ms: int) -> bool:
+    """One spelling of "this report is young enough to judge on".
+
+    The VERDICT is the authority on freshness — it is the thing that refuses
+    to speak on stale numbers — and the route mirrors this exact rule when it
+    decides whether to spend a refresh before asking it, so the two cannot
+    disagree at the TTL boundary (round-1 m5: the route spelled the rule
+    ``>= TTL``, the verdict ``> TTL`` — one rule, two boundaries). Inclusive
+    at the boundary on purpose: a report exactly TTL old still counts as
+    fresh, and the route refetches only once the verdict itself would reject
+    the row.
+    """
+    return report.fetched_at > 0 and now_ms - report.fetched_at <= USAGE_REPORT_TTL_MS
+
+
 def evaluate_quota_notice(
     *,
     provider: str,
@@ -132,8 +147,8 @@ def evaluate_quota_notice(
     set the reports must cover; both default empty so a caller checking a
     lone API-key provider passes neither.
     """
-    link = billing_link_for(provider)
-    default_kind: BillingKind = link.kind if link is not None else "none"
+    primary_link = billing_link_for(provider)
+    default_kind: BillingKind = primary_link.kind if primary_link is not None else "none"
     model_free = (
         entry is not None
         and entry.input_price == 0.0
@@ -150,10 +165,7 @@ def evaluate_quota_notice(
 
     if not reports:
         return QuotaVerdict("unknown", default_kind, model_free)
-    if any(
-        report.fetched_at <= 0 or now_ms - report.fetched_at > USAGE_REPORT_TTL_MS
-        for report in reports
-    ):
+    if any(not report_is_fresh(report, now_ms) for report in reports):
         # One stale report poisons the set: we can neither trust its numbers
         # nor prove the account behind it is covered.
         return QuotaVerdict("unknown", default_kind, model_free)
@@ -212,6 +224,14 @@ def evaluate_quota_notice(
         # measurable" — a key cap has a fraction and never resets.
         windowed = any(_has_rolling_window(report) for report in reports)
         kind = "subscription" if windowed else "balance"
+
+    # The link is resolved AFTER the kind, and WITH it (round-1 M2): a
+    # provider that sells two products has two surfaces, and the variant table
+    # exists precisely for the kind the evidence named. Resolved earlier, that
+    # table was dead code on this path and a spent Kimi plan linked to the
+    # API-key top-up page. ``billing_link_for`` falls back to the primary
+    # entry for a kind the provider does not sell.
+    link = billing_link_for(provider, kind=kind)
 
     resets_after = [
         health.reset_after_ms for health in depleted_health if health.reset_after_ms is not None
