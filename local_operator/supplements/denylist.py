@@ -86,6 +86,13 @@ _EXTRA_PATTERNS: Final[tuple[tuple[str, str], ...]] = (
     # The operator's standing rule: some repos keep env vars in docker-compose.
     ("docker-compose*.y*ml", RULE_COMPOSE),
     ("compose*.y*ml", RULE_COMPOSE),
+    # A kubeconfig is a cluster credential store wherever it lives. The ``.kube``
+    # component already covers the conventional location, but a copy rendered into a
+    # project tree (``deploy/kubeconfig``) was a live candidate until agent review round 1
+    # (R5) reproduced the slip. Both the prefix and the suffix spelling, because trees
+    # write the variants ``kubeconfig-prod`` and ``prod.kubeconfig``.
+    ("kubeconfig*", RULE_TOOL_CONFIG),
+    ("*.kubeconfig", RULE_TOOL_CONFIG),
 )
 
 #: Directory components (casefolded) that deny everything beneath them, beyond the

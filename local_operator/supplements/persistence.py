@@ -27,7 +27,7 @@ denylist because only candidates that survived the pre-filter can reach this mod
 
 import time
 import uuid
-from typing import Any, Final, Sequence
+from typing import Any, Final
 
 from local_operator.supplements.candidates import Candidate
 from local_operator.supplements.contract import (
@@ -128,7 +128,3 @@ def superseded(details: SupplementDetails) -> SupplementDetails:
 async def append_row(transcript: Any, details: SupplementDetails) -> None:
     """Journal one row. ``preserve_mtime=True``: see the module docstring."""
     await transcript.append_custom(SUPPLEMENT_CUSTOM_TYPE, dict(details), preserve_mtime=True)
-
-
-def files_of(candidates: Sequence[Candidate]) -> list[SupplementFile]:
-    return [file_entry(c) for c in candidates]

@@ -623,6 +623,57 @@ def test_the_team_depth_maximum_matches_max_org_depth() -> None:
     assert setting.maximum == MAX_ORG_DEPTH
 
 
+def test_supplements_registry_bounds_are_honoured_by_the_reader() -> None:
+    """Every value the settings page ACCEPTS must come back AS STORED from the reader.
+
+    The registry's ``[minimum, maximum]`` is the page's control range; the reader's
+    accept range (``policy``'s bounds, applied by ``SupplementSettings.from_values``)
+    must CONTAIN it, or a value a user clicked is silently swapped for the default.
+    Agent review round 1, R4 found the two pairs disagreeing both ways: ``maxCostUsd: 0``
+    -- "never spend" -- came back as the 0.20 default, and ``maxOutputTokens`` had no page
+    maximum while the reader maps anything above 1,000,000 to 6000. Exercised THROUGH
+    ``from_values`` at both extremes of every bounded row, so it fails on whichever side
+    of the pair drifts -- the shape ``test_the_team_depth_maximum_matches_max_org_depth``
+    gives the one-sided case.
+    """
+    from local_operator.supplements import policy
+    from local_operator.supplements.policy import SupplementSettings
+
+    rows = (
+        ("supplements.maxTurns", "maxTurns", "max_turns", policy.MAX_TURNS_BOUNDS),
+        (
+            "supplements.maxOutputTokens",
+            "maxOutputTokens",
+            "max_output_tokens",
+            policy.MAX_OUTPUT_TOKENS_BOUNDS,
+        ),
+        ("supplements.timeoutS", "timeoutS", "timeout_s", policy.TIMEOUT_S_BOUNDS),
+        ("supplements.maxFeatured", "maxFeatured", "max_featured", policy.MAX_FEATURED_BOUNDS),
+    )
+    for key, value_key, field, bounds in rows:
+        setting = settings_io.BY_KEY[key]
+        assert (
+            setting.minimum,
+            setting.maximum,
+        ) == bounds, f"{key}: the page's range is not the reader's range {bounds!r}"
+        for bound in bounds:
+            stored = SupplementSettings.from_values({"supplements": {value_key: bound}})
+            assert getattr(stored, field) == bound, (
+                f"{key}: the page accepts {bound!r} but the reader stores "
+                f"{getattr(stored, field)!r}"
+            )
+    # The cost cap is the one deliberately ONE-SIDED pair: the page's [0, 100] is a control
+    # window, while the reader honours any value >= 0 as stored (no upper cutoff -- a
+    # hand-edited higher cap is the user's own stated guard, not a number to substitute).
+    # ``0`` is the load-bearing end: "never spend" must survive as 0.
+    cost = settings_io.BY_KEY["supplements.maxCostUsd"]
+    assert (cost.minimum, cost.maximum) == (0.0, 100.0)
+    assert SupplementSettings.from_values({"supplements": {"maxCostUsd": 0.0}}).max_cost_usd == 0.0
+    assert (
+        SupplementSettings.from_values({"supplements": {"maxCostUsd": 100.0}}).max_cost_usd == 100.0
+    )
+
+
 def test_display_keys_are_flat_dotted() -> None:
     """THE trap. Every display flag's path is ONE element containing a dot."""
     for key in settings_io.flat_dotted_keys():
