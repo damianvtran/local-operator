@@ -139,10 +139,14 @@ def _stub_pass(
     """
     calls: dict[str, Any] = {"rolls": []}
     monkeypatch.setattr(
-        meshupdate, "refresh_runtimes", lambda root, *, live_count: (list(outcomes), "")
+        meshupdate,
+        "refresh_runtimes",
+        lambda root, *, targets, budget=None: (list(outcomes), ""),
     )
     monkeypatch.setattr(
-        meshupdate, "reengage_displaced", lambda root, records, found, version: (0, "")
+        meshupdate,
+        "reengage_displaced",
+        lambda root, records, found, *, budget=None: (0, ""),
     )
     monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: calls["rolls"].append(1))
     return calls
@@ -656,29 +660,189 @@ def test_a_non_uv_tool_member_without_the_layout_is_refused(
     assert reply["code"] == "editable_install", reply
 
 
+def test_the_generation_install_prunes_after_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M1: the direct generation call runs the retention tail, best-effort.
+
+    ``install_into_generation``'s retention is the CALLER'S (its own docstring),
+    every other generation install prunes immediately after, and a rolled
+    member is one that gets re-rolled — so this cell pins the caller calling it
+    (``perform_upgrade``'s own shape) and that a failed prune does not fail a
+    settled install. Sequenced with #2181.
+    """
+    from local_operator import update as update_mod
+
+    log: list[Any] = []
+    monkeypatch.setattr(meshupdate, "generation_layout_supported", lambda: True)
+    monkeypatch.setattr(
+        update_mod,
+        "install_into_generation",
+        lambda source=None, version=None, runner=None: log.append(("install", version)),
+    )
+    monkeypatch.setattr(update_mod, "referenced_install_roots", lambda: "REF")
+    monkeypatch.setattr(
+        update_mod,
+        "prune_generations",
+        lambda *, referenced, actor: log.append(("prune", referenced, actor)) or "PLAN",
+    )
+    monkeypatch.setattr(update_mod, "prune_notice_lines", lambda plan: [f"notice:{plan}"])
+    assert meshupdate.install_build("0.99.0") == meshupdate.METHOD_GENERATION
+    assert log[0] == ("install", "0.99.0"), log
+    assert log[1] == ("prune", "REF", update_mod.ACTOR_UPGRADE), log
+
+    def _prune_boom(*, referenced: Any, actor: Any) -> Any:
+        raise OSError("a generation is in use")
+
+    monkeypatch.setattr(update_mod, "prune_generations", _prune_boom)
+    # A failed prune is NOT a failed install: it logs and the pass proceeds.
+    assert meshupdate.install_build("0.99.0") == meshupdate.METHOD_GENERATION
+
+
+def test_a_failed_classic_install_is_labelled_with_the_shape_that_ran(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """m2/Q-1: the failed receipt and its audit row name the classic arm it ran."""
+    from local_operator import update as update_mod
+
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    monkeypatch.setattr(meshupdate, "detect_install_kind", lambda: update_mod.InstallKind.UV_TOOL)
+    monkeypatch.setattr(meshupdate, "generation_layout_supported", lambda: False)
+    monkeypatch.setattr(meshupdate, "current_member_version", lambda: "0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    monkeypatch.setattr(update_mod, "note_doomed_runtimes", lambda root, **kw: [])
+    monkeypatch.setattr(update_mod, "withdraw_involuntary_stops", lambda attested, **kw: None)
+
+    def _runner(argv: list[str], env: dict[str, str]) -> int:
+        return 3
+
+    reply = meshupdate.member_execute(
+        server_a, None, {"target": {"version": "0.99.0", "source_ref": ""}}, runner=_runner
+    )
+    assert reply["state"] == "failed", reply
+    assert reply["method"] == meshupdate.METHOD_CLASSIC, reply
+    rows = _member_audit_rows(server_a, "update_failed")
+    assert rows and rows[-1]["detail"]["method"] == meshupdate.METHOD_CLASSIC, rows
+
+
+def test_a_failed_install_carries_the_installers_own_output(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """Q-3: the failure tail carries uv's words, not just the updater's exit line.
+
+    The generation route runs through ``_CapturedInstall`` when no test runner
+    is injected; the classic arm's own capture is covered by its argv cell and
+    the label cell above. Pinned at the subprocess seam, never a real uv.
+    """
+    from local_operator import update as update_mod
+
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "error: No space left on device (os error 28)"
+
+    monkeypatch.setattr(meshupdate.subprocess, "run", lambda *a, **kw: _Proc())
+
+    def _fake_install(source: Any = None, version: str = "", runner: Any = None) -> None:
+        assert runner is not None
+        runner(["uv", "tool", "install"], {})  # the capture seam actually runs
+        raise update_mod.UpdateError("installer exited 1")
+
+    monkeypatch.setattr(update_mod, "install_into_generation", _fake_install)
+    reply = meshupdate.member_execute(
+        server_a, None, {"target": {"version": "0.99.0", "source_ref": ""}}
+    )
+    assert reply["state"] == "failed", reply
+    assert "installer exited 1" in reply["reason"], reply
+    assert "No space left on device" in reply["reason"], reply
+
+
+def test_the_receipt_counts_kept_only_working_runtimes(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """m1: unreachable/unsupported are NOT kept — the note carries them."""
+    outcomes = [_Outcome("moved", "s1"), _Outcome("unreachable", "s2"), _Outcome("busy", "s3")]
+    assert meshupdate.count_pass_outcomes(outcomes) == (1, 1)
+
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    state = _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    monkeypatch.setattr(meshupdate, "busy_sessions", lambda root: (0, ""))
+
+    def _install(version: str, *, runner: Any = None) -> str:
+        state["current"] = version
+        return meshupdate.METHOD_GENERATION
+
+    monkeypatch.setattr(meshupdate, "install_build", _install)
+    _stub_pass(monkeypatch, outcomes=tuple(outcomes))
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "done", detail
+    assert detail["sessions"] == {"moved": 1, "kept": 1}, detail
+    assert "1 not answerable" in detail["message"], detail
+
+
 def test_the_sweep_passes_outcomes_through_and_degrades_to_a_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A sweep that cannot run is a note on the receipt, never a failed pass."""
     from pathlib import Path as _Path
+    from types import SimpleNamespace
 
     from local_operator.session.runtime import control
 
     outcomes = [_Outcome("moved"), _Outcome("busy")]
+    seen: list[dict[str, Any]] = []
 
-    async def _fake(*, timeout_s: float, own_pid: int, _root: Any) -> list[Any]:
+    async def _fake(*, timeout_s: float, own_pid: int, only_pids: Any, _root: Any) -> list[Any]:
+        seen.append({"timeout_s": timeout_s, "only_pids": only_pids})
         return outcomes
 
     monkeypatch.setattr(control, "refresh_all", _fake)
-    got, note = meshupdate.refresh_runtimes(_Path("/nonexistent"), live_count=2)
+    targets = [SimpleNamespace(pid=11), SimpleNamespace(pid=12)]
+    got, note = meshupdate.refresh_runtimes(_Path("/nonexistent"), targets=targets)
     assert got == outcomes and note == ""
+    assert seen[0]["only_pids"] is None, seen  # two targets fit the budget: all asked
 
-    async def _boom(*, timeout_s: float, own_pid: int, _root: Any) -> list[Any]:
+    async def _boom(*, timeout_s: float, own_pid: int, only_pids: Any, _root: Any) -> list[Any]:
         raise OSError("registry unreadable")
 
     monkeypatch.setattr(control, "refresh_all", _boom)
-    got, note = meshupdate.refresh_runtimes(_Path("/nonexistent"), live_count=2)
+    got, note = meshupdate.refresh_runtimes(_Path("/nonexistent"), targets=targets)
     assert got == [] and "could not run" in note, note
+
+
+def test_the_sweep_chunks_a_live_set_past_its_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """QA Q-2's arithmetic: the sequential total never exceeds the budget.
+
+    ``REFRESH_MIN_PER_CALL_S`` is a floor, so ``2 s × live`` used to exceed the
+    nominal 60 s past 30 sessions. The sweep now asks only the targets the
+    budget can hold at the per-call size and names the rest in the note, so
+    the sum is bounded for ANY live count.
+    """
+    from pathlib import Path as _Path
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime import control
+
+    seen: list[dict[str, Any]] = []
+
+    async def _fake(*, timeout_s: float, own_pid: int, only_pids: Any, _root: Any) -> list[Any]:
+        seen.append({"timeout_s": timeout_s, "only_pids": only_pids})
+        return []
+
+    monkeypatch.setattr(control, "refresh_all", _fake)
+    targets = [SimpleNamespace(pid=i + 1) for i in range(200)]
+    got, note = meshupdate.refresh_runtimes(_Path("/x"), targets=targets, budget=60.0)
+    assert got == []
+    assert seen[0]["timeout_s"] == meshupdate.REFRESH_MIN_PER_CALL_S, seen
+    # 60 s of budget at a 0.5 s floor = 120 dials; the other 80 are not asked.
+    assert seen[0]["only_pids"] == frozenset(range(1, 121)), seen
+    assert "the live set (200) exceeds the sweep budget; 80 not asked" in note, note
 
 
 def test_reengage_targets_only_the_displaced_and_reports_failures(
@@ -691,7 +855,7 @@ def test_reengage_targets_only_the_displaced_and_reports_failures(
     records = [SimpleNamespace(session_id="s1"), SimpleNamespace(session_id="s3")]
     calls: list[str] = []
 
-    def _engage(record: Any, *, root: Any) -> str:
+    def _engage(record: Any, *, root: Any, deadline_s: float) -> str:
         calls.append(record.session_id)
         return "no runtime accepted the engage" if record.session_id == "s3" else ""
 
@@ -702,17 +866,22 @@ def test_reengage_targets_only_the_displaced_and_reports_failures(
         _Outcome("unreachable", "s3"),
         _Outcome("current", "s4"),
     ]
-    engaged, note = meshupdate.reengage_displaced(_Path("/x"), records, outcomes, "0.99.0")
+    engaged, note = meshupdate.reengage_displaced(_Path("/x"), records, outcomes)
     assert calls == ["s1", "s3"], calls
     assert engaged == 1, engaged
     assert "1 session(s) could not be re-engaged" in note, note
 
+    # A budget already spent skips every displacee, named, never engaged (M2).
+    engaged, note = meshupdate.reengage_displaced(_Path("/x"), records, outcomes, budget=0.0)
+    assert calls == ["s1", "s3"], calls
+    assert engaged == 0, engaged
+    assert "2 not re-engaged inside the budget" in note, note
+
 
 def test_the_successor_engage_uses_the_warm_errand_and_reports_failures(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     """The engage is the relay's own speculative shape — start the runtime, deliver nothing."""
-    from pathlib import Path as _Path
     from types import SimpleNamespace
 
     from local_operator.session.runtime import launch
@@ -725,32 +894,197 @@ def test_the_successor_engage_uses_the_warm_errand_and_reports_failures(
         seen.append((session_id, cwd, errand, config_dir, deadline_s))
 
     monkeypatch.setattr(launch, "engage_runtime", _engage)
+    root = tmp_path / "member"
+    (root / "sessions" / "s9").mkdir(parents=True)
     record = SimpleNamespace(session_id="s9", cwd="/tmp/x")
-    assert meshupdate._engage_successor(record, root=_Path("/root")) == ""
+    assert (
+        meshupdate._engage_successor(record, root=root, deadline_s=meshupdate.REENGAGE_DEADLINE_S)
+        == ""
+    )
     session_id, cwd, errand, config_dir, deadline = seen[0]
     assert session_id == "s9" and cwd == "/tmp/x"
     assert isinstance(errand, launch.WarmErrand), errand
-    assert config_dir == _Path("/root") and deadline == meshupdate.REENGAGE_DEADLINE_S
+    assert config_dir == root and deadline == meshupdate.REENGAGE_DEADLINE_S
+
+    # An id with no directory on THIS device is a raced registry read, not a
+    # session to spawn for — the relay's own pre-check (n3).
+    ghost = SimpleNamespace(session_id="gone", cwd="/tmp/x")
+    assert "does not hold a session gone" in meshupdate._engage_successor(
+        ghost, root=root, deadline_s=5.0
+    )
 
     async def _boom(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("could not start a runtime for session s9: no credential")
 
     monkeypatch.setattr(launch, "engage_runtime", _boom)
-    assert "no credential" in meshupdate._engage_successor(record, root=_Path("/root"))
+    assert "no credential" in meshupdate._engage_successor(
+        record, root=root, deadline_s=meshupdate.REENGAGE_DEADLINE_S
+    )
 
 
 def test_the_services_roll_is_scheduled_after_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The thread starts the stage's own child; the stage never raises into the pass."""
+    """The stage runs on a daemon thread: the call returns while the stage blocks.
+
+    WHAT THIS PROVES: the roll is started FIRE-AND-FORGET — a synchronous stage
+    (the shape the note's Q4 wording invited) would make the call below block
+    for the stage's whole duration, so the elapse assert goes red. It does NOT
+    prove the wire ordering of the ``done`` frame against the kickstart: the
+    frame's write belongs to the caller, and the thread's startup is the
+    margin (m3).
+    """
     import threading
+    import time
 
     from local_operator import update as update_mod
 
-    fired = threading.Event()
-    monkeypatch.setattr(
-        update_mod, "refresh_service_daemons_after_upgrade", lambda **kw: fired.set()
-    )
+    entered = threading.Event()
+    released = threading.Event()
+
+    def _stage(**kw: Any) -> None:
+        entered.set()
+        released.wait(5.0)
+
+    monkeypatch.setattr(update_mod, "refresh_service_daemons_after_upgrade", _stage)
+    started = time.monotonic()
     meshupdate.roll_services_after_reply()
-    assert fired.wait(5.0), "the roll thread did not start the stage"
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0, f"the roll blocked for {elapsed:.2f}s — a synchronous stage"
+    assert entered.wait(5.0), "the roll thread did not start the stage"
+    released.set()
+
+
+def test_the_roll_starts_only_after_the_install_sweep_and_reengage(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """Execution order on the done path: no tail effect precedes the install.
+
+    Discriminates the reorderings the receipt depends on (m3): a roll started
+    before the install or between the tail's steps shows up here as an
+    out-of-order log. The frame's wire ordering itself is the caller's, not
+    this module's — see the services cell above.
+    """
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    state = _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    monkeypatch.setattr(meshupdate, "busy_sessions", lambda root: (0, ""))
+    log: list[str] = []
+
+    def _install(version: str, *, runner: Any = None) -> str:
+        log.append("install")
+        state["current"] = version
+        return meshupdate.METHOD_GENERATION
+
+    def _sweep(root: Any, *, targets: Any, budget: Any = None) -> tuple[list[Any], str]:
+        log.append("sweep")
+        return [], ""
+
+    def _engage(root: Any, records: Any, found: Any, *, budget: Any = None) -> tuple[int, str]:
+        log.append("reengage")
+        return 0, ""
+
+    monkeypatch.setattr(meshupdate, "install_build", _install)
+    monkeypatch.setattr(meshupdate, "refresh_runtimes", _sweep)
+    monkeypatch.setattr(meshupdate, "reengage_displaced", _engage)
+    monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: log.append("roll"))
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "done", detail
+    assert log == ["install", "sweep", "reengage", "roll"], log
+
+
+def test_the_tail_runs_under_the_pass_lock(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """m5: the lock covers the WHOLE pass — the sweep dials with the lock held.
+
+    A second flock on a second descriptor fails while the pass holds its own,
+    so a revert to the install-scoped lock (tail unlocked) turns this red.
+    """
+    import fcntl
+
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    state = _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    monkeypatch.setattr(meshupdate, "busy_sessions", lambda root: (0, ""))
+
+    def _install(version: str, *, runner: Any = None) -> str:
+        state["current"] = version
+        return meshupdate.METHOD_GENERATION
+
+    monkeypatch.setattr(meshupdate, "install_build", _install)
+    lock_path = server_a.root / "network" / "update.lock"
+    held: list[bool] = []
+
+    def _sweep(root: Any, *, targets: Any, budget: Any = None) -> tuple[list[Any], str]:
+        fd = open(lock_path, "a+")
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(False)
+        except OSError:
+            held.append(True)
+        finally:
+            fd.close()
+        return [], ""
+
+    monkeypatch.setattr(meshupdate, "refresh_runtimes", _sweep)
+    monkeypatch.setattr(
+        meshupdate, "reengage_displaced", lambda root, records, found, *, budget=None: (0, "")
+    )
+    monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: None)
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "done", detail
+    assert held == [True], held
+
+
+def test_the_tail_degrades_when_the_slow_budget_is_nearly_spent(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """M2: the tail is clamped by what the requester is still listening for.
+
+    ``relay.slow_op_remaining_s()`` is None outside a slow op — the nominal
+    budgets apply. Inside one with less left than :data:`TAIL_RESERVE_S`, the
+    tail must degrade to notes: ``_dispatch_slow`` DROPS a reply that lands
+    after the deadline, and half a receipt is worse than a whole one.
+    """
+    from local_operator.network import relay
+
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    state = _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    monkeypatch.setattr(meshupdate, "busy_sessions", lambda root: (0, ""))
+
+    def _install(version: str, *, runner: Any = None) -> str:
+        state["current"] = version
+        return meshupdate.METHOD_GENERATION
+
+    monkeypatch.setattr(meshupdate, "install_build", _install)
+    budgets: list[Any] = []
+
+    def _sweep(root: Any, *, targets: Any, budget: Any = None) -> tuple[list[Any], str]:
+        budgets.append(budget)
+        return [], "no time remained for the runtime sweep"
+
+    monkeypatch.setattr(meshupdate, "refresh_runtimes", _sweep)
+    monkeypatch.setattr(
+        meshupdate, "reengage_displaced", lambda root, records, found, *, budget=None: (0, "")
+    )
+    monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: None)
+
+    monkeypatch.setattr(relay, "slow_op_remaining_s", lambda: 10.0)  # < TAIL_RESERVE_S
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "done", detail
+    assert budgets == [0.0], budgets
+    assert "no time remained for the runtime sweep" in detail["message"], detail
+
+    # With budget left, the clamp is the reserve-adjusted remainder capped by
+    # the nominal sweep bound: 90 - 30 = 60.
+    state["current"] = "0.0.1"
+    monkeypatch.setattr(relay, "slow_op_remaining_s", lambda: 90.0)
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "done", detail
+    assert budgets[-1] == 60.0, budgets
 
 
 # ---------------------------------------------------------------------------

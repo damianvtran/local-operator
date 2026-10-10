@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -83,6 +84,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: deadline"), and the bound is the same 900 s the onboarding runner gives that
 #: step (``onboard.STEP_TIMEOUTS["install"]``) — the one number this repo has
 #: already measured for a pinned wheel install on a loaded host.
+#:
+#: THE WHOLE PASS RIDES INSIDE IT (agent review round 1, M2): the tail
+#: (retention + sweep ≤ 60 s + re-engage ≤ 120 s) is clamped by
+#: ``relay.slow_op_remaining_s()`` less :data:`TAIL_RESERVE_S`, because
+#: ``_dispatch_slow`` DROPS a reply that lands after this deadline — so
+#: install + tail + reserve fits the 900 s by construction, and a member that
+#: cannot fit its tail degrades to notes rather than losing the receipt.
 UPDATE_OP_DEADLINE_S = 900.0
 
 #: The LOCAL control-socket budget for one ``peer_update`` hop (seconds).
@@ -112,23 +120,45 @@ UPDATE_LOCK_RELPATH: tuple[str, ...] = ("network", "update.lock")
 METHOD_GENERATION = "uv-tool-generation"
 METHOD_CLASSIC = "uv-tool-classic"
 
-#: The member pass's bounds (RU §4.2 steps 4–5).
+#: The member pass's bounds (RU §4.2 steps 4–5), ALL SPENT INSIDE THE OP'S
+#: DEADLINE and clamped by what is left of it (agent review round 1, M2):
+#: ``relay.slow_op_remaining_s()`` is the sanctioned read of "what the
+#: requester is still listening for", and ``_dispatch_slow`` drops a reply that
+#: lands after the deadline — so install + retention + sweep + re-engage +
+#: reserve must fit ``UPDATE_OP_DEADLINE_S`` by construction, and a member
+#: that cannot fit its tail degrades to notes rather than losing the receipt to
+#: an overrun.
 #:
 #: The sweep is "bounded at ~60 s" (RU §4.2 step 4). The budget is spent
 #: SEQUENTIALLY across the live set — ``control.refresh_all`` is deliberately
 #: sequential (each dial may wait out its timeout) — so the per-call timeout is
 #: this budget divided by the live count, clamped to the control module's own
-#: default. A sweep that cannot finish inside the budget degrades to counts;
-#: it never fails the pass (the runtimes also retire on their own watch).
+#: default; when the floor would push the sequential TOTAL past the budget
+#: (live > budget/floor), only the targets that fit are asked and the rest are
+#: named in the note (QA round 1, Q-2). A sweep that cannot run at all degrades
+#: to counts; it never fails the pass (the runtimes also retire on their own
+#: watch).
 REFRESH_SWEEP_DEADLINE_S = 60.0
+#: The per-dial floor for the sweep. Below this a dial would return before a
+#: healthy runtime could answer, so the floor is not lowered to fit a huge live
+#: set — the set is chunked instead (see above).
+REFRESH_MIN_PER_CALL_S = 0.5
 
 #: The re-engage budget (RU §4.2 step 5): the same 60 s ``relay.ENGAGE_DEADLINE_S``
-#: gives its own warm path, per session, and this is the TOTAL the loop may spend
-#: before it stops engaging — the op's 900 s deadline must still hold after the
+#: gives its own warm path, per session, and this is the TOTAL the loop may
+#: spend before it stops engaging — the op's deadline must still hold after the
 #: install and the sweep, and a member with many dead sessions (exactly the
-#: classic path's world) must not spend it one successor at a time.
+#: classic path's world) must not spend it one successor at a time. The budget
+#: is checked before each engage AND the engage's own deadline is clamped to
+#: what is left of it (agent review round 1, M2's tail note), so the total
+#: cannot exceed the budget by one full engage.
 REENGAGE_DEADLINE_S = 60.0
 REENGAGE_BUDGET_S = 120.0
+
+#: What the tail leaves unspent for the receipt write and the services thread's
+#: start (seconds), subtracted from the remaining slow-op budget before the
+#: tail is clamped to it.
+TAIL_RESERVE_S = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -279,11 +309,103 @@ def install_build(
     """
     from local_operator import update as update_mod
 
-    if generation_layout_supported():
-        update_mod.install_into_generation(source=None, version=version, runner=runner)
+    if install_shape() == METHOD_GENERATION:
+        _install_generation(version, runner=runner, update_mod=update_mod)
         return METHOD_GENERATION
     _install_classic(version, runner=runner, update_mod=update_mod)
     return METHOD_CLASSIC
+
+
+def install_shape() -> str:
+    """Which shape :func:`install_build` takes — the ONE condition, named.
+
+    THE FAILURE HANDLER NEEDS THE SAME LABEL THE INSTALL WOULD HAVE DISCLOSED
+    (agent review round 1, m2): a failed classic-arm install used to be
+    labelled ``uv-tool-generation`` by a hardcoded literal, so the one shape
+    whose disclosure matters most — the in-place rewrite that can cut a turn —
+    was misnamed exactly when it went wrong.
+    """
+    return METHOD_GENERATION if generation_layout_supported() else METHOD_CLASSIC
+
+
+class _CapturedInstall:
+    """Run one installer argv, KEEPING its output for a failed receipt (QA Q-3).
+
+    ``update._run_installer_env`` inherits this process's stdio, so uv's own
+    words on a failed generation install went to the relay's log and the
+    receipt carried only the updater's ``installer exited N``. The decision
+    (agent review round 1, Q-3) was to capture, in the family's
+    ``onboard._install_failure_detail`` discipline: the tail is flattened,
+    head-kept and bounded, so a failed receipt can read ``installer exited 1 —
+    installer output: … no space left on device``.
+
+    An injected ``runner`` (tests) replaces this object entirely, exactly as it
+    replaces ``_run_installer_env`` upstream.
+    """
+
+    def __init__(self) -> None:
+        self.output = ""
+
+    def __call__(self, argv: list[str], env: dict[str, str]) -> int:
+        proc = subprocess.run(argv, check=False, env=env, capture_output=True, text=True)
+        if int(proc.returncode) != 0:
+            self.output = _flatten_output(proc.stdout, proc.stderr)
+        return int(proc.returncode)
+
+
+def _flatten_output(*chunks: str) -> str:
+    """Flatten installer output and bound it, the failure-tail family's shape.
+
+    Whitespace collapses to single spaces (a receipt line is ONE line) and the
+    tail is head-kept when long — the head names the resolver or the errno,
+    which is the part a reader needs (``onboard._install_failure_detail``).
+    """
+    flat = " ".join(" ".join((chunk or "").split()) for chunk in chunks).strip()
+    if len(flat) > 300:
+        flat = flat[:300].rstrip() + "…"
+    return flat
+
+
+def _install_generation(version: str, *, runner: Any, update_mod: Any) -> None:
+    """``install_into_generation`` plus its retention tail and output capture.
+
+    THE PRUNE IS NOT OPTIONAL DECORATION (agent review round 1, M1):
+    ``install_into_generation``'s own docstring says "PRUNING IS THE CALLER'S",
+    every other generation install prunes immediately after it
+    (``perform_upgrade``, the CLI tail), and a member the mesh rolls is one
+    that gets re-rolled — without this it grows one whole venv per rollout,
+    unbounded (``DEFAULT_KEEP_GENERATIONS`` = 2 exists for exactly this). Run
+    best-effort, exactly as ``perform_upgrade`` runs it: a failed prune may not
+    fail a settled install, it only logs its own line.
+
+    SEQUENCED WITH #2181 (``fix/prune-running-generation``, MERGED 2026-10-10):
+    that fix is what makes the eviction pick safe for the calling process's own
+    tree, and this branch is rebased on it; the call shape below is
+    ``perform_upgrade``'s own (``prune_generations(referenced=…,
+    actor=ACTOR_UPGRADE)`` plus the notice lines), so the guard is the merged
+    one rather than a second-guess here.
+
+    ``_CapturedInstall`` carries uv's output onto the failure path (QA Q-3);
+    an injected runner replaces it, as upstream.
+    """
+    capture = _CapturedInstall()
+    try:
+        update_mod.install_into_generation(source=None, version=version, runner=runner or capture)
+    except Exception as exc:  # noqa: BLE001 — re-raised with the installer's own tail
+        if capture.output:
+            raise update_mod.UpdateError(
+                f"{' '.join(str(exc).split())} — installer output: {capture.output}"
+            ) from exc
+        raise
+    try:
+        plan = update_mod.prune_generations(
+            referenced=update_mod.referenced_install_roots(), actor=update_mod.ACTOR_UPGRADE
+        )
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("the generation prune after the install did not run", exc_info=True)
+    else:
+        for line in update_mod.prune_notice_lines(plan):
+            logger.info("%s", line)
 
 
 def _install_classic(
@@ -308,17 +430,31 @@ def _install_classic(
     Unlike the generation route this touches the LIVE tree, which is why it
     exists only on members where the layout cannot run, and only under the
     drain the caller has already proven.
+
+    THE DRAIN IS A PROBE, NOT A FENCE (agent review round 1, m4): a turn that
+    STARTS during the in-place rewrite can still be cut mid-turn — the one
+    hazard the generation layout exists to remove. That residual is accepted
+    only for members where the layout cannot run at all (RU §8.4 names the
+    platform out of scope) and is named in the PR; the attestation pair above
+    is what keeps a death recorded rather than silent.
     """
     argv = update_mod.installer_argv(update_mod.InstallKind.UV_TOOL, version=version)
     root = Path(sys.prefix)
     attested = update_mod.note_doomed_runtimes(
         root, mechanism=update_mod.MECHANISM_IN_PLACE_INSTALL, actor=update_mod.ACTOR_UPGRADE
     )
+    output = ""
     try:
         if runner is not None:
             code = runner(argv, dict(os.environ))
         else:
-            code = int(subprocess.run(argv, check=False).returncode)
+            # Capture, where ``_run_installer_env`` inherits stdio (QA Q-3):
+            # the receipt's tail must carry uv's own words, not just the exit
+            # status the updater layers over them.
+            proc = subprocess.run(argv, check=False, capture_output=True, text=True)
+            code = int(proc.returncode)
+            if code != 0:
+                output = _flatten_output(proc.stdout, proc.stderr)
     except BaseException:
         update_mod.withdraw_involuntary_stops(
             attested, mechanism=update_mod.MECHANISM_IN_PLACE_INSTALL
@@ -328,7 +464,10 @@ def _install_classic(
         update_mod.withdraw_involuntary_stops(
             attested, mechanism=update_mod.MECHANISM_IN_PLACE_INSTALL
         )
-        raise update_mod.UpdateError(f"installer exited {code}")
+        tail = f"installer exited {code}"
+        if output:
+            tail += f" — installer output: {output}"
+        raise update_mod.UpdateError(tail)
     if not update_mod.write_source_marker(root, version=version):
         # Deliberately not fatal, the same call ``perform_upgrade`` makes: the
         # install SUCCEEDED, and a failed marker only costs accuracy in the
@@ -412,7 +551,13 @@ def busy_sessions(root: Path) -> tuple[int, str]:
 
 @contextmanager
 def update_lock(root: Path, target: UpdateTarget) -> Iterator[None]:
-    """Hold the member's single update lock for the duration of an install.
+    """Hold the member's single update lock for the duration of a PASS.
+
+    THE PASS, NOT JUST THE INSTALL (agent review round 1, m5): the lock covers
+    install through the tail (sweep + re-engage), so a second origin naming a
+    distinct target during a rotation is refused ``update_in_progress`` rather
+    than installing under a pass whose receipt is about to describe it. Only
+    the receipt's composition and the services-roll hand-off run after release.
 
     ONE at a time on the member too (RU §4.4): a pid-carrying file lock, taken
     NON-blockingly so a second distinct target while one is in flight is refused
@@ -508,16 +653,27 @@ def live_session_targets(root: Path) -> list[Any]:
         return []
 
 
-def refresh_runtimes(root: Path, *, live_count: int) -> tuple[list[Any], str]:
+def refresh_runtimes(
+    root: Path, *, targets: Sequence[Any], budget: float | None = None
+) -> tuple[list[Any], str]:
     """Ask every live runtime to move to the build on disk — RU §4.2 step 4. NEVER raises.
 
     ``control.refresh_all`` IS ``lop refresh --all``: sequential asks over the
     live set, each runtime judging its own ``may_refresh`` and answering with
     its own sentence — nothing is signalled, nothing is stopped, and a busy
-    runtime answers ``busy`` and keeps its intact tree. The per-call timeout is
-    the 60 s budget (:data:`REFRESH_SWEEP_DEADLINE_S`) divided across the live
-    set, because the sweep is sequential and one unreachable runtime must not
-    spend the whole budget in a single dial.
+    runtime answers ``busy`` and keeps its intact tree. ``targets`` is the
+    pass's snapshot: an ask is a dial to a PID, so the snapshot decides WHO is
+    asked (and with whom the tail's counts are compared); ``refresh_all`` still
+    re-reads the registry for the records themselves.
+
+    THE PER-CALL TIMEOUT IS THE BUDGET DIVIDED ACROSS THE LIVE SET, with the
+    arithmetic that makes the TOTAL honest (QA round 1, Q-2 + agent review
+    round 1, M2): a floor alone let ``2 s × live`` exceed the nominal budget
+    past 30 live sessions, so the ask is also CHUNKED — at most
+    ``budget / per_call`` targets are asked and the rest are named in the
+    note — and the whole sweep runs inside ``budget`` (the remaining slow-op
+    time when the caller clamped it, the nominal
+    :data:`REFRESH_SWEEP_DEADLINE_S` otherwise).
 
     Returns ``(outcomes, note)``; a sweep that could not run at all returns no
     outcomes and a note, never an exception — the install already succeeded,
@@ -526,29 +682,63 @@ def refresh_runtimes(root: Path, *, live_count: int) -> tuple[list[Any], str]:
     """
     from local_operator.session.runtime import control
 
-    per_call = REFRESH_SWEEP_DEADLINE_S / max(live_count, 1)
-    per_call = min(max(per_call, 2.0), control.DEFAULT_REFRESH_TIMEOUT_S)
+    slots = max(len(targets), 1)
+    nominal = REFRESH_SWEEP_DEADLINE_S if budget is None else min(REFRESH_SWEEP_DEADLINE_S, budget)
+    if nominal <= 0:
+        return [], "no time remained for the runtime sweep"
+    per_call = min(max(nominal / slots, REFRESH_MIN_PER_CALL_S), control.DEFAULT_REFRESH_TIMEOUT_S)
+    askable = max(1, math.ceil(nominal / per_call - 1e-9))
+    only: frozenset[int] | None = None
+    note = ""
+    if len(targets) > askable:
+        only = frozenset(int(getattr(t, "pid", 0) or 0) for t in targets[:askable])
+        note = (
+            f"the live set ({len(targets)}) exceeds the sweep budget; "
+            f"{len(targets) - askable} not asked"
+        )
     try:
         outcomes = asyncio.run(
-            control.refresh_all(timeout_s=per_call, own_pid=os.getpid(), _root=root)
+            control.refresh_all(timeout_s=per_call, own_pid=os.getpid(), only_pids=only, _root=root)
         )
     except Exception as exc:  # noqa: BLE001 — degrade to counts, never fail the pass
         return [], f"the runtime sweep could not run ({exc})"
-    return list(outcomes), ""
+    return list(outcomes), note
 
 
-#: The methods that mean "this session's runtime is leaving or gone", and so
-#: the re-engage candidates (RU §4.2 step 5): a retirement just committed
-#: (``moved``/``draining``), or nothing a successor can reuse answered
+#: The sweep methods that mean "this session's runtime is leaving or gone",
+#: and so the re-engage candidates (RU §4.2 step 5): a retirement just
+#: committed (``moved``/``draining``), or nothing a successor can reuse answered
 #: (``unreachable``/``unsupported`` — a dead or pre-op runtime). ``busy``,
 #: ``kept``, ``current`` and ``unsettled`` keep a working runtime and are left
 #: alone. Deliberately a closure over the control module's own vocabulary —
 #: its ``RefreshOutcome`` docstring is the source of these names.
+_MOVED_METHODS = frozenset({"moved", "draining"})
 _DISPLACED_METHODS = frozenset({"moved", "draining", "unreachable", "unsupported"})
+#: The methods that mean a runtime is still there (agent review round 1, m1):
+#: ``kept`` in the receipt counts THESE, not ``len(outcomes) - moved`` — the old
+#: subtraction counted displaced sessions twice ("1 kept, 1 re-engaged" for one
+#: session) and called the dead ones kept.
+_KEPT_METHODS = frozenset({"busy", "current", "kept", "unsettled"})
+
+
+def count_pass_outcomes(outcomes: Sequence[Any]) -> tuple[int, int]:
+    """``(moved, kept)`` for the receipt — the two numbers the design freezes.
+
+    ``moved`` is a retirement actually committed; ``kept`` is a working runtime
+    left alone. Anything else (``unreachable``/``unsupported``) is neither and
+    rides the receipt's own "not answerable" count — never the kept count.
+    """
+    moved = sum(1 for o in outcomes if str(getattr(o, "method", "")) in _MOVED_METHODS)
+    kept = sum(1 for o in outcomes if str(getattr(o, "method", "")) in _KEPT_METHODS)
+    return moved, kept
 
 
 def reengage_displaced(
-    root: Path, records: Sequence[Any], outcomes: Sequence[Any], version: str
+    root: Path,
+    records: Sequence[Any],
+    outcomes: Sequence[Any],
+    *,
+    budget: float | None = None,
 ) -> tuple[int, str]:
     """Ensure a runtime exists for displaced sessions — RU §4.2 step 5. NEVER raises.
 
@@ -565,23 +755,33 @@ def reengage_displaced(
     sentence where an operator reads pass outcomes, and the open question —
     whether the line should also land in the session's inbox or attention row —
     is named in the PR rather than invented silently here.
+
+    ``budget`` is the remaining time the caller's clamp left (None = the
+    nominal :data:`REENGAGE_BUDGET_S`); it is checked before each engage AND
+    passed into the engage as its own deadline, so the total cannot exceed it
+    by one full engage (agent review round 1, M2's tail note).
     """
     by_id = {str(getattr(record, "session_id", "")): record for record in records}
     engaged = 0
     failed = 0
     skipped = 0
-    deadline = time.monotonic() + REENGAGE_BUDGET_S
+    total = REENGAGE_BUDGET_S if budget is None else max(0.0, budget)
+    deadline = time.monotonic() + total
     for outcome in outcomes:
         if str(getattr(outcome, "method", "")) not in _DISPLACED_METHODS:
             continue
-        if time.monotonic() >= deadline:
+        left = deadline - time.monotonic()
+        # One second, not zero: a sub-second engage cannot outlive the dial it
+        # makes, so it is skipped and said rather than started and counted as
+        # a failure.
+        if left < 1.0:
             skipped += 1
             continue
         record = by_id.get(str(getattr(outcome, "session_id", "")))
         if record is None:
             failed += 1
             continue
-        reason = _engage_successor(record, root=root)
+        reason = _engage_successor(record, root=root, deadline_s=min(REENGAGE_DEADLINE_S, left))
         if reason:
             failed += 1
         else:
@@ -594,25 +794,33 @@ def reengage_displaced(
     return engaged, "; ".join(notes)
 
 
-def _engage_successor(record: Any, *, root: Path) -> str:
+def _engage_successor(record: Any, *, root: Path, deadline_s: float) -> str:
     """Engage one successor runtime for ``record``; return "" or the failure reason.
 
-    The call shape mirrors the relay's own warm path (``relay._warm_after_create``'s
-    ``asyncio.run(engage_runtime(...))``) and the model is taken from the record's
-    own published facts; the deadline is :data:`REENGAGE_DEADLINE_S`. A failure is
-    reported to the caller, never raised: one session that cannot come back must
-    not fail a pass whose install already succeeded.
+    The call shape is the relay's own speculative engage (``WarmErrand``:
+    "start the runtime, deliver nothing") under the caller's deadline, and the
+    session must hold its directory on THIS device first — the same pre-check
+    ``relay._engage_locally`` makes for its create path, because an id with no
+    directory here is a registry read that raced, not a session to spawn for.
+    NO MODEL SAMPLE RIDES THE ERRAND (agent review round 1, n3: the record
+    publishes a label, not the birth sample ``relay`` passes), so the
+    successor boots on the device default. A failure is reported to the caller,
+    never raised: one session that cannot come back must not fail a pass whose
+    install already succeeded.
     """
     from local_operator.session.runtime.launch import WarmErrand, engage_runtime
 
+    session_id = str(record.session_id)
+    if not (root / "sessions" / session_id).is_dir():
+        return f"this device does not hold a session {session_id}"
     try:
         asyncio.run(
             engage_runtime(
-                str(record.session_id),
+                session_id,
                 str(record.cwd or Path.home()),
                 WarmErrand(),
                 config_dir=root,
-                deadline_s=REENGAGE_DEADLINE_S,
+                deadline_s=deadline_s,
             )
         )
     except (TimeoutError, RuntimeError, ConnectionError, OSError) as exc:
@@ -623,13 +831,16 @@ def _engage_successor(record: Any, *, root: Path) -> str:
 def roll_services_after_reply() -> None:
     """Kick the supervised daemons and THIS relay onto the new build — AFTER the reply.
 
-    the note's Q4 recommendation, recorded: "the executor replies first and
-    rolls services as a detached child" — because the daemon-refresh stage's
-    relay step asks this very process to move, and a kickstart racing the
-    ``done`` frame would cut the receipt off the wire. The thread's only job is
-    to START the stage's own child (the stage spawns one child for all the
-    daemons, and its kickstarts are OS-level: they complete whether or not this
-    process lives to watch them). Never raises — the upgrade already succeeded,
+    the note's Q4 recommendation, recorded — WITH ITS PROBABILISTIC HALF
+    NAMED (agent review round 1, m3): the receipt VALUE is composed before
+    this call is made and the stage runs on a daemon thread, so this call
+    returns immediately and the caller's write of the frame is not behind an
+    interpreter startup. The WRITE ITSELF belongs to the slow-dispatch
+    machinery above this module, so a kickstart still races it by the child's
+    startup time — a real margin (fork + interpreter start before the stage's
+    relay step can land), not an ordering; the losing race is covered by the
+    origin's own re-ask (``already_on_target``) and, once S3 lands, by the
+    rollout record's re-probe. Never raises — the upgrade already succeeded,
     so the worst outcome here is a warning (the stage's own contract).
     """
 
@@ -741,7 +952,11 @@ def _execute_validated(
     *,
     runner: Callable[[list[str], dict[str, str]], int] | None,
 ) -> dict[str, Any]:
-    """Validation, the never-force gate, the install, and the receipt."""
+    """Validation, the never-force gate, the install, the tail, and the receipt.
+
+    THE LOCK COVERS THE WHOLE PASS, the tail included (agent review round 1,
+    m5): "one at a time on the member" (RU §4.4) is not just the install.
+    """
     from local_operator import update as update_mod
 
     kind = detect_install_kind()
@@ -840,6 +1055,10 @@ def _execute_validated(
         )
 
     root = Path(server.root)
+    # RU §4.2 step 1, BEFORE the drain: the snapshot the tail's counting and
+    # re-engage candidates come from (agent review n1 — the call used to sit
+    # after the install while its docstring said "at the start of a pass").
+    snapshot = live_session_targets(root)
     with update_lock(root, target):
         count, detail = busy_sessions(root)
         if count != 0:
@@ -871,69 +1090,83 @@ def _execute_validated(
                 target=target,
                 outcome="failed",
                 cause="internal",
-                detail={"method": METHOD_GENERATION},
+                detail={"method": install_shape()},
             )
             return {
                 "state": "failed",
                 "code": "",
                 "reason": tail or "the install did not finish; nothing was made current",
-                "method": METHOD_GENERATION,
+                "method": install_shape(),
                 "version": "",
                 "sessions": {"moved": 0, "kept": 0},
                 "updated_at": time.time(),
             }
 
-    version_now = current_member_version()
-    if version_now != target_version:
+        version_now = current_member_version()
+        if version_now != target_version:
+            _audit_member(
+                server,
+                link,
+                "update_failed",
+                target=target,
+                outcome="failed",
+                cause="internal",
+                detail={"method": method},
+            )
+            return {
+                "state": "failed",
+                "code": "",
+                "reason": (
+                    f"the install finished but this device still reports "
+                    f"{version_now or 'nothing'}; nothing was advertised"
+                ),
+                "method": method,
+                "version": version_now,
+                "sessions": {"moved": 0, "kept": 0},
+                "updated_at": time.time(),
+            }
         _audit_member(
             server,
             link,
-            "update_failed",
+            "update_completed",
             target=target,
-            outcome="failed",
-            cause="internal",
-            detail={"method": method},
+            detail={"method": method, "from": current, "version": target_version},
         )
-        return {
-            "state": "failed",
-            "code": "",
-            "reason": (
-                f"the install finished but this device still reports {version_now or 'nothing'}; "
-                "nothing was advertised"
-            ),
-            "method": method,
-            "version": version_now,
-            "sessions": {"moved": 0, "kept": 0},
-            "updated_at": time.time(),
-        }
-    _audit_member(
-        server,
-        link,
-        "update_completed",
-        target=target,
-        detail={"method": method, "from": current, "version": target_version},
-    )
-    # STEPS 4–5, THE MEMBER PASS'S ROLL: ask the live runtimes onto the new build,
-    # then re-engage the displaced. Both are bounded and both degrade to a note
-    # (RU §4.2's own bounds); the reply below is where the counts are said.
-    snapshot = live_session_targets(root)
-    outcomes, sweep_note = refresh_runtimes(root, live_count=len(snapshot))
-    moved = sum(1 for o in outcomes if str(getattr(o, "method", "")) in ("moved", "draining"))
-    kept = max(len(outcomes) - moved, 0)
-    engaged, engage_note = reengage_displaced(root, snapshot, outcomes, target_version)
+        # THE TAIL RUNS UNDER THE SAME LOCK (agent review round 1, m5): the
+        # lock covers the WHOLE pass, so a second origin naming a distinct
+        # target while the sweep/re-engage window is open is refused
+        # ``update_in_progress`` instead of installing under a rotation the
+        # first receipt is about to describe.
+        from local_operator.network import relay
+
+        remaining = relay.slow_op_remaining_s()
+        # None outside a slow op (direct calls, cells): the nominal budgets
+        # apply. Inside one, the tail is clamped to what the requester is
+        # still listening for, less the reserve for the receipt write —
+        # ``_dispatch_slow`` DROPS a reply that lands after the deadline
+        # (agent review round 1, M2).
+        tail_budget = None if remaining is None else max(0.0, remaining - TAIL_RESERVE_S)
+        tail_started = time.monotonic()
+        outcomes, sweep_note = refresh_runtimes(root, targets=snapshot, budget=tail_budget)
+        moved, kept = count_pass_outcomes(outcomes)
+        left = (
+            None
+            if tail_budget is None
+            else max(0.0, tail_budget - (time.monotonic() - tail_started))
+        )
+        engaged, engage_note = reengage_displaced(root, snapshot, outcomes, budget=left)
+    other = len(outcomes) - moved - kept
     reason = f"this device moved from {current or 'an unknown build'} to {target_version}"
     if outcomes:
         reason += f"; {moved} session(s) retired for the new build, {kept} kept"
+        if other > 0:
+            reason += f", {other} not answerable"
     if engaged:
         reason += f", {engaged} re-engaged"
     for note in (sweep_note, engage_note):
         if note:
             reason += f" ({note})"
-    # THE SERVICES ROLL GOES LAST, AFTER THE REPLY IS COMPOSED (note Q4): its
-    # relay step asks this very process to move, and the receipt must be on the
-    # wire before that kickstart can cut it.
-    roll_services_after_reply()
-    return {
+    receipt = {
         "state": "done",
         "code": "",
         "reason": reason,
@@ -942,6 +1175,14 @@ def _execute_validated(
         "sessions": {"moved": moved, "kept": kept},
         "updated_at": time.time(),
     }
+    # THE RECEIPT VALUE IS COMPOSED BEFORE THE ROLL IS STARTED (agent review
+    # round 1, m3): the WRITE of the frame belongs to the slow-dispatch
+    # machinery above this module, so what this ordering buys is that the roll
+    # starts only after nothing is left to compute — and the thread's own
+    # startup is the margin for the kickstart/`done`-frame race on the wire.
+    # See `roll_services_after_reply`: a margin, not an ordering.
+    roll_services_after_reply()
+    return receipt
 
 
 # ---------------------------------------------------------------------------
