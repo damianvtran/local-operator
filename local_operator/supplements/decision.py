@@ -124,19 +124,31 @@ def _bound(text: str, limit: int) -> str:
     return text[: max(0, limit - len(marker))] + marker
 
 
-#: An absolute-path occurrence on its way to a vendor: a ``file://`` URI, or a ``/``- or
-#: ``~/``-rooted POSIX path (``candidates._PROSE_PATH``'s own roots). The boundary refuses a
-#: match that is really a URL tail, a fraction or a name (``https://host/x``, ``24/7`` and
-#: ``and/or`` all survive), and the final segment must carry a character, so a bare
-#: separator cannot match.
-_PATH_SPAN: Final = re.compile(r"(?<![\w.:/~-])(?:file://)?~?/(?:[\w.@%+~-]+/)*[\w.@%+~-]+")
+#: One path segment on its way to a vendor. A run of spaces inside a segment is carried only
+#: when the token after it is itself slash-attached -- ``Acme Corp/``, ``Client Work/`` -- so a
+#: segment with a space reduces whole without swallowing the sentence: ``see /x and /y`` is
+#: never crossed, while a token that is itself ``word/word`` (prose's ``and/or``) reads as
+#: slash-attached continuation and is taken with the path; a segment with further unattached
+#: spaces stops the crossing at the first of them.
+_PATH_SEGMENT: Final = r"[\w.@%+~-]+(?: +(?=[\w.@%+~-]+/)[\w.@%+~-]+)*"
+
+#: An absolute-path occurrence on its way to a vendor: a ``file://`` URI (any case, RFC 8089),
+#: or a ``/``- or ``~/``-rooted POSIX path (``candidates._PROSE_PATH``'s own roots). The lead
+#: refuses a match that is really a URL tail, a fraction or a relative path (``https://host/x``,
+#: ``24/7`` and ``and/or`` all survive) while taking a ``:``/``-`` lead (``path:/x``, ``to-/x``,
+#: a forward-slash drive ``C:/x``); the final segment must carry a character, so a bare
+#: separator cannot match. Windows backslash roots (``C:\...``, ``\\server\share\...``) are a
+#: recorded non-scrub -- see :func:`_egress`.
+_PATH_SPAN: Final = re.compile(
+    r"(?<![\w./~])(?i:file://)?~?/(?:" + _PATH_SEGMENT + r"/)*" + _PATH_SEGMENT
+)
 
 
 def _path_base(match: re.Match[str]) -> str:
-    """One matched path -> its base name (a ``file://`` scheme rides with the match)."""
+    """One matched path -> its base name (a ``file://`` scheme, any case, rides with it)."""
     path = match.group(0)
-    if path.startswith("file://"):
-        path = path[len("file://") :]
+    if path[:7].lower() == "file://":
+        path = path[7:]
     return path.rstrip("/").rsplit("/", 1)[-1].rstrip(".")
 
 
@@ -149,21 +161,33 @@ def _egress(text: str) -> str:
     (memo §4's egress statement; round-1 security S-R8). Two passes, in this order:
 
     * Absolute paths are reduced to their BASE NAME -- the home prefix and every directory
-      component go. The relative directory is the field that would carry a client's or a
-      project's name to the vendor (S-R8), and the memo's minimisation permits neither
-      relative directories nor absolute paths. The base name stays because the decision
-      needs it to judge "is this the deliverable?". A base name is never altered beyond
-      that: the shape pass below masks a credential spelling it recognises, and leaves a
-      spelling its negative corpus pins (a dotted tail like ``pypi-foo.json``) to itself.
+      component go. A space inside a component is carried only where the crossing guard
+      permits: ``Acme Corp/q3.pdf`` reduces whole, while ``see /x and /y`` is never crossed
+      (the guard's exact boundary is on ``_PATH_SEGMENT``). The relative directory is the
+      field that would carry a client's or a project's name to the vendor (S-R8), and the
+      memo's minimisation permits neither relative directories nor absolute paths. The base
+      name stays because the decision needs it to judge "is this the deliverable?". A base
+      name is never altered beyond that: the shape pass below masks a credential spelling it
+      recognises, and leaves a spelling its negative corpus pins (a dotted artifact tail
+      like ``pypi-foo.json``) to itself.
     * The minimised text then passes the project's one credential-shape table
       (:func:`local_operator.redaction_shapes.scrub_shapes`), the same pass classification
-      §6 requires for outbound state: a credential spelled in the prose, in an intent line
-      or in a base name is masked (never dropped), so the mask, not the value, is what a
-      vendor receives.
+      §6 requires for outbound state: a credential the table recognises is masked wherever
+      it stands -- the prose, an intent line, a base name -- and never dropped, so the mask,
+      not the value, is what a vendor receives. The table's own negative carries through
+      too: a vendor-prefix token carrying a dotted artifact tail (a ``glpat-`` token with a
+      ``.md`` tail) is NOT masked -- dotted artifact names must survive -- so as a base name
+      it arrives whole, and as a directory component it leaves with the directory.
 
     Deliberately NOT scrubbed, so a future fix does not "repair" them into over-masking:
     relative paths and bare directory names in prose (indistinguishable from ordinary text
-    without taking ``and/or``, ``24/7`` and URLs with them); e-mail addresses in prose --
+    without taking ``and/or``, ``24/7`` and URLs with them); a slash glued to a word character
+    is a URL tail or a relative path and stays whole (the lead refuses it -- ``example.com/x``,
+    ``clients/acme-corp/q3.pdf``); Windows root spellings (``C:\\...``, ``\\\\server\\share\\...``)
+    are recorded rather than silently missed -- the backslash is the escape character of every
+    embedded command and code fragment, so the form needs its own false-positive review (the
+    forward-slash drive form reduces today, through the relaxed ``:`` lead); e-mail
+    addresses in prose --
     not credentials, and the shape corpus pins ``user@example.com`` as a must-survive
     negative (an e-mail sitting in a credential POSITION, a password value, is masked as
     that credential); and the harness-authored instruction and criteria constants.
