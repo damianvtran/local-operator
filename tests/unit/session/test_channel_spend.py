@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -73,7 +74,7 @@ def payload(
     children: ChildrenSnapshot | None = None,
     tracked: bool = True,
     lost: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     return combine(
         fold_records(records).rows(),
         inference=inference or InferenceSnapshot(),
@@ -92,9 +93,11 @@ def test_fold_keeps_the_highest_rev_and_is_idempotent() -> None:
     assert fold.apply(record(amount_micro=8000)) is True
     assert fold.apply(record(amount_micro=8000)) is False, "same rev must not change the fold"
     assert fold.apply(record(amount_micro=53000, rev=1, basis=BASIS_BILLED)) is True
-    assert fold.get("search:one").amount_micro == 53000
+    held = fold.get("search:one")
+    assert held is not None and held.amount_micro == 53000
     assert fold.apply(record(amount_micro=99, rev=0)) is False, "a stale rev must not win"
-    assert fold.get("search:one").amount_micro == 53000
+    held = fold.get("search:one")
+    assert held is not None and held.amount_micro == 53000
     assert len(fold) == 1
 
 
@@ -103,6 +106,18 @@ def test_fold_dedups_a_forked_journal_by_record_id() -> None:
     fork = fold_records([record(), record(), record(record_id="image:x", channel="image")])
     assert len(fork) == 2
     assert fork.total_known_micro() == 16000
+
+
+def test_from_details_rejects_non_finite_amounts() -> None:
+    """MINOR 1: a corrupt ``NaN`` amount reads as NO RECORD, never raises.
+
+    JSON parses ``NaN``/``Infinity`` to floats, and ``int()`` on them raises:
+    one bad row would otherwise take the whole session open down with it.
+    """
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        assert (
+            ChannelSpendRecord.from_details({**record().to_details(), "amount_micro": bad}) is None
+        )
 
 
 def test_record_round_trip_and_malformed_degradation() -> None:
@@ -202,8 +217,14 @@ def test_lost_rows_mark_floor_but_partial_outranks_it() -> None:
 
 
 def test_tracked_flag_semantics() -> None:
-    """Untracked WITH rows degrades to partial; untracked WITHOUT rows keeps the
-    inference figure's own knowledge and only the flag says history is missing."""
+    """Untracked means the total is NEVER exact — with or without recovered rows.
+
+    A pre-feature session cannot rule out channel spend it never recorded (a
+    TTS call leaves no trace at all), so "nothing recoverable" is not the same
+    as "nothing spent" and the total is partial either way. The flag alone
+    carrying the news was design round 1's D3: the panel said "channels not
+    tracked" beside a total labelled ``exact`` and an unmarked band figure.
+    """
     with_rows = payload([record()], tracked=False)
     assert with_rows["tracked"] is False and with_rows["knowledge"] == "partial"
     without_rows = payload(
@@ -212,7 +233,7 @@ def test_tracked_flag_semantics() -> None:
         tracked=False,
     )
     assert without_rows["tracked"] is False
-    assert without_rows["knowledge"] == "exact", "no fabricated degradation of a true figure"
+    assert without_rows["knowledge"] == "partial", "an untracked total cannot be exact"
     assert without_rows["rows"][0]["channel"] == "inference"
 
 
@@ -363,7 +384,9 @@ def test_normalise_basis_maps_the_wave_two_spelling() -> None:
         ),
     ],
 )
-def test_image_label_mapping(kwargs: dict, expected_basis: str, expected_source: str) -> None:
+def test_image_label_mapping(
+    kwargs: dict[str, Any], expected_basis: str, expected_source: str
+) -> None:
     basis, source, _price_version = map_image_cost_labels(
         route=kwargs["route"],
         cost_source=kwargs["cost_source"],
@@ -508,6 +531,9 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
         "billed",
         "subscription_api_equivalent",
         "estimated",
+        # Money whose BASIS is not recorded (this session's inference plus the
+        # children bundle): the bucket that makes the parts sum to the whole.
+        "basis_not_recorded",
         "not_tracked_calls",
     }
 

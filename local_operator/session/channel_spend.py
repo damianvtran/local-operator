@@ -1,6 +1,6 @@
 """Per-session CHANNEL spend: the metered ledger beside the token accumulator.
 
-Why this module exists (design ``docs/design/spend-channels-wire.md`` and the
+Why this module exists (design ``docs/design/spend-channels.md`` and the
 project's design note): session money used to be inference only. ``SessionSpend``
 (``session/spend.py``) counts model turns, and web search kept a second,
 in-memory ledger (``web_search/cost.py``) that the TUI folded in at paint time
@@ -35,10 +35,12 @@ reason.
 from __future__ import annotations
 
 import logging
+import math
 import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,17 @@ BASIS_SUBSCRIPTION = "subscription_api_equivalent"
 BASIS_ESTIMATED = "estimated"
 BASIS_NOT_TRACKED = "not_tracked"
 BASIS_VALUES = frozenset({BASIS_BILLED, BASIS_SUBSCRIPTION, BASIS_ESTIMATED, BASIS_NOT_TRACKED})
+
+#: Wire-only ``by_basis`` key: money whose BASIS is not recorded — the session's
+#: OWN inference (its route→basis mapping is PR-3) plus the children bundle
+#: (relayed child records carry their own bases in their own session's object;
+#: the children block here carries a total). It is not a record-level basis, so
+#: no ``ChannelSpendRecord`` may carry it — that keeps this bucket out of the
+#: per-record loop and makes the bucket sum reconcile by construction:
+#: ``billed + subscription + estimated + basis_not_recorded == total_micro``
+#: once unknown-amount rows (which contribute 0) are counted separately
+#: (design round 1, D1).
+BASIS_NOT_RECORDED = "basis_not_recorded"
 
 #: Where an amount (or its documented absence) comes from. ``server_reported``
 #: is the first-party server's own figure (Radient); ``provider_reported`` is a
@@ -151,8 +164,6 @@ def usd_to_micro(value: Any) -> int | None:
         return int(round(value * 1_000_000))
     if isinstance(value, str):
         try:
-            from decimal import Decimal, InvalidOperation
-
             return int(round(Decimal(value.strip()) * 1_000_000))
         except (InvalidOperation, ValueError, ArithmeticError):
             return None
@@ -386,6 +397,11 @@ class ChannelSpendRecord:
         if amount is not None:
             if isinstance(amount, bool) or not isinstance(amount, int | float):
                 return None
+            # A JSON ``NaN``/``Infinity`` parses to a float and ``int()`` on it
+            # RAISES: a corrupt row must read as "no record", never take the
+            # session open down with it (review round 1, MINOR 1).
+            if isinstance(amount, float) and not math.isfinite(amount):
+                return None
             amount = int(amount)
         units = details.get("units", 0.0)
         if isinstance(units, bool) or not isinstance(units, int | float):
@@ -601,6 +617,30 @@ def _inference_rows(inference: InferenceSnapshot) -> list[dict[str, Any]]:
     return rows
 
 
+#: Display order of channels: the hierarchy the design note states
+#: (inference → image → tts → stt → search → read → classification → other).
+#: The panel sorts wire rows by this; keeping it here means every surface
+#: that groups by channel ages its rows the same way (design round 1, D9).
+CHANNEL_ORDER = (
+    CHANNEL_INFERENCE,
+    "image",
+    "tts",
+    "stt",
+    "search",
+    "read",
+    "classification",
+    "other",
+)
+
+
+def _channel_rank(channel: str) -> int:
+    """The display rank of a channel; unknown channels sort last, then by name."""
+    try:
+        return CHANNEL_ORDER.index(channel)
+    except ValueError:
+        return len(CHANNEL_ORDER)
+
+
 def _channel_rows(records: Sequence[ChannelSpendRecord]) -> list[dict[str, Any]]:
     """One wire row per ``(channel, provider, model, unit)`` group.
 
@@ -625,9 +665,18 @@ def _channel_rows(records: Sequence[ChannelSpendRecord]) -> list[dict[str, Any]]
                 "price_versions": set(),
                 "has_amount": False,
                 "has_unstated": False,
+                #: False until some record states a unit count. A legacy row
+                #: recovered without one writes 0 units, and 0 beside a real
+                #: dollar figure is the fabricated-zero defect this module
+                #: refuses for money — so the row emits ``units: None`` (the
+                #: panel omits the note) unless a count was actually recorded
+                #: (QA round 1, Q6).
+                "has_units": False,
             },
         )
-        group["units"] = float(group["units"]) + float(record.units or 0.0)
+        if record.units and record.units > 0:
+            group["units"] = float(group["units"]) + float(record.units)
+            group["has_units"] = True
         if record.amount_micro is not None:
             group["amount_micro"] = int(group["amount_micro"]) + int(record.amount_micro)
             group["has_amount"] = True
@@ -650,7 +699,10 @@ def _channel_rows(records: Sequence[ChannelSpendRecord]) -> list[dict[str, Any]]
                 "provider": group["provider"],
                 "model": group["model"],
                 "label": group["label"],
-                "units": group["units"],
+                # None when no contributing record carried a count: "units
+                # unknown" and "zero units" are as different as the money rule
+                # that made this module refuse fabricated zeros.
+                "units": group["units"] if group["has_units"] else None,
                 "unit": group["unit"],
                 # None, never 0, when nothing in the group was sized: on the wire
                 # an unknown amount and a free call are different facts.
@@ -660,7 +712,14 @@ def _channel_rows(records: Sequence[ChannelSpendRecord]) -> list[dict[str, Any]]
                 "price_versions": sorted(group["price_versions"]),
             }
         )
-    rows.sort(key=lambda row: (row["channel"], row["provider"], row["model"], row["unit"]))
+    rows.sort(
+        key=lambda row: (
+            _channel_rank(str(row["channel"])),
+            str(row["provider"]),
+            str(row["model"]),
+            str(row["unit"]),
+        )
+    )
     return rows
 
 
@@ -669,6 +728,7 @@ def combine(
     *,
     inference: InferenceSnapshot | None = None,
     children: ChildrenSnapshot | None = None,
+    child_records: Sequence[ChannelSpendRecord] = (),
     tracked: bool = False,
     lost: bool = False,
 ) -> dict[str, Any]:
@@ -678,6 +738,13 @@ def combine(
     channel record, and the subagent/fork contribution — so a surface that
     renders the total and the rows never sees them disagree, and a surface that
     renders ONLY the total (the status band) needs nothing else.
+
+    ``child_records`` are channel records RELAYED from live child sessions
+    (design §5.1: the parent total includes the child's records once, deduped
+    by ``record_id``). They are NOT mixed into ``rows`` — the children block is
+    their home, one line on the panel beside the session's own rows — and they
+    can never double count: a child's own object carries its records under the
+    child's session, and the parent only ever sees each ``record_id`` once.
 
     Knowledge precedence is ``unknown > partial > floor > exact``:
 
@@ -694,26 +761,37 @@ def combine(
     - ``exact``: everything that spent money has a stated figure.
     """
     records = list(records)
+    child_records = list(child_records)
     inference = inference or InferenceSnapshot()
     children = children or ChildrenSnapshot()
 
     stated_channel_micro = sum(rec.amount_micro for rec in records if rec.amount_micro is not None)
-    total_micro = inference.micro + stated_channel_micro + children.total_micro
+    child_stated_micro = sum(
+        rec.amount_micro for rec in child_records if rec.amount_micro is not None
+    )
+    children_total_micro = int(children.total_micro) + child_stated_micro
+    total_micro = inference.micro + stated_channel_micro + children_total_micro
 
     unstated_records = [
         rec for rec in records if rec.amount_micro is None and rec.status != STATUS_FAILED
     ]
+    # A relayed child record with no stated amount is money we know exists and
+    # cannot size: the children block says partial rather than letting the
+    # parent present an exact total over an undercount (QA round 1, Q2).
+    children_knowledge = children.knowledge
+    if any(rec.amount_micro is None and rec.status != STATUS_FAILED for rec in child_records):
+        children_knowledge = "partial"
     inference_unstated = inference.knowledge == "unknown" and inference.calls > 0
     inference_partial = inference.knowledge == "partial"
-    untracked_with_rows = not tracked and bool(records)
+    untracked_with_rows = not tracked
 
     partial = bool(
         unstated_records
         or inference_unstated
         or inference_partial
         or untracked_with_rows
-        or children.knowledge == "partial"
-        or children.knowledge == "unknown"
+        or children_knowledge == "partial"
+        or children_knowledge == "unknown"
     )
     floor = bool(lost or inference.knowledge == "floor" or children.knowledge == "floor")
     nothing_stated = (
@@ -734,6 +812,13 @@ def combine(
         BASIS_BILLED: 0,
         BASIS_SUBSCRIPTION: 0,
         BASIS_ESTIMATED: 0,
+        # Money whose basis is not recorded: this session's own inference (its
+        # route→basis mapping is PR-3) plus the whole children bundle. This is
+        # what makes the buckets sum to ``total_micro`` on every surface
+        # (design round 1, D1): billed + subscription + estimated +
+        # basis_not_recorded == total minus the unknown-amount rows, whose
+        # money is 0 by definition and whose COUNT is stated separately.
+        BASIS_NOT_RECORDED: 0,
         # A COUNT, not money: how many records have no trackable money basis.
         # Numeric because the UI renders one basis line; the key says what the
         # number is (design §5.1).
@@ -747,8 +832,7 @@ def combine(
             by_basis["not_tracked_calls"] += 1
             continue
         by_basis[basis] += int(record.amount_micro)
-    if inference.micro or inference.calls:
-        by_basis["not_tracked_calls"] += 1  # inference basis arrives in PR-3
+    by_basis[BASIS_NOT_RECORDED] = max(0, int(inference.micro)) + max(0, children_total_micro)
 
     rows = _inference_rows(inference) + _channel_rows(records)
     return {
@@ -759,8 +843,8 @@ def combine(
         "by_basis": by_basis,
         "rows": rows,
         "children": {
-            "total_micro": int(children.total_micro),
-            "knowledge": children.knowledge,
+            "total_micro": int(children_total_micro),
+            "knowledge": children_knowledge,
         },
     }
 

@@ -7,7 +7,8 @@
     "billed": 53000,
     "subscription_api_equivalent": 53000,
     "estimated": 10000,
-    "not_tracked_calls": 2
+    "basis_not_recorded": 900000,
+    "not_tracked_calls": 1
   },
   "rows": [
     {
@@ -58,13 +59,13 @@
       ]
     },
     {
-      "channel": "read",
-      "provider": "deepseek:read",
+      "channel": "search",
+      "provider": "tavily",
       "model": "",
       "label": "",
       "units": 1.0,
-      "unit": "reads",
-      "amount_micro": 2000,
+      "unit": "searches",
+      "amount_micro": 8000,
       "knowledge": "exact",
       "basis": [
         "estimated"
@@ -74,13 +75,13 @@
       ]
     },
     {
-      "channel": "search",
-      "provider": "tavily",
+      "channel": "read",
+      "provider": "deepseek:read",
       "model": "",
       "label": "",
       "units": 1.0,
-      "unit": "searches",
-      "amount_micro": 8000,
+      "unit": "reads",
+      "amount_micro": 2000,
       "knowledge": "exact",
       "basis": [
         "estimated"

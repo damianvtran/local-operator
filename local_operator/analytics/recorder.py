@@ -133,7 +133,7 @@ class _ChannelTask:
 
     __slots__ = ("row",)
 
-    def __init__(self, row: tuple) -> None:
+    def __init__(self, row: tuple[Any, ...]) -> None:
         self.row = row
 
 
@@ -857,7 +857,7 @@ class AnalyticsRecorder:
         """How many samples were dropped for a full queue (0 on a healthy run)."""
         return self._dropped
 
-    def record_channel(self, row: tuple) -> None:
+    def record_channel(self, row: tuple[Any, ...]) -> None:
         """Best-effort: record one channel-spend row off the hot path.
 
         Called from the session's fold (``Session.record_channel_spend``), which

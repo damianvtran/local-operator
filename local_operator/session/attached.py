@@ -2000,6 +2000,14 @@ class AttachedSession:
                 "subagent_cost": durable.subagent_cost,
                 "subagent_cost_knowledge": durable.subagent_cost_knowledge,
                 "cost_knowledge": durable.cost_knowledge,
+                # The published channel object rides the same rule: a cold read
+                # with no owner must render the SAME money as the warm one, or
+                # the desktop UI shows today's legacy inference-only total for
+                # a session whose channels it will render a moment later when a
+                # runtime attaches (QA round 1, Q4 — cold 0.2175 vs warm
+                # 0.2775 for one session). The checkpoint is where the durable
+                # copy lives, exactly like the scalars above.
+                "spend_channels": durable.spend_channels,
                 "last_usage": durable.last_usage,
                 **self._consistent_context(state, durable),
                 # MCP servers are the last runtime's connection report and

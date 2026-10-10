@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from local_operator.analytics.model import CallSnapshot
 from local_operator.analytics.store import AnalyticsStore
@@ -32,7 +33,7 @@ def channel_row(
     basis: str = "estimated",
     status: str = "ok",
     session_id: str = "s1",
-) -> tuple:
+) -> tuple[Any, ...]:
     """One store insert tuple: ``_CHANNEL_COLUMNS`` minus ``updated_at_ms``."""
     return (
         record_id,
@@ -65,7 +66,7 @@ def rollup_matches_ledger(conn: sqlite3.Connection, table: str, key: str) -> boo
             f"amount_micro, calls, known_calls FROM {table}"
         )
     }
-    ledger: dict[tuple, list] = {}
+    ledger: dict[tuple[Any, ...], list[Any]] = {}
     for row in conn.execute(
         "SELECT ts_ms, channel, provider, model_id, billing_basis, units, amount_micro "
         "FROM channel_calls"

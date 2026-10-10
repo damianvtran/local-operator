@@ -48,6 +48,7 @@ import string
 import tempfile
 import time
 import uuid
+import weakref
 from collections import OrderedDict
 from collections.abc import (
     AsyncIterator,
@@ -2673,6 +2674,15 @@ class Session:
         #: A holder cannot do the second: the middle child has no title of its
         #: own to hold. ``None`` on every top-level session.
         parent_display_name: Callable[[], str] | None = None,
+        #: The LIVE parent session, when this session is a subagent child.
+        #: Two readers, one purpose each: channel records this child emits are
+        #: RELAYED into the parent's children block as they land (design §5.1 —
+        #: the parent's total includes a child's records once, deduped by
+        #: ``record_id``), and ``parent_session_id`` stamps every journal and
+        #: analytics row so a tree can be rolled up by parent. Held WEAKLY: a
+        #: child must never keep a disposed parent alive.
+        parent_session: Any | None = None,
+        parent_session_id: str = "",
         #: The parent↔child messaging surface (``harness.comms.SubagentComms``).
         #: A top-level session mints its own; a CHILD is handed its parent's,
         #: which is what makes ``hub`` inside a subagent talk to the agent that
@@ -2980,6 +2990,19 @@ class Session:
         self._goal_state = goal_state if goal_state is not None else GoalState()
         self._variables = variables
         self._job_id = job_id
+        #: The parent link (see the ``parent_session`` parameter). The id is
+        #: kept even when the OBJECT is gone — a resumed child still answers
+        #: "whose child am I" for its analytics rows (QA round 1, Q3).
+        self._parent_session_ref: weakref.ref[Any] | None = (
+            weakref.ref(parent_session) if parent_session is not None else None
+        )
+        self._parent_session_id = str(parent_session_id or "")
+        #: Channel records relayed from LIVE children (design §5.1): a SEPARATE
+        #: fold from this session's own, because the children block is their
+        #: home on the wire and mixing them into ``rows`` would present a
+        #: child's spend as this session's. In memory only: a child's own
+        #: journal is the durable home of its records.
+        self._child_channel_spend: ChannelSpend = ChannelSpend()
         #: The confinement root, when this session's local tools must stay
         #: inside one. ``None`` everywhere no caller asked for confinement;
         #: read by ``_build_tool_context`` on every turn, which is what makes
@@ -3507,14 +3530,27 @@ class Session:
         # winning, so a quote-to-settled upgrade and a forked journal both stay
         # exact. Owned here, beside ``self.spend``, because both are this
         # session's money.
-        self.channels: ChannelSpend = fold_records(
-            records_from_details(transcript.channel_spend_rows())
-        )
+        try:
+            folded = records_from_details(transcript.channel_spend_rows())
+        except Exception:  # noqa: BLE001 — one corrupt row must not fail the open
+            logger.debug("channel journal fold failed; starting empty", exc_info=True)
+            folded = []
+        self.channels: ChannelSpend = fold_records(folded)
         #: Whether the journal carries the one-time channel ``start`` marker.
         #: False for a pre-feature session AND for a backfilled legacy one:
         #: the surfaces then say "channels not tracked" rather than implying
         #: $0, and the combiner degrades the knowledge to partial.
         self.channels_started = transcript.channel_spend_tracked()
+        #: HOW this session's channel history began — ``"marked"`` (a start
+        #: marker exists), ``"fresh"`` (the transcript was empty at
+        #: construction: this build watched the conversation from its first
+        #: message, so nothing can have been missed) or ``"legacy"`` (entries
+        #: exist with no marker: recording began after activity this build never
+        #: saw, and a live record must NOT flip that — the money it cannot see,
+        #: like a pre-feature TTS call, would then read as fully accounted).
+        #: ``channels_tracked`` is derived from it; see that property
+        #: (review round 1, M2).
+        self._channels_origin = self._classify_channels_origin(transcript)
         #: True only when the journal POSITIVELY reports a lost money row (the
         #: same ``lost_money_rows`` rule ``SessionSpend`` uses), which the
         #: combiner turns into the floor mark. Read once here, not per paint.
@@ -11007,6 +11043,69 @@ class Session:
 
     # -- channel spend -------------------------------------------------------
 
+    @staticmethod
+    def _classify_channels_origin(transcript: Any) -> str:
+        """``"marked" | "fresh" | "legacy"`` — how channel recording began.
+
+        "fresh" requires an EMPTY transcript at construction, and that is the
+        whole test: no entries means there was nothing to miss, while entries
+        without a ``start`` marker mean recording began after activity this
+        build never saw (review round 1, M2). The distinction decides whether a
+        live record may write the marker: it may for "fresh" (the session has
+        nothing prior to excuse) and never for "legacy" (the marker would claim
+        the missing history was watched).
+        """
+        if transcript.channel_spend_tracked():
+            return "marked"
+        try:
+            if not transcript.entries():
+                return "fresh"
+        except Exception:  # noqa: BLE001 — an unreadable journal is not fresh
+            logger.debug("channel origin probe failed; treating as legacy", exc_info=True)
+        return "legacy"
+
+    @property
+    def channels_tracked(self) -> bool:
+        """Whether THIS build watched the conversation's channel spend.
+
+        The wire's ``tracked`` flag. "fresh" and "marked" are tracked; "legacy"
+        is not, and a live record never flips it: what a pre-feature build
+        failed to record (a TTS call leaves no trace at all) cannot be
+        recovered, so a post-backfill session keeps saying "earlier activity
+        not tracked" instead of claiming exactness over history it never saw
+        (review round 1, M2).
+        """
+        return self._channels_origin != "legacy"
+
+    @property
+    def _parent_session(self) -> Any | None:
+        """The live parent session, when this is a child and it still exists."""
+        ref = self._parent_session_ref
+        return ref() if ref is not None else None
+
+    def _absorb_child_channel_spend(self, record: ChannelSpendRecord) -> None:
+        """Fold a LIVE child's channel record into this session's children block.
+
+        Called by the child's ingest (see :meth:`record_channel_spend`), never
+        by a tool. The child's record keeps ITS session id — the children block
+        is a total, not a claim that this session spent the money — and the
+        fold's ``record_id``/``rev`` rules are the dedup contract: a record a
+        fork already carries, or a re-delivered one, changes nothing.
+        """
+        if record.session_id and record.session_id == str(self._session_id or ""):
+            return  # a self-relay: the record is already in this session's fold
+        try:
+            if not self._child_channel_spend.apply(record):
+                return
+        except Exception:  # noqa: BLE001 — a relay defect is not a child's failure
+            logger.debug("child channel relay fold failed", exc_info=True)
+            return
+        # The parent's published total moved: republish now rather than at the
+        # next turn event, which is the whole point of the relay (QA round 1,
+        # Q2 — a child's image was invisible on the parent's band for the rest
+        # of the turn).
+        self._publish_channel_spend()
+
     def record_channel_spend(
         self, record: ChannelSpendRecord, *, write_marker: bool = True
     ) -> None:
@@ -11032,28 +11131,38 @@ class Session:
         journal keeps ``channels_started=False`` and every surface says
         "channels not tracked" beside a partial total — recovered history is
         partial by definition, and claiming otherwise would be the fabricated
-        completeness this ledger exists to avoid.
+        completeness this ledger exists to avoid. A LIVE record does not write
+        the marker either when the session's origin is ``"legacy"``: the
+        marker would claim history this build never watched (review M2).
         """
         try:
-            if not record.session_id:
-                # The SESSION stamps its own identity: a tool must not be able to
-                # attribute spend to a session it is not running in, and the
-                # parent link rides the same rule (``_parent_session_id`` is set
-                # by the subagent wiring and absent on a root, which is exactly
-                # the empty string the ledger means by "no parent").
-                from dataclasses import replace as _replace
+            # The SESSION owns the identity on every row it journals: a tool
+            # must not be able to attribute spend to a session it is not
+            # running in, and the stamping is unconditional so a caller that
+            # set some other id cannot smuggle it past the fold (review NIT 2).
+            # ``ts_ms`` is kept when the caller stamped one (a settle observed
+            # later must not claim the money arrived at publish time).
+            from dataclasses import replace as _replace
 
-                record = _replace(
-                    record,
-                    session_id=str(self._session_id or ""),
-                    parent_session_id=str(getattr(self, "_parent_session_id", "") or ""),
-                    ts_ms=record.ts_ms or channel_now_ms(),
-                )
+            record = _replace(
+                record,
+                session_id=str(self._session_id or ""),
+                parent_session_id=str(self._parent_session_id or ""),
+                ts_ms=record.ts_ms or channel_now_ms(),
+            )
             if not self.channels.apply(record):
                 return
         except Exception:  # noqa: BLE001 — a fold defect is not a failed turn
             logger.debug("channel record fold failed", exc_info=True)
             return
+        parent = self._parent_session
+        if parent is not None:
+            # The parent total includes a live child's records (design §5.1);
+            # the relay is best-effort like everything else on this path.
+            try:
+                parent._absorb_child_channel_spend(record)
+            except Exception:  # noqa: BLE001 — a relay defect is not a failed turn
+                logger.debug("child channel relay failed", exc_info=True)
         try:
             # Imported HERE, not at module scope: the SDK dependency must keep
             # none on analytics (see ``_record_tool_call``'s note), and this
@@ -11087,18 +11196,14 @@ class Session:
         retries rather than leaving the session permanently unmarked.
         """
         try:
-            if write_marker and not self.channels_started and not self._channel_start_scheduled:
+            if (
+                write_marker
+                and self._channels_origin == "fresh"
+                and not self.channels_started
+                and not self._channel_start_scheduled
+            ):
                 self._channel_start_scheduled = True
-                await self._transcript.append_custom(
-                    CHANNEL_SPEND_CUSTOM_TYPE,
-                    {
-                        "kind": "start",
-                        "version": CHANNEL_SPEND_VERSION,
-                        "ts_ms": channel_now_ms(),
-                    },
-                    preserve_mtime=True,
-                )
-                self.channels_started = True
+                await self._write_channel_start_marker()
         except Exception:  # noqa: BLE001 — a lost marker is not a failed turn
             if write_marker:
                 self._channel_start_scheduled = False
@@ -11114,6 +11219,33 @@ class Session:
         # the journal it will read on the next resume (transiently visible, but
         # "surfaces never disagree" outranks "publish only durable state").
         self._publish_channel_spend()
+
+    async def _write_channel_start_marker(self) -> None:
+        """Append the one-time channel ``start`` marker; never raises.
+
+        Shared by the first-record path and the adopt seam (a FRESH session
+        adopted for display writes its marker before it can be parked and
+        resumed, so a chat-only conversation does not come back claiming its
+        channels were untracked — review round 1, M2). Guarded on
+        ``channels_started`` so the two paths cannot double-append, and the
+        scheduled flag is reset on failure so a later attempt retries.
+        """
+        if self.channels_started:
+            return
+        try:
+            await self._transcript.append_custom(
+                CHANNEL_SPEND_CUSTOM_TYPE,
+                {
+                    "kind": "start",
+                    "version": CHANNEL_SPEND_VERSION,
+                    "ts_ms": channel_now_ms(),
+                },
+                preserve_mtime=True,
+            )
+            self.channels_started = True
+        except Exception:  # noqa: BLE001 — a lost marker is not a failed turn
+            self._channel_start_scheduled = False
+            logger.debug("channel start marker append failed", exc_info=True)
 
     def _publish_channel_spend(self) -> None:
         """Hand the fold to the frontend store, guarded and alone.
@@ -11133,13 +11265,15 @@ class Session:
                 logger.debug("channel spend publish failed", exc_info=True)
 
     def rebuild_channels_if_needed(self) -> None:
-        """Start the ONE-TIME legacy channel backfill, off the open path.
+        """The adopt seam for channel history: the legacy backfill, or a fresh
+        session's start marker.
 
         Fires from the same adopt seam as :meth:`rebuild_spend_if_needed` (a
         session that is never adopted for display pays nothing), and SKIPS
         immediately for a session whose journal already carries the channel
         ``start`` marker: a live session journals every record as it happens,
-        and a scan would only re-prove that.
+        and a scan would only re-prove that. A "fresh" session has nothing to
+        recover but takes this seam to write its marker (see below).
 
         Structural guarantees, the same shape as the spend rebuild: once per
         session per process; nothing on the event loop (the scan runs on a
@@ -11154,6 +11288,17 @@ class Session:
         except RuntimeError:
             return  # no loop: the fold still serves this process's reads
         self._channel_backfill_started = True
+        if self._channels_origin == "fresh":
+            # Nothing to recover, but the conversation needs its start marker
+            # durable BEFORE it mutates: a fresh session adopted here, chatted
+            # with and resumed later must not come back reading "channels not
+            # tracked" merely because no channel event had happened yet
+            # (review round 1, M2).
+            self._channel_start_scheduled = True
+            task = loop.create_task(self._write_channel_start_marker())
+            self._channel_tasks.add(task)
+            task.add_done_callback(self._channel_tasks.discard)
+            return
         task = loop.create_task(self._rebuild_channels())
         self._channel_tasks.add(task)
         task.add_done_callback(self._channel_tasks.discard)
