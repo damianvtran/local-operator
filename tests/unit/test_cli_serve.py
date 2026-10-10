@@ -211,21 +211,49 @@ def test_a_reload_probe_that_cannot_bind_is_refused_like_the_listener(
 ) -> None:
     """The ``--reload`` probe reports a bind failure the way the listener does.
 
-    An unbindable host (``--host 10.1.2.3``: not an address on this machine, and
-    the reachable input the reviewer named) used to escape ``serve_command`` as
-    an uncaught traceback on this branch while the non-reload branch printed a
-    named refusal — the same operator mistake, two different reports. uvicorn
-    must never be reached in that case.
+    A loopback host whose bind fails for a machine reason (the probe raises, the
+    reachable input the reviewer named) must leave ``serve_command`` as a NAMED
+    refusal, while the non-reload branch prints the same shape -- the same
+    operator mistake, one report. uvicorn must never be reached in that case.
+    (A NON-loopback host no longer gets this far: the bind policy refuses it
+    before any probe -- see the policy tests below.)
     """
 
     def refuse(host: str, port: int) -> socket.socket:
         raise OSError(49, "Can't assign requested address")
 
     with patch.object(cli, "_bind_serve_socket", refuse), patch("uvicorn.run") as mock_run:
-        assert serve_command("10.1.2.3", 0, True) == 1
+        assert serve_command("127.0.0.1", 0, True) == 1
 
     mock_run.assert_not_called()
-    assert "cannot bind http://10.1.2.3:0" in capsys.readouterr().err
+    assert "cannot bind http://127.0.0.1:0" in capsys.readouterr().err
+
+
+# ------------------------------------------------------- the bind policy (RFC §3.1)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.2", "::1", "localhost"])
+def test_every_loopback_spelling_is_accepted(host: str) -> None:
+    assert cli._serve_bind_is_loopback_only(host) is True
+
+
+@pytest.mark.parametrize(
+    "host", ["0.0.0.0", "::", "192.0.2.1", "192.168.0.155", "nonexistent.invalid", ""]
+)
+def test_a_non_loopback_bind_is_refused(host: str) -> None:
+    assert cli._serve_bind_is_loopback_only(host) is False
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.0.2.1", "nonexistent.invalid"])
+def test_the_policy_refusal_happens_before_anything_binds(
+    host: str, captured_server: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RFC §3.1: strict, no override -- exit 1, no listener, nothing reaches uvicorn."""
+    with patch.object(cli, "_bind_serve_socket") as mock_bind:
+        assert serve_command(host, 1111, False) == 1
+    mock_bind.assert_not_called()
+    assert captured_server == {}
+    assert "loopback-only by policy" in capsys.readouterr().err
 
 
 def _recorded_bind_options(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:

@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from local_operator.server import desktop
 from local_operator.server.utils import static_roots
@@ -63,9 +64,9 @@ def _roots(tmp_path: Path, workspace: Path | None = None, **kwargs) -> ServedRoo
     return build_roots(tmp_path / "config", config, **kwargs)
 
 
-def _denied(raw: str, roots: ServedRoots) -> StaticPathDenied:
+def _denied(raw: str, roots: ServedRoots, *, general: bool = False) -> StaticPathDenied:
     with pytest.raises(StaticPathDenied) as caught:
-        resolve_servable(raw, roots)
+        resolve_servable(raw, roots, general=general)
     return caught.value
 
 
@@ -97,7 +98,10 @@ def _other_spellings_of(directory: Path) -> list[Path]:
 def test_a_file_inside_a_root_is_served(tmp_path, workspace):
     target = workspace / "a.png"
     target.write_bytes(PNG)
-    assert resolve_servable(str(target), _roots(tmp_path, workspace)) == target.resolve()
+    assert (
+        resolve_servable(str(target), _roots(tmp_path, workspace), general=False)
+        == target.resolve()
+    )
 
 
 def test_a_file_outside_every_root_is_refused_403(tmp_path, workspace):
@@ -142,7 +146,9 @@ def test_a_symlink_pointing_inside_is_served_as_its_target(tmp_path, workspace):
     target.write_bytes(PNG)
     link = workspace / "alias.png"
     link.symlink_to(target)
-    assert resolve_servable(str(link), _roots(tmp_path, workspace)) == target.resolve()
+    assert (
+        resolve_servable(str(link), _roots(tmp_path, workspace), general=False) == target.resolve()
+    )
 
 
 def test_a_symlinked_root_is_compared_by_realpath(tmp_path):
@@ -152,7 +158,9 @@ def test_a_symlinked_root_is_compared_by_realpath(tmp_path):
     alias = tmp_path / "alias-root"
     alias.symlink_to(real)
     roots = _roots(tmp_path, alias)
-    assert resolve_servable(str(alias / "a.png"), roots) == (real / "a.png").resolve()
+    assert (
+        resolve_servable(str(alias / "a.png"), roots, general=False) == (real / "a.png").resolve()
+    )
 
 
 def test_a_sibling_sharing_a_name_prefix_is_not_inside(tmp_path, workspace):
@@ -210,7 +218,10 @@ def test_a_root_that_is_itself_under_a_dot_directory_still_serves(tmp_path):
     dot_root.mkdir(parents=True)
     (dot_root / "s.png").write_bytes(PNG)
     roots = build_roots(tmp_path / ".cfg", {})
-    assert resolve_servable(str(dot_root / "s.png"), roots) == (dot_root / "s.png").resolve()
+    assert (
+        resolve_servable(str(dot_root / "s.png"), roots, general=False)
+        == (dot_root / "s.png").resolve()
+    )
 
 
 def test_the_filesystem_root_can_never_be_a_root(tmp_path):
@@ -241,7 +252,9 @@ def test_the_env_var_adds_roots(tmp_path, monkeypatch):
     extra.mkdir()
     (extra / "a.png").write_bytes(PNG)
     monkeypatch.setenv(ROOTS_ENV, os.pathsep.join(["", str(extra)]))
-    assert resolve_servable(str(extra / "a.png"), build_roots(tmp_path / "config", {}))
+    assert resolve_servable(
+        str(extra / "a.png"), build_roots(tmp_path / "config", {}), general=False
+    )
 
 
 def _live_record(pid: int, cwd: Path):
@@ -272,7 +285,7 @@ def test_a_live_session_working_directory_is_a_root_and_a_stale_one_is_not(tmp_p
     # A pid that cannot be running: scanned as stale, so its cwd must not widen the roots.
     registry.publish(_live_record(2**22 + 12345, dead), config_dir)
     roots = build_roots(config_dir, {})
-    assert resolve_servable(str(live / "a.png"), roots)
+    assert resolve_servable(str(live / "a.png"), roots, general=False)
     assert _denied(str(dead / "a.png"), roots).status == 403
 
 
@@ -321,7 +334,7 @@ def test_a_session_inside_home_is_still_a_root(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     config_dir = tmp_path / "config"
     registry.publish(_live_record(os.getpid(), project), config_dir)
-    assert resolve_servable(str(project / "a.png"), build_roots(config_dir, {}))
+    assert resolve_servable(str(project / "a.png"), build_roots(config_dir, {}), general=False)
 
 
 def test_home_itself_is_served_when_the_operator_configures_it(tmp_path, monkeypatch):
@@ -337,7 +350,7 @@ def test_home_itself_is_served_when_the_operator_configures_it(tmp_path, monkeyp
     monkeypatch.setenv("HOME", str(home))
     for spelling in _other_spellings_of(home):
         roots = build_roots(tmp_path / "config", {"static": {"roots": [str(spelling)]}})
-        assert resolve_servable(str(home / "a.png"), roots), spelling
+        assert resolve_servable(str(home / "a.png"), roots, general=False), spelling
 
 
 @pytest.mark.parametrize("spelling", ["parent", "dotdot", "env"])
@@ -428,7 +441,7 @@ def test_a_differently_cased_parent_is_served_on_a_case_insensitive_volume(tmp_p
     flipped = Path(str(tmp_path.resolve()).swapcase()) / "workspace" / "a.png"
     if not flipped.exists():
         pytest.skip("case-sensitive filesystem: a differently-cased path is a different path")
-    assert resolve_servable(str(flipped), _roots(tmp_path, workspace))
+    assert resolve_servable(str(flipped), _roots(tmp_path, workspace), general=False)
 
 
 # -------------------------------------------------- settings validator (write facade)
@@ -498,7 +511,15 @@ def test_the_macos_data_volume_firmlink_counts_as_an_ancestor_of_home():
         ("   ", None, False),
         ("mac.lan:1111", "mac.lan", True),
         ("mac.lan:1111", "127.0.0.1", False),
-        ("anything.example", "0.0.0.0", True),  # explicit wildcard exposure: check is off
+        # Fail-closed for a wildcard/empty announced host (RFC §3.4): there is no
+        # name to compare against, so a DNS name is refused; IP literals and
+        # localhost still pass. The old bypass that admitted every name here is
+        # deleted.
+        ("anything.example", "0.0.0.0", False),
+        ("anything.example", "::", False),
+        ("anything.example", "", False),
+        ("127.0.0.1:1111", "0.0.0.0", True),
+        ("localhost:1111", "0.0.0.0", True),
         (None, "127.0.0.1", True),
     ],
 )
@@ -911,3 +932,243 @@ async def test_the_daemons_own_bound_name_is_admitted_through_the_middleware(
     finally:
         delattr(app.state, serve_registry.ANNOUNCED_STATE_ATTR)
     assert ok.status_code == 200
+
+
+# ------------------------------------------------------- the connection gate (P1)
+
+
+@pytest.mark.parametrize(
+    ("host", "loopback"),
+    [
+        ("127.0.0.1", True),
+        ("127.8.8.8", True),  # 127.0.0.0/8, not just .1
+        ("::1", True),
+        ("::ffff:127.0.0.1", True),  # a v6 listener's v4-mapped loopback client
+        ("localhost", True),
+        ("LOCALHOST", True),
+        ("0.0.0.0", False),
+        ("::", False),
+        ("192.168.0.155", False),
+        ("::ffff:192.168.0.155", False),
+        ("testserver", False),
+        ("rebind.attacker.test", False),
+        (None, False),
+    ],
+)
+def test_is_loopback_host(host, loopback):
+    assert static_roots.is_loopback_host(host) is loopback
+
+
+def test_connection_mode_is_fail_closed():
+    """Anything not provably loopback -- including a missing value -- is rooted."""
+    assert static_roots.connection_mode("127.0.0.1") == "general"
+    assert static_roots.connection_mode("::1") == "general"
+    assert static_roots.connection_mode(None) == "rooted"
+    assert static_roots.connection_mode("testserver") == "rooted"
+    assert static_roots.connection_mode("192.168.0.155") == "rooted"
+
+
+# -------------------------------------------------------------- general mode (D1)
+
+
+def _general(raw: str) -> Path:
+    """``resolve_servable`` in the loopback posture, with no roots configured."""
+    return resolve_servable(raw, ServedRoots(roots=()), general=True)
+
+
+def test_general_mode_serves_any_readable_file_outside_every_root(tmp_path):
+    target = tmp_path / "elsewhere" / "x.png"
+    target.parent.mkdir()
+    target.write_bytes(PNG)
+    assert _general(str(target)) == target.resolve()
+
+
+def test_general_mode_serves_dot_component_paths(tmp_path):
+    """The class the dot rule broke: session scratchpads live under ``~/.local-operator``."""
+    target = tmp_path / ".local-operator" / "sessions" / "s1" / "scratchpad" / "x.png"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(PNG)
+    assert _general(str(target)) == target.resolve()
+
+
+def test_general_mode_keeps_the_raw_dotdot_refusal(tmp_path):
+    (tmp_path / "x.png").write_bytes(PNG)
+    sneaky = str(tmp_path) + "/../" + tmp_path.name + "/x.png"
+    denied = _denied(sneaky, ServedRoots(roots=()), general=True)
+    assert denied.status == 403
+
+
+def test_general_mode_refuses_directories_fifos_and_missing_files(tmp_path):
+    directory = tmp_path / "dir"
+    directory.mkdir()
+    assert _denied(str(directory), ServedRoots(roots=()), general=True).status == 400
+    fifo = tmp_path / "pipe.png"
+    os.mkfifo(fifo)
+    assert _denied(str(fifo), ServedRoots(roots=()), general=True).status == 400
+    assert _denied(str(tmp_path / "nope.png"), ServedRoots(roots=()), general=True).status == 404
+
+
+def test_general_mode_uniform_403_for_the_unplaceable_classes(tmp_path):
+    """Unknown ``~user`` / an over-long component: ONE neutral body, no remedy text."""
+    for raw in ("~no-such-user-zzz/a.png", str(tmp_path / ("a" * 300) / "b.png")):
+        denied = _denied(raw, ServedRoots(roots=()), general=True)
+        assert (denied.status, denied.detail) == (403, static_roots.UNSERVABLE_DETAIL)
+    assert "static.roots" not in static_roots.UNSERVABLE_DETAIL
+
+
+def test_general_mode_unreadable_file_is_403_not_a_crash(tmp_path, monkeypatch):
+    target = tmp_path / "x.png"
+    target.write_bytes(PNG)
+    monkeypatch.setattr(static_roots.os, "access", lambda *_args, **_kwargs: False)
+    assert _denied(str(target), ServedRoots(roots=()), general=True).status == 403
+
+
+# ------------------------------------------------------------- live routes, general
+
+
+def _loopback_client() -> AsyncClient:
+    """The live app reached as a LOOPBACK-ACCEPTED connection.
+
+    ``scope["server"]`` is what the gate reads, and httpx 0.28 builds it from
+    the request URL: the default ``http://test`` client's value is the name
+    ``test`` (rooted, fail-closed), a ``127.0.0.1`` client's is loopback --
+    the same distinction a real socket makes, without a socket.
+    """
+    from local_operator.server.app import app
+
+    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:1111")
+    client.headers["Host"] = "127.0.0.1:1111"
+    return client
+
+
+@pytest.mark.asyncio
+async def test_general_mode_serves_out_of_root_through_the_route(test_app_client, configured):
+    """§3.7 item 3 at the app layer: the real handler chain, loopback-accepted."""
+    outside = configured.parent / "outside" / "x.png"
+    outside.parent.mkdir()
+    outside.write_bytes(PNG)
+    client = _loopback_client()
+    try:
+        response = await client.get("/v1/static/images", params={"path": str(outside)})
+    finally:
+        await client.aclose()
+    assert response.status_code == 200
+    assert response.content == PNG
+    # §3.7 item 7: the response policy rides general-mode responses exactly as it
+    # rides rooted ones -- the middleware is posture-independent by construction.
+    assert response.headers["x-content-type-options"] == "nosniff"
+    policy = response.headers["content-security-policy"]
+    assert policy.startswith(static_roots.MEDIA_CSP)
+    assert "frame-ancestors" in policy
+
+
+@pytest.mark.asyncio
+async def test_general_mode_keeps_the_clean_4xx_classes(test_app_client, configured):
+    client = _loopback_client()
+    try:
+        missing = await client.get(
+            "/v1/static/images", params={"path": str(configured.parent / "outside" / "nope.png")}
+        )
+        directory = configured.parent / "outside" / "dir"
+        directory.mkdir(parents=True)
+        not_a_file = await client.get("/v1/static/images", params={"path": str(directory)})
+    finally:
+        await client.aclose()
+    assert missing.status_code == 404
+    assert not_a_file.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_general_mode_does_not_disable_the_host_check(test_app_client, configured):
+    """§3.7 item 6: the unclamp never turns the rebinding guard off."""
+    outside = configured.parent / "outside" / "x.png"
+    outside.parent.mkdir()
+    outside.write_bytes(PNG)
+    client = _loopback_client()
+    try:
+        rebound = await client.get(
+            "/v1/static/images",
+            params={"path": str(outside)},
+            headers={"Host": "rebind.attacker.test:8080"},
+        )
+        ok = await client.get("/v1/static/images", params={"path": str(outside)})
+    finally:
+        await client.aclose()
+    assert rebound.status_code == 403
+    assert ok.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_general_mode_still_enforces_the_mime_allowlists(test_app_client, configured):
+    """D5: unclamped PATHS, never mimes -- an HTML document has no media route."""
+    outside = configured.parent / "outside"
+    outside.mkdir()
+    document = outside / "doc.html"
+    document.write_text("<!doctype html><script>x()</script>")
+    bare = outside / "blob"
+    bare.write_bytes(b"\x00")
+    client = _loopback_client()
+    try:
+        as_html = await client.get("/v1/static/images", params={"path": str(document)})
+        as_bytes = await client.get("/v1/static/images", params={"path": str(bare)})
+    finally:
+        await client.aclose()
+    assert as_html.status_code == 400
+    assert as_bytes.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_the_gate_reads_the_socket_not_an_announcement(test_app_client, configured):
+    """§3.7 items 4-5: announced loopback, but a non-loopback ACCEPTED address
+    (the embedding path) stays rooted; the same file serves on loopback."""
+    from local_operator.server import registry as serve_registry
+    from local_operator.server.app import app
+
+    outside = configured.parent / "outside" / "x.png"
+    outside.parent.mkdir()
+    outside.write_bytes(PNG)
+    params = {"path": str(outside)}
+    setattr(app.state, serve_registry.ANNOUNCED_STATE_ATTR, ("127.0.0.1", 1111))
+    try:
+        # test_app_client's URL host is the DNS NAME "test": not provably
+        # loopback, so the predicate stays rooted though the daemon "announced"
+        # loopback -- the mode does not trust the announcement.
+        rooted = await test_app_client.get("/v1/static/images", params=params)
+        client = _loopback_client()
+        try:
+            general = await client.get("/v1/static/images", params=params)
+        finally:
+            await client.aclose()
+    finally:
+        delattr(app.state, serve_registry.ANNOUNCED_STATE_ATTR)
+    assert rooted.status_code == 403
+    assert general.status_code == 200
+
+
+# ---------------------------------------------------------------- the pins (D4/D5)
+
+
+def test_html_csp_network_off_directives_are_pinned_against_widening():
+    """§3.7 item 10: a change here is a security change for the executing-frame
+    contract -- it must go through the supplements-lane review (D4)."""
+    assert static_roots.HTML_CSP == (
+        "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https:; "
+        "style-src 'unsafe-inline' https:; img-src data: blob: https:; "
+        "font-src data: https:; media-src data: blob: https:; connect-src https:; "
+        "worker-src blob:; form-action 'none'; base-uri 'none'; sandbox allow-scripts"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["audio", "images", "videos"])
+async def test_a_media_family_never_serves_html_or_untyped_bytes(
+    test_app_client, configured, route
+):
+    """§3.7 item 8 / D5: the media families carry no executable document type."""
+    document = configured / "doc.html"
+    document.write_bytes(b"<!doctype html><script>x()</script>")
+    bare = configured / "blob"
+    bare.write_bytes(b"\x00")
+    for name in (document, bare):
+        response = await test_app_client.get(f"/v1/static/{route}", params={"path": str(name)})
+        assert response.status_code == 400, (route, name, response.text)
