@@ -13,6 +13,11 @@ failure the other frame does not show:
     collapsed  (default)  every receipt closed: the ONE-ROW guarantee
     expanded              the long receipt opened: sender detail + full body
     empty                 an EMPTY-body receipt, opened — the degenerate case
+    group                 a RUN of receipts folded under one quiet-group bar
+                          (design §5, S5): the bar's one line over receipts
+                          and the tool rows between them
+    group-open            the same run with the bar opened: the members list
+                          in place, exactly as they paint unfolded
 
 The ``empty`` shape exists because that branch is the one an ordinary body
 never takes, and it has now carried two defects in a row: first a dangling
@@ -80,6 +85,7 @@ from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.tool_card import ToolCard  # noqa: E402
 from local_operator.tui.widgets.transcript import (  # noqa: E402
     PeerMessageBlock,
+    QuietGroupBlock,
     UserBlock,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
@@ -195,6 +201,39 @@ def _seed_empty(app: OperatorApp) -> list[PeerMessageBlock]:
     return blocks
 
 
+def _seed_group(app: OperatorApp) -> list[PeerMessageBlock]:
+    """A run of consecutive receipts with tool rows inside — the folded state.
+
+    The frame has to show the fold's whole claim: ONE line where the run used
+    to be five rows (two receipts and three tool rows), the tool rows inside
+    it folded too, and — with the answer after the run as the control — the
+    ledger around it unmoved. The leading tool row is deliberate: a span runs
+    between splitters, so the row ABOVE the first receipt sits inside it.
+    """
+    app._append_block(UserBlock("what is left before we can cut the release?"))
+    _tool(
+        app,
+        "t0",
+        "bash",
+        {"command": "git log --oneline v0.50.3..origin/main"},
+        "2 commits",
+    )
+    first = PeerMessageBlock(LONG_PEER_BODY, LONG_SENDER)
+    app._append_block(first)
+    _tool(
+        app,
+        "t1",
+        "send",
+        {"target": "lo-release-window", "message": "folding #751 in"},
+        "delivered",
+    )
+    second = PeerMessageBlock(SHORT_PEER_BODY, SHORT_SENDER)
+    app._append_block(second)
+    _tool(app, "t2", "bash", {"command": "pytest tests/unit/tui -q"}, "green")
+    app._append_block(_answer("Both receipts are folded under one bar."))
+    return [first, second]
+
+
 async def main() -> None:
     out = sys.argv[1]
     size = (100, 30)
@@ -206,7 +245,12 @@ async def main() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        blocks = _seed_empty(app) if shape == "empty" else _seed(app)
+        if shape == "empty":
+            blocks = _seed_empty(app)
+        elif shape in ("group", "group-open"):
+            blocks = _seed_group(app)
+        else:
+            blocks = _seed(app)
         await pilot.pause()
 
         if shape == "empty":
@@ -216,6 +260,13 @@ async def main() -> None:
                 toggle = getattr(block, "toggle_expanded", None)
                 if callable(toggle):
                     toggle()
+            await pilot.pause()
+        elif shape == "group-open":
+            # Open every bar: the frame this state exists for is the members
+            # listing in place — the same widgets that paint unfolded, with
+            # the bar's own one line above them.
+            for bar in app.query(QuietGroupBlock):
+                bar.toggle_expanded()
             await pilot.pause()
         elif shape == "expanded":
             # `toggle_expanded` exists only once the receipt is a ledger card.

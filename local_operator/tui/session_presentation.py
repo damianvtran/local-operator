@@ -232,6 +232,27 @@ class OlderHistoryNotice(NoticeBlock, can_focus=True):
 
     BINDINGS = [Binding("enter", "older", "Older messages", show=False)]
 
+    #: Head-cut marker for the quiet-group fold (design §5, S5): a span whose
+    #: first row sits below this notice may continue into rows that are NOT on
+    #: hand, so it states a minimum ("at least N") instead of an exact count.
+    #: The fold reads the attribute, not the class: the notice RESTATES rather
+    #: than removes itself when the head runs out (see :meth:`set_interactive`),
+    #: so presence alone stops being the truth — :meth:`set_quiet_group_head_cut`
+    #: is flipped from the same ``more`` verdict the copy is reconciled
+    #: against. Conservative when stale: the notice's own copy is the row's
+    #: answer to the same question, and a fold that reads the old value states
+    #: "at least N", which stays true either way.
+    QUIET_GROUP_HEAD_CUT = True
+
+    def set_quiet_group_head_cut(self, cut: bool) -> None:
+        """State whether rows above this notice are still off-screen.
+
+        Called from the head notice's reconciliation (the same ``more``
+        verdict the copy is decided from), so the fold cannot claim a minimum
+        over a head that is provably the conversation's start.
+        """
+        self.QUIET_GROUP_HEAD_CUT = bool(cut)
+
     class Requested(Message):
         def __init__(self, notice: OlderHistoryNotice) -> None:
             super().__init__()

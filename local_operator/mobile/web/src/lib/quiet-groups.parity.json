@@ -1,0 +1,683 @@
+{
+	"_": "THE SHARED QUIET-GROUP PARITY FIXTURE (quiet-turn design §5, rev 2). This file is the ONE definition's cross-client contract: the UI's `quietGroupsOf`/`quietGroupOfSegment` (turn-collapse-model.ts) are checked against it by scripts/turn-collapse-model.test.mjs today, and the native, relay-web and TUI group slices COPY this file and check their own derivation against the same cases, the way local-operator's `format.parity.json` and `spend-context.parity.json` pin a formatter across surfaces. A group is client-derived: there is no wire kind and no capability flag, so this fixture - not a schema - is what keeps the clients from drifting apart in silence.",
+	"vocabulary": "Rows are records in the UI's `TranscriptRecord` vocabulary, carrying only the fields the group definition reads: `kind` plus (`ts`, `id`) and, per kind, `text` (user/wake/assistant/notice/custom), `body`+`sender` (peer; missing sender fields fall back to the identity ladder), `customType`+`level` (custom), `toolName`+`phase`+`isError` (tool), `complete` (notice). A client with a different record type maps these onto its own shape; the DERIVATION is the shared thing.",
+	"shape": "Each case's `expected` is what the group entry point returns: for cases with a `span` (`[from, to]` indexes into `rows`, plus optional `spanHeadLoaded`/`open`), `quietGroupOfSegment(records, span, options)`; otherwise the whole-array `quietGroupsOf(records)`. Timestamps are ms epoch, copied verbatim into `firstTs`/`lastTs`.",
+	"generatedBy": "authored by hand for local-operator-ui S2 (quiet-turn slice), 2026-10-10; every case is also exercised through the shipped plan in scripts/turn-collapse-model.test.mjs.",
+	"cases": [
+		{
+			"name": "a peer group spans two quiet cycles: the quiet calls sit inside it and are excluded from the action count, and a failed call is counted as failed",
+			"rows": [
+				{
+					"kind": "peer",
+					"id": "p1",
+					"ts": 1000000,
+					"body": "first",
+					"sender": {
+						"conversationName": "ingest-rail"
+					}
+				},
+				{
+					"kind": "tool",
+					"id": "t1",
+					"ts": 1001000,
+					"toolName": "bash",
+					"durationS": 3
+				},
+				{
+					"kind": "tool",
+					"id": "q1",
+					"ts": 1002000,
+					"toolName": "no_reply"
+				},
+				{
+					"kind": "peer",
+					"id": "p2",
+					"ts": 9040000,
+					"body": "second",
+					"sender": {
+						"conversationName": "hermes"
+					}
+				},
+				{
+					"kind": "tool",
+					"id": "t2",
+					"ts": 9041000,
+					"toolName": "read",
+					"isError": true
+				},
+				{
+					"kind": "tool",
+					"id": "q2",
+					"ts": 9042000,
+					"toolName": "no_reply"
+				}
+			],
+			"expected": [
+				{
+					"key": "qg:p1",
+					"family": "peer",
+					"count": 2,
+					"firstTs": 1000000,
+					"lastTs": 9040000,
+					"senders": [
+						{
+							"label": "\"ingest-rail\"",
+							"count": 1
+						},
+						{
+							"label": "\"hermes\"",
+							"count": 1
+						}
+					],
+					"actions": 2,
+					"failed": 1,
+					"open": true,
+					"rowIds": ["p1", "t1", "q1", "p2", "t2", "q2"]
+				}
+			]
+		},
+		{
+			"name": "one receipt is not a group",
+			"rows": [
+				{
+					"kind": "peer",
+					"id": "p1",
+					"ts": 1000000,
+					"body": "hello"
+				},
+				{
+					"kind": "tool",
+					"id": "t1",
+					"ts": 1001000,
+					"toolName": "bash"
+				},
+				{
+					"kind": "tool",
+					"id": "q1",
+					"ts": 1002000,
+					"toolName": "no_reply"
+				}
+			],
+			"expected": []
+		},
+		{
+			"name": "a user row splits two groups; the earlier one is closed, the later one is the open tail",
+			"rows": [
+				{
+					"kind": "peer",
+					"id": "p1",
+					"ts": 1000000,
+					"body": "a"
+				},
+				{
+					"kind": "peer",
+					"id": "p2",
+					"ts": 1000060,
+					"body": "b"
+				},
+				{
+					"kind": "user",
+					"id": "u3",
+					"ts": 1000120,
+					"text": "steer"
+				},
+				{
+					"kind": "peer",
+					"id": "p4",
+					"ts": 1000180,
+					"body": "c"
+				},
+				{
+					"kind": "peer",
+					"id": "p5",
+					"ts": 1000240,
+					"body": "d"
+				}
+			],
+			"expected": [
+				{
+					"key": "qg:p1",
+					"family": "peer",
+					"count": 2,
+					"firstTs": 1000000,
+					"lastTs": 1000060,
+					"senders": [
+						{
+							"label": "another session",
+							"count": 2
+						}
+					],
+					"actions": 0,
+					"failed": 0,
+					"open": false,
+					"rowIds": ["p1", "p2"]
+				},
+				{
+					"key": "qg:p4",
+					"family": "peer",
+					"count": 2,
+					"firstTs": 1000180,
+					"lastTs": 1000240,
+					"senders": [
+						{
+							"label": "another session",
+							"count": 2
+						}
+					],
+					"actions": 0,
+					"failed": 0,
+					"open": true,
+					"rowIds": ["p4", "p5"]
+				}
+			]
+		},
+		{
+			"name": "visible assistant text splits a group",
+			"rows": [
+				{
+					"kind": "peer",
+					"id": "p1",
+					"ts": 1000000,
+					"body": "a"
+				},
+				{
+					"kind": "peer",
+					"id": "p2",
+					"ts": 1000060,
+					"body": "b"
+				},
+				{
+					"kind": "assistant",
+					"id": "a3",
+					"ts": 1000120,
+					"text": "on it"
+				}
+			],
+			"expected": [
+				{
+					"key": "qg:p1",
+					"family": "peer",
+					"count": 2,
+					"firstTs": 1000000,
+					"lastTs": 1000060,
+					"senders": [
+						{
+							"label": "another session",
+							"count": 2
+						}
+					],
+					"actions": 0,
+					"failed": 0,
+					"open": false,
+					"rowIds": ["p1", "p2"]
+				}
+			]
+		},
+		{
+			"name": "a completion receipt (a terminal marker) splits a group",
+			"rows": [
+				{
+					"kind": "peer",
+					"id": "p1",
+					"ts": 1000000,
+					"body": "a"
+				},
+				{
+					"kind": "peer",
+					"id": "p2",
+					"ts": 1000060,
+					"body": "b"
+				},
+				{
+					"kind": "notice",
+					"id": "k3",
+					"ts": 1000120,
+					"text": "Completed",
+					"complete": true
+				},
+				{
+					"kind": "peer",
+					"id": "p4",
+					"ts": 1000180,
+					"body": "c"
+				},
+				{
+					"kind": "peer",
+					"id": "p5",
+					"ts": 1000240,
+					"body": "d"
+				}
+			],
+			"expected": [
+				{
+					"key": "qg:p1",
+					"family": "peer",
+					"count": 2,
+					"firstTs": 1000000,
+					"lastTs": 1000060,
+					"senders": [
+						{
+							"label": "another session",
+							"count": 2
+						}
+					],
+					"actions": 0,
+					"failed": 0,
+					"open": false,
+					"rowIds": ["p1", "p2"]
+				},
+				{
+					"key": "qg:p4",
+					"family": "peer",
+					"count": 2,
+					"firstTs": 1000180,
+					"lastTs": 1000240,
+					"senders": [
+						{
+							"label": "another session",
+							"count": 2
+						}
+					],
+					"actions": 0,
+					"failed": 0,
+					"open": true,
+					"rowIds": ["p4", "p5"]
+				}
+			]
+		},
+		{
+			"name": "a mixed family states Messages and carries no senders (the sender summary is peer-only)",
+			"rows": [
+				{
+					"kind": "peer",
+					"id": "p1",
+					"ts": 1000000,
+					"body": "a",
+					"sender": {
+						"conversationName": "ingest-rail"
+					}
+				},
+				{
+					"kind": "wake",
+					"id": "w2",
+					"ts": 1000060,
+					"text": "wake"
+				}
+			],
+			"expected": [
+				{
+					"key": "qg:p1",
+					"family": "mixed",
+					"count": 2,
+					"firstTs": 1000000,
+					"lastTs": 1000060,
+					"senders": [],
+					"actions": 0,
+					"failed": 0,
+					"open": true,
+					"rowIds": ["p1", "w2"]
+				}
+			]
+		},
+		{
+			"name": "senders are the top 2 plus one aggregate entry for the rest, by count then first appearance",
+			"rows": [
+				{
+					"kind": "peer",
+					"id": "p1",
+					"ts": 1000000,
+					"body": "a",
+					"sender": {
+						"conversationName": "alpha"
+					}
+				},
+				{
+					"kind": "peer",
+					"id": "p2",
+					"ts": 1000010,
+					"body": "b",
+					"sender": {
+						"conversationName": "alpha"
+					}
+				},
+				{
+					"kind": "peer",
+					"id": "p3",
+					"ts": 1000020,
+					"body": "c",
+					"sender": {
+						"conversationName": "alpha"
+					}
+				},
+				{
+					"kind": "peer",
+					"id": "p4",
+					"ts": 1000030,
+					"body": "d",
+					"sender": {
+						"conversationName": "beta"
+					}
+				},
+				{
+					"kind": "peer",
+					"id": "p5",
+					"ts": 1000040,
+					"body": "e",
+					"sender": {
+						"conversationName": "beta"
+					}
+				},
+				{
+					"kind": "peer",
+					"id": "p6",
+					"ts": 1000050,
+					"body": "f",
+					"sender": {
+						"conversationName": "gamma"
+					}
+				},
+				{
+					"kind": "peer",
+					"id": "p7",
+					"ts": 1000060,
+					"body": "g",
+					"sender": {
+						"conversationName": "delta"
+					}
+				}
+			],
+			"expected": [
+				{
+					"key": "qg:p1",
+					"family": "peer",
+					"count": 7,
+					"firstTs": 1000000,
+					"lastTs": 1000060,
+					"senders": [
+						{
+							"label": "\"alpha\"",
+							"count": 3
+						},
+						{
+							"label": "\"beta\"",
+							"count": 2
+						},
+						{
+							"label": "2 more",
+							"count": 2
+						}
+					],
+					"actions": 0,
+					"failed": 0,
+					"open": true,
+					"rowIds": ["p1", "p2", "p3", "p4", "p5", "p6", "p7"]
+				}
+			]
+		},
+		{
+			"name": "a head-cut span states no times and its count is a minimum (the caller's spanHeadLoaded verdict)",
+			"span": [0, 5],
+			"spanHeadLoaded": false,
+			"open": true,
+			"rows": [
+				{
+					"kind": "peer",
+					"id": "p1",
+					"ts": 1000000,
+					"body": "a"
+				},
+				{
+					"kind": "tool",
+					"id": "t1",
+					"ts": 1001000,
+					"toolName": "bash"
+				},
+				{
+					"kind": "tool",
+					"id": "q1",
+					"ts": 1002000,
+					"toolName": "no_reply"
+				},
+				{
+					"kind": "peer",
+					"id": "p2",
+					"ts": 1003000,
+					"body": "b"
+				},
+				{
+					"kind": "tool",
+					"id": "t2",
+					"ts": 1004000,
+					"toolName": "read"
+				},
+				{
+					"kind": "tool",
+					"id": "q2",
+					"ts": 1005000,
+					"toolName": "no_reply"
+				}
+			],
+			"expected": {
+				"key": "qg:p1",
+				"family": "peer",
+				"count": 2,
+				"firstTs": null,
+				"lastTs": null,
+				"senders": [
+					{
+						"label": "another session",
+						"count": 2
+					}
+				],
+				"actions": 2,
+				"failed": 0,
+				"open": true,
+				"rowIds": ["p1", "t1", "q1", "p2", "t2", "q2"]
+			}
+		},
+		{
+			"name": "a sub-span of a larger stretch refuses: a bar states a whole group, never a fragment of one",
+			"span": [1, 2],
+			"rows": [
+				{
+					"kind": "peer",
+					"id": "p1",
+					"ts": 1000000,
+					"body": "a"
+				},
+				{
+					"kind": "tool",
+					"id": "t1",
+					"ts": 1001000,
+					"toolName": "bash"
+				},
+				{
+					"kind": "tool",
+					"id": "q1",
+					"ts": 1002000,
+					"toolName": "no_reply"
+				},
+				{
+					"kind": "peer",
+					"id": "p2",
+					"ts": 1003000,
+					"body": "b"
+				}
+			],
+			"expected": null
+		},
+		{
+			"name": "a compaction statement (the pinned memory row) splits a group: both entry points refuse to fold across it",
+			"rows": [
+				{
+					"kind": "peer",
+					"id": "p1",
+					"ts": 1000000,
+					"body": "a"
+				},
+				{
+					"kind": "peer",
+					"id": "p2",
+					"ts": 1000060,
+					"body": "b"
+				},
+				{
+					"kind": "compaction",
+					"id": "c3",
+					"ts": 1000120,
+					"text": "Context compacted",
+					"before": 41000
+				},
+				{
+					"kind": "peer",
+					"id": "p4",
+					"ts": 1000180,
+					"body": "c"
+				},
+				{
+					"kind": "peer",
+					"id": "p5",
+					"ts": 1000240,
+					"body": "d"
+				}
+			],
+			"expected": [
+				{
+					"key": "qg:p1",
+					"family": "peer",
+					"count": 2,
+					"firstTs": 1000000,
+					"lastTs": 1000060,
+					"senders": [
+						{
+							"label": "another session",
+							"count": 2
+						}
+					],
+					"actions": 0,
+					"failed": 0,
+					"open": false,
+					"rowIds": ["p1", "p2"]
+				},
+				{
+					"key": "qg:p4",
+					"family": "peer",
+					"count": 2,
+					"firstTs": 1000180,
+					"lastTs": 1000240,
+					"senders": [
+						{
+							"label": "another session",
+							"count": 2
+						}
+					],
+					"actions": 0,
+					"failed": 0,
+					"open": true,
+					"rowIds": ["p4", "p5"]
+				}
+			]
+		},
+		{
+			"name": "a wake-only run states the wake family",
+			"rows": [
+				{
+					"kind": "wake",
+					"id": "w1",
+					"ts": 1000000,
+					"text": "wake"
+				},
+				{
+					"kind": "wake",
+					"id": "w2",
+					"ts": 1000060,
+					"text": "wake"
+				}
+			],
+			"expected": [
+				{
+					"key": "qg:w1",
+					"family": "wake",
+					"count": 2,
+					"firstTs": 1000000,
+					"lastTs": 1000060,
+					"senders": [],
+					"actions": 0,
+					"failed": 0,
+					"open": true,
+					"rowIds": ["w1", "w2"]
+				}
+			]
+		},
+		{
+			"name": "a monitor-only run states the monitor family",
+			"rows": [
+				{
+					"kind": "custom",
+					"id": "x1",
+					"ts": 1000000,
+					"customType": "monitor_prompt",
+					"text": "(monitor) queue depth",
+					"level": "info"
+				},
+				{
+					"kind": "custom",
+					"id": "x2",
+					"ts": 1000060,
+					"customType": "monitor_prompt",
+					"text": "(monitor) queue depth",
+					"level": "info"
+				}
+			],
+			"expected": [
+				{
+					"key": "qg:x1",
+					"family": "monitor",
+					"count": 2,
+					"firstTs": 1000000,
+					"lastTs": 1000060,
+					"senders": [],
+					"actions": 0,
+					"failed": 0,
+					"open": true,
+					"rowIds": ["x1", "x2"]
+				}
+			]
+		},
+		{
+			"name": "a job-only run states the job family",
+			"rows": [
+				{
+					"kind": "custom",
+					"id": "j1",
+					"ts": 1000000,
+					"customType": "job_result",
+					"text": "job done",
+					"level": "info"
+				},
+				{
+					"kind": "custom",
+					"id": "j2",
+					"ts": 1000060,
+					"customType": "job_result",
+					"text": "job done",
+					"level": "info"
+				}
+			],
+			"expected": [
+				{
+					"key": "qg:j1",
+					"family": "job",
+					"count": 2,
+					"firstTs": 1000000,
+					"lastTs": 1000060,
+					"senders": [],
+					"actions": 0,
+					"failed": 0,
+					"open": true,
+					"rowIds": ["j1", "j2"]
+				}
+			]
+		}
+	]
+}
