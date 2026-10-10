@@ -613,8 +613,15 @@ class MonitorScheduler:
                 change: _Change | None = None
                 async with self._write_lock:
                     entry = self._entries.get(monitor_id)
-                    if entry is None or entry.generation != generation:
-                        return  # cancelled/replaced mid-flight: drop the result
+                    if self._disposed or entry is None or entry.generation != generation:
+                        # A disposed scheduler must never write: dispose()
+                        # cancelled this task, and the guard is what makes the
+                        # "cannot apply its result after teardown" claim true
+                        # even for a tool that swallowed the cancel and
+                        # returned a result anyway — the shape measured live
+                        # (a cancelled check's steering-detach NOTICE was
+                        # adopted as m28's baseline).
+                        return
                     now = self._now()
                     error = outcome.get("error")
                     if error:
@@ -639,7 +646,7 @@ class MonitorScheduler:
                     suppressed = suppressed_counter(choice)
                     async with self._write_lock:
                         entry = self._entries.get(monitor_id)
-                        if entry is None or entry.generation != generation:
+                        if self._disposed or entry is None or entry.generation != generation:
                             return  # cancelled during the call: drop the deliver
                         delivery = self._settle_change(entry, change, suppressed)
                         if delivery is not None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 from . import (
     tui_welcome,
     wire_errors,
+    wire_errors_settings,
     wire_exec,
     wire_incidents,
     wire_notices,
@@ -20,6 +21,7 @@ from . import (
 __all__ = [
     "tui_welcome",
     "wire_errors",
+    "wire_errors_settings",
     "wire_exec",
     "wire_incidents",
     "wire_notices",

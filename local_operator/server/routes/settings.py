@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
+from local_operator.i18n.keys import wire_errors_settings as _we
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
@@ -139,7 +140,11 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
 def _setting(key: str) -> settings_io.Setting:
     setting = settings_io.resolve_key(key)
     if setting is None:
-        raise HTTPException(404, "This setting is not registered.")
+        # Refusals carry the RFC §2.6 envelope ({code, params, text}) so clients
+        # can react to `code` and older readers still get the sentence in
+        # `text`. The contract is `detail: str | {code, params, text}` while
+        # routes migrate in slices (docs/design/i18n.md §2.6).
+        raise HTTPException(404, _we.not_registered().envelope())
     return setting
 
 
@@ -150,9 +155,7 @@ async def list_settings(manager: ConfigManager = Depends(get_config_manager)):
             settings_io._require_readable_config(manager)
             manager.reload()
         except settings_io.ConfigUnreadableError:
-            raise HTTPException(
-                409, "The configuration file cannot be read. Repair it before saving."
-            )
+            raise HTTPException(409, _we.config_unreadable().envelope())
         return CRUDResponse(
             status=200,
             message="Settings retrieved.",
@@ -200,7 +203,7 @@ async def edit_setting(
 ):
     setting = _setting(key)
     if _private_endpoint(edit.value):
-        raise HTTPException(422, "Use an endpoint without inline credentials or query parameters.")
+        raise HTTPException(422, _we.inline_credentials().envelope())
     async with _write_lock:
         try:
             if setting.kind is settings_io.Kind.CASCADE:
@@ -210,11 +213,12 @@ async def edit_setting(
             else:
                 settings_io.write_setting(manager, setting, edit.value)
         except settings_io.ConfigUnreadableError:
-            raise HTTPException(
-                409, "The configuration file cannot be read. Repair it before saving."
-            )
+            raise HTTPException(409, _we.config_unreadable().envelope())
         except ValueError as error:
-            raise HTTPException(422, str(error)) from None
+            # The ValueError prose is the settings_io layer's own sentence
+            # (translated at its source in a later slice); `text` carries it
+            # VERBATIM so readers that only show the string see no change.
+            raise HTTPException(422, _we.invalid_value(error=str(error)).envelope()) from None
         return CRUDResponse(status=200, message="Setting saved.", result=_view(manager, setting))
 
 
@@ -225,9 +229,10 @@ async def reset_setting(key: str, manager: ConfigManager = Depends(get_config_ma
         try:
             settings_io.reset_setting(manager, setting)
         except settings_io.ConfigUnreadableError:
-            raise HTTPException(
-                409, "The configuration file cannot be read. Repair it before saving."
-            )
+            raise HTTPException(409, _we.config_unreadable().envelope())
         except ValueError as error:
-            raise HTTPException(422, str(error)) from None
+            # The ValueError prose is the settings_io layer's own sentence
+            # (translated at its source in a later slice); `text` carries it
+            # VERBATIM so readers that only show the string see no change.
+            raise HTTPException(422, _we.invalid_value(error=str(error)).envelope()) from None
         return CRUDResponse(status=200, message="Setting reset.", result=_view(manager, setting))

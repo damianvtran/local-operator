@@ -58,6 +58,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # ``lop prune``'s sweep vocabulary: these ARE the sentences that line prints
     # (``superseded, unreferenced``), authored in ``update.py`` for a reader.
     ("local_operator/cli.py", "_cleanup_row", "reason"): (1, "the prune vocabulary's own prose"),
+    # The delegated content layer's per-pad row — the same class of prose as
+    # ``_cleanup_row`` above: ``merged-clean clone past the window`` /
+    # ``stale output past the window``, composed by
+    # ``session/delegated_retention.py`` from this project's own class phrases
+    # (``CONTENT_CLASS_*``) and printed as the dry-run parenthetical. The
+    # content pass has no peers and no wire; nothing here is a mesh value.
+    ("local_operator/cli.py", "_content_row_text", "reason"): (
+        1,
+        "the content layer's own class prose (merged-clean clone / stale output past the window)",
+    ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
     # ``lop update``'s prune notices read the plan's OWN reasons — the same sweep
@@ -118,6 +128,22 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/onboard.py", "OnboardRun.step_provision", "reason"): (
         1,
         "this device's own store-write refusal code, shown as the caveat's parenthetical",
+    ),
+    # The update verb's origin tail reads the MEMBER'S OWN reply sentence and puts it
+    # on the human line as ``message`` — and that is the design's whole contract
+    # ("report the member's own words", RU §3). The member's updater authors the
+    # field as prose (``UpdateError``'s texts, the state sentences), so the read is a
+    # PASS-THROUGH rather than a gloss: round 3 (M2/Q-R3-2) measured the gloss
+    # RE-WORDING receipts into false states — `uv tool install failed: disk full` lost
+    # its leading clause, and `…: E2BIG` / `[Errno 13] Permission denied: '…'` read as
+    # "it did not answer" when the member had answered. The relay's DIAL seam in the
+    # same function IS glossed (``resume.peer_reason_words``), because that one
+    # carries the relay's wire tokens; the two registers must not swap verdicts.
+    ("local_operator/network/meshupdate.py", "update_peer", "reason"): (
+        1,
+        "the member's own receipt sentence, authored-for-a-reader prose passed "
+        "through verbatim (the design's 'the member's own words'); glossing it "
+        "re-worded receipts into false states (round 3, M2/Q-R3-2)",
     ),
     # The relay's OWN sentence for a session op (``runtime joining``), printed verbatim
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
