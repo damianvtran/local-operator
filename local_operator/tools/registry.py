@@ -124,6 +124,15 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # purpose: appending never shifts a provider-visible array prefix, which
     # is what the prompt cache keys on.
     "code_requests": lambda context: build_code_requests_tool(context),
+    # createIf: rung 3 — present only where the session may END A TURN QUIETLY
+    # (`context.quiet_end`; absent for subagent children, one-shot hosts,
+    # output-contract sessions and under LOP_NO_REPLY=0 — see
+    # `Session._quiet_end_callable` and docs/design/quiet-turns.md §4).
+    # Deferred (its schema is never needed to form its argumentless call, and
+    # the rule is named in the system prompt). Appended at the END of both
+    # tables on purpose: appending never shifts a provider-visible array
+    # prefix, which is what the prompt cache keys on.
+    "no_reply": lambda context: builtin.build_no_reply_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -167,6 +176,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "ask_withdraw",
     "generate_image",
     "code_requests",
+    "no_reply",
 ]
 
 

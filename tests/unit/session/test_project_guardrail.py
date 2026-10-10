@@ -57,6 +57,7 @@ from local_operator.session.session import Session, _project_reminder_text
 from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
+from tests.unit.session.test_session import wait_for
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -703,3 +704,31 @@ async def test_lifecycle_in_flight_statuses_are_nudged(tmp_path, status) -> None
 
     assert any(stream.reminders(index) for index in range(len(stream.requests)))
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_turn_is_not_nudged_for_a_stale_project(tmp_path) -> None:
+    """The quiet call is not WORK (docs/design/quiet-turns.md §1): it is
+    excluded from ``_turn_tool_calls``, so the worked-turn guard still reads 0
+    and a quiet wake on a stale project must not re-enter the loop to report
+    on work nobody did. The pair with ``test_a_turn_with_no_tool_calls_is_not_
+    nudged`` is the point — the transcript shows a tool call, so a counter that
+    counted it would nudge here."""
+    store = stale_store(tmp_path, "payments-migration")
+    stream = ScriptedStream([tool_call("c-quiet", "no_reply", {})])
+    session = make_session(tmp_path, stream, store=store)
+    quiet = create_tools(session._build_tool_context(), enabled=["no_reply"])
+    assert quiet, "the door must bind on a plain session"
+    session.refresh_tools([*session._tools, *quiet])
+    try:
+        await session.receive_peer_message(
+            "beacon", mode="mailbox", wake=True, sender={"pid": 1, "conversation_name": "peer"}
+        )
+        await wait_for(lambda: len(stream.requests) >= 1)
+        await wait_for(lambda: not session.is_streaming and not session._turn_lock.locked())
+        # A buggy re-entry would buy a second call in this window.
+        await asyncio.sleep(0.05)
+        assert len(stream.requests) == 1, "a quiet turn is not work — no nudge"
+        assert not any(stream.reminders(index) for index in range(len(stream.requests)))
+    finally:
+        await session.dispose()
