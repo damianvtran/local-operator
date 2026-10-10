@@ -393,6 +393,11 @@ def test_the_reply_vocabulary_is_the_one_the_design_freezes(
         assert key in detail, (key, detail)
     assert detail["state"] == "already_on_target", detail
     assert detail["ok"] is True
+    # THE GLOSS IS A PASS-THROUGH FOR THIS OP'S OWN SENTENCES (CI shard 0):
+    # the tail now renders the member's ``reason`` through
+    # ``resume.peer_reason_words``, which must hand a sentence written for a
+    # reader back UNCHANGED — this pins that it does for the common case.
+    assert detail["message"] == "this device already runs 0.99.0", detail
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +632,17 @@ def test_the_channel_check_refuses_only_on_a_confirmed_absence() -> None:
 def test_the_unreachable_sentence_carries_the_dial_seams_reason(
     devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
-    """m5: ``no_endpoint`` / ``not_a_member`` must not collapse into one vague line."""
+    """m5: the distinguished fact reaches the line IN WORDS, never as a token.
+
+    ``no_endpoint`` / ``not_a_member`` must not collapse into one vague sentence,
+    and the token must not reach the line raw — the parenthetical goes through
+    ``resume.peer_reason_words``, the mesh's one spelling for a reason on a human
+    line. (CI shard 0's flagged read was NOT this one: the scanner sees
+    ``.get("reason")``-shaped reads and this is a bare local name — the flagged
+    site was the classifier tail in the same function, glossed in the same pass
+    and pinned by the guardian.) Both halves are asserted: the reading is
+    present, the token is not.
+    """
     server_a, server_b, record = _rig(devices, monkeypatch)
 
     def _no_link(device_id: str, **kwargs: Any) -> tuple[None, str]:
@@ -636,7 +651,8 @@ def test_the_unreachable_sentence_carries_the_dial_seams_reason(
     monkeypatch.setattr(server_b, "_ensure_link_with_reason", _no_link)
     detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
     assert detail["code"] == "unreachable", detail
-    assert "no_endpoint" in detail["message"], detail
+    assert "no address published for it" in detail["message"], detail
+    assert "no_endpoint" not in detail["message"], "the token is the --json register"
 
 
 _PROBE = """

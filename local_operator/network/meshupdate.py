@@ -720,22 +720,33 @@ def update_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
     BEFORE the first request (RU §5 — an old member never has to compose a
     refusal it did not ask to make), send the target identity, and report the
     member's own words. It sends NO code, NO ref to fetch, and NO command.
+
+    EVERY ``reason`` THIS FUNCTION RENDERS GOES THROUGH THE GLOSS: the dial
+    seam's token (the unreachable line) and the member's reply sentence (the
+    ``message`` this returns). ``resume.peer_reason_words`` is the mesh's one
+    spelling for a reason on a human line — ``test_reason_surfaces.py`` holds
+    every renderer to it — and it is imported locally, the way the network CLI
+    spells it, so the slice takes no module-scope dependency on the gloss
+    layer.
     """
+    from local_operator.resume import peer_reason_words  # the mesh's one gloss
+
     # The one dial seam, and the reason it returns.
     link, dial_reason = server._ensure_link_with_reason(device_id)  # noqa: SLF001
     label = server._member_name(device_id) or device_id  # noqa: SLF001 — the mesh's own name
     if link is None:
-        # THE SEAM'S OWN REASON RIDES THE SENTENCE (agent review round 1, m5):
-        # ``no_endpoint``, ``not_a_member`` and the dial's refusal code are
-        # different facts with different remedies, and dropping them left the
-        # operator to guess between "that device is off" and "this device was
-        # never told where it lives".
-        reason = f" ({dial_reason})" if dial_reason else ""
+        # THE SEAM'S OWN REASON RIDES THE SENTENCE, IN WORDS (m5): ``no_endpoint``,
+        # ``not_a_member`` and the dial's refusal codes are different facts with
+        # different remedies, and dropping them left the operator to guess
+        # between "that device is off" and "this device was never told where it
+        # lives". The TOKEN itself stays the ``--json`` register; the line reads
+        # the gloss.
         return {
             "ok": False,
             "code": "unreachable",
             "message": (
-                f"{label} is not answering right now, so it was not asked to update{reason}"
+                f"{label} is not answering right now, so it was not asked to update"
+                f" ({peer_reason_words(dial_reason)})"
             ),
             "device_id": device_id,
             "name": label,
@@ -849,7 +860,18 @@ def update_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
         "ok": ok,
         "code": inner_code or state or "failed",
         "state": state,
-        "message": str(detail_out.get("reason") or ""),
+        # THE MEMBER'S OWN SENTENCE, GLOSSED ON ITS WAY OUT (CI shard 0's
+        # flagged read was THIS one, not the unreachable parenthetical: the
+        # scanner sees ``.get("reason")``-shaped reads, and this coerces the
+        # reply's ``reason`` onto the origin's ``message`` line). For this op's
+        # own receipt sentences the gloss is a pass-through by construction —
+        # "a sentence written for a reader is returned as written" — and a
+        # reply that ever carried a bare token gets words instead. The
+        # emptiness guard keeps a missing reason a missing message, not the
+        # gloss's "it did not answer" default (which belongs to reachability).
+        "message": (
+            peer_reason_words(str(detail_out.get("reason"))) if detail_out.get("reason") else ""
+        ),
         "method": str(detail_out.get("method") or ""),
         "version": str(detail_out.get("version") or ""),
         "sessions": detail_out.get("sessions") or {"moved": 0, "kept": 0},
