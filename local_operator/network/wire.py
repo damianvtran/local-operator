@@ -119,6 +119,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "peer-readiness-v1",
     "mcp-defs-v1",
     "pair-offer-v1",
+    "mesh-update-v1",
     "zlib-records-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
@@ -135,6 +136,14 @@ PEER_READINESS_V1 = "peer-readiness-v1"
 #: did not ask to make. Named here so the tuple above, the push's ask condition
 #: and the tests read ONE spelling of the string.
 MCP_DEFS_V1 = "mcp-defs-v1"
+#: The mesh rolling-updates capability (``meshupdate.py``; mesh-rolling-
+#: updates.md §5). Advertised by every build that ships ``net_update``; the
+#: origin checks it BEFORE its first request, so a member that predates this
+#: feature never has to compose a refusal it did not ask to make — it is
+#: recorded ``predates_rolling_updates`` and the existing "update it there"
+#: path applies. Named here so the tuple above, the slice's ask condition and
+#: the tests read ONE spelling of the string.
+MESH_UPDATE_V1 = "mesh-update-v1"
 #: The pair ceremony's share list (``handshake.pair_offer_frame``). Advertised by
 #: every build that SENDS or READS ``net_pair_offer``; the owner checks it against
 #: the joiner's hello before sending, and the joiner's bounded drain checks it

@@ -156,7 +156,7 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 # Capabilities and roles
 # ---------------------------------------------------------------------------
 
-#: The ONE capability vocabulary (convergence round, authoritative): twelve
+#: The ONE capability vocabulary (convergence round, authoritative): thirteen
 #: names, no synonyms. ``broker:request``, ``broker:grant`` and ``member:admin``
 #: were draft names and are not implemented.
 #:
@@ -168,6 +168,16 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 #: ``admin`` member holds the full vocabulary (``ROLE_CAPABILITIES``), so a
 #: consumer reads the member row rather than a role name — and both are in
 #: :data:`GRANTABLE_CAPABILITIES`.
+#:
+#: ``update`` joined in S1 of the mesh rolling updates
+#: (``mesh-rolling-updates.md`` §2): the right for a granted peer to ask THIS
+#: device to install a strictly newer published build. It names the BOUND, not
+#: just the act — the peer never delivers code, never names a ref and never runs
+#: a command; it names a version this device resolves through its OWN channel.
+#: Like the two onboarding scopes it is granted PER MEMBER (no role carries it,
+#: so adding it to a role cannot silently widen every existing member) and it is
+#: a :data:`SELF_DECIDED_SCOPES` member, because the decision governs this
+#: device's own install.
 CAPABILITIES: frozenset[str] = frozenset(
     {
         "list",
@@ -181,6 +191,7 @@ CAPABILITIES: frozenset[str] = frozenset(
         "broker_credential",
         "approve",
         "unattended",
+        "update",
         "admin",
     }
 )
@@ -375,6 +386,15 @@ NET_OPS: tuple[str, ...] = (
     # row (``admin``, the same decision ``net_definitions`` records above) and
     # its own audit event, rather than a section inside that bundle.
     "net_mcp_defs",
+    # MESH ROLLING UPDATES (mesh-update-propagation.md §3; mesh-rolling-
+    # updates.md §2). One peer-scope op, apply-or-answer: the origin names ONLY a
+    # target identity — the version it just moved to, plus its own build ref as
+    # identity (never fetched) — and the member validates, probes its own idle
+    # state and may install from ITS OWN channel. It is the one op in this table
+    # whose capability (``update``) is refused by THIS device's own row for the
+    # requester, which is why the origin learns the grant from the answer rather
+    # than by reading a table it cannot see.
+    "net_update",
     "net_bye",
     "ping",
 )
@@ -475,6 +495,10 @@ LOCAL_OPS: tuple[str, ...] = (
     # A local op for the same reason ``definitions_sync`` is one — this device's
     # own relay being told to talk outward.
     "mcp_defs_sync",
+    # The single-peer update's client half (meshupdate.py): a viewer asking ITS
+    # OWN relay to ask a peer to move to this device's build. A local act by the
+    # ``peer_*`` boundary rule — the peer-scope half is ``net_update``.
+    "peer_update",
 )
 
 #: The phases ``net_session_move`` carries (§1.3 of the build plan). Declared
@@ -522,6 +546,9 @@ GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
         "broker_credential",
         "approve",
         "unattended",
+        # Per member, and NO role carries it: a role that carried ``update``
+        # would widen every existing member the day this table changed.
+        "update",
     }
 )
 
@@ -540,7 +567,7 @@ GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
 #: record a decision it had already made with its operator (§3.3 step 9 runs the
 #: grant on the node). Every capability outside this set keeps the admin-only
 #: write rule; ``broker_credential`` and the role caps explicitly.
-SELF_DECIDED_SCOPES: frozenset[str] = frozenset({"approve", "unattended"})
+SELF_DECIDED_SCOPES: frozenset[str] = frozenset({"approve", "unattended", "update"})
 
 #: What each capability lets the peer DO, in words, for ``member grant/revoke``'s
 #: human output. A capability name alone ("broker_credential") does not tell the
@@ -557,6 +584,11 @@ CAPABILITY_WORDS: dict[str, str] = {
     "broker_credential": "borrow this device's logins",
     "approve": "answer approval prompts for sessions here",
     "unattended": "start sessions here without approval prompts",
+    # The words name the BOUND, not just the act (mesh-rolling-updates.md §2): a
+    # capability row that only said "update this device" would read as an open
+    # authority over the install, and the whole reason a standing grant is
+    # defensible here is the narrowness below.
+    "update": "install a newer build here when this peer asks, and only from this device's own update channel",
     "admin": "administer the network",
 }
 
@@ -637,6 +669,14 @@ OP_CAPABILITY: dict[str, str | None] = {
     # conversation. A ``drive`` peer is told, in words, that the row could not
     # be sent and why — never silently dropped.
     "net_mcp_defs": "admin",
+    # ``update`` — the receiver-side grant (mesh-rolling-updates.md §2). NOT
+    # ``admin``: the grant is per member and governs THIS device's own install,
+    # which is the same class as the two onboarding scopes, not a change to the
+    # network. It is the only capability in this table whose holder is decided
+    # by the RECEIVING device's own member row — a refusal is how the origin
+    # learns the grant is absent (``not_authorised``), quoted by name into the
+    # ``no_grant`` skip.
+    "net_update": "update",
     "net_bye": None,
     "ping": "list",
 }

@@ -251,6 +251,17 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # able to tell it apart from a deny (the operator said no) and from an
         # expiry (the window lapsed on its own).
         "onboard_withdrawn",
+        # MESH ROLLING UPDATES, member side (mesh-update-propagation.md §6). One
+        # row per semantic change of one update request: the request was admitted
+        # by the authoriser, a rule refused it, or the install began/ended. A
+        # per-poll row is exactly what this set must NOT become — the split
+        # between these five names is what keeps a busy member's re-asks
+        # countable without writing one row per ask.
+        "update_requested",
+        "update_refused",
+        "update_started",
+        "update_completed",
+        "update_failed",
     }
 )
 
@@ -474,6 +485,19 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # withdrew (the store only ever accepts the filer), so the row is
     # self-explaining without reading the record.
     "onboard_withdrawn": frozenset({"kind", "surface", "session_id"}),
+    # Mesh rolling updates, member side. `rollout` is the origin's record id when
+    # one exists (empty for the single-peer verb — S1 carries it through so the
+    # S3 driver's rows need no schema change). `target` is the VERSION asked for,
+    # `code` the refusal token this module's own register names, `method` the
+    # install shape on the done/failed pair, and `from` the version the member
+    # was on when the install began. No file paths, no installer output beyond
+    # the bounded tail that rides the REPLY (a sentence for the origin), never
+    # the log.
+    "update_requested": frozenset({"rollout", "target", "capability"}),
+    "update_refused": frozenset({"rollout", "target", "code"}),
+    "update_started": frozenset({"rollout", "target", "method"}),
+    "update_completed": frozenset({"rollout", "target", "method", "from", "version"}),
+    "update_failed": frozenset({"rollout", "target", "method"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second
@@ -556,6 +580,13 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         "onboard_approved",
         "onboard_denied",
         "onboard_connected",
+        # The mesh update request and its by-rule refusals are AUTHORITY
+        # decisions ("may this peer move my install"): a widened standing grant
+        # whose request landed with no record would leave a device explaining an
+        # install nobody can attribute. The begin/end rows stay batched — a crash
+        # in their last second narrates nothing an incident needs.
+        "update_requested",
+        "update_refused",
     }
 )
 
