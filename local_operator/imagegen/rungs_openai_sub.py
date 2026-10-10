@@ -209,6 +209,12 @@ async def run_openai_sub(
     scope boundaries. ``image_size`` and ``seed`` have no wire parameter on
     this route and are dropped silently (the OpenAI rung's rule).
     """
+    # Observe a pre-aborted signal before anything else happens (QA round 2,
+    # Q9): without this the request was SENT before the abort was seen — the
+    # first SSE event observed it — spending plan quota the other rungs now
+    # avoid. Aligns with google/xai/openrouter; a no-op without a signal.
+    if pause is not None:
+        await pause(0.0)
     if source_url is not None:
         raise RungSkipped(
             "The subscription rung has no image-to-image route in v1.",

@@ -284,6 +284,40 @@ async def test_img2img_and_multi_image_are_recorded_skips() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_pre_aborted_signal_stops_before_the_request() -> None:
+    # QA round 2, Q9: align with google/xai/openrouter — a pre-aborted signal
+    # must stop the rung BEFORE the request (it previously sent first and saw
+    # the abort only at the first SSE event, spending plan quota).
+    from local_operator.imagegen import cascade as image_cascade
+
+    calls: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        calls.append(seconds)
+        raise image_cascade.ImageGenerationCancelled()
+
+    recorder = _Recorder()
+    http = _client(recorder.handler(httpx.Response(200, content=_sse(_completed_event()))))
+    with pytest.raises(image_cascade.ImageGenerationCancelled):
+        await rung_mod.run_openai_sub(
+            prompt="a cat",
+            access_token="tok",
+            account_id=None,
+            num_images=1,
+            image_size="square_hd",
+            source_url=None,
+            seed=None,
+            model=None,
+            emit=None,
+            pause=pause,
+            client=http,
+        )
+
+    assert calls == [0.0]
+    assert recorder.requests == []
+
+
+@pytest.mark.asyncio
 async def test_an_http_failure_maps_to_the_lane_error_shape() -> None:
     recorder = _Recorder()
     response = httpx.Response(401, json={"error": {"message": "bad grant"}})

@@ -343,7 +343,7 @@ async def xai_call_bearer(store: AuthStore, session_id: str | None = None) -> st
     try:
         key = await store.get_persisted_api_key("xai", session_id, kinds={"api_key"})
     except Exception:  # noqa: BLE001 - a probe must never take its caller down
-        logger.warning("xai key-row read failed; trying the grant")
+        logger.warning("xai credential read failed; trying the grant")
         key = None
     if key:
         return key
