@@ -1384,7 +1384,7 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
 4. **F4 — "files I edited" opt-in** for code turns.
 5. **F5 — native share/open** (`expo-sharing`, a new dependency).
 6. **F6 — `HtmlPreview` sandbox.** Confirmed and sharpened (round-1 S-R3): `allow-scripts` +
-   `allow-allow-same-origin` + `allow-forms` on an **unauthenticated** backend route
+   `allow-same-origin` + `allow-forms` on an **unauthenticated** backend route
    (`/v1/static/html`, outside both the sensitive-prefix boundary and the legacy gate) — i.e.
    unauthenticated same-origin script execution with arbitrary-path reads. **Land it as its own UI PR
    immediately — this week**; it must not wait on supplements.
