@@ -714,6 +714,50 @@ def reset_store_maintenance() -> Iterator[None]:
         reset_store_maintenance_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def reset_page_cache_between_tests() -> Iterator[None]:
+    """Give every test a worker that has served no transcript page yet.
+
+    ``local_operator.session.page_cache`` keys decoded pages on the journal's
+    file identity, ``(directory, st_ino, st_size)``, in one process-wide cache
+    (its module docstring argues why identity, not a generation counter, is the
+    invalidation). That identity is right for the product and cross-test state
+    for the suite: any later test that reads a journal can be answered from an
+    earlier one's page.
+
+    The collision is not hypothetical. CI run 38037554993 shard 3 (job
+    114171921826) failed
+    ``tests/unit/tui/test_subagent_view.py::test_the_no_fact_fallback_labels_an``
+    ``envelope_by_its_own_kind``, parameter ``[False-False-Parent]``, serving
+    an EARLIER parameter's page (``Parent · redirected`` where ``Parent`` was
+    expected). This repo deletes a PASSING test's ``tmp_path``
+    (``tmp_path_retention_policy = "failed"``) and ``_pytest.tmpdir`` numbers
+    the next directory from the suffixes that still EXIST, so a later parameter
+    gets the earlier one's path back; the kernel recycles the freed inode; and
+    the two journals are byte-length twins. Same ``(directory, st_ino,
+    st_size)``, different bytes, and the cached page answers — a hit the cache
+    cannot tell from a hit on the current file. The in-place rewrite at an
+    unchanged size, the other shape its docstring names, is the same defect one
+    test drives deterministically; see
+    ``tests/unit/session/test_page_cache_isolation.py``.
+
+    Reset BEFORE and AFTER each test, like ``reset_store_maintenance``: before,
+    so no test can be answered from another's cache; after, so nothing this
+    test left can be served inside a teardown that follows. This replaces the
+    file-local fixture ``tests/unit/session/test_page_cache.py`` carried — it
+    was right, it was just scoped to the one file that already knew. It does
+    not touch the product-side residual (a production fix changes the key and
+    its cache semantics), which stays the page-cache owners' call.
+    """
+    from local_operator.session.page_cache import reset_page_cache
+
+    reset_page_cache()
+    try:
+        yield
+    finally:
+        reset_page_cache()
+
+
 def _redaction_filter() -> logging.Filter | None:
     """``local_operator.mcp.redaction``'s filter, iff that module is imported.
 
