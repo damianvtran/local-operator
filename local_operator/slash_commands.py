@@ -1740,6 +1740,22 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.WORD,
         desktop_destination="sessions.stop",
     ),
+    # Turn supplements ("Highlights", memo §3.2 T5). The TUI's whole interaction
+    # with a supplement job — the block paints no pointer-only action pair, and
+    # `ctrl+c` stays the turn interrupt — so cancel / retry / adjust live here.
+    # No `desktop_destination`: the UI renders the block's own controls, so there
+    # is no desktop command path to route to (the `/keys` rule;
+    # `test_desktop_controls.py` pins the withheld set). ANY, the invariant a
+    # boolean-carried row declares (`test_slash_prefixes_text.py`): the trailing
+    # text is this command's argument (`adjust <text>`), so engaging it inline
+    # keeps the rest of the line with it. No echo: the receipt names what
+    # happened to which job, which is more than the typed word.
+    SlashCommand(
+        "highlights",
+        _tr(wire_slash.highlights()),
+        prefixes_text=True,
+        argument_shape=ArgumentShape.ANY,
+    ),
     # The receipt states the resulting mode, which is the durable fact; the
     # typed argument is only how it was reached.
     SlashCommand(

@@ -72,6 +72,10 @@ PREVIOUS_ENGLISH: dict[str, str] = {
     "team": "List teams, chart a team's org, or send a request to a team's manager",
     "agent": "List agents, switch an agent's class, or speak to this session as one",
     "project": "Track workstreams: list, show, new, delete, link, unlink",
+    # Added AFTER the S2 slice (turn supplements, TUI lane): there is no
+    # pre-slice English for a command that did not exist, so this row pins the
+    # text the catalogue shipped with — the same edit-together rule applies.
+    "highlights": "Cancel, retry or steer the highlights under an answer",
 }
 
 
@@ -79,7 +83,7 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # The migrated SITES: the registry field the picker, /help, the desktop
     # catalogue and the phone sheet all read. A missing/extra command raises a
     # KeyError here rather than passing silently.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) == 49
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) == 50
     for command in SLASH_COMMANDS:
         assert command.description == PREVIOUS_ENGLISH[command.name], command.name
 

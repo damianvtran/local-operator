@@ -80,6 +80,7 @@ from local_operator.session.runtime.types import (
     OPERATOR_SIGNATURE_CAPABILITY,
     SessionRecord,
 )
+from local_operator.supplements.contract import SUPPLEMENTS_CAPABILITY
 
 logger = logging.getLogger(__name__)
 
@@ -1232,6 +1233,15 @@ class RemoteSessionClient(AttachClient):
                 auth["display_history_entry_times"] = True
         if self._slash_consumers is not None:
             auth["slash_consumers"] = list(self._slash_consumers)
+        # The remote dial's half of the ``supplements-v1`` gate, mirrored here
+        # for the same reason ``_input_mode_supported`` is (see the comment on
+        # that assignment above): this connect does not delegate to
+        # ``AttachClient.connect``, so an omission would silently mean "this
+        # viewer cannot render supplements" for every mesh session. The relay
+        # forwards the field (``network.dial.AUTH_FIELDS``) and the peer's
+        # runtime ANDs it with its own capability, exactly as on a local dial.
+        if self._supplements and SUPPLEMENTS_CAPABILITY in capabilities:
+            auth["supplements"] = True
         if self._surface == "desktop":
             auth["surface"] = "desktop"
         writer.write(json.dumps({"key": self._facts.control_key, "client": "cli"}).encode() + b"\n")
