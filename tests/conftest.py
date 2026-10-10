@@ -28,6 +28,7 @@ import logging
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -583,6 +584,81 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     for name, value in _PROCESS_DESKTOP_GATES:
         monkeypatch.setenv(name, value)
     yield home
+
+
+@pytest.fixture(autouse=True)
+def refuse_real_notifier_spawn(monkeypatch):
+    """Refuse to START a real notification helper from a unit test, except in dry-run.
+
+    WHY A GUARD AT THE Popen BOUNDARY, ON TOP OF THE GATES ABOVE. The gates stop
+    the PRODUCT from announcing — a runtime reads them before it calls
+    ``detached_notify``. They mean nothing to a test that starts the
+    notification HELPER itself: the macOS helper is a compiled Objective-C
+    binary that talks to Notification Centre and reads none of them, and this
+    suite compiles and runs that real binary. Its one safety story is the
+    dry-run seam, ``LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1``, which makes the helper
+    report what it would do and exit before touching Notification Centre; the
+    F7 pin in ``test_click_durability.py`` holds the seam to exactly ``"1"``.
+    What this guard adds is the case a caller FORGETS: a spawn of a
+    ``notifier``/``notifier-*`` child that does not declare the seam is refused
+    here, for every test — instead of posting a banner to the developer's
+    screen that no assertion ever notices. That failure mode is real and was
+    seen on this feature: 2026-10-09 20:44:18, a compiled helper built from a
+    source that had no seam reached Notification Centre and presented a banner.
+
+    The ``osascript`` arm is the same rule for the fallback route: a test must
+    stub ``notify._spawn_detached_ok`` (or ``subprocess`` itself) rather than
+    spawn a real ``osascript -e 'display notification ...'``.
+
+    A test that deliberately runs the real helper opts in the visible way the
+    gates above document: pass ``LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1`` in the
+    child's environment. The pins are ``test_click_durability.py::
+    test_a_unit_run_cannot_start_a_real_notifier_without_the_seam`` and, for
+    the class contract, ``::test_the_spawn_guard_keeps_the_popen_class_contract``.
+    """
+
+    # The base is the REAL ``Popen``: this class body evaluates before the
+    # ``setattr`` below, so the name still holds the unpatched class.
+    class _GuardedPopen(subprocess.Popen[bytes]):
+        """The refusal, expressed as a Popen SUBCLASS — never a replacement.
+
+        WHY NOT A FUNCTION (round-3 regression). Whatever occupies
+        ``subprocess.Popen`` here IS Popen for every consumer in the process,
+        and consumers subscript it at runtime — the ``mcp`` package evaluates
+        ``subprocess.Popen[bytes]`` as its platform utility modules import,
+        and the repo's own annotations name ``Popen[...]`` widely. A plain
+        function answers the subscript — and ``isinstance()`` — with
+        ``TypeError: 'function' object is not subscriptable``: a measured 35
+        tests across the MCP auth and desktop catalog suites went red on the
+        broken head. Subclassing keeps ``Popen[str]``, ``isinstance`` and
+        ``issubclass`` working; the pin is
+        ``test_click_durability.py::test_the_spawn_guard_keeps_the_popen_class_contract``.
+        """
+
+        def __init__(self, args, *rest, **kwargs):
+            argv = [args] if isinstance(args, (str, bytes)) else list(args)
+            name = os.path.basename(str(argv[0])) if argv else ""
+            if name == "notifier" or name.startswith("notifier-"):
+                child_env = kwargs.get("env")
+                seam = (child_env if child_env is not None else os.environ).get(
+                    "LOCAL_OPERATOR_NOTIFIER_DRY_RUN"
+                )
+                if seam != "1":
+                    raise RuntimeError(
+                        f"refusing to start {argv[0]!r} without "
+                        "LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1: the dry-run seam is the "
+                        "only way a unit run reaches the notification helper (see "
+                        "tests/conftest.py::refuse_real_notifier_spawn)"
+                    )
+            if name == "osascript" and any("display notification" in str(arg) for arg in argv):
+                raise RuntimeError(
+                    "refusing to spawn a real 'osascript display notification' from a "
+                    "test; stub the spawn instead (see "
+                    "tests/conftest.py::refuse_real_notifier_spawn)"
+                )
+            super().__init__(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
 
 
 @pytest.fixture(autouse=True)

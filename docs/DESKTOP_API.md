@@ -2453,6 +2453,59 @@ the user forbade. With nothing else running, the click falls through to the
 terminal — the same place it lands when the launch is allowed and the app is
 absent.
 
+### Making the click survive until it is made
+
+A banner is often clicked long after it was posted. The case that shaped this
+section is the daily check-in from Aida, the built-in assistant session
+(`local_operator/aida/`): it is posted at 08:30 by a runtime that exits
+immediately afterwards, and the person clicks it from the notification list
+whenever they next sit down. For the click to land, each platform has to keep
+something alive or ready until then.
+
+- **macOS.** A click is delivered to the helper process that posted the banner,
+  so that process has to still be running. It waits for the number of seconds
+  given as its fifth argument after the program name (`argv[5]`), clamped to
+  1 s – 24 h and defaulting to 30 s. Aida's banner passes 24 h
+  (`notify.DURABLE_CLICK_WINDOW_S`); every other banner keeps 30 s. A 24 h wait
+  is a ceiling, not a promise: a logout, reboot or crash ends the helper sooner,
+  and a click after that does nothing (relaunching the program takes its
+  no-arguments usage branch and exits). That is also what happens at the end of
+  the window — the banner stays in the notification list and is inert, which is
+  deliberate: removing it would make an unanswered check-in disappear from the
+  one place the user can still find it. The click command is stored on the
+  notification itself, so when several helpers of the same app are alive the
+  click runs the command of the banner that was clicked. The sender app is
+  pre-warmed when a TUI or the desktop daemon starts
+  (`resume_click.prepare_for_clicks`) and built synchronously for a durable
+  banner, because the fallback used on a cold machine (`osascript`) cannot be
+  clicked at all. `BUILD_STAMP` is `"3"` so installs whose helper ignores the
+  wait argument rebuild. **Not verified on a real Notification Centre:** the
+  one real-banner click probe was skipped by the operator, so late-click
+  delivery is read from the code and not measured.
+- **Linux.** Whether `notify-send` understands `--action` is probed once and
+  kept in `<config>/notifier/notify-send-actions.json`, per binary (path, mtime
+  and size), so the first banner of a fresh runtime is already clickable. Only
+  an answer the probe actually returned is kept; a timeout or error is retried
+  by the next process. A banner that asks for a durable click probes
+  synchronously when nothing is known. The waiter is still
+  `notify-send --expire-time=5000 --action`: a click after the notification
+  daemon has dropped the popup is not delivered by every desktop. **Not
+  verified:** no Linux host or notification daemon was available.
+- **Windows.** A runtime banner does not exist there (`detached_notify` has no
+  Windows branch and `notify-send` is absent), so rungs 1–4 are never reached
+  from one. What a Windows user gets is the desktop app's own toast, only while
+  the app is running, and its click is handled inside the app. Raising a banner
+  from the runtime with a click that opens the conversation needs a registered
+  toast activator and a Windows host to test it on; neither exists here, so none
+  is claimed. This is a recorded limitation (see also `docs/XPLATFORM.md`).
+- **Rung 4's terminal.** A click's process sits in no terminal, so detection
+  finds none. The rung therefore tries the terminal the user last ran the TUI
+  in (`<config>/notifier/last-terminal.json`) before the macOS Terminal.app last
+  resort. The memory is refreshed on each TUI start, cleared when a TUI starts
+  somewhere that cannot be identified (or in cmux, which is never recorded
+  because it opens unfocused), and ignored after 30 days. A remembered terminal
+  that is no longer installed falls through to Terminal.app.
+
 ## Capability keys
 
 | Key | Version | Advertises | Absent means |

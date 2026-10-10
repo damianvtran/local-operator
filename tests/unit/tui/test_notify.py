@@ -586,10 +586,16 @@ def test_an_old_notify_send_without_action_support_gets_the_plain_toast(monkeypa
     class _Result:
         stdout = "Usage: notify-send [OPTION...]\n  --urgency\n"
         stderr = ""
+        # A real CompletedProcess always has one; the probe only persists (and
+        # only trusts) a run that exited 0.
+        returncode = 0
 
     class _Modern:
         stdout = "Usage: notify-send [OPTION...]\n  --action=KEY=LABEL\n"
         stderr = ""
+        # A real CompletedProcess always has one; the probe only persists (and
+        # only trusts) a run that exited 0.
+        returncode = 0
 
     def _probe_result(binary: str):
         # The probe is cached per binary path, so each case needs its own.
