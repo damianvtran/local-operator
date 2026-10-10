@@ -307,8 +307,10 @@ async def test_scheduling_requires_an_explicit_root_and_reaps(tmp_path: Path) ->
     rooted = ServingSessionHandle(
         session2, loop, install_gates=False, cwd=str(tmp_path), config_dir=tmp_path
     )
+    # Read the slot BEFORE the try so the finally cannot see an unbound name
+    # (constructing the handle is what schedules the pass).
+    awaited = rooted._supplements._sweep_task
     try:
-        awaited = rooted._supplements._sweep_task
         assert awaited is not None and not awaited.done()
     finally:
         # Disposal reaps the sweep task (cancelled if still pending, joined either
