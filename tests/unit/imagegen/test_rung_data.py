@@ -10,7 +10,7 @@ without failing a call).
 
 from __future__ import annotations
 
-from local_operator.artifacts.rung import CancelSupport
+from local_operator.artifacts.rung import CancelSupport, SourceSupport
 from local_operator.imagegen import ImageRoute, cascade
 
 
@@ -37,9 +37,12 @@ def test_every_ordered_route_has_a_spec_and_a_label() -> None:
 
 def test_the_v1_spec_facts_are_pinned() -> None:
     radient = cascade.RUNG_SPECS[ImageRoute.RADIENT]
-    assert radient.capabilities == frozenset({"t2i", "i2i"})
+    # i2i re-joins with the hub slice: edits are refused until the media
+    # route learns source handling (the enabling PR flips this beside it).
+    assert radient.capabilities == frozenset({"t2i"})
     assert radient.cancel_support == CancelSupport.SIGNAL
     assert radient.cost == "reported"
+    assert radient.sources == SourceSupport.NONE
 
     fal = cascade.RUNG_SPECS[ImageRoute.FAL]
     assert fal.capabilities == frozenset({"t2i", "i2i"})
@@ -48,8 +51,45 @@ def test_the_v1_spec_facts_are_pinned() -> None:
     # in v1 — no branch reads this value.
     assert fal.cancel_support == CancelSupport.SIGNAL
     assert fal.cost == "rate_table"
+    assert (fal.sources, fal.max_sources, fal.mask) == (SourceSupport.SINGLE, 1, False)
 
     openai = cascade.RUNG_SPECS[ImageRoute.OPENAI]
-    assert openai.capabilities == frozenset({"t2i"}), "img2img is skipped on this rung"
+    assert openai.capabilities == frozenset({"t2i", "i2i"}), "the edits path is wired"
     assert openai.cancel_support == CancelSupport.NONE
     assert openai.cost == "rate_table"
+    # "For GPT image models, you can provide up to 16 images" (API
+    # reference, fetched 2026-10-10) — the audit's unfilled "tbd", resolved
+    # from the document rather than guessed.
+    assert (openai.sources, openai.max_sources, openai.mask) == (SourceSupport.MULTI, 16, True)
+
+
+def test_the_wave2_capability_values_are_pinned() -> None:
+    """The declared edit capability per rung (media wave-2 edit lane).
+
+    Values change ONLY with the wiring change beside them — set here so a
+    silent flip fails by name; the runtime side is
+    ``test_edit_capability.py``'s join test.
+    """
+    expected = {
+        ImageRoute.OPENAI_SUB: (SourceSupport.NONE, 0, False),
+        ImageRoute.GOOGLE: (SourceSupport.MULTI, 14, False),
+        ImageRoute.XAI: (SourceSupport.MULTI, 5, False),
+        ImageRoute.OPENROUTER: (SourceSupport.SINGLE, 1, False),
+    }
+    for route, values in expected.items():
+        spec = cascade.RUNG_SPECS[route]
+        assert (spec.sources, spec.max_sources, spec.mask) == values, route
+    # A rung that declares nothing gets NONE: the dataclass default IS the
+    # declaration rule's floor (incapable until its edit path ships).
+    from local_operator.artifacts.rung import RungSpec
+
+    default = RungSpec(
+        route="new",
+        label="New",
+        kinds=frozenset({"image"}),
+        capabilities=frozenset(),
+        cancel_support=CancelSupport.NONE,
+    )
+    assert default.sources is SourceSupport.NONE
+    assert default.max_sources == 0
+    assert default.mask is False

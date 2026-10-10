@@ -47,7 +47,7 @@ from typing import Any
 import httpx
 from pydantic import SecretStr
 
-from local_operator.artifacts import BillingBasis
+from local_operator.artifacts import BillingBasis, CostSource
 from local_operator.artifacts.progress import ProgressFn, emit_progress
 from local_operator.artifacts.progress import (
     progress_details as _generic_progress_details,
@@ -338,6 +338,26 @@ def _num(value: Any) -> int | None:
         return None
 
 
+def _data_uri_parts(data_uri: str) -> tuple[str, str] | None:
+    """``(mime, base64 payload)`` for a ``data:`` URI, else ``None``.
+
+    The tool builds these URIs; a direct caller can hand anything. The two
+    edit consumers need different halves of the same string — OpenAI's
+    multipart upload needs decoded bytes, Google's content block needs the
+    base64 itself — so the parse lives here once, and a malformed source is
+    one refusal instead of two divergent ones.
+    """
+    if not data_uri.startswith("data:"):
+        return None
+    header, _, payload = data_uri.partition(",")
+    if not payload:
+        return None
+    mime, _, encoding = header[len("data:") :].partition(";")
+    if not mime or encoding.strip().lower() != "base64":
+        return None
+    return mime, payload
+
+
 # ``emit_progress`` moved to :mod:`local_operator.artifacts.progress` (imported
 # above) and is re-exported here under its exact name: the lane's own tests
 # call it from this module, and it is the one guarded spelling for "progress is
@@ -407,6 +427,20 @@ RADIENT_ERROR_TYPES = frozenset(
     {"media_rejected", "media_failed", "media_rate_limited", "media_unavailable"}
 )
 
+#: Radient's edit refusal — the ONE home of this sentence, shared by the rung's
+#: own skip and the cascade's capability pre-record (``cascade._edit_skip_message``)
+#: so the two cannot drift. WHY a skip and not an attempt: agent-server's media
+#: route forwards every body key verbatim to FAL, and the ``source_url`` →
+#: ``image_url`` mapping exists only on the LEGACY ``/v1/tools/images/generate``
+#: adapter this client does not call — so a ``source_url`` edit today is either a
+#: silent, BILLED text-to-image or a rejection, and the client cannot tell which.
+#: The enabling PR (hub exposes capability + maps sources) flips
+#: ``RUNG_SPECS[RADIENT].sources`` beside wiring ``image_url``/``image_urls``.
+RADIENT_EDIT_SKIP_MESSAGE = (
+    "Radient cannot edit yet — its media route has no source handling; "
+    "use another signed-in provider"
+)
+
 
 def _bearer_headers(credential: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
@@ -448,6 +482,33 @@ def _pick_radient_model(payload: dict[str, Any], requested: str | None) -> str:
         "Radient returned no usable image model in its media list.",
         status_code=None,
         code="invalid_response",
+    )
+
+
+def _radient_failure(payload: dict[str, Any], *, status: str = "") -> APIError | None:
+    """The platform's failure vocabulary on a status or result answer, else ``None``.
+
+    The hub NEVER emits a FAILED/ERROR status word: a failed generation settles as
+    status ``COMPLETED`` carrying ``error``/``error_type`` (agent-server
+    ``settledStatusResult`` and the result-side R1-2 branch; docs/MEDIA-PROVIDERS.md
+    section 5.5, hold H9 keeps it that way). Switch on ``error_type``, never prose; a
+    value outside the frozen vocabulary classifies as an upstream failure.
+    """
+    error_type = payload.get("error_type")
+    message = payload.get("error")
+    has_type = isinstance(error_type, str) and bool(error_type)
+    has_message = isinstance(message, str) and bool(message)
+    if not (has_type or has_message or status in ("FAILED", "ERROR")):
+        return None
+    code = error_type if has_type and error_type in RADIENT_ERROR_TYPES else "upstream"
+    return APIError(
+        (
+            message
+            if isinstance(message, str) and message
+            else "Radient reported the generation as FAILED."
+        ),
+        status_code=None,
+        code=code,
     )
 
 
@@ -549,9 +610,18 @@ async def run_radient(
 
     ``credential`` is the bearer the cascade resolved (``SecretStr`` unwrapped
     at the boundary); ``source_url`` is the img2img data URI when the caller
-    supplied one. The walk: live model list → affordability (optimistic on any
-    probe failure) → submit → poll → result → bounded downloads.
+    supplied one — an EDIT request, which this rung currently REFUSES before
+    any network call (see :data:`RADIENT_EDIT_SKIP_MESSAGE`). The walk for a
+    generation: live model list → affordability (optimistic on any probe
+    failure) → submit → poll → result → bounded downloads.
     """
+    if source_url is not None:
+        # Defence in depth: the cascade's capability filter pre-records this
+        # skip WITHOUT calling, so this branch serves direct callers and pins
+        # the declaration-matches-behaviour test. Before the models-list
+        # fetch on purpose — no probe runs for an edit this route cannot
+        # serve.
+        raise RungSkipped(RADIENT_EDIT_SKIP_MESSAGE, reason_class="unsupported")
     base = base_url.rstrip("/")
     async with _client_scope(client) as http:
         models_payload = await _request_json(
@@ -626,6 +696,9 @@ async def run_radient(
             if cost_usd is not None
             else None
         )
+        # The settled terminal payload may also carry the hub-side usage
+        # record's id; absent-safe (a deployment without it leaves None).
+        usage_record_id: str | None = None
 
         started = time.monotonic()
         while True:
@@ -645,6 +718,11 @@ async def run_radient(
             )
             status = str(status_payload.get("status") or "").strip().upper()
             elapsed = int(time.monotonic() - started)
+            # Classify BEFORE treating COMPLETED as terminal: a failure settles
+            # as COMPLETED carrying error/error_type (see _radient_failure).
+            failure = _radient_failure(status_payload, status=status)
+            if failure is not None:
+                raise failure
             if status == "COMPLETED":
                 # Prefer the settled figure over the quote: only ``settled``
                 # on the terminal status payload makes ``cost_usd`` a charge.
@@ -656,31 +734,15 @@ async def run_radient(
                         "Radient GET /tools/media/status cost_usd (settled: true; "
                         "equals the usage record and ledger)"
                     )
+                settled_usage = status_payload.get("usage_record_id")
+                if isinstance(settled_usage, str) and settled_usage:
+                    usage_record_id = settled_usage
                 break
             if status == "CANCELLED":
                 raise APIError(
                     "Radient reported the generation as CANCELLED.",
                     status_code=None,
                     code="cancelled",
-                )
-            if status in ("FAILED", "ERROR"):
-                # Switch on error_type, never on prose. Anything outside the
-                # frozen vocabulary classifies as an upstream failure.
-                error_type = status_payload.get("error_type")
-                code = (
-                    error_type
-                    if isinstance(error_type, str) and error_type in RADIENT_ERROR_TYPES
-                    else "upstream"
-                )
-                message = status_payload.get("error")
-                raise APIError(
-                    (
-                        message
-                        if isinstance(message, str) and message
-                        else "Radient reported the generation as FAILED."
-                    ),
-                    status_code=None,
-                    code=code,
                 )
             queue_position = _num(status_payload.get("queue_position"))
             queued = status == "IN_QUEUE"
@@ -725,6 +787,9 @@ async def run_radient(
         # downloads so a cancellation mid-download reads "none" rather than
         # firing an ALREADY_COMPLETED round-trip.
         handle.clear()
+        failure = _radient_failure(result_payload)
+        if failure is not None:
+            raise failure
         assets = await _download_rows(
             http,
             _asset_rows(result_payload),
@@ -742,6 +807,7 @@ async def run_radient(
             cost_source="reported" if cost_usd is not None else None,
             billing_basis=cost_basis,
             cost_provenance=cost_provenance,
+            usage_record_id=usage_record_id,
         )
 
 
@@ -752,6 +818,22 @@ async def run_radient(
 
 #: FAL's queue host, mirroring the legacy client's default.
 FAL_QUEUE_BASE_URL = "https://queue.fal.run"
+
+#: FAL edit routes, keyed by the model id a caller pins. FAL serves an edit as
+#: a SEPARATE app with its own request schema (both pages fetched 2026-10-10),
+#: so the endpoint and the field the source rides cannot be derived from the
+#: model path: the flux-class i2i apps take a single ``image_url``, while the
+#: newer multi-reference editors take an ``image_urls`` LIST. Values: (app
+#: path, source field).
+FAL_EDIT_MODELS: dict[str, tuple[str, str]] = {
+    # The default model's editor: documented at
+    # fal.ai/models/fal-ai/flux/dev/image-to-image (image_url required,
+    # strength default 0.95).
+    FAL_DEFAULT_MODEL: ("fal-ai/flux/dev/image-to-image", "image_url"),
+    # A pinned edit-native app: references as a list (1..10), no strength or
+    # number parameter in its schema.
+    "blackforestlabs/flux-3/edit-image": ("blackforestlabs/flux-3/edit-image", "image_urls"),
+}
 
 
 def _fal_fallback_urls(base: str, model_path: str, request_id: str) -> tuple[str, str, str]:
@@ -769,6 +851,33 @@ def _fal_fallback_urls(base: str, model_path: str, request_id: str) -> tuple[str
     app_root = model_path.rsplit("/", 1)[0] if "/" in model_path else model_path
     root = f"{base}/{app_root}/requests/{request_id.strip('/')}"
     return f"{root}/status", root, f"{root}/cancel"
+
+
+def _fal_edit_route(model_path: str) -> tuple[str, str]:
+    """(edit app path, source field) for an edit against ``model_path``.
+
+    Resolution order, and why:
+
+    1. a mapped model id resolves to its documented edit app;
+    2. a path that IS a mapped app is honoured AS-IS — the old unconditional
+       append corrupted exactly these (it appended ``/image-to-image`` to an
+       app that already was one);
+    3. a path ending in a documented edit suffix is also honoured as-is
+       (the multi-reference editors' ``/edit``-style convention: they take
+       ``image_urls``);
+    4. anything else keeps the flux-class append as the DEGRADED fallback —
+       an unmapped family fails at the provider and fails FORWARD, where
+       guessing an endpoint for it would be a silent wrong-model call.
+    """
+    mapped = FAL_EDIT_MODELS.get(model_path)
+    if mapped is not None:
+        return mapped
+    for app, field in FAL_EDIT_MODELS.values():
+        if model_path == app:
+            return app, field
+    if model_path.endswith(("/edit", "/edit-image")):
+        return model_path, "image_urls"
+    return f"{model_path}/image-to-image", "image_url"
 
 
 async def run_fal(
@@ -793,23 +902,43 @@ async def run_fal(
     recommended async flow — and the response-carried URLs are used verbatim
     (see :func:`_fal_fallback_urls` for the degraded path).
 
-    IMG2IMG rides FAL's dedicated ``/image-to-image`` app route with the field
-    spelled ``image_url`` (not ``source_url``): that conversion is the legacy
-    client's own, kept because it is the wire FAL documents for flux-class
-    apps — the old code appended ``GenerationType.IMAGE_TO_IMAGE.value`` for
-    exactly this reason.
+    IMG2IMG rides the model's own edit app, chosen by :func:`_fal_edit_route`
+    — ``image_url`` for the flux-class apps (the wire FAL documents), a
+    ``image_urls`` LIST for the multi-reference editors — instead of the old
+    unconditional ``/image-to-image`` append, which mapped correctly only for
+    the flux-class family and corrupted already-correct edit-app pins.
+    ``strength`` rides only the ``image_url`` schemas; a count is sent only
+    where the schema documents one, and a multi-image request against a route
+    without one is a recorded SKIP rather than a silently smaller delivery.
+    A ``strength`` the routed sub-schema has no field for comes back as
+    ``strength_ignored`` on the result — the tool records the drop (details +
+    caption note), never a silent one (review round 1, D2/R1).
     """
     base = base_url.rstrip("/")
     model_path = (model or FAL_DEFAULT_MODEL).strip().strip("/")
     headers = {"Authorization": f"Key {key}", "Content-Type": "application/json"}
+    strength_ignored = False
     async with _client_scope(client) as http:
         body: dict[str, Any] = {"prompt": prompt, "num_images": num_images, "sync_mode": False}
         if source_url is not None:
-            if not model_path.endswith("/image-to-image"):
-                model_path = f"{model_path}/image-to-image"
-            body["image_url"] = source_url
-            if strength is not None:
-                body["strength"] = strength
+            model_path, source_field = _fal_edit_route(model_path)
+            if source_field == "image_urls":
+                body["image_urls"] = [source_url]
+                if num_images > 1:
+                    raise RungSkipped(
+                        f"FAL's edit app {model_path} documents no image count; "
+                        "a multi-image request is skipped rather than silently "
+                        "delivering fewer.",
+                        reason_class="unsupported",
+                    )
+                # The multi-reference schemas document no strength field
+                # either; flag the drop for the tool's receipt instead of
+                # sending an unverified key (review round 1, D2/R1).
+                strength_ignored = strength is not None
+            else:
+                body["image_url"] = source_url
+                if strength is not None:
+                    body["strength"] = strength
         else:
             body["image_size"] = image_size
         if seed is not None:
@@ -921,7 +1050,12 @@ async def run_fal(
             pause=pause,
             started=started,
         )
-        return RungResult(assets=assets, model=model_path, generation_id=request_id)
+        return RungResult(
+            assets=assets,
+            model=model_path,
+            generation_id=request_id,
+            strength_ignored=strength_ignored,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -929,6 +1063,132 @@ async def run_fal(
 # ---------------------------------------------------------------------------
 
 OPENAI_IMAGES_PATH = "/images/generations"
+#: The edit endpoint: multipart (``image[]`` file parts beside the text
+#: fields), same ``data[]`` response items. A distinct transport from the
+#: JSON generations call — see :func:`_openai_edit_request`.
+OPENAI_EDITS_PATH = "/images/edits"
+
+#: Per-token rates for the GPT-image models whose edits response can carry
+#: ``usage`` — US$ per 1M tokens, standard tier, from the pricing page fetched
+#: 2026-10-10 (``docs/design/image-providers.md`` carries the table + dates).
+#: Ordered LONGEST-prefix-first on purpose: "gpt-image-1" must not swallow
+#: "gpt-image-1-mini"/"gpt-image-1.5". Values: (image input, image output,
+#: text input). An estimate multiplies ONLY this table; a model outside it
+#: yields no figure rather than a borrowed rate.
+_OPENAI_EDIT_TOKEN_RATES: tuple[tuple[str, float, float, float], ...] = (
+    ("gpt-image-2.5", 8.0, 30.0, 5.0),
+    ("gpt-image-2", 8.0, 30.0, 5.0),
+    ("gpt-image-1.5", 8.0, 32.0, 5.0),
+    ("gpt-image-1-mini", 2.5, 8.0, 2.0),
+    ("gpt-image-1", 10.0, 40.0, 5.0),
+    ("chatgpt-image-latest", 8.0, 32.0, 5.0),
+)
+
+
+def _openai_edit_usage_cost(model_id: str, usage: Any) -> tuple[float | None, str | None]:
+    """``(estimated cost, provenance)`` from an edits response's ``usage``.
+
+    Every multiplier is a token count the provider reported; every rate is
+    published (the table above). No usable ``usage``, or a model outside the
+    documented table, yields ``(None, None)`` — no figure is invented, and
+    the caller always labels the returned figure
+    ``estimated``/``rate_table`` (design D8's computed case).
+    """
+    if not isinstance(usage, dict):
+        return None, None
+    rates = next(
+        (
+            (image_in, image_out, text_in)
+            for prefix, image_in, image_out, text_in in _OPENAI_EDIT_TOKEN_RATES
+            if model_id.startswith(prefix)
+        ),
+        None,
+    )
+    if rates is None:
+        return None, None
+    details = usage.get("input_tokens_details")
+    if not isinstance(details, dict):
+        # The documented shape always carries the breakdown; without it the
+        # input side cannot be priced and a partial figure would understate —
+        # so no figure at all.
+        return None, None
+    image_in = _num(details.get("image_tokens"))
+    text_in = _num(details.get("text_tokens"))
+    out_details = usage.get("output_tokens_details")
+    image_out = _num(out_details.get("image_tokens")) if isinstance(out_details, dict) else None
+    if image_out is None:
+        image_out = _num(usage.get("output_tokens"))
+    if not any((image_in, text_in, image_out)):
+        return None, None
+    image_in_rate, image_out_rate, text_in_rate = rates
+    cost = (
+        (image_in or 0) * image_in_rate
+        + (text_in or 0) * text_in_rate
+        + (image_out or 0) * image_out_rate
+    ) / 1_000_000
+    provenance = (
+        "OpenAI docs pricing (fetched 2026-10-10): "
+        f"${image_in_rate:g}/M image input + ${text_in_rate:g}/M text input + "
+        f"${image_out_rate:g}/M image output, applied to the edits response "
+        "usage tokens — an estimate, not an invoice"
+    )
+    return cost, provenance
+
+
+async def _openai_edit_request(
+    http: httpx.AsyncClient,
+    *,
+    key: str,
+    source_url: str,
+    prompt: str,
+    model_id: str,
+    num_images: int,
+    image_size: str,
+    base_url: str,
+) -> dict[str, Any]:
+    """POST ``/images/edits`` as multipart; returns the parsed JSON payload.
+
+    Multipart IS the endpoint's documented transport (``image[]`` file parts
+    beside ``model``/``prompt``/``n``/``size``). The shared
+    :func:`_request_json` carries it unchanged — its ``**kwargs`` reach
+    httpx's ``data=``/``files=``, verified against ``httpx.MockTransport``
+    (multipart/form-data with the boundary httpx supplies), which is why no
+    second transport helper exists. ``Content-Type`` is deliberately NOT set
+    here: httpx adds the multipart one with its boundary.
+    """
+    parts = _data_uri_parts(source_url)
+    if parts is None:
+        raise APIError(
+            "OpenAI edits require a base64 data-URI source.",
+            status_code=None,
+            code="invalid_response",
+        )
+    mime, data_b64 = parts
+    try:
+        raw = base64.b64decode(data_b64, validate=False)
+    except (ValueError, TypeError) as exc:
+        raise APIError(
+            "OpenAI edit source is not valid base64.",
+            status_code=None,
+            code="invalid_response",
+        ) from exc
+    suffix = mime.rsplit("/", 1)[-1] or "png"
+    return await _request_json(
+        http,
+        "POST",
+        f"{base_url.rstrip('/')}{OPENAI_EDITS_PATH}",
+        label="OpenAI images",
+        timeout_s=OPENAI_IMAGE_TIMEOUT_S,
+        secrets=(key,),
+        headers={"Authorization": f"Bearer {key}"},
+        data={
+            "model": model_id,
+            "prompt": prompt,
+            "n": num_images,
+            "size": openai_size(image_size, model_id),
+        },
+        files=[("image[]", (f"source.{suffix}", raw, mime))],
+    )
 
 
 def openai_size(image_size: str, model_id: str) -> str:
@@ -977,18 +1237,18 @@ async def run_openai(
     guide) rather than papered over; the cancel handle is never set for this
     rung, so a best-effort cancel reports "none — nothing to cancel".
 
-    IMG2IMG is SKIPPED with a recorded reason (v1 scope): the design routes
-    edits through Radient's ``source_url`` passthrough and FAL's app route,
-    and there is no image-edit path in this rung.
+    EDITS ride ``POST /v1/images/edits`` as multipart (see
+    :func:`_openai_edit_request`), decode the same ``data[]`` items, and
+    turn the response's ``usage`` token fields — when present — into an
+    ESTIMATE with the published per-token rates
+    (:func:`_openai_edit_usage_cost`, labelled ``estimated``/``rate_table``).
+    No usage, or a model outside the documented table, yields no figure:
+    nothing is invented.
 
     ``seed``/``strength`` are not part of OpenAI's images wire and are dropped
     silently — the design's rule is "passed only to providers that support
     it", and a model that never received a field cannot honour it.
     """
-    if source_url is not None:
-        raise RungSkipped(
-            "OpenAI has no image-to-image route in this rung.", reason_class="unsupported"
-        )
     model_id = (model or OPENAI_DEFAULT_IMAGE_MODEL).strip()
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     body = {
@@ -999,16 +1259,28 @@ async def run_openai(
     }
     async with _client_scope(client) as http:
         started = time.monotonic()
-        payload = await _request_json(
-            http,
-            "POST",
-            f"{base_url.rstrip('/')}{OPENAI_IMAGES_PATH}",
-            label="OpenAI images",
-            timeout_s=OPENAI_IMAGE_TIMEOUT_S,
-            secrets=(key,),
-            headers=headers,
-            json=body,
-        )
+        if source_url is not None:
+            payload = await _openai_edit_request(
+                http,
+                key=key,
+                source_url=source_url,
+                prompt=prompt,
+                model_id=model_id,
+                num_images=num_images,
+                image_size=image_size,
+                base_url=base_url,
+            )
+        else:
+            payload = await _request_json(
+                http,
+                "POST",
+                f"{base_url.rstrip('/')}{OPENAI_IMAGES_PATH}",
+                label="OpenAI images",
+                timeout_s=OPENAI_IMAGE_TIMEOUT_S,
+                secrets=(key,),
+                headers=headers,
+                json=body,
+            )
         items = payload.get("data")
         if not isinstance(items, list) or not items:
             raise APIError(
@@ -1057,7 +1329,26 @@ async def run_openai(
                 status_code=None,
                 code="invalid_response",
             )
-        return RungResult(assets=assets, model=model_id)
+        cost_usd: float | None = None
+        cost_source: CostSource | None = None
+        cost_basis: BillingBasis | None = None
+        cost_provenance: str | None = None
+        if source_url is not None:
+            cost_usd, cost_provenance = _openai_edit_usage_cost(model_id, payload.get("usage"))
+            if cost_usd is not None:
+                # Provider-reported token counts × published rates: a
+                # rate-table ESTIMATE, never a charge (and never emitted for
+                # a model outside the documented table — see the helper).
+                cost_source = "rate_table"
+                cost_basis = "estimated"
+        return RungResult(
+            assets=assets,
+            model=model_id,
+            cost_usd=cost_usd,
+            cost_source=cost_source,
+            billing_basis=cost_basis,
+            cost_provenance=cost_provenance,
+        )
 
 
 # ---------------------------------------------------------------------------

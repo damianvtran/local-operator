@@ -1315,6 +1315,7 @@ def _bind_boot_instrumentation(
     global _boot_record_pid
     try:
         from local_operator import update as update_mod
+        from local_operator.macos_disclaim import spawn_chain_facts
         from local_operator.session.runtime import journal
 
         session = getattr(handle, "_session", None)
@@ -1326,7 +1327,12 @@ def _bind_boot_instrumentation(
         return None
 
     try:
-        journal.write_boot_record(identity, build, cwd=cwd)
+        # The spawn chain rides the boot record too (not just the signal
+        # receipt): the record is the artifact attribution readers already
+        # prefer, and a chain recorded only at signal time would be missing for
+        # every clean exit. Read from this process's environment — see
+        # ``macos_disclaim`` for who writes it and why (2026-10-09 incident).
+        journal.write_boot_record(identity, build, cwd=cwd, spawn_chain=spawn_chain_facts())
         _boot_record_pid = os.getpid()
         # THIS BOOT IS THE ONE MOMENT A NEW WRITER JOINS THE NAMESPACE, so it is
         # where the namespace is bounded: nothing else reaps ``run/host`` (see

@@ -1021,6 +1021,17 @@ should land as its own UI PR **immediately — this week** (§8 F6). The supplem
 round adds one row mounting the *preview* sandbox with the S1-S11 set, because it is the
 closest existing analogue.
 
+> **Status (core PR #2134, remediation round 1).** The *allow-root* half of the route fix
+> landed in core: `/v1/static/*` now serves only a regular file inside a served root (agent
+> home, session scratchpads, uploads, a running session's cwd below `$HOME`, `static.roots`),
+> refuses a non-loopback `Host`, drops its CORS grant for every non-admitted origin, and
+> carries `nosniff` + a CSP ending in `frame-ancestors` on every response. The UI sandbox
+> half is local-operator-ui PR #931. **Still open:** the *desktop-bearer* half -- the routes
+> stay unauthenticated because `<img>/<iframe src>` cannot carry a header; the fix is a
+> short-lived signed query token minted by an authenticated endpoint and verified in core,
+> which needs the UI lane. Known cost until the UI reads local file bytes over IPC: previews
+> and thumbnails of files outside every root 403 (see `docs/DESKTOP_API.md`).
+
 ### 4.2 Host-side validation (defence in depth, not the boundary)
 
 The sandbox is the boundary. Validation exists to fail fast, reduce noise, and keep honesty
@@ -1387,7 +1398,9 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
    `allow-[redacted]` + `allow-forms` on an **unauthenticated** backend route
    (`/v1/static/html`, outside both the sensitive-prefix boundary and the legacy gate) — i.e.
    [redacted] script execution with arbitrary-path reads. **Land it as its own UI PR
-   immediately — this week**; it must not wait on supplements.
+   immediately — this week**; it must not wait on supplements. *Status: the allow-root half
+   closed in core #2134; signed-token URLs (the bearer half) remain open — see the status
+   note in §4.1.*
 7. **F7 — UI palette contract `series-1..6`** if other UI surfaces want the series palette.
    v1 keeps it prelude-owned.
 8. **F8 — a server-side headless render check** of generated components (a render probe

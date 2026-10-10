@@ -787,5 +787,19 @@ def feature_flags() -> dict[str, Any]:
         # row (an additive field) rather than bump this key — a renderer that can read
         # link-only rows can read a fuller one.
         "code_requests": 1,
+        # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
+        # empty-session advisory that the selected account has no quota left
+        # (design: "pre-emptive no-quota notice"). Its OWN key rather than a
+        # bump of `catalogues`/`auth`, by the rule `code_requests` states
+        # above: the route is ADDITIVE — an older renderer never calls it —
+        # so this gates nothing for an old client. It is how a renderer
+        # learns the surface EXISTS before it mounts the notice line and
+        # starts a refetch cycle whose request an older backend answers with
+        # a 404. Absent, the empty session renders exactly as today, with no
+        # notice affordance and no request; that is the pre-feature state
+        # rather than a degraded one. The renderer must also treat a 404 as
+        # definitive (show nothing, do not retry), because a backend that
+        # answers this key yet 404s the route is broken, not slow.
+        "quota_notice": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }

@@ -112,7 +112,7 @@ import time
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -386,19 +386,49 @@ def _neutral_text() -> str:
     )
 
 
+AccountState = Literal["verified", "unverified", "unreadable"]
+
+
+def account_state(facts: RecoveryFacts) -> AccountState:
+    """The ONE classification of what ``facts`` proved about the account.
+
+    WHY A SEPARATE FUNCTION: :func:`recovery_line` (the sentence) and the
+    pre-emptive quota notice (``quota_notice``: its state and which buttons it
+    offers) must agree on which of the three situations an account is in. Two
+    copies of this ladder is how a notice would say "verify your email" over a
+    sentence that says "top up". ``recovery_line`` calls this; the notice calls
+    this; neither re-derives it.
+
+    - ``verified`` — a ``claimed`` grant, or ``email_verified`` true: the free
+      credits are spent (or were never owed), so the remedy is a top-up.
+    - ``unverified`` — ``pending`` / ``expired``, or any grant with an explicit
+      ``email_verified: false``: free credits are WAITING behind verification.
+    - ``unreadable`` — everything else (no probe answer, an older backend with
+      no ``verification``, an unrecognised shape): a claim about the account
+      would be a guess, so callers render the neutral text.
+    """
+    verification = facts.verification
+    if verification is None:
+        return "unreadable"
+    if verification.signup_grant == "claimed" or verification.email_verified is True:
+        return "verified"
+    if verification.signup_grant in ("pending", "expired") or verification.email_verified is False:
+        return "unverified"
+    return "unreadable"
+
+
 def recovery_line(facts: RecoveryFacts) -> str:
     """The user-facing text for ``facts``. Never empty, never raises.
 
-    Decided in this order, each branch stating only what the payload proved:
+    Decided by :func:`account_state`, each branch stating only what the payload
+    proved:
 
-    1. **verified** (``claimed`` grant, or ``email_verified`` true) — the free
-       credits are spent: the top-up link, plus the first-top-up bonus line
-       while the bonus is unclaimed.
-    2. **unverified** (``pending`` / ``expired``, or any grant with an explicit
-       ``email_verified: false``) — free credits are WAITING behind
-       verification, so that comes before any top-up. ``pending`` points at the
-       inbox; ``expired`` at requesting a new link, because the mail itself is
-       dead; anything else just opens the page.
+    1. **verified** — the free credits are spent: the top-up link, plus the
+       first-top-up bonus line while the bonus is unclaimed.
+    2. **unverified** — free credits are WAITING behind verification, so that
+       comes before any top-up. ``pending`` points at the inbox; ``expired`` at
+       requesting a new link, because the mail itself is dead; anything else
+       just opens the page.
     3. **unreadable** — the neutral text, which makes no claim about the
        account. That covers signed out too: the contract words the signed-out
        case as neutral, and a 402 proves a credential WAS spent somewhere this
@@ -406,10 +436,10 @@ def recovery_line(facts: RecoveryFacts) -> str:
        signed in" would be a claim it cannot support.
     """
     verification = facts.verification
-    if verification is not None:
+    state = account_state(facts)
+    if verification is not None and state != "unreadable":
         claim = verification.claim_url or CLAIM_URL
-        verified = verification.signup_grant == "claimed" or verification.email_verified is True
-        if verified:
+        if state == "verified":
             topup = (
                 verification.first_topup.topup_url if verification.first_topup else None
             ) or TOPUP_URL
@@ -418,22 +448,19 @@ def recovery_line(facts: RecoveryFacts) -> str:
             if bonus:
                 lines.append(bonus)
             return "\n".join(lines)
-        if verification.signup_grant in ("pending", "expired") or (
-            verification.email_verified is False
-        ):
-            amount = _money(verification.grant_amount)
-            credits = f"{amount} in free credits" if amount else "your free credits"
-            head = (
-                "You haven't verified your email yet. "
-                f"Verify to claim {credits} and start using Local Operator for free."
-            )
-            if verification.signup_grant == "pending":
-                action = f"Check your inbox for the Radient verification email, or open {claim}"
-            elif verification.signup_grant == "expired":
-                action = f"Your verification link has expired. Request a new one at {claim}"
-            else:
-                action = f"Open {claim} to verify your email."
-            return f"{head}\n{action}"
+        amount = _money(verification.grant_amount)
+        credits = f"{amount} in free credits" if amount else "your free credits"
+        head = (
+            "You haven't verified your email yet. "
+            f"Verify to claim {credits} and start using Local Operator for free."
+        )
+        if verification.signup_grant == "pending":
+            action = f"Check your inbox for the Radient verification email, or open {claim}"
+        elif verification.signup_grant == "expired":
+            action = f"Your verification link has expired. Request a new one at {claim}"
+        else:
+            action = f"Open {claim} to verify your email."
+        return f"{head}\n{action}"
     return _neutral_text()
 
 
@@ -523,17 +550,26 @@ def _probe_verification_sync(token: str) -> VerificationFacts | None:
         return fetch_me_verification_sync(client, token)
 
 
-async def get_recovery_facts(*, store: AuthStore | None = None) -> RecoveryFacts:
+async def get_recovery_facts(
+    *, store: AuthStore | None = None, force_refresh: bool = False
+) -> RecoveryFacts:
     """The cached-or-probed facts for this process's Radient account.
 
     ``store`` is a test seam and a caller's chance to reuse a store it already
     holds; production callers pass nothing and the process's shared store is
-    read. Never raises — see the module docstring.
+    read. ``force_refresh`` bypasses the process cache and re-probes, because
+    the cache is the WRONG answer for the one caller that asks right after the
+    account's state changed: a user who just clicked "I verified" must not be
+    re-served the pre-verification facts for up to the TTL (R1-X1). The fresh
+    result is remembered under the normal TTL, so the bypass also refreshes
+    the cache for every reader after it. Never raises — see the module
+    docstring.
     """
     now = time.monotonic()
-    cached = _cached_facts(now)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = _cached_facts(now)
+        if cached is not None:
+            return cached
     try:
         if store is None:
             from local_operator.providers.auth_store import shared_auth_store
@@ -555,8 +591,13 @@ async def get_recovery_facts(*, store: AuthStore | None = None) -> RecoveryFacts
     return facts
 
 
-def get_recovery_facts_sync(*, store: AuthStore | None = None) -> RecoveryFacts:
+def get_recovery_facts_sync(
+    *, store: AuthStore | None = None, force_refresh: bool = False
+) -> RecoveryFacts:
     """The bounded synchronous twin — the HEADLESS-ONLY arm.
+
+    ``force_refresh`` mirrors the async arm (see there): bypass the cache and
+    re-probe. The twins share one cache, so a divergence here would be a trap.
 
     See the module docstring's access patterns: this is the one entry point
     that blocks on a cold cache. It is kept for the one-shot headless
@@ -564,9 +605,10 @@ def get_recovery_facts_sync(*, store: AuthStore | None = None) -> RecoveryFacts:
     :func:`usage_limit_recovery_line_cached` (never blocks).
     """
     now = time.monotonic()
-    cached = _cached_facts(now)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = _cached_facts(now)
+        if cached is not None:
+            return cached
     try:
         if store is None:
             from local_operator.providers.auth_store import shared_auth_store
