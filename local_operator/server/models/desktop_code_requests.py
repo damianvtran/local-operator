@@ -72,7 +72,19 @@ class CodeRequestRow(BaseModel):
     #: True for every row in this slice, and it becomes False per row when an adapter
     #: exists for the forge AND a credential was found. Named here rather than derived
     #: from ``summary is None`` because a fetched row can still be stale-and-not-fetched.
+    #: The RENDERING predicate only ("no summary/lanes to draw"); how far the FORGE
+    #: read has got is ``fetch_state``, separately and explicitly.
     link_only: bool = True
+    #: How far this row's FORGE read has got, independent of ``link_only``: ``pending``
+    #: (the first read has not RESOLVED yet — render a loading state, never a remedy) |
+    #: ``ready`` (resolved with data) | ``stale`` (has last-known data, last
+    #: revalidation failed) | ``unauthenticated`` (a read RESOLVED without a usable
+    #: credential — the sign-in remedy belongs here, and only here plus ``cooling``) |
+    #: ``cooling`` (host rate-limited, no data yet) | ``failed`` (a read resolved as a
+    #: non-credential failure) | ``untracked`` (host/ref not fetchable in this build —
+    #: the link-only sentence is the whole state). None on an older backend: render as
+    #: if the field did not exist (pre-loading-state copy).
+    fetch_state: str | None = None
     #: Why a row is only a link, when there is something to say (an unconfirmed host, a
     #: script-created URL, a fork's inheritance). Shown verbatim; never a guess.
     reason: str | None = None
@@ -82,6 +94,9 @@ class CodeRequestRow(BaseModel):
     #: tracked yet."). A client must render this rather than deriving a CLI from
     #: ``forge`` — the derivation said "gh" for Codeberg (QA round 2, Q11: the field
     #: existed on the view but never reached the wire until it was listed here).
+    #: Suppressed (None) while ``fetch_state == "pending"``: a row whose first read
+    #: has not resolved must not carry a remedy its reader could act on, and an old
+    #: client then shows the bare link fallback instead.
     link_only_hint: str | None = None
     #: Epoch seconds until a cooling host accepts requests again, when the row's host
     #: is rate-limited: the row is tracked and WILL be fetched, so a reader must see

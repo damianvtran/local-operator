@@ -1,0 +1,14 @@
+{
+  "wire.errors.settings.config_retrieve_failed": "Error retrieving configuration: {error}",
+  "wire.errors.settings.config_unreadable": "The configuration file cannot be read. Repair it before saving.",
+  "wire.errors.settings.config_update_failed": "Error updating configuration: {error}",
+  "wire.errors.settings.credential_key_empty": "Credential key cannot be empty",
+  "wire.errors.settings.credential_retrieve_failed": "Error retrieving credentials: {error}",
+  "wire.errors.settings.credential_update_failed": "Error updating credential: {error}",
+  "wire.errors.settings.inline_credentials": "Use an endpoint without inline credentials or query parameters.",
+  "wire.errors.settings.invalid_value": "{error}",
+  "wire.errors.settings.no_update_fields": "No valid update fields provided",
+  "wire.errors.settings.not_registered": "This setting is not registered.",
+  "wire.errors.settings.system_prompt_retrieve_failed": "Error retrieving system prompt: {error}",
+  "wire.errors.settings.system_prompt_update_failed": "Error updating system prompt: {error}"
+}

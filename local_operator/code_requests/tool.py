@@ -198,8 +198,15 @@ def _list_line(row: dict[str, Any]) -> str:
         if row.get("stale"):
             parts.append(f"stale (fetched {_ago(row.get('fetched_at'))})")
     else:
-        reason = str(row.get("reason") or "link-only")
-        parts.append(reason)
+        # A row whose first read has not RESOLVED says what it is doing rather
+        # than claiming "link-only" — the model must not read a pending fetch
+        # as a settled no-login outcome (design §5). Every other no-summary
+        # row keeps today's reason (or the bare "link-only" fallback).
+        if str(row.get("fetch_state") or "") == service.FETCH_PENDING:
+            parts.append("fetching current state…")
+        else:
+            reason = str(row.get("reason") or "link-only")
+            parts.append(reason)
     parts.append(str(row.get("url") or ""))
     return " — ".join(parts)
 
@@ -268,7 +275,13 @@ def _render_issue(ref: Ref) -> str:
 def _render_show(view: dict[str, Any]) -> str:
     lines: list[str] = [f"{view.get('key')}"]
     if view.get("link_only"):
-        lines.append(f"link-only: {view.get('link_only_reason') or 'no state fetched'}")
+        # A pending row is not "link only" in the settled sense: its first read
+        # is still owed, so it says so. The sign-in remedy never appears here
+        # for pending (the hint is suppressed at the source, design §2/§5).
+        if view.get("fetch_state") == service.FETCH_PENDING:
+            lines.append("link-only: fetching current state — retry in a moment")
+        else:
+            lines.append(f"link-only: {view.get('link_only_reason') or 'no state fetched'}")
         if view.get("refresh_error"):
             lines.append(f"refresh error: {view['refresh_error']}")
         # The two fields the route already carries must reach the MODEL too
