@@ -97,7 +97,13 @@ class _RecordingTranscript:
     def __init__(self) -> None:
         self.customs: list[tuple[str, Any]] = []
 
-    async def append_custom(self, custom_type: str, details: Any) -> None:
+    async def append_custom(
+        self, custom_type: str, details: Any, *, preserve_mtime: bool = False
+    ) -> None:
+        # ``preserve_mtime`` mirrors the real writer's signature: the closing
+        # checkpoint passes it, a turn-end one does not, and a double that
+        # omitted the keyword would fail on the parameter instead of on the
+        # persistence under test.
         self.customs.append((custom_type, details))
 
 

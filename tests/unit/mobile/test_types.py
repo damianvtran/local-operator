@@ -623,3 +623,39 @@ def test_only_a_first_answer_may_carry_images(op: str) -> None:
     with pytest.raises(ValueError, match="does not carry images"):
         validate_control_frame(_ask_frame(op, images=[_img()]))
     validate_control_frame(_ask_frame(op, images=[]))
+
+
+def test_a_valid_rehome_frame_passes_and_every_field_is_required() -> None:
+    """``rehome_if_current`` shape: three non-empty strings, nothing else.
+
+    SHAPE only — whether the pair is servable, whether the old provider is still
+    stranded and whether the session is idle are the receiving handle's questions
+    (it is the only party that can see its own store and its own work). An empty
+    ``expected`` is refused here specifically because it would read as "the
+    selection is nothing", which the owner must never be asked to act on.
+    """
+    validate_control_frame(
+        {
+            "op": "rehome_if_current",
+            "req": 1,
+            "expected": "radient/auto",
+            "provider": "deepseek",
+            "model_id": "deepseek-flash",
+        }
+    )
+    for missing in ("expected", "provider", "model_id"):
+        frame: dict[str, Any] = {
+            "op": "rehome_if_current",
+            "expected": "radient/auto",
+            "provider": "deepseek",
+            "model_id": "deepseek-flash",
+        }
+        frame.pop(missing)
+        with pytest.raises(ValueError, match=f"{missing} must be a non-empty string"):
+            validate_control_frame(frame)
+        frame[missing] = "   "
+        with pytest.raises(ValueError, match=f"{missing} must be a non-empty string"):
+            validate_control_frame(frame)
+        frame[missing] = 3
+        with pytest.raises(ValueError, match=f"{missing} must be a non-empty string"):
+            validate_control_frame(frame)

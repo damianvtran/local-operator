@@ -65,3 +65,19 @@ def active_backend(
         except Exception:  # noqa: BLE001 — see docstring: never break the fork
             continue
     return None
+
+
+def backend_named(name: str, *, cmux_placement: str = PLACEMENT_WORKSPACE) -> SpawnBackend | None:
+    """The registered backend called ``name`` (``SpawnBackend.name``), or None.
+
+    The inverse of :func:`active_backend` for a caller that cannot DETECT — a
+    notification click, which runs outside any terminal — but remembers which
+    one the user last attended (:mod:`local_operator.spawn.remembered`). No
+    marker check and no binary check here: each backend's own ``spawn`` already
+    refuses (returns False) when its binary is absent, which is the signal the
+    caller's fall-through reads.
+    """
+    for backend in _ordered_backends(cmux_placement):
+        if backend.name == name:
+            return backend
+    return None

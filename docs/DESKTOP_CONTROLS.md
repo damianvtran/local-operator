@@ -804,11 +804,11 @@ the list must agree) and nothing when it does not.
 
 ## Radient: narrow proxy, not another authentication authority
 
-POST `/v1/desktop/radient` selects one of 30 closed operations: account/prices,
+POST `/v1/desktop/radient` selects one of 31 closed operations: account/prices,
 credits/usage, provision/application.create, agent catalogue/detail/CRUD,
 like/favourite/count controls, comments/CRUD, account.agents and the organization
-reads (memberships.list, org_agents.list, org_teams.list, org_team.get). Paths are
-assembled server-side from bounded identifiers. Query/payload keys are allowlisted per
+reads (memberships.list, org_agents.list, org_teams.list, org_team.get), plus
+`signup.resend`. Paths are assembled server-side from bounded identifiers. Query/payload keys are allowlisted per
 operation. Mutations require stable request_id; DELETE additionally requires
 confirmation. Redirects and oversized/upstream error bodies are refused. The id is
 spent by the attempt that carried it — including an attempt ANSWERED WITH A REFUSAL —
@@ -831,6 +831,16 @@ The organization reads (`memberships.list`, `org_agents.list`, `org_teams.list`,
 codes — `not_a_member`, `insufficient_role` (with `details.required` naming the
 rank) and `team_plan_required` — because none of those is fixed by signing in
 again; every other unrecognized 403 keeps `radient_credential_refused`.
+`signup.resend` (`POST /auth/signup/resend`: email a fresh signup-credit claim link
+to the account's own address; takes no payload, needs a `request_id`) has its own
+two refusal codes for the same reason: `signup_resend_rate_limited` (HTTP 429 — a
+link was requested recently; the server allows one per 2 minutes per account and 5
+live links per email per day; "check your inbox, try again shortly", NOT a sign-in
+problem) and `signup_resend_nothing_to_resend` (HTTP 409 — already verified or no
+grant is waiting). 401/403 keep `radient_credential_refused`; 500/503 read as
+`radient_upstream_failed`. The upstream route accepts a Radient OAuth JWT only —
+an API key is refused with 401 — so the quota notice offers the button only to an
+OAuth-signed-in account.
 `radient_no_credential` (nothing is stored) and `radient_credential_refused`
 (Radient refused this account's sign-in — including a grant the store knows is dead,
 which carries `details.reason = "grant_invalid"`) both mean "sign in to Radient

@@ -13,6 +13,8 @@ desktop at all (see ``/mobile``).
 
 from typing import Any, Mapping, Sequence
 
+from local_operator.i18n.keys import wire_slash
+from local_operator.i18n.messages import Msg, render
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
 
 #: ONE sentence for ONE instruction, carried verbatim by every surface that
@@ -986,9 +988,36 @@ def run_project_slash_op(
 #: be missing something without it", and exactly one thing qualifies: an
 #: argument that becomes part of what the MODEL is told. Comment per entry
 #: below; the table is pinned in ``tests/unit/tui/test_slash_echo.py``.
+#: The registry's copy resolves through the i18n runtime from the ``wire.slash``
+#: catalogue (RFC §2.2/§5/§9): the descriptions below are no longer literals —
+#: the English lives ONCE, in
+#: ``local_operator/i18n/catalogues/en/wire.slash.json``, keyed by command.
+#:
+#: Resolution happens ONCE, at import, materialising ``en`` (``locale=None``):
+#: `en` is the only SHIPPED locale, so every consumer — the TUI picker and
+#: ``/help``, ``command_catalogue()`` on the desktop, the phone sheet — reads
+#: byte-for-byte what it read before the extraction (RFC §5: extraction is a
+#: no-op; §7: English pinned under the ``en`` locale). It deliberately pays NO
+#: config/environment read here: the runtime's ``render`` defaults to `en`
+#: exactly so a caller chooses when to pay for resolution, and a module this
+#: widely imported is not where that belongs.
+#:
+#: When `wire.*` serving lands (RFC §2.1/§2.6) descriptions follow the CLIENT
+#: locale — a client resolves the served catalogue, and the TUI resolves at
+#: its render points (§3.1) — so this helper is the single seam where that
+#: rework starts; the call sites below do not change again.
+#:
+#: The command NAME, aliases and every machine field stay literals on purpose:
+#: RFC §2.7 lists commands/flags/identifiers as never translated, and the
+#: phone/desktop payloads carry them verbatim.
+def _tr(message: Msg) -> str:
+    """One catalogued ``wire.slash`` message, as the registry carries it."""
+    return render(message.code, message.params)
+
+
 SLASH_COMMANDS: list[SlashCommand] = [
     # The help table is the receipt.
-    SlashCommand("help", "List all commands", desktop_destination="commands"),
+    SlashCommand("help", _tr(wire_slash.help()), desktop_destination="commands"),
     # The `?`/`/keys` keyboard legend (issue #1944). Deliberately NO
     # `desktop_destination`, like `/links` and for a plainer version of its
     # reason: the card teaches THIS terminal's keyboard to the person sitting
@@ -1001,13 +1030,18 @@ SLASH_COMMANDS: list[SlashCommand] = [
     #
     # It lands beside `/help` because the two are the reading pair of the
     # command table: "what can I type" and "what can I press".
-    SlashCommand("keys", "Show the keyboard legend"),
+    SlashCommand("keys", _tr(wire_slash.keys())),
     # The app is gone; there is no ledger left to read.
-    SlashCommand("exit", "Quit the app", aliases=("quit",), desktop_destination="window.close"),
+    SlashCommand(
+        "exit",
+        _tr(wire_slash.exit()),
+        aliases=("quit",),
+        desktop_destination="window.close",
+    ),
     # Empties the surface the echo would land on — it was wiped a line later.
     SlashCommand(
         "clear",
-        "Clear the transcript (history is untouched)",
+        _tr(wire_slash.clear()),
         desktop_destination="transcript.clear",
     ),
     # Beside `/clear` because they are the two commands that act on the
@@ -1028,9 +1062,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # does. 35 cells, inside the ~55 the description column wraps past (see
     # `/model` and `/theme`, where a wrapping row renders a phantom command name
     # in `/help`).
-    SlashCommand(
-        "copy", "Copy an agent message or code block", desktop_destination="transcript.copy"
-    ),
+    SlashCommand("copy", _tr(wire_slash.copy()), desktop_destination="transcript.copy"),
     # The companion surface to `/copy` — same shape, a different verb — and
     # placed beside it because both answer "something in the conversation that I
     # want to take out of it". NOT an echo, `/approvals`' rule: the receipt is
@@ -1070,11 +1102,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # because this is where an editor looks when they wonder why no destination
     # is set; that test asserts the withheld set, so an entry arriving in it
     # without a decision still fails there.
-    SlashCommand("links", "Open a link from this conversation in a browser"),
+    SlashCommand("links", _tr(wire_slash.links())),
     # Replaces the transcript; a row describing the old one would not survive.
     SlashCommand(
         "new",
-        "Start a new conversation",
+        _tr(wire_slash.new()),
         # The word is the new-session picker's SELECTION (`selected=args`), so a
         # whole-draft `/new foo` is that picker's gesture; a sentence after the word
         # is prose.
@@ -1099,7 +1131,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # helper as ``/update`` — the conversation comes back via ``--resume``.
     SlashCommand(
         "reload",
-        "Relaunch this conversation on the current install",
+        _tr(wire_slash.reload()),
         # The word is the reload picker's SELECTION (`selected=args`).
         argument_shape=ArgumentShape.WORD,
         desktop_destination="sessions.reload",
@@ -1107,14 +1139,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # The notice (or the relaunch) is the receipt. echo=False is the default;
     # pin it in ECHO_POLICY so a later flip cannot sneak a user row onto an
     # empty splash that ``/update`` is required to leave standing.
-    SlashCommand(
-        "update", "Install the latest version from PyPI and relaunch", desktop_destination="updates"
-    ),
+    SlashCommand("update", _tr(wire_slash.update()), desktop_destination="updates"),
     # The picker (or "resuming session <id>…") is the receipt, and a resume
     # replaces the transcript anyway.
     SlashCommand(
         "resume",
-        "Pick a past conversation to resume, or resume one (id)",
+        _tr(wire_slash.resume()),
         aliases=("recall",),
         # The word is the resume picker's SELECTION (`selected=args`) — a session id
         # or name, one token; a sentence after the word is prose.
@@ -1139,7 +1169,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # rather than splice mid-sentence.
     SlashCommand(
         "aida",
-        "Open your chief of staff, or send her a request",
+        _tr(wire_slash.aida()),
         arguments=ArgumentMode.OPTIONAL,
         consumes_prompt=True,
         prefixes_text=True,
@@ -1172,7 +1202,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # will not guess that a path can be typed straight in. 44 cells, inside
         # the ~55 at which the description column wraps (see `/model`, where a
         # wrapping row renders a phantom command name in `/help`).
-        "Change this session's working directory",
+        _tr(wire_slash.move()),
         # OPTIONAL: a bare `/move` opens the picker, which is the discoverable
         # route, and the space offers the same suggestions for a user who would
         # rather type. Enter on the bare command still does something useful,
@@ -1221,7 +1251,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # so the misreading is reachable, not pedantic. The picker needs no
         # such help: it supplies the argument itself, so its row teaches the
         # flag alone.
-        "Name this conversation, or /title --refresh",
+        _tr(wire_slash.rename()),
         aliases=("title",),
         arguments=ArgumentMode.OPTIONAL,
         # The title is arbitrary text: `native_action` pre-fills the form's text field
@@ -1256,7 +1286,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # message the branch STARTS ON, which is what stops them typing a title
         # and being billed for a turn in the fork. `docs/fork.md` carries
         # the rest.
-        "Branch this chat; --switch here, --window elsewhere; <message> starts work",
+        _tr(wire_slash.fork()),
         echo=True,
         consumes_prompt=True,
         # The trailing text is the branch's starting instruction, so a message
@@ -1288,7 +1318,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # wraps past ~55 cells and renders a phantom command name in `/help`.
         # 41 cells, and it names the way BACK rather than the way in, because
         # the way back is what a user who has just hidden a conversation needs.
-        "Hide from the lists, still resumable by id",
+        _tr(wire_slash.archive()),
         desktop_destination="sessions.archive",
     ),
     # OFFERED ONLY WHILE THE CURRENT SESSION IS ARCHIVED — the one command in
@@ -1299,7 +1329,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # as a bug.
     SlashCommand(
         "unarchive",
-        "Show this conversation in the lists again",
+        _tr(wire_slash.unarchive()),
         desktop_destination="sessions.unarchive",
     ),
     # THE DANGER CONFIRMATION IS A TYPED WORD, not a picked row: `/delete`
@@ -1314,7 +1344,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # own confirm control is what authorises it.
     SlashCommand(
         "delete",
-        "Delete this conversation for good; asks to confirm",
+        _tr(wire_slash.delete()),
         arguments=ArgumentMode.OPTIONAL,
         # The word is the confirmation token this command owns. See the comment
         # above for why the list holds exactly one row.
@@ -1346,7 +1376,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # the exact defect D7 was filed against. The flag is taught by the
         # picker footer's own clause (`/model --all shows`); this row keeps the
         # one consequence D14 made every surface state.
-        "Switch model; /model default saves it for new sessions",
+        _tr(wire_slash.model()),
         aliases=("models",),
         # The trailing selector is a value this command owns, not the start of a
         # message: `/model gpt-5` is the model command, while
@@ -1365,7 +1395,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # word is only how it was reached. Exactly `/approvals`' rule.
     SlashCommand(
         "effort",
-        "Show or set reasoning effort (shift+tab cycles)",
+        _tr(wire_slash.effort()),
         # OPTIONAL: the space offers this model's rungs, and a bare `/effort`
         # still prints the ladder with the current one marked. The list is what
         # the printed ladder could never be — the rungs are OFFERED rather than
@@ -1394,7 +1424,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # that costs meaningfully more money, and a description promising speed
         # while omitting the premium would sell half the bargain. 47 cells, in
         # under the ~55 at which the description column wraps.
-        "Toggle faster output at premium pricing",
+        _tr(wire_slash.fast()),
         # OPTIONAL: bare `/fast` toggles, and the space offers on/off/status for
         # a user who wants to name the resulting state rather than flip into it.
         arguments=ArgumentMode.OPTIONAL,
@@ -1416,7 +1446,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # Terse like `/model`'s: the description column wraps past ~55 cells.
         # "live preview" is the half the list cannot teach on its own — a user
         # has to know arrowing is safe before they will browse with it.
-        "Switch color theme; arrows preview live",
+        _tr(wire_slash.theme()),
         aliases=("themes",),
         # OPTIONAL: a bare `/theme` reports the active theme, and the space
         # offers every registered ramp with the current one marked.
@@ -1433,7 +1463,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # The listing is the receipt.
     SlashCommand(
         "provider",
-        "List providers and their login/usage state",
+        _tr(wire_slash.provider()),
         # The word is the provider the panel opens on (`selection=args`).
         argument_shape=ArgumentShape.WORD,
         desktop_destination="providers",
@@ -1444,7 +1474,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # is the surface that contains both of them.
     SlashCommand(
         "settings",
-        "Change every setting on one page",
+        _tr(wire_slash.settings()),
         aliases=("config",),
         # The word is the settings FILTER (`filter=args`).
         argument_shape=ArgumentShape.WORD,
@@ -1458,12 +1488,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # omitted the argument told a user the command had none. 49 cells — the
         # description column wraps past ~55, which would render a phantom
         # command name in `/help` (see the `/copy` note above).
-        "Show or hide conversations; 'focus' keys the list",
+        _tr(wire_slash.sidebar()),
         desktop_destination="sessions.sidebar",
     ),
     SlashCommand(
         "search",
-        "Configure web search providers and load balancing",
+        _tr(wire_slash.search()),
         # `filter=args`: the route's presentation payload carries the word. The
         # desktop's own `/search` fixes that filter to `web-search` and reads no
         # word, so this is one of the two DELIBERATE EXCEPTIONS to the criterion
@@ -1475,7 +1505,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # The listing is the receipt.
     SlashCommand(
         "accounts",
-        "List stored credentials",
+        _tr(wire_slash.accounts()),
         # `selection=args` — the account/provider the panel opens on.
         argument_shape=ArgumentShape.WORD,
         desktop_destination="accounts",
@@ -1493,20 +1523,20 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # cheap half of what an alias would buy.
     SlashCommand(
         "failovers",
-        "Show the model failover cascade and what is serving",
+        _tr(wire_slash.failovers()),
         desktop_destination="session.failovers",
     ),
     # The panel is the receipt — the row the owner reported as noise.
     SlashCommand(
         "usage",
-        "Show provider usage quota",
+        _tr(wire_slash.usage()),
         # The word is the view the panel opens on (`selection=args`).
         argument_shape=ArgumentShape.WORD,
         desktop_destination="usage",
     ),
     SlashCommand(
         "context",
-        "Show prompt, tool-schema and message token usage",
+        _tr(wire_slash.context()),
         # NONE, and the criterion is why: a shape is published only where the
         # desktop's command path USES the trailing text. This one DROPS it —
         # `_slash_result` calls `_context_slash_result(SlashResult)` with no args
@@ -1533,7 +1563,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # `/fork --switch` is taught. 54 cells, inside the ~55 the column wraps past.
     SlashCommand(
         "session",
-        "Usage, cost, diagnostics; --copy copies the session ID",
+        _tr(wire_slash.session()),
         argument_shape=ArgumentShape.WORD,
         desktop_destination="session.diagnostics",
     ),
@@ -1563,7 +1593,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # CONVERSATIONS and this describes live PROCESSES, and both descriptions
         # sit in one picker where the shared word read as the same thing (UX
         # round 1, U9). One word buys the distinction.
-        "Install, version, and running sessions on this machine",
+        _tr(wire_slash.info()),
         desktop_destination="info",
         # NO ALIASES, deliberately — `version`/`about` were added for UX round 1
         # U8 and reverted the same round. The claim that alias rows "cost no
@@ -1584,7 +1614,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # while leaving room for `/analytics cost`, `/analytics latency`, ... later.
     SlashCommand(
         "analytics",
-        "Aggregated token-consumption analytics across all sessions",
+        _tr(wire_slash.analytics()),
         arguments=ArgumentMode.OPTIONAL,
         # The word is the view to open (`selection=args`).
         argument_shape=ArgumentShape.WORD,
@@ -1606,7 +1636,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # goal" and the receipt reads "goal cleared", so the third phrasing of
         # the same act was the odd one out beside a flag literally spelled
         # `--clear` (round 1, D3). Same 52 cells, so nothing re-sizes.
-        "Set the goal and start work; /goal --clear clears it",
+        _tr(wire_slash.goal()),
         echo=True,
         consumes_prompt=True,
         # The trailing text is the objective, this command's own argument.
@@ -1654,7 +1684,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # the runtime refuses while a loop runs, so naming it here would teach a
         # form in the one place it works least; the picker row that offers each
         # flag, and `docs/DESKTOP_CONTROLS.md`, carry that distinction.
-        "Loop toward a goal: /loop <goal>, <n>; --stop cancels",
+        _tr(wire_slash.loop()),
         consumes_prompt=True,
         # The trailing text is the loop instruction or count, this command's own
         # argument.
@@ -1677,7 +1707,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # row, as a real turn rather than an echo.
     SlashCommand(
         "btw",
-        "Ask a side question off the record (esc closes it)",
+        _tr(wire_slash.btw()),
         consumes_prompt=True,
         # The trailing text is the aside question, this command's own argument.
         prefixes_text=True,
@@ -1691,7 +1721,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # 21.9k tokens` notices the automatic one emits, and a refusal says why it
     # did not run — nothing typed here reaches the model, so a user row above
     # that would only restate the word.
-    SlashCommand("compact", "Compact the context now", desktop_destination="session.compact"),
+    SlashCommand("compact", _tr(wire_slash.compact()), desktop_destination="session.compact"),
     # The kill switch (design §12): bare stops THIS session, `/stop <target>`
     # stops another one (the `send` target vocabulary: name / session id /
     # pid / substring), `/stop all` arms a 10 s window and a repeat executes.
@@ -1700,7 +1730,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # the typed word.
     SlashCommand(
         "stop",
-        "End this session, another by name/pid, or all — /resume reopens it",
+        _tr(wire_slash.stop()),
         arguments=ArgumentMode.OPTIONAL,
         # The word is the same TARGET vocabulary the TUI's `/stop <target>` takes,
         # and the second of the two DELIBERATE EXCEPTIONS to the criterion (see
@@ -1719,7 +1749,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # next launch will use. `default` is the half a list cannot teach on its
         # own, because a user has to suspect it exists to go looking for it —
         # the same job `PERSIST_HINT` does on `/model`.
-        "Show or set tool approval mode for this session",
+        _tr(wire_slash.approvals()),
         arguments=ArgumentMode.OPTIONAL,
         # Trailing text is the mode name, a value this command owns.
         prefixes_text=True,
@@ -1731,7 +1761,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # The listing is the receipt.
     SlashCommand(
         "skills",
-        "List loaded skills",
+        _tr(wire_slash.skills()),
         # `selection=args`.
         argument_shape=ArgumentShape.WORD,
         desktop_destination="skills",
@@ -1745,7 +1775,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # more than this one truncating row can carry.
     SlashCommand(
         "mcp",
-        "List MCP servers; add/remove one, or manage an OAuth grant",
+        _tr(wire_slash.mcp()),
         arguments=ArgumentMode.OPTIONAL,
         # The route parses `<subcommand> [name]` against `MCP_SUBCOMMANDS` and
         # `SERVER_NAME_RE`, so `/mcp logout` is the command and `/mcp logout seems to
@@ -1759,7 +1789,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # submitting a no-op over the list it just drew.
     SlashCommand(
         "login",
-        "Authenticate a provider",
+        _tr(wire_slash.login()),
         arguments=ArgumentMode.REQUIRED,
         # The route resolves the word against the provider registry — a known id is
         # the command, an unknown one is prose.
@@ -1769,7 +1799,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # The worker reports the removal, naming the provider.
     SlashCommand(
         "logout",
-        "Remove stored provider credentials",
+        _tr(wire_slash.logout()),
         arguments=ArgumentMode.REQUIRED,
         # Same lookup as `/login`: a known provider id is the command, an unknown one
         # is prose.
@@ -1796,7 +1826,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # row and the answer now use one verb for one act.
     SlashCommand(
         "notifications",
-        "Unread completions; read marks them read",
+        _tr(wire_slash.notifications()),
         arguments=ArgumentMode.OPTIONAL,
         # The vocabulary is one word (`read`). Declared `WORD` rather than
         # `NONE` because the trailing text IS read by the handler, which is the
@@ -1820,7 +1850,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # serves account, billing, usage and agent catalogue only), so a desktop
     # host would have to invent an upstream contract. The terminal command is
     # untouched and still does the whole job.
-    SlashCommand("mobile", "Radient phone access: status, enable, stop, billing"),
+    SlashCommand("mobile", _tr(wire_slash.mobile())),
     # THE SECOND "this machine's connectivity" command, and the reason it sits
     # beside `/mobile`. One grouped command with a declared vocabulary rather
     # than a word per verb: a mesh has several verbs that are variations of one
@@ -1843,7 +1873,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # them would be a second answer to "what does disconnect do".
     SlashCommand(
         "network",
-        "Networks, peers, and this device's mesh state",
+        _tr(wire_slash.network()),
         arguments=ArgumentMode.OPTIONAL,
         argument_shape=ArgumentShape.SUBCOMMAND,
         subcommands=NETWORK_SUBCOMMANDS,
@@ -1877,7 +1907,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # one paints whole from 80 columns up and still leads with the gesture
         # everywhere below that. The SPACE is named because it is what arms the
         # mode and nothing else on screen says so (UX round 1, U5).
-        "Type or paste a secret after a space; masked",
+        _tr(wire_slash.credential()),
         aliases=("cred",),
         arguments=ArgumentMode.OPTIONAL,
         # ANY, and this row is the reason the shape vocabulary needed a third
@@ -1911,7 +1941,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # `/team` is a listing and the listing is the receipt.
     SlashCommand(
         "team",
-        "List teams, chart a team's org, or send a request to a team's manager",
+        _tr(wire_slash.team()),
         aliases=("teams",),
         arguments=ArgumentMode.OPTIONAL,
         # The first token is a ROSTER NAME with free text after it, which is a
@@ -1941,7 +1971,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "agent",
         # D4: "agents", standardizing the noun with the listing header and the
         # attach/detach notices rather than saying "agent profiles" here.
-        "List agents, switch an agent's class, or speak to this session as one",
+        _tr(wire_slash.agent()),
         aliases=("agents",),
         arguments=ArgumentMode.OPTIONAL,
         # Same name slot as `/team`, whose every surface this mirrors.
@@ -1976,7 +2006,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # panel/dialogs), never as an owner-side command (design §5.2).
     SlashCommand(
         "project",
-        "Track workstreams: list, show, new, delete, link, unlink",
+        _tr(wire_slash.project()),
         arguments=ArgumentMode.OPTIONAL,
         argument_shape=ArgumentShape.SUBCOMMAND,
         subcommands=PROJECT_SUBCOMMANDS,

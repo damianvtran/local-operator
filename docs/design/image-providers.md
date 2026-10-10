@@ -86,13 +86,61 @@ status* settles both. Everything else in the matrix is **Contract**.
   [docs](https://openrouter.ai/docs/guides/overview/multimodal/image-generation)
   (fetched 2026-10-09).
 
+## Edit lane (media wave-2 image-to-image, 2026-10-10)
+
+Edit paths were wired per rung; the capability declaration
+(``RUNG_SPECS[*].sources``) is declared in the SAME change as the wiring, and a
+test walks every rung to fail either drift direction. Wire facts below were
+fetched 2026-10-10 (no live call — same operator decision as above).
+
+| Rung | Edit wire | Source shape | Notes |
+|---|---|---|---|
+| FAL | per-model edit app (documented pages) | `image_url` for the flux-class apps; `image_urls` LIST for the multi-reference editors | default model's app `fal-ai/flux/dev/image-to-image` (image_url required, strength default 0.95); `blackforestlabs/flux-3/edit-image` takes `image_urls` (1–10 refs), no strength/count in its schema |
+| OpenAI | `POST /v1/images/edits`, multipart | `image[]` file part decoded from the source's data URI | "For GPT image models, you can provide up to 16 images" (API reference); mask documented (alpha PNG) — the single-source wire sends one image, no mask |
+| Google | image content blocks in `input` | `{"type":"image","data":<b64>,"mime_type":…}` | up to 14; no API mask (prompt-driven "semantic masking") |
+| xAI | `POST /v1/images/edits` | `"image": {"url": <data URI>, "type": "image_url"}` | single-image shape wired; multi-image (≤5 refs) page read, its field shape waits for the multi-source wire; edits bill input + output |
+| OpenRouter | `input_references` | `[{"type":"image_url","image_url":{"url": …}}]` | sent only after `GET /api/v1/images/models` confirms `architecture.input_modalities` includes `"image"`; deterministic negative → recorded skip, models read that cannot answer → rung failure (its real class) |
+| Radient | — (skips) | — | the media route forwards body keys verbatim to FAL and maps `source_url` only on the LEGACY adapter, so an edit today is a silent billed text-to-image or a rejection; the message says so. The enabling PR (hub capability + server-side mapping) flips `sources` and wires `image_url`/`image_urls` |
+| openai-sub | — (skips) | — | unchanged; the planned Codex probe settles acceptance |
+
+### Edit cost posture
+
+- **OpenAI edits**: when the response's `usage` reports token counts AND the
+  model appears in the published GPT-image table below, the result carries a
+  computed **estimate** — `cost_source="rate_table"`,
+  `billing_basis="estimated"`, provenance naming rates + date. No usage, or a
+  model outside the table → **no figure**. (Update 2026-10-10: `cost_source`'s
+  meaning is "the number rests on a published price", which now includes this
+  computed case; the table below is the in-code reference.)
+- **xAI edits** keep the reported `usage.cost_in_usd_ticks` when the response
+  carries it — the generations flat rate is never reused for an edit (the
+  pricing page states edits bill input AND output).
+- **OpenRouter edits** use `usage.cost` as before; the per-endpoint billables
+  already include the reference.
+- **FAL / Google edits** carry no figure (none exists per call).
+
+**GPT-image token rates, US$ per 1M tokens** (pricing page fetched
+2026-10-10; these six rows are mirrored as named constants in `rungs.py`
+SOLELY for the computed estimate — `gpt-image-1` is the rung's default model):
+
+| Model | Image input | Image output | Text input |
+|---|---|---|---|
+| gpt-image-2.5-sunburst / -flare | $8 | $30 | $5 |
+| gpt-image-2 | $8 | $30 | $5 |
+| gpt-image-1.5 | $8 | $32 | $5 |
+| gpt-image-1-mini | $2.50 | $8 | $2 |
+| gpt-image-1 | $10 | $40 | $5 |
+| chatgpt-image-latest | $8 | $32 | $5 |
+
 ## Cost posture in the harness
 
 - **Reported figures only on `cost_usd`** (design D8): Radient (hub),
   xAI (`usage.cost_in_usd_ticks`), OpenRouter (`usage.cost`). Absent usage →
-  no figure, no label.
-- **Rate-table rungs are documentation-only**: Google, OpenAI-key, FAL —
-  no in-code price tables; the tables above are the reference, with dates.
+  no figure, no label. The ONE computed case is the OpenAI edit estimate
+  above (every multiplier is provider-reported usage; every rate published).
+- **Rate-table rungs are documentation-only EXCEPT the OpenAI edit
+  estimate**: Google, FAL and OpenAI's generations path keep no in-code
+  price tables; the tables above are the reference, with dates.
 - **openai-sub is quota-funded**: `cost_source="subscription"`; the guide
   states the 3–5× quota burn and the Free-plan exclusion. Wave-2 cost rule: the
   amount is a provenance-labelled **API-equivalent** (`billing_basis=
@@ -122,7 +170,10 @@ an operator-approved probe). The acceptance probe for each is ONE call:
 | OpenRouter | `/api/v1/images` + `usage.cost` against the live settlement shape | all-or-nothing billing |
 
 Radient/FAL are the unchanged baseline rungs; their live evidence stands from
-wave-1 (PRs #2089/#2091), and no new live call was made this wave.
+wave-1 (PRs #2089/#2091), and no new live call was made this wave. The edit
+paths added 2026-10-10 carry the same posture: hermetic-test-backed against
+the fetched docs, no live call; the per-rung probes above (plus one FAL edit
+and one OpenAI edit probe) settle them when the operator opens spend.
 
 ## Document-only this wave (survey verdicts)
 
