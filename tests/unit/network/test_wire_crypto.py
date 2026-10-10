@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import zlib
+from typing import Any
 
 import pytest
 
@@ -302,3 +304,395 @@ def test_keepalive_is_a_reused_control_op() -> None:
 def test_canonical_json_is_stable_across_key_order() -> None:
     assert wire.canonical_json({"b": 1, "a": 2}) == wire.canonical_json({"a": 2, "b": 1})
     assert json.loads(wire.canonical_json({"a": "é"}))["a"] == "é"
+
+
+# ---------------------------------------------------------------------------
+# Record compression (``zlib-records-v1``)
+# ---------------------------------------------------------------------------
+#
+# The matrix below pins the MIXED-VERSION RULE (wire.py "Record compression"):
+# compression is on only when BOTH ends advertised the capability, and a link
+# where it is off is byte-identical to the codec before the capability existed.
+
+
+def _page(rows: int = 100) -> dict[str, Any]:
+    """A ``net_session_history``-shaped reply: repetitive journal JSON, ~100 KB+."""
+    entries = [
+        {
+            "id": index,
+            "ts": 1_760_000_000.0 + index,
+            "type": "assistant_message",
+            "payload": {"text": f"row {index} " + "lorem ipsum dolor sit amet " * 40},
+        }
+        for index in range(rows)
+    ]
+    return {"op": "ack", "req": 7, "detail": {"entries": entries, "has_more": True}}
+
+
+def _pair(*, dialer_zlib: bool, listener_zlib: bool) -> tuple[wire.LinkCrypto, wire.LinkCrypto]:
+    keys = wire.link_keys(_shared(), b"t" * 32, b"l" * 16)
+    return (
+        wire.LinkCrypto(keys, role="dialer", compression=dialer_zlib),
+        wire.LinkCrypto(keys, role="listener", compression=listener_zlib),
+    )
+
+
+def _plaintext_of(frame: dict[str, Any]) -> bytes:
+    return json.dumps(frame, sort_keys=False, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def _decrypt_raw(codec: wire.LinkCrypto, record: bytes, sequence: int = 0) -> bytes:
+    """The AEAD plaintext of a sealed record, to inspect what is ON the wire."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    return AESGCM(codec._recv_key).decrypt(  # noqa: SLF001
+        codec._nonce(codec._recv_iv, sequence),  # noqa: SLF001
+        record[4:],
+        codec._aad(codec._recv_direction, sequence),  # noqa: SLF001
+    )
+
+
+def _seal_raw(sender: wire.LinkCrypto, plaintext: bytes) -> bytes:
+    """A record with an arbitrary plaintext, authenticated like a real one.
+
+    The malformed-input cells need a PEER that authenticates garbage (a bad tag is
+    a different, already-tested failure), so this encrypts under the sender's key
+    with the next counter exactly as ``seal`` does.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    sequence = sender._send_seq  # noqa: SLF001
+    payload = AESGCM(sender._key).encrypt(  # noqa: SLF001
+        sender._nonce(sender._iv, sequence),  # noqa: SLF001
+        plaintext,
+        sender._aad(sender._direction, sequence),  # noqa: SLF001
+    )
+    sender._send_seq += 1  # noqa: SLF001
+    return len(payload).to_bytes(4, "big") + payload
+
+
+def test_the_capability_is_advertised_and_is_the_codecs_only_gate() -> None:
+    assert wire.ZLIB_RECORDS_V1 in wire.LINK_CAPABILITIES
+    assert wire.ZLIB_RECORDS_V1 == "zlib-records-v1"
+
+
+@pytest.mark.parametrize(
+    ("mine", "theirs", "expected"),
+    [
+        # new <-> new: compress.
+        (list(wire.LINK_CAPABILITIES), list(wire.LINK_CAPABILITIES), True),
+        # new <-> old (the old peer has every capability EXCEPT this one): plaintext.
+        (
+            list(wire.LINK_CAPABILITIES),
+            [c for c in wire.LINK_CAPABILITIES if c != wire.ZLIB_RECORDS_V1],
+            False,
+        ),
+        # new <-> a peer that advertised nothing at all (pre-capability build).
+        (list(wire.LINK_CAPABILITIES), [], False),
+        # old <-> old.
+        (
+            [c for c in wire.LINK_CAPABILITIES if c != wire.ZLIB_RECORDS_V1],
+            [c for c in wire.LINK_CAPABILITIES if c != wire.ZLIB_RECORDS_V1],
+            False,
+        ),
+        # The mirror of new <-> old: the OTHER end is new.
+        (
+            [c for c in wire.LINK_CAPABILITIES if c != wire.ZLIB_RECORDS_V1],
+            list(wire.LINK_CAPABILITIES),
+            False,
+        ),
+    ],
+)
+def test_handshake_codec_compresses_only_on_the_intersection(
+    mine: list[str], theirs: list[str], expected: bool
+) -> None:
+    """``Handshake.codec`` is the ONE place the decision is made, on both roles."""
+    from local_operator.network import handshake as handshake_mod
+
+    # Drive the real method over a stand-in carrying just what it reads; the full
+    # handshake is exercised by tests/unit/network/test_handshake.py and the real
+    # two-ended cell below.
+    class _Stub:
+        capabilities = mine
+        peer_capabilities = theirs
+        role = "dialer"
+
+        @staticmethod
+        def establish() -> object:
+            class _Result:
+                keys = wire.link_keys(_shared(), b"t" * 32, b"l" * 16)
+
+            return _Result()
+
+    codec = handshake_mod.Handshake.codec(_Stub())  # type: ignore[arg-type]
+    assert codec.compression is expected
+
+
+# The real two-ended handshake cells live in test_handshake.py, which owns the
+# socket-and-thread harness (``run_handshake``).
+
+
+def test_a_frame_over_the_threshold_round_trips_compressed() -> None:
+    sender, receiver = _pair(dialer_zlib=True, listener_zlib=True)
+    frame = _page()
+    plaintext = _plaintext_of(frame)
+    assert len(plaintext) > wire.COMPRESS_MIN_BYTES
+    record = sender.seal(frame)
+    # Fewer bytes cross; the marker is inside the AEAD, never in the prefix.
+    assert len(record) < len(plaintext) // 3
+    assert int.from_bytes(record[:4], "big") == len(record) - 4
+    assert _decrypt_raw(receiver, record).startswith(wire.COMPRESSED_MARKER)
+    assert receiver.open(record[4:]) == frame
+
+
+def test_compressed_and_plain_records_interleave_in_one_reader() -> None:
+    """The marker makes each record self-describing, so one reader decodes a mix."""
+    sender, receiver = _pair(dialer_zlib=True, listener_zlib=True)
+    small = {"op": "ping", "req": 1}
+    big = _page(20)
+    for frame in (small, big, small, big, big, small):
+        assert receiver.open(sender.seal(frame)[4:]) == frame
+
+
+def test_below_the_threshold_is_byte_identical_to_the_uncompressed_codec() -> None:
+    keys = wire.link_keys(_shared(), b"t" * 32, b"l" * 16)
+    compressing = wire.LinkCrypto(keys, role="dialer", compression=True)
+    plain = wire.LinkCrypto(keys, role="dialer")
+    # Just under the threshold, so the boundary — not just "tiny" — is what is pinned.
+    filler = "a" * (wire.COMPRESS_MIN_BYTES - len('{"op":"x","pad":""}') - 1)
+    frame = {"op": "x", "pad": filler}
+    assert len(_plaintext_of(frame)) == wire.COMPRESS_MIN_BYTES - 1
+    # AES-GCM with a derived nonce is deterministic, so equal bytes is equal bytes.
+    assert compressing.seal(frame) == plain.seal(frame)
+
+
+def test_the_threshold_itself_compresses_when_it_shrinks() -> None:
+    sender, receiver = _pair(dialer_zlib=True, listener_zlib=True)
+    filler = "a" * (wire.COMPRESS_MIN_BYTES - len('{"op":"x","pad":""}'))
+    frame = {"op": "x", "pad": filler}
+    assert len(_plaintext_of(frame)) == wire.COMPRESS_MIN_BYTES
+    record = sender.seal(frame)
+    assert _decrypt_raw(receiver, record).startswith(wire.COMPRESSED_MARKER)
+
+
+def test_a_frame_zlib_cannot_shrink_is_sent_as_plain_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frame the compressor does not make smaller is never made bigger: it goes
+    out exactly as the uncompressed codec would have sent it.
+
+    Real JSON cannot be made incompressible (base64 of random bytes still shrinks
+    ~25 %, because a character carries 6 bits), so the compressor is made to lose.
+    """
+    keys = wire.link_keys(_shared(), b"t" * 32, b"l" * 16)
+    compressing = wire.LinkCrypto(keys, role="dialer", compression=True)
+    plain = wire.LinkCrypto(keys, role="dialer")
+    frame = _page(10)
+    monkeypatch.setattr(wire.zlib, "compress", lambda data, level=-1: data + b"\x00" * 16)
+    assert compressing.seal(frame) == plain.seal(frame)
+
+
+def test_without_the_capability_a_big_frame_is_byte_identical_and_old_readable() -> None:
+    """THE OLD PEER'S VIEW. The receiver here is a codec built exactly as the
+    previous release built it (no ``compression`` argument): it must decode what a
+    new build sends it, and the bytes must be the ones the previous build sent."""
+    keys = wire.link_keys(_shared(), b"t" * 32, b"l" * 16)
+    new_build = wire.LinkCrypto(keys, role="dialer", compression=False)
+    old_build = wire.LinkCrypto(keys, role="dialer")
+    old_reader = wire.LinkCrypto(keys, role="listener")
+    frame = _page()
+    record = new_build.seal(frame)
+    assert record == old_build.seal(frame)
+    assert _decrypt_raw(old_reader, record) == _plaintext_of(frame)
+    assert old_reader.open(record[4:]) == frame
+
+
+def test_a_new_build_decodes_a_plaintext_record_from_an_old_peer() -> None:
+    keys = wire.link_keys(_shared(), b"t" * 32, b"l" * 16)
+    old_writer = wire.LinkCrypto(keys, role="dialer")
+    new_reader = wire.LinkCrypto(keys, role="listener", compression=True)
+    frame = _page()
+    assert new_reader.open(old_writer.seal(frame)[4:]) == frame
+
+
+def test_a_compressed_record_on_a_link_that_did_not_negotiate_it_is_refused() -> None:
+    """The receive side of the rule: a peer that compresses without having
+    negotiated it is the same fatal parse error a bad plaintext always was."""
+    sender, receiver = _pair(dialer_zlib=True, listener_zlib=False)
+    with pytest.raises(wire.LinkCryptoError) as excinfo:
+        receiver.open(sender.seal(_page())[4:])
+    assert excinfo.value.kind == "parse"
+
+
+def test_credential_broker_frames_are_never_compressed() -> None:
+    keys = wire.link_keys(_shared(), b"t" * 32, b"l" * 16)
+    compressing = wire.LinkCrypto(keys, role="dialer", compression=True)
+    plain = wire.LinkCrypto(keys, role="dialer")
+    request = {"op": "net_broker", "kind": "copy", "pad": "a" * 5000}
+    reply = wire.UncompressedFrame({"op": "ack", "req": 3, "detail": {"value": "a" * 5000}})
+    assert compressing.seal(request) == plain.seal(request)
+    assert compressing.seal(reply) == plain.seal(dict(reply))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",  # marker and nothing after it
+        b"not a zlib stream",
+        zlib.compress(b'{"op":"ping"}')[:-4],  # truncated: no end-of-stream
+        zlib.compress(b'{"op":"ping"}') + b"trailing",  # bytes after the stream's end
+        zlib.compress(b"[1,2,3]"),  # inflates to JSON that is not an object
+        zlib.compress(b"\xff\xfe not utf-8"),
+    ],
+)
+def test_a_malformed_compressed_record_is_fatal_and_yields_no_frame(body: bytes) -> None:
+    sender, receiver = _pair(dialer_zlib=True, listener_zlib=True)
+    record = _seal_raw(sender, wire.COMPRESSED_MARKER + body)
+    with pytest.raises(wire.LinkCryptoError) as excinfo:
+        receiver.open(record[4:])
+    assert excinfo.value.kind in {"parse", "limit"}
+
+
+def test_a_decompression_bomb_is_refused_at_the_record_ceiling() -> None:
+    """A few KB that inflate past ``MAX_RECORD_BYTES`` must stop at the ceiling —
+    the bound applies as the stream inflates, not after."""
+    sender, receiver = _pair(dialer_zlib=True, listener_zlib=True)
+    bomb = zlib.compress(b"{" + b"a" * (wire.MAX_RECORD_BYTES + 1024), 9)
+    assert len(bomb) < 64 * 1024
+    record = _seal_raw(sender, wire.COMPRESSED_MARKER + bomb)
+    with pytest.raises(wire.LinkCryptoError) as excinfo:
+        receiver.open(record[4:])
+    assert excinfo.value.kind == "limit"
+
+
+def test_the_ceiling_is_on_the_compressed_size_that_crosses(socketpair: object) -> None:
+    """The length prefix is still checked against ``MAX_RECORD_BYTES`` and it is the
+    COMPRESSED length that is in it: a frame whose plaintext is over the ceiling is
+    still refused by ``seal`` (the plaintext bound is unchanged), and an oversized
+    prefix is still refused before a byte is allocated."""
+    sender, _receiver = _pair(dialer_zlib=True, listener_zlib=True)
+    with pytest.raises(wire.LinkCryptoError) as excinfo:
+        sender.seal({"op": "x", "blob": "a" * (wire.MAX_RECORD_BYTES + 1)})
+    assert excinfo.value.kind == "limit"
+    client, server = socketpair  # type: ignore[misc]
+    server.sendall((wire.MAX_RECORD_BYTES + 1).to_bytes(4, "big"))
+    with pytest.raises(wire.LinkCryptoError):
+        wire.FrameReader(client).read_record_payload(wire.deadline_in(2.0))
+
+
+def test_a_tampered_compressed_record_fails_authentication_before_inflation() -> None:
+    sender, receiver = _pair(dialer_zlib=True, listener_zlib=True)
+    record = bytearray(sender.seal(_page()))
+    record[-1] ^= 0x01
+    with pytest.raises(wire.LinkCryptoError) as excinfo:
+        receiver.open(bytes(record[4:]))
+    assert excinfo.value.kind == "auth"
+
+
+def test_compressed_records_cross_a_real_socket_pipelined(socketpair: object) -> None:
+    """The bounded in-process link: real loopback sockets, the production
+    ``FrameReader``, a mix of compressed and plain records back to back."""
+    client, server = socketpair  # type: ignore[misc]
+    sender, receiver = _pair(dialer_zlib=True, listener_zlib=True)
+    frames = [{"op": "ping", "req": 1}, _page(30), {"op": "ping", "req": 2}, _page(60)]
+    server.sendall(b"".join(sender.seal(frame) for frame in frames))
+    reader = wire.FrameReader(client)
+    for frame in frames:
+        assert receiver.open(reader.read_record_payload(wire.deadline_in(5.0))) == frame
+
+
+# ---------------------------------------------------------------------------
+# The secret-bearing frame classes, excluded by NAME at the codec
+# (agent review round 1, R1-1)
+# ---------------------------------------------------------------------------
+
+
+def _rotation_record() -> Any:
+    """A record with enough members that its rotation frames exceed the threshold.
+
+    The exclusion is only load-bearing on frames big enough to compress, so the
+    fixture is sized to the measured shape (the review's frames were 2.4-3 KB).
+    """
+    from local_operator.network import relay as relay_mod
+    from local_operator.network import types as net_types
+
+    record = net_types.NetworkRecord(
+        network_id="n_" + "0" * 22,
+        name="wire-compression-test",
+        created_by="d_" + "a" * 32,
+        self_device_id="d_" + "a" * 32,
+        self_role="admin",
+        self_capabilities=sorted(net_types.capabilities_for_role("admin")),
+        listen={"address": "127.0.0.1", "port": 0, "advertised": []},
+    )
+    for index in range(8):
+        relay_mod.admit(
+            record,
+            device_id=f"d_{index:032x}",
+            public_key=wire.b64u(bytes([index]) * 32),
+            name=f"device-{index}",
+            role="read",
+            endpoints=[f"10.0.0.{index}:4097"],
+            persist=False,
+        )
+    return record
+
+
+def test_epoch_and_pairing_secret_frames_are_never_compressed() -> None:
+    """The rotation and pairing frames carry the NEW EPOCH SECRET and are large
+    enough to compress well, so only the named exclusion keeps them plain on the
+    wire: a compressed length would publish the secret's compressibility (wire.py
+    "Record compression"; agent review round 1, R1-1).
+
+    Built by the PRODUCTION builders (``epoch_frame``, ``panic_frame``,
+    ``pair_result_frame``), never by hand. ``net_reconcile``'s reply is pinned
+    separately, at the relay wrap (``test_refusals.py``), because it has no op of
+    its own to seal under.
+    """
+    from local_operator.network import handshake as handshake_mod
+    from local_operator.network import relay as relay_mod
+    from local_operator.network import types as net_types
+
+    record = _rotation_record()
+    state = net_types.SecretState(
+        network_id=record.network_id, epoch=record.epoch, secret=wire.b64u(b"k" * 32)
+    )
+    frames = {
+        "net_epoch": relay_mod.epoch_frame(record, state, reason="member_rm"),
+        "net_panic": relay_mod.panic_frame(record, state, reason="operator_panic"),
+        "net_pair_result": handshake_mod.pair_result_frame(
+            req=1,
+            admit=True,
+            network={
+                "network_id": record.network_id,
+                "name": record.name,
+                "epoch": record.epoch,
+                "sequence": record.sequence,
+                "trust": record.trust,
+            },
+            member=record.members[0].to_json(),
+            members=[row.to_json() for row in record.members],
+            members_digest=relay_mod.members_digest_of(record),
+            material=state.secret,
+            rotations={},
+            shares=[],
+            reduced=[],
+        ),
+    }
+    for name, frame in frames.items():
+        assert frame["op"] == name and name in wire.NEVER_COMPRESS_OPS, name
+        plaintext = _plaintext_of(frame)
+        # NON-VACUOUS ON BOTH COUNTS: over the threshold, and worth compressing —
+        # the review measured 2421/2396 B frames shrinking to 841 B.
+        assert len(plaintext) > wire.COMPRESS_MIN_BYTES, (name, len(plaintext))
+        assert len(zlib.compress(plaintext, wire.COMPRESS_LEVEL)) < len(plaintext) // 2, name
+        keys = wire.link_keys(_shared(), b"t" * 32, b"l" * 16)
+        sender = wire.LinkCrypto(keys, role="dialer", compression=True)
+        receiver = wire.LinkCrypto(keys, role="listener", compression=True)
+        legacy = wire.LinkCrypto(keys, role="dialer")  # the pre-compression codec
+        record_bytes = sender.seal(frame)
+        # Byte-identical to the codec that has no compression at all: not merely
+        # "uncompressed", the very bytes today's build would send.
+        assert record_bytes == legacy.seal(frame), name
+        assert not _decrypt_raw(receiver, record_bytes).startswith(wire.COMPRESSED_MARKER)
+        assert receiver.open(record_bytes[4:]) == frame
