@@ -25,6 +25,7 @@ import hashlib
 import inspect
 import json
 import logging
+import re
 import time
 import uuid
 from collections import Counter
@@ -1166,6 +1167,124 @@ def _scrub_argument_value(value: Any, redact: Callable[[str], str]) -> tuple[Any
     return value, False
 
 
+#: One JSON string token of a (possibly truncated) argument document: the opening quote, the
+#: body up to the closing quote (``\\.`` consumes an escape pair, so an escaped quote never
+#: ends it), and the closing quote -- empty when the stream was cut inside the string.
+_JSON_STRING_TOKEN = re.compile(r'"((?:[^"\\]|\\.)*)("?)', re.DOTALL)
+
+#: A well-formed JSON escape. Used only when ``json.loads`` rejects a body (a truncated
+#: ``\\u00`` at the cut, a model's invalid escape) so the rest of the string is still judged.
+_JSON_ESCAPE = re.compile(r'\\(u[0-9a-fA-F]{4}|["\\/bfnrt])')
+_JSON_SIMPLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+_JSON_KEY_COLON = re.compile(r"\s*:")
+
+
+def _decode_json_string_body(body: str) -> str:
+    """The characters a JSON string BODY denotes: ``\\n`` -> a real newline, ``\\"`` -> ``"``."""
+    try:
+        decoded = json.loads(f'"{body}"')
+    except ValueError:
+        return _JSON_ESCAPE.sub(
+            lambda m: (
+                chr(int(m.group(1)[1:], 16))
+                if m.group(1)[0] == "u"
+                else _JSON_SIMPLE_ESCAPES[m.group(1)]
+            ),
+            body,
+        )
+    return decoded if isinstance(decoded, str) else body
+
+
+def _scrub_json_string_values(text: str, redact: Callable[[str], str]) -> str:
+    """Scrub the JSON string VALUES in ``text``, judged as the characters they denote.
+
+    The raw carrier (``raw_arguments``) is JSON TEXT: a newline inside a string value is
+    the two characters backslash-n, and the shape rules' word-boundary and line-start
+    anchors cannot see it (QA on PR #2133, Q-1 / Q-7). This pass closes that gap exactly:
+    each string value's body is DECODED (``\\n`` -> a real newline), judged on its own --
+    the same characters, judged the same way as ``arguments`` gets -- and only a value the
+    scrub changed is re-encoded. Everything else keeps the exact bytes the provider sent.
+
+    Works whether or not ``text`` parses: an unterminated body (a stream cut mid-call, the
+    fragment ``_assemble_tool_call`` leaves beside empty ``arguments``) is judged as the
+    truncated value it is.
+
+    THIS pass skips a string that is recognisably an object KEY (a closing quote followed by
+    a colon), because a masked key would rename the argument -- mirroring
+    ``_scrub_argument_value``, which scrubs values only. The claim is scoped to this pass:
+    pass 1 (``redact`` over the whole rendering) can still rewrite a key-shaped string, and
+    is deliberately untouched -- its spans are what the shape corpus pins.
+    """
+
+    def judge(match: re.Match[str]) -> str:
+        body, closing = match.group(1), match.group(2)
+        if closing and _JSON_KEY_COLON.match(text, match.end()):
+            return match.group(0)
+        decoded = _decode_json_string_body(body)
+        scrubbed = redact(decoded)
+        if scrubbed == decoded:
+            return match.group(0)
+        return '"' + json.dumps(scrubbed)[1:-1] + closing
+
+    return _JSON_STRING_TOKEN.sub(judge, text)
+
+
+def _scrub_raw_arguments(raw: str, redact: Callable[[str], str]) -> str:
+    """The copy of a call's ``raw_arguments`` that history stores and replays.
+
+    **The defect this fixes (QA on PR #2133, Q-1 / Q-7).** ``redact(raw)`` judged the JSON
+    TEXT, where a newline is the two characters backslash-n. The shape rules anchor on word
+    boundaries and real line starts, so a key, ``Bearer`` value or bare token after a line
+    break in a heredoc, a ``write`` body or an env block was not recognised and was
+    persisted to ``transcript.jsonl`` and replayed to the provider on every later request --
+    while the identical value in ``arguments`` was masked. (The session hook happened to
+    contain some parseable rows by registering the value during the ``arguments`` pass
+    first; that is an ordering accident, not cover: with the shape function alone, or when
+    ``arguments`` is empty because the call never parsed, the value survived.)
+
+    Two passes, VALUE-FIRST, and the order is load-bearing (QA round 2, Q-1, measured):
+
+    * :func:`_scrub_json_string_values` first -- each string value's body is decoded and
+      judged on the characters it DENOTES, the same judgement ``_scrub_argument_value``
+      gives the decoded view. This runs first because the text pass can EAT the boundary
+      this pass needs: when a credential assignment sits directly before a ``Bearer`` line
+      (two values, one escaped newline apart in the payload), the text pass rewrote the
+      assignment's value AND consumed the escape between the two lines -- judging the
+      rendering, it read the value as running on to the end of the string -- so the
+      word-boundary rule could no longer anchor the bearer value at all. Judging the values
+      first masks the bearer value before anything can rewrite its neighbourhood.
+    * ``redact`` on the text, LAST, because the keyed rules (``"api_key": "..."``) need the
+      key beside the value in one string, and masking a span ACROSS a quote (which the
+      shapes can do) is behaviour the corpus pins here. What the value pass masked is
+      already the mask marker by then, and the marker is stable under the text pass.
+
+    Ordering differential, measured over this repository's shape corpus (323 positive / 220
+    negative rows, each judged as ``json.dumps({"command": row})``): 15 positive rows and NO
+    negative row differ between the two orders, and every differing row keeps its mask in
+    both, at the same marker count. What the old order's text pass additionally covered in
+    those rows was damage: in 14 of the 15 it left the rendering unparseable (a span ran
+    across the escape, into a neighbouring name), while the value-first order leaves valid
+    JSON; in the one row that stayed parseable it masked a following name the value pass
+    leaves intact. Nothing released (any negative row) moved in either direction.
+
+    Deliberately NOT derived by re-serialising ``arguments`` (the direction PR #2133's
+    discussion floated): ``json.dumps`` adds a second escaping layer, and on the rows built
+    around escaped spellings that layer is judged differently from the value it came from
+    (six corpus rows measured over-masked through it), while the text pass above already
+    gives the keyed cover a re-serialise would lose.
+    """
+    return redact(_scrub_json_string_values(raw, redact))
+
+
 def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | None) -> Message:
     """The copy of an assistant turn that history STORES and REPLAYS.
 
@@ -1177,6 +1296,11 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     ``--flag``) was surviving in the journal in full even though the RESULT of
     that call is scrubbed. This returns the copy for that second use; the caller
     keeps executing the original.
+
+    **BOTH carriers of the call are scrubbed, each with real line boundaries**:
+    ``arguments`` (decoded values) and ``raw_arguments`` (the JSON string the wire replays
+    verbatim). See :func:`_scrub_raw_arguments` for why the string cannot simply be
+    redacted as text.
 
     **IDENTITY IS PRESERVED when nothing changed**, and that is load-bearing
     rather than tidy: the loop's error and refusal paths retract a message they
@@ -1196,12 +1320,17 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
         # came from rather than as an anonymous one.
         with tool_source(call.name, call.arguments):
             arguments, arguments_changed = _scrub_argument_value(call.arguments, redact)
-            raw = redact(call.raw_arguments) if isinstance(call.raw_arguments, str) else None
-        changed = changed or arguments_changed or raw != call.raw_arguments
+            raw = (
+                _scrub_raw_arguments(call.raw_arguments, redact)
+                if isinstance(call.raw_arguments, str)
+                else None
+            )
+        call_changed = arguments_changed or raw != call.raw_arguments
+        changed = changed or call_changed
         calls.append(
-            call
-            if not (arguments_changed or raw != call.raw_arguments)
-            else call.model_copy(update={"arguments": arguments, "raw_arguments": raw})
+            call.model_copy(update={"arguments": arguments, "raw_arguments": raw})
+            if call_changed
+            else call
         )
     if not changed:
         return message
