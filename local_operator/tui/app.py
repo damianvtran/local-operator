@@ -301,6 +301,7 @@ from local_operator.tui.notify import (
     remote_park_banner,
     remote_park_card,
 )
+from local_operator.tui.quota_notice import prewarm_verdict
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
 from local_operator.tui.session_interaction import (
@@ -11636,6 +11637,11 @@ class OperatorApp(App[None]):
         # Cached: every appended block asks the splash to hide, and that path
         # should not pay for a DOM query per block.
         self._welcome = self.query_one(WelcomeView)
+        # The splash's quota-verdict module, loaded in a thread while the boot
+        # worker runs (`_prewarm_quota_notice`): the read skips rather than
+        # import on the loop, and the module must stay off the startup import
+        # path — `tui/quota_notice` says why on both counts.
+        self.run_worker(self._prewarm_quota_notice(), thread=False, group="quota-prewarm")
         # An empty transcript is the boot layout's whole precondition, and the
         # session starts empty — so the app opens in it. Set here rather than in
         # the stylesheet's base rules because this is state, not style: it is the
@@ -11750,6 +11756,21 @@ class OperatorApp(App[None]):
         from local_operator.session_factory import warm_session_imports
 
         await asyncio.to_thread(warm_session_imports)
+
+    async def _prewarm_quota_notice(self) -> None:
+        """Import the splash's verdict module in a thread, once, at boot.
+
+        Mirrors :meth:`_warm_session_imports`'s rationale — import releases
+        the GIL for its file I/O and between bytecode switches — applied to
+        the one provider-stack module the splash will read
+        (``tui/quota_notice.quota_notice_line``): the read SKIPS while this
+        import is in flight (it never waits on the import lock — see there),
+        and this method's refresh after the load paints the row the skip
+        could not compute.
+        """
+        loaded = await prewarm_verdict()
+        if loaded and self._welcome is not None:
+            self._welcome.refresh_info()
 
     async def _construct_session(self) -> Any:
         """Apply the factory's import policy and await it. RAISES; adopts nothing.
