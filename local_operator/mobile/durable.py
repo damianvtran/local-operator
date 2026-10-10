@@ -441,22 +441,29 @@ class DurableFoldCache:
         )
         entries = list(suffix.entries)
         state.window_bytes = suffix.bytes_read
-        # THE READER'S OWN FACT, derived rather than taken from the caller. Two
-        # answers turn on it: this fold's boundary (``_replay``'s
-        # ``keep_start_id``, the archive's cut) and whether the prune map is the
-        # FILE's own (``scan_from_bof``, which ``_journal_page`` reads to decide
-        # whether the archive must rebuild it from the journal before serving a
-        # page — a prune marker sits ABOVE the row it blanks, so a windowed fold
-        # that served its own map would hand the phone output the live fold had
-        # hidden).
+        # THE READER'S OWN FACT, CARRIED RATHER THAN INFERRED. Two answers turn on
+        # it: this fold's boundary (``_replay``'s ``keep_start_id``, the archive's
+        # cut) and whether the prune map is the FILE's own (``scan_from_bof``,
+        # which ``_journal_page`` reads to decide whether the archive must rebuild
+        # it from the journal before serving a page — a prune marker sits ABOVE
+        # the row it blanks, so a windowed fold that served its own map would hand
+        # the phone output the live fold had hidden).
         #
-        # ``bytes_read`` is the span from the chunk the backward walk stopped at
-        # to EOF, so it equals the file exactly when that walk reached the file's
-        # start — which is the case for a journal with no compaction to stop at,
-        # and not for a bounded window. The comparison is against the stat taken
-        # by ``load``; a file that grew between the two reads therefore lands
-        # conservative (``False``, rebuild the map), never the other way.
-        at_bof = suffix.bytes_read >= fingerprint.size
+        # ``reached_bof`` is true only when the backward walk consumed the chunk
+        # at offset 0, i.e. the file's own first row was in hand; a journal with no
+        # compaction to stop at walks all the way, a bounded window does not.
+        #
+        # NOT A BYTE-SPAN COMPARISON, and this comment used to make the argument
+        # for exactly the wrong one. ``suffix.bytes_read >= fingerprint.size``
+        # compares a span the READER measured at its own EOF against a size
+        # ``load`` stat'ed earlier, so a file that GREW in between inflates the
+        # left side: for growth G the test becomes ``chunk_start <= G``, which a
+        # window that stopped short satisfies as soon as it stopped within G bytes
+        # of the start. That answers True while the walk never reached the file's
+        # beginning — the non-conservative direction, and the one that matters
+        # here, because True tells the archive to trust a map that is incomplete
+        # by construction (review round 9, MAJOR-9-1).
+        at_bof = suffix.reached_bof
         # ``opportunistic_types`` never gates the scan (a type that may
         # legitimately be absent must not, see ``read_replay_suffix``), so this
         # is the free half: snapshots the window already passed.
@@ -798,8 +805,18 @@ def _journal_prunes(directory: Path, *, fallback: Mapping[str, str]) -> dict[str
     TUI's audit window sidesteps this by reading the resident entries
     (``collect_prunes``); this reader is disk-based and stateless, so it makes
     one byte pass looking for the prune needle and parses only the lines that
-    carry it, cached against the file's identity so the pass happens once per
-    file state rather than once per page.
+    carry it, cached against the file's identity ``(path, inode, size)`` — so the
+    pass happens once per file STATE, and an appending session gets a new state
+    per append: on a live session this is per page, not once per session as an
+    earlier version of this sentence implied.
+
+    THE INCREMENTAL SHAPE, named here as the follow-up rather than done here:
+    prune rows are append-only, so a cache keyed on ``(inode, size_scanned)``
+    could scan only the new span and merge it into the map it already holds,
+    which would make the pass once per session again without changing what the
+    map means. Until then the full pass is what guarantees the redaction, and it
+    is cheaper than the parse it replaced (a C-level needle scan, not a decode
+    per row).
 
     ``fallback`` is the map the caller already holds — the fold's own, which is
     complete whenever the fold read the whole journal. It is what an unreadable

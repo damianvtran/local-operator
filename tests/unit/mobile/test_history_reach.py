@@ -1020,3 +1020,113 @@ def test_a_capped_projection_does_not_strand_the_row_the_cap_dropped(
         expected = {row.id for row in _journal_rows(walk["directory"])}
         assert ids["own_row"] in observed, f"page {page} stranded the dropped row"
         assert expected <= observed, f"page {page} stranded {sorted(expected - observed)[:3]}"
+
+
+def test_scan_from_bof_trusts_the_readers_fact_not_a_byte_span(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window that stopped short must never claim the file's own prune map.
+
+    The archive reads ``scan_from_bof`` to decide whether it may trust the fold's
+    prune map, and a map from a window is incomplete by construction — a prune
+    marker sits ABOVE the row it blanks — so a false True is a redaction failure,
+    not a stale page. The fact therefore has to come from the read that happened
+    (``ReplaySuffix.reached_bof``) rather than from a byte span compared against a
+    size stat'ed earlier: growth between the two makes the span exceed the size
+    while the walk never reached the file's beginning (review round 9, MAJOR-9-1).
+
+    No test read this field before, and the arm below is the one the old
+    arithmetic got wrong, so it is the one worth pinning by name.
+    """
+    config = tmp_path / "config"
+    directory = config / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+
+    async def seed() -> None:
+        await transcript.append_message(Message.user("seed", id="scan-seed"))
+
+    asyncio.run(seed())
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+
+    # Both names are new, so they are imported HERE: a tree without the field
+    # should fail this test on its assertion, not at this module's import.
+    from local_operator.mobile import durable as durable_module
+    from local_operator.session.transcript import ReplaySuffix
+
+    def stub(*, bytes_read: int, reached_bof: bool) -> ReplaySuffix:
+        return ReplaySuffix(
+            entries=(),
+            through_present=True,
+            checkpoint=None,
+            bytes_read=bytes_read,
+            reached_bof=reached_bof,
+        )
+
+    # The pair a growth race produces: a span far larger than the file on disk,
+    # from a walk that stopped short. The size arithmetic answered True here.
+    monkeypatch.setattr(
+        durable_module,
+        "read_replay_suffix",
+        lambda *a, **k: stub(bytes_read=10**9, reached_bof=False),
+    )
+    windowed = DurableFoldCache().load(directory)
+    assert (
+        windowed.scan_from_bof is False
+    ), "a window that stopped short claimed the file's own prune map"
+
+    # The other direction, from the same field: a walk that reached the start.
+    monkeypatch.setattr(
+        durable_module,
+        "read_replay_suffix",
+        lambda *a, **k: stub(bytes_read=1, reached_bof=True),
+    )
+    whole = DurableFoldCache().load(directory)
+    assert whole.scan_from_bof is True
+
+
+def test_a_bounded_window_says_so_and_a_whole_file_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same two directions through the REAL reader, not a stub.
+
+    The window arm needs a journal larger than the walker's 1 MiB chunk, with its
+    kept window opening far enough above the end that the backward walk stops
+    before the file's first chunk. Below that size the reader reaches the start on
+    any journal, answers True, and would prove nothing about bounding — which is
+    why the small arm is stated as its own expectation rather than left implicit.
+    """
+    config = tmp_path / "config"
+    directory = config / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    blotter = "x" * 4096
+
+    async def big() -> None:
+        for i in range(1600):  # ~6.9 MB of rows: well past the 1 MiB chunk
+            await transcript.append_message(Message.user(f"{blotter} {i}", id=f"chunk-u{i}"))
+        # The kept window opens 400 rows (~1.7 MB) above the end, so the walk
+        # stops inside a chunk that does not start at the file's beginning.
+        await transcript.append_compaction(
+            summary="the boundary", first_kept_entry_id="chunk-u1200", tokens_before=1000
+        )
+
+    asyncio.run(big())
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    windowed = DurableFoldCache().load(directory)
+    assert windowed.scan_from_bof is False, "a windowed fold claimed the whole journal"
+    assert (
+        windowed.window_bytes < (directory / "transcript.jsonl").stat().st_size
+    ), "the window must be smaller than the file for this arm to mean anything"
+
+    plain = tmp_path / "plain" / "sessions" / SESSION_ID
+    plain.mkdir(parents=True)
+
+    async def small() -> None:
+        rows = Transcript(plain)
+        for i in range(5):
+            await rows.append_message(Message.user(f"short {i}", id=f"small-u{i}"))
+
+    asyncio.run(small())
+    whole = DurableFoldCache().load(plain)
+    assert whole.scan_from_bof is True, "a whole-file fold should report the file as its own"
