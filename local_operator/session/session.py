@@ -13022,7 +13022,10 @@ class Session:
         ``carried_prompt`` is True only for the peer callers — a peer message
         is a person's words at the other end of `lop send`, so a run it opens
         keeps the cut-off verdict a harness delivery does not get (see
-        ``_attention_run_has_evidence``).
+        ``_attention_run_has_evidence``) — and for the turn-end flush opening
+        a batch containing one: the parked row is the same person's words
+        whichever consumer took it (agent review round 1, MINOR-1; see
+        ``_flush_parked_deliveries``).
 
         ``guard`` is the patience delivery's under-lock re-check: it runs once
         the turn lock is held, and a False return retires the delivery
@@ -13927,6 +13930,17 @@ class Session:
         by the disposal that follows (see ``_deliver_job_results``' leaving
         arm), and an ask is not lost to the skip -- its answer is durable in
         the log and the next runtime's boot reconcile re-delivers it.
+
+        One baked-in premise rides a flushed row (agent review round 1,
+        MINOR-2): the busy-resume note some busy arms attach at hand-off
+        (``_append_busy_resume_note`` -- the wake, monitor and resume-catch-up
+        paths) tells the model the delivery "was held for a tool boundary" and
+        to resume the interrupted work. At a turn-end flush the turn it was
+        held from has ENDED, so that premise is past -- kept anyway, not
+        un-baked: the note stays conservative ("unless this [delivery] makes
+        it obsolete") and the model can see the finished turn, while un-baking
+        would cost the busy arms one shared sentence. Recorded here so the
+        next reader does not re-derive the mismatch as a bug.
         """
         if self._disposed or self._leaving_deliveries or self._one_shot_exit:
             return
@@ -13941,11 +13955,27 @@ class Session:
             for item in drained:
                 self._steering_queue.put_nowait(item)
             return
-        task = self._spawn_background(self._prompt_messages(parked))
+        # PARITY WITH THE PEER ARMS (agent review round 1, MINOR-1): both
+        # ``receive_peer_message`` arms spawn with ``carried_prompt=True``,
+        # and this flush is a third consumer of the same parked row -- a
+        # person is at the other end of it whichever consumer took it, so a
+        # flush-opened run cut before its first provider round-trip must earn
+        # the neutral closure instead of settling silently. A batch with no
+        # peer row keeps the harness shape: a wake's, ask's or monitor's
+        # zero-work run gets no verdict. The discriminator is ``custom_type``,
+        # never attribution (see ``_note_run_input``).
+        carries_peer = any(
+            getattr(item, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE for item in parked
+        )
+        task = self._spawn_background(self._prompt_messages(parked, carried_prompt=carries_peer))
         if task is None:
-            # Disposed between the guard above and the spawn: nothing was
-            # spawned, and ``_spawn_background`` closed the coroutine it was
-            # handed -- so the queue goes back exactly as it was.
+            # A belt with no race to catch (agent review round 1, NIT-2):
+            # nothing between the guard above and this spawn awaits, and
+            # ``_spawn_background`` answers None only while disposed -- which
+            # the guard already excluded. Kept so a future await introduced
+            # above cannot silently drop the queue; the coroutine was closed
+            # by ``_spawn_background``, so the queue goes back exactly as it
+            # was.
             for item in drained:
                 self._steering_queue.put_nowait(item)
             return
@@ -13957,6 +13987,12 @@ class Session:
         # reset ``_drain_steering`` performs. What remains queued is plain
         # steers, which are never counted as courtesy.
         self._courtesy_wake_count = 0
+        # The take changed what ``queued_steering()`` folds into the frontend
+        # snapshot, so refresh before returning -- a follower must not keep
+        # rendering the taken row as still queued until the spawned turn's
+        # next refresh. Parity with ``_drain_steering`` and
+        # ``_drop_queued_wake_deliveries`` (agent review round 1, NIT-1).
+        self.refresh_frontend_state()
 
     async def _drop_pre_aborted_turn(
         self,
