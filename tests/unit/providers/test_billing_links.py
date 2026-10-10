@@ -108,7 +108,9 @@ def test_two_flavour_providers_offer_both_surfaces() -> None:
     assert openai_balance is not None and openai_balance.kind == "balance"
     assert openai_balance.url == "https://platform.openai.com/account/billing"
     # Without a kind, the notice path's surface (the subscription) answers.
-    assert billing_link_for("openai").url == "https://chatgpt.com/codex/settings/usage"
+    openai_subscription = billing_link_for("openai")
+    assert openai_subscription is not None
+    assert openai_subscription.url == "https://chatgpt.com/codex/settings/usage"
 
     kimi_plan = billing_link_for("kimi", kind="subscription")
     assert kimi_plan is not None and kimi_plan.url == "https://www.kimi.com/code/console"
@@ -130,4 +132,6 @@ def test_kimi_topup_url_follows_the_platform_split() -> None:
     # No argument: the registry default, which is the mainland host.
     assert kimi_topup_url() == "https://platform.kimi.com/console/pay"
     # And the table fills that resolved URL in for every caller.
-    assert billing_link_for("kimi").url == "https://platform.kimi.com/console/pay"
+    kimi_link = billing_link_for("kimi")
+    assert kimi_link is not None
+    assert kimi_link.url == "https://platform.kimi.com/console/pay"
