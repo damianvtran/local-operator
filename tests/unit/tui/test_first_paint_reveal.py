@@ -817,14 +817,29 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
         "the transcript's height on a LATER frame",
         content[:4],
     )
-    # THE CARD'S ROWS ARE RESERVED IN THAT SAME FRAME (`arrange`-time settle, see
-    # `OperatorApp._settle_dock_rows_before_reveal`), so the transcript's own
-    # region is the settled one immediately and the host sits inside the screen.
-    # Before the reservation, measured at this size: region 38, host y=39 with 15
-    # rows on a 45-row screen (clipped), settling to 23 at +147 ms with the scroll
-    # moving by exactly the card's height — review round 1's F2, QA's Q2, design's
-    # D4. `region`, not `outer_size`: the reviewer's point, and it is the region the
-    # reader's rows are clipped to.
+    # THE CARD IS IN THAT FRAME, and the equalities below are what say its rows
+    # came out of the transcript there and then. What this does NOT credit is the
+    # arrange-time settle: `OperatorApp._settle_dock_rows_before_reveal` runs its
+    # pass while the card is still composing (instrumented: `card_mounted=False` in
+    # every settle this lane and the reviewer took), so the pass cannot be the
+    # mechanism — see the comment under the equalities. Before the reservation,
+    # measured at this size: region 38, host `y=39` with its 15 rows on a 45-row
+    # screen (clipped), settling to 23 at +147 ms with the scroll moving by exactly
+    # the card's height — review round 1's F2, QA's Q2, design's D4. `region`, not
+    # `outer_size`: that is the box the reader's rows are clipped to.
+    #
+    # A ONE-FRAME TRACE WOULD PASS THIS SILENTLY, which is the class of defect this
+    # round is about (`settled` and `first` are then the same sample, so both
+    # equalities compare a value with itself). The guard is here to make that fail
+    # loudly instead: a reveal that composes a single frame has not shown that the
+    # card's rows were reserved in the frame that carries the card — it has shown
+    # nothing, and the pin is not allowed to call that green.
+    assert len(content) >= 2, (
+        "the trace holds a single frame, so the two equalities below compare a "
+        "sample with itself and cannot fail: measure two frames or do not claim "
+        "the reservation",
+        content,
+    )
     settled = content[-1]
     # THE ACCEPTANCE CRITERION FOR THIS FRAME, asserted as an equality and
     # deliberately NOT one-sided. The frame that first carries the card must
@@ -834,9 +849,10 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
     # both of the defects this exists to catch, because both of them give the
     # transcript MORE rows than it settles with:
     #
-    # * the round-1 shape — region `h=38` against a settled `23`, the dock at its
-    #   3 rows of chrome instead of 15 (the card added BELOW the transcript, then
-    #   a second state at +147 ms taking the rows back);
+    # * the round-1 shape — region `h=38` against a settled `23` with the dock
+    #   already at its full 15 rows, but placed BELOW the transcript (`host y=39`,
+    #   clipped off a 45-row screen): the card's rows were never taken out of the
+    #   transcript, and the second state at +147 ms is what took them;
     # * the partial reserve — region `35`, the card in the dock with only part of
     #   its height authored.
     #
@@ -845,8 +861,8 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
     # only half-lands.
     assert first["region"] == settled["region"], (
         "the frame that carries the card did not take the card's rows out of the "
-        "transcript: the region is not the settled one (round-1 defect 38 vs 23; "
-        "partial reserve 35 vs 23)",
+        "transcript: the region is not the settled one (round-1 shape 38 vs 23 "
+        "with the dock below the transcript; partial reserve 35 vs 23)",
         first["region"],
         settled["region"],
         content[:4],
