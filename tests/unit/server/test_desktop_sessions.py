@@ -5708,6 +5708,49 @@ async def test_a_latched_daemon_gets_no_successor_from_the_retire_frame(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_the_retire_frame_publishes_the_honest_projection_before_any_engage(tmp_path) -> None:
+    """THE HONESTY UPDATE IS NOT THE ENGAGE'S TO DECLINE (2026-10-10 incident).
+
+    Session 62480a153ced served ``frontend.streaming: true`` for 6+ minutes
+    during the daemon-wide update rollover: the retire raced its turn-end
+    delta, the successor-snapshot repair was declined by the daemon latch, and
+    this callback published nothing that could restate the claim — so mounted
+    viewers kept steering (mode="steer" on the 10:05:24 and 10:07:59 presses)
+    and painted the stuck "thinking" indicator off a bit nothing could clear.
+    The replacement is now published FIRST — before the engage attempt — and
+    the latch's decline only ever declines the SUCCESSOR.
+    """
+    from local_operator.mobile.attach_client import RETIRING_REASON
+    from local_operator.session.attached import AttachedSession
+
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path), retiring=lambda: True)
+    remote = await AttachedSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=module._no_takeover
+    )
+    bridge.remote = remote
+    remote.set_refresh_callback(bridge._on_runtime_retired)
+    # The incident's exact shape: the claim raced the retirement into the
+    # facade and its canonical mirror. ``_drop_liveness_claim`` corrects both,
+    # and this frame is what must carry that correction to mounted viewers.
+    remote._streaming = True
+    store = remote._frontend_store
+    assert store is not None, "cold() installs the synthesised canonical state"
+    store.replace(store.state.model_copy(update={"streaming": True}))
+
+    remote._on_disconnected(RETIRING_REASON)
+
+    frames = [frame for frame, _size in bridge.replay if frame["type"] == "frontend.replace"]
+    assert frames, "the retire published nothing; the served claim would stand"
+    payload = frames[-1]["payload"]
+    assert (
+        payload["frontend"]["snapshot"]["streaming"] is False
+    ), "the replacement must carry the dropped claim, not restate it"
+    assert payload["cold"] is True, "a retired facade reports itself as cold"
+    assert bridge.warm_task is None, "a latched daemon's retire frame started a runtime"
+    assert remote.is_streaming is False
+
+
+@pytest.mark.asyncio
 async def test_concurrent_move_waits_for_refusal_rollback(move_api) -> None:
     client, app, root = move_api
     before, refused, accepted = (root / name for name in ("before", "refused", "accepted"))
