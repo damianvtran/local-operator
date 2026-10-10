@@ -1216,8 +1216,13 @@ def _scrub_json_string_values(text: str, redact: Callable[[str], str]) -> str:
 
     Works whether or not ``text`` parses: an unterminated body (a stream cut mid-call, the
     fragment ``_assemble_tool_call`` leaves beside empty ``arguments``) is judged as the
-    truncated value it is. Object KEYS are skipped -- a masked key would rename the
-    argument -- mirroring ``_scrub_argument_value``, which scrubs values only.
+    truncated value it is.
+
+    THIS pass skips a string that is recognisably an object KEY (a closing quote followed by
+    a colon), because a masked key would rename the argument -- mirroring
+    ``_scrub_argument_value``, which scrubs values only. The claim is scoped to this pass:
+    pass 1 (``redact`` over the whole rendering) can still rewrite a key-shaped string, and
+    is deliberately untouched -- its spans are what the shape corpus pins.
     """
 
     def judge(match: re.Match[str]) -> str:
