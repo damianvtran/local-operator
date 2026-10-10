@@ -38,6 +38,8 @@ def _result(
     cost: float | None = None,
     basis: BillingBasis | None = None,
     provenance: str | None = None,
+    usage_record_id: str | None = None,
+    strength_ignored: bool = False,
 ) -> RungResult:
     return RungResult(
         assets=[MediaAsset(data=b"png", content_type="image/png", source_url="https://x/1.png")],
@@ -47,6 +49,8 @@ def _result(
         cost_source="reported" if cost is not None else None,
         billing_basis=basis,
         cost_provenance=provenance,
+        usage_record_id=usage_record_id,
+        strength_ignored=strength_ignored,
     )
 
 
@@ -83,6 +87,8 @@ async def _run(
     rung_timeout_s: float = 240.0,
     overall_timeout_s: float = 300.0,
     emit=None,
+    pre_attempts: dict[str, JobAttempt] | None = None,
+    action: str = "generation",
 ):
     fake, calls = _script(script)
     handle = CancelHandle()
@@ -100,6 +106,8 @@ async def _run(
         rung_timeout_s=rung_timeout_s,
         overall_timeout_s=overall_timeout_s,
         on_exhausted=on_exhausted,
+        pre_attempts=pre_attempts,
+        action=action,
     )
     return outcome, calls, captured
 
@@ -369,6 +377,80 @@ async def test_the_walk_serves_video_through_the_same_seam() -> None:
             on_exhausted=on_exhausted,
         )
     assert str(caught.value).startswith("Video generation failed on every available provider:")
+
+
+# ---------------------------------------------------------------------------
+# pre_attempts: the caller's before-the-walk filter
+# ---------------------------------------------------------------------------
+
+
+def _pre(route: str, message: str = "cannot edit.") -> JobAttempt:
+    return JobAttempt(route=route, outcome="skipped", reason_class="unsupported", message=message)
+
+
+@pytest.mark.asyncio
+async def test_pre_attempts_are_recorded_in_place_and_never_dispatched() -> None:
+    recorded = _pre("alpha")
+    outcome, calls, _ = await _run(
+        {"beta": _result("b-model")},
+        pre_attempts={"alpha": recorded},
+    )
+
+    assert calls == ["beta"], "a pre-recorded route is never dispatched"
+    assert outcome.attempts[0] == recorded, "its record lands at its cascade position"
+    assert outcome.attempts[1].outcome == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a_pre_attempt_is_checked_before_a_spent_budget_arm() -> None:
+    """Capability is not time-dependent: the budget arm must not rewrite it."""
+    with pytest.raises(JobUnavailable) as caught:
+        await _run(
+            {},
+            candidates=("alpha", "beta"),
+            pre_attempts={"alpha": _pre("alpha")},
+            overall_timeout_s=0.0,
+        )
+
+    assert [(a.route, a.reason_class) for a in caught.value.attempts] == [
+        ("alpha", "unsupported"),
+        ("beta", "timeout"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_action_word_rides_the_exhausted_header() -> None:
+    with pytest.raises(JobUnavailable) as caught:
+        await _run(
+            {
+                "alpha": APIError("a down", status_code=500),
+                "beta": APIError("b down", status_code=500),
+            },
+            action="editing",
+        )
+
+    assert str(caught.value).startswith("Image editing failed on every available provider:")
+    assert "Alpha: a down" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_usage_record_id_rides_a_successful_outcome() -> None:
+    outcome, _, _ = await _run({"alpha": _result(usage_record_id="ur-1")})
+
+    assert outcome.usage_record_id == "ur-1"
+    # And it stays None when no rung set one (the absent-safe default).
+    plain, _, _ = await _run({"alpha": _result()})
+    assert plain.usage_record_id is None
+
+
+@pytest.mark.asyncio
+async def test_the_strength_ignored_flag_rides_a_successful_outcome() -> None:
+    outcome, _, _ = await _run({"alpha": _result(strength_ignored=True)})
+
+    assert outcome.strength_ignored is True
+    # Default-off: a rung that honoured strength must not claim otherwise.
+    plain, _, _ = await _run({"alpha": _result()})
+    assert plain.strength_ignored is False
 
 
 # ---------------------------------------------------------------------------
