@@ -101,13 +101,14 @@ PERSIST_HINT_PREFIX = "/model default"
 
 #: The argument words ``/model`` consumes as COMMANDS rather than as selectors
 #: to rank rows against. Typing one filters the catalogue to nothing by
-#: construction — no row is named `default` — so the empty-state row says what
-#: the word does instead of reporting a failed search (UX review round 3, U3).
+#: construction — no row is named `default`, and no model id starts with
+#: `--all` — so the empty-state row says what the word does instead of
+#: reporting a failed search (UX review round 3, U3).
 #: Kept beside ``PERSIST_HINT_PREFIX`` because both exist for the same reason:
 #: this widget has to recognise the app's `/model` vocabulary without importing
 #: ``app``, which imports this module. ``test_persist_keywords_match_app``
 #: asserts they stay in step with the handler's own dispatch.
-_PERSIST_KEYWORDS = frozenset({"default", "saved"})
+_PERSIST_KEYWORDS = frozenset({"default", "saved", "--all"})
 
 
 def _keyword_row(keyword: str) -> str:
@@ -410,6 +411,10 @@ class ModelPicker(Static):
         # so a bare `render_text` call (the unit tests do this) holds the row
         # too; only `close()` releases it.
         self._status_row_held = False
+        #: The width the last ``_repaint`` rendered at. Read only by
+        #: :meth:`on_resize`, which is the correction for a paint that landed
+        #: while the widget had no laid-out width — see that method.
+        self._painted_width = 0
         # The query Esc dismissed, or ``None``. The counterpart of
         # ``CommandPicker._dismissed_query``, and it exists for the same reason:
         # the editor re-derives every list from the buffer on EVERY key, before
@@ -650,6 +655,7 @@ class ModelPicker(Static):
         if not self._open or not self.is_mounted:
             return
         width = max(self.size.width, 20)
+        self._painted_width = width
         rows = self._chrome_rows(width)
         # Pin the height for the same reason ToolCard does: `auto` measures the
         # content against a guessed width before layout and settles one row too
@@ -793,6 +799,12 @@ class ModelPicker(Static):
         be and a shrinking window never hands the annotation the cells it freed.
         """
         if not row.connected:
+            # The `login required` tag rides THIS run, so it is dropped with the
+            # whole numbers column below ``_NUMBERS_MIN_WIDTH`` (56; 58/59-column
+            # terminals) — below the picker's supported 60x20 floor. Recorded,
+            # not fixed (design review round 1, D4): a monochrome client below
+            # the floor reads the dim row without the tag, and trimming the cell
+            # further to save the tag would cost either the count or the id.
             return "login required"
         short_window = width is not None and width < _SHORT_WINDOW_MIN_WIDTH
         parts = [
@@ -981,6 +993,31 @@ class ModelPicker(Static):
             self._repaint()
 
     # -- mouse --------------------------------------------------------------
+    def on_resize(self, event) -> None:  # noqa: ANN001 - Textual event type
+        """Re-render when the WIDTH moved — the one input a paint can be missing.
+
+        ``_repaint`` falls back to ``max(self.size.width, 20)`` while the
+        widget has no laid-out width, and a paint can land in exactly that
+        window: ``/model --all`` (or a dispatched bare ``/model``) clears the
+        buffer, closes the list and reopens it inside one keypress, so both the
+        populate and the live refresh rendered at the 20-cell fallback and the
+        settled frame kept rows truncated to ``openrouter/deeps…`` while
+        ``picker.size`` read 73 — caught by the rendered frames, not by any
+        assertion, because every test calls ``render_text`` with the width it
+        wants. Nothing else repaints on a width change, so the row truncation
+        and the footer's clause fitting have to be redone here.
+
+        Guarded on the WIDTH, the ``tool_card`` rule: ``_repaint`` sets the
+        widget's own height, so every repaint can raise a Resize that lands
+        straight back here, and a height-only resize reproduces the rows byte
+        for byte.
+        """
+        size = getattr(event, "size", None)
+        if size is not None and size.width == self._painted_width:
+            return
+        if self._open:
+            self._repaint()
+
     def on_mouse_move(self, event) -> None:  # noqa: ANN001 - Textual event type
         index = self._index_at(event.y)
         if index != self._hovered:

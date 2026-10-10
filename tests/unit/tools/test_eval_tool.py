@@ -29,7 +29,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
-from local_operator.scratchpad import SCRATCHPAD_PATH_ENV
+from local_operator.scratchpad import SCRATCHPAD_ELSEWHERE_SHORT, SCRATCHPAD_PATH_ENV
 from local_operator.tools import builtin
 from local_operator.tools import eval as eval_tool
 
@@ -850,6 +850,104 @@ async def test_render_does_not_block_the_event_loop(context, monkeypatch) -> Non
         f"event loop stalled {state['max_gap'] * 1000:.0f} ms during eval render "
         f"(block_s={block_s * 1000:.0f} ms ran on the loop, not off it)"
     )
+
+
+# ---------------------------------------------------------------------------
+# the pad audit: the eval channel reports pad state a cell NAMED
+# ---------------------------------------------------------------------------
+#
+# Budget arm ONLY, unlike the shell channel: a command's creating positions can
+# be attributed after the fact, a cell's Python cannot — so the line is about
+# the pad STATE the cell named, never about a name it may not have created.
+# The fixtures patch BOTH bindings of the budget (the walk reads it off
+# ``local_operator.scratchpad``, the sentence off ``builtin``'s import of it)
+# so the over-budget arm, not a neighbour, is what fires.
+
+
+def _pad_over_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A context whose pad holds ONE real file, budget patched one byte under it."""
+    pad = tmp_path / "sessions" / "eval-pad" / "scratchpad"
+    pad.mkdir(parents=True)
+    filled = pad / "bulk.dat"
+    filled.write_bytes(b"x" * 8192)
+    held = filled.stat().st_blocks * 512
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
+    monkeypatch.setattr(builtin, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
+    context = ToolContext(cwd=str(tmp_path), session_id="eval-pad", scratchpad_dir=str(pad))
+    return context, pad, held
+
+
+def _render_offline(context: ToolContext, code: str) -> ToolResult:
+    """The real renderer, called the way ``_render`` calls it (off the loop)."""
+    return eval_tool._build_render_result(
+        "c-render", True, "printed", "", None, None, [], context, code
+    )
+
+
+def test_a_pad_naming_cell_carries_the_size_line_near_the_top(tmp_path, monkeypatch) -> None:
+    """A cell that names the pad while the pad is over budget gets ONE line —
+    first line of the body, ahead of its own output — the same walk and the
+    same thresholds the write path refuses with, in the unit a reader parses
+    (design review round 1, D2) and claiming exactly what the write path
+    refuses, writes that add (F3)."""
+    context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
+    code = "import os\nprint(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])\n"
+
+    result = _render_offline(context, code)
+
+    expected = (
+        f"[scratch] The pad now holds ≥{held:,} bytes, over its {held - 1:,}-byte budget — "
+        f"{SCRATCHPAD_ELSEWHERE_SHORT}; writes that add are refused."
+    )
+    assert result.text.splitlines()[0] == expected, result.text
+
+
+def test_a_cell_without_a_word_about_the_pad_is_never_measured(tmp_path, monkeypatch) -> None:
+    """The gate's zero-work promise on this channel too: the pad is left OVER
+    BUDGET, and a cell that never mentions it neither gets a line nor pays for
+    a walk (spy counter)."""
+    context, pad, _ = _pad_over_budget(tmp_path, monkeypatch)
+    walked = []
+    real_footprint = builtin.scratchpad_footprint
+
+    def spy(root):
+        walked.append(root)
+        return real_footprint(root)
+
+    monkeypatch.setattr(builtin, "scratchpad_footprint", spy)
+
+    result = _render_offline(context, "print(2 + 2)")
+
+    assert "[scratch]" not in result.text, result.text
+    assert walked == []
+
+
+def test_a_pad_naming_cell_on_a_healthy_pad_stays_silent(tmp_path) -> None:
+    """The line is about pad STATE, not about the mention: a cell that names a
+    healthy pad reads exactly as before — the alternative is an advisory every
+    pad-touching cell pays for, which is how a channel gets muted."""
+    pad = tmp_path / "sessions" / "eval-pad" / "scratchpad"
+    pad.mkdir(parents=True)
+    (pad / "notes.md").write_text("x")
+    context = ToolContext(cwd=str(tmp_path), session_id="eval-pad", scratchpad_dir=str(pad))
+
+    result = _render_offline(context, "import os\nprint(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])\n")
+
+    assert "[scratch]" not in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_the_pad_line_reaches_the_real_eval_result(tmp_path, monkeypatch) -> None:
+    """End to end through the tool: the cell really runs on a worker and the
+    line lands on the result the loop returns — the thread from ``execute_eval``
+    through ``_render`` is the half a renderer-only test cannot see."""
+    context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
+    code = "import os\nprint(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])\n"
+
+    result = await _call(context, code)
+
+    assert result.is_error is False
+    assert "[scratch] The pad now holds ≥" in result.text, result.text
 
 
 # ---------------------------------------------------------------------------

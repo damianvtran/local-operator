@@ -150,6 +150,33 @@ _RULES: list[tuple[str, tuple[Marker, ...]]] = [
         "reasoning-echo",
         (REASONING_ECHO_MARKERS,),
     ),
+    # An HTTP 402 is an out-of-credits (billing) refusal, named BEFORE
+    # "rate-limit" because the two share words: the harness used to render a 402
+    # as "rate limit or quota exceeded (HTTP 402): insufficient credits", and the
+    # rate-limit rule's bare "quota" marker claimed it, so a signed-in user with a
+    # zero balance was told to back off and retry. The later `billing` rule could
+    # never see it.
+    #
+    # ONE marker, the status token, and that narrowness is the point (agent
+    # review round 1, R1-1): "(HTTP 402)" is written by ``ProviderError.__str__``
+    # for this status alone and is not ordinary provider prose, whereas the
+    # WORDINGS that describe the same failure ("out of credits", "insufficient
+    # credits") are carried by other failures too — "insufficient credits to
+    # refresh" is a rejected bearer, "out of credits? retry in 5s" is a throttle
+    # — and at THIS position they outranked the auth and rate-limit rules that
+    # own those failures. Past those rules, the later `billing` rule still claims
+    # a label-less relayed body through its own markers (`credit` covers both
+    # wordings). Never a bare "402" either: that occurs in token counts ("used
+    # 402000 tokens").
+    #
+    # Both the current label ("out of credits (HTTP 402): ...") and the legacy
+    # rendering ("rate limit or quota exceeded (HTTP 402): ...") carry the
+    # token, so a transcript written by an older runtime classifies like a fresh
+    # one.
+    (
+        "billing",
+        ("http 402",),
+    ),
     (
         "rate-limit",
         (

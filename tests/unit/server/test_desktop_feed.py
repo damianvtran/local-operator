@@ -4090,3 +4090,177 @@ def test_the_feed_does_not_inherit_the_desktop_pre_open_supersession(tmp_path):
     assert frames[-1]["type"] == "gap"
     assert frames[-1]["payload"]["reason"] == "overflow"
     assert frames[-1]["payload"]["subscription_id"] == subscription.id
+
+
+# -- the code-request channel -------------------------------------------------
+
+
+def _index_updated_at(root: Path, session_id: str) -> float:
+    """The revision the route reports for one session: the index's ``updated_at`` in ms."""
+    index = root / "code_requests" / f"{session_id}.json"
+    # The ROUTE's own conversion, to the digit: ``int(updated_at * 1000)``. Returning the
+    # float would compare 1791570123456.789 against the 1791570123456 the feed publishes
+    # and fail on precision rather than on behaviour.
+    return int(float(json.loads(index.read_text())["updated_at"]) * 1000)
+
+
+def _tick_probe(feed: DesktopFeed) -> None:
+    """One tick with the code-request probe's clock rewound.
+
+    The probe is gated to once per ``CATALOGUE_PROBE_INTERVAL_S``, and a synchronous test
+    runs its ticks microseconds apart — so without the rewind the second tick would be
+    gated shut and the test would assert absence for the wrong reason.
+    """
+    feed._code_requests_probed_at = 0.0
+    _tick(feed)
+
+
+def _code_request_index(root: Path, session_id: str, rows: int = 1) -> Path:
+    """Write a derived code-request index the way ``code_requests/ledger.py`` does."""
+    directory = root / "code_requests"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{session_id}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "session_id": session_id,
+                "updated_at": time.time(),
+                "rows": [
+                    {
+                        "key": f"github.com/o/r#{index + 1}",
+                        "ref": {
+                            "forge": "github",
+                            "host": "github.com",
+                            "project": "o/r",
+                            "number": index + 1,
+                            "url": f"https://github.com/o/r/pull/{index + 1}",
+                            "full": True,
+                        },
+                        "relation": "opened",
+                    }
+                    for index in range(rows)
+                ],
+                "tool_output_only": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_code_request_index_that_predates_the_connection_is_not_replayed(tmp_path):
+    """A conversation with rows is not NEWS to a client that has just connected: the
+    baseline primes the tokens, exactly as the catalogue's and authoring's do."""
+    root = tmp_path
+    sid = "ab" * 6
+    _listable_session(root, sid)
+    _code_request_index(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick_probe(feed)
+    assert [frame["type"] for frame in _queued(subscription)] == []
+    asyncio.run(feed.close())
+
+
+def test_a_new_code_request_index_publishes_one_frame_for_that_session(tmp_path):
+    root = tmp_path
+    sid = "ab" * 6
+    other = "cd" * 6
+    _listable_session(root, sid)
+    _listable_session(root, other)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick_probe(feed)
+    _queued(subscription)
+
+    _code_request_index(root, sid)
+    _tick_probe(feed)
+    frames = _queued(subscription)
+    assert [frame["type"] for frame in frames] == ["code_requests"]
+    assert frames[0]["session_id"] == sid
+    # The revision is the INDEX's own ``updated_at`` in milliseconds — the same currency
+    # the route reports for the session, not a counter local to this process.
+    assert frames[0]["payload"]["revision"] == int(_index_updated_at(root, sid))
+
+    # The SAME index does not publish again, and a second session's list is its own frame.
+    _tick_probe(feed)
+    assert _queued(subscription) == []
+    _code_request_index(root, other, rows=2)
+    _tick_probe(feed)
+    frames = _queued(subscription)
+    assert [frame["session_id"] for frame in frames] == [other]
+    assert frames[0]["payload"]["revision"] == _index_updated_at(root, other)
+
+    # A re-scan that changes WHICH rows are listed moves the token even when the file's
+    # length is unchanged, so an edit in place still reaches the client.
+    _code_request_index(root, other, rows=1)
+    _tick_probe(feed)
+    frames = _queued(subscription)
+    assert [frame["session_id"] for frame in frames] == [other]
+    assert frames[0]["payload"]["revision"] == _index_updated_at(root, other)
+    asyncio.run(feed.close())
+
+
+def test_a_removed_code_request_index_invalidates_the_row(tmp_path):
+    """Rows deleted (or a session deleted) must reach the client, or the pane keeps
+    drawing a row nothing backs."""
+    root = tmp_path
+    sid = "ab" * 6
+    _listable_session(root, sid)
+    path = _code_request_index(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick_probe(feed)
+    _queued(subscription)
+
+    path.unlink()
+    _tick_probe(feed)
+    frames = _queued(subscription)
+    assert [frame["type"] for frame in frames] == ["code_requests"]
+    assert frames[0]["session_id"] == sid
+    asyncio.run(feed.close())
+
+
+def test_the_code_request_probe_creates_nothing_and_reads_nothing_when_idle(tmp_path):
+    """A READER, in the strong sense: an absent directory is an empty answer, and a
+    second probe over unchanged files reads no file at all."""
+    root = tmp_path
+    sid = "ab" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    assert feed._code_requests_probe() == {}
+    assert not (root / "code_requests").exists()
+
+    _code_request_index(root, sid)
+    assert list(feed._code_requests_probe()) == [sid]
+    reads = {"count": 0}
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        if self.parent == root / "code_requests":
+            reads["count"] += 1
+        return real_read_text(self, *args, **kwargs)
+
+    with monkeypatch_read_text(counting_read_text):
+        feed._code_requests_probe()
+    assert reads["count"] == 0, "an unchanged index must not be re-read"
+
+
+def monkeypatch_read_text(replacement):
+    """Context manager swapping ``Path.read_text`` for the duration of a probe."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _manage():
+        original = Path.read_text
+        Path.read_text = replacement
+        try:
+            yield
+        finally:
+            Path.read_text = original
+
+    return _manage()

@@ -87,3 +87,42 @@ def test_an_unreadable_desktop_posture_answers_no_surface(
 
     monkeypatch.setattr("local_operator.server.desktop.desktop_posture", _boom)
     assert activation.human_surface_present() is False
+
+
+# ---------------------------------------------------------------------------
+# R17's third signal (2026-10-09): the boot's HOME identity.
+# ---------------------------------------------------------------------------
+
+
+def test_the_users_home_answers_yes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pathlib import Path
+
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: Path.home().resolve())
+    assert activation.home_is_the_users() is True
+
+
+def test_a_redirected_home_answers_no(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pathlib import Path
+
+    monkeypatch.setattr(
+        "local_operator.supervisors.real_home", lambda: Path("/nonexistent-foreign")
+    )
+    assert activation.home_is_the_users() is False
+
+
+def test_an_unknowable_home_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A platform we cannot interrogate must keep today's behaviour.
+
+    ``None`` from the shared predicate (no passwd database) and a raise from
+    the probe both answer True — taking the feature away on "cannot tell" is
+    the direction this deliberately does not take; the toast gate documents
+    the same asymmetry.
+    """
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: None)
+    assert activation.home_is_the_users() is True
+
+    def _boom() -> None:
+        raise RuntimeError("no home here")
+
+    monkeypatch.setattr("local_operator.supervisors.real_home", _boom)
+    assert activation.home_is_the_users() is True

@@ -124,6 +124,12 @@ OBSERVING_VERBS: dict[str, tuple[str, frozenset[str]]] = {
     # console's four read methods minus `screenshot` (writes a PNG — see the
     # module docstring).
     "console": ("method", frozenset({"list", "status", "read"})),
+    # code_requests' two ops: `list` reads this session's derived index and the
+    # local fetch cache, `show` reads the cache and (at most) one conditional
+    # fetch for a ref the cache does not know — a network READ with no side
+    # effect, which is what a scheduled "tell me when round 2 lands" check
+    # needs to re-run unattended.
+    "code_requests": ("op", frozenset({"list", "show"})),
 }
 
 #: Refusals for specific (tool, verb) pairs whose reason is worth naming

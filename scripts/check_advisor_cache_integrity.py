@@ -56,7 +56,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from local_operator.compaction.advisor import ADVISOR_SYSTEM_PROMPT  # noqa: E402
-from local_operator.compaction.thresholds import CompactionSettings  # noqa: E402
+from local_operator.compaction.thresholds import (  # noqa: E402
+    DEFAULT_THRESHOLD_TOKENS,
+    CompactionSettings,
+)
 from local_operator.harness.types import AgentTool, ChatRequest, Message  # noqa: E402
 from local_operator.model.configure import build_model_spec  # noqa: E402
 from local_operator.providers.clients import AnthropicClient  # noqa: E402
@@ -343,8 +346,15 @@ def main() -> int:
         f"advisor_enabled default={legacy.advisor_enabled}",
     )
     # A config written BEFORE the feature must validate and resolve the same.
+    # The threshold tracks the SHIPPED default rather than a 600k literal: this
+    # check is about advisor fields not perturbing non-advisor resolution, and a
+    # literal goes stale the moment the default moves (agent review round 1, R1-1).
     pre_feature = CompactionSettings.model_validate(
-        {"enabled": True, "threshold_tokens": 600_000, "keep_recent_tokens": 20_000}
+        {
+            "enabled": True,
+            "threshold_tokens": DEFAULT_THRESHOLD_TOKENS,
+            "keep_recent_tokens": 20_000,
+        }
     )
     non_advisor = {k: v for k, v in legacy.model_dump().items() if not k.startswith("advisor_")}
     pre_non_advisor = {

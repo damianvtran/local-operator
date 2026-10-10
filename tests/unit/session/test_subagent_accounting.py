@@ -117,15 +117,15 @@ def test_known_unknown_and_free_survive_wire_folding(monkeypatch):
 @pytest.mark.asyncio
 async def test_canonical_rows_never_discover_in_viewer_thread(monkeypatch):
     # Patch the name the CALLER resolves, not the one the function is defined in.
-    # ``job_stats`` looks ``job_cost`` up in its own module globals, so a patch on
-    # ``tui.costs.job_cost`` — or on ``model.costs.job_cost``, where the function
-    # lives after the import move — binds a name nothing calls and the trap
+    # ``job_stats`` looks ``subtree_cost`` up in its own module globals, so a patch
+    # on ``tui.costs.subtree_cost`` — or on ``model.costs.subtree_cost``, where the
+    # function lives after the import move — binds a name nothing calls and the trap
     # silently never fires. It had been pointed at ``tui.costs`` since before that
     # move and was dead in both places (review round 1, R1), which is why the
     # positive control below exists: a guard that cannot fire is
     # indistinguishable from a pass.
     monkeypatch.setattr(
-        "local_operator.tui.widgets.subagent_panel.job_cost",
+        "local_operator.tui.widgets.subagent_panel.subtree_cost",
         lambda *_args, **_kwargs: pytest.fail("viewer priced"),
     )
     row = JobState(

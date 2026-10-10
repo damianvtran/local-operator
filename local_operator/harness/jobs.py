@@ -25,7 +25,7 @@ import inspect
 import logging
 import time
 import uuid
-from typing import Any, Awaitable, Callable, Literal, Mapping
+from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -233,20 +233,189 @@ JOB_RESULT_MESSAGE_TYPE = "job_result"
 ProgressFn = Callable[["str | Mapping[str, Any]"], None]
 
 
-def _usage_components(usage: Usage | None, model_label: str | None) -> list[Usage]:
-    """Detach priceable calls from one direct usage aggregate."""
+def _usage_components(
+    usage: Usage | None, model_label: str | None, *, detach: bool = True
+) -> list[Usage]:
+    """Detach priceable calls from one direct usage aggregate.
+
+    ``detach=False`` is for readers that only PRICE the result (a row's figure on
+    the 1 Hz repaint): it stamps identity with a shallow copy instead of a deep
+    one, because a long-running child's ``cost_components`` holds one entry per
+    model call and a deep copy of all of them per row per tick is cost the
+    pricing never needed. The ledger keeps the deep default.
+    """
     if usage is None:
         return []
     provider, _, model_id = (model_label or "").partition("/")
     source = usage.cost_components or [usage]
     components: list[Usage] = []
     for item in source:
-        component = item.model_copy(deep=True)
-        component.cost_components = []
-        component.provider = component.provider or provider or None
-        component.model_id = component.model_id or model_id or None
-        components.append(component)
+        # ``update=`` rather than assigning after the copy: a FOLLOWER's row
+        # carries a frozen usage (``frontend_state._FrozenUsage``) and the row
+        # pricing below reads those too, where a post-copy assignment raises.
+        components.append(
+            item.model_copy(
+                update={
+                    "cost_components": [],
+                    "provider": item.provider or provider or None,
+                    "model_id": item.model_id or model_id or None,
+                },
+                deep=detach,
+            )
+        )
     return components
+
+
+def job_subtree_components(
+    job: Any,
+    *,
+    seen: set[int] | None = None,
+    detach: bool = True,
+    live: bool = True,
+    problems: list[str] | None = None,
+) -> list[Usage]:
+    """Every priceable component one task row is responsible for, unmerged.
+
+    THE ONE PLACE a row's subtree is defined. The manager's own ledger
+    (:meth:`AsyncJobManager._collect_accounting_components`) and every surface
+    that prices a ROW (the TUI panel and harvest, the frontend-state job rows,
+    via ``model.costs.subtree_components``) read it, so a row and the footer total
+    cannot disagree about what a subtree contains. Before this the rows priced
+    ``usage`` plus ``descendant_usage`` only, and ``descendant_usage`` is filled
+    when a child manager is DETACHED at completion: a running parent whose scouts
+    were still spending showed its own few cents while the footer, which reads the
+    live manager, showed the scouts' dollars.
+
+    Three sources, each counted once:
+
+    * the row's own calls, stamped with the row's serving identity so a Sonnet
+      child under a Radient parent is priced at Sonnet rates;
+    * ``descendant_usage`` — settled descendants, copied in at detach;
+    * the LIVE child manager while one is attached (``detach_child_manager``
+      clears it in the same step that fills ``descendant_usage``, so a finished
+      child is never in both).
+
+    Duck-typed because the TUI also runs against embedder hosts and replayed
+    ledgers whose rows are not ``AsyncJob``, and a follower's rows are frozen
+    ``JobState`` objects with no live manager: an unreadable row contributes
+    nothing rather than raising. No I/O and nothing that waits, so it is safe on
+    the Textual loop. It is NOT safe on another thread when ``live`` is true: the
+    attached manager's accounting cache is written without a lock and is the same
+    cache the footer total reads, so a worker thread racing the loop could
+    publish a stale snapshot as fresh. Gather on the loop, price anywhere.
+
+    ``seen`` is the cycle guard the manager recursion threads through; ``None``
+    (a surface asking about one row) reads a nested manager through its cached
+    :meth:`~AsyncJobManager.accounting_components`, so an unchanged child tree is
+    not rewalked every second. ``detach=False`` skips the deep copies for a reader
+    that only prices the result. A failure inside the LIVE read propagates by
+    design: swallowing it here would turn an unreadable branch into a silently
+    low figure, so the caller decides how to mark it (``live=False`` retries
+    without the branch).
+
+    ``problems`` collects what could NOT be read from the row itself (a malformed
+    descendant, an unreadable ``usage``). Each readable part still contributes —
+    one bad descendant must not erase the row's own spend — and a caller that
+    passes the list marks the figure a lower bound when it comes back non-empty.
+    """
+    components: list[Usage] = []
+    try:
+        usage = getattr(job, "usage", None)
+        if isinstance(usage, dict):
+            usage = Usage.model_validate(usage)
+        components = _usage_components(
+            usage if isinstance(usage, Usage) else None,
+            getattr(job, "model_label", None),
+            detach=detach,
+        )
+    except Exception:  # noqa: BLE001 — an unreadable row is not a render error
+        if problems is not None:
+            problems.append("usage")
+    try:
+        descendants = getattr(job, "descendant_usage", None)
+        if isinstance(descendants, Sequence) and not isinstance(descendants, (str, bytes)):
+            for item in descendants:
+                try:
+                    if isinstance(item, Usage):
+                        components.append(item)
+                    elif isinstance(item, dict):
+                        components.append(Usage.model_validate(item))
+                    else:
+                        raise TypeError(type(item).__name__)
+                except Exception:  # noqa: BLE001 — skip the one bad component, keep the rest
+                    if problems is not None:
+                        problems.append("descendant_usage")
+    except Exception:  # noqa: BLE001
+        if problems is not None:
+            problems.append("descendant_usage")
+    try:
+        nested = getattr(job, "child_jobs", None) if live else None
+    except Exception:  # noqa: BLE001
+        nested = None
+        if problems is not None:
+            problems.append("child_jobs")
+    if nested is not None:
+        components.extend(_nested_components(nested, seen, detach, problems))
+    return components
+
+
+def _nested_components(
+    nested: Any, seen: set[int] | None, detach: bool, problems: list[str] | None = None
+) -> list[Usage]:
+    """The components of one attached child manager, whatever shape the host gave."""
+    if isinstance(nested, AsyncJobManager):
+        if seen is not None:
+            return nested._collect_accounting_components(seen)
+        return nested.accounting_components()
+    accounting = getattr(nested, "accounting_components", None)
+    if callable(accounting):
+        snapshot = accounting()
+        if not isinstance(snapshot, (list, tuple)):
+            return []
+        return [item for item in snapshot if isinstance(item, Usage)]
+    # Reduced / embedder hosts expose only ``list()``. Walk it and roll the rows
+    # up within THIS row: manager-local ids are never promoted into a shared
+    # namespace, because independent child managers reuse the same local id.
+    visited = seen if seen is not None else set()
+    if id(nested) in visited:
+        return []
+    visited.add(id(nested))
+    lister = getattr(nested, "list", None)
+    if not callable(lister):
+        return []
+    components: list[Usage] = []
+    for row in list(lister()):  # type: ignore[operator]
+        components.extend(
+            job_subtree_components(row, seen=visited, detach=detach, problems=problems)
+        )
+    return components
+
+
+def job_subtree_summary(
+    job: Any, *, live: bool = True, problems: list[str] | None = None
+) -> list[Usage]:
+    """:func:`job_subtree_components`, collapsed exactly as the ledger collapses it.
+
+    Grouped by serving identity and receipt-vs-estimate through the SAME
+    :func:`_merge_accounting_component` the manager applies, so a row priced from
+    this is the ledger's own share for that subtree, not a second way of adding it
+    up. It also bounds the pricing work to the distinct billing routes rather than
+    to the model calls a long-running child has made. Inputs are never mutated
+    (the merge copies before it accumulates), so no defensive deep copy is paid.
+
+    The one place this can differ from pricing each call alone is a time-of-use
+    model whose calls straddled a price window: a merged component whose members
+    disagree on ``at_ms`` is priced at the wall clock (see the merge). The footer
+    total has always been priced that way, and the row now agrees with it.
+    """
+    grouped: dict[tuple[str | None, str | None, str], Usage] = {}
+    for component in job_subtree_components(job, detach=False, live=live, problems=problems):
+        if type(component) is not Usage:
+            # A follower's rows carry frozen ``Usage`` subclasses; the merge
+            # accumulates in place, so it needs the plain mutable model.
+            component = Usage.model_validate(component.model_dump())
+        _merge_accounting_component(grouped, component)
+    return list(grouped.values())
 
 
 def _merge_accounting_component(
@@ -878,11 +1047,7 @@ class AsyncJobManager:
             # retained rows again would make totals depend on retention length.
             if job.type != "task" or job.status != "running":
                 continue
-            components = [*_usage_components(job.usage, job.model_label), *job.descendant_usage]
-            child_manager = job.child_jobs
-            if isinstance(child_manager, AsyncJobManager):
-                components.extend(child_manager._collect_accounting_components(seen))
-            for component in components:
+            for component in job_subtree_components(job, seen=seen):
                 _merge_accounting_component(grouped, component)
         return [component.model_copy(deep=True) for component in grouped.values()]
 

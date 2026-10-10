@@ -118,6 +118,13 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # a surface no user has (the exact defect this module's docstring
         # records for the project registry and the patience class).
         withdraw_ask=lambda *args, **kwargs: {"ok": True},
+        # The code-requests tool's createIf gate reads the session's own
+        # DIRECTORY (its derived index lives beside the transcript) — context
+        # DATA rather than a machine probe, so the stub simply carries one;
+        # the tool is never called by a measurement. Without it the measured
+        # surface is one tool lighter than a real session's, the same defect
+        # the project registry above records.
+        session_dir=f"{cwd}/.stub-session",
     )
 
 
