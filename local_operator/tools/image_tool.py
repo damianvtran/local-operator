@@ -78,14 +78,16 @@ from local_operator.tools.builtin import _guard
 
 logger = logging.getLogger(__name__)
 
-#: Wire description (design §2.3), 186 chars, first sentence 117 — the
-#: classification roster reads ONLY the first sentence (``_tool_candidate_
-#: description`` bounds it at 160), so the capability statement must fit there
-#: and the pointers to the deeper docs follow it.
+#: Wire description (media wave-2, design D9/§2.3), 160 chars, first sentence
+#: 91 — the classification roster reads ONLY the first sentence
+#: (``_tool_candidate_description`` bounds it at 160), so the capability
+#: statement must fit there and the pointers to the deeper docs follow it.
+#: The provider enumeration moved OUT of the wire (four new provider rungs
+#: made the parenthetical wrong, and the requirement forbids a list here):
+#: providers live in ``guide://image-generation``, which costs no schema.
 _DESCRIPTION = (
-    "Generate or edit an image via the configured provider (Radient, FAL, or OpenAI); "
-    "the result is attached for the user. Docs: `tool://generate_image`; "
-    "playbook: `guide://image-generation`."
+    "Generate or edit an image via the configured provider; the result is attached for the user. "
+    "Docs: `tool://generate_image`; playbook: `guide://image-generation`."
 )
 
 #: The six FAL-shaped size values (design §2.2/§9): accepted by Radient's
@@ -186,6 +188,14 @@ def _preferred_route_label() -> str:
             return "FAL"
         if image_availability.openai_images_key(cfg):
             return "OpenAI"
+        if image_availability.openai_subscription_grant(cfg):
+            return "ChatGPT plan"
+        if image_availability.google_key(cfg):
+            return "Google"
+        if image_availability.xai_available(cfg):
+            return "xAI"
+        if image_availability.openrouter_key(cfg):
+            return "OpenRouter"
     except Exception:  # noqa: BLE001 - a describer must never fail a call
         logger.debug("image availability read failed for approval text", exc_info=True)
     return "the configured provider"
