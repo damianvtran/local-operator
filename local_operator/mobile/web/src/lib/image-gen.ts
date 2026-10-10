@@ -288,8 +288,9 @@ export function imageGenView(
 	   provider reports one — the harness lane deliberately never synthesizes
 	   one — and out-of-range values are NOT clamped: clamping 42 into a full
 	   bar would state 100% off a value that never meant a fraction, so
-	   anything outside 0..1 renders the indeterminate bar instead — the
-	   reduced state, honestly. */
+	   anything outside 0..1 renders the reduced state instead — no bar at
+	   all (the fraction-less bar was removed with the desktop's D2 mirror;
+	   the card reduces to the tile alone), honestly. */
 	const rawProgress = details.progress_fraction;
 	const progress =
 		typeof rawProgress === "number" &&

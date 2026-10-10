@@ -52,8 +52,9 @@
  * desktop's F3 rule, mirrored — `view.generating` in the adapter): the
  * tile, the bar and the log tail render while `running`, and during a
  * `cancelling` hold only when the state the hold replaced was running. A
- * hold that replaced the queued card renders the state line alone — it must
- * not grow the body it never had.
+ * hold that replaced the queued card holds the word ALONE — in the control
+ * slot, the running hold's own place (UX round 1, U4) — and never grows the
+ * body it never had.
  *
  * ONE MOTION PER SURFACE (the desktop's D2 ruling, mirrored). The tile's
  * sweep is this card's ONE indefinite element; the progress bar draws ONLY
@@ -287,19 +288,22 @@ export function ImageGenCard({
 					</div>
 				) : view.state === "cancelling" ? (
 					/* THE REDUCED HOLD (F3): the call never generated, so the
-					   hold renders the state line alone — the queued line's own
-					   register with its one word swapped — and the 44px row
-					   floor holds (design D1: the press must not lift the card's
-					   bottom edge under the thumb that just stopped it; the
-					   vertical padding rides the CONTAINER, the running body's
-					   own composition, so the padded row measures the same with
-					   and without the control the hold replaced). No tile, no
-					   bar: nothing the card never showed. */
+					   hold word stands alone — no tile, no bar, nothing the card
+					   never showed — in the CONTROL SLOT, trailing edge, where the
+					   cancel control was: the same slot the running hold keeps
+					   (UX round 1, U4: the one word must not move left-to-right
+					   between the two holds). The 44px row floor holds (design
+					   D1: the press must not lift the card's bottom edge under the
+					   thumb that just stopped it; the vertical padding rides the
+					   CONTAINER, the running body's own composition, so the padded
+					   row measures the same with and without the control the hold
+					   replaced). */
 					<div className="w-full pt-0.5 pb-1.5 pl-6">
 						<div className="flex min-h-11 w-full items-center gap-2 pr-1.5">
+							<span aria-hidden className="min-w-0 flex-1" />
 							<span
 								data-testid="image-gen-hold"
-								className={`${STATE_LINE} min-w-0 flex-1`}
+								className="shrink-0 text-meta text-ink-dim"
 							>
 								cancelling…
 							</span>
