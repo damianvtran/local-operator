@@ -5129,11 +5129,18 @@ class AgentLoop:
                 out[key] = masked[index]
                 index += 1
             elif isinstance(value, (list, tuple)):
-                rebuilt = [
-                    masked[index + offset] if isinstance(item, str) else item
-                    for offset, item in enumerate(value)
-                ]
-                index += len(value)
+                rebuilt: list[Any] = []
+                for item in value:
+                    if isinstance(item, str):
+                        rebuilt.append(masked[index])
+                        index += 1
+                    else:
+                        # Not text, so it neither takes a mask nor shifts one:
+                        # the index advances only over the strings the
+                        # collection phase banked (review round 1, R-2 — an
+                        # enumerated position put the mask one ahead for every
+                        # non-``str`` item and read past the list).
+                        rebuilt.append(item)
                 # Same concrete sequence back, so a consumer that checks the
                 # container type (the card accepts any Sequence, but a future
                 # one may not) sees exactly the shape it stored.

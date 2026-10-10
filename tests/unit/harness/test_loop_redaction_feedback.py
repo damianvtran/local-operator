@@ -1027,6 +1027,36 @@ class TestWrittenContentInDetailsTakesTheResultMask:
         assert REDACTION_MARKER in joined, "premise: the scrub replaced it, not dropped it"
         assert target.read_bytes() == content.encode(), "the write itself stays byte-exact"
 
+    @pytest.mark.asyncio
+    async def test_a_mixed_sequence_masks_only_its_strings(self, tmp_path: Path) -> None:
+        """A non-``str`` item rides back untouched — and must not shift the mask.
+
+        Review round 1, R-2: the rebuild indexed ``masked`` by the item's position
+        in the sequence while the collection phase banked only the strings, so
+        ``{"diff": ["a", 1, "b"]}`` read one past the mask list and raised
+        ``IndexError`` inside ``_append_results``. Unreachable through first-party
+        writers today (``_diff_details`` always emits ``list[str]``), but the seam
+        runs for every tool result, and a buggy producer must degrade to "that
+        item is not text", not a crash. Both container spellings are pinned.
+        """
+        store = _store_that_scrubs_details_key(tmp_path)
+
+        def redact(text: str) -> str:
+            return store.redact_with_report(text)[0]
+
+        out = await AgentLoop._redact_details(
+            {"diff": [f"a {DETAILS_KEY}", 7, f"b {DETAILS_KEY}"]}, redact, "write", None
+        )
+        assert out["diff"][1] == 7
+        assert out["diff"][0] == f"a {REDACTION_MARKER}"
+        assert out["diff"][2] == f"b {REDACTION_MARKER}"
+        out = await AgentLoop._redact_details(
+            {"diff": (f"a {DETAILS_KEY}", None, f"b {DETAILS_KEY}")}, redact, "write", None
+        )
+        assert out["diff"][1] is None
+        assert out["diff"][0] == f"a {REDACTION_MARKER}"
+        assert out["diff"][2] == f"b {REDACTION_MARKER}"
+
 
 # --- RAW ARGUMENTS: the JSON string is judged with the same line boundaries ----------------
 #
