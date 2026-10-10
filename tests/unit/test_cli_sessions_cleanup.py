@@ -23,6 +23,7 @@ import pytest
 
 from local_operator.cli import sessions_cleanup_command
 from local_operator.config import ConfigManager
+from local_operator.session import delegated_retention as dr
 from local_operator.session.cleanup import CLEANUP_LOG_NAME, mark_store
 
 
@@ -334,3 +335,103 @@ def test_a_real_run_with_nothing_to_do_never_promises_a_removal(store: Path, cap
     assert "note: delegated cleanup is off in config; this is a preview only" in out
     assert "will remove kid-old-0001" not in out
     assert (store / "sessions" / "kid-old-0001").exists()
+
+
+# -- the scratchpad-content block --------------------------------------------
+
+
+def _content_pad(store: Path, name: str) -> Path:
+    """A scratchpad for a delegated session the RECORD pass keeps.
+
+    The keep comes from an active parent with a roster edge, so the delegated
+    rows stay empty and these tests exercise the content carve-out, not a
+    record removal.
+    """
+    sessions = store / "sessions"
+    parent = sessions / f"parent-{name}"
+    parent.mkdir()
+    (parent / "transcript.jsonl").write_text('{"type":"message"}\n')
+    (parent / dr.ROSTER_NAME).write_text(
+        json.dumps({"version": 1, "records": [{"session_dir": str(sessions / name)}]})
+    )
+    directory = _delegated(store, name)
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    return pad
+
+
+def _big_log(path: Path, *, size_mb: int = 11, age_h: float = 24) -> Path:
+    """A sparse file of roughly ``size_mb`` MiB, last modified ``age_h`` ago."""
+    with open(path, "wb") as handle:
+        handle.seek(size_mb * 1024 * 1024 - 1)
+        handle.write(b"\0")
+    stamp = time.time() - age_h * 3600
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_dry_run_shows_the_scratchpad_content_block(store: Path, capsys: Any) -> None:
+    pad = _content_pad(store, "content-kid-01")
+    big = _big_log(pad / "desktop-suite.log")
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "scratchpad content: would reclaim 1 pad(s)" in out
+    assert "(1 stale output)" in out
+    assert "content-kid-01" in out and "(stale output past the window; 1 entry)" in out
+    assert big.exists(), "a dry run removes nothing"
+
+
+def test_json_carries_the_scratchpad_content_block(store: Path, capsys: Any) -> None:
+    pad = _content_pad(store, "content-kid-02")
+    big = _big_log(pad / "desktop-suite.log")
+    assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    scratch = payload["delegated"]["scratchpad"]
+    assert scratch["enabled"] is True
+    assert [row["session"] for row in scratch["reclaimed"]] == ["content-kid-02"]
+    assert scratch["classes"] == {"stale output": 1}
+    assert scratch["bytes"] == big.stat().st_size
+    assert scratch["kept"] == [] and scratch["remaining"] == 0
+    assert payload["delegated"]["removed"] == []  # no record rows: nothing removed
+
+
+def test_a_content_only_run_confirms_with_its_own_sentence_and_reclaims(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pad = _content_pad(store, "content-kid-03")
+    big = _big_log(pad / "desktop-suite.log")
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    assert sessions_cleanup_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "reclaim scratchpad content from 1 session(s)? type 'yes' to confirm" in out
+    assert not big.exists()
+    assert "reclaimed scratchpad content from 1 session(s)" in out
+    rows = [
+        json.loads(line)
+        for line in (store / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()
+    ]
+    assert len(rows) == 1 and rows[0]["policy"] == "delegated_scratchpad"
+    assert rows[0]["session"] == "content-kid-03" and rows[0]["actor"] == "cli"
+
+
+def test_the_scratchpad_switch_off_reclaims_nothing_and_says_so(store: Path, capsys: Any) -> None:
+    _config(store, delegated={"scratchpad": {"enabled": False}})
+    pad = _content_pad(store, "content-kid-04")
+    big = _big_log(pad / "desktop-suite.log")
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "scratchpad content: off (session.cleanup.delegated.scratchpad.enabled is off" in out
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    assert big.exists(), "the switch gates only the content phase"
+    assert "nothing to remove" in capsys.readouterr().out
+
+
+def test_force_runs_the_content_phase_when_the_scratchpad_switch_is_off(
+    store: Path,
+) -> None:
+    _config(store, delegated={"scratchpad": {"enabled": False}})
+    pad = _content_pad(store, "content-kid-05")
+    big = _big_log(pad / "desktop-suite.log")
+    assert sessions_cleanup_command(_args(force=True, yes=True)) == 0
+    assert not big.exists()

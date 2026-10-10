@@ -600,6 +600,19 @@ DEFAULT_CONFIG = Config(
             # flat-vs-nested key mismatch that made the #576 opt-out a no-op
             # cannot recur. Semantics are documented on the settings rows and
             # in ``local_operator.session.cleanup``.
+            #
+            # The DELEGATED class (subagents and background sessions) is a
+            # separate, ON-by-default pair under ``session.cleanup.delegated``:
+            # ``enabled`` gates REMOVING delegated sessions idle past
+            # ``max_age_hours``, and ``scratchpad.enabled`` gates the content
+            # layer that additionally reclaims stale build output, build
+            # shapes and merged-clean git trees inside the pads of delegated
+            # sessions the record pass KEEPS. Both switches default on and are
+            # read through ``cleanup.DELEGATED_PATH``; the content layer's
+            # rules, guards and thresholds live in
+            # ``local_operator.session.delegated_retention`` ("THE CONTENT
+            # LAYER"). They are absent from this mapping on purpose: the
+            # defaults live in one place, the consuming module's constants.
             "session": {
                 "cleanup": {
                     "enabled": False,
