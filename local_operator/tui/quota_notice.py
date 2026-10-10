@@ -52,6 +52,7 @@ import asyncio
 import importlib
 import logging
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -62,17 +63,22 @@ logger = logging.getLogger(__name__)
 #: through this one string rather than three spellings of it.
 _VERDICT_MODULE = "local_operator.providers.quota_notice"
 
-#: True from the moment the boot prewarm (``prewarm_verdict``) starts its
-#: import until it finishes. While it is set, the READ skips rather than wait
-#: on the import lock; see ``quota_notice_line``.
+#: True from the moment ``start_prewarm`` engages until the import finishes.
+#: While it is set, the READ skips rather than wait on the import lock; see
+#: ``quota_notice_line``.
 _prewarm_started = False
+
+#: The prewarm thread; one per process (the module is process-global), which
+#: is also what makes ``start_prewarm`` idempotent.
+_prewarm_thread: threading.Thread | None = None
 
 # ``providers.quota_notice`` (the verdict) is NOT imported here: it pulls in
 # the provider stack — httpx with it — and the startup path must reach the
 # first frame without httpx (``tests/unit/test_import_graph.py`` pins it,
-# ~88 ms / 16.5 MB). The app loads it ONCE at boot in a thread
-# (``prewarm_verdict`` below, called by ``OperatorApp``); the read keeps a
-# synchronous import as the fallback for callers no prewarm covers.
+# ~88 ms / 16.5 MB). The app starts the load ONCE at construction, on a
+# daemon thread (``start_prewarm`` below, called by ``OperatorApp``); the
+# read keeps a synchronous import as the fallback for callers no prewarm
+# covers.
 
 if TYPE_CHECKING:  # pragma: no cover - import weight guard, not a behaviour
     from local_operator.providers.controller import CatalogueEntry
@@ -102,27 +108,51 @@ def _load_verdict_module() -> None:
     importlib.import_module(_VERDICT_MODULE)
 
 
-async def prewarm_verdict() -> bool:
-    """Load the verdict module in a THREAD, once, for the splash's later read.
+def _load_and_release() -> None:
+    """The prewarm thread's body: import once; on failure release the flag.
 
-    WHY. ``quota_notice_line`` defers its verdict import (the module must stay
-    off the startup import path — ``test_import_graph``), and the deferred exec
-    is hundreds of milliseconds cold. Awaiting it from the first splash
-    snapshot would pay that on the loop, mid-paint; the app calls this once at
-    boot instead (``OperatorApp._prewarm_quota_notice``), so by the time a
-    refresh runs, the read is a dict lookup. Returns whether the module
-    loaded; a failure clears the in-flight flag so a later read may retry the
+    A failure clears ``_prewarm_started`` so a later read may retry the
     import itself rather than the row dying to one transient import error.
     """
     global _prewarm_started
-    _prewarm_started = True
     try:
-        await asyncio.to_thread(_load_verdict_module)
+        _load_verdict_module()
     except Exception:  # noqa: BLE001 — a prewarm must never hurt; the read degrades
         logger.debug("quota verdict prewarm failed", exc_info=True)
         _prewarm_started = False
-        return False
-    return True
+
+
+def start_prewarm() -> None:
+    """Start the verdict import on a daemon thread — from APP CONSTRUCTION.
+
+    WHY CONSTRUCTION, NOT A MOUNT HOOK. Textual dispatches the welcome
+    splash's own ``on_mount`` — which takes the first read — BEFORE the
+    app's ``on_mount``; measured in CI review round 4 (R4-1): a worker
+    scheduled from the app's mount ran one full read too late, and that read
+    paid the verdict import synchronously on the loop. Construction is the
+    last hook that provably precedes the mount cascade, and it has no
+    running loop to post a worker onto — hence a plain daemon thread doing
+    the same work ``asyncio.to_thread`` would (see ``_warm_session_imports``
+    for the GIL rationale that applies here identically). The in-flight flag
+    is engaged SYNCHRONOUSLY so the very first snapshot's read already
+    skips; ``await_prewarm`` below is how the app waits for the load off
+    the loop before it re-snapshots the splash. Idempotent per process;
+    a no-op once the module is loaded.
+    """
+    global _prewarm_started, _prewarm_thread
+    if _prewarm_thread is not None or sys.modules.get(_VERDICT_MODULE) is not None:
+        return
+    _prewarm_started = True
+    _prewarm_thread = threading.Thread(target=_load_and_release, name="quota-prewarm", daemon=True)
+    _prewarm_thread.start()
+
+
+async def await_prewarm() -> bool:
+    """Wait off the loop for the construction-time import; True if it loaded."""
+    thread = _prewarm_thread
+    if thread is not None and thread.is_alive():
+        await asyncio.to_thread(thread.join)
+    return sys.modules.get(_VERDICT_MODULE) is not None
 
 
 def quota_notice_line(
@@ -160,7 +190,7 @@ def quota_notice_line(
             # rather than wait on the import lock — a splash paint must never
             # block the loop on a module exec (the deferral above exists to
             # keep this module's exec off the critical path; the prewarm
-            # thread pays it once instead). `prewarm_verdict`'s completion
+            # thread pays it once instead). `await_prewarm`'s completion
             # refreshes the splash, so the row lands one refresh later
             # instead of stalling this one.
             return None

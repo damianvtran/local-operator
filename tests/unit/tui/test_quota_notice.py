@@ -23,6 +23,7 @@ must render the SAME fixtures these tests pin rather than a drifting copy.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import sys
 import threading
@@ -61,6 +62,7 @@ from local_operator.providers.usage_cache import USAGE_REPORT_TTL_MS, UsageCache
 from local_operator.tui import quota_notice as tui_quota
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
+from local_operator.tui.widgets import welcome as welcome_mod
 from local_operator.tui.widgets.welcome import (
     _PRIORITY_NOTICE,
     _PRIORITY_QUOTA,
@@ -508,14 +510,16 @@ def test_a_cold_cache_with_a_stored_credential_still_never_probes(
 
 
 @pytest.mark.asyncio
-async def test_the_prewarm_imports_the_verdict_off_the_loop(
+async def test_the_prewarm_imports_the_verdict_off_the_main_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The boot prewarm pays the verdict import in a THREAD, once (round 4).
+    """Engagement is synchronous; the import runs on a non-main thread (round 5).
 
-    The read must never pay it on the loop, and the module must not load at
-    import time either (``test_import_graph``) — the prewarm is where both
-    rules are satisfied: the loop awaits, the import runs beside it.
+    The read's skip must be visible to the very first snapshot, so the flag is
+    engaged before any loop turn; the import itself must stay off the loop
+    (``test_import_graph`` keeps the module off the startup path and the read
+    must never pay it), and a failing load has to release the flag so a later
+    read may retry.
     """
     calls: list[str] = []
     threads: list[str] = []
@@ -523,17 +527,36 @@ async def test_the_prewarm_imports_the_verdict_off_the_loop(
     def fake_loader() -> None:
         calls.append(tui_quota._VERDICT_MODULE)
         threads.append(threading.current_thread().name)
+        tui_quota.importlib.import_module(tui_quota._VERDICT_MODULE)  # the real load
 
+    monkeypatch.setattr(tui_quota, "_prewarm_thread", None)
+    monkeypatch.setattr(tui_quota, "_prewarm_started", False)
     monkeypatch.setattr(tui_quota, "_load_verdict_module", fake_loader)
-    assert await tui_quota.prewarm_verdict() is True
+    # Cold shape: with the module already in this process the guard would
+    # (rightly) no-op, so remove it for the test — the guard itself is the
+    # pin's own subject in `test_a_cold_first_read_skips_before_the_prewarm_lands`.
+    monkeypatch.delitem(sys.modules, tui_quota._VERDICT_MODULE, raising=False)
+
+    tui_quota.start_prewarm()
+    thread = tui_quota._prewarm_thread
+    assert tui_quota._prewarm_started is True, "engaged synchronously, before any loop turn"
+    assert thread is not None and thread.name == "quota-prewarm"
+    assert await tui_quota.await_prewarm() is True  # the thread's load landed
+    await asyncio.to_thread(thread.join)
     assert calls == [tui_quota._VERDICT_MODULE]
-    assert threads and threads[0] != threading.main_thread().name, "must be off the loop"
+    assert threads and threads[0] != threading.main_thread().name, "off the main thread"
 
     def broken() -> None:
         raise ImportError("no verdict for you")
 
+    monkeypatch.delitem(sys.modules, tui_quota._VERDICT_MODULE, raising=False)
+    monkeypatch.setattr(tui_quota, "_prewarm_thread", None)
+    monkeypatch.setattr(tui_quota, "_prewarm_started", False)
     monkeypatch.setattr(tui_quota, "_load_verdict_module", broken)
-    assert await tui_quota.prewarm_verdict() is False
+    tui_quota.start_prewarm()
+    failed_thread = tui_quota._prewarm_thread
+    assert failed_thread is not None
+    await asyncio.to_thread(failed_thread.join)
     assert tui_quota._prewarm_started is False, "a failed prewarm lets the read retry"
 
 
@@ -915,25 +938,84 @@ def test_session_welcome_info_degrades_when_the_quota_read_fails() -> None:
     assert session_welcome_info(None, QuotaController()).quota_notice is None
 
 
-@pytest.mark.asyncio
-async def test_the_app_starts_the_quota_prewarm_at_boot(
+def test_the_app_engages_the_quota_prewarm_at_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The prewarm is wired to the boot, not left to the first read (round 4)."""
-    started: list[int] = []
+    """Construction — not a mount hook — is where the prewarm engages (R4-1).
 
-    async def fake_prewarm() -> bool:
-        started.append(1)
-        return False
+    Textual dispatches the welcome's own ``on_mount`` (the first read) before
+    the app's, so anything scheduled from the app's mount provably trails the
+    read; engaging from ``OperatorApp.__init__`` is what makes the read's
+    skip reachable at all.
+    """
+    engaged: list[int] = []
+    monkeypatch.setattr("local_operator.tui.app.start_prewarm", lambda: engaged.append(1))
+    _make_app(QuotaSession())
+    assert engaged == [1], "construction must engage the prewarm"
 
-    monkeypatch.setattr("local_operator.tui.app.prewarm_verdict", fake_prewarm)
-    app = _make_app(QuotaSession())
+
+@pytest.mark.asyncio
+async def test_a_cold_first_read_skips_before_the_prewarm_lands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordering R4-1 measured, pinned: engagement precedes the first read.
+
+    Cold shape: the verdict module is absent from ``sys.modules`` and the
+    prewarm's import is gated open. The splash's first read must SKIP (return
+    None, import nothing); if the engagement ever trailed the read again, the
+    read would import synchronously and return the row here, failing that
+    assert. Then the gate opens: the prewarm lands the module and the worker's
+    re-snapshot paints the row the skip deferred.
+    """
+    gate = threading.Event()
+
+    def gated_loader() -> None:
+        gate.wait(timeout=5)
+        tui_quota.importlib.import_module(tui_quota._VERDICT_MODULE)
+
+    reads: list[tuple[bool, bool, Any]] = []
+    original = welcome_mod.quota_notice_line
+
+    def spy(session: Any, providers: Any, **kwargs: Any) -> Any:
+        result = original(session, providers, **kwargs)
+        reads.append((tui_quota._prewarm_started, tui_quota._VERDICT_MODULE in sys.modules, result))
+        return result
+
+    monkeypatch.setattr(welcome_mod, "quota_notice_line", spy)
+    monkeypatch.setattr(tui_quota, "_prewarm_thread", None)
+    monkeypatch.setattr(tui_quota, "_prewarm_started", False)
+    monkeypatch.setattr(tui_quota, "_load_verdict_module", gated_loader)
+    monkeypatch.delitem(sys.modules, tui_quota._VERDICT_MODULE, raising=False)
+
+    controller = QuotaController(
+        reports=[_report("deepseek", _balance_limit(0.0), fetched_at=int(time.time() * 1000))]
+    )
+    app = _make_app(QuotaSession(), controller)
     async with app.run_test(size=(100, 30)) as pilot:
-        for _ in range(40):
-            if started:
+        for _ in range(60):
+            if reads:
                 break
             await pilot.pause(0.05)
-    assert started, "the boot must start the prewarm"
+        assert reads, "the splash read must run during boot"
+        flag_at_read, module_at_read, first_result = reads[0]
+        assert flag_at_read is True, "the prewarm must be engaged before the first read"
+        assert module_at_read is False
+        assert first_result is None, "the first read must skip, not import synchronously"
+        assert tui_quota._VERDICT_MODULE not in sys.modules, "no synchronous import happened"
+
+        gate.set()
+        for _ in range(100):
+            if tui_quota._VERDICT_MODULE in sys.modules:
+                break
+            await pilot.pause(0.05)
+        assert tui_quota._VERDICT_MODULE in sys.modules, "the prewarm thread must land it"
+        for _ in range(100):
+            if any(read[2] is not None for read in reads[1:]):
+                break
+            await pilot.pause(0.05)
+        assert any(
+            read[2] is not None for read in reads[1:]
+        ), "the completion refresh must paint the deferred row"
 
 
 @pytest.mark.asyncio
