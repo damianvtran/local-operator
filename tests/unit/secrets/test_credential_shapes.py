@@ -2794,6 +2794,138 @@ def test_ordinary_text_that_looks_transformed_is_left_byte_identical() -> None:
         assert redact_secret_values(text, [SPELLED_VALUE]) == text
 
 
+# --- a PLAIN-WORD value is masked as a word, not as a substring ----------------
+#
+# The display half of the edit-corruption loop (2026-10-09): scrubbing
+# ``PASSWORD=<word>`` registers the word, and a substring match then rewrote
+# ordinary prose (``un<mask>ally``) in output the model copies back into source
+# files. The rule under test: a value of ASCII letters only is matched on
+# letter-run boundaries; every other shape keeps the substring match. Built from
+# parts so this file never holds the word contiguously (the display layer masks it
+# in agent-visible transcripts).
+
+PLAIN_WORD = "synth" + "etic"
+#: 14 letters, i.e. at or over ``_TRANSFORM_MIN_VALUE_LEN``, so every ENCODED spelling
+#: is generated for it (the 9-letter word above only has its verbatim form).
+LONG_PLAIN_WORD = "indisting" + "uishable"
+
+
+class TestPlainWordValueIsMatchedOnWordBoundaries:
+    """DISPLAY of the exact-value pass for a letters-only value."""
+
+    def test_the_word_inside_a_longer_run_of_letters_is_left_alone(self) -> None:
+        for text in (
+            f"un{PLAIN_WORD}ally",
+            f"{PLAIN_WORD}ally",
+            f"pre{PLAIN_WORD}",
+            f"{PLAIN_WORD}s and {PLAIN_WORD}ism",
+        ):
+            assert redact_secret_values(text, [PLAIN_WORD]) == text, text
+
+    def test_the_standalone_word_is_still_masked_in_every_position(self) -> None:
+        for text, expected in (
+            (f"a {PLAIN_WORD} store", "a [redacted] store"),
+            (PLAIN_WORD, "[redacted]"),
+            (f"x={PLAIN_WORD}.", "x=[redacted]."),
+            (f"'{PLAIN_WORD}'", "'[redacted]'"),
+            (f"({PLAIN_WORD}, {PLAIN_WORD})", "([redacted], [redacted])"),
+            # A word glued to a digit, underscore or symbol is NOT a longer run of
+            # letters: a credential is routinely glued into exactly these.
+            (f"{PLAIN_WORD}1", "[redacted]1"),
+            (f"my_{PLAIN_WORD}", "my_[redacted]"),
+            (f"{PLAIN_WORD}_x", "[redacted]_x"),
+            (f"{PLAIN_WORD}-x", "[redacted]-x"),
+            (f"{PLAIN_WORD}\n", "[redacted]\n"),
+        ):
+            assert redact_secret_values(text, [PLAIN_WORD]) == expected, text
+
+    def test_other_case_variants_are_not_values_and_are_left_alone(self) -> None:
+        """Unchanged behaviour, pinned: the pass has never been case-insensitive."""
+        for text in (PLAIN_WORD.capitalize(), PLAIN_WORD.upper()):
+            assert redact_secret_values(text, [PLAIN_WORD]) == text
+
+    def test_the_reversed_spelling_is_matched_on_the_same_boundaries(self) -> None:
+        # LONG: a value under the transform floor has no reversal spelling at all.
+        reversed_word = LONG_PLAIN_WORD[::-1]
+        masked = redact_secret_values(f"is {reversed_word} ok", [LONG_PLAIN_WORD])
+        assert masked == "is [redacted] ok"
+        glued = f"un{reversed_word}ally"
+        assert redact_secret_values(glued, [LONG_PLAIN_WORD]) == glued
+
+    @pytest.mark.parametrize("label", sorted(_spellings(LONG_PLAIN_WORD)))
+    def test_every_spelling_of_a_long_plain_word_still_masks(self, label: str) -> None:
+        """The #1428 family list, run over a letters-only value: nothing is dropped."""
+        spelling = _spellings(LONG_PLAIN_WORD)[label]
+        masked = redact_secret_values(f"printed={spelling} done", [LONG_PLAIN_WORD])
+        assert spelling not in masked, f"{label} survived the mask"
+        assert masked == "printed=[redacted] done"
+
+    def test_an_encoded_spelling_keeps_the_substring_match_even_glued_in(self) -> None:
+        """Only the two letter-run spellings take the boundary; an encoded one is a leak
+        wherever it sits, so it fails toward masking."""
+        encoded = _spellings(LONG_PLAIN_WORD)["hex lower"]
+        masked = redact_secret_values(f"blob{encoded}tail", [LONG_PLAIN_WORD])
+        assert encoded not in masked
+
+    @pytest.mark.parametrize(
+        "value",
+        (
+            "synth" + "etic9",  # digit
+            "synth" + "etic-pass",  # symbol
+            "Synth" + "eticPass7",  # mixed shape
+            "p\u00e4ssw\u00f6rd",  # non-ASCII letters: no word edge to rely on
+            "\u5bc6\u7801\u5bc6\u7801\u5bc6\u7801",  # CJK has no spaces to bound on
+        ),
+    )
+    def test_a_value_that_is_not_a_plain_ascii_word_keeps_the_substring_match(
+        self, value: str
+    ) -> None:
+        """Pins the unchanged half: only letters-only values moved to boundaries."""
+        for text in (f"x{value}y", f"un{value}ally", f"{value}"):
+            masked = redact_secret_values(text, [value])
+            assert value not in masked, text
+            assert REDACTION_MARKER in masked
+
+    def test_the_boundary_cannot_hide_a_longer_value_that_contains_the_word(self) -> None:
+        """Longest-first still holds: a long value runs first, then the bare word."""
+        longer = PLAIN_WORD + "9"
+        masked = redact_secret_values(
+            f"{longer} then {PLAIN_WORD} then {PLAIN_WORD}ally", [PLAIN_WORD, longer]
+        )
+        assert masked == f"[redacted] then [redacted] then {PLAIN_WORD}ally"
+
+    @pytest.mark.parametrize("label", sorted(_spellings(LONG_PLAIN_WORD)))
+    def test_the_stream_masker_never_leaks_the_word_at_any_cut(self, label: str) -> None:
+        """Chunked surfaces: a boundary is read at a cut, so the risk is a LEAK, swept.
+
+        The cut rules are unchanged; what must hold is that no chunking publishes the
+        word (a cut may over-mask a fragment of a longer word, never under-mask).
+        """
+        spelling = _spellings(LONG_PLAIN_WORD)[label]
+        payload = f"prefix {spelling} suffix\n"
+        for offset in range(len(payload) + 1):
+            masker = redaction_shapes.StreamMasker([LONG_PLAIN_WORD])
+            published = masker.push(payload[:offset]) + masker.push(payload[offset:])
+            published += masker.push("", final=True)
+            assert spelling not in published, f"{label} leaked at {offset}"
+            assert REDACTION_MARKER in published
+
+    def test_the_stream_masker_settles_to_the_whole_text_answer_on_one_push(self) -> None:
+        text = f"a {PLAIN_WORD} store, un{PLAIN_WORD}ally\n"
+        masker = redaction_shapes.StreamMasker([PLAIN_WORD])
+        assert masker.push(text, final=True) == f"a [redacted] store, un{PLAIN_WORD}ally\n"
+
+    def test_the_variable_store_registers_the_word_and_masks_it_as_a_word(self) -> None:
+        """The real path: SCRUB ``PASSWORD=<word>``, never ``register_redaction`` by hand."""
+        store = VariableStore(cwd=tempfile.mkdtemp())
+        first, _ = store.redact_with_report(f"PASSWORD={PLAIN_WORD}")
+        assert PLAIN_WORD not in first
+        assert PLAIN_WORD in store.redaction_values(), "premise: the shape pass registered it"
+        assert store.redact(f"a {PLAIN_WORD} store") == "a [redacted] store"
+        prose = f"un{PLAIN_WORD}ally {PLAIN_WORD.capitalize()} {PLAIN_WORD.upper()}"
+        assert store.redact(prose) == prose
+
+
 def test_every_spelling_of_a_longer_value_is_masked_before_a_prefix_value() -> None:
     """Longest-first ordering, preserved one level down under normalisation.
 

@@ -40,6 +40,14 @@ store registered, is contained for the rest of the session). There is
 deliberately no "looks random" / entropy rule: see the note on
 :data:`CREDENTIAL_SHAPES`.
 
+**A plain-word secret is masked as a WORD, not as a substring.** A registered value
+made only of ASCII letters is matched on letter-run boundaries (see
+:func:`_is_word_like`): it is masked wherever it stands alone or beside a digit or
+symbol, and it is NOT masked inside a longer run of letters. The residual, accepted
+on purpose: a password that is an ordinary word and appears embedded in a longer
+word (``unsynthetically`` for the password ``synthetic``) is shown. Masking it
+rewrote vocabulary in tool output the model copies back into source files.
+
 **Two model-visible surfaces this pass does not reach, named rather than
 implied.** The composed scrubber is the tool/result seam and everything the
 session hands to the loop, which is where the audit that produced this module
@@ -106,6 +114,7 @@ from __future__ import annotations
 
 import base64
 import codecs
+import functools
 import json
 import re
 import urllib.parse
@@ -5603,6 +5612,73 @@ class StreamMasker:
         return len(self._pending)
 
 
+#: The letters a word-like value is delimited by. ASCII only, on purpose, on BOTH
+#: sides of the decision (see :func:`_is_word_like`).
+_ASCII_LETTER_CLASS = "A-Za-z"
+
+
+def _is_word_like(value: str) -> bool:
+    """Whether ``value`` is a plain ASCII word: letters only, no digit, symbol or space.
+
+    **Why the exact-value pass distinguishes these at all (2026-10-09, the display
+    half of the edit-corruption loop).** A registered value is matched as a
+    SUBSTRING, which is right for anything with a digit, a symbol or mixed shape:
+    such a string is a credential wherever it appears, including glued into a
+    longer token. A plain word is the opposite case. ``PASSWORD=synthetic`` is
+    registered (:func:`is_registerable_component` needs only length), and a
+    substring match then rewrote ordinary prose — ``a synthetic store`` became
+    ``a [mask] store`` and ``unsynthetically`` became ``un[mask]ally`` — in tool
+    output the model reads and copies back into source files, which is how a
+    mask ends up on disk. Matching a word-like value on WORD BOUNDARIES
+    (:func:`_word_pattern`) keeps it masked wherever it stands alone and stops it
+    mangling larger words.
+
+    **The accepted residual, stated here and pinned in the tests:** a plain-word
+    secret embedded INSIDE a longer run of letters is no longer masked
+    (``unsynthetically`` keeps the word). Such a string is indistinguishable from
+    ordinary vocabulary, and mangling vocabulary is the worse failure — it blinds
+    the model and corrupts files. A word glued to a digit, an underscore or any
+    symbol is NOT a longer run of letters and is still masked
+    (``synthetic1``, ``my_synthetic``, ``synthetic.``).
+
+    ASCII only, deliberately: a boundary is the edge of a run of letters, and
+    scripts that are written without spaces (CJK) have no such edge, so a
+    boundary rule over them would leave a secret unmasked beside any neighbouring
+    character. Those values keep the substring match, which fails toward masking.
+
+    Applied to the two spellings of a word-like value that are themselves a run of
+    letters a reader can meet in prose: the verbatim value and its reversal (a
+    reversed word is still a word often enough — ``stressed`` reverses to
+    ``desserts`` — that the substring match mangled it for the same reason). Every
+    ENCODED spelling (base64, hex, percent, escaped, separator-spread) keeps the
+    substring match even when it happens to be all letters: it is an opaque string
+    that is not ordinary vocabulary, and a base64 spelling glued into a longer
+    base64 blob is a leak, so that side fails toward masking.
+
+    **Chunked surfaces over-mask, never under-mask, at a cut.** A stream cut can
+    leave the word at the very edge of a chunk, where the missing neighbour reads as
+    a boundary: ``synthetic`` | ``ally`` published as two chunks masks the first
+    half. That errs toward masking, and only at a chunk edge; the cut rules in
+    :class:`StreamMasker` and the bash pipe filter are unchanged and still never
+    publish a spelling in two halves.
+    """
+    return value.isascii() and value.isalpha()
+
+
+@functools.lru_cache(maxsize=2048)
+def _word_pattern(form: str) -> Pattern[str]:
+    """``form`` as a pattern that refuses to match inside a longer run of letters.
+
+    Lookarounds, not ``\\b``: ``\\b`` treats an underscore and a digit as part of a
+    word, so ``my_synthetic`` and ``synthetic1`` would escape the mask, and those
+    are exactly the spellings a credential is glued into. Cached because the pass
+    runs over every settled tool result; the key set is bounded by the session's
+    registration cap times the (closed) spelling list.
+    """
+    letters = _ASCII_LETTER_CLASS
+    return re.compile(f"(?<![{letters}]){re.escape(form)}(?![{letters}])")
+
+
 def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
     """Mask every known value in ``text``, in every spelling it may be printed in.
 
@@ -5643,8 +5719,13 @@ def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
         reverse=True,
     )
     for value in ordered:
+        word_like = _is_word_like(value)
         for form in credential_forms(value):
-            if form in result:
+            if form not in result:
+                continue
+            if word_like and (form == value or form == value[::-1]):
+                result = _word_pattern(form).sub(REDACTION_MARKER, result)
+            else:
                 result = result.replace(form, REDACTION_MARKER)
     return result
 

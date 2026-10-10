@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,28 @@ IDENT = "xai_" + "availab" + "le"
 OTHER_IDENTS = ("hf_" + "ready" + "probe", "tvly_" + "supports" + "streams", "npm_" + "installed")
 
 #: A realistic xAI-shaped key (mixed case + digits). It is REAL-SHAPED, not a real secret.
+#: A plain English word registered as a secret (``PASSWORD=<word>``). Assembled from parts for
+#: the same reason as ``IDENT``. The exact-value pass matches it on LETTER-RUN BOUNDARIES, so
+#: ordinary words that merely contain it (``un<word>ally``) stay readable; the standalone
+#: token stays masked.
+PLAIN_WORD = "synth" + "etic"
+EMBEDDED_WORD = "un" + PLAIN_WORD + "ally"
+
+
+def _store_that_has_scrubbed_the_word(tmp_path: Path) -> Any:
+    """A real ``VariableStore`` that REGISTERED the word the way production does.
+
+    Through the shape pass (``PASSWORD=<word>``), never ``register_redaction`` by hand: the
+    over-match this class pins only exists on the registration path the store really takes.
+    """
+    from local_operator.variables import VariableStore
+
+    store = VariableStore(cwd=str(tmp_path))
+    store.redact_with_report(f"PASSWORD={PLAIN_WORD}")
+    assert PLAIN_WORD in store.redaction_values(), "premise: the word is a registered value"
+    return store
+
+
 REAL_KEY = "xai-" + "Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6kM9nP2rS5tU8wX1yA4cD7fG0iL3oQ6"
 
 
@@ -296,6 +319,65 @@ class TestDiskBytes:
         assert REAL_KEY not in json.dumps(stored_calls[0].arguments)
 
 
+class TestPlainWordOnDisk:
+    """DISK for the plain-word over-match: prose copied from a result is written intact.
+
+    The second half of the loop in the module docstring. The read result masks only the
+    STANDALONE registered word, so a model copying the surrounding prose (which contains the
+    word inside longer words) copies real text; before the boundary rule it copied the mask
+    in place of ``un<word>ally`` and the writer put it on disk. Byte-level, by design.
+    """
+
+    @pytest.mark.asyncio
+    async def test_edit_copying_prose_with_longer_words_writes_them_intact(
+        self, tmp_path: Path
+    ) -> None:
+        store = _store_that_has_scrubbed_the_word(tmp_path)
+        src = tmp_path / "notes.md"
+        src.write_bytes(f"a {PLAIN_WORD} store\n{EMBEDDED_WORD} odd\n".encode())
+
+        def plan(seen: str):
+            # The mechanical model copies the longer word exactly as it SAW it.
+            copied = re.search(r"un\S*?ally", seen)
+            assert copied is not None, seen
+            return "edit", {
+                "path": str(src),
+                "old_text": "odd",
+                "new_text": f"odd and {copied.group(0)} again",
+            }
+
+        model = _MechanicalModel(src, plan)
+        await _drive(model, redact=lambda text: store.redact_with_report(text)[0])
+
+        # What the model saw: the standalone token masked, the longer word readable.
+        assert EMBEDDED_WORD in model.seen_by_model
+        assert model.seen_by_model.count(REDACTION_MARKER) == 1
+        assert f"a {PLAIN_WORD} store" not in model.seen_by_model
+        disk = src.read_bytes()
+        assert disk.count(EMBEDDED_WORD.encode()) == 2, disk
+        assert disk.count(MARKER_BYTES) == 0, disk
+
+    @pytest.mark.asyncio
+    async def test_write_of_a_prose_document_keeps_longer_words_intact(
+        self, tmp_path: Path
+    ) -> None:
+        store = _store_that_has_scrubbed_the_word(tmp_path)
+        src = tmp_path / "readme.md"
+        src.write_bytes(f"# T\n\n{EMBEDDED_WORD} and {PLAIN_WORD.upper()} and more\n".encode())
+
+        def plan(seen: str):
+            copied = re.search(r"un\S*?ally", seen)
+            assert copied is not None, seen
+            return "write", {"path": str(src), "content": f"# T\n\n{copied.group(0)} again\n"}
+
+        await _drive(
+            _MechanicalModel(src, plan), redact=lambda text: store.redact_with_report(text)[0]
+        )
+        disk = src.read_bytes()
+        assert disk == f"# T\n\n{EMBEDDED_WORD} again\n".encode(), disk
+        assert MARKER_BYTES not in disk
+
+
 # --- the net under the fix: edit/write say so when they put the marker on disk --------
 
 
@@ -517,3 +599,76 @@ class TestDisplayStillMasksSecrets:
             ]
         )
         assert value not in persisted, "persisted transcript (content + call arguments)"
+
+
+class TestDisplayMasksARegisteredPlainWordAsAToken:
+    """DISPLAY for a registered plain word: masked as a standalone token, never inside a word.
+
+    Separate from :class:`TestPlainWordOnDisk` on purpose (see the module docstring): the
+    operator's rule that a real value stays scrubbed from results, history and transcript
+    must hold at the same time as the prose staying readable, and neither may pass by
+    weakening the other.
+    """
+
+    @pytest.mark.asyncio
+    async def test_results_history_and_transcript(self, tmp_path: Path) -> None:
+        from local_operator.session.transcript import Transcript
+
+        store = _store_that_has_scrubbed_the_word(tmp_path)
+        src = tmp_path / "notes.txt"
+        src.write_text(f"pw is {PLAIN_WORD} ok\nprose: {EMBEDDED_WORD}\n")
+        target = tmp_path / "out.txt"
+        content = f"copy {PLAIN_WORD} and {EMBEDDED_WORD}\n"
+        model = _MechanicalModel(
+            src, lambda seen: ("write", {"path": str(target), "content": content})
+        )
+        events = await _drive(model, redact=lambda text: store.redact_with_report(text)[0])
+
+        # The result the model reads.
+        assert f"pw is {REDACTION_MARKER} ok" in model.seen_by_model
+        assert f"prose: {EMBEDDED_WORD}" in model.seen_by_model
+
+        end = events[-1]
+        assert isinstance(end, AgentEndEvent)
+        stored = [
+            call
+            for m in end.messages
+            if isinstance(m, Message)
+            for call in (m.tool_calls or [])
+            if call.name == "write"
+        ][0]
+        # The history copy of the call: standalone masked, embedded intact.
+        assert stored.arguments["content"] == f"copy {REDACTION_MARKER} and {EMBEDDED_WORD}\n"
+        # The DISK write is still the original bytes (display never alters a writer's input).
+        assert target.read_text() == content
+
+        # The persisted transcript: message content and call arguments.
+        transcript = Transcript(tmp_path / "session")
+        for message in end.messages:
+            await transcript.append_message(message)
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "session" / "transcript.jsonl").read_text().splitlines()
+        ]
+        persisted = json.dumps(
+            [
+                {k: v for k, v in row.get("payload", {}).items() if k != "provider_payload"}
+                for row in rows
+            ]
+        )
+        assert f"{PLAIN_WORD} and" not in persisted, "the standalone word reached the transcript"
+        assert f"{REDACTION_MARKER} and {EMBEDDED_WORD}" in persisted, persisted
+
+    def test_a_non_word_registered_value_still_masks_inside_a_longer_token(
+        self, tmp_path: Path
+    ) -> None:
+        """The unchanged half: a value with a digit keeps the substring match everywhere."""
+        from local_operator.variables import VariableStore
+
+        value = "Zq8" + "Lm2Vb9Nk4"
+        store = VariableStore(cwd=str(tmp_path))
+        assert store.register_redaction(value)
+        for text in (f"x{value}y", f"un{value}ally", value):
+            masked = store.redact(text)
+            assert value not in masked, text
+            assert REDACTION_MARKER in masked
