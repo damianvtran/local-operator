@@ -211,7 +211,12 @@ made here.
   authenticated endpoint and checked here, and it needs the UI to request it. Also
   open: a symlink swapped between the check and the open (TOCTOU -- robustness
   rather than a boundary once no root list bounds the read; the recorded fix is
-  Phase 3), and the accepted `<img>`-observable existence/dimension residual.
+  Phase 3), and the accepted `<img>`-observable residual: general mode widens
+  that path existence/dimension signal to the whole disk, and it stays bounded
+  only because the document CSP keeps a preview page off the network
+  (`connect-src https:`, `worker-src blob:` -- pinned by a core-side test; any
+  future widening is a security change through the supplements-lane review,
+  RFC §3.7 item 10).
 - **The former 403 class is retired.** Every UI consumer that passes a user- or
   agent-named path (composer thumbnails, message attachments, video/HTML previews,
   canvas file viewer) is served on loopback -- `~/Downloads` picks, session

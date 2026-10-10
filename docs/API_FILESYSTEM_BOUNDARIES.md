@@ -65,6 +65,18 @@ workspace explicitly set to the filesystem root grants that scope. The edit
 check is not a security boundary against a caller already authorized to
 reconfigure agents or use the unrestricted local harness.
 
+**Loopback is not a boundary between local accounts.** On a shared host, any
+local account that can reach `127.0.0.1:<port>` can call this API; the static
+file route serves unclamped on loopback-accepted connections, so -- subject to
+file permissions -- that account can read any file this user's account can
+read. It can also observe path existence and image dimensions across the disk
+through `<img>` loads; that class stays bounded only because the document CSP
+keeps a preview page off the network, and widening that CSP is a security
+change (pinned by a core-side test; RFC §3.7 item 10). The supported posture is
+a single-user machine. The RFC's phased tokens start permissive (Phase A
+accepts a token, does not require one), so they do not change this;
+enforcement arrives in later phases gated on the compat matrix.
+
 Canonical resolution followed immediately by opening the canonical target is
 portable, but not race-free against a concurrent local process replacing path
 components. Such a process is outside this remote-input confinement threat

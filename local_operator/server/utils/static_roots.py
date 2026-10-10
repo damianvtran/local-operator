@@ -631,13 +631,16 @@ def host_is_acceptable(host_header: str | None, bound_host: str | None) -> bool:
     (security S-3). Neither is an authority a browser can send, and the split on
     ``:`` would otherwise read the attacker's name out of such a value.
 
-    No header at all is accepted: rebinding always carries a name. A wildcard or
-    empty announced host (``--host 0.0.0.0`` -- no longer producible through the
-    CLI, which refuses every non-loopback bind; kept fail-closed for an
-    embedding path) has nothing to compare a DNS name against, so a name fails
-    closed: only an IP literal or ``localhost`` passes (the wildcard-bind bypass
-    that admitted every name here is deleted; RFC §3.4). The app's own renderer
-    dials ``http://127.0.0.1:<port>`` (backend-service.ts), which passes.
+    An ABSENT ``Host`` header is still accepted: HTTP/1.0 clients may omit it,
+    no browser does, and the rebinding actor always sends a name -- so
+    "fail-closed" here is about a wildcard/empty ANNOUNCED host, which gives
+    nothing to compare a DNS name against, not about refusing nameless
+    requests. Such an announced host (``--host 0.0.0.0`` -- no longer producible
+    through the CLI, which refuses every non-loopback bind; kept fail-closed
+    for an embedding path) admits only an IP literal or ``localhost`` and
+    refuses DNS names (the wildcard-bind bypass that admitted every name here
+    is deleted; RFC §3.4). The app's own renderer dials
+    ``http://127.0.0.1:<port>`` (backend-service.ts), which passes.
     """
     if host_header is None:
         return True
