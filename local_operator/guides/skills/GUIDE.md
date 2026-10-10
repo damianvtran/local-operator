@@ -28,7 +28,7 @@ Fourteen builtin skills are packaged inside Local Operator itself. They are rele
 
 ## Where skills come from and who wins
 
-Roots are scanned in order, and the first root holding a given name wins. Every shadowed loser is reported as a `Skill name conflict … (earlier root wins)` warning naming both files.
+Roots are scanned in order, and the first root holding a given name wins. Every shadowed loser is reported as a `Skill name conflict …` warning naming both files and the rule that decided it — `earlier root wins` across roots, `same root: earlier in the walk` within one.
 
 | Order | Root | Owner |
 | --- | --- | --- |
@@ -52,7 +52,7 @@ Two environment knobs change the scan:
 ## Customise or override a builtin
 
 - **Override without editing it**: copy the skill to `~/.local-operator/skills/<name>/` (or a project root) keeping the same name. Your copy wins; the builtin is shadowed and reported once as a name conflict at session start. Rename your copy and both load, with no warning.
-- **Silence one**: a same-named copy with `enabled: false` replaces the builtin with nothing; `hide: true` keeps direct `skill://` reads working but removes it from semantic selection.
+- **Silence one**: a same-named copy with `hide: true` — your copy wins the name, direct `skill://` reads return it, and semantic selection excludes it, so the builtin never reaches a session. An `enabled: false` copy is ignored: it is dropped before it can claim the name, so the builtin stays loaded and no warning fires.
 - **Do not edit the packaged copy** — the next update replaces it.
 - The conflict warning is not an error: it names the shadowed file, the winner, and the rule. It is exactly what shadowing a builtin looks like.
 
@@ -62,4 +62,4 @@ The `skill://skill-authoring` skill is the playbook: description as routing sign
 
 ## Place a skill for a user
 
-Write `<root>/<name>/SKILL.md` with frontmatter `name` and `description`, and add `references/*.md` for material only some tasks need. A skill you create is readable immediately — the next `skill://` miss rescans the roots, so it resolves in this session and in subagents already running, with no restart. What waits for the next session is semantic selection: the skill is not auto-suggested until then, so tell the agent to `read skill://<name>` by name. Validate by reading it back: `skill://<name>` must return the body, not an error.
+Write `<root>/<name>/SKILL.md` with frontmatter `name` and `description`, and add `references/*.md` for material only some tasks need. A skill you create is readable immediately — the next `skill://` miss rescans the roots, so it resolves in this session and in subagents already running, with no restart. What waits for the next session is the semantic `<skills>` listing: it is a per-session snapshot, so the new skill joins it at the next session start. The recommendation roster refreshes sooner — a skill authored mid-session can be a candidate on the very next message. To be sure it is picked up this session, tell the agent to `read skill://<name>` by name. Validate by reading it back: `skill://<name>` must return the body, not an error.
