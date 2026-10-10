@@ -721,13 +721,15 @@ def update_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
     refusal it did not ask to make), send the target identity, and report the
     member's own words. It sends NO code, NO ref to fetch, and NO command.
 
-    EVERY ``reason`` THIS FUNCTION RENDERS GOES THROUGH THE GLOSS: the dial
-    seam's token (the unreachable line) and the member's reply sentence (the
-    ``message`` this returns). ``resume.peer_reason_words`` is the mesh's one
-    spelling for a reason on a human line — ``test_reason_surfaces.py`` holds
-    every renderer to it — and it is imported locally, the way the network CLI
-    spells it, so the slice takes no module-scope dependency on the gloss
-    layer.
+    THE TWO REASONS THIS FUNCTION RENDERS, AND WHY THEY DIFFER (round 3, M2):
+    the dial seam's token (the unreachable line) is a wire TOKEN and goes through
+    the mesh's one gloss, ``resume.peer_reason_words`` (imported locally, the way
+    the network CLI spells it); the member's reply sentence is
+    authored-for-a-reader PROSE and is passed through VERBATIM — "report the
+    member's own words" is the design's contract (RU §3), and round 3 measured
+    the gloss re-wording receipts into false states. ``test_reason_surfaces.py``
+    holds both: the gloss call satisfies it for the token, and the member's read
+    is a DECLARED entry there (its comment carries the same record).
     """
     from local_operator.resume import peer_reason_words  # the mesh's one gloss
 
@@ -735,18 +737,21 @@ def update_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
     link, dial_reason = server._ensure_link_with_reason(device_id)  # noqa: SLF001
     label = server._member_name(device_id) or device_id  # noqa: SLF001 — the mesh's own name
     if link is None:
-        # THE SEAM'S OWN REASON RIDES THE SENTENCE, IN WORDS (m5): ``no_endpoint``,
-        # ``not_a_member`` and the dial's refusal codes are different facts with
-        # different remedies, and dropping them left the operator to guess
-        # between "that device is off" and "this device was never told where it
-        # lives". The TOKEN itself stays the ``--json`` register; the line reads
-        # the gloss.
+        # THE SEAM'S OWN REASON RIDES THE SENTENCE, IN WORDS, WHEN IT EXISTS
+        # (m5 + Q-R3-1): ``no_endpoint``, ``not_a_member`` and the dial's refusal
+        # codes are different facts with different remedies, and dropping them
+        # left the operator to guess between "that device is off" and "this
+        # device was never told where it lives". The TOKEN itself stays the
+        # ``--json`` register; the line reads the gloss — and an EMPTY reason
+        # stays a MISSING parenthetical (the CI round made it unconditional,
+        # which would have rendered the gloss's reachability default onto a line
+        # that had no reason to say it).
+        suffix = f" ({peer_reason_words(dial_reason)})" if dial_reason else ""
         return {
             "ok": False,
             "code": "unreachable",
             "message": (
-                f"{label} is not answering right now, so it was not asked to update"
-                f" ({peer_reason_words(dial_reason)})"
+                f"{label} is not answering right now, so it was not asked to update{suffix}"
             ),
             "device_id": device_id,
             "name": label,
@@ -860,18 +865,18 @@ def update_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
         "ok": ok,
         "code": inner_code or state or "failed",
         "state": state,
-        # THE MEMBER'S OWN SENTENCE, GLOSSED ON ITS WAY OUT (CI shard 0's
-        # flagged read was THIS one, not the unreachable parenthetical: the
-        # scanner sees ``.get("reason")``-shaped reads, and this coerces the
-        # reply's ``reason`` onto the origin's ``message`` line). For this op's
-        # own receipt sentences the gloss is a pass-through by construction —
-        # "a sentence written for a reader is returned as written" — and a
-        # reply that ever carried a bare token gets words instead. The
-        # emptiness guard keeps a missing reason a missing message, not the
-        # gloss's "it did not answer" default (which belongs to reachability).
-        "message": (
-            peer_reason_words(str(detail_out.get("reason"))) if detail_out.get("reason") else ""
-        ),
+        # THE MEMBER'S OWN WORDS, VERBATIM (round 3, M2/Q-R3-2): this read was
+        # routed through ``resume.peer_reason_words`` in the CI-round fix, and
+        # the gloss RE-WORDED the member's receipts into false states — `uv tool
+        # install failed: disk full` lost its leading clause, and `…: E2BIG` /
+        # `[Errno 13] Permission denied: '…'` read as "it did not answer" (the
+        # member DID answer). The member's updater authors this field as prose
+        # for a reader, and the design's contract is "report the member's own
+        # words" (RU §3) — so the tail is a PASS-THROUGH, and the guardian
+        # (``test_reason_surfaces.py``) carries it as a DECLARED read whose entry
+        # records this. The emptiness guard stays: a missing reason is a missing
+        # message, never a default sentence.
+        "message": str(detail_out.get("reason") or ""),
         "method": str(detail_out.get("method") or ""),
         "version": str(detail_out.get("version") or ""),
         "sessions": detail_out.get("sessions") or {"moved": 0, "kept": 0},

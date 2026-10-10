@@ -393,10 +393,9 @@ def test_the_reply_vocabulary_is_the_one_the_design_freezes(
         assert key in detail, (key, detail)
     assert detail["state"] == "already_on_target", detail
     assert detail["ok"] is True
-    # THE GLOSS IS A PASS-THROUGH FOR THIS OP'S OWN SENTENCES (CI shard 0):
-    # the tail now renders the member's ``reason`` through
-    # ``resume.peer_reason_words``, which must hand a sentence written for a
-    # reader back UNCHANGED — this pins that it does for the common case.
+    # THE TAIL IS A PASS-THROUGH (round 3, M2): the member's own receipt
+    # sentence is reported verbatim — authored prose must survive the report,
+    # and this pins that it does for the common case.
     assert detail["message"] == "this device already runs 0.99.0", detail
 
 
@@ -632,19 +631,28 @@ def test_the_channel_check_refuses_only_on_a_confirmed_absence() -> None:
 def test_the_unreachable_sentence_carries_the_dial_seams_reason(
     devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
-    """m5: the distinguished fact reaches the line IN WORDS, never as a token.
+    """m5 + Q-R3-1: the dial fact is said in words — and only when it exists.
 
     ``no_endpoint`` / ``not_a_member`` must not collapse into one vague sentence,
-    and the token must not reach the line raw — the parenthetical goes through
+    and the token must not reach the line raw: the parenthetical goes through
     ``resume.peer_reason_words``, the mesh's one spelling for a reason on a human
-    line. (CI shard 0's flagged read was NOT this one: the scanner sees
-    ``.get("reason")``-shaped reads and this is a bare local name — the flagged
-    site was the classifier tail in the same function, glossed in the same pass
-    and pinned by the guardian.) Both halves are asserted: the reading is
-    present, the token is not.
+    line. Q-R3-1: an EMPTY dial reason stays a MISSING parenthetical — the CI
+    round made it unconditional, which would have rendered the gloss's
+    reachability default ("it did not answer") onto a line that had no reason to
+    say it. (The tail's read in the same function is the member's own prose and
+    is passed through VERBATIM, declared in the guardian — round 3, M2; this
+    cell is the dial half only.)
     """
     server_a, server_b, record = _rig(devices, monkeypatch)
 
+    # NO reason: no parenthetical at all (Q-R3-1).
+    monkeypatch.setattr(server_b, "_ensure_link_with_reason", lambda device_id, **kw: (None, ""))
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["code"] == "unreachable", detail
+    assert "it did not answer" not in detail["message"], detail
+    assert detail["message"].endswith("update"), detail
+
+    # A reason: glossed, never the token.
     def _no_link(device_id: str, **kwargs: Any) -> tuple[None, str]:
         return None, "no_endpoint"
 
@@ -653,6 +661,80 @@ def test_the_unreachable_sentence_carries_the_dial_seams_reason(
     assert detail["code"] == "unreachable", detail
     assert "no address published for it" in detail["message"], detail
     assert "no_endpoint" not in detail["message"], "the token is the --json register"
+
+
+def test_the_members_receipt_sentence_is_reported_verbatim(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """M2/Q-R3-2: the member's own reason is authored prose; the tail repeats it.
+
+    The member's updater writes this sentence for a reader, and the design's
+    contract is "report the member's own words" (RU §3) — so the origin's
+    ``message`` hands it over UNTOUCHED. The shapes below are the ones the
+    CI-round gloss mangled: the leading clause dropped (``uv tool install
+    failed: disk full`` -> ``disk full``), a colon-tail without a space falling
+    to a false "it did not answer" (``…: E2BIG``), the realistic ``UpdateError``
+    text ``[Errno 13] Permission denied: '<path>'`` reading as silence, and a
+    token-shaped reason reported as authored. The member composes each through
+    its real failed path (the installer raises); only the installer seam is
+    monkeypatched. The guardian's DECLARED read is the static half of this pin.
+    """
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "busy_sessions", lambda root: (0, ""))
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    shapes = (
+        "uv tool install failed: disk full",
+        "uv tool install failed: E2BIG",
+        "[Errno 13] Permission denied: '/Users/x/.local/share/lop'",
+        "connect_failed:TimeoutError",  # a token shape, reported as authored
+    )
+
+    for shape in shapes:
+
+        def _fail(version: str, *, runner: Any = None, _shape: str = shape) -> str:
+            raise RuntimeError(_shape)
+
+        monkeypatch.setattr(meshupdate, "install_build", _fail)
+        detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+        assert detail["state"] == "failed", (shape, detail)
+        assert detail["message"] == shape, (shape, detail)
+
+
+def test_a_missing_member_reason_stays_a_missing_message(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """n4: ``""``/absent member reason -> ``""``, never a default sentence.
+
+    The emptiness guard's pass-through half: an ack whose ``reason`` is empty or
+    absent must produce an empty ``message``. Driven through a fake link so the
+    reply's detail is exact; nothing else about the ask is stubbed away.
+    """
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+
+    class _FakeLink:
+        capabilities = frozenset({wire.MESH_UPDATE_V1})
+        detail: dict[str, Any] = {"state": "already_on_target", "code": "", "reason": ""}
+
+        def request(self, frame: Any, *, timeout: float) -> Any:
+            return {"op": "ack", "detail": dict(self.detail)}
+
+    monkeypatch.setattr(
+        server_b, "_ensure_link_with_reason", lambda device_id, **kw: (_FakeLink(), "")
+    )
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["message"] == "", detail
+
+    class _NoReason(_FakeLink):
+        detail = {"state": "already_on_target", "code": ""}
+
+    monkeypatch.setattr(
+        server_b, "_ensure_link_with_reason", lambda device_id, **kw: (_NoReason(), "")
+    )
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["message"] == "", detail
 
 
 _PROBE = """
