@@ -39,7 +39,9 @@ order the operator asked for — the UI first, a terminal last:
 4. **A terminal** — the original premise genuinely holds, and the spawn below
    runs the argv it always ran. That path is why this module exists. What it no
    longer does is claim a landing it did not make: it opens a window, or it
-   reports failure.
+   reports failure. WHICH terminal: the one detection finds (almost never, from
+   a click), then the one the user LAST ATTENDED (``spawn.remembered``, written
+   by :func:`prepare_for_clicks` when a TUI boots), then Terminal.app on macOS.
 
 THREE RUNGS BECAME FOUR when the ordering was corrected (review round 1, R9):
 asking "is anything running?" before discovery let a TUI that happened to be
@@ -547,6 +549,131 @@ def _route_to_viewer(session_id: str, *, surface: str | None = None) -> bool:
     return False
 
 
+def prepare_for_clicks(*, attended_terminal: bool = False) -> None:
+    """Make the NEXT banner's click work, from a moment a person is present.
+
+    Called off the event loop by the surfaces a human is looking at (the TUI at
+    boot, the desktop daemon at boot). Two independent preparations, each of
+    which can only be done at an attended moment and each of which a click
+    cannot do for itself:
+
+    - **Remember the terminal** (:func:`local_operator.spawn.remembered.remember_current`).
+      Emulator markers exist only here; the click that needs the answer has none.
+    - **Pre-warm the macOS identity bundle** (:func:`notifier_app.prewarm`). On a
+      cold machine the first banner otherwise goes out through ``osascript``,
+      which cannot be clicked, and Aida's check-in — a one-turn runtime's only
+      banner — is always that first one.
+
+    ``attended_terminal`` is True only from a caller that IS a person's terminal
+    (the TUI): it lets "I booted somewhere I cannot name" clear an older memory.
+    The desktop daemon passes the default, because it has no emulator markers
+    for the reason that it has no emulator (``spawn.remembered`` explains why
+    forgetting there would be wrong).
+
+    Gated on the same two questions every banner asks first, so a user who
+    turned notifications off, or a rig under a redirected HOME, pays no compile
+    and writes no memory: ``notifications_enabled`` and
+    ``desktop_belongs_to_this_process(report=False)`` (quiet, because this is
+    not a refusal anyone should be told about). Never raises, never logs above
+    debug: a warm-up is not worth a boot failure.
+    """
+    try:
+        from local_operator.paths import config_dir
+        from local_operator.tui import notifier_app
+        from local_operator.tui.notify import (
+            desktop_belongs_to_this_process,
+            notifications_enabled,
+        )
+
+        if not notifications_enabled() or not desktop_belongs_to_this_process(report=False):
+            return
+        root = config_dir()
+        from local_operator.spawn import remembered
+
+        remembered.remember_current(root, forget_if_undetected=attended_terminal)
+        notifier_app.prewarm(root)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("could not prepare the click path", exc_info=True)
+
+
+async def prepare_for_clicks_detached(*, attended_terminal: bool = False) -> None:
+    """Run :func:`prepare_for_clicks` on a DAEMON thread and await it.
+
+    **NOT ``asyncio.to_thread``.** That runs in the loop's default executor, and
+    ``asyncio.run`` JOINS the default executor when the loop shuts down, so
+    quitting during the first run after a ``BUILD_STAMP`` bump would wait for
+    ``clang`` (up to its 120 s timeout) before the process could exit. Measured
+    against a plain ``to_thread`` sleep of 4 s: ``asyncio.run`` returned after
+    4.2 s; with a daemon thread, after 0.1 s. A daemon thread is abandoned at
+    exit instead, which is safe here: the build is guarded by the single-builder
+    marker, ``is_built`` trusts only a complete stamp, and a killed build is
+    reclaimed by the marker's stale window — the contract
+    ``notifier_app._build_in_background`` already relies on.
+
+    Shared by the TUI boot hook and the daemon's lifespan so the two cannot
+    drift into one that joins and one that does not. Never raises.
+    """
+    import asyncio
+    import threading
+
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future[None] = loop.create_future()
+
+    def _work() -> None:
+        try:
+            prepare_for_clicks(attended_terminal=attended_terminal)
+        except Exception:  # noqa: BLE001 — never the boot's failure
+            logger.debug("click preparation failed", exc_info=True)
+        finally:
+            # The loop may already be closed by an exit that did not wait.
+            try:
+                loop.call_soon_threadsafe(lambda: done.done() or done.set_result(None))
+            except RuntimeError:
+                pass
+
+    threading.Thread(target=_work, name="click-preparation", daemon=True).start()
+    await done
+
+
+def _remembered_backend(env: EnvMap, already: list[SpawnBackend]) -> SpawnBackend | None:
+    """The backend for the terminal the user last attended, or None.
+
+    Written by the TUI at boot (``spawn.remembered.remember_current``), read
+    here because a click cannot detect. Withheld over ssh for the same reason
+    as :func:`_last_resort_backend`: every emulator backend needs a window
+    server this session does not have, and would report a landing that never
+    happened. Withheld when it is the candidate detection already chose, so a
+    refusal is not reported twice and the failure is not delayed.
+
+    Nothing here checks that the terminal is installed. That is safe only
+    because every backend's ``spawn`` answers FALSE for a terminal that is not
+    there, and the loop in :func:`_spawn_terminal` then moves on to
+    Terminal.app: kitty/WezTerm/Ghostty-on-Linux by ``shutil.which``, the
+    AppleScript backends by ``osascript``'s exit status, and Ghostty on macOS —
+    which is ``open -na Ghostty.app`` and used to answer True the moment ``open``
+    STARTED, even for a missing bundle — by ``open``'s own exit status (see
+    ``spawn.ghostty``). The memory is also dropped when it is stale
+    (``spawn.remembered.MAX_AGE_S``) or when the TUI later boots somewhere it
+    cannot name.
+    """
+    try:
+        from local_operator import terminals
+        from local_operator.paths import config_dir
+        from local_operator.spawn import remembered
+        from local_operator.spawn.registry import backend_named
+
+        name = remembered.recall(config_dir())
+        if not name or terminals.is_ssh(env):
+            return None
+        found = backend_named(name)
+    except Exception:  # noqa: BLE001 — a memory problem must not eat the click
+        logger.debug("could not recall the attended terminal", exc_info=True)
+        return None
+    if found is None or any(candidate.name == found.name for candidate in already):
+        return None
+    return found
+
+
 def _last_resort_backend(env: EnvMap, detected: SpawnBackend | None) -> SpawnBackend | None:
     """The backend that can open a window WITHOUT being inside one, or None.
 
@@ -661,8 +788,17 @@ def _spawn_terminal(session_id: str) -> bool:
     candidates: list[SpawnBackend] = []
     if backend is not None:
         candidates.append(backend)
+    # THE TERMINAL THE USER LAST ATTENDED comes before the hard-coded last
+    # resort. A click's process has no emulator markers, so `active_backend`
+    # above almost always answers None here and this used to be Terminal.app
+    # for everyone — including the person who lives in Ghostty.
+    remembered = _remembered_backend(env, candidates)
+    if remembered is not None:
+        candidates.append(remembered)
     last_resort = _last_resort_backend(env, backend)
-    if last_resort is not None:
+    if last_resort is not None and not any(
+        isinstance(candidate, type(last_resort)) for candidate in candidates
+    ):
         candidates.append(last_resort)
 
     # A backend is abandoned only where it opened NOTHING — a missing binary, a

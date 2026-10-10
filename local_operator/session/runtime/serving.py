@@ -6235,7 +6235,11 @@ class ServingSessionHandle(SessionHandle):
         can begin with a dash.
         """
         from local_operator.notifications import compose
-        from local_operator.tui.notify import argv_safe, detached_notify
+        from local_operator.tui.notify import (
+            DURABLE_CLICK_WINDOW_S,
+            argv_safe,
+            detached_notify,
+        )
 
         session_dir = getattr(getattr(self._session, "transcript", None), "directory", None)
         composed = compose(
@@ -6243,12 +6247,33 @@ class ServingSessionHandle(SessionHandle):
             session_dir=session_dir,
             session_name=self._notifiable_session_name(),
         )
+        # HER CHECK-IN IS THE BANNER THAT IS ANSWERED LATER, so it asks for a
+        # durable click (see ``detached_notify(durable_click_s=...)``): the
+        # cadence row posts at 08:30 and the person clicks it from Notification
+        # Centre whenever they next sit down. Three consequences ride that one
+        # argument — a long-lived macOS click helper, a synchronously-built
+        # identity bundle on a cold machine, and a synchronously-known Linux
+        # ``--action`` probe — all of which block for up to seconds, which is
+        # safe HERE because ``_announce_completion`` (this method's only
+        # caller) runs under ``asyncio.to_thread``, never on the event loop.
+        # Every other session keeps the 30 s helper and the never-blocking
+        # first toast: a completion toast is read within moments, and paying a
+        # resident process per banner for it would be cost with no reader.
+        #
+        # The keyword is passed ONLY for her, so every other session's call is
+        # byte-for-byte the call it was before this existed.
+        durable: dict[str, float] = (
+            {"durable_click_s": DURABLE_CLICK_WINDOW_S}
+            if getattr(self._session, "_aida_duty", False)
+            else {}
+        )
         return bool(
             detached_notify(
                 argv_safe(composed.title),
                 argv_safe(composed.body),
                 session_id=session_id,
                 subtitle=composed.status,
+                **durable,
             )
         )
 
