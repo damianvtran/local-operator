@@ -1251,25 +1251,38 @@ def _scrub_raw_arguments(raw: str, redact: Callable[[str], str]) -> str:
     first; that is an ordering accident, not cover: with the shape function alone, or when
     ``arguments`` is empty because the call never parsed, the value survived.)
 
-    Two passes, and neither alone is enough:
+    Two passes, VALUE-FIRST, and the order is load-bearing (QA round 2, Q-1, measured):
 
-    * ``redact`` on the text, FIRST, because that is the pass the wire's other consumers
-      and the shape module's own escape-aware rules were written against -- the keyed rules
-      (``"api_key": "..."``) need the key and the value in one string, and masking a span
-      ACROSS a quote (which the shapes can do) is behaviour the corpus pins here.
-    * :func:`_scrub_json_string_values`, which judges each string value on the characters
-      it DENOTES -- the same judgement ``_scrub_argument_value`` gives the decoded view. A
-      value the decoded view masks is masked here in the provider's own spelling; a value
-      the decoded view releases keeps every byte.
+    * :func:`_scrub_json_string_values` first -- each string value's body is decoded and
+      judged on the characters it DENOTES, the same judgement ``_scrub_argument_value``
+      gives the decoded view. This runs first because the text pass can EAT the boundary
+      this pass needs: when a credential assignment sits directly before a ``Bearer`` line
+      (two values, one escaped newline apart in the payload), the text pass rewrote the
+      assignment's value AND consumed the escape between the two lines -- judging the
+      rendering, it read the value as running on to the end of the string -- so the
+      word-boundary rule could no longer anchor the bearer value at all. Judging the values
+      first masks the bearer value before anything can rewrite its neighbourhood.
+    * ``redact`` on the text, LAST, because the keyed rules (``"api_key": "..."``) need the
+      key beside the value in one string, and masking a span ACROSS a quote (which the
+      shapes can do) is behaviour the corpus pins here. What the value pass masked is
+      already the mask marker by then, and the marker is stable under the text pass.
+
+    Ordering differential, measured over this repository's shape corpus (323 positive / 220
+    negative rows, each judged as ``json.dumps({"command": row})``): 15 positive rows and NO
+    negative row differ between the two orders, and every differing row keeps its mask in
+    both, at the same marker count. What the old order's text pass additionally covered in
+    those rows was damage: in 14 of the 15 it left the rendering unparseable (a span ran
+    across the escape, into a neighbouring name), while the value-first order leaves valid
+    JSON; in the one row that stayed parseable it masked a following name the value pass
+    leaves intact. Nothing released (any negative row) moved in either direction.
 
     Deliberately NOT derived by re-serialising ``arguments`` (the direction PR #2133's
     discussion floated): ``json.dumps`` adds a second escaping layer, and on the rows built
     around escaped spellings that layer is judged differently from the value it came from
-    (six corpus rows measured over-masked through ``transcript.encode_message_payload``'s
-    own spelling), while the text pass above already gives the keyed cover a re-serialise
-    would lose.
+    (six corpus rows measured over-masked through it), while the text pass above already
+    gives the keyed cover a re-serialise would lose.
     """
-    return _scrub_json_string_values(redact(raw), redact)
+    return redact(_scrub_json_string_values(raw, redact))
 
 
 def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | None) -> Message:
