@@ -1308,6 +1308,9 @@ class AgentLoop:
         pending: list[AgentMessage] = []
         has_more_tool_calls = True  # forces the first model call
         reentries: dict[str, int] = {}  # per-producer outer-loop re-entries
+        # One-shot latch for the opening steering drain: the run takes it once
+        # (see ``drain_steering_on_open`` below), never on a later outer pass.
+        opening_steering_drained = False
         # A reasoning model can spend its ENTIRE output budget thinking and be
         # cut off at ``length`` with nothing visible to show for it — the user
         # then watches minutes of "thinking" end in silence (session f3c058d1:
@@ -1378,9 +1381,24 @@ class AgentLoop:
                     # their boundary semantics (collected after batches and
                     # at the yield edge) so a queued aside still forces its
                     # own follow-up model call.
-                    if not first_inner:
+                    #
+                    # THE OPENING DRAIN (``drain_steering_on_open``) is the
+                    # same drain taken ONCE before the run's first request, for
+                    # a run whose whole purpose is to consume the queue: the
+                    # session opens one for a steer admitted while idle (see
+                    # ``Session.steer``). Without it that run's first call
+                    # carried nothing new -- a paid no-op -- and the steer rode
+                    # a continuation call. Opt-in and run-scoped, so every
+                    # ordinary run keeps the historical shape where a steer
+                    # can never appear in its first request (a spooled row
+                    # parks behind the turn lock and lands at the boundary; see
+                    # the session's ``_drain_spooled_peer_inbox`` note).
+                    if not first_inner or (
+                        config.drain_steering_on_open and not opening_steering_drained
+                    ):
                         if config.get_steering_messages is not None:
                             pending.extend(await config.get_steering_messages())
+                        opening_steering_drained = True
                     first_inner = False
                     if pending:
                         last_error_batch = None
