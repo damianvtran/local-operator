@@ -3639,7 +3639,7 @@ async def test_the_gate_is_re_applied_when_the_retry_runs(
     assert session.model_label == "radient/auto"
     assert handle._rehome_pending is None
     assert recorder.notices() == [
-        "This conversation stays on radient/auto until the turn ends — " "/model switches it now.",
+        "This conversation stays on radient/auto until the turn ends — /model switches it now.",
         "This conversation is still on radient/auto — /model switches it when you are ready.",
     ]
 
@@ -3707,7 +3707,63 @@ async def test_a_disposing_handle_starts_no_retry(
     assert applied == [] and session.model_label == "radient/auto"
     assert handle._rehome_retry_task is None
     assert recorder.notices() == [
-        "This conversation stays on radient/auto until the turn ends — " "/model switches it now."
+        "This conversation stays on radient/auto until the turn ends — /model switches it now."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_dispose_landing_on_the_parked_read_stops_the_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-4 Q1: the third window — a dispose during the credential read.
+
+    The schedule and spawn guards cannot see it: this retry already passed
+    them and is parked on the ``to_thread`` read when ``dispose()`` lands (its
+    first act is ``_disposing = True``). The pre-set re-check is the one that
+    keeps "retiring work begins no new work" true to the end — without it the
+    model moves and the notice paints on a handle that is going away.
+    """
+    import threading
+
+    from local_operator.providers import model_access
+
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    session.is_streaming = True
+    _patch_access(monkeypatch, {"deepseek"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == REHOME_BUSY_REPLY
+    )
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _parked_read(**kwargs: Any) -> set[str]:
+        entered.set()
+        release.wait(timeout=10)
+        return {"deepseek"}
+
+    monkeypatch.setattr(model_access, "credentialed_chat_providers_here", _parked_read)
+
+    session.is_streaming = False
+    handle._on_turn_settled()
+    for _ in range(300):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert entered.is_set(), "the retry reached the credential read"
+
+    await handle.dispose()  # the real coroutine, flag included
+    release.set()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    await _drain_background(handle)
+    await _settle_notices(handle)
+
+    assert applied == [], "a retiring handle must not move the model"
+    assert session.model_label == "radient/auto"
+    assert recorder.notices() == [
+        "This conversation stays on radient/auto until the turn ends — /model switches it now."
     ]
 
 
