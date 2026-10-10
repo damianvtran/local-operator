@@ -80,16 +80,20 @@ BASIS_ESTIMATED = "estimated"
 BASIS_NOT_TRACKED = "not_tracked"
 BASIS_VALUES = frozenset({BASIS_BILLED, BASIS_SUBSCRIPTION, BASIS_ESTIMATED, BASIS_NOT_TRACKED})
 
-#: Wire-only ``by_basis`` key: money whose BASIS is not recorded — the session's
-#: OWN inference (its route→basis mapping is PR-3) plus the children bundle
-#: (relayed child records carry their own bases in their own session's object;
-#: the children block here carries a total). It is not a record-level basis, so
-#: no ``ChannelSpendRecord`` may carry it — that keeps this bucket out of the
-#: per-record loop and makes the bucket sum reconcile by construction:
-#: ``billed + subscription + estimated + basis_not_recorded == total_micro``
-#: once unknown-amount rows (which contribute 0) are counted separately
-#: (design round 1, D1).
-BASIS_NOT_RECORDED = "basis_not_recorded"
+#: Wire-only ``by_basis`` key: the micro-USD amount whose billing BASIS is not
+#: tracked yet — the session's OWN inference (its route→basis mapping is PR-3)
+#: plus the children bundle (relayed child records carry their own bases in
+#: their own session's object; the children block here carries a total). It is
+#: not a record-level basis, so no ``ChannelSpendRecord`` may carry it — that
+#: keeps this bucket out of the per-record loop and makes the bucket sum
+#: reconcile by construction: ``billed + subscription + estimated +
+#: not_tracked_micro == total_micro`` once unknown-amount rows (which
+#: contribute 0) are counted separately as ``not_tracked_calls`` (design round
+#: 1, D1). ADDITIVE on the v1 wire: an older producer omits the key and a
+#: reader must treat absence as 0 — the UI round-2 request that named this
+#: field was exactly "the backend must publish the amount, a UI must never
+#: re-sum inference rows to find it".
+NOT_TRACKED_MICRO = "not_tracked_micro"
 
 #: Where an amount (or its documented absence) comes from. ``server_reported``
 #: is the first-party server's own figure (Radient); ``provider_reported`` is a
@@ -816,9 +820,9 @@ def combine(
         # route→basis mapping is PR-3) plus the whole children bundle. This is
         # what makes the buckets sum to ``total_micro`` on every surface
         # (design round 1, D1): billed + subscription + estimated +
-        # basis_not_recorded == total minus the unknown-amount rows, whose
+        # not_tracked_micro == total minus the unknown-amount rows, whose
         # money is 0 by definition and whose COUNT is stated separately.
-        BASIS_NOT_RECORDED: 0,
+        NOT_TRACKED_MICRO: 0,
         # A COUNT, not money: how many records have no trackable money basis.
         # Numeric because the UI renders one basis line; the key says what the
         # number is (design §5.1).
@@ -832,7 +836,7 @@ def combine(
             by_basis["not_tracked_calls"] += 1
             continue
         by_basis[basis] += int(record.amount_micro)
-    by_basis[BASIS_NOT_RECORDED] = max(0, int(inference.micro)) + max(0, children_total_micro)
+    by_basis[NOT_TRACKED_MICRO] = max(0, int(inference.micro)) + max(0, children_total_micro)
 
     rows = _inference_rows(inference) + _channel_rows(records)
     return {
