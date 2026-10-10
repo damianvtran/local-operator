@@ -318,7 +318,9 @@ def load_baseline(path: Path) -> dict[str, Any]:
     MISSING ``enforced`` key falls back to ``DEFAULT_ENFORCED`` (fail closed —
     a schema-1 file must not silently un-enforce the code this program owns);
     a PRESENT-but-empty list is respected as the deliberate "nothing is
-    enforced" state.
+    enforced" state; and a NON-LIST value (a hand-edit) fails closed the same
+    way — silently UN-enforcing on damage is the direction this guard must not
+    fail (round-4 m1).
     """
     if not path.is_file():
         return {"schema": 2, "enforced": list(DEFAULT_ENFORCED), "files": {}}
@@ -330,7 +332,9 @@ def load_baseline(path: Path) -> dict[str, Any]:
     return {
         "schema": data.get("schema", 1),
         "note": data.get("note", BASELINE_NOTE),
-        "enforced": [str(p) for p in enforced] if isinstance(enforced, list) else [],
+        "enforced": (
+            [str(p) for p in enforced] if isinstance(enforced, list) else list(DEFAULT_ENFORCED)
+        ),
         "files": {str(p): int(c) for p, c in files.items()} if isinstance(files, dict) else {},
     }
 
@@ -397,7 +401,7 @@ class Finding:
         if self.ceiling is None:
             return (
                 f"{self.path}: {self.count} literal(s) — not in baseline.json; "
-                "a NEW file starts at 0"
+                "a file with no recorded ceiling starts at 0"
             )
         return f"{self.path}: {self.count} literal(s) against a ceiling of {self.ceiling}"
 
@@ -615,8 +619,9 @@ def main(argv: list[str] | None = None) -> int:
             if old is None:
                 if new > 0:
                     print(
-                        f"check.py --update: {rel} is a NEW file with {new} literal(s) — new files "
-                        "start at 0: extract, pragma, or allowlist instead of recording a ceiling."
+                        f"check.py --update: {rel} has {new} literal(s) with no recorded "
+                        "ceiling — a file with no recorded ceiling starts at 0: extract, "
+                        "pragma, or allowlist instead of recording one."
                     )
                     return 1
                 continue
