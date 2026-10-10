@@ -1930,13 +1930,29 @@ def _commit_adoption(sock: socket.socket, request: dict[str, Any]) -> int:
     _rename_argv(b"[standby]", b"[session]")
     _rename_argv(b"id=--------", _label_id(env).encode())
     cap_fd = int(request.get("cap_fd", -1))
+    from local_operator.macos_disclaim import spawn_chain_facts
+
+    # CAPTURE THE SPAWN CHAIN BEFORE THE ENV SWAP BELOW, and put it back after.
+    # The chain this process was spawned with lives in the environment the
+    # standby inherited (``spawn_disclaimed`` injected it);
+    # ``_apply_environment`` replaces ``os.environ`` WHOLE with the requester's
+    # dict — which cannot carry it, because the requester never had one — and
+    # both evidence writers read ``os.environ``: the boot record written two
+    # lines down, and the signal receipt written if a signal catches this
+    # runtime. Without the re-injection an ADOPTED runtime records no chain at
+    # all (measured on the 2026-10-09 rig: ``ps -Eww`` still showed the
+    # spawn-time variable while ``os.environ`` — and therefore the record — had
+    # lost it), while a cold child keeps it. The two spawn paths must leave the
+    # same evidence.
+    spawn_chain = spawn_chain_facts()
     _apply_environment(env)
+    _restore_spawn_chain(spawn_chain)
     _change_directory(str(request.get("cwd") or ""))
     _redirect_output(str(request.get("capture") or ""))
     # BEFORE the session is constructed, so the sweep can see this runtime's
     # session and its true age for the whole construction window (R1-3). The
     # runtime rewrites this same record at its own boot boundary.
-    _write_adoption_boot_record(env)
+    _write_adoption_boot_record(env, spawn_chain=spawn_chain)
     _send(sock, {"ok": True, "pid": os.getpid()})
     # The private descriptor has served its purpose, and the runtime must not hold
     # one nothing will ever write to again: close it before any tool subprocess
@@ -1971,7 +1987,32 @@ def _commit_adoption(sock: socket.socket, request: dict[str, Any]) -> int:
     return cap_fd
 
 
-def _write_adoption_boot_record(env: dict[str, Any]) -> None:
+def _restore_spawn_chain(chain: list[dict[str, Any]] | None) -> None:
+    """Put this process's spawn chain back into ``os.environ`` after adoption.
+
+    A cold child gets ``LOP_SPAWN_CHAIN`` from its spawner
+    (``spawn_disclaimed``'s env injection); an adopted standby's copy is
+    destroyed by ``_apply_environment``'s whole-environment replacement, and
+    the requester cannot hand one over — it never had one. Re-injecting the
+    CAPTURED value is what keeps the adopted runtime indistinguishable from a
+    cold child for every reader of evidence: the boot record, and the signal
+    receipt written if a signal catches this process. (``ps -E`` cannot be
+    repaired — see ``_apply_environment`` — and is not consulted by either
+    reader.) Best-effort: evidence never gates an adoption.
+    """
+    if not chain:
+        return
+    try:
+        from local_operator.macos_disclaim import ENV_SPAWN_CHAIN
+
+        os.environ[ENV_SPAWN_CHAIN] = json.dumps(chain, separators=(",", ":"))
+    except Exception:  # noqa: BLE001
+        logger.debug("could not restore the spawn chain after adoption", exc_info=True)
+
+
+def _write_adoption_boot_record(
+    env: dict[str, Any], *, spawn_chain: list[dict[str, Any]] | None = None
+) -> None:
     """Publish this process's boot record now, before it constructs anything.
 
     ``run/host``'s record is the artifact ``reclaim`` and the roster already
@@ -1979,13 +2020,16 @@ def _write_adoption_boot_record(env: dict[str, Any]) -> None:
     adopted runtime visible to them exactly as a forked one is. Best-effort, for
     the reason ``journal.write_boot_record``'s own contract gives: a runtime whose
     boot record cannot be written must still run its turns.
+
+    ``spawn_chain`` is passed in rather than read here: by the time this runs,
+    ``_apply_environment`` has already swapped ``os.environ``, so the caller
+    captures the chain beforehand and hands it over (see ``_commit_adoption``).
     """
     session_id = str(env.get("LOP_MOBILE_CHILD_RESUME") or "")
     if not session_id:
         return
     try:
         from local_operator import update
-        from local_operator.macos_disclaim import spawn_chain_facts
         from local_operator.session.runtime.journal import write_boot_record
 
         build = update.installed_build(os.environ.get("LOP_BUILD_PREFIX") or None)
@@ -1993,7 +2037,7 @@ def _write_adoption_boot_record(env: dict[str, Any]) -> None:
             session_id,
             build,
             cwd=str(env.get("LOP_MOBILE_CHILD_CWD") or ""),
-            spawn_chain=spawn_chain_facts(),
+            spawn_chain=spawn_chain,
         )
     except Exception:  # noqa: BLE001 — instrumentation, never a boot gate
         logger.debug("adopted runtime could not write its boot record", exc_info=True)
