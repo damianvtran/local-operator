@@ -318,8 +318,9 @@ describe("live detail fields reduce honestly when absent or malformed", () => {
 		expect(at(0.42)).toBe(0.42);
 		expect(at(1)).toBe(1);
 		/* NOT clamped. 42 is not a fraction, and clamping it into a full bar
-		   would state 100% off a value that never meant one — the
-		   indeterminate branch is the honest rendering. */
+		   would state 100% off a value that never meant one — the reduced
+		   state (no bar at all; one draws only against a carried fraction)
+		   is the honest rendering. */
 		expect(at(42)).toBeNull();
 		expect(at(-0.1)).toBeNull();
 		expect(at(Number.NaN)).toBeNull();

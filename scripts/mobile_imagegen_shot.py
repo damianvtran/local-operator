@@ -99,6 +99,9 @@ GEOMETRY_JS = r"""
     ? Array.from(card.querySelectorAll('p')).map((p) => text(p))
     : [];
   const hold = card ? card.querySelector('[data-testid="image-gen-hold"]') : null;
+  // The hold's WORDS join the state lines, and its BOX is recorded with the
+  // controls below: both holds (queued and running) must sit in the control
+  // slot — trailing edge, where the cancel button was (UX round 1, U4).
   if (hold) stateLines.push(text(hold));
   return JSON.stringify({
     card: box(card),
@@ -112,6 +115,7 @@ GEOMETRY_JS = r"""
         }
       : null,
     cancel: box(byText('cancel')),
+    hold: box(hold),
     restart: box(byText('restart')),
     stateLines,
     imageCount: card ? card.querySelectorAll('img').length : 0,

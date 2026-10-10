@@ -130,6 +130,23 @@ describe("queued", () => {
 		   one; "position 2" read as an off-by-one position. */
 		expect(cardOf(withPosition).textContent).toContain("queued · 2 ahead");
 	});
+
+	it("pins the datum at zero — 0 ahead still renders (review round 1, M1)", () => {
+		/* The gate is `!== null`, not truthiness: `queue_position: 0` means
+		   NEXT in line, and a mutation to a truthy check silently drops the
+		   datum — the reviewer's mutation suite passed against the un-pinned
+		   head. The `· ` prefix pins the digit boundary, so "10 ahead" (or
+		   any multi-digit spelling) cannot alias this. */
+		const { container } = render(
+			<Transcript
+				pid="9"
+				entries={[
+					entry({ tool_state: "queued", details: liveDetails({ queue_position: 0 }) }),
+				]}
+			/>,
+		);
+		expect(cardOf(container).textContent).toContain("queued · 0 ahead");
+	});
 });
 
 describe("running", () => {
@@ -363,6 +380,25 @@ describe("cancel gating", () => {
 		/* Pressable ONCE: the hold replaced the control, so a double-tap has
 		   nothing to press — the same guard the running case has. */
 		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
+	});
+
+	it("a cancel keeps the determinate bar a running card carried (review round 1, M2)", async () => {
+		/* The desktop pins this (its F3/D2 suite): the determinate fill
+		   survives into a cancelling body that was generating and still
+		   carries a fraction. QA verified the behaviour on the relay (bar
+		   with aria-valuenow=42 after the press); this locks it. */
+		const { container } = render(
+			<Transcript
+				pid="9"
+				entries={[entry({ details: liveDetails({ progress_fraction: 0.42 }) })]}
+			/>,
+		);
+		fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+		await screen.findByText("cancelling…");
+		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
+		expect(container.querySelector(".lo-gen-tile")).toBeTruthy();
+		const bar = screen.getByRole("progressbar");
+		expect(bar.getAttribute("aria-valuenow")).toBe("42");
 	});
 
 	it("a refused abort puts the queued control back", async () => {
