@@ -2299,6 +2299,60 @@ def _requested_scope(scope_kind: str, scope_name: str) -> CatalogueScope | None:
     return CatalogueScope(kind, name)
 
 
+async def _delegated_cleanup_notice(request: Request) -> dict[str, Any] | None:
+    """The one-time "delegated sessions were cleaned up" notice as a READ-ONLY peek.
+
+    A read must never consume it: this route is polled, and the app's own
+    main-process reads (the attach probe, the auth probe, the serving-state
+    reads) are among the pollers — consuming on read let them eat the notice
+    before the renderer could render it, permanently, since it is once per
+    store. It rides every listed read until the renderer acknowledges it
+    through ``POST /v1/desktop/delegated-cleanup-notice/ack``; the TUI keeps
+    its consume-on-show read. Read on a worker thread (a few-hundred-byte file,
+    but this route is polled). Never raises into the listing it rides on.
+    """
+    try:
+        from local_operator.session.delegated_retention import (
+            notice_wire,
+            peek_unannounced_delegated_notice,
+        )
+        from local_operator.session.retention import SESSIONS_DIRNAME
+
+        root = pathlib.Path(request.app.state.config_manager.config_dir)
+        payload = await asyncio.to_thread(
+            peek_unannounced_delegated_notice, root / SESSIONS_DIRNAME
+        )
+        return None if payload is None else notice_wire(payload)
+    except Exception:  # noqa: BLE001 — a notice never fails the sidebar
+        logger.debug("delegated cleanup notice unavailable", exc_info=True)
+        return None
+
+
+@router.post(
+    "/v1/desktop/delegated-cleanup-notice/ack", response_model=CRUDResponse[dict[str, Any]]
+)
+async def ack_delegated_cleanup_notice(request: Request):
+    """Acknowledge the one-time delegated-cleanup notice, so it is never served again.
+
+    The write half of the pair whose read half rides ``GET /v1/desktop/sessions``
+    (which only PEEKS: every list read — the app's own attach and auth probes
+    among them — must not consume a once-per-store notice). The renderer calls
+    this after it has shown the band. Idempotent: acknowledging twice, an
+    already-acknowledged record, or no record at all all answer
+    ``{"acknowledged": true}`` — the state the caller asked for, the sibling
+    pin/archive convention; a client that needs the store's own answer re-reads
+    the listing, where the notice is simply gone. A store this process cannot
+    write logs and the notice repeats rather than erroring.
+    """
+    from local_operator.session.delegated_retention import acknowledge_delegated_notice
+    from local_operator.session.retention import SESSIONS_DIRNAME
+
+    root = pathlib.Path(request.app.state.config_manager.config_dir)
+    async with errors(request):
+        await asyncio.to_thread(acknowledge_delegated_notice, root / SESSIONS_DIRNAME)
+    return reply({"acknowledged": True})
+
+
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
 async def list_sessions(
     request: Request,
@@ -2408,6 +2462,7 @@ async def list_sessions(
                 "cursor_missing": page.cursor_missing,
                 "scope": None if scope is None else {"kind": scope.kind, "name": scope.name},
                 "counts": page.counts,
+                "delegated_cleanup_notice": await _delegated_cleanup_notice(request),
             }
         )
 
@@ -3088,6 +3143,7 @@ async def snapshot(
     session_id: str,
     request: Request,
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3119,6 +3175,13 @@ async def snapshot(
     # ``allow_draft``: one of the five doors a new-chat pane may hold before a
     # session exists (spec §1.3); a draft answers the cold/empty shape.
     #
+    # ``open_frame=1`` IS THE OTHER ADDITIVE FLAG, and it is on this route for
+    # the same reason ``entry_ts`` is: the snapshot embeds a history page, and a
+    # renderer that paints from the paint-only page must get the same shape from
+    # the snapshot as from ``/history`` — two unit systems for one page is the
+    # defect this capability exists to avoid. See ``docs/DESKTOP_API.md``
+    # §"The open frame".
+    #
     # ``entry_ts=1`` RIDES THIS ROUTE TOO, because the snapshot embeds a history
     # page (``payload.history``) and that page is served by the same reader — so a
     # renderer that declared the vocabulary must get the SAME answer from the
@@ -3129,7 +3192,7 @@ async def snapshot(
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.snapshot(entry_times=bool(entry_ts)))
+        return reply(await bridge.snapshot(entry_times=bool(entry_ts), open_frame=bool(open_frame)))
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -3186,6 +3249,7 @@ async def history(
     after: int | None = Query(default=None, ge=0, le=500),
     limit: int = Query(default=100, ge=1, le=500),
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3197,6 +3261,14 @@ async def history(
     # named with a cursor, counts with no anchor) through ``errors()``, so the
     # request fails the same way whichever door it came through; the numeric
     # bounds here are the wire's (0..500 per side) and fail as the ordinary 422.
+    #
+    # ``open_frame=1`` ASKS FOR THE PAINT-ONLY, RUN-ALIGNED PAGE of
+    # ``docs/DESKTOP_API.md`` §"The open frame" — a page counted in paintable
+    # rows, cut back to a run's opening user row under a hard cap (with an honest
+    # ``head_cut`` when the cap binds), with non-painted bytes stripped and the
+    # per-run facts a collapsed turn's bar needs. It is additive in both
+    # directions: without it every answer is byte-for-byte today's, and this
+    # route's own reading is unchanged.
     #
     # ``entry_ts=1`` IS THE SAME KIND OF ADDITIVE NEGOTIATION as
     # ``frontend_replace`` on ``events`` beside it: it says this renderer can
@@ -3218,6 +3290,7 @@ async def history(
                 after=after,
                 limit=limit,
                 entry_times=bool(entry_ts),
+                open_frame=bool(open_frame),
             )
         )
 
@@ -3544,6 +3617,26 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
         # re-deciding that for itself. `tunnels/gateway.py` sets the same
         # header on this repo's other byte-serving surface.
         headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get("/v1/desktop/sessions/{session_id}/supplements/{digest}/document")
+async def supplement_document(session_id: str, digest: AttachmentDigest, request: Request):
+    """The assembled HTML document of one stored supplement component, as ``{html}``.
+
+    A C0 STUB: it answers 404 for every well-formed request so the contract (path, digest
+    shape, JSON-not-``text/html`` reply) is frozen and lane C2 can fill it in without a
+    route-table change. The real route (``docs/design/turn-supplements.md`` §2.7) resolves
+    the blob through the attachment store, hands it to
+    ``supplements.document.assemble_document`` and returns ``{html}`` -- JSON, never a
+    navigable ``text/html`` URL, because no host may point a frame at a URL (§4.1) -- with
+    409 ``attachment_on_peer`` passed through for a digest held by another device.
+
+    ``digest`` reuses :data:`AttachmentDigest`, the traversal gate of the attachment route
+    beside it: a non-matching path is a 422 before any handler code runs.
+    """
+    raise HTTPException(
+        404, {"code": "supplement_unavailable", "message": "Highlights are not available yet."}
     )
 
 
@@ -4852,6 +4945,7 @@ async def events(
     after_seq: int = Query(default=0, ge=0),
     frontend_replace: int = Query(default=0, ge=0),
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -4922,7 +5016,13 @@ async def events(
             # silently skipped there. Closing it *inside* the ``try`` is the
             # load-bearing part: the outer ``finally`` below has not run yet.
             async with aclosing(
-                bridge.events(sub, epoch=epoch, after_seq=after_seq, entry_times=bool(entry_ts))
+                bridge.events(
+                    sub,
+                    epoch=epoch,
+                    after_seq=after_seq,
+                    entry_times=bool(entry_ts),
+                    open_frame=bool(open_frame),
+                )
             ) as frames:
                 try:
                     async for frame in frames:

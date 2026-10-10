@@ -2456,6 +2456,46 @@ class TestProviderErrorKinds:
         assert is_usage_limit_error(error) is False
         assert is_transient_error(error) is False
 
+    def test_402_renders_as_out_of_credits_while_keeping_every_rotation_semantic(
+        self,
+    ) -> None:
+        """Regression for the rate-limit mislabel: the WORDS change, the kind does not.
+
+        ``kind="quota"`` is what rotation, the direct-credential refresh skip and
+        the sticky-credential rule dispatch on, so this pins every one of those
+        outputs against the pre-change values alongside the new label. A 429 keeps
+        the rate-limit wording.
+        """
+        # Values measured on main BEFORE the label split, per wording. The
+        # ``is_usage_limit_error`` difference between the two is pre-existing and
+        # deliberately left alone: "insufficient" is a weak usage marker that
+        # matches the Radient body but not Anthropic's "credit balance" body.
+        for message, usage_limit in (
+            ("insufficient credits", True),
+            ("Your credit balance is too low", False),
+        ):
+            error = ProviderError(402, message)
+            assert str(error) == f"out of credits (HTTP 402): {message}"
+            assert error.kind == "quota"
+            assert error.retryable is False
+            assert is_direct_credential_rotation_error(error) is True
+            assert is_usage_limit_error(error) is usage_limit
+            assert is_transient_error(error) is False
+            assert is_auth_error(error) is False
+            assert classify_provider_error(error) == "quota"
+        # ---- the 429 neighbour keeps its wording and its semantics ----
+        throttled = ProviderError(429, "slow down", retryable=True)
+        assert str(throttled) == "rate limit or quota exceeded (HTTP 429): slow down"
+        assert throttled.kind == "quota"
+        assert is_usage_limit_error(throttled) is True
+
+    def test_only_a_402_earns_the_out_of_credits_label(self) -> None:
+        """A quota-kind error on another status, or a stated kind, is untouched."""
+        assert str(ProviderError(403, "quota exceeded for project")).startswith(
+            "rate limit or quota exceeded (HTTP 403)"
+        )
+        assert str(ProviderError(402, "x", kind="request")).startswith("invalid request")
+
     @pytest.mark.parametrize(
         ("error", "rendered"),
         [
@@ -5330,31 +5370,29 @@ def test_append_auth_recovery_generic_without_provider() -> None:
     assert "/login <provider>" in out
 
 
-def test_is_rendered_usage_limit_error_reads_the_quota_label() -> None:
-    """The string-form gate the Radient recovery keys off, both quota routes.
+def test_is_rendered_out_of_credits_error_reads_the_402_label_and_its_legacy_form() -> None:
+    from local_operator.providers.failover import is_rendered_out_of_credits_error
 
-    402 and 429 both render through the same label (``_classify_fields``),
-    which is what lets a display site with only the rendered string decide
-    "this is a usage limit" without the original exception.
-    """
-    from local_operator.providers.failover import is_rendered_usage_limit_error
-
-    assert is_rendered_usage_limit_error(
+    assert is_rendered_out_of_credits_error("out of credits (HTTP 402): insufficient credits")
+    # A runtime older than the label split rendered the same failure as quota.
+    assert is_rendered_out_of_credits_error(
         "rate limit or quota exceeded (HTTP 402): insufficient credits"
     )
-    assert is_rendered_usage_limit_error("Rate limit or quota exceeded (HTTP 429): slow down")
-    assert not is_rendered_usage_limit_error("authentication failed (HTTP 401): bad key")
-    assert not is_rendered_usage_limit_error("transient provider error: boom")
-    assert not is_rendered_usage_limit_error("")
+    # A 429 is a rate limit, not a balance problem.
+    assert not is_rendered_out_of_credits_error(
+        "rate limit or quota exceeded (HTTP 429, retry in 42s): slow down"
+    )
+    assert not is_rendered_out_of_credits_error("authentication failed (HTTP 401): bad key")
+    assert not is_rendered_out_of_credits_error("")
 
 
 def test_a_quota_error_never_receives_the_auth_hint() -> None:
     """The disjointness the display sites rely on: one kind, one remedy.
 
     A Radient quota error is exactly the case the two remedies could collide
-    on (the usage-limit sentence names `/login radient` for the sign-out
-    branch), so the auth gate must keep leaving quota errors alone — a login
-    cannot fix an unclaimed grant, and stacking both sentences under one
+    on: the usage-limit recovery and the auth recovery can sit at the same
+    display site, so the auth gate must keep leaving quota errors alone — a
+    login cannot fix an unclaimed grant, and stacking both sentences under one
     failure is the double-fire the contract forbids.
     """
     from local_operator.providers.failover import append_auth_recovery

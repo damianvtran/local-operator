@@ -727,6 +727,32 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
     ), "a non-hotkey row carries a scope"
 
 
+async def test_settings_projection_carries_the_bounded_duration_contract(desktop):
+    """minimum / maximum / unit are what a bounded-hours control renders from.
+
+    The delegated retention window is the first INT whose unit matters to a
+    renderer; the contract is asserted against the live route so the desktop
+    UI coder's fixture is this response, not a restatement of the registry.
+    """
+    client, _app = desktop
+    rows = {
+        row["key"]: row for row in (await client.get("/v1/settings")).json()["result"]["settings"]
+    }
+    hours = rows["session.cleanup.delegated.max_age_hours"]
+    assert (hours["kind"], hours["minimum"], hours["maximum"], hours["unit"]) == (
+        "int",
+        2,
+        720,
+        "hours",
+    )
+    assert hours["default"] == 48 and hours["gated_by"] == "session.cleanup.delegated.enabled"
+    assert hours["section"] == rows["session.cleanup.delegated.enabled"]["section"]
+    assert rows["session.cleanup.delegated.enabled"]["default"] is True
+    assert all(
+        row["unit"] == "" for key, row in rows.items() if key != hours["key"]
+    ), "only the hours row declares a unit"
+
+
 async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):
     """The write path proves the dispatch, not just the projection: the same
     payloads are refused with the desktop reasons and a valid one stores its

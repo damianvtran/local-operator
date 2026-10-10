@@ -92,6 +92,17 @@ class Catalogue(BaseModel):
     #: and a flag that also said "credentials unknown" would invite a caller to
     #: badge rows that are not in doubt (Q3-2).
     credentials_known: bool = True
+    #: Which view this response is: ``usable`` withheld the rows the user has no
+    #: credential for, ``all`` is the whole catalogue. Echoes the REQUEST, so a
+    #: client that asked for ``usable`` and got ``credentials_known: false`` can
+    #: tell "the filter had nothing to go on" from "the user owns everything".
+    #: Absent from an older backend, which a client must read as ``all``.
+    scope: Literal["usable", "all"] = "all"
+    #: How many rows ``scope=usable`` withheld (the current-model exemption is
+    #: not counted). Always 0 for ``all``, and 0 when the credential store could
+    #: not be read -- nothing was withheld in either case. It is what a picker's
+    #: "Show all (N need sign-in)" toggle prints without a second request.
+    hidden: int = 0
 
 
 class UsageReports(BaseModel):
@@ -131,7 +142,21 @@ async def commands():
 
 
 @router.get("/v1/desktop/models", response_model=CRUDResponse[Catalogue])
-async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_auth)):
+async def models(
+    live: bool = False,
+    # ``all`` stays the default so every shipped client sees byte-identical rows
+    # (the new fields below are additive). The access-aware picker opts in with
+    # ``usable``; the legacy authoring catalogue ``/v1/models`` is untouched on
+    # purpose, because Settings comboboxes WANT to list providers the user has
+    # not signed in to.
+    scope: Literal["usable", "all"] = "all",
+    # The session's current ``provider/model``. The route is not session-scoped,
+    # so the caller names the row to keep: dropping it would make a session
+    # running an unreachable model look configured (the same exemption the TUI
+    # applies, `providers.catalogue.split_by_access`).
+    current: str | None = Query(default=None, max_length=256),
+    auth: DesktopAuth = Depends(get_desktop_auth),
+):
     controller = auth.controller()
     try:
         failures: dict[str, str] = {}
@@ -209,13 +234,28 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
         # under a "Connected" heading on a fixture with no credentials (D5).
         # Carrying the uncertainty separately lets the picker keep listing
         # everything while only claiming what is known.
-        credentials_known = controller.usable_providers() is not None
+        #
+        # ONE read answers both the flag and the filter, so a request can never
+        # report `credentials_known: true` beside a filter that ran on a
+        # different (or failed) read. Still on the loop thread (D18 above).
+        usable = controller.usable_providers()
+        credentials_known = usable is not None
+        hidden = 0
+        if scope == "usable":
+            # `usable is None` filters nothing -- an unreadable store must not
+            # present as "you own no models" -- and says so via
+            # `credentials_known`. The predicate is the picker seam's own.
+            from local_operator.providers.catalogue import split_by_access
+
+            entries, hidden = split_by_access(entries, usable=usable, current=current)
         return reply(
             {
                 "models": [dataclasses.asdict(row) | {"selector": row.selector} for row in entries],
                 "source": "live" if live else "initial",
                 "errors": failures,
                 "credentials_known": credentials_known,
+                "scope": scope,
+                "hidden": hidden,
             }
         )
     finally:

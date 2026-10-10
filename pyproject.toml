@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.68.18"
+version = "0.68.22"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -226,6 +226,13 @@ local_operator = [
     "prompts_md/*.md",
     "guides/*/*.md",
     "tui/*.tcss",
+    # The turn-supplement ("Highlights") prelude: the minified stylesheet and
+    # script the document assembler injects into every generated component. Both
+    # are read at runtime (``supplements/document.py``), so a wheel without them
+    # would install the assembler and fail on the first document. The ``.src.*``
+    # sources and BUILD.md stay in git only: nothing at runtime reads them.
+    "supplements/prelude/prelude.css",
+    "supplements/prelude/prelude.js",
     # Packaged starter role profiles. Without this they are absent from a
     # wheel, and ``task(agent="reviewer")`` silently degrades to an unguided
     # child on every non-source install.

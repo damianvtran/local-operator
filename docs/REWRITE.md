@@ -209,18 +209,18 @@ Skills (deliberate design choices, user-requested):
   - **Trigger threshold**: `min(threshold_percent * context_window,
     threshold_tokens)`, resolved in exactly one place
     (`compaction.thresholds.resolve_threshold_tokens`). Defaults: 80% and
-    600,000 tokens. The SMALLER of the two wins — the percentage keeps a
+    400,000 tokens. The SMALLER of the two wins — the percentage keeps a
     small-context model compacting in proportion to what it can hold (80% of
-    200k = 160k, where a 600k absolute trigger could never fire), and the
+    200k = 160k, where a 400k absolute trigger could never fire), and the
     absolute ceiling stops a very large window from letting one session grow
     to a size that is slow and expensive on every request even though it fits
-    (600k of a 1M window). An explicit `reserve_tokens` additionally caps the
+    (400k of a 1M window). An explicit `reserve_tokens` additionally caps the
     trigger at `window - reserve`, so it can only pull a pass earlier.
     Out-of-range values fall back to the default with a `logger.warning`.
   - Settings in config.yml `values.compaction.*`: enabled (true),
     strategy (auto), reserve_tokens (unset → 15% proportional floor),
     keep_recent_tokens (20000), threshold_percent (0.80; `80` is accepted and
-    means the same), threshold_tokens (600000), auto_continue (true),
+    means the same), threshold_tokens (400000), auto_continue (true),
     mid_turn_enabled (true). The former `max_threshold_tokens` ceiling is
     superseded by `threshold_tokens` (same meaning under `min`) and is read as
     it with a rename warning.

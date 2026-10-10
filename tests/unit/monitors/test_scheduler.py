@@ -20,6 +20,7 @@ from local_operator.monitors import state as monitor_state
 from local_operator.monitors.scheduler import CheckOutcome, MonitorScheduler
 from local_operator.monitors.settings import MonitorSettings
 from local_operator.monitors.spec import MonitorSpec
+from tests.unit.monitors.support import DRAIN_BACKSTOP_S, drain_checks, wait_set
 
 NOW = 1_756_000_000_000
 
@@ -108,9 +109,13 @@ class Harness:
     def _on_change(self) -> None:
         self.changes += 1
 
-    async def settle(self, rounds: int = 12) -> None:
-        for _ in range(rounds):
-            await asyncio.sleep(0)
+    async def settle(self) -> None:
+        """Await every in-flight check to completion (see ``support.drain_checks``).
+
+        Not a loop-turn count: a delivery sink may hop to a thread, and how many
+        turns that takes is the host's business, not the scheduler's.
+        """
+        await drain_checks(self.scheduler)
 
     async def pump_ripen(self, *, advance: int = 10**9) -> None:
         """Advance the clock past every due time, pump, and settle."""
@@ -327,22 +332,17 @@ async def test_a_due_monitor_with_a_check_in_flight_is_skipped_not_overlapped(
         scheduler.load([spec(every_ms=30_000)])
         clock[0] += 5_000
         await scheduler.pump()
-        for _ in range(6):
-            await asyncio.sleep(0)
+        await drain_checks(scheduler)
         assert slow.calls == 1  # baseline captured, no delivery
 
         clock[0] += 60_000
         await scheduler.pump()  # starts the slow second check
-        for _ in range(6):
-            await asyncio.sleep(0)
-        assert started.is_set()
+        await wait_set(started, "the second check to start")  # parked on ``release``
         await scheduler.pump()  # third pump while in flight: overlap
-        await asyncio.sleep(0)
         counters = monitor_state.read_counters(tmp_path / "cfg", "sess", "m1")
         assert counters is not None and counters["skipped_overlap"] == 1
         release.set()
-        for _ in range(6):
-            await asyncio.sleep(0)
+        await drain_checks(scheduler)
         assert slow.calls == 2  # no overlapping execution, ever
         assert len(slow.deliveries) == 1
         assert slow.deliveries[0].delta_text.count("+ B") == 1
@@ -355,12 +355,15 @@ async def test_the_semaphore_bounds_simultaneous_checks_at_two(tmp_path: Any) ->
     running = 0
     peak = 0
     release = asyncio.Event()
+    two_running = asyncio.Event()
     clock = [NOW]
 
     async def run(monitor: MonitorSpec) -> CheckOutcome:
         nonlocal running, peak
         running += 1
         peak = max(peak, running)
+        if running == 2:
+            two_running.set()
         await release.wait()
         running -= 1
         return {"text": monitor.id, "error": None}
@@ -380,16 +383,16 @@ async def test_the_semaphore_bounds_simultaneous_checks_at_two(tmp_path: Any) ->
         scheduler.load([spec(f"m{i}") for i in (1, 2, 3)])
         clock[0] += 5_000
         await scheduler.pump()
-        for _ in range(6):
-            await asyncio.sleep(0)
-        assert peak == 2  # the third stayed due for the next pass
+        await wait_set(two_running, "two checks to be running at once")
         release.set()
-        for _ in range(6):
-            await asyncio.sleep(0)
+        await drain_checks(scheduler)
+        # Asserted AFTER the drain, not before the release: all three checks
+        # have now run, so a ceiling that failed to hold would show as 3 here,
+        # where a mid-flight look could only prove the third had not started YET.
+        assert peak == 2  # the third waited for a slot
         # The deferred check is due the moment a slot frees; a later pump runs it.
         await scheduler.pump()
-        for _ in range(6):
-            await asyncio.sleep(0)
+        await drain_checks(scheduler)
         counters = monitor_state.read_counters(tmp_path / "cfg", "sess", "m3")
         assert counters is not None and counters["checks"] == 1
         assert counters["skipped_overlap"] == 0  # deferred is not skipped
@@ -804,10 +807,14 @@ async def test_dispose_cancels_an_in_flight_check(tmp_path: Any) -> None:
     clock[0] += 5_000
     await scheduler.pump()
     await started.wait()
+    task = next(iter(scheduler._check_tasks))
     scheduler.dispose()
     release.set()
-    for _ in range(6):
-        await asyncio.sleep(0)
+    # The cancelled check task is what must finish; awaiting it (rather than
+    # counting loop turns) is what makes "nothing was delivered" a statement
+    # about a settled task and not about how far it had got.
+    await asyncio.wait([task], timeout=DRAIN_BACKSTOP_S)
+    assert task.done() and task.cancelled()
     assert delivered == []
 
 

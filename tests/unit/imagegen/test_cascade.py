@@ -12,6 +12,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from local_operator.clients._http import APIError
@@ -28,6 +29,10 @@ def _pin_probes(
     radient: bool = False,
     fal: bool = False,
     openai: bool = False,
+    openai_sub: bool = False,
+    google: bool = False,
+    xai: bool = False,
+    openrouter: bool = False,
 ) -> None:
     async def fake_radient(config_dir, base_url, *, store):
         return radient
@@ -38,6 +43,18 @@ def _pin_probes(
     )
     monkeypatch.setattr(
         image_availability, "openai_images_key", lambda config_dir=None: "ok" if openai else None
+    )
+    monkeypatch.setattr(
+        image_availability,
+        "openai_subscription_grant",
+        lambda config_dir=None: openai_sub,
+    )
+    monkeypatch.setattr(
+        image_availability, "google_key", lambda config_dir=None: "gk" if google else None
+    )
+    monkeypatch.setattr(image_availability, "xai_available", lambda config_dir=None: xai)
+    monkeypatch.setattr(
+        image_availability, "openrouter_key", lambda config_dir=None: "ork" if openrouter else None
     )
 
 
@@ -65,6 +82,70 @@ async def test_priority_is_radient_then_fal_then_openai(
 
 
 @pytest.mark.asyncio
+async def test_the_key_rung_still_wins_over_the_subscription(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Manager sign-off #1 (§14.5): v1 is KEY-FIRST — an existing user's path
+    # must not change, and openai-sub runs only when earlier rungs refuse or
+    # are absent. The order constant is the whole mechanism.
+    _pin_probes(monkeypatch, openai=True, openai_sub=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.OPENAI
+
+    _pin_probes(monkeypatch, openai_sub=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.OPENAI_SUB
+    assert resolution.reason == "A ChatGPT subscription sign-in is stored."
+
+
+@pytest.mark.asyncio
+async def test_the_google_rung_appends_after_the_subscription(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, openai_sub=True, google=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.OPENAI_SUB
+
+    _pin_probes(monkeypatch, google=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.GOOGLE
+    assert resolution.reason == "A Google AI Studio key is stored."
+
+
+@pytest.mark.asyncio
+async def test_the_xai_rung_appends_after_google(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, google=True, xai=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.GOOGLE
+
+    _pin_probes(monkeypatch, xai=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.XAI
+    assert resolution.reason == "An xAI key or sign-in is stored."
+
+
+@pytest.mark.asyncio
+async def test_the_openrouter_rung_is_the_last_resort(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Append-only: everything earlier beats it, and it resolves alone.
+    _pin_probes(monkeypatch, radient=True, openrouter=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.RADIENT
+
+    _pin_probes(monkeypatch, xai=True, openrouter=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.XAI
+
+    _pin_probes(monkeypatch, openrouter=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.OPENROUTER
+    assert resolution.reason == "An OpenRouter key is stored."
+
+
+@pytest.mark.asyncio
 async def test_no_rung_names_every_remedy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _pin_probes(monkeypatch)
     resolution = await cascade.resolve_image_route(tmp_path)
@@ -72,7 +153,8 @@ async def test_no_rung_names_every_remedy(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert "/login radient" in resolution.reason
     assert "lop login fal" in resolution.reason
     assert "openai-key" in resolution.reason
-    assert [rung.available for rung in resolution.rungs] == [False, False, False]
+    assert "sign in to a ChatGPT plan" in resolution.reason
+    assert [rung.available for rung in resolution.rungs] == [False] * len(cascade.IMAGE_RUNG_ORDER)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +330,84 @@ async def test_task_cancellation_propagates_untouched(
     with pytest.raises(asyncio.CancelledError):
         await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path)
     assert calls == [ImageRoute.RADIENT]
+
+
+@pytest.mark.asyncio
+async def test_the_walk_dispatches_the_subscription_rung(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, openai_sub=True)
+    fake, calls = _make_route_script({ImageRoute.OPENAI_SUB: _result("gpt-image-2")})
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    outcome = await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path)
+
+    assert calls == [ImageRoute.OPENAI_SUB]
+    assert outcome.route == ImageRoute.OPENAI_SUB
+    assert outcome.model == "gpt-image-2"
+
+
+@pytest.mark.asyncio
+async def test_the_walk_dispatches_the_xai_rung(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, xai=True)
+    fake, calls = _make_route_script({ImageRoute.XAI: _result("grok-imagine-image-2.0")})
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    outcome = await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path)
+
+    assert calls == [ImageRoute.XAI]
+    assert outcome.route == ImageRoute.XAI
+
+
+@pytest.mark.asyncio
+async def test_the_walk_dispatches_the_openrouter_rung(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, openrouter=True)
+    fake, calls = _make_route_script({ImageRoute.OPENROUTER: _result("seedream-4.5")})
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    outcome = await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path)
+
+    assert calls == [ImageRoute.OPENROUTER]
+    assert outcome.route == ImageRoute.OPENROUTER
+
+
+@pytest.mark.asyncio
+async def test_the_subscription_rung_refuses_a_platform_key_credential(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Reviewer round 1 F1 / QA Q1: ``get_oauth_access`` rotates to a sibling
+    # ``api_key`` row when a grant cannot mint a bearer — right for chat, a
+    # leak here, because that key must never reach chatgpt.com. An api_key
+    # credential therefore reads as unauthorized and fails forward, and the
+    # transport (a recorder) must never see a request.
+    from local_operator.providers.auth_store import AuthStore
+
+    _pin_probes(monkeypatch, openai_sub=True)
+    store = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path)
+    store.upsert_credential(
+        "openai", {"type": "api_key", "source": "login", "key": "sk-synthetic-not-real"}
+    )
+    store.close()
+
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        sent.append(request)
+        return httpx.Response(200)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
+        await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path, client=client)
+    await client.aclose()
+
+    assert sent == [], "the platform key must never reach the chat backend"
+    assert [(str(attempt.route), attempt.reason_class) for attempt in caught.value.attempts] == [
+        ("openai-sub", "unauthorized")
+    ]
 
 
 @pytest.mark.asyncio

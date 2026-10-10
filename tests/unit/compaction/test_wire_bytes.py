@@ -148,13 +148,13 @@ def test_byte_trigger_respects_disabled_and_off_exactly_like_the_token_trigger()
     "context_tokens,window,expected",
     [
         # The resolved trigger is min(threshold_percent * window,
-        # threshold_tokens), so 600k binds on a 1M window, not 80%.
+        # threshold_tokens), so 400k binds on a 1M window, not 80%.
         (0, 1_000_000, False),
         (100_000, 1_000_000, False),
-        (599_999, 1_000_000, False),
-        (600_000, 1_000_000, False),  # strictly greater-than
-        (600_001, 1_000_000, True),
-        (600_001, 10_000_000, True),
+        (399_999, 1_000_000, False),
+        (400_000, 1_000_000, False),  # strictly greater-than
+        (400_001, 1_000_000, True),
+        (400_001, 10_000_000, True),
         (79_999, 100_000, False),  # 80% binds on a small window
         (80_001, 100_000, True),
     ],

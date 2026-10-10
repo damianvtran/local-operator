@@ -510,7 +510,8 @@ def pid_alive(pid: int, *, check_zombie: bool = False) -> bool:
     the CLI startup path), and `/proc` does not exist on macOS.
 
     **The zombie probe is opt-in via `check_zombie`**, because on macOS it
-    costs a `ps` fork — measured at 3.9 ms, against ~1 µs for signal-0 — and
+    costs a platform probe (see ``procstate.is_zombie`` for the measured cost
+    of the ``sysctl`` read and its ``ps`` fallback) against ~1 µs for signal-0 — and
     `scan()` runs on every `lop` invocation. Paying that per live session on
     startup would trade a rare stale row for a routine slowdown.
     :func:`classify` derives the policy (probe only where the answer changes

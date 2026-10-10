@@ -2171,6 +2171,275 @@ def test_a_bad_page_limit_is_refused_by_name_on_both_halves_of_the_read(
         link.close("test")
 
 
+def test_a_bad_open_frame_flag_is_refused_by_name_on_both_halves_of_the_read(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open-frame flag shares ``limit``'s discipline: one spelling, refused
+    rather than coerced, on both halves of the read.
+
+    ``relay.validate_open_frame`` accepts exactly the two spellings a caller may
+    write — JSON ``true`` and ``1`` — and refuses everything else with
+    ``protocol_error`` by the SAME shared decision on the local control frame and
+    on the link's own frame (the R1-5/Q2 rule, one layer out). ``false`` and
+    ``0`` are NOT second spellings of "no": absence is (see the validator), so
+    they are refusals, not answers.
+    """
+    server_a, server_b, _h, _p = peer_pair
+    _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        # THE LOCAL HALF: the flag on this device's own control frame.
+        for bad in ("yes", "1", 0, False, 2, 1.5):
+            reply = _call(
+                server_a.root,
+                "peer_session_history",
+                peer=server_b.identity.device_id,
+                session_id=SESSION,
+                open_frame=bad,
+            )
+            assert reply.get("op") == "error", (bad, reply)
+            assert reply.get("code") == "protocol_error", (bad, reply)
+        # THE PEER HALF: the same validator, on the link's own frame.
+        for bad in ("1", 0, False, 2, 1.5):
+            refused = link.request(
+                {
+                    "op": "net_session_history",
+                    "req": 99_200,
+                    "locality": "remote",
+                    "session_id": SESSION,
+                    "open_frame": bad,
+                },
+                timeout=10.0,
+            )
+            assert refused is not None and refused.get("op") == "error", (bad, refused)
+            assert refused.get("code") == "protocol_error", (bad, refused)
+        # AND BOTH ACCEPTED SPELLINGS STILL SERVE A PAGE, so the refusals are
+        # not a blanket no.
+        for good in (1, True):
+            ok = _call(
+                server_a.root,
+                "peer_session_history",
+                peer=server_b.identity.device_id,
+                session_id=SESSION,
+                open_frame=good,
+            )
+            assert ok.get("op") == "ack", (good, ok)
+            assert len(ok["detail"]["entries"]) == 3, (good, ok)
+        assert link.alive
+    finally:
+        link.close("test")
+
+
+def test_the_open_frame_flag_rides_the_page_request_only_when_asked(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the wire carries: the key present IFF asked, and today's frame
+    byte-for-byte otherwise.
+
+    The LINK is the only thing stubbed (the ``_ctl_peer_stop`` precedent), so the
+    frames asserted are the ones this code really sends. An absent flag must not
+    become ``false`` on the wire — an older owner is sent today's frame exactly,
+    and "no" has no second spelling for an owner to refuse (see
+    ``relay.validate_open_frame``).
+    """
+    server_a, _server_b, _host, _port = peer_pair
+    seen: list[dict[str, Any]] = []
+    detail = {"entries": [{"id": "e1"}], "has_more": False, "cursor_missing": False}
+
+    class _RecordingLink:
+        def request(self, frame: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+            seen.append(dict(frame))
+            return {"op": "ack", "req": frame.get("req"), "detail": dict(detail)}
+
+    monkeypatch.setattr(server_a, "_resolve_peer", lambda peer: peer)
+    monkeypatch.setattr(server_a, "_ensure_link", lambda _peer: _RecordingLink())
+
+    base = {"peer": "d_" + "c" * 32, "session_id": SESSION, "limit": 25, "req": 1}
+    reply = server_a.control_dispatch("peer_session_history", dict(base))
+    assert reply["op"] == "ack", reply
+    # BYTE-FOR-BYTE TODAY'S FRAME: asserted as an EXACT dict (minus the relay's
+    # own request counter, which is per-process), not a subset — a subset would
+    # not see an ``open_frame: false`` the frame must not carry.
+    assert {key: value for key, value in seen[0].items() if key != "req"} == {
+        "op": "net_session_history",
+        "locality": "remote",
+        "session_id": SESSION,
+        "before_id": None,
+        "limit": 25,
+    }, seen[0]
+
+    for asked in (1, True):  # the two accepted spellings
+        reply = server_a.control_dispatch("peer_session_history", {**base, "open_frame": asked})
+        assert reply["op"] == "ack", (asked, reply)
+        assert seen[-1]["open_frame"] is True, (asked, seen[-1])
+    assert len(seen) == 3
+
+
+def test_the_open_frame_compat_matrix_across_builds(peer_pair: Devices, monkeypatch) -> None:
+    """old owner / new viewer, old viewer / new owner, new / new — over real relays.
+
+    THE FLAG MUST NOT COST AN OLDER OWNER ITS ANSWER. The old owner named here is
+    a build that predates the flag (v0.68.11, the build on this mesh's cloud
+    peer): verified from the tag, its ``dispatch``, ``Authorizer`` and
+    ``_op_session_history`` are BYTE-IDENTICAL to this build's minus this change,
+    and none of them reads a key it does not name — so the simulation is exactly
+    one fact: THE HANDLER NEVER READS ``open_frame``. The key is dropped before
+    delegating to the real handler, which is that build's whole relationship to
+    it, while the REAL authoriser and dispatch still run on B — they are where a
+    key-set check would live, and they are what the new viewer's frame crosses.
+
+    The three directions, one contract: an owner that does not know the flag
+    answers today's page; a viewer that does not ask sends today's frame; both
+    new is tolerated and also answers today's page until the facts half lands.
+    """
+    server_a, server_b, _h, _p = peer_pair
+    ids = _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    today_keys = {"entries", "has_more", "cursor_missing", "has_newer"}
+    try:
+        # NEW VIEWER -> NEW OWNER: the flag is tolerated; the answer is today's.
+        new_new = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            open_frame=1,
+            limit=50,
+        )
+        assert new_new.get("op") == "ack", new_new
+        assert set(new_new["detail"]) == today_keys, new_new["detail"]
+        assert [entry["id"] for entry in new_new["detail"]["entries"]] == ids
+
+        # OLD VIEWER -> NEW OWNER: no key on the frame, the same answer.
+        old_new = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=50,
+        )
+        assert old_new.get("op") == "ack", old_new
+        assert set(old_new["detail"]) == today_keys, old_new["detail"]
+        assert old_new["detail"]["entries"] == new_new["detail"]["entries"]
+
+        # NEW VIEWER -> OLD OWNER: the key arrives on a real dispatch (recorded
+        # below) and the old reading of it is: unread.
+        delivered: list[dict[str, Any]] = []
+        original = server_b._handlers["net_session_history"]  # noqa: SLF001 — the relay's table
+
+        def _owner_older_than_the_flag(link_: relay.PeerLink, frame: dict[str, Any]) -> Any:
+            delivered.append(dict(frame))
+            without = {key: value for key, value in frame.items() if key != "open_frame"}
+            return original(link_, without)
+
+        monkeypatch.setitem(server_b._handlers, "net_session_history", _owner_older_than_the_flag)
+        new_old = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            open_frame=1,
+            limit=50,
+        )
+        assert new_old.get("op") == "ack", new_old
+        assert set(new_old["detail"]) == today_keys, new_old["detail"]
+        assert new_old["detail"]["entries"] == new_new["detail"]["entries"]
+        # THE KEY REALLY CROSSED: it is on the frame the real dispatch delivered
+        # to the handler — the authoriser admitted it and the old reading ignored
+        # it. That pair IS the compatibility claim.
+        assert delivered and delivered[0].get("open_frame") is True, delivered
+    finally:
+        link.close("test")
+
+
+def test_the_open_frame_reply_fields_pass_through_the_whole_read_unchanged(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reply's optional run facts cross both hops verbatim — or not at all.
+
+    NO OWNER BUILDS THE FACTS YET (the owner-side strip is the next half of this
+    series), so the owner's participation is simulated at the last honest place:
+    the handler's own answer. Everything the reply then crosses — the link, the
+    viewer relay's control socket, and the whole of
+    ``projection.peer_stored_history_page`` — is the real code path. The two
+    properties: fields the contract names are carried UNCHANGED when present,
+    and absent fields leave today's answer exactly as it is.
+    """
+    from local_operator.network import projection
+
+    server_a, server_b, _h, _p = peer_pair
+    ids = _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    today_keys = {"entries", "has_more", "cursor_missing", "has_newer"}
+    # One run in the contract's own vocabulary, with a ``None`` and a ``False``
+    # inside it: coercion at any hop would show up as a changed value.
+    runs = [
+        {
+            "run_key": "r1",
+            "opening_user_id": ids[0],
+            "closing_answer_id": None,
+            "settled": False,
+            "outcome": None,
+            "started_ts": 1_700_000_000.0,
+        }
+    ]
+    original = server_b._handlers["net_session_history"]  # noqa: SLF001 — the relay's table
+    delivered: list[dict[str, Any]] = []
+    seen_frames: list[dict[str, Any]] = []
+
+    def _owner_with_the_facts_half(link_: relay.PeerLink, frame: dict[str, Any]) -> Any:
+        delivered.append(dict(frame))
+        produced = original(link_, frame)
+        assert isinstance(produced, dict), produced  # the op always answers a page dict
+        return {**produced, "runs": runs, "runs_state": "ready", "head_cut": False}
+
+    def _recording_owner(link_: relay.PeerLink, frame: dict[str, Any]) -> Any:
+        seen_frames.append(dict(frame))
+        return original(link_, frame)
+
+    try:
+        monkeypatch.setitem(server_b._handlers, "net_session_history", _owner_with_the_facts_half)
+        page = projection.peer_stored_history_page(
+            server_a.root,
+            device_id=server_b.identity.device_id,
+            session_id=SESSION,
+            open_frame=True,
+            limit=50,
+        )
+        if page is None:
+            raise AssertionError("the store page came back unservable")
+        assert page["runs"] == runs, page["runs"]  # VERBATIM: same ids, ``None`` and all
+        assert page["runs_state"] == "ready"
+        assert page["head_cut"] is False  # present but falsy: carried, not dropped
+        assert [entry["id"] for entry in page["entries"]] == ids
+        # The ASK rode the whole way in: the handler at the far edge saw the flag.
+        assert delivered and delivered[0].get("open_frame") is True, delivered
+
+        # ABSENT = TODAY, EXACTLY: the same read against the real owner, with no
+        # flag in the request (recorded at the handler, the far edge of the
+        # viewer's own chain) and no new keys in the answer.
+        monkeypatch.setitem(server_b._handlers, "net_session_history", _recording_owner)
+        plain = projection.peer_stored_history_page(
+            server_a.root,
+            device_id=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=50,
+        )
+        if plain is None:
+            raise AssertionError("the plain store page came back unservable")
+        assert set(plain) == today_keys, plain
+        assert [entry["id"] for entry in plain["entries"]] == ids
+        assert seen_frames and "open_frame" not in seen_frames[0], seen_frames
+    finally:
+        link.close("test")
+
+
 def test_a_stored_session_refuses_a_peek_and_stays_cold(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

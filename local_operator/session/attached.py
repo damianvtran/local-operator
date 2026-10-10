@@ -59,6 +59,7 @@ from local_operator.harness.types import (
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
+    SupplementProgressEvent,
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -619,6 +620,7 @@ _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
         RetryStartEvent,
         ModelChangeEvent,
         RetryEndEvent,
+        SupplementProgressEvent,
     )
 }
 
@@ -2344,7 +2346,9 @@ class AttachedSession:
                 )
             for raw in (payload or {}).get("jobs") or []:
                 job = JobState.model_validate(raw)
-                if job.usage is not None:
+                # A parent that has reported nothing itself but carries settled
+                # descendants still has a subtree figure to rebuild.
+                if job.usage is not None or job.descendant_usage:
                     from local_operator.model.costs import (
                         cost_summary,  # neutral module (Q7)
                     )
@@ -2354,9 +2358,13 @@ class AttachedSession:
                     # fields without breaking older owners. Reconstruct only
                     # from persisted bills/estimates here: a daemonless viewer
                     # must not need credentials or trigger model discovery.
-                    cost, unknown = cost_summary(
-                        job.usage.cost_components or [job.usage], recorded_only=True
-                    )
+                    # Own calls PLUS settled descendants: the row's figure is its
+                    # whole subtree everywhere else (``job_subtree_cost``), and the
+                    # sidecar row carries the same ``descendant_usage`` the owner
+                    # filled at detach. Receipts and recorded estimates only, so no
+                    # live manager is needed — there is none in a cold viewer.
+                    own = (job.usage.cost_components or [job.usage]) if job.usage else []
+                    cost, unknown = cost_summary([*own, *job.descendant_usage], recorded_only=True)
                     previous = rows.get(str(job.id))
                     if cost is not None or previous is None:
                         job = job.model_copy(

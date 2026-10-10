@@ -46,6 +46,7 @@ from local_operator.server.routes import (
     desktop_approvals,
     desktop_catalogues,
     desktop_claim,
+    desktop_code_requests,
     desktop_hub,
     desktop_lifecycle,
     desktop_mcp,
@@ -215,6 +216,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # switches disable her entirely. See `aida/activation.py`.
             if not activation.human_surface_present():
                 logger.info("aida: no human surface at boot; not auto-activating")
+                return
+            # R17's third signal (2026-10-09), SCOPED TO THE TERMINAL ARM
+            # (design §3 / T9): a pty carries a RUN, not a person, when HOME
+            # is not the user's — a rig, a container or an orchestrator under
+            # `lop serve` must not create her session, arm a cadence and
+            # install a wake supervisor for a store nobody owns. The
+            # desktop-token arm is deliberately NOT gated here: the desktop
+            # app spawns its daemon as the user, and gating it would recast
+            # the shipped desktop contract (see
+            # ``activation.terminal_under_a_foreign_home`` for the full
+            # reasoning and the quiet paths that still bound such a boot).
+            if activation.terminal_under_a_foreign_home():
+                logger.info("aida: boot terminal is under a foreign HOME; not auto-activating")
                 return
             await ensure_session(config_dir)
         except Exception:  # noqa: BLE001 — a bootstrap must never fail the daemon
@@ -819,6 +833,14 @@ app.include_router(desktop_mesh.router)
 # template declared earlier (`{id}/approve`/`{id}/deny` are two-segment children of a
 # path nothing else declares).
 app.include_router(desktop_approvals.router)
+# The CODE-REQUEST surface (`features.code_requests`): the per-session read of which PRs
+# and MRs this conversation touched, and the refresh affordance. Registered after the
+# approvals block for the reason each block above gives — FastAPI matches in declaration
+# order — and its templates (`/v1/desktop/sessions/{id}/code-requests` and its
+# `/refresh` child) collide with nothing declared earlier: the sessions router has no
+# `/code-requests` child of a session, and the two-segment `/refresh` path is declared
+# after its own parent here, so the literal suffix cannot be swallowed.
+app.include_router(desktop_code_requests.router)
 
 # Add CORS middleware
 app.add_middleware(
