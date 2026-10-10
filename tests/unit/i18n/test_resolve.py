@@ -225,3 +225,88 @@ def test_language_options_lead_with_auto() -> None:
     options = resolve.language_options()
     assert options[0] == (resolve.DEFAULT_LANGUAGE, resolve.DEFAULT_LANGUAGE)
     assert all(locale in resolve.SUPPORTED_LOCALES for _, locale in options[1:])
+
+
+# ---------------------------------------------------------------------------
+# The model-facing preference line (SYS1)
+# ---------------------------------------------------------------------------
+
+
+def test_preferred_language_line_defaults_to_english() -> None:
+    line = resolve.preferred_language_line("auto", environ={}, system="Linux")
+    assert line == (
+        "The user's preferred language is English (en). Reply in that language "
+        "by default; if the conversation context clearly establishes another "
+        "language, follow that instead."
+    )
+
+
+def test_preferred_language_line_accepts_supported_but_unshipped_locales() -> None:
+    """The DELIBERATE divergence from ``resolve_language``, pinned by name.
+
+    A supported locale whose translation wave has not shipped resolves to
+    ``en`` for every live SURFACE (it cannot render unaudited catalogues), but
+    the model line must state the user's actual preference: an OS-French user
+    gets en UI copy today AND a model told to answer in French. A later
+    "unify the two filters" edit fails HERE rather than silently muting the
+    feature until fr ships.
+    """
+    assert resolve.resolve_language("fr", environ={}, system="Linux") == "en"
+
+    line = resolve.preferred_language_line("fr", environ={}, system="Linux")
+    assert "French (fr)" in line
+
+
+def test_preferred_language_line_reads_the_env_override() -> None:
+    line = resolve.preferred_language_line("auto", environ={"LOP_LANG": "vi"}, system="Linux")
+    assert "Vietnamese (vi)" in line
+
+
+def test_preferred_language_line_reads_the_os_when_nothing_wins_earlier() -> None:
+    line = resolve.preferred_language_line("auto", environ={"LANG": "es_ES.UTF-8"}, system="Linux")
+    assert "Spanish (es)" in line
+
+
+def test_preferred_language_line_normalises_or_falls_back_to_en() -> None:
+    # Unknown tags, Traditional Chinese (v1 falls back to en per the RFC) and
+    # empty values all render the English line — never a crash, never a tag
+    # the naming table does not carry.
+    for tag in ("xx", "zh-TW", "zh-Hant", ""):
+        assert "English (en)" in resolve.preferred_language_line(tag, environ={}, system="Linux")
+
+
+def test_preferred_language_line_kill_switch_forces_en() -> None:
+    line = resolve.preferred_language_line("fr", environ={"LOP_I18N": "0"}, system="Linux")
+    assert "English (en)" in line
+
+
+def test_preferred_language_line_never_raises_when_the_config_read_fails() -> None:
+    import local_operator.i18n.resolve as mod
+
+    def _boom() -> None:
+        raise RuntimeError("config unreadable")
+
+    original = mod.config_value
+    mod.config_value = _boom  # type: ignore[assignment]
+    try:
+        line = resolve.preferred_language_line(None, environ={}, system="Linux")
+    finally:
+        mod.config_value = original  # type: ignore[assignment]
+    assert "English (en)" in line
+
+
+def test_every_supported_locale_has_an_english_display_name() -> None:
+    # The naming table is static while SUPPORTED_LOCALES is code-owned: a new
+    # supported locale must not silently render as "English" in the model line.
+    for locale in resolve.SUPPORTED_LOCALES:
+        assert locale in resolve._LANGUAGE_NAMES, locale
+
+
+def test_preferred_language_line_shape_is_uniform_across_locales() -> None:
+    # Uniform INCLUDING en: the prefix's shape must not change with the
+    # language, so a language switch cannot read as a structural prompt edit.
+    for locale in resolve.SUPPORTED_LOCALES:
+        line = resolve.preferred_language_line(locale, environ={}, system="Linux")
+        assert line.startswith("The user's preferred language is ")
+        assert f"({locale})" in line
+        assert line.endswith("follow that instead.")
