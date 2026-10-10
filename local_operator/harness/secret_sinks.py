@@ -448,8 +448,8 @@ RULES: tuple[Rule, ...] = (
             "set -x; echo hello",
             "set -e; v=$(lop secret get GITHUB_TOKEN); curl -H 'Bearer $v' https://x",
             # Attribute flags are not tracing: `declare -x` marks for export.
-            "v=$(lop secret get [redacted]); declare -x v",
-            "v=$(lop secret get [redacted]); export -n v",
+            "v=$(lop secret get GITHUB_TOKEN); declare -x v",
+            "v=$(lop secret get GITHUB_TOKEN); export -n v",
         ),
     ),
     Rule(
@@ -735,18 +735,18 @@ RULES: tuple[Rule, ...] = (
             # Q1's boundary: a print of something DERIVED from the request is not
             # a print of the value. The response was built WITH it and does not
             # carry it, and `_value_taint` is the test that says so.
-            'token = secrets["[redacted]"]\nresp = requests.get(url, head'
+            'token = secrets["GITHUB_TOKEN"]\nresp = requests.get(url, head'
             'ers={"Authorization": f"Bearer {token}"})\nprint(resp.status'
             ")",
-            'token = secrets["[redacted]"]\nresp = requests.get(url, head'
+            'token = secrets["GITHUB_TOKEN"]\nresp = requests.get(url, head'
             'ers={"Authorization": f"Bearer {token}"})\nprint(str(resp.st'
             "atus))",
-            'token = secrets["[redacted]"]\nresp = requests.get(url, head'
+            'token = secrets["GITHUB_TOKEN"]\nresp = requests.get(url, head'
             'ers={"Authorization": f"Bearer {token}"})\nprint(resp.url)',
-            'token = secrets["[redacted]"]\nresp = requests.get(url, head'
+            'token = secrets["GITHUB_TOKEN"]\nresp = requests.get(url, head'
             'ers={"Authorization": f"Bearer {token}"})\nprint(len(resp.re'
             "ad()))",
-            'token = secrets["[redacted]"]\ndone = subprocess.run(["curl"'
+            'token = secrets["GITHUB_TOKEN"]\ndone = subprocess.run(["curl"'
             ', "-H", "Authorization: Bearer " + token, url], capture_outp'
             'ut=True)\nprint("rc", done.returncode)',
         ),
