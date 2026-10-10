@@ -1935,6 +1935,91 @@ backend-minted `dedupe_key`), its focus gate, and notification-click behaviour.
 The backend still never DELIVERS an OS toast for a leased desktop surface; it
 composes for a frontend that does.
 
+### Turn supplements: the `supplement_v1` row and the `supplement_progress` event
+
+"Highlights" (contract: `local_operator/supplements/contract.py`; design authority
+`docs/design/turn-supplements.md` §2.4/§2.7) is the block an owner runtime may add
+under a final answer — file callouts for what the turn produced, and (once the
+generator lane ships) a small generated graphic. It is decided after the turn's
+`agent_end` is emitted, and it never reaches the model's context.
+
+**The gate is two halves, ANDed** (`supplements.contract.negotiated`): the owner
+advertises `supplements-v1` only when it can honour the lazy read op
+(`supplements_for(anchors[]) → {anchor: newest row}`), and the viewer declares
+`supplements` on its auth frame (`auth["supplements"] = true`; the desktop live path
+declares `?supplements=1` on its events route instead — the `entry_ts` shape; that
+parameter is a frozen name today, read by no route until the routes lane lands). Only then
+may the runtime send `supplement_progress` events or project supplement rows; a viewer
+that does not declare receives neither, so it never paints an unknown kind. Rows are
+journaled either way, reach a desktop as ordinary history entries (raw `custom` rows)
+and the other surfaces through the lazy read op.
+
+**The row** — a durable custom entry:
+
+```jsonc
+{"id": "22130e9a88661cd6d09c59fa0f765b2d", "ts": 1791000002.0, "type": "custom",
+ "payload": {"custom_type": "supplement_v1", "details": { /* below */ }}}
+```
+
+`payload.details` (`supplements.contract.SupplementDetails`); the required keys plus the
+staged optionals (`files_more`, `more`, `images`, `decision`, `instruction`, `model`,
+`turns`, `tokens_in`, `tokens_out`, `cost_usd`, `error`, `dismissed`):
+
+```jsonc
+{
+  "anchor": "a1b2c3d4e5f60718293a4b5c6d7e8f90",  // the final assistant message id
+  "job": "3f9c1a7e5b20",     // stable across versions of one anchor
+  "version": 1,              // +1 per regeneration; readers take the NEWEST per anchor
+  "state": "done",           // decided|queued|done|failed|cancelled|skipped
+  "files": [{"path": "reports/latency.md", "name": "latency.md", "kind": "markdown",
+             "size_bytes": 4120, "mtime": 1790999940.0, "why": "written by write"}],
+  "components": [{"attachment": "<32-hex digest>", "title": "Latency by region (ms)",
+                  "source": "bench.csv rows 1-4 (tool result of bash at 10:41)",
+                  "mime": "text/html", "height_hint": 320}],
+  "more": ["rel/path…"],     // ≤ 20; the "N more" paths; same denylist as files
+  "at": 1791000002.0
+}
+```
+
+Paths in `files`/`more` are session-relative (or `~/`-relative), never absolute. A row
+carrying `error: "superseded"` (a newer turn moved past it) or `dismissed: true` renders
+NOTHING on every surface, whatever its state.
+
+**The stale-row rule, for every reader.** Read the newest version per `anchor`; when a
+non-terminal row (`decided`/`queued`) has no live job in the answering runtime — a cold
+read, or a cut job — render it as `cancelled · Retry`, never a spinner that cannot
+finish. A terminal `done` row with nothing inside renders nothing either.
+
+**The event** — `supplement_progress`, a new `AgentEvent` family (additive on the
+tolerant frame; no `PROTOCOL_VERSION` bump), sent only to viewers that negotiated:
+
+```jsonc
+{"type": "supplement_progress", "anchor": "a1b2…", "job": "3f9c1a7e5b20", "version": 2,
+ "state": "running",     // + running|cancelling, which are LIVE-ONLY, never journaled
+ "stage": "generating",  // deciding|generating|validating|repairing; "" outside running
+ "elapsed_s": 41.5,
+ "files": [], "components": [],  // only on decided/done; done carries the components
+ "error": "", "error_type": ""}
+```
+
+It arrives only AFTER the turn's `agent_end`, and it carries the `anchor`, so a late
+event (the next turn already started) still lands on the right answer. `lop exec` never
+produces one (its turns are outside the trigger), and SDK event streams are unchanged.
+Under backpressure, supplement frames fold keep-newest — the family is
+self-replacing by construction — but no fold key exists for them yet; `session/delta_merge.py`
+gains the `supplement` fold with the emitter lane.
+
+**Not in this release.** No image components (v1 documents carry HTML only); no mesh
+transfer (a file or component a peer device holds reads as "on <peer>" with previews
+disabled — `GET …/attachments/{digest}` already answers 409 `attachment_on_peer`); the
+native (phone) WebView frame is pending its own lane; and the static preview routes
+(`/v1/static/*`) are not yet token-authenticated — short-lived signed URLs are a
+recorded follow-up that needs a client change. No renderer consumes any of this yet:
+the TUI, UI, relay and native renderers are separate lanes, and the desktop document
+route is a registered 404 stub until the routes lane fills it; the `?supplements=1`
+events-route reader and the keep-newest fold are contract-frozen names still to be
+implemented, by the routes and emitter lanes respectively.
+
 ### Verification
 
 `tests/e2e/test_desktop_sessions.py` drives real loopback HTTP and the production
@@ -2522,6 +2607,7 @@ something alive or ready until then.
 | `ask_attachments` | 1 | the optional `images` list on `POST .../{id}/answers` (and the identical `images` key of the `ask_respond` socket frame), and the `attachments` refs on a `PendingAsk` row. The key is a BUILD fact; whether the owner behind a given session can keep the pictures is a separate, per-owner `ask-attachments-v1` runtime capability, and its absence is refused in words rather than stripped | the answer card offers no attach affordance and sends text only. A new UI that sends `images` to an old backend gets a `422` (`Answer` forbids unknown keys) — never a silent drop |
 | `entry_ts` | 1 | `entry_ts=1` on `GET .../{id}/history`, `GET .../{id}` and `GET .../{id}/events`, which turns on the per-row `ts_source` vocabulary for wire rows (`ts: null` + `"unstated"` where the owner shipped no true entry time) | the renderer sends no `entry_ts` and reads no `ts_source`, keeping today's serve-stamp ordering exactly. It must NOT gate any existing surface on this key: `ts_source` itself is additive and ignored by an older reader, so nothing breaks in either direction — the key only lets a NEW renderer tell whether asking is worthwhile |
 | `open_frame` | 1 | `open_frame=1` on `GET .../{id}`, `GET .../{id}/history` and `GET .../{id}/events`: a page counted in PAINTABLE rows, cut back to the oldest included run's opening user row under a hard cap (with `head_cut` when the cap binds), with non-painted bytes stripped and `runs[]` / `runs_state` carry the per-run facts the bar needs — see [the open frame](#the-open-frame-a-turn-aligned-paint-only-page-open_frame-1) | the renderer sends no `open_frame` and receives today's page byte-for-byte: counts in journal entries, unstripped rows, no `runs`. It must NOT send the flag unless it reads `runs`/`head_cut`, because the unit of `limit` changes with it |
+| `supplements` | 1 | `features.supplements: 1` — the turn-supplement ("Highlights") contract is in the build: the `supplement_progress` event family, the `supplement_v1` journal row, the `supplements-v1` attach capability and the document assembler. It is a BUILD fact, NOT the attach gate: live events and the history projection reach a viewer only under the two-half `supplements-v1` gate (the owner's own capability string ANDed with the viewer's declaration — `auth["supplements"] = true`, or `?supplements=1` on the desktop live path). See [Turn supplements](#turn-supplements-the-supplement_v1-row-and-the-supplement_progress-event) | the renderer draws nothing supplement-shaped and is never refused for it: a viewer that does not declare is not sent a `supplement_progress` event or a supplement projection, and rows are journaled either way. It must NOT gate any existing surface on this key |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already

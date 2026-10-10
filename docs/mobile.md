@@ -313,6 +313,32 @@ route and no desktop bridge in it, so `mobile/` can import it the day its fold
 has a bounded suffix to start from. Nothing in this contract changes the
 daemon's routes, the projection's shape or the web UI.
 
+### Highlights (`supplements-v1`) — the relay's seam
+
+Turn supplements ("Highlights") follow the open frame's shape: the owner runtime journals
+a `supplement_v1` row after an eligible turn, and `supplement_progress` events ride the
+job; both reach a viewer only under the two-half `supplements-v1` gate — the owner's
+capability string ANDed with the viewer's own declaration. A relayed viewer declares
+with `auth["supplements"] = true`; `supplements` is a name on `network/dial.AUTH_FIELDS`,
+so the relay forwards it (the entry-times declaration once shipped inert for want of
+exactly this line). A viewer that does not declare receives no event and no projected
+row and paints no unknown kind; the row is journaled either way.
+
+The phone renders none of this yet, and that is the revision's honest state: the
+projection's `supplement` arm, `mobile/web`'s frame and the relay's document/file routes
+belong to the relay lane, which also needs the routes lane. Both relay routes are
+registered today as auth-first 404 stubs
+(`GET /api/sessions/{id}/supplements/{digest}/document` and
+`GET /api/sessions/{id}/supplements/{job}/file?i=<n>`), frozen so the route table and
+the auth ordering cannot drift before their implementation; until then a phone must
+expect the 404 and show nothing.
+
+Row and event shapes (newest version per anchor; the stale-row rule; the live-only
+`running`/`cancelling` states): `docs/DESKTOP_API.md`, §"Turn supplements". Not in this
+release: no image components (documents carry HTML only in v1), no mesh transfer (a
+peer-held file is named but not previewed), the phone app's own WebView frame is
+pending its own lane, and static preview URLs are not yet token-authenticated.
+
 ### The peers' rows — other devices' sessions (`GET /api/sessions?include_peers`)
 
 The relay half of "sessions and delegation": the sessions OTHER devices hold,
