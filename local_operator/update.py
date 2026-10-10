@@ -7215,10 +7215,11 @@ def update_command(
 
     ``allow_downgrade`` (``--allow-downgrade``) belongs to ``--from-snapshot``
     and answers exactly one case: a target STRICTLY OLDER than the install the
-    pointer names (see :func:`_snapshot_command`). Alone it is a refusal, on
-    the same rule ``--check`` follows above — the PyPI path's ``behind`` gate
-    only ever installs NEWER versions, so "allow a downgrade" is a question
-    nothing on that path can answer.
+    pointer names (see :func:`_snapshot_command`). Alone — on the PyPI path,
+    the one left once the refresh flags above have answered — it is a refusal,
+    on the same rule ``--check`` follows: the PyPI path's ``behind`` gate only
+    ever installs NEWER versions, so "allow a downgrade" is a question nothing
+    on that path can answer.
     """
     if refresh_daemons:
         return _run_daemon_repair(services_only=services_only)

@@ -1771,16 +1771,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # STRICTLY OLDER than the install the pointer names is refused before any
     # install work (update.classify_snapshot_downgrade). Named after the flag
     # the retired legacy installer carried; the deliberate rollback it allows
-    # rides the install marker as `downgrade-allowed`. Alone it is a refusal —
-    # the PyPI path only ever installs newer versions.
+    # rides the install marker as `downgrade-allowed`. Alone — on the PyPI
+    # path, the one left once the refresh flags have answered — it is a
+    # refusal: that path only ever installs newer versions.
     update_parser.add_argument(
         "--allow-downgrade",
         dest="allow_downgrade",
         action="store_true",
         help=(
             "Allow --from-snapshot to install a build OLDER than the current install "
-            "(a deliberate rollback; recorded in the install marker). Refused without "
-            "--from-snapshot: the PyPI path only installs newer versions."
+            "(a deliberate rollback; recorded in the install marker). Without "
+            "--from-snapshot it is refused on the PyPI path, which only installs "
+            "newer versions; the refresh flags take precedence."
         ),
     )
     update_parser.add_argument(
