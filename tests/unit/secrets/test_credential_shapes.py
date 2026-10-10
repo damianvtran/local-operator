@@ -6047,7 +6047,7 @@ _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0e
 #:    That is the whole safety claim of this round: the enforcement narrowed the
 #:    release class the branch introduced and touched nothing the branch had not.
 #:
-#: 2. **The corpus grew by TEN positives and ONE negative, which is what moves the
+#: 2. **The corpus grew by ELEVEN positives and ONE negative, which is what moves the
 #:    constant.** The eleven are the DIGIT-CARRYING and LOWERCASE-BASE half of the
 #:    residual class plus the primitive-argument spellings — all of them released WHOLE
 #:    with no hit at all before this round, and all of them things the corpus had no row
