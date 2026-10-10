@@ -26,7 +26,18 @@ cannot simply be required. The follow-up is a short-lived signed query token
 minted by an authenticated endpoint and verified here, which needs the UI lane
 to request it. Until then a hostile local caller can still *trigger* a read of
 anything inside the roots below -- but no longer anything outside them, and a
-web page can no longer *read the response* cross-origin.
+web page can no longer *read the response* cross-origin. Also open, all of them
+needing write access INSIDE a root or a same-user local process (who could read
+the file directly anyway), so none is closed here:
+
+* TOCTOU: :func:`resolve_servable` validates a realpath and the handlers then
+  open BY PATH, so a symlink swapped inside a writable root between the check and
+  the open is followed. The case that matters is a root shared with another OS
+  user (``static.roots`` pointing at a shared directory);
+* hardlinks: a hardlink inside a root to a file outside it is indistinguishable
+  from a file that lives there, and no realpath test can tell;
+* Host validation covers DNS NAMES only (:func:`host_is_acceptable`): an IP
+  literal Host is admitted, since a rebinding page cannot present one.
 
 THE ROOTS, and why each is there (all compared as realpaths):
 
@@ -36,10 +47,18 @@ THE ROOTS, and why each is there (all compared as realpaths):
   directory, and tools write screenshots and renders there;
 * ``<config>/uploads``: where a decoded chat attachment lands;
 * the working directory of every non-stale live session (``run/mobile``
-  discovery records) and of every registered agent: the canvas previews "the
-  file the agent just wrote", wherever the user pointed the session. This is the
-  deliberately wide arm -- a session started in ``~`` makes ``~`` a root -- and
-  it is what keeps "preview a file in my workspace" working with no setting;
+  discovery records): the canvas previews "the file the agent just wrote",
+  wherever the user pointed the session. This is the IMPLICIT arm, and it is
+  bounded: a cwd that equals or CONTAINS ``$HOME`` yields no root (review R1 --
+  34 live sessions on the reference host were started in ``~``, which would have
+  made ``~/Pictures``, ``~/Downloads`` and ``~/Desktop`` servable and the list
+  no list at all). Why a session's cwd is a safe input and an agent's is not:
+  a record is written by the session process into a ``0700`` directory, and the
+  only HTTP route that names a cwd (``POST /v1/desktop/sessions``) is behind the
+  desktop bearer, so no ungated caller can move it. A registered agent's
+  ``current_working_directory`` IS writable by the ungated ``PATCH /v1/agents/<id>``
+  (review R2: one cross-origin PATCH widened the list and it persisted to
+  ``agent.yml``), so that arm was removed rather than guarded;
 * explicitly configured roots: ``static.roots`` (settings page / ``config.yml``)
   and ``LOCAL_OPERATOR_STATIC_ROOTS`` (an ``os.pathsep``-separated list, for a
   daemon launched from a script).
@@ -52,15 +71,26 @@ Two refusals apply on top of the roots, to every root:
   the agent is asked to *preview* sits in one. A root that is itself under a
   dot-directory (``~/.local-operator/sessions``) is unaffected: only the part
   after the root is judged.
-* the filesystem root is never a root, however it got configured: it would turn
-  the allowlist back into "anywhere on disk".
+* a root that is an ANCESTOR of ``$HOME`` (``/``, ``/Users``, ``~/..``, and on
+  macOS the ``/System/Volumes/Data`` firmlink of ``/``) is never a root, however
+  it got configured -- ``static.roots`` and the environment variable go through
+  the same :func:`root_refusal` -- because it would turn the allowlist back into
+  "anywhere on disk". ``$HOME`` itself is an operator choice and is accepted
+  ONLY from the explicit arms: widening past the built-ins is the operator's
+  opt-in through ``static.roots`` / ``LOCAL_OPERATOR_STATIC_ROOTS``, never
+  something a session's cwd can do for them.
 
-KNOWN COST OF A ROOT ALLOWLIST: the composer's attachment thumbnails ask this
-route for files the user picked or dropped from ANYWHERE (``~/Downloads``). One
-outside every root above now gets a 403 and the thumbnail is broken (the
-attachment itself is unaffected; it is read server-side by the chat route). The
-operator's remedy today is ``static.roots``; the durable one is for the UI to
-read those bytes over IPC the way the canvas image viewer already does.
+KNOWN COST OF A ROOT ALLOWLIST, wider than the composer: every UI consumer that
+hands this route the path a user or agent NAMED -- the composer's attachment
+thumbnails (files picked from ``~/Downloads``), message attachments and mentioned
+files, the video/HTML previews and the canvas file viewer -- now gets a 403 for a
+file outside every root above (agent output in ``/tmp``, a ``/var/folders``
+render, a file on another volume). The attachment itself is unaffected: the chat
+route reads it server-side. A core-side per-session grant cannot fix it: the
+thumbnail is requested at PICK time, before any transcript references the file.
+The operator's remedy today is ``static.roots`` (the 403 body says so); the
+durable one is for local-operator-ui to read local file bytes over IPC for
+previews and thumbnails, retiring this route as the file reader.
 
 No FastAPI import here: this raises :class:`StaticPathDenied` and the route turns
 it into an ``HTTPException``, which keeps the module cheap to import from the
@@ -69,6 +99,7 @@ settings registry and its tests.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import time
@@ -140,6 +171,18 @@ _ALWAYS_FRAMING = ("'self'", "file:")
 _LOOPBACK_DEV_FRAMING = ("http://localhost:*", "http://127.0.0.1:*")
 
 
+#: The ONE body for "not inside a served root", shared by every route and every
+#: reason (see :func:`resolve_servable`). It names the remedy: the UI consumers
+#: that hand this route a user-picked path (composer thumbnails, message
+#: attachments) break on it until local-operator-ui reads those bytes over IPC,
+#: and a developer reading logs should not have to find ``static.roots`` by grep.
+OUTSIDE_ROOTS_DETAIL = (
+    "Path is outside the directories this server may serve. To allow it, add the "
+    "directory to static.roots (Settings > File previews, or config.yml) or to "
+    f"{ROOTS_ENV}."
+)
+
+
 class StaticPathDenied(Exception):
     """A path the static routes will not serve; ``status`` is the HTTP code."""
 
@@ -156,12 +199,69 @@ class ServedRoots:
     roots: tuple[Path, ...]
 
 
-def _realpath(value: str | os.PathLike[str]) -> Path | None:
+def _home() -> Path | None:
+    """``$HOME`` as a realpath, or ``None`` when it cannot be determined."""
+    try:
+        return Path.home().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _contains(root: Path, home: Path) -> bool:
+    """Whether ``home`` is inside ``root``, by name OR by identity.
+
+    The name test alone misses a firmlink: macOS exposes the whole disk a second
+    time at ``/System/Volumes/Data``, whose realpath is itself, so it does not
+    lexically contain ``/Users/me`` although ``/System/Volumes/Data/Users/me`` IS
+    that directory (review R6). So the tail of ``home`` is also looked up under
+    ``root`` and compared with ``samefile``.
+    """
+    if home.is_relative_to(root):
+        return True
+    for start in range(1, len(home.parts)):
+        probe = root.joinpath(*home.parts[start:])
+        try:
+            if probe.samefile(home):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def root_refusal(real: Path, *, implicit: bool = False) -> str | None:
+    """Why ``real`` (an absolute realpath) may not be a served root, else ``None``.
+
+    THE ONE PREDICATE behind every root: the settings validator, the environment
+    variable, the built-ins and the live-session arm all call it, so there is no
+    second spelling to drift (review R1/R6).
+
+    * A root that CONTAINS ``$HOME`` is refused outright -- ``/``, ``/Users``,
+      ``~/..``, and ``/System/Volumes/Data`` on macOS, which is ``/`` by another
+      name. Matching on the filesystem root's NAME alone missed all but one.
+    * ``implicit=True`` is the stricter rule for a root nobody typed (a live
+      session's cwd): it must not EQUAL ``$HOME`` either. Sessions started in
+      ``~`` are the normal case, and honouring them would serve ``~/Pictures``,
+      ``~/Downloads`` and ``~/Desktop``. Serving ``~`` is the operator's explicit
+      opt-in through ``static.roots``.
+    """
+    if real == Path(real.anchor):
+        return "the filesystem root cannot be a served root"
+    home = _home()
+    if home is None or not _contains(real, home):
+        return None
+    if real != home:
+        return f"{real} contains your home directory, so it would serve nearly everything"
+    if implicit:
+        return "your home directory is only served when configured explicitly"
+    return None
+
+
+def _realpath(value: str | os.PathLike[str], *, implicit: bool = False) -> Path | None:
     """``value`` as an absolute realpath, or ``None`` when it cannot be a root.
 
     Refused: relative spellings (resolved against the DAEMON's cwd they would
-    name a directory nobody configured), anything unresolvable, and the
-    filesystem root (see the module docstring).
+    name a directory nobody configured), anything unresolvable, and whatever
+    :func:`root_refusal` rejects.
     """
     try:
         candidate = Path(value).expanduser()
@@ -170,8 +270,11 @@ def _realpath(value: str | os.PathLike[str]) -> Path | None:
         real = candidate.resolve()
     except (OSError, RuntimeError, ValueError):
         return None
-    if real == Path(real.anchor):
-        logger.warning("static root %s is the filesystem root and is ignored", value)
+    reason = root_refusal(real, implicit=implicit)
+    if reason is not None:
+        # An implicit refusal is routine (most sessions run in ~) and says so quietly.
+        log = logger.debug if implicit else logger.warning
+        log("static root %s is ignored: %s", value, reason)
         return None
     return real
 
@@ -214,7 +317,7 @@ def _live_session_roots(config_dir: Path) -> tuple[Path, ...]:
         for record, state in registry.scan(config_dir, reap=False, check_zombie=False):
             if state == "stale":
                 continue
-            real = _realpath(str(getattr(record, "cwd", "") or ""))
+            real = _realpath(str(getattr(record, "cwd", "") or ""), implicit=True)
             if real is not None:
                 roots.append(real)
     except Exception:  # a broken discovery dir must cost the live arm, not the route
@@ -227,9 +330,12 @@ def _live_session_roots(config_dir: Path) -> tuple[Path, ...]:
 def build_roots(
     config_dir: Path,
     config_values: Mapping[str, Any] | None = None,
-    agent_cwds: Iterable[str] = (),
 ) -> ServedRoots:
-    """Assemble the roots for one request. See the module docstring for the why."""
+    """Assemble the roots for one request. See the module docstring for the why.
+
+    There is deliberately no registered-agent arm: ``current_working_directory``
+    is writable through the ungated ``PATCH /v1/agents/<id>`` (review R2).
+    """
     from local_operator.paths import agent_home_dir
 
     candidates: list[Path | None] = [
@@ -238,16 +344,39 @@ def build_roots(
         _realpath(config_dir / "uploads"),
     ]
     candidates.extend(_realpath(item) for item in configured_root_strings(config_values))
-    candidates.extend(_realpath(item) for item in agent_cwds)
     candidates.extend(_live_session_roots(config_dir))
     return ServedRoots(roots=tuple(dict.fromkeys(root for root in candidates if root is not None)))
 
 
 def _containing_root(path: Path, roots: Sequence[Path]) -> Path | None:
-    """The first root that contains ``path``, or ``None``."""
+    """The prefix of ``path`` that is one of ``roots``, or ``None``.
+
+    Lexical first (the cheap, common answer). On a miss, fall back to comparing
+    each existing ancestor of ``path`` with each root by identity (``samefile``):
+    on a case-insensitive filesystem (default APFS) ``/Users/x/Workspace`` and a
+    root spelled ``/Users/x/workspace`` are one directory, and the byte-wise test
+    would give a false 403 for a file that is plainly in the workspace (review
+    R10). Identity is the right test and cannot admit anything outside a root:
+    ``path`` is already symlink-resolved, so an ancestor that IS a root puts the
+    file inside it.
+    """
     for root in roots:
         if path.is_relative_to(root):
             return root
+    root_ids = set()
+    for root in roots:
+        try:
+            info = root.stat()
+        except OSError:
+            continue
+        root_ids.add((info.st_dev, info.st_ino))
+    for ancestor in path.parents:
+        try:
+            info = ancestor.stat()
+        except OSError:
+            continue  # a missing parent (a 404 later, but 403 first when outside)
+        if (info.st_dev, info.st_ino) in root_ids:
+            return ancestor
     return None
 
 
@@ -265,18 +394,22 @@ def resolve_servable(raw: str, roots: ServedRoots) -> Path:
     # a clear refusal rather than something that happens to land back inside.
     if ".." in Path(raw).parts:
         raise StaticPathDenied(403, "Path may not contain '..'.")
-    candidate = Path(raw).expanduser()
-    if not candidate.is_absolute():
-        raise StaticPathDenied(400, "Path must be absolute.")
+    # ONE refusal for everything that cannot be placed inside a root, whatever the
+    # reason it cannot: an unknown ``~user`` (``expanduser`` raises RuntimeError and
+    # would otherwise be a 500 that also tells a caller which local users exist)
+    # and a symlink loop (which would otherwise be a distinct 400, a loop-existence
+    # oracle for the rest of the disk) answer exactly like a path outside the roots.
     try:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            raise StaticPathDenied(400, "Path must be absolute.")
         real = candidate.resolve()
     except (OSError, RuntimeError, ValueError):
-        # RuntimeError is a symlink loop. Same answer as any unservable path.
-        raise StaticPathDenied(400, "Path could not be resolved.") from None
+        raise StaticPathDenied(403, OUTSIDE_ROOTS_DETAIL) from None
 
     root = _containing_root(real, roots.roots)
     if root is None:
-        raise StaticPathDenied(403, "Path is outside the directories this server may serve.")
+        raise StaticPathDenied(403, OUTSIDE_ROOTS_DETAIL)
     # Dot-directories below the root (``~/.ssh`` under a session rooted at ``~``).
     if any(part.startswith(".") for part in real.relative_to(root).parts):
         raise StaticPathDenied(403, "Hidden paths may not be served.")
@@ -301,6 +434,54 @@ def frame_ancestors(app_origins: Iterable[str]) -> str:
     """
     origins = sorted(app_origins)
     return "frame-ancestors " + " ".join([*_ALWAYS_FRAMING, *(origins or _LOOPBACK_DEV_FRAMING)])
+
+
+#: Bind addresses that mean "every interface": the daemon is then reachable under
+#: names this process cannot enumerate, so a Host check has nothing to compare to.
+_WILDCARD_BINDS = frozenset({"0.0.0.0", "::", ""})
+
+
+def _host_name(host_header: str) -> str:
+    """The bare, lower-cased host of a ``Host`` header (port and IPv6 brackets stripped)."""
+    value = host_header.strip().lower()
+    if value.startswith("["):  # [::1]:8080
+        return value[1:].split("]", 1)[0]
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def host_is_acceptable(host_header: str | None, bound_host: str | None) -> bool:
+    """Whether a request's ``Host`` may reach a static route (DNS-rebinding guard).
+
+    WHY. Dropping the CORS grant stops a foreign page READING a response, but a
+    DNS-rebinding page is not foreign: it re-points ``rebind.attacker.test`` at
+    ``127.0.0.1`` and is then same-origin with this daemon, so it needs no grant
+    at all (review R8). The one thing it cannot change is the ``Host`` it sends,
+    which is the attacker's name. So the route accepts only:
+
+    * an IP literal (a rebinding page cannot present one: no DNS is involved);
+    * ``localhost`` -- what the dev renderer and a hand-typed URL use;
+    * the host the daemon was told to bind, when that is a specific name (an
+      operator who bound ``--host mac.lan`` and reaches it as such).
+
+    No header at all is accepted: rebinding always carries a name. A WILDCARD bind
+    (``--host 0.0.0.0``) turns the check off, because the daemon is then meant to
+    be reached under names this process cannot list; that is an explicit operator
+    exposure and is recorded under WHAT IS STILL OPEN. The app's own renderer
+    dials ``http://127.0.0.1:<port>`` (backend-service.ts), which passes.
+    """
+    if bound_host is not None and bound_host.strip().lower() in _WILDCARD_BINDS:
+        return True
+    if not host_header:
+        return True
+    name = _host_name(host_header)
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    if name == "localhost":
+        return True
+    return bool(bound_host) and name == _host_name(bound_host or "")
 
 
 def is_static_path(path: str) -> bool:

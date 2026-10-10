@@ -9,7 +9,7 @@ import pytest
 
 
 @pytest.fixture
-def served_dir(temp_dir):
+def served_dir(temp_dir, test_app_client):
     """A directory INSIDE a root the static routes serve from.
 
     ``test_app_client`` makes ``temp_dir`` the config dir, and ``<config>/uploads``
@@ -19,6 +19,9 @@ def served_dir(temp_dir):
     """
     directory = temp_dir / "uploads"
     directory.mkdir()
+    # The app's renderer dials 127.0.0.1; httpx's default ``Host: test`` would hit the
+    # DNS-rebinding guard, which is not what these type-handling tests are about.
+    test_app_client.headers["Host"] = "127.0.0.1:1111"
     return directory
 
 
