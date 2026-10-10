@@ -62,6 +62,15 @@ SESSION_SPEND_VERSION = 1
 #: rather than silently overwriting this process's total.
 _BOOT_ID = int(time.time())
 
+#: Cap on NAMED per-identity split entries (design §3.3): a session that walked
+#: a hundred models keeps 32 names and folds the rest into ``"other"`` so one
+#: record cannot grow without bound. The cap is enforced at accrual, the only
+#: writer.
+IDENTITY_CAP = 32
+
+#: The overflow bucket's key in :attr:`SessionSpend.by_identity`.
+IDENTITY_OTHER = "other"
+
 
 def writer_stamp() -> str:
     """``"<pid>:<boot-second>"`` for the record's ``writer`` field."""
@@ -241,11 +250,28 @@ class SessionSpend:
     rebuilt: bool = False
     writer: str = ""
     last_identity: dict[str, str] | None = None
+    #: Per-IDENTITY split of this accumulator, additive in ``session_spend.v1``:
+    #: ``{"<provider>/<model>": {provider, model_id, micro, calls, unpriced}}``.
+    #: This is what gives ``/session`` and the UI an inference-by-model split
+    #: from the SAME record as the headline (design §3.3), without a second
+    #: store. Optional on read: a row written before this field existed simply
+    #: has no breakdown, and the surfaces then say "not tracked" while the
+    #: total stays exact — the one degradation that never fakes a number.
+    #:
+    #: Capped at :data:`IDENTITY_CAP` named entries; further identities fold
+    #: into an ``"other"`` bucket so a session that walked a hundred models
+    #: cannot grow this record without bound. The cap is enforced at ACCRUAL,
+    #: which is the only writer, so a resumed record is already capped.
+    by_identity: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: Per-call prices still eligible for an authoritative correction. In-memory
     #: only: a recalled record is already authoritative, and keeping the map
     #: across a resume would let a correction land against a call that this
     #: process never priced.
     _estimates: dict[int, int | None] = field(default_factory=dict, repr=False)
+    #: The by-identity key each accrued call was attributed to, so a later
+    #: ``correct`` moves the SAME split entry it moved the total by. In-memory
+    #: only, like ``_estimates``: a recalled record is already authoritative.
+    _identity_keys: dict[int, str] = field(default_factory=dict, repr=False)
     _next_index: int = field(default=0, repr=False)
 
     # -- properties -------------------------------------------------------
@@ -286,7 +312,42 @@ class SessionSpend:
                     **({"provider": provider} if provider else {}),
                     **({"model_id": model_id} if model_id else {}),
                 }
+            key = self._bump_identity(provider, model_id, value)
+            if key is not None:
+                self._identity_keys[index] = key
         return index
+
+    def _bump_identity(self, provider: str, model_id: str, value: int | None) -> str | None:
+        """Fold ONE call into the by-identity split. Returns its bucket key.
+
+        A call with neither provider nor model is NOT attributed: an
+        unattributed call is exactly the remainder ``channel_spend``'s combiner
+        states as its own row, and inventing a bucket here would hide that
+        difference inside a named identity nobody served.
+        """
+        if not provider and not model_id:
+            return None
+        key = f"{provider}/{model_id}" if provider and model_id else (provider or model_id)
+        entry = self.by_identity.get(key)
+        if entry is None:
+            named = sum(1 for name in self.by_identity if name != IDENTITY_OTHER)
+            key = key if named < IDENTITY_CAP else IDENTITY_OTHER
+            entry = self.by_identity.get(key)
+            if entry is None:
+                entry = {
+                    "provider": "" if key == IDENTITY_OTHER else provider,
+                    "model_id": "" if key == IDENTITY_OTHER else model_id,
+                    "micro": 0,
+                    "calls": 0,
+                    "unpriced": 0,
+                }
+                self.by_identity[key] = entry
+        entry["calls"] += 1
+        if value is None:
+            entry["unpriced"] += 1
+        else:
+            entry["micro"] += value
+        return key
 
     def correct(self, index: int, micro: int | None) -> int:
         """Replace an accrued call's estimate with its authoritative price.
@@ -305,6 +366,7 @@ class SessionSpend:
             return 0
         previous = self._estimates.pop(index)
         value = _as_int(micro) if micro is not None else None
+        self._correct_identity(index, previous, value)
         if value == previous:
             return 0
         if previous is None:
@@ -321,6 +383,30 @@ class SessionSpend:
             return -previous
         self.micro += value - previous
         return value - previous
+
+    def _correct_identity(self, index: int, previous: int | None, value: int | None) -> None:
+        """Move the by-identity split with the total, for ONE correction.
+
+        Without this the split and the headline drift apart the moment a
+        re-price lands, and the wire's rows would stop summing to its total —
+        the quiet disagreement between the parts and the whole that this whole
+        project exists to remove. A no-op when the correction changes nothing
+        or the call was unattributed.
+        """
+        key = self._identity_keys.pop(index, None)
+        if key is None or previous == value:
+            return
+        entry = self.by_identity.get(key)
+        if entry is None:
+            return
+        if previous is None and value is not None:
+            entry["unpriced"] -= 1
+            entry["micro"] += value
+        elif previous is not None and value is None:
+            entry["unpriced"] += 1
+            entry["micro"] -= previous
+        elif previous is not None and value is not None:
+            entry["micro"] += value - previous
 
     def adjust(self, delta_micro: int) -> bool:
         """Apply a turn-level remainder, which is not a call.
@@ -425,6 +511,20 @@ class SessionSpend:
         }
         if self.last_identity:
             details["last_identity"] = dict(self.last_identity)
+        if self.by_identity:
+            # Only when non-empty: a row without the key is the documented
+            # "no breakdown" state, and writing an empty map would claim the
+            # same thing while looking like data.
+            details["by_identity"] = {
+                str(key): {
+                    "provider": str(entry.get("provider", "") or ""),
+                    "model_id": str(entry.get("model_id", "") or ""),
+                    "micro": int(entry.get("micro", 0) or 0),
+                    "calls": int(entry.get("calls", 0) or 0),
+                    "unpriced": int(entry.get("unpriced", 0) or 0),
+                }
+                for key, entry in self.by_identity.items()
+            }
         return details
 
     @classmethod
@@ -466,7 +566,39 @@ class SessionSpend:
                 if isinstance(last_identity, Mapping)
                 else None
             ),
+            by_identity=_parse_identity_split(details.get("by_identity")),
         )
+
+
+def _parse_identity_split(raw: Any) -> dict[str, dict[str, Any]]:
+    """Parse the optional by-identity split, dropping malformed entries.
+
+    Optional by design (design §3.3): a row written before the field existed
+    reads as NO breakdown, which the surfaces render as "inference by model:
+    not tracked" beside an exact total. Never as an empty map pretending the
+    split was consulted and found empty.
+    """
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, entry in raw.items():
+        if not isinstance(entry, Mapping):
+            continue
+        micro = _as_int(entry.get("micro", 0))
+        calls = _as_int(entry.get("calls", 0))
+        unpriced = _as_int(entry.get("unpriced", 0))
+        if micro is None or calls is None or unpriced is None:
+            continue
+        if min(micro, calls, unpriced) < 0:
+            continue
+        out[str(key)] = {
+            "provider": str(entry.get("provider", "") or ""),
+            "model_id": str(entry.get("model_id", "") or ""),
+            "micro": micro,
+            "calls": calls,
+            "unpriced": unpriced,
+        }
+    return out
 
 
 def recall(transcript: Any) -> SessionSpend | None:

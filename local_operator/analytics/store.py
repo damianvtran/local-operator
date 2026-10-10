@@ -508,6 +508,73 @@ CREATE TABLE IF NOT EXISTS session_daily_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- One row per CHANNEL money event: the non-token half of the ledger
+-- (image / tts / stt / search / read / classification / other), mirrored from
+-- the session journals where it is the durable source of truth. Keyed by
+-- ``record_id`` (globally unique, "<channel>:<provider correlation id|uuid4>",
+-- or "legacy:<entry id>" for a backfilled row), because a replayed journal, a
+-- re-run backfill or a forked copy must not double count. ``rev`` supersedes:
+-- a higher rev with the same record_id REPLACES the row and the rollups take a
+-- DELTA (see ``record_channel_batch``), so a quote-to-settled upgrade never
+-- counts twice.
+CREATE TABLE IF NOT EXISTS channel_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  record_id TEXT NOT NULL UNIQUE,
+  rev INTEGER NOT NULL DEFAULT 0,
+  ts_ms INTEGER NOT NULL,
+  session_id TEXT NOT NULL,
+  parent_session_id TEXT NOT NULL DEFAULT '',
+  channel TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT '',
+  model_id TEXT NOT NULL DEFAULT '',
+  units REAL NOT NULL DEFAULT 0,
+  unit TEXT NOT NULL DEFAULT '',
+  -- NULL = unknown, NEVER 0: a call we could not size and a free call are
+  -- different facts (the fold's own rule, restated here because a 0 here
+  -- would silently make the unknown look like a charge of nothing).
+  amount_micro INTEGER,
+  billing_basis TEXT NOT NULL DEFAULT 'not_tracked',
+  cost_source TEXT NOT NULL DEFAULT 'none',
+  price_version TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ok',
+  request_id TEXT NOT NULL DEFAULT '',
+  updated_at_ms INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS channel_calls_ts ON channel_calls(ts_ms);
+CREATE INDEX IF NOT EXISTS channel_calls_session ON channel_calls(session_id);
+CREATE INDEX IF NOT EXISTS channel_calls_channel ON channel_calls(channel, provider);
+
+-- Day/month rollups of ``channel_calls``, incrementally maintained in the
+-- SAME transaction as the ledger upsert (a rev upgrade applies new-minus-old).
+-- ``amount_micro`` sums only KNOWN amounts; ``known_calls`` counts them, so a
+-- reader can always separate "spent nothing" from "could not be sized".
+CREATE TABLE IF NOT EXISTS channel_daily (
+  day TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  billing_basis TEXT NOT NULL DEFAULT '',
+  units REAL NOT NULL DEFAULT 0,
+  amount_micro INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  known_calls INTEGER NOT NULL DEFAULT 0,
+  updated_at_ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, channel, provider, model, billing_basis)
+);
+CREATE TABLE IF NOT EXISTS channel_monthly (
+  month TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  billing_basis TEXT NOT NULL DEFAULT '',
+  units REAL NOT NULL DEFAULT 0,
+  amount_micro INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  known_calls INTEGER NOT NULL DEFAULT 0,
+  updated_at_ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (month, channel, provider, model, billing_basis)
+);
 """
 
 _CALL_COLUMNS = (
@@ -695,6 +762,93 @@ _INSERT_SQL = (
     f"INSERT INTO calls ({', '.join(_CALL_COLUMNS)}) "
     f"VALUES ({', '.join('?' for _ in _CALL_COLUMNS)})"
 )
+
+#: Columns of one channel-call row, in the order the writer passes them.
+#: ``updated_at_ms`` is stamped by the store, so the tuple the recorder carries
+#: ends one short of this list — primitives only, because the producer is the
+#: session (through the recorder queue), which has no analytics import.
+_CHANNEL_COLUMNS = (
+    "record_id",
+    "rev",
+    "ts_ms",
+    "session_id",
+    "parent_session_id",
+    "channel",
+    "provider",
+    "model_id",
+    "units",
+    "unit",
+    "amount_micro",
+    "billing_basis",
+    "cost_source",
+    "price_version",
+    "status",
+    "request_id",
+    "updated_at_ms",
+)
+_CHANNEL_INSERT_SQL = (
+    f"INSERT INTO channel_calls ({', '.join(_CHANNEL_COLUMNS)}) "
+    f"VALUES ({', '.join('?' for _ in _CHANNEL_COLUMNS)})"
+)
+_CHANNEL_UPDATE_SQL = (
+    "UPDATE channel_calls SET rev = ?, ts_ms = ?, session_id = ?, "
+    "parent_session_id = ?, channel = ?, provider = ?, model_id = ?, "
+    "units = ?, unit = ?, amount_micro = ?, billing_basis = ?, "
+    "cost_source = ?, price_version = ?, status = ?, request_id = ?, "
+    "updated_at_ms = ? WHERE record_id = ?"
+)
+#: The accumulate-upsert both channel rollups share. Every measure is summed on
+#: conflict (``x = x + excluded.x``), so a rev upgrade applies a DELTA by
+#: passing new-minus-old as the values — the one correctness-sensitive SQL path
+#: in this feature (design §3.4, risk 5).
+_CHANNEL_ROLLUP_UPSERT = (
+    "INSERT INTO {table} ({key_col}, channel, provider, model, billing_basis, "
+    "units, amount_micro, calls, known_calls, updated_at_ms) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT({key_col}, channel, provider, model, billing_basis) DO UPDATE SET "
+    "units = units + excluded.units, "
+    "amount_micro = amount_micro + excluded.amount_micro, "
+    "calls = calls + excluded.calls, "
+    "known_calls = known_calls + excluded.known_calls, "
+    "updated_at_ms = excluded.updated_at_ms"
+)
+
+#: The cross-channel reporting view: ``calls`` mapped to
+#: ``channel='inference'`` UNION ALL ``channel_calls``, one column shape so a
+#: reader can query "all spend" without knowing which table a row lives in.
+#: Inference ``billing_basis`` is ``not_tracked`` for every historic row — the
+#: calls ledger gains its own basis columns in the follow-up slice, and because
+#: a VIEW has no ALTER path this definition is dropped and re-created on every
+#: open, so the updated shape is picked up without a migration.
+#: ``amount_micro`` is NULL when ``cost_known = 0``: the calls ledger's ``0``
+#: for an unpriced call is exactly the fabricated zero the channel side
+#: refuses, and the view must not launder it into a real-looking amount.
+_SPEND_ALL_VIEW_SQL = """
+CREATE VIEW spend_all AS
+SELECT
+  'inference:' || id AS record_id,
+  0 AS rev,
+  ts_ms,
+  session_id,
+  parent_session_id,
+  'inference' AS channel,
+  provider,
+  model_id,
+  1 AS units,
+  'calls' AS unit,
+  CASE WHEN cost_known = 1 THEN cost_micro ELSE NULL END AS amount_micro,
+  'not_tracked' AS billing_basis,
+  'none' AS cost_source,
+  '' AS price_version,
+  CASE WHEN ok = 1 THEN 'ok' ELSE 'failed' END AS status,
+  request_id
+FROM calls
+UNION ALL
+SELECT record_id, rev, ts_ms, session_id, parent_session_id, channel, provider,
+       model_id, units, unit, amount_micro, billing_basis, cost_source,
+       price_version, status, request_id
+FROM channel_calls
+"""
 
 #: The measure columns a rollup row accumulates. Every one is summed on
 #: conflict, so an upsert is a pure ``x = x + excluded.x`` accumulate and N
@@ -1343,6 +1497,13 @@ class AnalyticsStore:
         #: write path omits the rollup upsert and every read takes the ledger
         #: path, which is today's behaviour exactly.
         self._has_session_daily = True
+        #: Whether the CHANNEL tables (``channel_calls``/``channel_daily``/
+        #: ``channel_monthly``) actually exist on this database, for the same
+        #: never-break-a-turn reason: a schema script that aborted before their
+        #: CREATE would otherwise fail every channel batch. Absent means the
+        #: write path is skipped (the session journal remains the source of
+        #: truth and nothing user-visible breaks).
+        self._has_channel_tables = True
         #: Which path the LAST ``aggregate()`` on this instance took: ``"rollup"``
         #: or ``"ledger"`` (``""`` before the first call). A diagnostic seam and
         #: a test seam in one: the gate's refusals are only trustworthy if a
@@ -1635,8 +1796,55 @@ class AnalyticsStore:
         except Exception:  # noqa: BLE001 — no rollup table means no fast path
             logger.debug("analytics: could not inspect for session_daily", exc_info=True)
             self._has_session_daily = False
+        # The CHANNEL tables arrive with their own release, so a database from
+        # any earlier binary simply lacks them: confirm they are really there
+        # before the writer commits to them, and set the flag the write path
+        # reads (see ``_has_channel_tables``).
+        try:
+            present_channel_tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name IN ('channel_calls', 'channel_daily', 'channel_monthly')"
+                )
+            }
+            self._has_channel_tables = present_channel_tables == {
+                "channel_calls",
+                "channel_daily",
+                "channel_monthly",
+            }
+            if not self._has_channel_tables:
+                logger.debug(
+                    "analytics: channel tables missing %s, so channel recording is off",
+                    sorted(
+                        {"channel_calls", "channel_daily", "channel_monthly"}
+                        - present_channel_tables
+                    ),
+                )
+        except Exception:  # noqa: BLE001 — no tables means no channel write path
+            logger.debug("analytics: could not inspect for channel tables", exc_info=True)
+            self._has_channel_tables = False
+        if self._has_channel_tables:
+            self._recreate_spend_all_view(conn)
         self._rebuild_insert_plan()
         self._create_optional_indexes(conn, existing)
+
+    @staticmethod
+    def _recreate_spend_all_view(conn: sqlite3.Connection) -> None:
+        """(Re)create the inference+channel UNION view, idempotently.
+
+        A VIEW has no ``ALTER`` path, so it is DROPPED and re-created on every
+        open: a later release that adds a column to ``channel_calls`` (or to
+        ``calls``) updates :data:`_SPEND_ALL_VIEW_SQL` and every existing
+        database picks the new shape up on the next launch. Best-effort — a
+        view that cannot be created is a missing reporting convenience, never a
+        store that refuses to open (analytics is not a hard dependency).
+        """
+        try:
+            conn.execute("DROP VIEW IF EXISTS spend_all")
+            conn.execute(_SPEND_ALL_VIEW_SQL)
+        except Exception:  # noqa: BLE001 — see the docstring
+            logger.debug("analytics: could not create the spend_all view", exc_info=True)
 
     @staticmethod
     def _migrate_session_daily(conn: sqlite3.Connection) -> None:
@@ -1910,6 +2118,222 @@ class AnalyticsStore:
                 return 0
         return 0
 
+    def record_channel_batch(self, rows: Sequence[tuple[Any, ...]]) -> int:
+        """Upsert channel-call rows with rev-upgrade rollup deltas, atomically.
+
+        ``rows`` are :data:`_CHANNEL_COLUMNS` minus ``updated_at_ms`` (the
+        store stamps that): ``(record_id, rev, ts_ms, session_id,
+        parent_session_id, channel, provider, model_id, units, unit,
+        amount_micro, billing_basis, cost_source, price_version, status,
+        request_id)``. Plain tuples because the producer is the session through
+        the recorder queue, which must not import this module.
+
+        THE CORRECTNESS-SENSITIVE PATH of the feature (design §3.4, risk 5):
+
+        * a ``record_id`` we have never seen INSERTS the row and adds its full
+          contribution to the day and month rollups;
+        * a row whose ``rev`` does not beat the stored one changes NOTHING —
+          not even a no-op UPDATE — which is what makes a replayed journal or a
+          re-run backfill idempotent;
+        * an accepted upgrade UPDATEs the row and applies new-minus-old to the
+          rollups IN THE SAME TRANSACTION, reversing the old contribution under
+          its own key first (a quote→settled upgrade usually moves the basis,
+          so old and new keys differ) — the settled figure therefore counts
+          once, and only once, whichever keys it moved between.
+
+        Batched, retried on ``SQLITE_BUSY`` and best-effort exactly like
+        :meth:`record_batch`; returns the number of rows PROCESSED (``len(rows)``
+        once the transaction commits — a row that lost the rev race was still
+        processed deliberately, which its idempotence contract requires), and 0
+        when the whole batch was dropped. Never raises.
+        """
+        if not rows or not self._has_channel_tables:
+            return 0
+        conn: sqlite3.Connection | None = None
+        for attempt in range(_WRITE_RETRIES):
+            conn = self._connect()
+            if conn is not None or self._broken:
+                break
+            time.sleep(_WRITE_RETRY_BACKOFF_S * (attempt + 1))
+        if conn is None:
+            return 0
+        for attempt in range(_WRITE_RETRIES):
+            try:
+                for row in rows:
+                    self._apply_channel_row(conn, row)
+                conn.commit()
+                return len(rows)
+            except sqlite3.OperationalError as exc:
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                if not _is_lock_error(exc):
+                    logger.debug("analytics: channel batch failed", exc_info=True)
+                    return 0
+                if attempt == _WRITE_RETRIES - 1:
+                    logger.debug("analytics: channel batch dropped after busy retries")
+                    return 0
+                time.sleep(_WRITE_RETRY_BACKOFF_S * (attempt + 1))
+            except Exception:  # noqa: BLE001 — a lost batch must not kill the writer
+                logger.debug("analytics: channel batch failed", exc_info=True)
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                return 0
+        return 0
+
+    def _apply_channel_row(self, conn: sqlite3.Connection, row: tuple[Any, ...]) -> bool:
+        """Insert or upgrade ONE channel row. Returns True when it was applied."""
+        (
+            record_id,
+            rev,
+            ts_ms,
+            session_id,
+            parent_session_id,
+            channel,
+            provider,
+            model_id,
+            units,
+            unit,
+            amount_micro,
+            billing_basis,
+            cost_source,
+            price_version,
+            status,
+            request_id,
+        ) = row
+        existing = conn.execute(
+            "SELECT rev, ts_ms, channel, provider, model_id, billing_basis, units, "
+            "amount_micro FROM channel_calls WHERE record_id = ?",
+            (record_id,),
+        ).fetchone()
+        now = self._now_ms()
+        if existing is None:
+            conn.execute(_CHANNEL_INSERT_SQL, (*row, now))
+            self._channel_rollup_delta(
+                conn,
+                ts_ms=int(ts_ms),
+                channel=str(channel),
+                provider=str(provider or ""),
+                model=str(model_id or ""),
+                basis=str(billing_basis or ""),
+                units=float(units or 0.0),
+                amount=amount_micro,
+                calls=1,
+                known=1 if amount_micro is not None else 0,
+            )
+            return True
+        old_rev = int(existing[0] or 0)
+        if int(rev or 0) <= old_rev:
+            return False
+        conn.execute(
+            _CHANNEL_UPDATE_SQL,
+            (
+                int(rev or 0),
+                int(ts_ms),
+                session_id,
+                parent_session_id,
+                channel,
+                provider,
+                model_id,
+                units,
+                unit,
+                amount_micro,
+                billing_basis,
+                cost_source,
+                price_version,
+                status,
+                request_id,
+                now,
+                record_id,
+            ),
+        )
+        # Reverse the OLD contribution under the key it was booked beneath,
+        # then book the new one. When the key is unchanged the two calls net
+        # out to the plain delta; when the upgrade moved the basis (the usual
+        # quote→settled shape) each bucket moves by exactly its own share.
+        self._channel_rollup_delta(
+            conn,
+            ts_ms=int(existing[1]),
+            channel=str(existing[2]),
+            provider=str(existing[3] or ""),
+            model=str(existing[4] or ""),
+            basis=str(existing[5] or ""),
+            units=-float(existing[6] or 0.0),
+            amount=None if existing[7] is None else -int(existing[7]),
+            calls=-1,
+            known=-1 if existing[7] is not None else 0,
+        )
+        self._channel_rollup_delta(
+            conn,
+            ts_ms=int(ts_ms),
+            channel=str(channel),
+            provider=str(provider or ""),
+            model=str(model_id or ""),
+            basis=str(billing_basis or ""),
+            units=float(units or 0.0),
+            amount=amount_micro,
+            calls=1,
+            known=1 if amount_micro is not None else 0,
+        )
+        return True
+
+    def _channel_rollup_delta(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        ts_ms: int,
+        channel: str,
+        provider: str,
+        model: str,
+        basis: str,
+        units: float,
+        amount: Any,
+        calls: int,
+        known: int,
+    ) -> None:
+        """Apply one contribution to the day AND month rollups.
+
+        Both rollups advance in this transaction or neither does: a batch that
+        rolls back must not leave a day bucket describing a ledger row the
+        database never saw.
+        """
+        day, month = _local_day_month(int(ts_ms))
+        now = self._now_ms()
+        for table, key_col, key_value in (
+            ("channel_daily", "day", day),
+            ("channel_monthly", "month", month),
+        ):
+            conn.execute(
+                _CHANNEL_ROLLUP_UPSERT.format(table=table, key_col=key_col),
+                (
+                    key_value,
+                    channel,
+                    provider,
+                    model,
+                    basis,
+                    float(units),
+                    int(amount or 0),
+                    int(calls),
+                    int(known),
+                    now,
+                ),
+            )
+            # A quote→settled upgrade REVERSES the old bucket, which can leave it
+            # at all-zero (the settled amount and the call count moved to the new
+            # basis). Drop such a row rather than leaving a "$0.00, 0 calls"
+            # bucket a reader would have to special-case: the predicate demands
+            # every measure be zero, so it cannot race a concurrent writer's
+            # positive delta (SQLite serialises writers anyway).
+            conn.execute(
+                f"DELETE FROM {table} WHERE {key_col} = ? AND channel = ? AND provider = ? "
+                "AND model = ? AND billing_basis = ? AND units = 0 AND amount_micro = 0 "
+                "AND calls = 0 AND known_calls = 0",
+                (key_value, channel, provider, model, basis),
+            )
+
     def upsert_session_name(
         self, session_id: str, name: str, *, rank: int = SESSION_NAME_RANK_TITLE
     ) -> bool:
@@ -2169,6 +2593,16 @@ class AnalyticsStore:
             conn.commit()
         except Exception:  # noqa: BLE001 — a tool-call prune failure is non-fatal
             logger.debug("analytics: tool-call prune failed", exc_info=True)
+        # ``channel_calls`` keeps the SAME raw window as the ledger it mirrors
+        # (``retention_days``): it is a per-event raw table and grows with
+        # image/search/voice volume rather than request volume, so it needs the
+        # bound for the same reason ``tool_calls`` does. Its rows are NOT added
+        # to ``removed``, which contractually counts raw-ledger request rows.
+        try:
+            conn.execute("DELETE FROM channel_calls WHERE ts_ms < ?", (cutoff,))
+            conn.commit()
+        except Exception:  # noqa: BLE001 — a channel prune failure is non-fatal
+            logger.debug("analytics: channel-call prune failed", exc_info=True)
         # Rollup prunes are best-effort and independent of the ledger prune
         # above: a failure here must not undo the ledger delete or raise. The
         # ledger's own window in DAYS is derived here from the SAME retention
@@ -2189,6 +2623,26 @@ class AnalyticsStore:
                 "DELETE FROM usage_monthly WHERE month < ("
                 "  SELECT MIN(month) FROM ("
                 "    SELECT DISTINCT month FROM usage_monthly ORDER BY month DESC LIMIT ?"
+                "  )"
+                ")",
+                (MONTHLY_ROLLUP_RETENTION_MONTHS,),
+            )
+            # The channel rollups follow the SAME two reaches as their
+            # inference twins (daily by distinct days, monthly by distinct
+            # months), so "the rollup outlives the raw ledger" holds for
+            # channels exactly as it does for calls.
+            conn.execute(
+                "DELETE FROM channel_daily WHERE day < ("
+                "  SELECT MIN(day) FROM ("
+                "    SELECT DISTINCT day FROM channel_daily ORDER BY day DESC LIMIT ?"
+                "  )"
+                ")",
+                (DAILY_ROLLUP_RETENTION_DAYS,),
+            )
+            conn.execute(
+                "DELETE FROM channel_monthly WHERE month < ("
+                "  SELECT MIN(month) FROM ("
+                "    SELECT DISTINCT month FROM channel_monthly ORDER BY month DESC LIMIT ?"
                 "  )"
                 ")",
                 (MONTHLY_ROLLUP_RETENTION_MONTHS,),

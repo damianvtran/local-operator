@@ -7011,6 +7011,38 @@ class FrontendStateStore:
             changes["cost_knowledge"] = spend.knowledge()
         return self.mutate(**changes)
 
+    def refresh_spend_channels(self, session: Any) -> FrontendUpdate | None:
+        """Publish the session's channel ledger, ALONE and cheaply.
+
+        The ingest seam's publish step (``Session.record_channel_spend``): a
+        channel record arrives several times a turn at most, and the full
+        :meth:`refresh_from_session` re-reads the job roster and the transcript
+        cursor — far more than a search or an image needs to reach the band.
+        This rebuilds exactly the one object from the session's fold plus the
+        children figures the state already holds.
+
+        ``None`` (no update) when the host has no fold: nothing to publish is
+        not the same as publishing a zero, and the field keeps whatever it had.
+        """
+        ledger = _ledger_cost(session)
+        state = self._state
+        payload = _spend_channels_payload(
+            session,
+            (
+                ledger
+                if ledger
+                else {
+                    "subagent_cost": state.subagent_cost,
+                    "subagent_cost_knowledge": state.subagent_cost_knowledge,
+                }
+            ),
+            state.child_costs,
+            self._spend_of(session),
+        )
+        if payload is None:
+            return None
+        return self.mutate(spend_channels=payload)
+
     def accrue_usage(self, session: Any, usage: Usage) -> FrontendUpdate | None:
         """Accrue a provider call outside the ordinary agent event stream.
 

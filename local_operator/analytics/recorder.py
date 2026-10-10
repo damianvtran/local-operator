@@ -41,6 +41,7 @@ import queue
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from local_operator.analytics.model import CallSnapshot
 from local_operator.analytics.store import SESSION_NAME_RANK_TITLE, AnalyticsStore
@@ -113,6 +114,27 @@ class _ToolCallTask:
             self.fault,
             self.duration_ms,
         )
+
+
+class _ChannelTask:
+    """One channel-spend record queued for the writer thread.
+
+    Routed through the SAME queue, thread and connection as call samples and
+    name upserts, for the reason ``_NameTask`` records: two threads opening
+    their first connection to a freshly-created database race in a way that
+    left the writer unable to see its own commits. There is exactly one writer
+    here and adding a second is forbidden.
+
+    ``row`` is the store's insert tuple MINUS ``updated_at_ms`` (the store
+    stamps it), flattened to primitives by ``ChannelSpendRecord.analytics_row``
+    — the producer is the session's fold, which has no analytics import, so the
+    shape has to survive the queue.
+    """
+
+    __slots__ = ("row",)
+
+    def __init__(self, row: tuple) -> None:
+        self.row = row
 
 
 #: Upper bound on queued-but-unwritten samples. A provider call takes seconds
@@ -336,9 +358,9 @@ class AnalyticsRecorder:
         #: assert the election, and so a caller that already knows the root does
         #: not have to make the recorder re-derive it.
         self._maintenance_root = Path(maintenance_root) if maintenance_root is not None else None
-        self._queue: "queue.Queue[CallSnapshot | _NameTask | _ToolCallTask | None]" = queue.Queue(
-            maxsize=_QUEUE_MAXSIZE
-        )
+        self._queue: (
+            "queue.Queue[CallSnapshot | _NameTask | _ToolCallTask | _ChannelTask | None]"
+        ) = queue.Queue(maxsize=_QUEUE_MAXSIZE)
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._dropped = 0
@@ -407,6 +429,7 @@ class AnalyticsRecorder:
             batch: list[CallSnapshot] = []
             names: list[_NameTask] = []
             tools: list[_ToolCallTask] = []
+            channels: list[_ChannelTask] = []
             # How many queue items this iteration took off, so the settle below
             # accounts for each of them exactly once (``unfinished_tasks`` is
             # raised by ``put`` and lowered by ``task_done``, never by ``get``).
@@ -421,7 +444,7 @@ class AnalyticsRecorder:
             if item is None:  # sentinel: flush, settle, exit
                 stopping = True
             else:
-                self._classify(item, batch, names, tools)
+                self._classify(item, batch, names, tools, channels)
                 # Opportunistically drain whatever else is already queued so a
                 # burst becomes one transaction.
                 while len(batch) < 256:
@@ -433,8 +456,8 @@ class AnalyticsRecorder:
                     if item is None:
                         stopping = True
                         break
-                    self._classify(item, batch, names, tools)
-            self._flush(batch, names, tools)
+                    self._classify(item, batch, names, tools, channels)
+            self._flush(batch, names, tools, channels)
             for _ in range(consumed):
                 self._queue.task_done()
             if stopping:
@@ -443,15 +466,19 @@ class AnalyticsRecorder:
 
     @staticmethod
     def _classify(
-        item: "CallSnapshot | _NameTask | _ToolCallTask",
+        item: "CallSnapshot | _NameTask | _ToolCallTask | _ChannelTask",
         batch: list[CallSnapshot],
         names: list["_NameTask"],
         tools: list["_ToolCallTask"],
+        channels: list["_ChannelTask"] | None = None,
     ) -> None:
         if isinstance(item, _NameTask):
             names.append(item)
         elif isinstance(item, _ToolCallTask):
             tools.append(item)
+        elif isinstance(item, _ChannelTask):
+            if channels is not None:
+                channels.append(item)
         else:
             batch.append(item)
 
@@ -460,7 +487,28 @@ class AnalyticsRecorder:
         batch: list[CallSnapshot],
         names: list["_NameTask"],
         tools: list["_ToolCallTask"] | None = None,
+        channels: list["_ChannelTask"] | None = None,
     ) -> None:
+        if channels:
+            # Its own transaction, like the tool-call batch: channel records are
+            # produced DURING a turn by a different code path than the ledger
+            # row, and the store's rev-upgrade deltas are scoped to this batch.
+            try:
+                rows = [task.row for task in channels]
+                applied = self._store.record_channel_batch(rows)
+            except Exception as exc:  # noqa: BLE001 — a bad sample must not kill the writer
+                logger.debug("analytics: channel-record flush failed", exc_info=True)
+                self._note_write_failure("channel record", repr(exc))
+            else:
+                if applied != len(rows):
+                    # The store returns 0 when the whole batch was dropped (a
+                    # wedged DB), never a partial count: the batch is one
+                    # transaction. A replayed row that loses the rev race is
+                    # still counted as processed by design — see
+                    # ``record_channel_batch``.
+                    self._note_write_failure(
+                        "channel record", f"the store wrote {applied} of {len(rows)} rows"
+                    )
         if tools:
             # Its own transaction, not joined to the ledger insert below: tool
             # calls are produced DURING a turn and the ledger row at the end of
@@ -809,6 +857,29 @@ class AnalyticsRecorder:
         """How many samples were dropped for a full queue (0 on a healthy run)."""
         return self._dropped
 
+    def record_channel(self, row: tuple) -> None:
+        """Best-effort: record one channel-spend row off the hot path.
+
+        Called from the session's fold (``Session.record_channel_spend``), which
+        runs ON THE EVENT LOOP inside a live turn — so the non-blocking half of
+        the contract is load-bearing, exactly as it is for
+        :meth:`record_tool_call`: one bounded ``put_nowait``, never raising,
+        never touching disk or a lock on this side. Analytics that can add
+        latency to a turn or abort one is a defect, not a measurement.
+
+        ``row`` is ``ChannelSpendRecord.analytics_row()``: primitives, store
+        insert order, no timestamp (the store stamps it).
+        """
+        if self._closed or not row:
+            return
+        self._ensure_thread()
+        try:
+            self._queue.put_nowait(_ChannelTask(tuple(row)))
+        except queue.Full:
+            logger.debug("analytics: queue full, dropped a channel record")
+        except Exception:  # noqa: BLE001 — recording is best-effort
+            logger.debug("analytics: channel-record enqueue failed", exc_info=True)
+
     def flush_for_test(self, timeout: float = 5.0) -> None:
         """Block until every queued item has been through the write path. TEST ONLY.
 
@@ -994,3 +1065,22 @@ def reset_recorder_for_test(store: AnalyticsStore | None = None) -> AnalyticsRec
             _recorder.close()
         _recorder = AnalyticsRecorder(store=store)
     return _recorder
+
+
+def enqueue_channel_record(record: Any) -> None:
+    """Module-level convenience: enqueue ONE channel-spend record. Never raises.
+
+    This is what ``Session.record_channel_spend`` calls. It runs on the event
+    loop during a live turn, so even the singleton lookup and the record's row
+    conversion must be unable to throw into the turn; a lost channel record is
+    a slightly-incomplete analytics mirror (the session journal remains the
+    source of truth), never a broken turn.
+
+    ``record`` is duck-typed to ``ChannelSpendRecord.analytics_row()`` rather
+    than imported: analytics must not depend on the session package (the arrow
+    runs the other way in every other feature).
+    """
+    try:
+        get_recorder().record_channel(record.analytics_row())
+    except Exception:  # noqa: BLE001 — recording is never allowed to raise
+        logger.debug("analytics: enqueue_channel_record failed", exc_info=True)

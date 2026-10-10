@@ -60,11 +60,6 @@ from local_operator.harness.types import (
     TextContent,
 )
 from local_operator.session.attachments import AttachmentStore
-from local_operator.session.creation import (
-    ensure_session_created_at,
-    session_created_at,
-)
-from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
 
 # The engagement reader — and the transcript filename it looks for — live in
 # ``session/runtime/engagement.py``, a stdlib-only module, so the peer-send core
@@ -72,6 +67,17 @@ from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYP
 # dependency weight (that module's docstring has the whole reason). Re-exported
 # rather than redefined: exactly one definition of each, and every existing
 # importer of ``session.transcript`` keeps resolving.
+from local_operator.session.channel_spend import (
+    CHANNEL_SPEND_CUSTOM_TYPE,
+    CHANNEL_SPEND_VERSION,
+    map_image_cost_labels,
+    usd_to_micro,
+)
+from local_operator.session.creation import (
+    ensure_session_created_at,
+    session_created_at,
+)
+from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
 from local_operator.session.runtime.engagement import (  # noqa: F401
     TRANSCRIPT_FILENAME,
     durable_conversation_path,
@@ -166,6 +172,7 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
+        CHANNEL_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
     }
 )
@@ -2290,6 +2297,146 @@ class Transcript:
                             else f"{str(details.get('provider') or '')}:read"
                         ),
                         "kind": kind,
+                    }
+                )
+        return rows
+
+    def channel_spend_rows(self) -> list[dict[str, Any]]:
+        """Every channel-spend RECORD this journal carries, oldest first.
+
+        The channel twin of :meth:`search_spend_rows`, read off the same
+        ``session_channel_spend.v1`` custom rows the Session appends (see
+        ``session/channel_spend.py``). Deliberately NO compaction/prune
+        boundary, for the reason that method documents: money already spent is
+        not invalidated by a later rewrite of the context.
+
+        Rows come back as their raw ``details`` mappings and are NOT deduped
+        here: a higher ``rev`` row can arrive after a lower one, and the fold
+        is the one place that decides which revision wins. The ``start``
+        marker is skipped (``channel_spend_tracked`` reads it); malformed rows
+        are dropped individually, so one bad line cannot hide the rest.
+        """
+        rows: list[dict[str, Any]] = []
+        for entry in self._entries:
+            if entry.type != ENTRY_CUSTOM:
+                continue
+            payload = entry.payload
+            if payload.get("custom_type") != CHANNEL_SPEND_CUSTOM_TYPE:
+                continue
+            details = payload.get("details")
+            if not isinstance(details, dict):
+                continue
+            if details.get("kind") == "start":
+                continue
+            rows.append(dict(details))
+        return rows
+
+    def channel_spend_tracked(self) -> bool:
+        """Whether the journal carries the one-time channel ``start`` marker.
+
+        False for a pre-feature session: its total is inference-only and every
+        surface must say "channels not tracked" rather than implying $0 of
+        channel spend (the no-fabricated-zeros rule). A BACKFILLED legacy
+        journal deliberately has rows but no marker — recovered history is
+        partial by definition, and the combiner degrades it.
+        """
+        for entry in self._entries:
+            if entry.type != ENTRY_CUSTOM:
+                continue
+            payload = entry.payload
+            if payload.get("custom_type") != CHANNEL_SPEND_CUSTOM_TYPE:
+                continue
+            details = payload.get("details")
+            if isinstance(details, dict) and details.get("kind") == "start":
+                return True
+        return False
+
+    def channel_backfill_rows(self) -> list[dict[str, Any]]:
+        """Record-shaped rows recovered from a pre-feature journal, one pass.
+
+        WHAT IS RECOVERED (design §3.5): legacy ``search_cost``/``read_cost``
+        tool details become ``search``/``read`` rows priced from the SAME
+        client table the live emission uses (labelled
+        ``client-search-table-legacy``), and image tool rows that carry a
+        ``cost_usd`` figure become ``image`` rows with the recorded labels.
+        WHAT IS NOT: any row whose money is absent is not invented (no
+        fabricated zeros) — an unpriced search keeps ``amount=None``, and an
+        image row without a figure yields no row at all.
+
+        Record ids are the idempotency contract: ``legacy:<entry id>`` for the
+        search/read pair (the entry is the only stable identity those rows
+        have) and ``image:<generation id>`` for an image generation, falling
+        back to ``legacy:<entry id>`` when the provider returned no id. Running
+        the backfill twice therefore lands the same ids, and the fold (plus the
+        Session's append guard) makes the second run a no-op.
+        """
+        rows: list[dict[str, Any]] = []
+        for entry in self._entries:
+            if entry.type != ENTRY_MESSAGE:
+                continue
+            details = (entry.payload.get("provider_payload") or {}).get("details")
+            if not isinstance(details, dict):
+                continue
+            ts_ms = int(round(float(entry.ts) * 1000))
+            for key, kind in (("search_cost", "search"), ("read_cost", "read")):
+                cost = details.get(key)
+                if not isinstance(cost, dict):
+                    continue
+                provider = str(cost.get("ledger_provider") or "") or (
+                    str(details.get("provider") or "")
+                    if kind == "search"
+                    else f"{str(details.get('provider') or '')}:read"
+                )
+                rows.append(
+                    {
+                        "version": CHANNEL_SPEND_VERSION,
+                        "record_id": f"legacy:{entry.id}",
+                        "ts_ms": ts_ms,
+                        "channel": kind,
+                        "provider": provider,
+                        "units": 1,
+                        "unit": "searches" if kind == "search" else "reads",
+                        "amount_micro": usd_to_micro(cost.get("usd")),
+                        "billing_basis": "estimated",
+                        "cost_source": "catalogue",
+                        "price_version": "client-search-table-legacy",
+                        "status": "ok",
+                        "detail": "backfilled from the tool row's own cost details",
+                    }
+                )
+            if str(details.get("provider") or "") and "cost_usd" in details:
+                amount = usd_to_micro(details.get("cost_usd"))
+                if amount is None:
+                    continue  # an image row without a figure is not invented
+                generation_id = str(details.get("generation_id") or "")
+                basis, source, price_version = map_image_cost_labels(
+                    route=str(details.get("provider") or ""),
+                    cost_source=details.get("cost_source"),
+                    billing_basis=details.get("billing_basis"),
+                    cost_provenance=details.get("cost_provenance"),
+                    has_amount=True,
+                )
+                rows.append(
+                    {
+                        "version": CHANNEL_SPEND_VERSION,
+                        "record_id": (
+                            f"image:{generation_id}" if generation_id else f"legacy:{entry.id}"
+                        ),
+                        "ts_ms": ts_ms,
+                        "channel": "image",
+                        "provider": str(details.get("provider") or ""),
+                        "model": str(details.get("model") or ""),
+                        # The legacy details carry no asset count, so the units
+                        # stay 0 rather than guessing: the money is the fact,
+                        # and an invented count would be a second, wrong one.
+                        "units": 0,
+                        "unit": "images",
+                        "amount_micro": amount,
+                        "billing_basis": basis,
+                        "cost_source": source,
+                        "price_version": price_version,
+                        "status": "ok",
+                        "request_id": generation_id,
                     }
                 )
         return rows

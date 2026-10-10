@@ -114,6 +114,12 @@ STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 STATUS_VALUES = frozenset({STATUS_OK, STATUS_FAILED, STATUS_CANCELLED})
 
+#: ``price_version`` for the two known client-side rate tables (web search and
+#: web read). These are the labelled exceptions to the no-rate-tables rule
+#: (design §4.3): the figure IS an estimate, the id says which table produced
+#: it, and ``# MIGRATE to catalogue`` marks them for the server-prices pass.
+SEARCH_PRICE_VERSION = "client-search-table-2026-09"  # MIGRATE to catalogue
+
 #: The web-search price table's version label. A constant stays because the
 #: catalogue document does not exist yet (design §4.3); the ``price_version``
 #: makes the estimate visible instead of hidden, and the marker comments below
@@ -293,6 +299,33 @@ class ChannelSpendRecord:
         """
         if self.amount_micro is None and self.billing_basis != BASIS_NOT_TRACKED:
             object.__setattr__(self, "billing_basis", BASIS_NOT_TRACKED)
+
+    def analytics_row(self) -> tuple[Any, ...]:
+        """The recorder queue's primitive row for this record.
+
+        Store insert order MINUS the timestamp the store stamps itself, so the
+        producer (the session, which has no analytics import and reaches the
+        writer through a queue) has to flatten to primitives exactly once, in
+        one place; a test pins the tuple against the store's column list.
+        """
+        return (
+            self.record_id,
+            int(self.rev),
+            int(self.ts_ms),
+            self.session_id,
+            self.parent_session_id,
+            self.channel,
+            self.provider,
+            self.model,
+            float(self.units),
+            self.unit,
+            self.amount_micro,
+            self.billing_basis,
+            self.cost_source,
+            self.price_version,
+            self.status,
+            self.request_id,
+        )
 
     def to_details(self) -> dict[str, Any]:
         """The transcript row's ``details`` payload."""
@@ -730,6 +763,45 @@ def combine(
             "knowledge": children.knowledge,
         },
     }
+
+
+def web_search_record(*, channel: str, provider: str, usd: float | None) -> ChannelSpendRecord:
+    """One search/read record from the search ledger's own estimate (design §4.1).
+
+    ``estimated`` with the client table's OWN id in ``price_version`` — the
+    labelled exception to the no-rate-tables rule, so the figure is visible as
+    an estimate and can be migrated to a server catalogue without a wire
+    change. ``usd is None`` (an unpriced search) stays ``amount=None``, never
+    0: an unpriced operation is not a free one.
+    """
+    return ChannelSpendRecord(
+        record_id=new_record_id(channel),
+        ts_ms=now_ms(),
+        channel=channel,
+        provider=provider,
+        units=1,
+        unit="searches" if channel == "search" else "reads",
+        amount_micro=usd_to_micro(usd),
+        billing_basis=BASIS_ESTIMATED,
+        cost_source=COST_SOURCE_CATALOGUE,
+        price_version=SEARCH_PRICE_VERSION,
+        status=STATUS_OK,
+    )
+
+
+def emit_web_spend(callback: Any, *, channel: str, provider: str, usd: float | None) -> None:
+    """Build and hand over ONE search/read record, best-effort.
+
+    Called by the two web tools with the callback off their ``ToolContext``;
+    ``None`` is the documented "this host does not track channels" value and
+    skips QUIETLY. Never raises: a lost spend row must not fail a search.
+    """
+    if not callable(callback):
+        return
+    try:
+        callback(web_search_record(channel=channel, provider=provider, usd=usd))
+    except Exception:  # noqa: BLE001 — a lost spend row is not a failed search
+        logger.debug("web channel-spend emission failed", exc_info=True)
 
 
 def records_from_details(rows: Sequence[Mapping[str, Any]]) -> list[ChannelSpendRecord]:
