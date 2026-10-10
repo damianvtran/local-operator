@@ -935,6 +935,23 @@ def build_session_report(
     return body.to_text()
 
 
+def _channels_reconciliation_rungs(
+    notes: tuple[str, ...], runtime: SessionDiagnostics
+) -> tuple[str, ...]:
+    """Prepend a scope rung to the ``Est. cost`` note ladder, when channels publish.
+
+    The ``Est. cost`` row is the recorded ledger's model+search figure; the
+    Spend by channel table directly below it is every source. Round 1 (MINOR 5)
+    named the two-sums shape as the defect this PR removes elsewhere: nothing
+    said how the two figures relate. The rung is the WIDEST spelling of the
+    ladder, so it sheds before the search clause that says what the figure
+    contains — the reconciliation is worth less than the row's own scope.
+    """
+    if runtime.spend_channels is None:
+        return notes
+    return ("recorded model + search · all sources below", *notes)
+
+
 def _draw_spend_sections(body: _Body, runtime: SessionDiagnostics) -> None:
     """The all-sources spend block: the published object, or the legacy block.
 
@@ -1562,7 +1579,7 @@ def _draw_recorded_usage(
         body.kv(
             cost_label(bool(search_note)),
             format_cost(MoneyFigure.of(spend)),
-            notes=ladder,
+            notes=_channels_reconciliation_rungs(ladder, runtime),
         )
         # Kept under ~70 characters so it does not wrap at the common widths.
         # The 103-character version wrapped at every width from 70 to ~128 and
@@ -1588,7 +1605,9 @@ def _draw_recorded_usage(
         body.kv(
             cost_label(bool(search_note)),
             format_cost(MoneyFigure.of(spend)),
-            notes=cost_note_rungs(spend, search_component=search_note),
+            notes=_channels_reconciliation_rungs(
+                cost_note_rungs(spend, search_component=search_note), runtime
+            ),
         )
     # Suppressed when both are zero: on the healthy path "0 requests; 0 unknown"
     # is a row whose only content is the absence of a problem.
