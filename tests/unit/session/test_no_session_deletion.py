@@ -2608,6 +2608,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes this request's tempfile.mkdtemp() upload spool; never session-derived",
         2,
     ),
+    # -- the turn-supplement sweep: the attachment STORE's own orphaned blobs --
+    # Both calls unlink FILES inside the content-addressed attachment store at
+    # ``<config>/attachments/`` -- ``session/attachments.py``'s directory, a
+    # SIBLING of ``sessions/``, never under it. ``content`` is the store's own
+    # direct child this pass listed, and ``meta`` is the store's sidecar for the
+    # same digest; the digest is that child's name minus ``.bin``, required
+    # non-empty and hex-only (``blob_candidates``), so neither path can leave
+    # the store. ``unlink()`` removes a FILE entry -- a symlink entry is removed
+    # as the link, never as its target -- so neither call can displace a
+    # directory at all. Nothing here is derived from a session id; the module's
+    # only touch of ``sessions/`` is the read-only reference scan.
+    (
+        "local_operator/supplements/sweep.py::store_sweep",
+        "<path>.unlink",
+        "Orphaned component blob FILES under <config>/attachments/; content is a store "
+        "child, meta is its hex digest + '.json', neither session-derived",
+        2,
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}

@@ -726,6 +726,21 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "their constant names end in DIR/NAME/PREFIX/SUFFIX while their values read as "
         "path-shaped spellings",
     ),
+    # ---- the turn-supplement sweep: the blob STORE's own layout, none of it an
+    # ---- entry OF a session directory
+    "local_operator/supplements/sweep.py": (
+        3,
+        "``.bin``/``.json`` are the attachment store's two file-name SUFFIXES, "
+        "suffixed to a digest (``<digest>.bin``/``.json``) and never a bare entry "
+        "name: a component blob is carried by the session whose transcript "
+        "REFERENCES it, as the ``attachments/<digest>.bin``/``.json`` members "
+        "``sync._member_stamps`` derives from ``referenced_attachments_in`` (a "
+        "supplement row's ``attachment`` key is that literal reference), so neither "
+        "suffix belongs in ``COPY_SET_NAMES`` or ``EXCLUDED_ENTRIES``. "
+        "``_SESSIONS_DIRNAME`` (``sessions``) is the conversations subtree the "
+        "entries live UNDER -- the same value ``retention.py``/``search_guard.py`` "
+        "declare",
+    ),
     # ---- ID / KEY FRAGMENTS (widened guard): a ``*_PREFIX``/``*_SUFFIX`` constant is a
     # ---- FRAGMENT joined to some id or key, never a bare entry of a session directory.
     # ---- Each is declared with what it is joined to, so a future keyed session
