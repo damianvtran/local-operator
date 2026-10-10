@@ -89,7 +89,7 @@ def test_rules_restored_in_review_round_one(queued: str) -> None:
     """F5/N1/minor: rules the first trim dropped instead of moving."""
     assert "when the user asks to be reminded" in queued
     assert "arm one when the user asks you to watch, poll, or be told" in queued
-    assert "end it with no reply, and don't notify" in queued
+    assert "needing no reply or action: call `no_reply` and write nothing" in queued
     assert "Never write lettered options into your reply; ask everything in one call" in queued
     assert "for an urgent one, delegate the question to a `task` subagent" in queued
     assert "before browser, generic API, or local-config discovery" in queued

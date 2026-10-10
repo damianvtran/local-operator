@@ -162,7 +162,8 @@ slot (`disabled` / `stalled` / `idle`) and the state clause of a hint; the
 
 ## No action needed is a first-class outcome
 
-A monitor delivery that turns out to need nothing is not a problem: end the
-turn with no reply, keep the same unchanged content out of later turns, and
-don't notify. That is the design — the delta was the point, and the quiet
-ticks around it cost nothing.
+A monitor delivery that turns out to need nothing is not a problem: call
+`no_reply`; don't notify. (A delivery armed with `notify: true` is exempt: it
+still gets its answer.) Keep the same unchanged content out of later turns.
+That is the design — the delta was the point, and the quiet ticks around it
+cost nothing.
