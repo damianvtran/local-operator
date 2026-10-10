@@ -521,10 +521,10 @@ SECTIONS: tuple[Section, ...] = (
         "supplements",
         # The user-facing name is "Highlights" (memo §0 "The names").
         "Highlights",
-        # NEW_SESSIONS: the runner is built once per runtime handle and reads a
-        # SNAPSHOT of this section when a job starts (docs/design/turn-supplements.md
-        # §2.12), so an edit lands on the next session. Claiming LIVE would be a
-        # painted lie.
+        # NEW_SESSIONS: the runner is built once per runtime handle and reads a SNAPSHOT
+        # of this section AT BUILD (docs/design/turn-supplements.md §2.12; the read is in
+        # ``SupplementRunner.__init__``), so an edit lands on the next session. Claiming
+        # LIVE would be a painted lie.
         Scope.NEW_SESSIONS,
         "After an answer, point out the files it produced and, when you turn it on, "
         "draw a chart of numbers it showed. Off by environment: LOP_SUPPLEMENTS=0.",
@@ -3209,7 +3209,12 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.INT,
         default=6000,
         help="Needs graphics on. Output budget per generator turn.",
+        # Mirrors ``policy.MAX_OUTPUT_TOKENS_BOUNDS``, the reader's accept range: with no
+        # page maximum the registry accepted values ``from_values`` substitutes with the
+        # default (round-1 R4: 2,000,000 came back as 6000). The pair is pinned by
+        # ``test_supplements_registry_bounds_are_honoured_by_the_reader``.
         minimum=1,
+        maximum=1_000_000,
         gated_by="supplements.graphics",
     ),
     Setting(
@@ -3232,6 +3237,9 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.FLOAT,
         default=0.20,
         help="Needs graphics on. Soft cap on one job's spend.",
+        # ``0`` is a VALID value -- "never spend" -- and the reader honours it as stored
+        # (round-1 R4); the range is only the page's control window, not the reader's
+        # limit (a hand-edited higher cap stays the user's own stated guard).
         minimum=0.0,
         maximum=100.0,
         gated_by="supplements.graphics",

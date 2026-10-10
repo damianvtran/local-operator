@@ -293,11 +293,66 @@ async def test_the_kill_switch_stops_the_job_before_any_work(tmp_path: Path) -> 
     try:
         policy.SUPPLEMENTS = False
         await session.prompt("write me a report")
-        await asyncio.sleep(0.05)
-        assert session.transcript.latest_custom(SUPPLEMENT_CUSTOM_TYPE) is None
+        # Nothing is scheduled on the off path (the refusal is synchronous in the event
+        # fan-out, before ``prompt`` returns), so these are direct assertions rather than
+        # a wait on the clock -- round-1 R7; the file's own doctrine is "wait on the
+        # event, never on the clock", and there is no event here to wait on.
         assert handle._supplements._task is None
+        assert session.transcript.latest_custom(SUPPLEMENT_CUSTOM_TYPE) is None
     finally:
         policy.SUPPLEMENTS = True
+        await handle.dispose()
+        await session.dispose()
+
+
+async def test_the_settings_snapshot_is_read_at_build_not_per_turn(tmp_path: Path) -> None:
+    """Round-1 R3: the runner reads ``values.supplements`` ONCE, at build (memo §2.12).
+
+    The section's scope is ``NEW_SESSIONS``, and the scope claim is exactly this: an edit
+    lands on the NEXT session. A per-job read made an edit land on the next eligible turn
+    of an EXISTING session -- LIVE behaviour under a NEW_SESSIONS label. The turn below
+    is the discriminator: the trigger still schedules its job, and under the old shape
+    that job read the EDITED config and journalled a row.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.session.runtime.supplements import SupplementRunner
+
+    config_dir_path = tmp_path / "cfg"
+    config_dir_path.mkdir()
+    manager = ConfigManager(config_dir_path)
+    settings_io.write_setting(manager, settings_io.BY_KEY["supplements.files"], False)
+    calls: list[str] = []
+    stream = _report_stream("reports/snap.md")
+    session = _make_session(
+        tmp_path / "sessions" / "snap", stream, [_write_tool(tmp_path, calls)], tmp_path
+    )
+    handle = ServingSessionHandle(
+        session,
+        asyncio.get_running_loop(),
+        install_gates=False,
+        cwd=str(tmp_path),
+        config_dir=config_dir_path,
+    )
+    handle.subscribe(lambda: None)
+    try:
+        # The build-time snapshot saw ``files: false``: inactive, master on by default.
+        snapshot = handle._supplements._settings
+        assert snapshot.enabled is True and snapshot.files is False and not snapshot.active
+        # Edit the config mid-session through the same facade the settings page uses...
+        settings_io.write_setting(manager, settings_io.BY_KEY["supplements.files"], True)
+        await session.prompt("write me the report")
+        # ...the job runs on the SNAPSHOT and no-ops: no row, while the turn was real.
+        await wait_for(
+            lambda: handle._supplements._task is not None and handle._supplements._task.done(),
+            timeout=10,
+        )
+        assert session.transcript.latest_custom(SUPPLEMENT_CUSTOM_TYPE) is None
+        assert calls == ["reports/snap.md"]
+        # A runner built AFTER the edit reads it: the edit lands on the next session.
+        fresh = SupplementRunner(session, cwd=str(tmp_path), config_dir=config_dir_path)
+        assert fresh._settings.files is True and fresh._settings.active
+    finally:
         await handle.dispose()
         await session.dispose()
 

@@ -76,6 +76,18 @@ DEFAULT_MAX_COST_USD: Final = 0.20
 DEFAULT_MAX_FEATURED: Final = 4
 DEFAULT_DENY_PREFIXES: Final[tuple[str, ...]] = ()
 
+#: ACCEPT RANGES, ``(low, high)``, for the keys below: ``from_values`` honours a stored value
+#: inside as stored and falls back to the default outside. Each is MIRRORED by the registry
+#: row's ``minimum``/``maximum`` in ``settings_io.py`` (carried as literals there, because
+#: settings_io stays off this module's import path) and the pair is pinned equal by
+#: ``tests/unit/test_settings_io.py::test_supplements_registry_bounds_are_honoured_by_the_reader``.
+#: The invariant is one-directional: the page's range must sit INSIDE the reader's, because a
+#: value the page accepts and the reader substitutes is a silent lie (agent review round 1,
+#: R4 -- ``maxOutputTokens`` had no page maximum, so 2,000,000 came back as 6000).
+MAX_OUTPUT_TOKENS_BOUNDS: Final = (1, 1_000_000)
+TIMEOUT_S_BOUNDS: Final = (1, 3600)
+MAX_FEATURED_BOUNDS: Final = (1, 12)
+
 
 @dataclass(frozen=True)
 class SupplementSettings:
@@ -110,10 +122,11 @@ class SupplementSettings:
         if not isinstance(section, Mapping):
             return cls()
         # Lazy: ``settings_io`` is the registry's home and this module is a leaf. The import
-        # is paid once per runtime, when the first eligible turn builds the runner.
+        # is paid when a runtime handle's runner is BUILT (``SupplementRunner.__init__``),
+        # and only when the section exists at all -- an absent section returns ``cls()``
+        # without touching the registry.
         from local_operator.settings_io import strict_bool
 
-        low, high = MAX_TURNS_BOUNDS
         model = section.get("model")
         prefixes = section.get("denyPrefixes")
         return cls(
@@ -121,13 +134,17 @@ class SupplementSettings:
             files=strict_bool(section.get("files"), DEFAULT_FILES),
             graphics=strict_bool(section.get("graphics"), DEFAULT_GRAPHICS),
             model=model.strip() if isinstance(model, str) and model.strip() else DEFAULT_MODEL,
-            max_turns=_bounded_int(section.get("maxTurns"), DEFAULT_MAX_TURNS, low, high),
+            max_turns=_bounded_int(section.get("maxTurns"), DEFAULT_MAX_TURNS, *MAX_TURNS_BOUNDS),
             max_output_tokens=_bounded_int(
-                section.get("maxOutputTokens"), DEFAULT_MAX_OUTPUT_TOKENS, 1, 1_000_000
+                section.get("maxOutputTokens"),
+                DEFAULT_MAX_OUTPUT_TOKENS,
+                *MAX_OUTPUT_TOKENS_BOUNDS,
             ),
-            timeout_s=_bounded_int(section.get("timeoutS"), DEFAULT_TIMEOUT_S, 1, 3600),
-            max_cost_usd=_positive_float(section.get("maxCostUsd"), DEFAULT_MAX_COST_USD),
-            max_featured=_bounded_int(section.get("maxFeatured"), DEFAULT_MAX_FEATURED, 1, 12),
+            timeout_s=_bounded_int(section.get("timeoutS"), DEFAULT_TIMEOUT_S, *TIMEOUT_S_BOUNDS),
+            max_cost_usd=_nonnegative_float(section.get("maxCostUsd"), DEFAULT_MAX_COST_USD),
+            max_featured=_bounded_int(
+                section.get("maxFeatured"), DEFAULT_MAX_FEATURED, *MAX_FEATURED_BOUNDS
+            ),
             deny_prefixes=(
                 tuple(item.strip() for item in prefixes if isinstance(item, str) and item.strip())
                 if isinstance(prefixes, (list, tuple))
@@ -143,7 +160,14 @@ def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
     return value if low <= value <= high else default
 
 
-def _positive_float(value: Any, default: float) -> float:
+def _nonnegative_float(value: Any, default: float) -> float:
+    # ``0`` is a VALID stored value here, not a malformed one (agent review round 1, R4):
+    # the settings page accepts ``maxCostUsd: 0`` -- "never spend" -- and mapping it to the
+    # 0.20 default turned a block into a permit. Negative, bool and non-numeric stay
+    # malformed -> default, and there is deliberately NO upper cutoff: the registry's 100.0
+    # is the page's control ceiling, while a hand-edited higher cap is the user's own
+    # written money guard -- substituting the default would silently change a limit they
+    # stated. The invariant this keeps: every value the page accepts comes back as stored.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
-    return float(value) if value > 0 else default
+    return float(value) if value >= 0 else default

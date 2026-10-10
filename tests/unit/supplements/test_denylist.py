@@ -46,6 +46,12 @@ S14_TABLE = [
     ("api_token.txt", denylist.RULE_TOKEN_SECRET),
     ("my-Secret-notes.md", denylist.RULE_TOKEN_SECRET),
     ("docker-compose.prod.yml", denylist.RULE_COMPOSE),
+    # Round 1 (R5): a kubeconfig outside ``.kube`` is the same cluster credential store --
+    # ``deploy/kubeconfig`` was the reproduced slip; the two spellings trees write are here
+    # so the ``kubeconfig*`` / ``*.kubeconfig`` patterns cannot silently regress.
+    ("deploy/kubeconfig", denylist.RULE_TOOL_CONFIG),
+    ("kubeconfig-prod", denylist.RULE_TOOL_CONFIG),
+    ("prod.kubeconfig", denylist.RULE_TOOL_CONFIG),
     ("server.PEM", denylist.RULE_SUFFIX),
     ("~/.ssh/config", denylist.RULE_COMPONENT),
     ("keys/signing.key", denylist.RULE_SUFFIX),

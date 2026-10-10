@@ -81,6 +81,16 @@ class SupplementRunner:
         self._cwd = cwd
         self._config_dir = config_dir
         self._seam = seam
+        #: THE SETTINGS SNAPSHOT (memo §2.12), read ONCE here, at build, and never
+        #: re-read: the section's scope is NEW_SESSIONS because the runner is built per
+        #: runtime handle, so an edit lands on the NEXT session -- exactly what the
+        #: settings page paints. A per-job re-read (this class's first shape) made an
+        #: edit land on the next eligible turn of an EXISTING session: LIVE behaviour
+        #: under a NEW_SESSIONS label, with the comments and §2.12 all describing the
+        #: snapshot (agent review round 1, R3). The read is synchronous, bounded, and
+        #: never raises -- the ``read_monitor_settings`` posture (``Session.__init__``
+        #: reads ``values.monitor`` the same way, on the same kind of build path).
+        self._settings = self._read_settings()
         self._task: asyncio.Task[None] | None = None
         self._open_row: SupplementDetails | None = None
         #: Jobs this runtime is running right now: the runtime's half of the reader rule
@@ -153,7 +163,7 @@ class SupplementRunner:
                 await asyncio.gather(previous, return_exceptions=True)
                 await self._close_superseded()
             await self._session.wait_turn_settled(provenance.settled_mark)
-            settings = await asyncio.to_thread(self._read_settings)
+            settings = self._settings
             if not settings.active:
                 return
             await asyncio.wait_for(self._job(provenance, settings), timeout=settings.timeout_s)
@@ -172,11 +182,26 @@ class SupplementRunner:
             logger.debug("could not journal the superseded supplement row", exc_info=True)
 
     def _read_settings(self) -> policy.SupplementSettings:
-        from local_operator.config import ConfigManager
-        from local_operator.paths import config_dir
+        """Read the ``supplements`` section ONCE, at build (``__init__`` keeps the snapshot).
 
-        manager = ConfigManager(self._config_dir or config_dir())
-        return policy.SupplementSettings.from_values(getattr(manager.get_config(), "values", None))
+        Never raises, and the failure envelope is why: the old per-job call sat inside the
+        job's fail-open ``except``, while THIS one runs in the handle's constructor -- an
+        unreadable config must not fail every session started from it. Falls back to the
+        built-in defaults with a warning, the ``read_monitor_settings`` posture; the
+        defaults keep the feature ON, matching the kill switch's rule that a typo must not
+        silently unbuild it.
+        """
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            manager = ConfigManager(self._config_dir or config_dir())
+            return policy.SupplementSettings.from_values(
+                getattr(manager.get_config(), "values", None)
+            )
+        except Exception:  # noqa: BLE001 — a bad config must not fail session startup
+            logger.warning("values.supplements could not be read; using the built-in defaults")
+            return policy.SupplementSettings()
 
     async def _job(self, provenance: Any, settings: policy.SupplementSettings) -> None:
         transcript = self._session.transcript
