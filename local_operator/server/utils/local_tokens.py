@@ -11,10 +11,15 @@ action**, shipped PERMISSIVE first so no mixed-version combination breaks.
 PHASE A IS THE CONTRACT THIS MODULE IMPLEMENTS. Nothing here refuses a
 request. A presented token is validated and, when valid, counted (so the code
 path is genuinely exercised); an invalid or STALE one is treated as absent --
-never a refusal in Phase A. The one observable side effect is a single log
-line per distinct stale generation, so the compat window shows stale surfaces
-without a log sink (see :func:`observe_credentials`). Phases B/C (settings-
-gated settings, later releases) reuse the same primitives to refuse.
+never a refusal in Phase A. Every classification is TOTAL: attacker-shaped
+values classify, they never raise -- a raise here would be a 500 on a route
+whose contract is "served regardless", and the shape of a raise must not
+depend on the serving generation. The one observable side effect is a single
+WARNING line per distinct stale generation (WARNING because the daemon's
+console logging runs at the default level; a line nobody sees is not a
+notice), so the compat window shows stale surfaces without a log sink (see
+:func:`observe_credentials`). Phases B/C (settings-gated, later releases)
+reuse the same primitives to refuse.
 
 THE KEY SPLIT. One boot draws a 256-bit seed from the OS CSPRNG
 (``secrets.token_bytes(32)``) and derives two values with HKDF-SHA256
@@ -113,6 +118,35 @@ _SIGNING_INFO = b"lop-serve-signing-key-v1"
 _HEX_RE = re.compile(r"[0-9a-f]{64}")
 _EXP_RE = re.compile(r"[0-9]{1,10}")
 
+#: The token generation prefix's strict spelling: digit-only, at most 10 digits
+#: (the same bound as ``exp``, far above any real boot count). The bound is
+#: TOTALITY, not taste: the value is attacker-supplied on every static GET, and
+#: ``int()`` on an unbounded digit string is O(n^2) and raises above 4300 digits
+#: (the interpreter's str-digit safety wall) -- a crafted prefix must therefore
+#: be rejected BEFORE any conversion, not guarded around it.
+_GENERATION_RE = re.compile(r"[0-9]{1,10}")
+
+#: The token secret's strict spelling: the url-safe base64 alphabet (a minted
+#: secret is 43 unpadded chars of it; the cap is a bound, not the format).
+#: Anything outside this set -- whitespace, controls, non-ASCII, punctuation --
+#: was never a real token, so it classifies invalid BEFORE the generation
+#: comparison: that keeps malformed shapes generation-independent (no oracle)
+#: and keeps ``compare_digest`` from ever seeing a non-ASCII str.
+_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _parse_token(presented: str) -> tuple[int, str] | None:
+    """``(generation, secret)`` for a well-formed token, ``None`` otherwise.
+
+    TOTAL by construction: every ``str`` returns, none raises. Both callers
+    (``token_status`` and the observation log) share this one parser so the
+    bound cannot be fixed in one place and left open in the other.
+    """
+    prefix, sep, secret = presented.partition(".")
+    if not sep or not _GENERATION_RE.fullmatch(prefix):
+        return None
+    return int(prefix), secret
+
 
 def _hkdf_sha256(*, ikm: bytes, info: bytes) -> bytes:
     """RFC 5869 HKDF-SHA256 (extract, expand) over stdlib ``hmac``/``hashlib``."""
@@ -143,19 +177,33 @@ class SurfaceKeys:
     def token_status(self, presented: str) -> str:
         """``"valid"`` / ``"stale"`` / ``"invalid"`` for a presented token.
 
+        TOTAL: every ``str`` classifies and none raises. The value is
+        attacker-supplied on every static GET and at the sign door, so a raise
+        here is a 500 where the contract says "treated as absent" -- and it was
+        also a generation oracle: a non-ASCII secret used to raise only when
+        its prefix MATCHED the serving generation. Malformed SHAPES are
+        therefore classified before any generation comparison, making their
+        outcome independent of the serving generation by construction.
+
         ``stale`` is a well-formed token whose generation is not the serving
         one -- the class Phase A logs once; ``invalid`` is everything else,
         including a well-formed token with the right generation but the wrong
         secret. Constant-time comparison for the secret (a token guess must
         not be tunable by timing).
         """
-        prefix, sep, secret = presented.partition(".")
-        if not sep or not (prefix.isascii() and prefix.isdigit()):
+        parsed = _parse_token(presented)
+        if parsed is None:
             return "invalid"
-        if int(prefix) != self.generation:
+        generation, secret = parsed
+        if not _SECRET_RE.fullmatch(secret):
+            # Outside the alphabet a minted secret can have: never a real token,
+            # so invalid regardless of generation (and ``compare_digest`` can
+            # never see the non-ASCII str it would raise on).
+            return "invalid"
+        if generation != self.generation:
             return "stale"
         expected_secret = self.access_token.partition(".")[2]
-        if secret and secrets.compare_digest(secret, expected_secret):
+        if secrets.compare_digest(secret, expected_secret):
             return "valid"
         return "invalid"
 
@@ -337,7 +385,8 @@ def observe_credentials(
     NEVER raises and never influences the response -- permissiveness is the
     caller's contract (the static routes serve regardless in Phase A; Phases
     B/C will read a hardened version of this result). The token is validated
-    and counted; a stale token additionally logs once per distinct generation.
+    and counted; a stale token additionally logs one WARNING per distinct
+    generation (WARNING so a daemon without ``LOG_LEVEL`` still shows it).
     Signed-URL params are verified (before any resolution, which is why this
     is called BEFORE ``resolve_servable``) and counted when valid; an invalid
     or expired signature is silently absent in Phase A -- it is not a
@@ -350,15 +399,24 @@ def observe_credentials(
             _STATS["tokens_valid"] += 1
         elif status == "stale":
             _STATS["tokens_stale"] += 1
-            presented_generation = int(token.partition(".")[0])
-            if presented_generation not in _STALE_LOGGED and len(_STALE_LOGGED) < _STALE_LOG_CAP:
-                _STALE_LOGGED.add(presented_generation)
-                logger.info(
-                    "local surface token from generation %s presented; this daemon serves "
-                    "generation %s (Phase A: treated as absent)",
-                    presented_generation,
-                    keys.generation,
-                )
+            parsed = _parse_token(token)
+            if parsed is not None:  # stale implies it; stated for the reader
+                presented_generation = parsed[0]
+                if (
+                    presented_generation not in _STALE_LOGGED
+                    and len(_STALE_LOGGED) < _STALE_LOG_CAP
+                ):
+                    _STALE_LOGGED.add(presented_generation)
+                    # WARNING, not INFO, because the daemon's console logging runs
+                    # at LOG_LEVEL's default WARNING -- a line nobody sees is not a
+                    # notice, and this line IS the Phase A compat signal (the same
+                    # reasoning as server/retire.py's notices to the operator).
+                    logger.warning(
+                        "local surface token from generation %s presented; this daemon serves "
+                        "generation %s (Phase A: treated as absent)",
+                        presented_generation,
+                        keys.generation,
+                    )
         else:
             _STATS["tokens_invalid"] += 1
     if exp_raw is not None or sig_raw is not None:
