@@ -892,6 +892,31 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # re-delivery after a runtime restart — the one property (idempotent
     # re-arm) the queue exists for.
     "queue_move": "stop",
+    # TURN SUPPLEMENTS ("Highlights", memo §2.7): the lazy read and the three
+    # controls an ``AttachedSession`` facade sends once the two-half
+    # ``supplements-v1`` gate admitted it. All four need rows or a real
+    # viewer's stream dies on them: ``_forward_stream_frame`` refuses an op
+    # with no decision AND CLOSES the stream, and the READ rides the mount
+    # path (``_request_supplement_reads``), so a missing row would kill a
+    # viewer's whole session stream over a cosmetic read.
+    #
+    # Each value is the narrowest capability already covering its effect, the
+    # row-per-effect rule this table states above. ``supplements_for`` is
+    # ``view`` — it reads the session's own journal rows (the
+    # ``history_page``/``job_trajectory`` class). ``supplement_cancel`` is
+    # ``stop``: "cancel" is listed in that capability's own words, and
+    # ``cancel_subagents`` is the same verb one family over — cancelling this
+    # session's own background work. ``supplement_steer`` is ``steer`` (it
+    # injects the instruction the next attempt runs with).
+    # ``supplement_restart`` rides ``steer`` too: a steer already cuts the
+    # in-flight attempt and starts version + 1, so a surface that may perform
+    # the stronger act cannot be refused the retry with the previous
+    # instruction — the ``queue_move`` rule ("the actor that may retire NOW
+    # may certainly schedule the same retirement for later").
+    "supplements_for": "view",
+    "supplement_cancel": "stop",
+    "supplement_steer": "steer",
+    "supplement_restart": "steer",
     # AN OP WITH NO ROW IS REFUSED WHEN FORWARDED, and that is the
     # deliberate-absence mechanism this table used for ``operator_challenge``
     # until slice (a): "it produces material a surface uses to SIGN as the

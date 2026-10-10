@@ -178,7 +178,13 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # omission. THE TAB WILL CONSUME a destination that renders a LIVE
             # node graph (networks, member devices, link state) — not a receipt of
             # a CLI run, which is why no existing destination name fits and one
-            # must be added with the tab.
+            # must be added with the tab. `/highlights`, whose affordance on the
+            # desktop is the supplement block's OWN control pair (the UI side of
+            # memo §3.2 T5) rather than a slash-command destination: apart from
+            # that pair there is nothing for a route to reach, and offering a
+            # destination whose renderer has no adapter is the
+            # offered-and-then-dead-ends row the `/mobile` lesson refuses. The
+            # decision is stated on the `highlights` entry in `slash_commands.py`.
             # `/info` used to be the
             # other one — its every field describes the PROCESS AND HOST it
             # runs in (install prefix, resolved import path, pid, control port,
@@ -197,7 +203,14 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # A literal, and updating it is the review prompt: a command that
             # lands in this set without a decision to withhold it is a command
             # silently missing from the desktop.
-            assert withheld == {"keys", "links", "mobile", "network", "notifications"}
+            assert withheld == {
+                "highlights",
+                "keys",
+                "links",
+                "mobile",
+                "network",
+                "notifications",
+            }
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The
             # catalogue's `aliases` are copied straight off `spec.aliases`
