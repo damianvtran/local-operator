@@ -811,6 +811,8 @@ class TestEscapedWordFormsStayMaskedThroughRawArguments:
         assert json.loads(raw)["content"] == (
             f"my_{REDACTION_MARKER}\n\\{REDACTION_MARKER}\n{EMBEDDED_WORD}\n"
         )
+
+
 # --- RAW ARGUMENTS: the JSON string is judged with the same line boundaries ----------------
 #
 # QA on PR #2133 (round 1 Q-1, round 2 Q-7): a credential right after a line break inside a
