@@ -20,6 +20,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from local_operator.supplements.contract import (
+    SUPPLEMENTS_FEATURE_KEY,
+    SUPPLEMENTS_FEATURE_VERSION,
+)
+
 
 def feature_flags() -> dict[str, Any]:
     """The versioned feature map, resolved per call.
@@ -753,6 +758,18 @@ def feature_flags() -> dict[str, Any]:
         # additive — an absent key means the surface is not there, which is the
         # pre-voicing behaviour rather than a degraded one.
         "tts": 1,
+        # TURN SUPPLEMENTS ("Highlights"), the STATIC HTTP flag: the contract (event,
+        # row, capability strings, document assembler) is in this build. The document
+        # routes are 404 stubs until lane C2 fills them in, and nothing emits a
+        # supplement until lane C1, so no renderer is yet answered. It is deliberately
+        # NOT the attach gate --
+        # live events and projected rows ride the ``supplements-v1`` capability on
+        # the owner record ANDed with the viewer's own declaration (see
+        # ``supplements.contract.negotiated``) -- so a renderer reads this key to decide
+        # whether to ASK, and the capability decides whether it is ANSWERED. No
+        # released renderer reads it; lane C1 puts it behind the ``LOP_SUPPLEMENTS``
+        # kill switch the way ``references`` is.
+        SUPPLEMENTS_FEATURE_KEY: SUPPLEMENTS_FEATURE_VERSION,
         # THE PER-SESSION CODE-REQUEST SURFACE: `GET
         # /v1/desktop/sessions/{id}/code-requests` (this conversation's PRs/MRs, from the
         # derived index) plus its `/refresh` child. ONE key for the family, because the
