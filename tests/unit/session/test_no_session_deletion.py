@@ -1713,15 +1713,35 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ("local_operator/tools/group_reaper.py::_safe_unlink", "<path>.unlink", "pgid ledger FILE"),
     ("local_operator/tools/group_reaper.py::kill_own_groups", "<path>.unlink", "pgid ledger FILE"),
     ("local_operator/tools/spill.py::SpillStore._remove", "<path>.unlink", "spill FILE"),
+    # The notifier's own files under <config_dir>/notifier/: a build lock, the
+    # terminal memory and the --action probe cache, each built from
+    # ``config_dir()`` plus a fixed basename — none can name a path under
+    # sessions/. The ``_build_in_background`` rows that stood here moved when
+    # the single-builder rework split the marker into claim/release.
     (
-        "local_operator/tui/notifier_app/__init__.py::_build_in_background",
+        "local_operator/tui/notifier_app/__init__.py::_claim_build_lock",
         "<path>.unlink",
-        "build marker FILE",
+        "stale build-marker FILE <config_dir>/notifier/.building; config-dir lock",
     ),
     (
-        "local_operator/tui/notifier_app/__init__.py::_build_in_background._run",
+        "local_operator/tui/notifier_app/__init__.py::_release_build_lock",
         "<path>.unlink",
-        "build marker FILE",
+        "build-marker FILE <config_dir>/notifier/.building; config-dir lock",
+    ),
+    (
+        "local_operator/spawn/remembered.py::remember",
+        "os.replace",
+        "Atomic write of <config_dir>/notifier/last-terminal.json; config-dir FILE",
+    ),
+    (
+        "local_operator/spawn/remembered.py::forget",
+        "<path>.unlink",
+        "Removes <config_dir>/notifier/last-terminal.json; config-dir FILE",
+    ),
+    (
+        "local_operator/tui/notify.py::_write_persisted_action_support",
+        "os.replace",
+        "Atomic write of <config_dir>/notifier/notify-send-actions.json; config-dir FILE",
     ),
     ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
