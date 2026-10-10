@@ -1627,7 +1627,10 @@ def providers_openrouter_data_collection_label() -> Msg:
 
 
 def providers_openrouter_enforce_distillable_text_choice_true_description() -> Msg:
-    return Msg("wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description", {})
+    return Msg(
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+        {},
+    )
 
 
 def providers_openrouter_enforce_distillable_text_choice_true_label() -> Msg:
@@ -1635,7 +1638,10 @@ def providers_openrouter_enforce_distillable_text_choice_true_label() -> Msg:
 
 
 def providers_openrouter_enforce_distillable_text_choice_unset_description() -> Msg:
-    return Msg("wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.description", {})
+    return Msg(
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.description",
+        {},
+    )
 
 
 def providers_openrouter_enforce_distillable_text_choice_unset_label() -> Msg:
@@ -2743,7 +2749,10 @@ def wakes_triggers_min_gap_minutes_label() -> Msg:
 
 
 def wakes_triggers_project_staleness_enabled_choice_false_description() -> Msg:
-    return Msg("wire.settings.wakes_triggers_project_staleness_enabled.choice.false.description", {})
+    return Msg(
+        "wire.settings.wakes_triggers_project_staleness_enabled.choice.false.description",
+        {},
+    )
 
 
 def wakes_triggers_project_staleness_enabled_choice_true_description() -> Msg:

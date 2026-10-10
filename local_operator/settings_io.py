@@ -109,7 +109,6 @@ def _t(message: _Msg) -> str:
     return _i18n_runtime.render_message(source, dict(message.params), "en")
 
 
-
 class ConfigUnreadableError(Exception):
     """config.yml cannot be parsed, so no write may be based on it.
 
@@ -867,6 +866,13 @@ REJECTION_VALUE_SEP = " — "
 ADVICE_NOT_FOUND = "does not exist; clicks open a terminal. Clear this to discover the app."
 ADVICE_NOT_EXECUTABLE = "not executable; clicks open a terminal. Clear this to discover the app."
 ADVICE_NOT_ON_PATH = "not on PATH; clicks open a terminal. Clear this to discover the app."
+#: RESIDUAL COPY / OWNER (S1 extraction, review round 2): these three constants,
+#: :data:`REJECTION_VALUE_SEP` above and this module's ``raise ValueError``
+#: prose stay LITERAL by decision — they are rejection/envelope copy, invisible
+#: to the ratchet's sinks (concatenation and ``raise`` are its documented blind
+#: spot), and they render as /settings rejection feedback and 4xx details.
+#: Owner: the wire.errors slice (error-envelope migration; RFC §1.2 already
+#: names :func:`split_value_rejection` as a precondition consumer).
 
 #: Whether this process is on Windows, read ONCE as a module constant.
 #:
@@ -1206,7 +1212,11 @@ def _effort_choices() -> tuple[Choice, ...]:
     no-model setup state.
     """
     return (
-        Choice("", _t(_ws.model_effort_choice_unset_label()), _t(_ws.model_effort_choice_unset_description())),
+        Choice(
+            "",
+            _t(_ws.model_effort_choice_unset_label()),
+            _t(_ws.model_effort_choice_unset_description()),
+        ),
         *(Choice(level, level, _EFFORT_LEVEL_HELP.get(level, "")) for level in EFFORT_ORDER),
     )
 
@@ -1450,9 +1460,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.providers_openai_use_max_context_window_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.providers_openai_use_max_context_window_help())
-        ),
+        help=(_t(_ws.providers_openai_use_max_context_window_help())),
     ),
     Setting(
         key="providers.openai.api",
@@ -1463,8 +1471,16 @@ SETTINGS: tuple[Setting, ...] = (
         default="responses",
         help=_t(_ws.providers_openai_api_help()),
         choices=(
-            Choice("responses", _t(_ws.providers_openai_api_choice_responses_label()), _t(_ws.providers_openai_api_choice_responses_description())),
-            Choice("chat_completions", _t(_ws.providers_openai_api_choice_chat_completions_label()), _t(_ws.providers_openai_api_choice_chat_completions_description())),
+            Choice(
+                "responses",
+                _t(_ws.providers_openai_api_choice_responses_label()),
+                _t(_ws.providers_openai_api_choice_responses_description()),
+            ),
+            Choice(
+                "chat_completions",
+                _t(_ws.providers_openai_api_choice_chat_completions_label()),
+                _t(_ws.providers_openai_api_choice_chat_completions_description()),
+            ),
         ),
     ),
     Setting(
@@ -1480,9 +1496,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.providers_anthropic_cache_ttl_1h_min_context_tokens_label()),
         kind=Kind.INT,
         default=150_000,
-        help=(
-            _t(_ws.providers_anthropic_cache_ttl_1h_min_context_tokens_help())
-        ),
+        help=(_t(_ws.providers_anthropic_cache_ttl_1h_min_context_tokens_help())),
         minimum=0,
         maximum=10_000_000,
     ),
@@ -1521,9 +1535,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.providers_openrouter_provider_affinity_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.providers_openrouter_provider_affinity_help())
-        ),
+        help=(_t(_ws.providers_openrouter_provider_affinity_help())),
     ),
     Setting(
         key="providers.openrouter.sort",
@@ -1536,14 +1548,28 @@ SETTINGS: tuple[Setting, ...] = (
         # key. An ENUM member rather than `empty_unsets` so the page can show
         # the three real policies beside "default" as peers to pick between.
         default="",
-        help=(
-            _t(_ws.providers_openrouter_sort_help())
-        ),
+        help=(_t(_ws.providers_openrouter_sort_help())),
         choices=(
-            Choice("", _t(_ws.providers_openrouter_sort_choice_unset_label()), _t(_ws.providers_openrouter_sort_choice_unset_description())),
-            Choice("price", _t(_ws.providers_openrouter_sort_choice_price_label()), _t(_ws.providers_openrouter_sort_choice_price_description())),
-            Choice("throughput", _t(_ws.providers_openrouter_sort_choice_throughput_label()), _t(_ws.providers_openrouter_sort_choice_throughput_description())),
-            Choice("latency", _t(_ws.providers_openrouter_sort_choice_latency_label()), _t(_ws.providers_openrouter_sort_choice_latency_description())),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_sort_choice_unset_label()),
+                _t(_ws.providers_openrouter_sort_choice_unset_description()),
+            ),
+            Choice(
+                "price",
+                _t(_ws.providers_openrouter_sort_choice_price_label()),
+                _t(_ws.providers_openrouter_sort_choice_price_description()),
+            ),
+            Choice(
+                "throughput",
+                _t(_ws.providers_openrouter_sort_choice_throughput_label()),
+                _t(_ws.providers_openrouter_sort_choice_throughput_description()),
+            ),
+            Choice(
+                "latency",
+                _t(_ws.providers_openrouter_sort_choice_latency_label()),
+                _t(_ws.providers_openrouter_sort_choice_latency_description()),
+            ),
         ),
     ),
     Setting(
@@ -1561,9 +1587,7 @@ SETTINGS: tuple[Setting, ...] = (
         warning=_t(_ws.providers_openrouter_order_warning()),
         # Empty-first (design round 1, D3): empty is the default that must not
         # be disturbed, so the detail names what empty MEANS before the how-to.
-        help=(
-            _t(_ws.providers_openrouter_order_help())
-        ),
+        help=(_t(_ws.providers_openrouter_order_help())),
         # OPEN namespace — deliberately no `members`. OpenRouter owns the slug
         # vocabulary and grows it without notice (deepinfra, novita, regional
         # variants like google-vertex/us-east5), so a closed list would reject
@@ -1582,9 +1606,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.providers_openrouter_only_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            _t(_ws.providers_openrouter_only_help())
-        ),
+        help=(_t(_ws.providers_openrouter_only_help())),
         # Open namespace, same reason as `order` above.
         placeholder=_t(_ws.providers_openrouter_only_placeholder()),
         empty_unsets=True,
@@ -1596,9 +1618,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.providers_openrouter_ignore_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            _t(_ws.providers_openrouter_ignore_help())
-        ),
+        help=(_t(_ws.providers_openrouter_ignore_help())),
         # Open namespace, same reason as `order` above.
         placeholder=_t(_ws.providers_openrouter_ignore_placeholder()),
         empty_unsets=True,
@@ -1619,12 +1639,18 @@ SETTINGS: tuple[Setting, ...] = (
         # shows is what `lop config edit` accepts.
         kind=Kind.ENUM,
         default="",
-        help=(
-            _t(_ws.providers_openrouter_allow_fallbacks_help())
-        ),
+        help=(_t(_ws.providers_openrouter_allow_fallbacks_help())),
         choices=(
-            Choice("", _t(_ws.providers_openrouter_allow_fallbacks_choice_unset_label()), _t(_ws.providers_openrouter_allow_fallbacks_choice_unset_description())),
-            Choice("false", _t(_ws.providers_openrouter_allow_fallbacks_choice_false_label()), _t(_ws.providers_openrouter_allow_fallbacks_choice_false_description())),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_allow_fallbacks_choice_unset_label()),
+                _t(_ws.providers_openrouter_allow_fallbacks_choice_unset_description()),
+            ),
+            Choice(
+                "false",
+                _t(_ws.providers_openrouter_allow_fallbacks_choice_false_label()),
+                _t(_ws.providers_openrouter_allow_fallbacks_choice_false_description()),
+            ),
         ),
     ),
     Setting(
@@ -1637,12 +1663,18 @@ SETTINGS: tuple[Setting, ...] = (
         # "no preference sent"; "" restores the shared no-opinion `—`.
         kind=Kind.ENUM,
         default="",
-        help=(
-            _t(_ws.providers_openrouter_require_parameters_help())
-        ),
+        help=(_t(_ws.providers_openrouter_require_parameters_help())),
         choices=(
-            Choice("", _t(_ws.providers_openrouter_require_parameters_choice_unset_label()), _t(_ws.providers_openrouter_require_parameters_choice_unset_description())),
-            Choice("true", _t(_ws.providers_openrouter_require_parameters_choice_true_label()), _t(_ws.providers_openrouter_require_parameters_choice_true_description())),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_require_parameters_choice_unset_label()),
+                _t(_ws.providers_openrouter_require_parameters_choice_unset_description()),
+            ),
+            Choice(
+                "true",
+                _t(_ws.providers_openrouter_require_parameters_choice_true_label()),
+                _t(_ws.providers_openrouter_require_parameters_choice_true_description()),
+            ),
         ),
     ),
     Setting(
@@ -1652,13 +1684,23 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.providers_openrouter_data_collection_label()),
         kind=Kind.ENUM,
         default="",
-        help=(
-            _t(_ws.providers_openrouter_data_collection_help())
-        ),
+        help=(_t(_ws.providers_openrouter_data_collection_help())),
         choices=(
-            Choice("", _t(_ws.providers_openrouter_data_collection_choice_unset_label()), _t(_ws.providers_openrouter_data_collection_choice_unset_description())),
-            Choice("allow", _t(_ws.providers_openrouter_data_collection_choice_allow_label()), _t(_ws.providers_openrouter_data_collection_choice_allow_description())),
-            Choice("deny", _t(_ws.providers_openrouter_data_collection_choice_deny_label()), _t(_ws.providers_openrouter_data_collection_choice_deny_description())),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_data_collection_choice_unset_label()),
+                _t(_ws.providers_openrouter_data_collection_choice_unset_description()),
+            ),
+            Choice(
+                "allow",
+                _t(_ws.providers_openrouter_data_collection_choice_allow_label()),
+                _t(_ws.providers_openrouter_data_collection_choice_allow_description()),
+            ),
+            Choice(
+                "deny",
+                _t(_ws.providers_openrouter_data_collection_choice_deny_label()),
+                _t(_ws.providers_openrouter_data_collection_choice_deny_description()),
+            ),
         ),
     ),
     Setting(
@@ -1675,8 +1717,16 @@ SETTINGS: tuple[Setting, ...] = (
         default="",
         help=_t(_ws.providers_openrouter_zdr_help()),
         choices=(
-            Choice("", _t(_ws.providers_openrouter_zdr_choice_unset_label()), _t(_ws.providers_openrouter_zdr_choice_unset_description())),
-            Choice("true", _t(_ws.providers_openrouter_zdr_choice_true_label()), _t(_ws.providers_openrouter_zdr_choice_true_description())),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_zdr_choice_unset_label()),
+                _t(_ws.providers_openrouter_zdr_choice_unset_description()),
+            ),
+            Choice(
+                "true",
+                _t(_ws.providers_openrouter_zdr_choice_true_label()),
+                _t(_ws.providers_openrouter_zdr_choice_true_description()),
+            ),
         ),
     ),
     Setting(
@@ -1687,12 +1737,18 @@ SETTINGS: tuple[Setting, ...] = (
         # ENUM for the same tri-state reason as `zdr` directly above.
         kind=Kind.ENUM,
         default="",
-        help=(
-            _t(_ws.providers_openrouter_enforce_distillable_text_help())
-        ),
+        help=(_t(_ws.providers_openrouter_enforce_distillable_text_help())),
         choices=(
-            Choice("", _t(_ws.providers_openrouter_enforce_distillable_text_choice_unset_label()), _t(_ws.providers_openrouter_enforce_distillable_text_choice_unset_description())),
-            Choice("true", _t(_ws.providers_openrouter_enforce_distillable_text_choice_true_label()), _t(_ws.providers_openrouter_enforce_distillable_text_choice_true_description())),
+            Choice(
+                "",
+                _t(_ws.providers_openrouter_enforce_distillable_text_choice_unset_label()),
+                _t(_ws.providers_openrouter_enforce_distillable_text_choice_unset_description()),
+            ),
+            Choice(
+                "true",
+                _t(_ws.providers_openrouter_enforce_distillable_text_choice_true_label()),
+                _t(_ws.providers_openrouter_enforce_distillable_text_choice_true_description()),
+            ),
         ),
     ),
     Setting(
@@ -1702,9 +1758,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.providers_openrouter_quantizations_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            _t(_ws.providers_openrouter_quantizations_help())
-        ),
+        help=(_t(_ws.providers_openrouter_quantizations_help())),
         # CLOSED here (unlike the host lists): this vocabulary is a documented
         # finite set, not a growing upstream namespace. mxfp4/nvfp4/mxfp8 and
         # `unknown` are in the OpenRouter docs beside the classic levels
@@ -1750,9 +1804,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.providers_openrouter_preferred_min_throughput_label()),
         kind=Kind.FLOAT,
         default=0.0,
-        help=(
-            _t(_ws.providers_openrouter_preferred_min_throughput_help())
-        ),
+        help=(_t(_ws.providers_openrouter_preferred_min_throughput_help())),
         minimum=0.0,
         maximum=100_000.0,
     ),
@@ -1763,9 +1815,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.providers_openrouter_preferred_max_latency_label()),
         kind=Kind.FLOAT,
         default=0.0,
-        help=(
-            _t(_ws.providers_openrouter_preferred_max_latency_help())
-        ),
+        help=(_t(_ws.providers_openrouter_preferred_max_latency_help())),
         minimum=0.0,
         maximum=600.0,
     ),
@@ -1778,7 +1828,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.retry_enabled_help()),
-        choices=_bool_choices(_t(_ws.retry_enabled_choice_true_description()), _t(_ws.retry_enabled_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.retry_enabled_choice_true_description()),
+            _t(_ws.retry_enabled_choice_false_description()),
+        ),
     ),
     Setting(
         key="retry.maxRetries",
@@ -1832,7 +1885,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.retry_modelfallback_help()),
-        choices=_bool_choices(_t(_ws.retry_modelfallback_choice_true_description()), _t(_ws.retry_modelfallback_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.retry_modelfallback_choice_true_description()),
+            _t(_ws.retry_modelfallback_choice_false_description()),
+        ),
     ),
     Setting(
         key="retry.usageAwareFallback",
@@ -1842,7 +1898,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=False,
         help=_t(_ws.retry_usageawarefallback_help()),
-        choices=_bool_choices(_t(_ws.retry_usageawarefallback_choice_true_description()), _t(_ws.retry_usageawarefallback_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.retry_usageawarefallback_choice_true_description()),
+            _t(_ws.retry_usageawarefallback_choice_false_description()),
+        ),
     ),
     Setting(
         key="retry.usageAwareAccountPick",
@@ -1851,10 +1910,11 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.retry_usageawareaccountpick_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.retry_usageawareaccountpick_help())
+        help=(_t(_ws.retry_usageawareaccountpick_help())),
+        choices=_bool_choices(
+            _t(_ws.retry_usageawareaccountpick_choice_true_description()),
+            _t(_ws.retry_usageawareaccountpick_choice_false_description()),
         ),
-        choices=_bool_choices(_t(_ws.retry_usageawareaccountpick_choice_true_description()), _t(_ws.retry_usageawareaccountpick_choice_false_description())),
     ),
     Setting(
         key="retry.usageReservePercent",
@@ -1906,9 +1966,7 @@ SETTINGS: tuple[Setting, ...] = (
         # `(announced)` lives in the help below, which paints in full on the
         # detail line's 93 cells at 100x30, and is the clause the overlong
         # predecessor clipped at every size.
-        help=(
-            _t(_ws.retry_pinnedfallback_help())
-        ),
+        help=(_t(_ws.retry_pinnedfallback_help())),
         choices=(
             Choice(
                 "same-family",
@@ -1966,7 +2024,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_shimmer_help()),
-        choices=_bool_choices(_t(_ws.display_shimmer_choice_true_description()), _t(_ws.display_shimmer_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_shimmer_choice_true_description()),
+            _t(_ws.display_shimmer_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.narration",
@@ -1976,7 +2037,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_narration_help()),
-        choices=_bool_choices(_t(_ws.display_narration_choice_true_description()), _t(_ws.display_narration_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_narration_choice_true_description()),
+            _t(_ws.display_narration_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.reasoning",
@@ -1996,10 +2060,11 @@ SETTINGS: tuple[Setting, ...] = (
         # where it has room. The trigger says the thinking ENDS, not "the answer
         # starts", because `reasoning_end` also drops the block on a turn that
         # goes on to a tool call (round 1, D4).
-        help=(
-            _t(_ws.display_reasoning_help())
+        help=(_t(_ws.display_reasoning_help())),
+        choices=_bool_choices(
+            _t(_ws.display_reasoning_choice_true_description()),
+            _t(_ws.display_reasoning_choice_false_description()),
         ),
-        choices=_bool_choices(_t(_ws.display_reasoning_choice_true_description()), _t(_ws.display_reasoning_choice_false_description())),
     ),
     Setting(
         key="display.rail",
@@ -2008,10 +2073,11 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.display_rail_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.display_rail_help())
+        help=(_t(_ws.display_rail_help())),
+        choices=_bool_choices(
+            _t(_ws.display_rail_choice_true_description()),
+            _t(_ws.display_rail_choice_false_description()),
         ),
-        choices=_bool_choices(_t(_ws.display_rail_choice_true_description()), _t(_ws.display_rail_choice_false_description())),
     ),
     Setting(
         # Default changed to False by maintainer
@@ -2022,7 +2088,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=False,
         help=_t(_ws.display_comfortable_rows_help()),
-        choices=_bool_choices(_t(_ws.display_comfortable_rows_choice_true_description()), _t(_ws.display_comfortable_rows_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_comfortable_rows_choice_true_description()),
+            _t(_ws.display_comfortable_rows_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.nerd_icons",
@@ -2038,9 +2107,21 @@ SETTINGS: tuple[Setting, ...] = (
         # `write_setting`, which deletes on a None for a key with no shipped
         # default.
         choices=(
-            Choice(None, _t(_ws.display_nerd_icons_choice_none_label()), _t(_ws.display_nerd_icons_choice_none_description())),
-            Choice(True, _t(_ws.display_nerd_icons_choice_true_label()), _t(_ws.display_nerd_icons_choice_true_description())),
-            Choice(False, _t(_ws.display_nerd_icons_choice_false_label()), _t(_ws.display_nerd_icons_choice_false_description())),
+            Choice(
+                None,
+                _t(_ws.display_nerd_icons_choice_none_label()),
+                _t(_ws.display_nerd_icons_choice_none_description()),
+            ),
+            Choice(
+                True,
+                _t(_ws.display_nerd_icons_choice_true_label()),
+                _t(_ws.display_nerd_icons_choice_true_description()),
+            ),
+            Choice(
+                False,
+                _t(_ws.display_nerd_icons_choice_false_label()),
+                _t(_ws.display_nerd_icons_choice_false_description()),
+            ),
         ),
     ),
     Setting(
@@ -2051,7 +2132,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=False,
         help=_t(_ws.display_heading_markers_help()),
-        choices=_bool_choices(_t(_ws.display_heading_markers_choice_true_description()), _t(_ws.display_heading_markers_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_heading_markers_choice_true_description()),
+            _t(_ws.display_heading_markers_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.terminal_title",
@@ -2061,7 +2145,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_terminal_title_help()),
-        choices=_bool_choices(_t(_ws.display_terminal_title_choice_true_description()), _t(_ws.display_terminal_title_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_terminal_title_choice_true_description()),
+            _t(_ws.display_terminal_title_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.images",
@@ -2071,7 +2158,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_images_help()),
-        choices=_bool_choices(_t(_ws.display_images_choice_true_description()), _t(_ws.display_images_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_images_choice_true_description()),
+            _t(_ws.display_images_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.notifications",
@@ -2081,7 +2171,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_notifications_help()),
-        choices=_bool_choices(_t(_ws.display_notifications_choice_true_description()), _t(_ws.display_notifications_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_notifications_choice_true_description()),
+            _t(_ws.display_notifications_choice_false_description()),
+        ),
     ),
     Setting(
         # The observer path (a background session finishing while you are
@@ -2115,14 +2208,15 @@ SETTINGS: tuple[Setting, ...] = (
         # holding the line under the 100-column flake8/black budget; a
         # `noqa: E501` on the joined form is reserved in this repo for
         # unsplittable content (URLs, embedded code), not prose.
-        help=(
-            _t(_ws.display_notification_session_name_help())
-        ),
+        help=(_t(_ws.display_notification_session_name_help())),
         # `off` no longer means "app name only" on every route — a background
         # session with no stored title is titled "A session finished" — so the
         # label names what the user gets rather than a fallback that is now one
         # of two (design round 1, D7, folded into D2).
-        choices=_bool_choices(_t(_ws.display_notification_session_name_choice_true_description()), _t(_ws.display_notification_session_name_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_notification_session_name_choice_true_description()),
+            _t(_ws.display_notification_session_name_choice_false_description()),
+        ),
         # Without this the row renders `on` while `display.notifications` is
         # off, describing a banner that cannot fire — the "page states
         # something untrue about its own effect" class (#431). The detail line
@@ -2144,15 +2238,22 @@ SETTINGS: tuple[Setting, ...] = (
         default="12h",
         help=_t(_ws.display_time_format_help()),
         choices=(
-            Choice("12h", _t(_ws.display_time_format_choice_12h_label()), _t(_ws.display_time_format_choice_12h_description())),
-            Choice("24h", _t(_ws.display_time_format_choice_24h_label()), _t(_ws.display_time_format_choice_24h_description())),
+            Choice(
+                "12h",
+                _t(_ws.display_time_format_choice_12h_label()),
+                _t(_ws.display_time_format_choice_12h_description()),
+            ),
+            Choice(
+                "24h",
+                _t(_ws.display_time_format_choice_24h_label()),
+                _t(_ws.display_time_format_choice_24h_description()),
+            ),
         ),
     ),
     Setting(
         key="language",
         path=("language",),
         section="appearance",
-        # i18n: ignore wire.settings slice owns this row's copy (label + help).
         label=_t(_ws.language_label()),
         kind=Kind.ENUM,
         # Literal, not imported: the registry stays off the resolver's import
@@ -2188,9 +2289,21 @@ SETTINGS: tuple[Setting, ...] = (
             # made it the only choice explaining its own exit and left the
             # list reading unevenly — and the help line above already names
             # `ctrl+g` for all three (round 1, D5).
-            Choice("full", _t(_ws.display_dock_choice_full_label()), _t(_ws.display_dock_choice_full_description())),
-            Choice("summary", _t(_ws.display_dock_choice_summary_label()), _t(_ws.display_dock_choice_summary_description())),
-            Choice("hidden", _t(_ws.display_dock_choice_hidden_label()), _t(_ws.display_dock_choice_hidden_description())),
+            Choice(
+                "full",
+                _t(_ws.display_dock_choice_full_label()),
+                _t(_ws.display_dock_choice_full_description()),
+            ),
+            Choice(
+                "summary",
+                _t(_ws.display_dock_choice_summary_label()),
+                _t(_ws.display_dock_choice_summary_description()),
+            ),
+            Choice(
+                "hidden",
+                _t(_ws.display_dock_choice_hidden_label()),
+                _t(_ws.display_dock_choice_hidden_description()),
+            ),
         ),
     ),
     # Cross-session traffic — the `send` tool's own traces and the inbound
@@ -2222,7 +2335,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=False,  # OFF = today's rendering; see tui/settings.py _DEFAULT_NOTES
         help=_t(_ws.display_hide_cross_session_help()),
-        choices=_bool_choices(_t(_ws.display_hide_cross_session_choice_true_description()), _t(_ws.display_hide_cross_session_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_hide_cross_session_choice_true_description()),
+            _t(_ws.display_hide_cross_session_choice_false_description()),
+        ),
     ),
     # The desktop transcript's answer mark: a thin rule to the left of the row
     # that CLOSES a turn (the `display.rail` idea, for the desktop app). Only
@@ -2242,7 +2358,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=False,  # opt-in: the rail looked heavy; see tui/settings.py _DEFAULT_NOTES
         help=_t(_ws.display_turn_answer_rail_help()),
-        choices=_bool_choices(_t(_ws.display_turn_answer_rail_choice_true_description()), _t(_ws.display_turn_answer_rail_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_turn_answer_rail_choice_true_description()),
+            _t(_ws.display_turn_answer_rail_choice_false_description()),
+        ),
     ),
     # -- the composer widget-visibility family (operator request, 2026-09-27) --
     #
@@ -2271,7 +2390,10 @@ SETTINGS: tuple[Setting, ...] = (
         # help that lists the segments first clips that clause off first.
         # Measured 67 cells, which paints whole at both 100 and 80 columns.
         help=_t(_ws.display_composer_band_help()),
-        choices=_bool_choices(_t(_ws.display_composer_band_choice_true_description()), _t(_ws.display_composer_band_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_composer_band_choice_true_description()),
+            _t(_ws.display_composer_band_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.chevron",
@@ -2281,7 +2403,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_composer_chevron_help()),
-        choices=_bool_choices(_t(_ws.display_composer_chevron_choice_true_description()), _t(_ws.display_composer_chevron_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_composer_chevron_choice_true_description()),
+            _t(_ws.display_composer_chevron_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.model",
@@ -2291,7 +2416,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_composer_model_help()),
-        choices=_bool_choices(_t(_ws.display_composer_model_choice_true_description()), _t(_ws.display_composer_model_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_composer_model_choice_true_description()),
+            _t(_ws.display_composer_model_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.cwd",
@@ -2301,7 +2429,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_composer_cwd_help()),
-        choices=_bool_choices(_t(_ws.display_composer_cwd_choice_true_description()), _t(_ws.display_composer_cwd_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_composer_cwd_choice_true_description()),
+            _t(_ws.display_composer_cwd_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.context",
@@ -2311,7 +2442,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_composer_context_help()),
-        choices=_bool_choices(_t(_ws.display_composer_context_choice_true_description()), _t(_ws.display_composer_context_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_composer_context_choice_true_description()),
+            _t(_ws.display_composer_context_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.rate",
@@ -2321,7 +2455,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_composer_rate_help()),
-        choices=_bool_choices(_t(_ws.display_composer_rate_choice_true_description()), _t(_ws.display_composer_rate_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_composer_rate_choice_true_description()),
+            _t(_ws.display_composer_rate_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.cost",
@@ -2331,7 +2468,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_composer_cost_help()),
-        choices=_bool_choices(_t(_ws.display_composer_cost_choice_true_description()), _t(_ws.display_composer_cost_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_composer_cost_choice_true_description()),
+            _t(_ws.display_composer_cost_choice_false_description()),
+        ),
     ),
     Setting(
         key="display.composer.duration",
@@ -2341,7 +2481,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.display_composer_duration_help()),
-        choices=_bool_choices(_t(_ws.display_composer_duration_choice_true_description()), _t(_ws.display_composer_duration_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.display_composer_duration_choice_true_description()),
+            _t(_ws.display_composer_duration_choice_false_description()),
+        ),
     ),
     Setting(
         key="tui.sidebar_visible",
@@ -2351,7 +2494,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=False,
         help=_t(_ws.tui_sidebar_visible_help()),
-        choices=_bool_choices(_t(_ws.tui_sidebar_visible_choice_true_description()), _t(_ws.tui_sidebar_visible_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.tui_sidebar_visible_choice_true_description()),
+            _t(_ws.tui_sidebar_visible_choice_false_description()),
+        ),
     ),
     Setting(
         key="tui.sidebar_position",
@@ -2362,8 +2508,16 @@ SETTINGS: tuple[Setting, ...] = (
         default="left",
         help=_t(_ws.tui_sidebar_position_help()),
         choices=(
-            Choice("left", _t(_ws.tui_sidebar_position_choice_left_label()), _t(_ws.tui_sidebar_position_choice_left_description())),
-            Choice("right", _t(_ws.tui_sidebar_position_choice_right_label()), _t(_ws.tui_sidebar_position_choice_right_description())),
+            Choice(
+                "left",
+                _t(_ws.tui_sidebar_position_choice_left_label()),
+                _t(_ws.tui_sidebar_position_choice_left_description()),
+            ),
+            Choice(
+                "right",
+                _t(_ws.tui_sidebar_position_choice_right_label()),
+                _t(_ws.tui_sidebar_position_choice_right_description()),
+            ),
         ),
     ),
     Setting(
@@ -2373,10 +2527,11 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.tui_sidebar_show_subagents_label()),
         kind=Kind.BOOL,
         default=False,
-        help=(
-            _t(_ws.tui_sidebar_show_subagents_help())
+        help=(_t(_ws.tui_sidebar_show_subagents_help())),
+        choices=_bool_choices(
+            _t(_ws.tui_sidebar_show_subagents_choice_true_description()),
+            _t(_ws.tui_sidebar_show_subagents_choice_false_description()),
         ),
-        choices=_bool_choices(_t(_ws.tui_sidebar_show_subagents_choice_true_description()), _t(_ws.tui_sidebar_show_subagents_choice_false_description())),
     ),
     # -- hotkeys ------------------------------------------------------------
     # DERIVED from `keymap.KEY_ACTIONS` rather than spelled out, because the
@@ -2433,8 +2588,16 @@ SETTINGS: tuple[Setting, ...] = (
         # write) and for the attached one.
         help=_t(_ws.tool_approval_mode_help()),
         choices=(
-            Choice("ask", _t(_ws.tool_approval_mode_choice_ask_label()), _t(_ws.tool_approval_mode_choice_ask_description())),
-            Choice("auto", _t(_ws.tool_approval_mode_choice_auto_label()), _t(_ws.tool_approval_mode_choice_auto_description())),
+            Choice(
+                "ask",
+                _t(_ws.tool_approval_mode_choice_ask_label()),
+                _t(_ws.tool_approval_mode_choice_ask_description()),
+            ),
+            Choice(
+                "auto",
+                _t(_ws.tool_approval_mode_choice_auto_label()),
+                _t(_ws.tool_approval_mode_choice_auto_description()),
+            ),
         ),
     ),
     # -- session storage ----------------------------------------------------
@@ -2446,7 +2609,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=False,
         help=_t(_ws.auto_save_conversation_help()),
-        choices=_bool_choices(_t(_ws.auto_save_conversation_choice_true_description()), _t(_ws.auto_save_conversation_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.auto_save_conversation_choice_true_description()),
+            _t(_ws.auto_save_conversation_choice_false_description()),
+        ),
     ),
     # -- runtime ------------------------------------------------------------
     Setting(
@@ -2531,9 +2697,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.session_cleanup_enabled_label()),
         kind=Kind.BOOL,
         default=False,
-        help=(
-            _t(_ws.session_cleanup_enabled_help())
-        ),
+        help=(_t(_ws.session_cleanup_enabled_help())),
         choices=_bool_choices(
             _t(_ws.session_cleanup_enabled_choice_true_description()),
             _t(_ws.session_cleanup_enabled_choice_false_description()),
@@ -2580,7 +2744,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=False,
         help=_t(_ws.session_cleanup_remove_empty_help()),
-        choices=_bool_choices(_t(_ws.session_cleanup_remove_empty_choice_true_description()), _t(_ws.session_cleanup_remove_empty_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.session_cleanup_remove_empty_choice_true_description()),
+            _t(_ws.session_cleanup_remove_empty_choice_false_description()),
+        ),
         gated_by="session.cleanup.enabled",
     ),
     # -- delegated-work retention --------------------------------------------
@@ -2596,9 +2763,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.session_cleanup_delegated_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.session_cleanup_delegated_enabled_help())
-        ),
+        help=(_t(_ws.session_cleanup_delegated_enabled_help())),
         choices=_bool_choices(
             _t(_ws.session_cleanup_delegated_enabled_choice_true_description()),
             _t(_ws.session_cleanup_delegated_enabled_choice_false_description()),
@@ -2660,7 +2825,10 @@ SETTINGS: tuple[Setting, ...] = (
         # trimmed, and the invariant — every guide/skill NAME survives, so
         # nothing a child could have read becomes unfindable, only terser.
         help=_t(_ws.subagents_slim_child_knowledge_help()),
-        choices=_bool_choices(_t(_ws.subagents_slim_child_knowledge_choice_true_description()), _t(_ws.subagents_slim_child_knowledge_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.subagents_slim_child_knowledge_choice_true_description()),
+            _t(_ws.subagents_slim_child_knowledge_choice_false_description()),
+        ),
     ),
     Setting(
         key="subagents.max_team_depth",
@@ -2970,10 +3138,26 @@ SETTINGS: tuple[Setting, ...] = (
         # the page unable to show which of the two the operator chose.
         help=_t(_ws.classification_vendor_help()),
         choices=(
-            Choice("auto", _t(_ws.classification_vendor_choice_auto_label()), _t(_ws.classification_vendor_choice_auto_description())),
-            Choice("radient", _t(_ws.classification_vendor_choice_radient_label()), _t(_ws.classification_vendor_choice_radient_description())),
-            Choice("typesafe", _t(_ws.classification_vendor_choice_typesafe_label()), _t(_ws.classification_vendor_choice_typesafe_description())),
-            Choice("openrouter", _t(_ws.classification_vendor_choice_openrouter_label()), _t(_ws.classification_vendor_choice_openrouter_description())),
+            Choice(
+                "auto",
+                _t(_ws.classification_vendor_choice_auto_label()),
+                _t(_ws.classification_vendor_choice_auto_description()),
+            ),
+            Choice(
+                "radient",
+                _t(_ws.classification_vendor_choice_radient_label()),
+                _t(_ws.classification_vendor_choice_radient_description()),
+            ),
+            Choice(
+                "typesafe",
+                _t(_ws.classification_vendor_choice_typesafe_label()),
+                _t(_ws.classification_vendor_choice_typesafe_description()),
+            ),
+            Choice(
+                "openrouter",
+                _t(_ws.classification_vendor_choice_openrouter_label()),
+                _t(_ws.classification_vendor_choice_openrouter_description()),
+            ),
         ),
         gated_by="classification.auto",
     ),
@@ -3139,9 +3323,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.monitor_classifymaxchars_label()),
         kind=Kind.INT,
         default=1200,
-        help=(
-            _t(_ws.monitor_classifymaxchars_help())
-        ),
+        help=(_t(_ws.monitor_classifymaxchars_help())),
         minimum=0,
     ),
     Setting(
@@ -3203,7 +3385,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.supplements_files_help()),
-        choices=_bool_choices(_t(_ws.supplements_files_choice_true_description()), _t(_ws.supplements_files_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.supplements_files_choice_true_description()),
+            _t(_ws.supplements_files_choice_false_description()),
+        ),
         gated_by="supplements.enabled",
     ),
     Setting(
@@ -3215,7 +3400,8 @@ SETTINGS: tuple[Setting, ...] = (
         default=False,
         help=_t(_ws.supplements_graphics_help()),
         choices=_bool_choices(
-            _t(_ws.supplements_graphics_choice_true_description()), _t(_ws.supplements_graphics_choice_false_description())
+            _t(_ws.supplements_graphics_choice_true_description()),
+            _t(_ws.supplements_graphics_choice_false_description()),
         ),
         gated_by="supplements.enabled",
     ),
@@ -3305,9 +3491,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.supplements_denyprefixes_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            _t(_ws.supplements_denyprefixes_help())
-        ),
+        help=(_t(_ws.supplements_denyprefixes_help())),
         placeholder=_t(_ws.supplements_denyprefixes_placeholder()),
         empty_unsets=True,
         gated_by="supplements.enabled",
@@ -3333,7 +3517,11 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.fork_mode_choice_window_label()),
                 _t(_ws.fork_mode_choice_window_description()),
             ),
-            Choice("switch", _t(_ws.fork_mode_choice_switch_label()), _t(_ws.fork_mode_choice_switch_description())),
+            Choice(
+                "switch",
+                _t(_ws.fork_mode_choice_switch_label()),
+                _t(_ws.fork_mode_choice_switch_description()),
+            ),
         ),
     ),
     Setting(
@@ -3349,8 +3537,16 @@ SETTINGS: tuple[Setting, ...] = (
         default="workspace",
         help=_t(_ws.fork_cmux_placement_help()),
         choices=(
-            Choice("workspace", _t(_ws.fork_cmux_placement_choice_workspace_label()), _t(_ws.fork_cmux_placement_choice_workspace_description())),
-            Choice("surface", _t(_ws.fork_cmux_placement_choice_surface_label()), _t(_ws.fork_cmux_placement_choice_surface_description())),
+            Choice(
+                "workspace",
+                _t(_ws.fork_cmux_placement_choice_workspace_label()),
+                _t(_ws.fork_cmux_placement_choice_workspace_description()),
+            ),
+            Choice(
+                "surface",
+                _t(_ws.fork_cmux_placement_choice_surface_label()),
+                _t(_ws.fork_cmux_placement_choice_surface_description()),
+            ),
         ),
     ),
     # -- compaction ---------------------------------------------------------
@@ -3362,7 +3558,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.compaction_enabled_help()),
-        choices=_bool_choices(_t(_ws.compaction_enabled_choice_true_description()), _t(_ws.compaction_enabled_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.compaction_enabled_choice_true_description()),
+            _t(_ws.compaction_enabled_choice_false_description()),
+        ),
     ),
     Setting(
         key="compaction.strategy",
@@ -3373,10 +3572,26 @@ SETTINGS: tuple[Setting, ...] = (
         default="auto",
         help=_t(_ws.compaction_strategy_help()),
         choices=(
-            Choice("auto", _t(_ws.compaction_strategy_choice_auto_label()), _t(_ws.compaction_strategy_choice_auto_description())),
-            Choice("context-full", _t(_ws.compaction_strategy_choice_context_full_label()), _t(_ws.compaction_strategy_choice_context_full_description())),
-            Choice("snapcompact", _t(_ws.compaction_strategy_choice_snapcompact_label()), _t(_ws.compaction_strategy_choice_snapcompact_description())),
-            Choice("off", _t(_ws.compaction_strategy_choice_off_label()), _t(_ws.compaction_strategy_choice_off_description())),
+            Choice(
+                "auto",
+                _t(_ws.compaction_strategy_choice_auto_label()),
+                _t(_ws.compaction_strategy_choice_auto_description()),
+            ),
+            Choice(
+                "context-full",
+                _t(_ws.compaction_strategy_choice_context_full_label()),
+                _t(_ws.compaction_strategy_choice_context_full_description()),
+            ),
+            Choice(
+                "snapcompact",
+                _t(_ws.compaction_strategy_choice_snapcompact_label()),
+                _t(_ws.compaction_strategy_choice_snapcompact_description()),
+            ),
+            Choice(
+                "off",
+                _t(_ws.compaction_strategy_choice_off_label()),
+                _t(_ws.compaction_strategy_choice_off_description()),
+            ),
         ),
     ),
     Setting(
@@ -3421,7 +3636,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.compaction_auto_continue_help()),
-        choices=_bool_choices(_t(_ws.compaction_auto_continue_choice_true_description()), _t(_ws.compaction_auto_continue_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.compaction_auto_continue_choice_true_description()),
+            _t(_ws.compaction_auto_continue_choice_false_description()),
+        ),
     ),
     Setting(
         key="compaction.mid_turn_enabled",
@@ -3431,7 +3649,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.compaction_mid_turn_enabled_help()),
-        choices=_bool_choices(_t(_ws.compaction_mid_turn_enabled_choice_true_description()), _t(_ws.compaction_mid_turn_enabled_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.compaction_mid_turn_enabled_choice_true_description()),
+            _t(_ws.compaction_mid_turn_enabled_choice_false_description()),
+        ),
     ),
     # The two BYTE knobs. They live in this section because they are compaction
     # triggers, but they measure a different thing from every other key here:
@@ -3447,9 +3668,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.compaction_wire_bytes_budget_label()),
         kind=Kind.INT,
         default=24_000_000,
-        help=(
-            _t(_ws.compaction_wire_bytes_budget_help())
-        ),
+        help=(_t(_ws.compaction_wire_bytes_budget_help())),
         minimum=0,
     ),
     Setting(
@@ -3459,9 +3678,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.compaction_wire_bytes_trigger_label()),
         kind=Kind.INT,
         default=16_000_000,
-        help=(
-            _t(_ws.compaction_wire_bytes_trigger_help())
-        ),
+        help=(_t(_ws.compaction_wire_bytes_trigger_help())),
         minimum=0,
     ),
     # -- web search ---------------------------------------------------------
@@ -3478,7 +3695,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.web_search_enabled_help()),
-        choices=_bool_choices(_t(_ws.web_search_enabled_choice_true_description()), _t(_ws.web_search_enabled_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.web_search_enabled_choice_true_description()),
+            _t(_ws.web_search_enabled_choice_false_description()),
+        ),
     ),
     Setting(
         key="web_search.strategy",
@@ -3489,8 +3709,16 @@ SETTINGS: tuple[Setting, ...] = (
         default="round_robin",
         help=_t(_ws.web_search_strategy_help()),
         choices=(
-            Choice("round_robin", _t(_ws.web_search_strategy_choice_round_robin_label()), _t(_ws.web_search_strategy_choice_round_robin_description())),
-            Choice("ordered", _t(_ws.web_search_strategy_choice_ordered_label()), _t(_ws.web_search_strategy_choice_ordered_description())),
+            Choice(
+                "round_robin",
+                _t(_ws.web_search_strategy_choice_round_robin_label()),
+                _t(_ws.web_search_strategy_choice_round_robin_description()),
+            ),
+            Choice(
+                "ordered",
+                _t(_ws.web_search_strategy_choice_ordered_label()),
+                _t(_ws.web_search_strategy_choice_ordered_description()),
+            ),
         ),
     ),
     Setting(
@@ -3600,7 +3828,10 @@ SETTINGS: tuple[Setting, ...] = (
         # plain `Text`, so they render as literal characters, and this was the
         # only one of 57 help strings carrying any (design round 1, D5).
         help=_t(_ws.web_fetch_enabled_help()),
-        choices=_bool_choices(_t(_ws.web_fetch_enabled_choice_true_description()), _t(_ws.web_fetch_enabled_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.web_fetch_enabled_choice_true_description()),
+            _t(_ws.web_fetch_enabled_choice_false_description()),
+        ),
     ),
     Setting(
         key="web_fetch.timeout_seconds",
@@ -3652,7 +3883,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=False,
         help=_t(_ws.web_fetch_allow_private_help()),
-        choices=_bool_choices(_t(_ws.web_fetch_allow_private_choice_true_description()), _t(_ws.web_fetch_allow_private_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.web_fetch_allow_private_choice_true_description()),
+            _t(_ws.web_fetch_allow_private_choice_false_description()),
+        ),
     ),
     Setting(
         key="web_fetch.render_backend",
@@ -3663,8 +3897,16 @@ SETTINGS: tuple[Setting, ...] = (
         default="auto",
         help=_t(_ws.web_fetch_render_backend_help()),
         choices=(
-            Choice("auto", _t(_ws.web_fetch_render_backend_choice_auto_label()), _t(_ws.web_fetch_render_backend_choice_auto_description())),
-            Choice("stdlib", _t(_ws.web_fetch_render_backend_choice_stdlib_label()), _t(_ws.web_fetch_render_backend_choice_stdlib_description())),
+            Choice(
+                "auto",
+                _t(_ws.web_fetch_render_backend_choice_auto_label()),
+                _t(_ws.web_fetch_render_backend_choice_auto_description()),
+            ),
+            Choice(
+                "stdlib",
+                _t(_ws.web_fetch_render_backend_choice_stdlib_label()),
+                _t(_ws.web_fetch_render_backend_choice_stdlib_description()),
+            ),
         ),
     ),
     Setting(
@@ -3675,7 +3917,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.web_fetch_enrich_help()),
-        choices=_bool_choices(_t(_ws.web_fetch_enrich_choice_true_description()), _t(_ws.web_fetch_enrich_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.web_fetch_enrich_choice_true_description()),
+            _t(_ws.web_fetch_enrich_choice_false_description()),
+        ),
     ),
     Setting(
         key="web_fetch.max_attempts",
@@ -3696,7 +3941,10 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=_t(_ws.web_fetch_blocked_retry_help()),
-        choices=_bool_choices(_t(_ws.web_fetch_blocked_retry_choice_true_description()), _t(_ws.web_fetch_blocked_retry_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.web_fetch_blocked_retry_choice_true_description()),
+            _t(_ws.web_fetch_blocked_retry_choice_false_description()),
+        ),
     ),
     # -- tools --------------------------------------------------------------
     # ``path`` mirrors ``tools.builtin.BASH_SHELL_PATH``; the two are pinned
@@ -3766,9 +4014,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.send_journal_unconfirmed_label()),
         kind=Kind.BOOL,
         default=False,
-        help=(
-            _t(_ws.send_journal_unconfirmed_help())
-        ),
+        help=(_t(_ws.send_journal_unconfirmed_help())),
     ),
     # -- search_interception ------------------------------------------------
     # ``path`` mirrors ``tools.builtin.SEARCH_INTERCEPTION_*_PATH`` (pinned
@@ -3790,9 +4036,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.tools_search_interception_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.tools_search_interception_enabled_help())
-        ),
+        help=(_t(_ws.tools_search_interception_enabled_help())),
     ),
     Setting(
         key="tools.search_interception.block",
@@ -3801,9 +4045,7 @@ SETTINGS: tuple[Setting, ...] = (
         section="tools",
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.tools_search_interception_block_help())
-        ),
+        help=(_t(_ws.tools_search_interception_block_help())),
     ),
     Setting(
         key="tools.search_interception.rg_excludes",
@@ -3812,9 +4054,7 @@ SETTINGS: tuple[Setting, ...] = (
         section="tools",
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.tools_search_interception_rg_excludes_help())
-        ),
+        help=(_t(_ws.tools_search_interception_rg_excludes_help())),
     ),
     # LIVE: ``Session._apply_config_change`` re-reads it into the publish
     # filter, so the next turn's tools array follows the edit. Path mirrors
@@ -3827,9 +4067,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.tools_defer_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.tools_defer_help())
-        ),
+        help=(_t(_ws.tools_defer_help())),
     ),
     # -- memory_guard -------------------------------------------------------
     # ``path`` mirrors ``memory_guard.BASH_MEMORY_*_PATH``; the four are pinned
@@ -3844,10 +4082,11 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.bash_memory_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.bash_memory_enabled_help())
+        help=(_t(_ws.bash_memory_enabled_help())),
+        choices=_bool_choices(
+            _t(_ws.bash_memory_enabled_choice_true_description()),
+            _t(_ws.bash_memory_enabled_choice_false_description()),
         ),
-        choices=_bool_choices(_t(_ws.bash_memory_enabled_choice_true_description()), _t(_ws.bash_memory_enabled_choice_false_description())),
     ),
     Setting(
         key="bash.memory.mode",
@@ -3856,12 +4095,18 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.bash_memory_mode_label()),
         kind=Kind.ENUM,
         default="auto",
-        help=(
-            _t(_ws.bash_memory_mode_help())
-        ),
+        help=(_t(_ws.bash_memory_mode_help())),
         choices=(
-            Choice("auto", _t(_ws.bash_memory_mode_choice_auto_label()), _t(_ws.bash_memory_mode_choice_auto_description())),
-            Choice("manual", _t(_ws.bash_memory_mode_choice_manual_label()), _t(_ws.bash_memory_mode_choice_manual_description())),
+            Choice(
+                "auto",
+                _t(_ws.bash_memory_mode_choice_auto_label()),
+                _t(_ws.bash_memory_mode_choice_auto_description()),
+            ),
+            Choice(
+                "manual",
+                _t(_ws.bash_memory_mode_choice_manual_label()),
+                _t(_ws.bash_memory_mode_choice_manual_description()),
+            ),
         ),
     ),
     Setting(
@@ -3871,9 +4116,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.bash_memory_limit_mb_label()),
         kind=Kind.INT,
         default=0,
-        help=(
-            _t(_ws.bash_memory_limit_mb_help())
-        ),
+        help=(_t(_ws.bash_memory_limit_mb_help())),
     ),
     Setting(
         key="bash.memory.soft_fraction",
@@ -3882,9 +4125,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.bash_memory_soft_fraction_label()),
         kind=Kind.FLOAT,
         default=0.8,
-        help=(
-            _t(_ws.bash_memory_soft_fraction_help())
-        ),
+        help=(_t(_ws.bash_memory_soft_fraction_help())),
     ),
     # -- query_budget -------------------------------------------------------
     # ``path`` mirrors ``query_budget.QUERY_BUDGET_*_PATH`` in
@@ -3903,10 +4144,11 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.bash_query_budget_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.bash_query_budget_enabled_help())
+        help=(_t(_ws.bash_query_budget_enabled_help())),
+        choices=_bool_choices(
+            _t(_ws.bash_query_budget_enabled_choice_true_description()),
+            _t(_ws.bash_query_budget_enabled_choice_false_description()),
         ),
-        choices=_bool_choices(_t(_ws.bash_query_budget_enabled_choice_true_description()), _t(_ws.bash_query_budget_enabled_choice_false_description())),
     ),
     Setting(
         key="bash.query_budget.stop",
@@ -3915,10 +4157,11 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.bash_query_budget_stop_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(
-            _t(_ws.bash_query_budget_stop_help())
+        help=(_t(_ws.bash_query_budget_stop_help())),
+        choices=_bool_choices(
+            _t(_ws.bash_query_budget_stop_choice_true_description()),
+            _t(_ws.bash_query_budget_stop_choice_false_description()),
         ),
-        choices=_bool_choices(_t(_ws.bash_query_budget_stop_choice_true_description()), _t(_ws.bash_query_budget_stop_choice_false_description())),
     ),
     Setting(
         key="bash.query_budget.seconds",
@@ -3927,9 +4170,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.bash_query_budget_seconds_label()),
         kind=Kind.INT,
         default=60,
-        help=(
-            _t(_ws.bash_query_budget_seconds_help())
-        ),
+        help=(_t(_ws.bash_query_budget_seconds_help())),
     ),
     # -- shell_environment ----------------------------------------------
     # ``path`` mirrors ``tools.shell_env.MODE_PATH`` and friends, pinned the
@@ -3958,12 +4199,18 @@ SETTINGS: tuple[Setting, ...] = (
         # imported: the default must stay the permissive one, and the pin is
         # what makes flipping it a decision rather than an edit.
         default="inherit",
-        help=(
-            _t(_ws.shell_environment_mode_help())
-        ),
+        help=(_t(_ws.shell_environment_mode_help())),
         choices=(
-            Choice("inherit", _t(_ws.shell_environment_mode_choice_inherit_label()), _t(_ws.shell_environment_mode_choice_inherit_description())),
-            Choice("allowlist", _t(_ws.shell_environment_mode_choice_allowlist_label()), _t(_ws.shell_environment_mode_choice_allowlist_description())),
+            Choice(
+                "inherit",
+                _t(_ws.shell_environment_mode_choice_inherit_label()),
+                _t(_ws.shell_environment_mode_choice_inherit_description()),
+            ),
+            Choice(
+                "allowlist",
+                _t(_ws.shell_environment_mode_choice_allowlist_label()),
+                _t(_ws.shell_environment_mode_choice_allowlist_description()),
+            ),
         ),
     ),
     Setting(
@@ -3973,9 +4220,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.shell_environment_inherit_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            _t(_ws.shell_environment_inherit_help())
-        ),
+        help=(_t(_ws.shell_environment_inherit_help())),
         # OPEN namespace: these are the operator's own variable names, so there
         # is no vocabulary for this repo to bound.
         placeholder=_t(_ws.shell_environment_inherit_placeholder()),
@@ -3988,9 +4233,7 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.shell_environment_exclude_label()),
         kind=Kind.LIST,
         default=[],
-        help=(
-            _t(_ws.shell_environment_exclude_help())
-        ),
+        help=(_t(_ws.shell_environment_exclude_help())),
         placeholder=_t(_ws.shell_environment_exclude_placeholder()),
         empty_unsets=True,
     ),
@@ -4117,9 +4360,7 @@ SETTINGS: tuple[Setting, ...] = (
         # so its tail was dead copy at every width the page measures: the
         # `{session}` semantics are now the SHORT half and the placeholder
         # carries the command's shape.
-        help=(
-            _t(_ws.desktop_launch_command_help())
-        ),
+        help=(_t(_ws.desktop_launch_command_help())),
         placeholder=_t(_ws.desktop_launch_command_placeholder()),
         # Empty is the DEFAULT that must not be disturbed, and it has a real
         # meaning here ("discover it for me"), so it clears the key rather than
@@ -4143,9 +4384,7 @@ SETTINGS: tuple[Setting, ...] = (
         # The consequence is the point of the row: every entry WIDENS what an
         # unauthenticated local caller can trigger a read of.
         warning=_t(_ws.static_roots_warning()),
-        help=(
-            _t(_ws.static_roots_help())
-        ),
+        help=(_t(_ws.static_roots_help())),
         placeholder=_t(_ws.static_roots_placeholder()),
     ),
     # -- network: where peers reach this device -------------------------------
@@ -4249,9 +4488,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=8_388_608,
         minimum=65_536,
         maximum=1_073_741_824,
-        help=(
-            _t(_ws.network_audit_max_bytes_help())
-        ),
+        help=(_t(_ws.network_audit_max_bytes_help())),
     ),
     Setting(
         key="network.audit.generations",
@@ -4273,9 +4510,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=90.0,
         minimum=1.0,
         maximum=3650.0,
-        help=(
-            _t(_ws.network_audit_max_age_days_help())
-        ),
+        help=(_t(_ws.network_audit_max_age_days_help())),
     ),
     # THE RELAY'S OWN LIMIT, and the one an operator needs exactly when a peer
     # cannot connect: §2.1's cap on UNAUTHENTICATED connections in flight. The slot
@@ -4297,9 +4532,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=8,
         minimum=1,
         maximum=1024,
-        help=(
-            _t(_ws.network_max_handshakes_help())
-        ),
+        help=(_t(_ws.network_max_handshakes_help())),
     ),
     # -- network.sync / network.credentials (mesh build plan P0) ---------------
     # Declared by P0 so the sync and credentials slices never edit this file (the
@@ -4317,9 +4550,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=30.0,
         minimum=1.0,
         maximum=3600.0,
-        help=(
-            _t(_ws.network_sync_debounce_s_help())
-        ),
+        help=(_t(_ws.network_sync_debounce_s_help())),
     ),
     Setting(
         key="network.sync.tick_s",
@@ -4341,9 +4572,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=900.0,
         minimum=60.0,
         maximum=3600.0,
-        help=(
-            _t(_ws.network_credentials_grant_ttl_s_help())
-        ),
+        help=(_t(_ws.network_credentials_grant_ttl_s_help())),
     ),
     # The github adapter's allow-list (github.py's ``REPOSITORIES_PATH``; the same
     # key is read by the owner — the mint narrows to it and REFUSES when empty —
@@ -4378,7 +4607,10 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.hub_auto_update_agents_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices(_t(_ws.hub_auto_update_agents_choice_true_description()), _t(_ws.hub_auto_update_agents_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.hub_auto_update_agents_choice_true_description()),
+            _t(_ws.hub_auto_update_agents_choice_false_description()),
+        ),
         help=_t(_ws.hub_auto_update_agents_help()),
     ),
     Setting(
@@ -4388,7 +4620,10 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.hub_auto_update_teams_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices(_t(_ws.hub_auto_update_teams_choice_true_description()), _t(_ws.hub_auto_update_teams_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.hub_auto_update_teams_choice_true_description()),
+            _t(_ws.hub_auto_update_teams_choice_false_description()),
+        ),
         help=_t(_ws.hub_auto_update_teams_help()),
     ),
     Setting(
@@ -4428,7 +4663,10 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.agents_auto_update_seeds_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices(_t(_ws.agents_auto_update_seeds_choice_true_description()), _t(_ws.agents_auto_update_seeds_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.agents_auto_update_seeds_choice_true_description()),
+            _t(_ws.agents_auto_update_seeds_choice_false_description()),
+        ),
         # <= 72 cells (the picker's budget). The round-1 copy measured 77 and
         # blew that budget; trimmed here to 61 on the ``cell_len`` measure
         # (design round 2, D2-2 / agent review R2-3). Names the held
@@ -4453,7 +4691,10 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.aida_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices(_t(_ws.aida_enabled_choice_true_description()), _t(_ws.aida_enabled_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.aida_enabled_choice_true_description()),
+            _t(_ws.aida_enabled_choice_false_description()),
+        ),
         help=_t(_ws.aida_enabled_help()),
     ),
     Setting(
@@ -4489,10 +4730,11 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.aida_cadence_paused_label()),
         kind=Kind.BOOL,
         default=False,
-        choices=_bool_choices(_t(_ws.aida_cadence_paused_choice_true_description()), _t(_ws.aida_cadence_paused_choice_false_description())),
-        help=(
-            _t(_ws.aida_cadence_paused_help())
+        choices=_bool_choices(
+            _t(_ws.aida_cadence_paused_choice_true_description()),
+            _t(_ws.aida_cadence_paused_choice_false_description()),
         ),
+        help=(_t(_ws.aida_cadence_paused_help())),
     ),
     Setting(
         key="aida.cadence.max_extra_per_day",
@@ -4525,9 +4767,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=14,
         minimum=1,
         maximum=365,
-        help=(
-            _t(_ws.aida_onboarding_nudge_days_help())
-        ),
+        help=(_t(_ws.aida_onboarding_nudge_days_help())),
     ),
     # -- projects -------------------------------------------------------------
     # The staleness window. Default is a LITERAL like the aida block's (this
@@ -4544,9 +4784,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=4,
         minimum=1,
         maximum=168,
-        help=(
-            _t(_ws.projects_stale_after_hours_help())
-        ),
+        help=(_t(_ws.projects_stale_after_hours_help())),
     ),
     # -- wake triggers --------------------------------------------------------
     # Defaults are LITERALS here too; `_consumer_defaults()` imports the
@@ -4559,7 +4797,10 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.wakes_triggers_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices(_t(_ws.wakes_triggers_enabled_choice_true_description()), _t(_ws.wakes_triggers_enabled_choice_false_description())),
+        choices=_bool_choices(
+            _t(_ws.wakes_triggers_enabled_choice_true_description()),
+            _t(_ws.wakes_triggers_enabled_choice_false_description()),
+        ),
         help=_t(_ws.wakes_triggers_enabled_help()),
     ),
     Setting(
@@ -4571,9 +4812,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=6,
         minimum=0,
         maximum=48,
-        help=(
-            _t(_ws.wakes_triggers_max_per_day_help())
-        ),
+        help=(_t(_ws.wakes_triggers_max_per_day_help())),
     ),
     Setting(
         key="wakes.triggers.min_gap_minutes",
@@ -4593,10 +4832,11 @@ SETTINGS: tuple[Setting, ...] = (
         label=_t(_ws.wakes_triggers_project_staleness_enabled_label()),
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices(_t(_ws.wakes_triggers_project_staleness_enabled_choice_true_description()), _t(_ws.wakes_triggers_project_staleness_enabled_choice_false_description())),
-        help=(
-            _t(_ws.wakes_triggers_project_staleness_enabled_help())
+        choices=_bool_choices(
+            _t(_ws.wakes_triggers_project_staleness_enabled_choice_true_description()),
+            _t(_ws.wakes_triggers_project_staleness_enabled_choice_false_description()),
         ),
+        help=(_t(_ws.wakes_triggers_project_staleness_enabled_help())),
     ),
     # -- proactive class ------------------------------------------------------
     # Defaults are LITERALS here, not imports, for the same reason the aida
@@ -4614,9 +4854,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=300000,
         minimum=60000,
         maximum=86400000,
-        help=(
-            _t(_ws.proactive_patience_default_ms_help())
-        ),
+        help=(_t(_ws.proactive_patience_default_ms_help())),
     ),
     Setting(
         key="proactive.patience.backoff",
@@ -4627,9 +4865,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=3,
         minimum=1,
         maximum=10,
-        help=(
-            _t(_ws.proactive_patience_backoff_help())
-        ),
+        help=(_t(_ws.proactive_patience_backoff_help())),
     ),
     Setting(
         key="proactive.patience.max_attempts",
@@ -4651,9 +4887,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=7200000,
         minimum=60000,
         maximum=86400000,
-        help=(
-            _t(_ws.proactive_patience_episode_ttl_ms_help())
-        ),
+        help=(_t(_ws.proactive_patience_episode_ttl_ms_help())),
     ),
     Setting(
         key="proactive.patience.max_pending",
@@ -4689,8 +4923,16 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.speech_voice_gender_choice_auto_label()),
                 _t(_ws.speech_voice_gender_choice_auto_description()),
             ),
-            Choice("female", _t(_ws.speech_voice_gender_choice_female_label()), _t(_ws.speech_voice_gender_choice_female_description())),
-            Choice("male", _t(_ws.speech_voice_gender_choice_male_label()), _t(_ws.speech_voice_gender_choice_male_description())),
+            Choice(
+                "female",
+                _t(_ws.speech_voice_gender_choice_female_label()),
+                _t(_ws.speech_voice_gender_choice_female_description()),
+            ),
+            Choice(
+                "male",
+                _t(_ws.speech_voice_gender_choice_male_label()),
+                _t(_ws.speech_voice_gender_choice_male_description()),
+            ),
         ),
     ),
     Setting(
@@ -4702,11 +4944,31 @@ SETTINGS: tuple[Setting, ...] = (
         default="warm",
         help=_t(_ws.speech_voice_tone_help()),
         choices=(
-            Choice("warm", _t(_ws.speech_voice_tone_choice_warm_label()), _t(_ws.speech_voice_tone_choice_warm_description())),
-            Choice("neutral", _t(_ws.speech_voice_tone_choice_neutral_label()), _t(_ws.speech_voice_tone_choice_neutral_description())),
-            Choice("bright", _t(_ws.speech_voice_tone_choice_bright_label()), _t(_ws.speech_voice_tone_choice_bright_description())),
-            Choice("calm", _t(_ws.speech_voice_tone_choice_calm_label()), _t(_ws.speech_voice_tone_choice_calm_description())),
-            Choice("authoritative", _t(_ws.speech_voice_tone_choice_authoritative_label()), _t(_ws.speech_voice_tone_choice_authoritative_description())),
+            Choice(
+                "warm",
+                _t(_ws.speech_voice_tone_choice_warm_label()),
+                _t(_ws.speech_voice_tone_choice_warm_description()),
+            ),
+            Choice(
+                "neutral",
+                _t(_ws.speech_voice_tone_choice_neutral_label()),
+                _t(_ws.speech_voice_tone_choice_neutral_description()),
+            ),
+            Choice(
+                "bright",
+                _t(_ws.speech_voice_tone_choice_bright_label()),
+                _t(_ws.speech_voice_tone_choice_bright_description()),
+            ),
+            Choice(
+                "calm",
+                _t(_ws.speech_voice_tone_choice_calm_label()),
+                _t(_ws.speech_voice_tone_choice_calm_description()),
+            ),
+            Choice(
+                "authoritative",
+                _t(_ws.speech_voice_tone_choice_authoritative_label()),
+                _t(_ws.speech_voice_tone_choice_authoritative_description()),
+            ),
         ),
     ),
     Setting(
@@ -4718,9 +4980,21 @@ SETTINGS: tuple[Setting, ...] = (
         default="medium",
         help=_t(_ws.speech_voice_expressiveness_help()),
         choices=(
-            Choice("low", _t(_ws.speech_voice_expressiveness_choice_low_label()), _t(_ws.speech_voice_expressiveness_choice_low_description())),
-            Choice("medium", _t(_ws.speech_voice_expressiveness_choice_medium_label()), _t(_ws.speech_voice_expressiveness_choice_medium_description())),
-            Choice("high", _t(_ws.speech_voice_expressiveness_choice_high_label()), _t(_ws.speech_voice_expressiveness_choice_high_description())),
+            Choice(
+                "low",
+                _t(_ws.speech_voice_expressiveness_choice_low_label()),
+                _t(_ws.speech_voice_expressiveness_choice_low_description()),
+            ),
+            Choice(
+                "medium",
+                _t(_ws.speech_voice_expressiveness_choice_medium_label()),
+                _t(_ws.speech_voice_expressiveness_choice_medium_description()),
+            ),
+            Choice(
+                "high",
+                _t(_ws.speech_voice_expressiveness_choice_high_label()),
+                _t(_ws.speech_voice_expressiveness_choice_high_description()),
+            ),
         ),
     ),
     Setting(
