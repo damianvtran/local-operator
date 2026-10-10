@@ -2811,9 +2811,10 @@ async def test_tab_after_an_escape_does_not_type_into_the_query(
     picker's own parse, so narrowing the gate to any subset of them now fails
     here rather than in the composer.
     """
-    # The `$` list is the one surface with no built-in vocabulary: the hermetic
-    # suite discovers zero skills, and an empty list never opens. Wired in
-    # through the documented env var, as `test_skill_invocation` does.
+    # The `$` list has no built-in vocabulary of its own: it is fed from
+    # discovery, and an empty list never opens. The packaged catalog is always
+    # discovered, so the fixture wires its own root via the documented env var
+    # (as `test_skill_invocation` does) to keep the content deterministic.
     root = tmp_path / "skills"
     (root / "research").mkdir(parents=True)
     (root / "research" / "SKILL.md").write_text(
