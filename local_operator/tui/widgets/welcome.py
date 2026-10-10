@@ -15,6 +15,7 @@ BORDERLESS block resting on the input card:
            ~/local-operator
       ! not logged in — /login openrouter
       ! anthropic quota low — falling back to zai/glm-5.3
+      ! No balance on DeepSeek — top up at the DeepSeek platform.
 
     /         command picker
     /help     all commands
@@ -89,6 +90,7 @@ from local_operator import terminals
 from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
+from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
 from local_operator.tui.widgets.status_line import format_model_label
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 
@@ -691,16 +693,20 @@ WARNING_SHORT = "not logged in"
 #: Drop priorities for the status rows. Rows are shed lowest-first when the
 #: terminal is too short for all of them, so the credential warning — the
 #: only row that changes what the user must DO next — is the last one
-#: standing. A harness notice (quota fallback) is the same KIND of row but
-#: not the same urgency: you can still type, just on a different model, so
-#: it sheds one step before the login warning. An optional update row is
+#: standing. The pre-emptive quota advisory is one step less foundational
+#: than the login warning (a send MAY be refused, versus not being able to
+#: send at all) and one step more actionable than news, so it sheds after
+#: the notice and before the login warning. A harness notice (quota
+#: fallback) is a fact rather than an action: you can still type, just on a
+#: different model, so it sheds one step earlier. An optional update row is
 #: news, not an action that unblocks typing, so it sheds before both.
 _PRIORITY_VERSION = 0
 _PRIORITY_CWD = 1
 _PRIORITY_MODEL = 2
 _PRIORITY_UPDATE = 3
 _PRIORITY_NOTICE = 4
-_PRIORITY_WARNING = 5
+_PRIORITY_QUOTA = 5
+_PRIORITY_WARNING = 6
 
 
 @dataclass(frozen=True)
@@ -744,6 +750,13 @@ class WelcomeInfo:
     #: is the quota fallback, and an update probe must not hide a failover.
     #: Absent when current — the row is not reserved.
     update_available: str | None = None
+    #: The pre-emptive no-quota advisory for the session's own provider, or
+    #: ``None``. Computed cached-only (see
+    #: :func:`local_operator.tui.quota_notice.quota_notice_line`) from the row
+    #: the usage warmer maintains; rendered one row above the credential
+    #: warning, because both are amber actionable facts and the warning keeps
+    #: its place as the last row standing.
+    quota_notice: QuotaNoticeLine | None = None
     #: First-run SETUP state: the app opened with nothing configured so the user
     #: can `/login` from here (see ``app._enter_setup_state``). It changes what
     #: the empty splash SAYS — the model row's idle word, the affordance the
@@ -791,11 +804,13 @@ def session_welcome_info(
     — /login openrouter" on the first screen, pointing them at a login they do not
     need and cannot usefully perform.
 
-    Both reads are defended. ``model_label`` touches a session that may be
-    mid-teardown, and the credential check touches the store on disk; either raising
-    here would take down the app's very first render. A failed read degrades to *no
-    warning* rather than to a false alarm: telling a correctly configured user they
-    are logged out is worse than staying quiet.
+    Every read here is defended. ``model_label`` touches a session that may be
+    mid-teardown, the credential check touches the store on disk, and the quota
+    notice fans out over the usage cache, the auth store and the catalogue; any
+    raising here would take down the app's very first render. A failed read
+    degrades to *no warning* rather than to a false alarm: telling a correctly
+    configured user they are logged out — or out of credit — is worse than
+    staying quiet.
     """
     label = ""
     name = ""
@@ -818,12 +833,23 @@ def session_welcome_info(
                 missing = provider
         except Exception:
             missing = None
+    # The quota advisory answers "is there definite, fresh evidence this
+    # provider is empty" — cached-only, never a fetch on a paint path (see
+    # ``tui/quota_notice``). Its own read is attempted on every snapshot; it
+    # returns None for every state that must show nothing.
+    quota: QuotaNoticeLine | None = None
+    if providers is not None:
+        try:
+            quota = quota_notice_line(session, providers)
+        except Exception:  # noqa: BLE001 — same degradation as the reads above
+            quota = None
     return WelcomeInfo(
         version=app_version(),
         model_label=label,
         model_name=name,
         cwd=os.getcwd(),
         missing_credential=missing,
+        quota_notice=quota,
         notice=notice or None,
         notice_kind=notice_kind,
         # No update row in the setup state (audit D8): the first screen a new
@@ -1041,6 +1067,20 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
         if not body.startswith(glyph):
             body = f"{glyph} {body}"
         rows.append((_PRIORITY_NOTICE, Text(body, style=style, no_wrap=True)))
+    if info.quota_notice is not None:
+        # The pre-emptive no-quota advisory, in the same amber family as the
+        # login warning below it. The sentence is the verdict's own (never
+        # authored here); the URL is the remedy the TUI cannot click, so it
+        # trails the sentence and is dropped WHOLE when the row cannot hold
+        # it — a half-printed address is a link nobody can open, the same
+        # rule `/login <provider>` follows. When the sentence alone overflows,
+        # the final truncation keeps its head: that names the condition.
+        glyph = NOTICE_GLYPHS["warning"]
+        quota = info.quota_notice
+        body = f"{glyph} {quota.text}"
+        if quota.url is not None and cell_len(f"{body} {quota.url}") <= width:
+            body = f"{body} {quota.url}"
+        rows.append((_PRIORITY_QUOTA, Text(body, style=warn, no_wrap=True)))
     if info.missing_credential:
         # The single most common first-run failure, so it is spelled as the
         # command that fixes it. `!` is the app's warning glyph (D14). When the
