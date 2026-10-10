@@ -1971,6 +1971,17 @@ _VENDOR_TAIL_IS_A_NAME = re.compile(r"[a-z]+(?:[-_/][a-z]+)+(?:=\S*)?")
 #: on the tail's SHAPE after the prefix is stripped, for both prefix tables. A real
 #: ``xai-``/``sk-``/``gsk_`` key (mixed case, a digit, or 16+ characters) is untouched.
 #:
+#: **The BARE word only, deliberately NOT the ``=value`` spelling (agent review R1).** The
+#: two-word form above carries an ``(?:=\S*)?`` arm because an environment variable in
+#: prose arrives with its assignment. Mirroring it here would release the VALUE of a
+#: ``<prefix>_<word>=<secret>`` pair (``\S*`` takes anything), and unlike the two-word form
+#: there is no measured false-positive class to pay for it: the matched tail swallows the
+#: ``=`` and the value, so a one-word name followed by ``=`` fails this fullmatch and is
+#: masked whole, exactly as it was before this form existed. Cost, recorded: a keyword
+#: argument or assignment written WITHOUT spaces (``f(<prefix>_<word>=True)``) is still
+#: masked and so still carries the copy-the-mask risk; the spaced spelling
+#: (``<prefix>_<word> = True``) and every other position are released.
+#:
 #: **Accepted residuals, recorded rather than closed.** (1) A real credential that is
 #: genuinely 8-15 lowercase letters (``sk-`` plus a short English word) is now readable by
 #: this rule. Every such string in this repo and in the sibling checkouts surveyed
@@ -1980,7 +1991,7 @@ _VENDOR_TAIL_IS_A_NAME = re.compile(r"[a-z]+(?:[-_/][a-z]+)+(?:=\S*)?")
 #: carries a digit, or is camelCase is still masked: the same "case or a digit makes it a
 #: token" bet #1399 took, with the same feedback-loop risk, now covered by the
 #: marker-introduction note in ``edit``/``write``.
-_VENDOR_TAIL_IS_ONE_WORD = re.compile(r"[a-z]{8,15}(?:=[^=\s]\S*)?")
+_VENDOR_TAIL_IS_ONE_WORD = re.compile(r"[a-z]{8,15}")
 
 
 def _vendor_tail_guard(match: Match[str]) -> bool:

@@ -10010,6 +10010,12 @@ def _marker_introduced(before: str, after: str) -> int:
     the redactor) and an edit that merely leaves it in place, or removes one, introduced
     nothing. The result is advisory only: the caller appends a note and never refuses or
     rewrites, because a document that is ABOUT the marker is a legitimate write.
+
+    **Net-zero swaps are invisible, by construction.** An edit that removes one marker
+    and adds another (a fixture's legitimate marker replaced by a copied mask) leaves the
+    count unchanged and so says nothing. Telling the two apart needs the positions of the
+    markers, not their number, and the note is an advisory net under the root fix rather
+    than a guarantee; the cheap, stable signal is kept over a fragile one.
     """
     return max(0, after.count(REDACTION_MARKER) - before.count(REDACTION_MARKER))
 
@@ -10024,12 +10030,9 @@ def _marker_introduced_note(count: int) -> str:
     """
     return (
         f"Note: this write put {count} redaction marker(s) ({REDACTION_MARKER}) into the file. "
-        "That string is the harness's mask for text it hid from your view (a secret-looking "
-        "value or identifier), not source: the hidden original was never visible to you. If "
-        "you meant to write the original text, the file now holds the mask instead; recover "
-        "the real text from another source (git diff, the original file, a different "
-        "spelling) and edit it back. If the marker is intentional (documentation of the "
-        "redactor, a fixture), ignore this note."
+        "That string is the harness's mask for text it hid from you, not source: if you meant "
+        "to write the original text, recover it (git diff, the original file) and edit it "
+        "back; if the marker is intentional (docs, a fixture), ignore this note."
     )
 
 
