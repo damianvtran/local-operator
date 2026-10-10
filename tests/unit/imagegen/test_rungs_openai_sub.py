@@ -112,8 +112,19 @@ async def test_the_streamed_call_shape_and_the_decoded_asset(
     )
 
     assert result.model == "host-model"
-    assert result.cost_usd is None
+    # Quota-funded (``cost_source`` unchanged) but carrying the labelled
+    # API-equivalent amount, never a charge.
     assert result.cost_source == "subscription"
+    assert result.cost_usd == pytest.approx(rung_mod.OPENAI_SUB_API_EQUIVALENT_USD)
+    assert result.cost_usd == pytest.approx(0.053)
+    assert result.billing_basis == "subscription-api-equivalent"
+    provenance = result.cost_provenance or ""
+    assert provenance == rung_mod.OPENAI_SUB_API_EQUIVALENT_PROVENANCE
+    # The provenance must say it is not a charge, cite the doc + date, and
+    # state the size/quality assumption.
+    assert "not billed" in provenance
+    assert "developers.openai.com" in provenance and "2026-10-09" in provenance
+    assert "assumed" in provenance
     assert len(result.assets) == 1
     asset = result.assets[0]
     assert asset.data == PNG_1X1
