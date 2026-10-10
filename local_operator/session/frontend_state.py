@@ -76,6 +76,11 @@ from local_operator.model.costs import (
     job_subtree_cost,
     turn_cost,
 )
+from local_operator.session.channel_spend import (
+    ChildrenSnapshot,
+    InferenceSnapshot,
+    combine,
+)
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from local_operator.session.spend import (
@@ -1089,6 +1094,80 @@ class CostKnowledge(StrEnum):
     EXACT = "exact"
     PARTIAL = "partial"
     FLOOR = "floor"
+
+
+class FrontendSpendChannelRow(BaseModel):
+    """One aggregated row of the published ``spend_channels`` object.
+
+    Money is INTEGER micro-USD, like every other money field on this wire; a
+    UI formats it with its own dollar ladder rather than receiving preformatted
+    text (design §5.1). ``amount_micro=None`` means the row's money could not
+    be stated — it is NEVER a zero (the accumulator's own rule), and the row's
+    ``knowledge`` says how to read it.
+
+    ``label`` is the inference by-identity bucket key (``provider/model``, or
+    ``other`` for the cap's remainder, or ``unattributed`` for money that is
+    real but belongs to no single call). Channel rows leave it empty.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    channel: str
+    provider: str = ""
+    model: str = ""
+    label: str = ""
+    units: float = 0.0
+    unit: str = ""
+    amount_micro: int | None = None
+    knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+    basis: list[str] = Field(default_factory=list)
+    price_versions: list[str] = Field(default_factory=list)
+
+
+class FrontendSpendChildren(BaseModel):
+    """The subagent/forked-children contribution inside the published total.
+
+    For PR-1 this is the children's INFERENCE ledger (the figure the band has
+    always included through ``subagent_cost``/``child_costs``). Relayed channel
+    records from child sessions join it in the follow-up; until then this is
+    exactly the money the total contains for children, no more.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    total_micro: int = 0
+    knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+
+
+class FrontendSpendChannels(BaseModel):
+    """The session's published per-channel spend (``spend_channels``).
+
+    ONE object every surface renders, so surfaces cannot disagree: the TUI
+    band, ``/session``, the phone and the Electron strip all read
+    ``total_micro``/``knowledge``/``rows`` from here instead of summing
+    locally (design §5.1). ``total_micro`` is the grand total across the
+    session's own inference, its channel records and its children. It is
+    ``None``-free by construction: absence of the whole object is the "this
+    build does not publish it" state an old UI renders legacy-style.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    version: int = 1
+    #: False for a session whose journal carries no channel ``start`` marker —
+    #: a pre-feature conversation. Its totals are inference-only and every
+    #: surface must say "channels not tracked" rather than implying $0 of
+    #: channel spend (no fabricated zeros).
+    tracked: bool = False
+    total_micro: int = 0
+    knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+    #: Money per billing basis: ``billed``/``subscription_api_equivalent``/
+    #: ``estimated`` are micro-USD SUMS, ``not_tracked_calls`` is a COUNT of
+    #: records with no trackable money basis. Subscription dollars stay in
+    #: their own bucket — never added into ``billed``.
+    by_basis: dict[str, int] = Field(default_factory=dict)
+    rows: list[FrontendSpendChannelRow] = Field(default_factory=list)
+    children: FrontendSpendChildren = Field(default_factory=FrontendSpendChildren)
 
 
 class SlashCapability(BaseModel):
@@ -2992,6 +3071,11 @@ class FrontendSessionState(BaseModel):
     subagent_cost: float | None = None
     subagent_cost_knowledge: CostKnowledge | None = None
     cost_knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+    #: The published per-channel spend object (design §5.1): what every surface
+    #: reads for channel money. Additive and optional — absent on an old
+    #: runtime, and an old reader ignores it (``extra="allow"``), keeping this
+    #: wire change safe in both directions.
+    spend_channels: FrontendSpendChannels | None = None
     streaming: bool = False
     generation: int = 0
     #: How the last logical turn ended, for a viewer that dropped mid-turn and
@@ -6580,6 +6664,12 @@ class FrontendStateStore:
         # its measured cases live in ``_replayed_context_change``, shared with
         # the spend republish path so the two cannot drift.
         receipt_context = getattr(last_usage, "context_tokens", None) if last_usage else None
+        # Computed ONCE here because two consumers need the same fresh figures:
+        # the state's ``subagent_cost*`` fields below, and the channel payload's
+        # children section. Two calls could not disagree (it is a pure read of
+        # the manager's ledger), but one call is what keeps them provably the
+        # same number.
+        ledger = _ledger_cost(session)
         changes = dict(
             attention=dict(getattr(session, "_attention", {}) or {}),
             cwd=str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or os.getcwd()),
@@ -6628,8 +6718,13 @@ class FrontendStateStore:
             context_breakdown=context_breakdown,
             cumulative_parent_cost=parent_cost,
             child_costs=child_costs,
-            **_ledger_cost(session),
+            **ledger,
             cost_knowledge=knowledge,
+            # The published channel object is rebuilt from the SESSION's fold
+            # and the fresh children figures, in one place, so every surface
+            # reading this state sees one total. ``None`` for a host with no
+            # fold keeps the legacy shape an old surface renders today.
+            spend_channels=_spend_channels_payload(session, ledger, child_costs, spend),
             streaming=bool(getattr(session, "is_streaming", False)),
             generation=int(getattr(session, "_generation", current.generation) or 0),
             last_turn_outcome=_last_turn_outcome_from(session, current.last_turn_outcome),
@@ -7968,6 +8063,84 @@ def _ledger_cost(session: Any) -> dict[str, Any]:
         # does. PARTIAL keeps that distinction when parent spend is known.
         "subagent_cost_knowledge": (CostKnowledge.PARTIAL if unknown else CostKnowledge.EXACT),
     }
+
+
+def _children_snapshot(
+    ledger: Mapping[str, Any], child_costs: Mapping[str, float]
+) -> ChildrenSnapshot:
+    """The children contribution to the published total, in micro-USD.
+
+    The SAME rule the cumulative total has always used for children, restated
+    once so the band's number and the channel object's ``children`` section can
+    never disagree: the whole-manager ledger (``subagent_cost``) wins when its
+    knowledge exists, the compatibility ``child_costs`` rows are the fallback
+    (their sum is a true LOWER bound — only priced rows are in the map, so a
+    child the price resolver could not size is missing from it), and a session
+    with no children at all is a stated zero.
+    """
+    knowledge = ledger.get("subagent_cost_knowledge")
+    if knowledge is not None:
+        cost = ledger.get("subagent_cost")
+        return ChildrenSnapshot(
+            total_micro=_usd_to_micro(cost),
+            knowledge=str(knowledge),
+        )
+    if child_costs:
+        return ChildrenSnapshot(
+            total_micro=_usd_to_micro(sum(float(value) for value in child_costs.values())),
+            knowledge="floor",
+        )
+    return ChildrenSnapshot(total_micro=0, knowledge="exact")
+
+
+def _usd_to_micro(value: Any) -> int:
+    """A USD float (or ``None``) as integer micro-USD, never raising."""
+    try:
+        return int(round(float(value or 0.0) * 1_000_000))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _spend_channels_payload(
+    session: Any,
+    ledger: Mapping[str, Any],
+    child_costs: Mapping[str, float],
+    spend: Any,
+) -> FrontendSpendChannels | None:
+    """The published ``spend_channels`` object for one refresh, or ``None``.
+
+    ``None`` means this host publishes no channel ledger (a reduced facade, a
+    test double, an embedded host) — it NEVER means "no money", and a surface
+    must keep its legacy rendering rather than paint a zero. The object itself
+    is built by :func:`local_operator.session.channel_spend.combine`, the one
+    place that sums, so every reader agrees to the micro-USD.
+    """
+    fold = getattr(session, "channels", None)
+    if fold is None or not hasattr(fold, "rows"):
+        return None
+    inference = InferenceSnapshot(
+        micro=int(getattr(spend, "micro", 0) or 0),
+        calls=int(getattr(spend, "calls", 0) or 0),
+        priced_calls=int(getattr(spend, "priced_calls", 0) or 0),
+        knowledge=(str(spend.knowledge()) if isinstance(spend, SessionSpend) else "unknown"),
+        by_identity=getattr(spend, "by_identity", None),
+    )
+    try:
+        payload = combine(
+            fold.rows(),
+            inference=inference,
+            children=_children_snapshot(ledger, child_costs),
+            tracked=bool(getattr(session, "channels_started", False)),
+            lost=bool(getattr(session, "channels_lost", False)),
+        )
+    except Exception:  # noqa: BLE001 — a publish must never break a refresh
+        logger.debug("spend_channels payload failed", exc_info=True)
+        return None
+    try:
+        return FrontendSpendChannels.model_validate(payload)
+    except Exception:  # noqa: BLE001 — an unbuildable object degrades to absent
+        logger.debug("spend_channels payload did not validate", exc_info=True)
+        return None
 
 
 def _carry_child_cost(child_costs: dict[str, float], job: Any, *, default_model_label: str) -> None:

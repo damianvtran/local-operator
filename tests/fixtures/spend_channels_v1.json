@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "tracked": true,
+  "total_micro": 1016000,
+  "knowledge": "partial",
+  "by_basis": {
+    "billed": 53000,
+    "subscription_api_equivalent": 53000,
+    "estimated": 10000,
+    "not_tracked_calls": 2
+  },
+  "rows": [
+    {
+      "channel": "inference",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "label": "anthropic/claude-sonnet-5-5",
+      "units": 12.0,
+      "unit": "calls",
+      "amount_micro": 900000,
+      "knowledge": "exact",
+      "basis": [
+        "not_tracked"
+      ],
+      "price_versions": []
+    },
+    {
+      "channel": "image",
+      "provider": "openai-sub",
+      "model": "gpt-image-2",
+      "label": "",
+      "units": 1.0,
+      "unit": "images",
+      "amount_micro": 53000,
+      "knowledge": "exact",
+      "basis": [
+        "subscription_api_equivalent"
+      ],
+      "price_versions": [
+        "OpenAI image-generation pricing (gpt-image-2, 1024x1024 medium, 2026-10-09)"
+      ]
+    },
+    {
+      "channel": "image",
+      "provider": "radient",
+      "model": "gpt-image-2",
+      "label": "",
+      "units": 3.0,
+      "unit": "images",
+      "amount_micro": 53000,
+      "knowledge": "partial",
+      "basis": [
+        "billed",
+        "not_tracked"
+      ],
+      "price_versions": [
+        "Radient GET /tools/media/status cost_usd"
+      ]
+    },
+    {
+      "channel": "read",
+      "provider": "deepseek:read",
+      "model": "",
+      "label": "",
+      "units": 1.0,
+      "unit": "reads",
+      "amount_micro": 2000,
+      "knowledge": "exact",
+      "basis": [
+        "estimated"
+      ],
+      "price_versions": [
+        "client-search-table-2026-09"
+      ]
+    },
+    {
+      "channel": "search",
+      "provider": "tavily",
+      "model": "",
+      "label": "",
+      "units": 1.0,
+      "unit": "searches",
+      "amount_micro": 8000,
+      "knowledge": "exact",
+      "basis": [
+        "estimated"
+      ],
+      "price_versions": [
+        "client-search-table-2026-09"
+      ]
+    }
+  ],
+  "children": {
+    "total_micro": 0,
+    "knowledge": "exact"
+  }
+}
