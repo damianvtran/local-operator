@@ -1330,15 +1330,32 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
     assert link is not None, reason
 
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
+    assert a_link is not None
+
+    # LET a's OWN ESTABLISHMENT PULL SETTLE BEFORE THE DUE WINDOW IS ARMED. b's dial
+    # returns when b is satisfied, but a's listener side runs its own ``net_member_list``
+    # pull for this link on a handshake thread of its own (``register_link``), and that
+    # pull STAMPS ``member_pulled_at`` when its answer lands. Armed too early, the arm
+    # below (``= 0.0``) is overwritten by that late stamp, the link reads as pulled
+    # moments ago, the kicked pass finds it NOT DUE and answers from the cadence
+    # without ever entering ``_pull_members`` — "the kicked pass never entered the
+    # pull" (CI shards 2026-10-09/10; the margin between the two threads is ~1 ms on a
+    # quiet host, measured, and a starved runner turns it into a coin flip). The stamp
+    # is the event: it is written exactly once per establishment pull, so waiting for
+    # it leaves no other writer racing the arm.
+    assert net_fixtures.wait_for(
+        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+    ), "a's establishment pull never stamped the link"
+
     # A completed pass first: the fallback must BE this one, so make it answer with
-    # b's table (a real pull — the link is up).
+    # b's table (a real pull — the link is up, and the zero makes it due).
+    a_link.member_pulled_at = 0.0
     first = a.server.refresh_membership()[record.network_id]  # noqa: SLF001
     assert first.answered == [b.device_id], first
 
     # Make the NEXT pull hang, and re-open the link's due window so the pass the
     # read triggers actually enters the hung pull.
-    a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
-    assert a_link is not None
     a_link.member_pulled_at = 0.0
     release = threading.Event()
 
