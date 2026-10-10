@@ -1767,6 +1767,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "carrying the macOS key agent — and every other ref is built from source."
         ),
     )
+    # The deliberate-downgrade override for --from-snapshot: without it a target
+    # STRICTLY OLDER than the install the pointer names is refused before any
+    # install work (update.classify_snapshot_downgrade). Named after the flag
+    # the retired legacy installer carried; the deliberate rollback it allows
+    # rides the install marker as `downgrade-allowed`. Alone it is a refusal —
+    # the PyPI path only ever installs newer versions.
+    update_parser.add_argument(
+        "--allow-downgrade",
+        dest="allow_downgrade",
+        action="store_true",
+        help=(
+            "Allow --from-snapshot to install a build OLDER than the current install "
+            "(a deliberate rollback; recorded in the install marker). Refused without "
+            "--from-snapshot: the PyPI path only installs newer versions."
+        ),
+    )
     update_parser.add_argument(
         "--no-services",
         dest="no_services",
@@ -14568,6 +14584,7 @@ def main() -> int:
                 refresh_mobile=bool(getattr(args, "refresh_mobile", False)),
                 from_snapshot=getattr(args, "from_snapshot", None),
                 services=not bool(getattr(args, "no_services", False)),
+                allow_downgrade=bool(getattr(args, "allow_downgrade", False)),
             )
         elif args.subcommand == "services":
             # Lazy for the same reason as ``update``: this pulls the serve
