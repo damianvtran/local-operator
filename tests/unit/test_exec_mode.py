@@ -4,7 +4,8 @@ Engine-free by construction: a scripted ``FakeSession`` implements the
 ``SessionProtocol`` surface and is injected through the documented seams
 (``exec_mode.default_session_factory`` and ``exec_worker.run``'s factory
 parameter). Background spawning is verified by monkeypatching
-``subprocess.Popen`` — no real detached processes are created.
+``exec_mode.spawn_disclaimed`` — the one spawn seam — so no real detached
+processes are created.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import asyncio
 import io
 import json
 import os
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -1012,7 +1014,7 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 4321
-    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "spawn_disclaimed", popen_mock)
     monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     code = exec_mode.run_exec(
@@ -1021,7 +1023,9 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     )
     assert code == 0
 
-    # Detached argv, one new session on POSIX.
+    # The spawn ROUTES through the shared helper (``macos_disclaim.spawn_disclaimed``,
+    # which owns detachment and the macOS responsibility disclaim — 2026-10-09);
+    # this asserts the argv and stdio handed to it.
     popen_mock.assert_called_once()
     argv = popen_mock.call_args[0][0]
     kwargs = popen_mock.call_args[1]
@@ -1052,8 +1056,14 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     # `--job-id=<id>`, one item: see build_worker_argv on why every
     # value-carrying option uses the `=` form.
     assert any(a.startswith("--job-id=") for a in argv)  # CL-09 terminal-record wiring
-    if sys.platform != "win32":
-        assert kwargs.get("start_new_session") is True
+    # Detachment and the macOS responsibility disclaim live INSIDE the helper:
+    # the call site hands over stdio only and cannot half-apply a platform
+    # branch of its own. The flags themselves are pinned on a REAL spawn in
+    # tests/unit/test_macos_disclaim.py (own session + disclaim attribute).
+    assert "start_new_session" not in kwargs and "creationflags" not in kwargs
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.STDOUT
+    assert "stdout" in kwargs
 
     # Log path printed and registered; JSONL ledger appended (CL-11).
     # STDERR: --json and --background are independent flags, so these two
@@ -1103,7 +1113,7 @@ def test_a_deny_trapped_background_launch_advertises_the_remedies(
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 4321
-    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "spawn_disclaimed", popen_mock)
     monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     assert exec_mode.run_exec("task", ExecArgs(background=True)) == 0
@@ -1139,7 +1149,7 @@ def test_a_profile_declared_run_is_not_advertised_as_deny_trapped(
     monkeypatch.setattr("local_operator.session_factory.resolve_hosting_model", resolved)
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 4321
-    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "spawn_disclaimed", popen_mock)
     monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     assert exec_mode.run_exec("task", ExecArgs(background=True, profile="reviewer")) == 0
@@ -1171,7 +1181,7 @@ def test_a_config_auto_run_is_not_advertised_as_deny_trapped(
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 4321
-    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "spawn_disclaimed", popen_mock)
     monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     assert exec_mode.run_exec("task", ExecArgs(background=True)) == 0
@@ -1279,7 +1289,7 @@ def test_an_answerable_background_launch_stays_quiet(
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 4321
-    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "spawn_disclaimed", popen_mock)
     monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     assert exec_mode.run_exec("task", ExecArgs(background=True, **flags)) == 0
@@ -1318,19 +1328,22 @@ def test_the_background_worker_detaches_through_the_shared_helper(
 ) -> None:
     """A7: this spawn spelled its own ``os.name == \"posix\"`` branch.
 
-    ``start_new_session`` is documented "(POSIX only)" and Windows SILENTLY
-    ignores it, so the hand-rolled branch left a "detached" worker sharing this
-    console on the one platform where the flag is a no-op — a Ctrl-C and a
-    console close both reached it, which is the property the call exists to get.
-    What this pins is the ROUTING: with the platform seam flipped to Windows the
-    spawn carries Windows detachment and no ``start_new_session`` at all, which
-    can only have come from ``procstate.detached_popen_kwargs``.
+    THE SPAWN NOW ROUTES THROUGH ``macos_disclaim.spawn_disclaimed``, which owns
+    detachment on every platform — ``procstate.detached_popen_kwargs`` inside its
+    fallback, plus the macOS responsibility disclaim the 2026-10-09 fix needs.
+    What this pins is that routing, exercised for real: the fallback is forced,
+    the platform seam is flipped to Windows, and the ``Popen`` the helper reaches
+    carries Windows detachment and NO ``start_new_session`` at all.
     """
-    from local_operator import procstate
+    from local_operator import macos_disclaim, procstate
 
     _redirect_logs_dir(monkeypatch, tmp_path)
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
     monkeypatch.setattr(procstate, "is_windows", lambda: True)
+    # Force the helper's fallback path so the Windows branch is reachable on this
+    # (macOS) host; the disclaimed path itself is pinned in
+    # tests/unit/test_macos_disclaim.py.
+    monkeypatch.setattr(macos_disclaim, "_fallback_reason", lambda: "forced for this test")
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 4321
     monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
@@ -1360,7 +1373,7 @@ def test_spawn_background_unconfigured_hosting_returns_one(
         lambda args: (_ for _ in ()).throw(ValueError("Hosting platform is not configured.")),
     )
     popen_mock = MagicMock()
-    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "spawn_disclaimed", popen_mock)
     monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     code = exec_mode.run_exec("do a thing", ExecArgs(background=True))
@@ -1389,7 +1402,7 @@ def test_logs_dir_and_log_file_permissions(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 1
-    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "spawn_disclaimed", popen_mock)
     monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     assert exec_mode.run_exec("perm task", ExecArgs(background=True)) == 0
@@ -1411,7 +1424,7 @@ def test_background_preflight_blocks_spawn(
 
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", broken)
     popen_mock = MagicMock()
-    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "spawn_disclaimed", popen_mock)
     monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     code = exec_mode.run_exec("doomed", ExecArgs(background=True))
@@ -1964,7 +1977,7 @@ def test_background_logs_and_ledger_follow_the_config_dir_override(
     Asserted on the FILES THAT APPEAR, not on the resolver's return value: a
     resolver can be correct while a caller keeps a stale copy of the old root, and
     only looking at the filesystem afterwards tells those apart. The whole spawn
-    runs for real (``Popen`` alone is faked), so this covers the log path, the
+    runs for real (the spawn CALL alone is faked), so this covers the log path, the
     0700 directory and the ledger write in one pass.
     """
     override = tmp_path / "override-config"
@@ -1974,7 +1987,7 @@ def test_background_logs_and_ledger_follow_the_config_dir_override(
 
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 5150
-    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "spawn_disclaimed", popen_mock)
     monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     assert exec_mode.run_exec("isolated background task", ExecArgs(background=True)) == 0

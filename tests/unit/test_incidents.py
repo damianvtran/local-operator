@@ -915,3 +915,104 @@ def test_signal_receipt_detail_states_the_gap_and_never_names_a_sender() -> None
     # another device, so the clock it is on travels with it.
     dated = render_signal_receipt_detail(signal_name="SIGTERM", at=1_760_000_000.0)
     assert re.search(r"received at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}", dated), dated
+
+
+def test_signal_detail_names_a_gone_app_ancestor_and_claims_no_more() -> None:
+    """2026-10-09, gated (design round 1, D1): the clause states BOTH readings.
+
+    The app at the ROOT of the recorded chain was alive when the chain was
+    recorded for this runtime and is gone at arrival — the clause says exactly
+    those two observations, names the app by DESCENT with its bundle name and
+    pid (D2/D3), and must not upgrade either reading to "force-quit" or to a
+    sender. The closing "nobody asked for a stop" stays final (D4).
+    """
+    from local_operator.incidents import KILL_UNATTRIBUTED, render_signal_receipt_detail
+
+    detail = render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        at=1_760_000_000.0,
+        spawn_chain=[
+            {"pid": 111, "argv0": "lop", "alive_at_spawn": True, "alive_now": False},
+            {
+                "pid": 66213,
+                "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+                "alive_at_spawn": True,
+                "alive_now": False,
+            },
+        ],
+    )
+    assert (
+        "the app this runtime descends from (Local Operator.app, pid 66213)"
+        " was running when the runtime started and was no longer running when the signal arrived"
+        " (when it exited is not recorded)"
+    ) in detail
+    # The rendered identity is the bundle name plus pid — never the recorded
+    # command line (D3) — and the order is sender → app status → the closing
+    # conclusion (D4).
+    assert "/Applications/" not in detail
+    assert detail.index("unidentified sender") < detail.index("this runtime descends from")
+    assert detail.rstrip(")").endswith("nobody asked for a stop")
+    assert "force quit" not in detail and "force-quit" not in detail
+    assert KILL_UNATTRIBUTED in detail
+
+
+def test_signal_detail_skips_ancestors_that_fail_either_reading() -> None:
+    """The gate is strict on both halves — anything but proven-alive → proven-gone says nothing."""
+    from local_operator.incidents import render_signal_receipt_detail
+
+    app = "/Applications/Local Operator.app/Contents/MacOS/Local Operator"
+    cases: list[dict[str, object]] = [
+        # still alive at arrival — it did not outlive anything
+        {"pid": 66213, "argv0": app, "alive_at_spawn": True, "alive_now": True},
+        # gone at BOTH readings — it was already gone when the chain was written
+        {"pid": 66213, "argv0": app, "alive_at_spawn": False, "alive_now": False},
+        # a probe that could not be made on either side is not evidence
+        {"pid": 66213, "argv0": app, "alive_at_spawn": None, "alive_now": False},
+        {"pid": 66213, "argv0": app, "alive_at_spawn": True, "alive_now": None},
+        # no recorded reading at all (a chain written by an older build)
+        {"pid": 66213, "argv0": app, "alive_now": False},
+    ]
+    for entry in cases:
+        detail = render_signal_receipt_detail(signal_name="SIGTERM", spawn_chain=[entry])
+        assert "no longer running" not in detail, entry
+
+
+def test_signal_detail_ignores_non_app_members_and_malformed_chains() -> None:
+    from local_operator.incidents import render_signal_receipt_detail
+
+    gone: dict[str, object] = {"alive_at_spawn": True, "alive_now": False}
+    assert "no longer running" not in render_signal_receipt_detail(
+        signal_name="SIGTERM", spawn_chain=[{"pid": 9, "argv0": "/bin/zsh", **gone}]
+    )
+    assert "no longer running" not in render_signal_receipt_detail(
+        signal_name="SIGTERM", spawn_chain="garbage"
+    )
+    assert "no longer running" not in render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        spawn_chain=[{"argv0": "/Applications/X.app/Contents/MacOS/X", **gone}],
+    )
+
+
+def test_signal_detail_renders_the_bundle_name_for_helper_shaped_lines() -> None:
+    """D3: a helper's command line carries flags — the clause cuts to its bundle."""
+    from local_operator.incidents import render_signal_receipt_detail
+
+    helper = (
+        "/Applications/Local Operator.app/Contents/Frameworks/"
+        "Local Operator Helper (Renderer).app/Contents/MacOS/Local Operator Helper (Renderer)"
+        " --type=renderer --user-data-dir=/Users/damian/Library/Application Support/Local Operator"
+    )
+    detail = render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        spawn_chain=[{"pid": 66213, "argv0": helper, "alive_at_spawn": True, "alive_now": False}],
+    )
+    assert "Local Operator Helper (Renderer).app, pid 66213" in detail
+    assert "--user-data-dir" not in detail and "--type=renderer" not in detail
+
+
+def test_signal_detail_without_a_chain_is_byte_identical_to_before() -> None:
+    from local_operator.incidents import render_signal_receipt_detail
+
+    assert render_signal_receipt_detail(signal_name="SIGTERM") == (
+        " (unattributed, SIGTERM received from an unidentified sender; nobody asked for a stop)"
+    )
