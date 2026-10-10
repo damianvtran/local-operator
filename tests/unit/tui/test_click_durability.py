@@ -103,9 +103,25 @@ def test_the_compiled_helper_uses_the_window_it_is_given(tmp_path: Path) -> None
     """The REAL binary, built from the shipped source, reports the window it
     would wait for. Its dry-run seam exits before touching Notification Centre,
     so nothing is posted to the desktop."""
-    app = notifier_app.build_bundle(tmp_path)
-    assert app is not None
-    binary = str(app / "Contents" / "MacOS" / "notifier")
+    # Compiled directly, NOT through `build_bundle`: that also runs `lsregister
+    # -f`, which would point LaunchServices' record for our one real bundle id
+    # (`me.damiantran.localoperator`) at a throwaway pytest directory and could
+    # change which binary the operator's real banners are attributed to.
+    binary = str(tmp_path / "notifier")
+    subprocess.run(
+        [
+            "clang",
+            "-framework",
+            "Foundation",
+            "-Wno-deprecated-declarations",
+            "-o",
+            binary,
+            str(Path(notifier_app.__file__).parent / "notifier.m"),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
     env = {"PATH": os.environ["PATH"], "LOCAL_OPERATOR_NOTIFIER_DRY_RUN": "1"}
 
     def window(*extra: str) -> str:
