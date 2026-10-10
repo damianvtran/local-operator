@@ -4,6 +4,7 @@
   "enforced": [
     "local_operator/i18n/",
     "scripts/i18n/",
+    "local_operator/slash_commands.py",
     "local_operator/settings_io.py"
   ],
   "files": {
@@ -135,7 +136,7 @@
     "local_operator/skills/discovery.py": 1,
     "local_operator/skills/index.py": 4,
     "local_operator/skills/protocol.py": 2,
-    "local_operator/slash_commands.py": 78,
+    "local_operator/slash_commands.py": 29,
     "local_operator/supervisors.py": 5,
     "local_operator/teams.py": 4,
     "local_operator/tools/agent_tool.py": 3,

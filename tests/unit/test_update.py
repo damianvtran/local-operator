@@ -775,6 +775,7 @@ def test_main_dispatches_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
             refresh_mobile=False,
             from_snapshot=None,
             services=True,
+            allow_downgrade=False,
         )
 
 
@@ -791,6 +792,7 @@ def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
             refresh_mobile=False,
             from_snapshot=None,
             services=True,
+            allow_downgrade=False,
         )
 
 
@@ -814,6 +816,7 @@ def test_main_dispatches_the_service_only_repair(monkeypatch: pytest.MonkeyPatch
             refresh_mobile=False,
             from_snapshot=None,
             services=True,
+            allow_downgrade=False,
         )
 
 
@@ -838,6 +841,7 @@ def test_main_dispatches_the_mobile_repair(monkeypatch: pytest.MonkeyPatch) -> N
             refresh_mobile=True,
             from_snapshot=None,
             services=True,
+            allow_downgrade=False,
         )
 
 
@@ -855,12 +859,40 @@ def test_main_dispatches_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
             refresh_mobile=False,
             from_snapshot="main",
             services=True,
+            allow_downgrade=False,
         )
 
     monkeypatch.setattr("sys.argv", ["lop", "update", "--check", "--from-snapshot", "main"])
     with patch("local_operator.update.update_command", return_value=1) as refused:
         assert main() == 1
         refused.assert_called_once()
+
+
+def test_main_dispatches_allow_downgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--allow-downgrade`` reaches the installer as the deliberate rollback.
+
+    Parse → dispatch end to end: the flag is the only way past the
+    strictly-older refusal on the snapshot path
+    (update.classify_snapshot_downgrade), so a flag the parser accepts and the
+    dispatch drops would strand the override — the refusal would name a command
+    that does nothing.
+    """
+    from local_operator.cli import main
+
+    monkeypatch.setattr(
+        "sys.argv", ["lop", "update", "--from-snapshot", "v0.9.8", "--allow-downgrade"]
+    )
+    with patch("local_operator.update.update_command", return_value=0) as cmd:
+        assert main() == 0
+        cmd.assert_called_once_with(
+            check=False,
+            refresh_daemons=False,
+            services_only=False,
+            refresh_mobile=False,
+            from_snapshot="v0.9.8",
+            services=True,
+            allow_downgrade=True,
+        )
 
 
 def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -882,6 +914,7 @@ def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
             refresh_mobile=False,
             from_snapshot=None,
             services=False,
+            allow_downgrade=False,
         )
 
 
@@ -3886,7 +3919,7 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
     ):
         assert update_mod._snapshot_command("v1.2.3") == 0
 
-    assert calls == [(None, {"version": "1.2.3"})]
+    assert calls == [(None, {"version": "1.2.3", "note": ""})]
     bundle.assert_not_called()
     assert not snapshot.exists(), "the wheel route must still reclaim the ref extract"
     out = capsys.readouterr().out
@@ -3940,3 +3973,366 @@ def test_from_snapshot_unreleased_ref_falls_back_loudly_and_records_the_reason(
         "warning: this build does not carry the macOS key agent (lop-keyagent.app)" in captured.err
     )
     assert "building from source" not in captured.out, "the fallback is a warning, not progress"
+
+
+def test_from_snapshot_refuses_a_strictly_older_release_before_the_classifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE INCIDENT, pinned at the command that caused it (2026-10-10).
+
+    ``lop-update v0.68.23`` under a 0.68.24 install built generation
+    ``20261010T153510Z-0.68.23``, flipped ``current`` onto it and moved the
+    serve process and every daemon down — an innocent explicit-tag install
+    reached the installer without ever comparing its version against the
+    install the pointer named. This is the wheel route (the ref is exactly a
+    published release), and the refusal must land before any install work: no
+    route announcement, no PyPI consult, no installer call, extract reclaimed.
+    """
+    repo, commit = _release_repo(tmp_path, tag="v0.9.8", version="0.9.8")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    document = _release_document(
+        "0.9.8", _wheel_entry("local_operator-0.9.8-py3-none-macosx_11_0_universal2.whl")
+    )
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def install(source: Any, **kwargs: Any) -> None:
+        calls.append((source, kwargs))
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8", ref="v0.9.8"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")) as pypi,
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("v0.9.8") == 1
+
+    assert calls == [], "a refused downgrade must not reach the installer"
+    assert not snapshot.exists(), "the refusal still reclaims the ref extract"
+    captured = capsys.readouterr()
+    assert (
+        "matches published release" not in captured.out
+    ), "the refusal lands before the route announcement"
+    assert (
+        "refusing to install an older build — 0.9.8 is older than this machine's "
+        "current install (0.9.9); nothing was installed." in captured.err
+    ), "the refusal names both versions and the state of the install"
+    assert (
+        "  To downgrade deliberately, re-run from the repository: "
+        "`lop update --from-snapshot v0.9.8 --allow-downgrade`" in captured.err
+    ), "the refusal names the explicit override, spelled as a runnable command"
+    # The classifier is what pays this consult for a release-tagged ref, so the
+    # pin is that the refusal lands BEFORE it — a gate moved after
+    # ``classify_snapshot_install`` consults PyPI here and fails this line
+    # (agent review round 1, F1).
+    pypi.assert_not_called()
+
+
+def test_from_snapshot_refuses_a_strictly_older_source_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other route: a plain older ref (no release tag) is refused too.
+
+    The wheel route is the incident's shape; the source route is the same
+    decision one ref over — a SHA, a branch tip, an unreleased tag. The tree's
+    own ``pyproject.toml`` names the version there, and it must not be able to
+    move the fleet down either. The refusal lands before the mobile-bundle
+    build, the installer, and the fallback notice — so it is never buried
+    under the notice that would otherwise announce a source build.
+    """
+    repo, commit = _release_repo(tmp_path, tag=None, version="0.9.8")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def install(source: Any, **kwargs: Any) -> None:
+        calls.append((source, kwargs))
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(update_mod, "_release_versions_at") as tags,
+        patch.object(update_mod, "_pypi_release_document") as pypi,
+        patch.object(install_mod, "snapshot_bundle") as bundle,
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    assert calls == [], "a refused downgrade must not reach the installer"
+    bundle.assert_not_called()
+    tail.assert_not_called()
+    assert not snapshot.exists(), "the refusal still reclaims the ref extract"
+    captured = capsys.readouterr()
+    assert (
+        "building from source" not in captured.out + captured.err
+    ), "the refusal lands before the fallback notice"
+    assert (
+        "refusing to install an older build — 0.9.8 is older than this machine's "
+        "current install (0.9.9); nothing was installed." in captured.err
+    )
+    assert (
+        "`lop update --from-snapshot main --allow-downgrade`" in captured.err
+    ), "the remedy names the ref the caller actually passed"
+    # The ordering pin for THIS route: a gate moved after
+    # ``classify_snapshot_install`` would run the classifier's first read, the
+    # tags lookup; the PyPI mock is the same pin for the routes that consult
+    # (an untagged ref never reaches that consult, so it cannot bite here —
+    # agent review round 1, F1).
+    tags.assert_not_called()
+    pypi.assert_not_called()
+
+
+def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The override path on the wheel route: it installs, loudly, and the marker
+    note records the deliberate downgrade rather than the silent one."""
+    repo, commit = _release_repo(tmp_path, tag="v0.9.8", version="0.9.8")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    document = _release_document(
+        "0.9.8", _wheel_entry("local_operator-0.9.8-py3-none-macosx_11_0_universal2.whl")
+    )
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def install(source: Any, **kwargs: Any) -> None:
+        calls.append((source, kwargs))
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8", ref="v0.9.8"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
+    ):
+        assert update_mod._snapshot_command("v0.9.8", allow_downgrade=True) == 0
+
+    assert calls == [
+        (None, {"version": "0.9.8", "note": "downgrade-allowed"})
+    ], "the override installs the older wheel and the marker note records it"
+    tail.assert_called_once_with(0, services=True, install_version="0.9.8", target="0.9.8")
+    captured = capsys.readouterr()
+    assert (
+        "warning: downgrading on purpose — current install 0.9.9, snapshot 0.9.8; "
+        "the install marker will record downgrade-allowed" in captured.err
+    ), "the override warns loudly, naming both versions"
+    assert "matches published release" in captured.out, "the install still runs its route"
+    assert not snapshot.exists(), "the override path reclaims the extract like any install"
+
+
+def test_from_snapshot_allow_downgrade_composes_the_note_with_the_fallback_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both facts ride the marker note: the fallback rationale, then the token."""
+    repo, commit = _release_repo(tmp_path, tag=None, version="0.9.8")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(install_mod, "snapshot_bundle", return_value="built"),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: calls.append((path, kwargs)),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main", allow_downgrade=True) == 0
+
+    assert len(calls) == 1
+    assert (
+        calls[0][1]["note"] == "unreleased-ref downgrade-allowed"
+    ), "the fallback reason and the downgrade record share the annotation slot"
+    assert "downgrading on purpose" in capsys.readouterr().err
+
+
+def test_from_snapshot_equal_version_still_rebuilds_the_stale_main_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stale local ``main`` is the SAME version — the case the gate must NOT block.
+
+    ``main``'s ``pyproject.toml`` names the last release until the next bump, so
+    a stale checkout and a fresh one carry equal versions; rebuilding for a
+    same-version snapshot is the documented reason ``lop-update`` may run
+    against a not-yet-advanced ``main``, and the gate must preserve it —
+    equality is not a downgrade.
+    """
+    repo, commit = _release_repo(tmp_path, tag=None, version="0.9.9")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.9"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(install_mod, "snapshot_bundle", return_value="built"),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: calls.append((path, kwargs)),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0
+
+    assert len(calls) == 1, "a same-version rebuild is a normal install"
+    assert calls[0][1]["note"] == "unreleased-ref"
+    captured = capsys.readouterr()
+    assert "refusing" not in captured.err
+    assert "downgrading on purpose" not in captured.err
+
+
+def test_from_snapshot_newer_version_installs_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A NEWER snapshot passes the gate and rides the wheel route unchanged."""
+    repo, commit = _release_repo(tmp_path, tag="v0.9.10", version="0.9.10")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    document = _release_document(
+        "0.9.10", _wheel_entry("local_operator-0.9.10-py3-none-macosx_11_0_universal2.whl")
+    )
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def install(source: Any, **kwargs: Any) -> None:
+        calls.append((source, kwargs))
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.10", ref="v0.9.10"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("v0.9.10") == 0
+
+    assert calls == [(None, {"version": "0.9.10", "note": ""})]
+    captured = capsys.readouterr()
+    assert "refusing" not in captured.err
+    assert "downgrading on purpose" not in captured.err
+
+
+def test_from_snapshot_downgrade_gate_is_silent_without_two_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No positive evidence of an ordering, no refusal — the fail-open rule.
+
+    (a) a target version this module cannot order (an ``rc`` spelling): the
+    comparison is refused, not the install; (b) an install side it cannot read
+    (no pointer, no distribution): same. Both proceed exactly as they did
+    before the gate existed — a refusal that cannot be defended must not block
+    an install the caller asked for, the same rule :func:`is_behind` follows.
+    """
+    repo, commit = _release_repo(tmp_path, tag=None, version="0.9.8rc1")
+    snapshot = tmp_path / "extract-a"
+    snapshot.mkdir()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8rc1"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(install_mod, "snapshot_bundle", return_value="built"),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: calls.append((path, kwargs)),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0, "an unorderable target proceeds"
+        assert len(calls) == 1
+        assert "refusing" not in capsys.readouterr().err
+
+    calls.clear()
+    snapshot_b = tmp_path / "extract-b"
+    snapshot_b.mkdir()
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot_b, commit=commit, version="0.9.8"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=None),
+        patch.object(install_mod, "snapshot_bundle", return_value="built"),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: calls.append((path, kwargs)),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0, "an unreadable install proceeds"
+        assert len(calls) == 1
+        assert "refusing" not in capsys.readouterr().err
+
+
+def test_update_command_refuses_allow_downgrade_without_from_snapshot(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The override answers nothing on the PyPI path, so it is refused there.
+
+    ``check_latest``'s ``behind`` gate only ever installs NEWER versions, so
+    ``--allow-downgrade`` alone is the same category error ``--check
+    --from-snapshot`` is, and takes the same refusal shape — and it must not
+    even consult the index on the way out.
+    """
+    with patch.object(update_mod, "check_latest") as latest:
+        assert update_mod.update_command(allow_downgrade=True) == 1
+    latest.assert_not_called()
+    assert "--allow-downgrade applies to --from-snapshot" in capsys.readouterr().err
