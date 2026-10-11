@@ -820,9 +820,14 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
     # THE CARD IS IN THAT FRAME, and the equalities below are what say its rows
     # came out of the transcript there and then. What this does NOT credit is the
     # arrange-time settle: `OperatorApp._settle_dock_rows_before_reveal` runs its
-    # pass while the card is still composing (instrumented: `card_mounted=False` in
-    # every settle this lane and the reviewer took), so the pass cannot be the
-    # mechanism — see the comment under the equalities. Before the reservation,
+    # pass while the card is still composing (instrumented: `card_mounted=False`
+    # in every settle this lane and the reviewer took), so the pass is not the
+    # mechanism — see the comment under the equalities. It was dropped for two
+    # rounds and came back on the numbers: without it this pin is 3 of 8 green
+    # against 8 of 8 with it (p = 2.3e-04, every failure `38.0 == 23.0`, the
+    # 15-row shift on the pre-armed path), while the cold path's transitional
+    # frame it authors is that path's RECORDED residual (19 of 20 opens with it,
+    # 3 of 20 without). Before the reservation,
     # measured at this size: region 38, host `y=39` with its 15 rows on a 45-row
     # screen (clipped), settling to 23 at +147 ms with the scroll moving by exactly
     # the card's height — review round 1's F2, QA's Q2, design's D4. `region`, not
@@ -884,10 +889,11 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
     # one equality over the geometry a reader sees — not a claim about the code
     # path. `_settle_dock_rows_before_reveal` runs its pass while the card is still
     # composing (instrumented: `card_mounted=False` in every run the reviewer and
-    # this lane took), so the pass cannot be credited with the reservation; what
-    # decides the frame is the card's own composition landing before the reveal is
-    # painted. The rate therefore belongs to the pin, not to a comment: at matched
-    # load the reviewer measured 16 of 16 and 21 of 23 in the two arms, with no
+    # this lane took), so the pass was never the reservation — and what decides
+    # this frame is the card's own composition landing before the reveal is
+    # painted, which is why the drop measured above costs this pin. The rate
+    # therefore belongs to the pin, not to a comment: at matched load the reviewer
+    # measured 16 of 16 and 21 of 23 in the two arms, with no
     # measurable gain from the in-turn mount helper, which is why that helper is
     # gone from this branch — a mechanism that does not move the number is not kept
     # for its name.

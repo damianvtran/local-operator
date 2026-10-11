@@ -9664,16 +9664,11 @@ class OperatorApp(App[None]):
             # section, so the reveal's own frame already excludes its rows
             # (`_prearm_known_gate`; the ladder adopts the card when it runs).
             self._prearm_known_gate(source)
-            # NO ARRANGE-TIME SETTLE HERE. This call site took a synchronous
-            # layout pass for four rounds — first as `_settle_dock_rows_before_reveal`
-            # guarded on `self._prearmed_approval`, then scoped to the pre-arm — and
-            # QA measured it as the dominant author of an extra painted state on the
-            # cold-switch path rather than a cure for one: the partial-reserve frame
-            # is 18 of 20 opens on the round-4 head and 19 of 20 on the round-5 head
-            # with the pass, 2 of 8 without it (p = 0.007). The reader's criterion is
-            # no extra painted state, so the pass is gone; the reveal frame's own
-            # geometry is still asserted on painted frames by
-            # `test_a_gate_the_app_already_holds_is_in_the_reveal_frame`.
+            # THE CARD'S ROWS ARE SETTLED WHERE THE CARD IS MOUNTED, not here:
+            # `_prearm_known_gate` takes the layout pass itself, immediately after
+            # its mount. Two rounds tried to move or drop that pass and both were
+            # measured; it is back where the measurement put it, and its own
+            # numbers are in `_settle_dock_rows_before_reveal`.
             # IMMEDIATELY AFTER the adopt, and never before it. `_adopt_session`
             # is the single place a source becomes current: it has just moved
             # `self._interaction` to the incoming source and lifted ITS mute, so
@@ -27996,6 +27991,54 @@ class OperatorApp(App[None]):
         if self._approval is card:
             self._approval = None
 
+    def _settle_dock_rows_before_reveal(self) -> None:
+        """Run the dock's layout in the reveal's own turn — and what that is NOT.
+
+        MEASURED, review rounds 2 and 3: the pre-armed card is NOT composed when
+        this pass runs (23 of 23 instrumented runs: `card_mounted=False`, the host
+        at its 3 rows of chrome), so this pass does not reserve the card's rows
+        and must not be described as doing so. What it does is the thing its call
+        site needs: one layout pass inside the turn that mounted the card (and
+        hence, on the sidebar path, inside the turn that reveals the transcript),
+        with the paint suppressed, so the compositor paints the arrangement that
+        exists rather than a half-arranged one.
+
+        The property the reader sees — the frame that carries the card carries the
+        settled geometry too — is asserted on PAINTED FRAMES by
+        `test_a_gate_the_app_already_holds_is_in_the_reveal_frame`, and it is the
+        card's own composition (Textual's async pipeline) that decides it: the
+        pin's rate is the honest measure of that, not this method's intent.
+
+        IT WAS DROPPED AND IT IS BACK, on measurement rather than on taste (QA
+        rounds 5-6, review round 7). Dropping it took the cold-switch
+        partial-reserve frame from 19 of 20 opens to 3 of 20 (p = 3.5e-09) — and
+        took this pin's own property with it: the pin that asserts the reader's
+        frame went 8 of 8 green to 3 of 8 (p = 2.3e-04), every failure
+        `38.0 == 23.0`, i.e. a 15-row shift on the PRE-ARMED path — exactly the
+        symptom this PR exists to remove. So the trade is: one transitional frame
+        on a first visit to a conversation, against the absence of a 15-row shift
+        on every return to one. The shift is the operator's criterion; the
+        transitional frame on that cold path is recorded as this PR's residual.
+        """
+        # CALLED ONLY FROM `_prearm_known_gate`, immediately after it mounts the
+        # card: this pass exists for that mount and for nothing else. It used to
+        # carry a `self._prearmed_approval is None` guard instead of that scoping,
+        # which was not enough — the field outlives the conversation it was set
+        # for, so a cold switch (nothing pre-armed for the incoming source) still
+        # paid a synchronous reflow and painted an extra state: QA round 4
+        # measured the partial-reserve shape in 18 of 20 opens on head and 0 of 8
+        # with the call removed. Scope by CALL SITE, not by a field the previous
+        # conversation can leave behind. Two further scoping attempts (round 4's
+        # move, round 5's drop) were both measured; this is the version QA had
+        # green at 8 of 8, and the drop's numbers are in the docstring above.
+        screen = self.screen
+        paint = screen._compositor_refresh
+        screen._compositor_refresh = _suppress_intermediate_paint
+        try:
+            screen._refresh_layout()
+        finally:
+            screen._compositor_refresh = paint
+
     def _prearm_known_gate(self, source: SessionInteraction) -> None:
         """Mount a gate the app ALREADY has in hand IN the frame that reveals its conversation.
 
@@ -28033,13 +28076,14 @@ class OperatorApp(App[None]):
         """
         if self._approval is not None or self._ask_screen is not None:
             return
-        # ...AND WHAT THE DOCK IS ACTUALLY HOLDING (QA round 5, Q6). On a cold
-        # switch the ladder mounts the real card in one commit and this pre-arm
-        # reaches the SAME gate, so the host transiently held two children: the
-        # field above does not catch it because `_approval` is written by the
-        # ladder when its own write lands, and the commit that runs this can
-        # precede that. The host's children are what the reader gets, so the
-        # guard asks about them.
+        # ...AND WHAT THE DOCK IS ACTUALLY HOLDING (QA round 5, Q6; mechanism
+        # corrected in review round 7, M1). On a cold switch the ladder mounts the
+        # real card in one commit and this pre-arm reaches the SAME gate, so the
+        # host transiently held two children. The field above does not catch it,
+        # and NOT because of ordering — the ladder writes `_approval` and mounts in
+        # one synchronous body: it is None here because a take-down on the way into
+        # this commit cleared it with the removal still queued. So the guard asks
+        # the host, with the departing child excluded (`_mounted_prompt_cards`).
         if self._mounted_prompt_cards():
             return
         if source is not self._interaction or source.session is None:
@@ -28076,22 +28120,55 @@ class OperatorApp(App[None]):
         self._prearmed_approval = prompt
         self._approval = prompt
         self._mount_prompt(prompt)
+        # THE PASS BELONGS HERE, in the same synchronous section as the mount, and
+        # this is its only caller. Mounting the card is not the same as taking its
+        # rows out of the transcript: a widget authors its height during a layout
+        # pass, and the pass that resolved the transcript's `1fr` ran before this
+        # mount. Without a pass here the compositor can paint the transcript at its
+        # pre-card height with the card's rows below it — measured at 160x45:
+        # region `1/38`, host at `y=39` (15 rows on a 45-row screen, i.e. clipped),
+        # settling to `1/23` a display later with the scroll moving 93 -> 108 by
+        # exactly the card's height: review round 1's F2, QA's Q2, design's D1/D4.
+        #
+        # Dropped in `c12a62b9a1` and reinstated here, on measurement rather than
+        # a change of mind: without it the cold path's transitional frame fell from
+        # 19 of 20 opens to 3 of 20, but the pin on the PRE-ARMED path went from
+        # 8 of 8 green to 3 of 8 (`38.0 == 23.0` — a 15-row shift on every return
+        # to a conversation), which is the trade the operator's criterion forbids.
+        # Its own limit is measured too: the pass runs while the card is still
+        # composing (`card_mounted=False` in 23 of 23 instrumented runs), so the pin
+        # on painted frames — not this pass — is what says the reader got the rows.
+        self._settle_dock_rows_before_reveal()
 
     def _mounted_prompt_cards(self) -> tuple[Widget, ...]:
-        """The cards the dock's prompt host is holding right now.
+        """The dock cards the READER has right now — mounted, shown, not leaving.
 
-        Read from the DOM rather than from a field. `_approval` and
-        `_prearmed_approval` are written by two different paths at two different
-        moments of the same switch, and QA round 5's Q6 measured the consequence:
-        a cold switch mounting the same gate's card twice, with the host holding
-        two children until the writers settled. The host's children are what the
-        reader sees, so they are what the pre-arm asks about.
+        Read from the DOM rather than from a field: the field is `None` while the
+        host still lists a child, because a take-down clears it and leaves the
+        removal queued (review round 7, M1 — the ladder writes `_approval` and
+        mounts in one synchronous body, so ordering is not the reason).
+
+        NOT a plain `host.children` read. `Widget.remove()` is deferred — it queues
+        a `Prune` and the child stays listed on this frame — and the switch commit
+        takes the outgoing card down and pre-arms the incoming one in ONE
+        synchronous body with no await between, so no pump tick can process the
+        Prune in between. A raw read therefore counts a card the reader has already
+        lost, the pre-arm stands down on it, and the reveal frame loses the
+        INCOMING gate's card: the frame-late card this path exists to remove.
+        `_pruning` is Textual's own on-its-way-out flag (`App._prune` sets it
+        synchronously, `Widget.render` honours it), and `display` is what the
+        reader gets; `_unmount_prompt` excludes the departing card by identity for
+        the same reason, from the call that holds the identity.
         """
         try:
             host = self.query_one("#prompt-host", Container)
         except Exception:  # pragma: no cover - only before the dock is composed
             return ()
-        return tuple(host.children)
+        return tuple(
+            child
+            for child in host.children
+            if child.display and not getattr(child, "_pruning", False)
+        )
 
     def _mount_prompt(self, card: Widget) -> None:
         """Put a prompt into the dock's prompt host, above the status band.
