@@ -60,11 +60,6 @@ from local_operator.harness.types import (
     TextContent,
 )
 from local_operator.session.attachments import AttachmentStore
-from local_operator.session.creation import (
-    ensure_session_created_at,
-    session_created_at,
-)
-from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
 
 # The engagement reader — and the transcript filename it looks for — live in
 # ``session/runtime/engagement.py``, a stdlib-only module, so the peer-send core
@@ -72,11 +67,23 @@ from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYP
 # dependency weight (that module's docstring has the whole reason). Re-exported
 # rather than redefined: exactly one definition of each, and every existing
 # importer of ``session.transcript`` keeps resolving.
+from local_operator.session.channel_spend import (
+    CHANNEL_SPEND_CUSTOM_TYPE,
+    CHANNEL_SPEND_VERSION,
+    map_image_cost_labels,
+    usd_to_micro,
+)
+from local_operator.session.creation import (
+    ensure_session_created_at,
+    session_created_at,
+)
+from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
 from local_operator.session.runtime.engagement import (  # noqa: F401
     TRANSCRIPT_FILENAME,
     durable_conversation_path,
 )
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
+from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
 
 if TYPE_CHECKING:
     from local_operator.session.history_window import _DisplayWindowCache
@@ -185,8 +192,21 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
+        CHANNEL_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
         "frontend_state_checkpoint_v1",
+        # A turn supplement lands AFTER the turn settled (memo §2.4 "Activity clock"):
+        # re-ranking a session as freshly worked because a callout arrived would reorder
+        # the sidebar for nothing. The writer passes ``preserve_mtime=True``.
+        SUPPLEMENT_CUSTOM_TYPE,
+        # The video lane's durable job record (``local_operator.video.records``):
+        # its writes are caused by a generation the user started, but the
+        # terminal transition lands minutes later with the user away — a
+        # bookkeeping row, never a sign the operator returned. The writer
+        # passes ``preserve_mtime=True``. The literal is pinned against
+        # ``video.records.VIDEO_JOB_CUSTOM_TYPE`` by a unit test (the
+        # ``stt.sidecar`` drift rule: this module does not import the writer).
+        "video_job_v1",
     }
 )
 
@@ -1333,6 +1353,70 @@ def find_row_for_custom_type(
     return None
 
 
+def read_custom_entries(
+    directory: str | Path, custom_type: str, *, max_rows: int | None = None
+) -> list[TranscriptEntry]:
+    """Every custom row of ``custom_type``, NEWEST first, without parsing the journal.
+
+    The multi-row sibling of :func:`read_latest_custom_entry`, for one consumer
+    class the single-row answer cannot serve: append-only rows where MULTIPLE
+    live objects each need their latest revision — the video phase's
+    ``video_job_v1`` records are written one row per state transition and the
+    reader groups them per job id (newest-wins per id).
+
+    Same scan, same needle, same per-row decode as
+    :func:`find_row_for_custom_type`; the differences are that it collects
+    instead of returning on first match, dedupes by row OFFSET (a payload string
+    that happens to contain the needle decodes to the same enclosing row), and
+    answers newest-first, so a caller may truncate from the tail and keep the
+    newest rows. ``max_rows`` bounds the walk for a journal that has accumulated
+    very many rows of this type; ``None`` reads all of them. The walk cost is
+    the distance from EOF to the OLDEST returned row — never worse than the
+    one-row reader's worst case, which reaches the file start itself.
+    """
+    encoded = json.dumps(custom_type)
+    if encoded != f'"{custom_type}"':
+        return []
+    if max_rows is not None and max_rows <= 0:
+        return []
+    needle = b'"custom_type":' + encoded.encode("utf-8")
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return []
+    entries: list[TranscriptEntry] = []
+    seen_offsets: set[int] = set()
+    with handle:
+        handle.seek(0, os.SEEK_END)
+        end_of_file = handle.tell()
+        overlap = len(needle) - 1
+        position = end_of_file
+        while position > 0:
+            start = max(0, position - _CUSTOM_NEEDLE_CHUNK_BYTES)
+            read_start = max(0, start - overlap)
+            handle.seek(read_start)
+            buf = handle.read(position - read_start)
+            index = buf.rfind(needle)
+            while index != -1:
+                offset = read_start + index
+                located = _row_at_offset(handle, offset)
+                if located is not None:
+                    row_offset, entry = located
+                    if (
+                        entry.type == ENTRY_CUSTOM
+                        and str(entry.payload.get("custom_type", "")) == custom_type
+                        and row_offset not in seen_offsets
+                    ):
+                        seen_offsets.add(row_offset)
+                        entries.append(entry)
+                        if max_rows is not None and len(entries) >= max_rows:
+                            return entries
+                index = buf.rfind(needle, 0, index)
+            position = start
+    return entries
+
+
 def _row_at_offset(handle: Any, offset: int) -> tuple[int, TranscriptEntry] | None:
     """The complete row containing byte ``offset``, with its first byte offset.
 
@@ -1496,6 +1580,16 @@ class ReplaySuffix:
     checkpoint_order: dict[str, int] = field(default_factory=dict)
     #: Bytes actually read, for the caller's own evidence; not a contract.
     bytes_read: int = 0
+    #: Did the backward walk reach the file's FIRST chunk — the one holding the
+    #: journal's opening row? THIS is the caller's fact for "the window is the
+    #: whole journal", and it is deliberately not derived from :attr:`bytes_read`
+    #: or from a stat: the walk stops early when it finds its stopping row, and
+    #: only the pair with ``chunk_start == 0`` means the file's first row was in
+    #: hand. A span compared against a caller's earlier ``st_size`` part company
+    #: with the truth as soon as the file grows between the stat and this read's
+    #: own EOF — a window that stopped short can then look like a full read,
+    #: which is the unsafe direction for every consumer of "I saw everything".
+    reached_bof: bool = False
 
 
 def read_replay_suffix(
@@ -1555,7 +1649,11 @@ def read_replay_suffix(
         # answers the same way rather than turning "nothing yet" into an
         # error the whole-file parse never raised.
         return ReplaySuffix(
-            entries=(), through_present=through_id is None, checkpoint=None, bytes_read=0
+            entries=(),
+            through_present=through_id is None,
+            checkpoint=None,
+            bytes_read=0,
+            reached_bof=False,
         )
     # Normalise the request ONCE, so every stop/collect site below reads the
     # same tuple: an empty request means "no custom rows wanted" (the cheapest
@@ -1571,6 +1669,23 @@ def read_replay_suffix(
         else tuple(opportunistic_types or ())
     )
     collectible = wanted + opportunistic
+    # A REQUIRED TYPE MAY ALREADY BE PROVEN ABSENT (``session.tail_anchor``).
+    # Without the proof, "this journal has no checkpoint row anywhere" is a
+    # whole-file fact, so the walk below is a scan to BOF — 570-650 ms of CPU on a
+    # 35 MB checkpointless journal, once per fresh process, and the one cost the
+    # replay cache in ``attached`` cannot remove. The sidecar is written by the
+    # pre-warm job (see ``index_prewarm``), never by a reader, and it is believed
+    # only after validation against THIS journal version (inode, a file that has
+    # not shrunk, and a scan of the bytes appended since the record). What it
+    # relaxes is one requirement of the stop condition below; the compaction
+    # boundary is still required, so a proven-absent checkpoint can never cut a
+    # journal short of the replay's own boundary.
+    proven_absent: set[str] = set()
+    if wanted:
+        from local_operator.session.tail_anchor import ANCHOR_CUSTOM_TYPE, proves_absent
+
+        if ANCHOR_CUSTOM_TYPE in wanted and proves_absent(path.parent):
+            proven_absent.add(ANCHOR_CUSTOM_TYPE)
     checkpoints: dict[str, dict[str, Any]] = {}
     checkpoint_order: dict[str, int] = {}
     met = 0  # 1-based: the scan walks newest-first, so lower means newer
@@ -1580,6 +1695,7 @@ def read_replay_suffix(
     cursor_reached = through_id is None
     parsed: list[TranscriptEntry] = []  # newest first while reading backward
     bytes_read = 0
+    reached_bof = False
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
         # EOF as the handle saw it. Re-stat'ing after the close would measure a
@@ -1631,12 +1747,19 @@ def read_replay_suffix(
                         # NEWEST row: its meeting index is what orders it against
                         # another type's newest row.
                         checkpoint_order[custom_type] = met
+            # The walker's last pair is ``chunk_start == 0``: reaching it means
+            # the file's leading fragment was consumed, which is the only way this
+            # read can claim the whole journal. ``reached_bof`` is read from the
+            # SAME expression the stop below turns on, so the two cannot drift —
+            # an inner-loop stop added later would otherwise leave the flag
+            # describing a chunk whose tail was skipped.
             at_start = chunk_start == 0
+            reached_bof = at_start
             boundary_seen = compaction is not None and (
                 first_kept_id is None or first_kept_id in seen_ids
             )
             cursor_seen = through_id is None or through_id in seen_ids
-            checkpoint_seen = all(name in checkpoints for name in wanted)
+            checkpoint_seen = all(name in checkpoints or name in proven_absent for name in wanted)
             if at_start or (boundary_seen and cursor_seen and checkpoint_seen):
                 break
             # A journal with no compaction has no boundary to stop at: keep
@@ -1652,6 +1775,7 @@ def read_replay_suffix(
         checkpoints=checkpoints,
         checkpoint_order=checkpoint_order,
         bytes_read=bytes_read,
+        reached_bof=reached_bof,
     )
 
 
@@ -2424,6 +2548,168 @@ class Transcript:
                             else f"{str(details.get('provider') or '')}:read"
                         ),
                         "kind": kind,
+                    }
+                )
+        return rows
+
+    def channel_spend_rows(self) -> list[dict[str, Any]]:
+        """Every channel-spend RECORD this journal carries, oldest first.
+
+        The channel twin of :meth:`search_spend_rows`, read off the same
+        ``session_channel_spend.v1`` custom rows the Session appends (see
+        ``session/channel_spend.py``). Deliberately NO compaction/prune
+        boundary, for the reason that method documents: money already spent is
+        not invalidated by a later rewrite of the context.
+
+        Rows come back as their raw ``details`` mappings and are NOT deduped
+        here: a higher ``rev`` row can arrive after a lower one, and the fold
+        is the one place that decides which revision wins. The ``start``
+        marker is skipped (``channel_spend_tracked`` reads it); malformed rows
+        are dropped individually, so one bad line cannot hide the rest.
+        """
+        rows: list[dict[str, Any]] = []
+        for entry in self._entries:
+            if entry.type != ENTRY_CUSTOM:
+                continue
+            payload = entry.payload
+            if payload.get("custom_type") != CHANNEL_SPEND_CUSTOM_TYPE:
+                continue
+            details = payload.get("details")
+            if not isinstance(details, dict):
+                continue
+            if details.get("kind") == "start":
+                continue
+            rows.append(dict(details))
+        return rows
+
+    def channel_spend_tracked(self) -> bool:
+        """Whether the journal carries the one-time channel ``start`` marker.
+
+        False for a pre-feature session: its total is inference-only and every
+        surface must say "channels not tracked" rather than implying $0 of
+        channel spend (the no-fabricated-zeros rule). A BACKFILLED legacy
+        journal deliberately has rows but no marker — recovered history is
+        partial by definition, and the combiner degrades it.
+        """
+        for entry in self._entries:
+            if entry.type != ENTRY_CUSTOM:
+                continue
+            payload = entry.payload
+            if payload.get("custom_type") != CHANNEL_SPEND_CUSTOM_TYPE:
+                continue
+            details = payload.get("details")
+            if isinstance(details, dict) and details.get("kind") == "start":
+                return True
+        return False
+
+    def channel_backfill_rows(self) -> list[dict[str, Any]]:
+        """Record-shaped rows recovered from a pre-feature journal, one pass.
+
+        WHAT IS RECOVERED (design §3.5): legacy ``search_cost``/``read_cost``
+        tool details become ``search``/``read`` rows priced from the SAME
+        client table the live emission uses (labelled
+        ``client-search-table-legacy``), and image tool rows that carry a
+        ``cost_usd`` figure become ``image`` rows with the recorded labels.
+        WHAT IS NOT: any row whose money is absent is not invented (no
+        fabricated zeros) — an unpriced search keeps ``amount=None``, and an
+        image row without a figure yields no row at all.
+
+        Record ids are the idempotency contract: ``legacy:<entry id>`` for the
+        search/read pair (the entry is the only stable identity those rows
+        have) and ``image:<generation id>`` for an image generation, falling
+        back to ``legacy:<entry id>`` when the provider returned no id. Running
+        the backfill twice therefore lands the same ids, and the fold (plus the
+        Session's append guard) makes the second run a no-op.
+
+        TWO DOCUMENTED LIMITS of recovering from a pre-feature journal, both
+        visible in the rows it emits rather than silently wrong:
+
+        - A base-code image row's ``details`` carried only ``cost_usd`` (the
+          wave-2 ``cost_source``/``billing_basis``/``cost_provenance`` labels
+          arrive with PR #2141), so a recovered ``openai-sub`` image reads
+          ``estimated``/``none`` rather than ``subscription_api_equivalent``:
+          the figure is real, its basis is the best label available for a row
+          that never recorded one.
+        - The details carry no asset count (the caption prose is not parsed),
+          so a recovered image row states NO unit count rather than a zero —
+          the wire row reports ``units: None`` and the panel omits the note
+          (QA round 1, Q6: ``$0.053   0 images`` was a fabricated zero).
+        """
+        rows: list[dict[str, Any]] = []
+        for entry in self._entries:
+            if entry.type != ENTRY_MESSAGE:
+                continue
+            details = (entry.payload.get("provider_payload") or {}).get("details")
+            if not isinstance(details, dict):
+                continue
+            ts_ms = int(round(float(entry.ts) * 1000))
+            for key, kind in (("search_cost", "search"), ("read_cost", "read")):
+                cost = details.get(key)
+                if not isinstance(cost, dict):
+                    continue
+                provider = str(cost.get("ledger_provider") or "") or (
+                    str(details.get("provider") or "")
+                    if kind == "search"
+                    else f"{str(details.get('provider') or '')}:read"
+                )
+                rows.append(
+                    {
+                        "version": CHANNEL_SPEND_VERSION,
+                        "record_id": f"legacy:{entry.id}",
+                        "ts_ms": ts_ms,
+                        "channel": kind,
+                        "provider": provider,
+                        "units": 1,
+                        "unit": "searches" if kind == "search" else "reads",
+                        "amount_micro": usd_to_micro(cost.get("usd")),
+                        "billing_basis": "estimated",
+                        "cost_source": "catalogue",
+                        "price_version": "client-search-table-legacy",
+                        "status": "ok",
+                        "detail": "backfilled from the tool row's own cost details",
+                    }
+                )
+            # ONLY a real image tool row, matched on the tool name rather than
+            # on "has a provider and a cost_usd key": any OTHER tool that
+            # reports a per-call cost would otherwise be misfiled as an image
+            # (review round 1, MINOR 2 — a `classify` row with a cost became an
+            # image record).
+            if entry.payload.get("tool_name") != "generate_image":
+                continue
+            if str(details.get("provider") or "") and "cost_usd" in details:
+                amount = usd_to_micro(details.get("cost_usd"))
+                if amount is None:
+                    continue  # an image row without a figure is not invented
+                generation_id = str(details.get("generation_id") or "")
+                basis, source, price_version = map_image_cost_labels(
+                    route=str(details.get("provider") or ""),
+                    cost_source=details.get("cost_source"),
+                    billing_basis=details.get("billing_basis"),
+                    cost_provenance=details.get("cost_provenance"),
+                    has_amount=True,
+                )
+                rows.append(
+                    {
+                        "version": CHANNEL_SPEND_VERSION,
+                        "record_id": (
+                            f"image:{generation_id}" if generation_id else f"legacy:{entry.id}"
+                        ),
+                        "ts_ms": ts_ms,
+                        "channel": "image",
+                        "provider": str(details.get("provider") or ""),
+                        "model": str(details.get("model") or ""),
+                        # The legacy details carry no asset count (see the
+                        # docstring): NO count and no unit spelling, so the
+                        # wire row reports units unknown (None) rather than a
+                        # zero beside a real dollar figure.
+                        "units": 0,
+                        "unit": "",
+                        "amount_micro": amount,
+                        "billing_basis": basis,
+                        "cost_source": source,
+                        "price_version": price_version,
+                        "status": "ok",
+                        "request_id": generation_id,
                     }
                 )
         return rows

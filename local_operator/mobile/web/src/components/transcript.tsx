@@ -13,6 +13,7 @@ import { Markdown } from "./markdown"
 import { AskRow } from "./ask-row";
 import { AttachmentImage } from "./attachment-image";
 import { ImageGenCard } from "./image-gen-card";
+import { SupplementBlock } from "./supplement-block";
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
 import { Disclosure } from "./ui/disclosure";
@@ -21,10 +22,26 @@ import { getHistory, getSubagentHistory } from "../api";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
 import { quietGroupLabel, quietGroupsOf, type QuietGroup } from "../lib/quiet-groups";
+import { beatLive, type SupplementBeat } from "../lib/supplement";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
 
 const PAGE = 120;
+
+/* The daemon's ``PROJECTION_TRANSCRIPT_LIMIT`` (``local_operator/mobile/types.py``):
+   the projection is the pinned opener plus the newest 79 rows, so a transcript
+   this long is a CAPPED window whose head row is not the tail's chronological
+   neighbour. Mirrored rather than fetched because the rule is about the SHAPE of
+   what arrived, and ``agent-view.tsx`` mirrors the same number for the child
+   sheet. It was compared against ``PAGE`` (120) before — a number the daemon
+   never sends — so the pinned-opener branch never ran on a real projection and
+   the first cursor was the opener itself: the page came back as the opener's own
+   neighbour plus the journal BELOW the cut, and the turns in between were never
+   requested (measured with the S6 first-paint fixture: 22 user turns, 272 rows;
+   on S3, 28 turns and 839 rows). ``>=`` rather than ``===`` is safe because the
+   head row is already held either way — paging from the row after it cannot lose
+   it, only re-offer it to the merge's id de-dup. */
+const PROJECTION_ROWS = 80;
 
 /* Severity glyphs, matching the TUI's NOTICE_GLYPHS exactly (transcript.py).
    Severity was HUE-ONLY on this surface: measured against the theme tokens,
@@ -345,6 +362,8 @@ export function Transcript({
 	pending = [],
 	streaming = false,
 	topInset = 0,
+	supplements,
+	projectionPid = 0,
 	tailContent,
 	emptyContent,
 }: {
@@ -352,6 +371,17 @@ export function Transcript({
 	entries: TranscriptEntry[];
 	jobId?: string;
 	scrollKey?: string;
+	/** Turn supplements ("Highlights", memo §3.1 row 18): the projection's
+	 *  sibling `{anchor: beat}` map. The block renders under the answer row
+	 *  whose `id` is the beat's anchor — outside the completion anchor div (the
+	 *  block is the answer's supplement, not part of the message the completion
+	 *  receipt samples), inside the same row boundary so one malformed beat
+	 *  cannot blank the screen. Absent map = no blocks, which is what every
+	 *  session without beats and every older daemon mean. */
+	supplements?: Record<string, SupplementBeat>;
+	/** The projection's own process identity, for the reader rule's `job_live`
+	 *  (`lib/supplement.ts`, `beatLive`): 0 is a disk rebuild. */
+	projectionPid?: number;
 	/** Commands this device sent that the session has not written a row for yet.
 	 *  Rendered as the LAST rows of the conversation, which is where the real rows
 	 *  will land, and boxed like the row each op settles into (`PendingEchoRow`)
@@ -433,13 +463,26 @@ export function Transcript({
 	/* Long projections pin the opening user row ahead of a disjoint tail. It is
 	   already retained, but it is not the tail's chronological history cursor;
 	   anchor at the next row so the API can return the missing middle. The
-	   merge's id de-dup keeps the opener exactly once when that page reaches it. */
+	   merge's id de-dup keeps the opener exactly once when that page reaches it.
+
+	   ONCE A PAGE HAS BEEN FETCHED THE CURSOR IS THE OLDEST ROW HELD, not the
+	   oldest row RENDERED. `visible[0]` is the oldest row inside the mounted
+	   window, and that window only grows when the reader taps `show N more
+	   loaded` — so while fetches outpace taps the cursor did not move and every
+	   request returned the SAME page. Measured on the S6 fixture after deep
+	   history became reachable: 40 taps produced 139 requests and 4,680 mounted
+	   rows holding 240 distinct ones, twenty copies of one page, which the
+	   reader then scrolls through as a conversation that repeats itself.
+	   `older[0]` is the oldest row this view actually holds, so the next page is
+	   the one immediately before it and paging is linear in the reader's taps. */
 	const oldestId =
-		older.length === 0 && entries.length === PAGE && entries[0]?.kind === "user"
-			? entries[1]?.id ?? entries[0]?.id ?? null
-			: visible.length > 0
-				? visible[0].id
-				: null;
+		older.length > 0
+			? older[0].id
+			: entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user"
+				? entries[1]?.id ?? entries[0]?.id ?? null
+				: visible.length > 0
+					? visible[0].id
+					: null;
 
 	/* THE QUIET GROUPS over the rows on hand (design §5, slice S4): pure per
 	   render — rows only append, so a closed group's facts cannot move and the
@@ -460,12 +503,31 @@ export function Transcript({
 	/* One row's box + anchor attrs, shared by the plain rows and a group's
 	   receipts so the two can never disagree about the follow contract. A
 	   boundary per row: one malformed entry must not unmount the whole app
-	   (the "tap → blank screen" failure). */
+	   (the "tap → blank screen" failure). The supplement seat rides HERE, at
+	   the row renderer, so a grouped row and a plain row carry it by
+	   construction — the fold (origin/main) and the quiet groups (S4) cannot
+	   drift on where a beat paints. */
 	const transcriptRow = (entry: TranscriptEntry) => (
 		<RowBoundary key={entry.id}>
 			<div data-completion-anchor={entry.id} data-completion-complete={entry.final && entry.text_complete === true}>
 				<Entry entry={entry} pid={pid} />
 			</div>
+			{(() => {
+				/* The supplement block's seat: under the FINAL answer, outside
+				   the completion-anchor div, inside the row boundary. The anchor
+				   is the display entry id, so only the answer the beat names
+				   renders it; the beat's own `beatLive` decides the stale rule. */
+				const beat =
+					entry.kind === "assistant" ? supplements?.[entry.id] : undefined;
+				if (!beat) return null;
+				return (
+					<SupplementBlock
+						beat={beat}
+						sessionId={pid}
+						jobLive={beatLive(beat, projectionPid)}
+					/>
+				);
+			})()}
 		</RowBoundary>
 	);
 
@@ -522,7 +584,17 @@ export function Transcript({
 			const { entries: page, has_more } = jobId
 				? await getSubagentHistory(pid, jobId, oldestId, PAGE)
 				: await getHistory(pid, oldestId, PAGE);
-			if (page.length > 0) prependPage(page);
+			if (page.length > 0) {
+				prependPage(page);
+				/* A page that lands while the reader is parked at the top has to MOUNT
+				   in the same commit, or they see the idle hairline and nothing else
+				   until they gesture again — one extra flick per page, and the page is
+				   already held (review round 2, R2-3). Growing by the page's own
+				   length keeps one mechanism per gesture: this adds exactly what just
+				   arrived, and `onScroll` still owns everything after that. */
+				const el = scrollRef.current;
+				if (el && el.scrollTop < 120) setWindowSize((n) => n + page.length);
+			}
 			setHasMore(has_more);
 		} catch {
 			/* A failed page is not fatal — leave hasMore so a retry can load it. */
@@ -538,10 +610,20 @@ export function Transcript({
 		pinnedRef.current =
 			el.scrollHeight - el.scrollTop - el.clientHeight < 48;
 		sessionStorage.setItem(`lo-mobile-scroll:${scrollKey}`, String(el.scrollTop));
-		/* Near the top with more history to fetch: auto-load so scrolling up
-		   just keeps going, no button needed. */
-		if (el.scrollTop < 120 && hasMore && !loadingRef.current) {
-			void loadOlder();
+		/* Near the top: reveal what is already held, then fetch what is not.
+		   ONE mechanism at a time, in that order, and no button.
+
+		   The order is the fix for two rounds of the same complaint. A page
+		   arriving while rows sat hidden behind `show N more loaded` fetched
+		   further pages nobody could see (13 pages, 2.24 MB), and the button's
+		   own label described a count it did not deliver (`show 1,425 more
+		   loaded` revealed 120, with the next tap about 18 screens above the
+		   reader). Growing first means the reader's upward gesture always moves
+		   the transcript, and a fetch only ever happens once there is nothing
+		   left held above them. */
+		if (el.scrollTop < 120 && !loadingRef.current) {
+			if (hiddenCount > 0) setWindowSize((n) => n + PAGE);
+			else if (hasMore) void loadOlder();
 		}
 	};
 
@@ -549,9 +631,9 @@ export function Transcript({
 	   reserve's own edges; round 4 extends the same hand to every other row
 	   change, because the opt-out means no other hand exists). The live window
 	   drops its oldest row on each append at the cap (U28 — native anchoring
-	   used to cover that removal silently), `show N more loaded` expands the
-	   window upward, a page of older rows can prepend, and the reserve grows or
-	   clears. So rather than compensating one cause, this measures its EFFECT:
+	   used to cover that removal silently), scrolling up expands the window
+	   upward (the tap target that used to do it is gone — review round 1, D2/D3),
+	   a page of older rows can prepend, and the reserve grows or clears. So rather than compensating one cause, this measures its EFFECT:
 	   EVERY rendered row is remembered with its viewport offset, and the next
 	   commit re-measures the row the reader was closest to — the first row at
 	   the viewport's top edge — and follows how far it moved.
@@ -676,15 +758,24 @@ export function Transcript({
 			{/* History loads automatically as the user scrolls up — no button. A
 			   subtle top indicator is the only chrome: a thin accent bar that
 			   fills while a page is in flight, plus a hairline when more history
-			   exists. Nothing tappable, nothing blocky. */}
+			   exists. Nothing tappable, nothing blocky.
+
+			   THE TWO STATES ARE THE SAME HEIGHT (2px), and that is load-bearing
+			   rather than tidy. The bar used to be 2px and the hairline 1px, so
+			   each swap moved the rows below it by a pixel — and the anchor-hold
+			   wrote `scrollTop` to compensate, which fired `scroll`, which saw
+			   `scrollTop < 120` and fetched again: measured on the S6 deep cell,
+			   23 of 27 transitions in one open were that 1px oscillation against
+			   a rig scrolling once every 300 ms, and the cascade pulled 13 pages
+			   (2.24 MB) into a window the reader could not see. */}
 			{loadingOlder ? (
-				<div className="flex justify-center py-1" aria-hidden>
-					<span className="lo-loadbar h-0.5 w-16 overflow-hidden rounded-full bg-sunken">
+				<div className="flex h-0.5 justify-center" aria-hidden>
+					<span className="lo-loadbar h-full w-16 overflow-hidden rounded-full bg-sunken">
 						<span className="lo-loadbar-fill block h-full w-1/2 rounded-full bg-accent" />
 					</span>
 				</div>
 			) : hasMore ? (
-				<div className="flex justify-center py-1" aria-hidden>
+				<div className="flex h-0.5 items-center justify-center" aria-hidden>
 					<span className="h-px w-10 bg-hairline" />
 				</div>
 			) : null}

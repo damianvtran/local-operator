@@ -536,3 +536,106 @@ describe("the canonical stage word", () => {
 		expect(screen.getByRole("button", { name: "cancel" })).toBeTruthy();
 	});
 });
+
+describe("video", () => {
+	/* The video member of the detection set wears the same card with ONE
+	   exclusion and ONE word (surfaces programme, R1/R4; the frozen §5.4
+	   relay row): the cancel control is WITHHELD — a video job is cancelled
+	   post-turn via `jobs op='cancel'`, never by a turn interrupt — and the
+	   done line is `video ready`. Everything else is the imagegen rendering. */
+	const video = (over: Partial<TranscriptEntry>) =>
+		entry({ tool_name: "generate_video", ...over });
+
+	it("mounts the card for generate_video too", () => {
+		const { container } = render(<Transcript pid="9" entries={[video({})]} />);
+		expect(cardOf(container)).toBeTruthy();
+	});
+
+	it("queued: the datum renders and the cancel control is withheld", () => {
+		const { container } = render(
+			<Transcript
+				pid="9"
+				entries={[
+					video({
+						tool_state: "queued",
+						details: liveDetails({ queue_position: 2 }),
+					}),
+				]}
+			/>,
+		);
+		expect(cardOf(container).textContent).toContain("queued · 2 ahead");
+		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
+		expect(container.querySelector(".lo-gen-tile")).toBeNull();
+	});
+
+	it("running: the tile renders, the control does not, and no phantom hold appears", () => {
+		const { container } = render(<Transcript pid="9" entries={[video({})]} />);
+		expect(container.querySelector(".lo-gen-tile")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
+		expect(screen.queryByRole("progressbar")).toBeNull();
+		/* Withholding is NOT a cancelling state: nothing may paint a hold the
+		   wire did not send. */
+		expect(screen.queryByText("cancelling…")).toBeNull();
+	});
+
+	it("the wire's own cancelling still holds — the hold is the wire's, not a press", () => {
+		const { container } = render(
+			<Transcript
+				pid="9"
+				entries={[
+					video({
+						tool_state: "running",
+						details: liveDetails({ stage: "cancelling" }),
+					}),
+				]}
+			/>,
+		);
+		expect(screen.getByText("cancelling…")).toBeTruthy();
+		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
+		expect(container.querySelector(".lo-gen-tile")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
+	});
+
+	it("done: the done line reads `video ready` — the one material string", () => {
+		const { container } = render(
+			<Transcript pid="9" entries={[video({ tool_state: "done" })]} />,
+		);
+		const text = cardOf(container).textContent ?? "";
+		expect(text).toContain("video ready");
+		expect(text).not.toContain("image ready");
+	});
+
+	it("failed keeps the platform sentence verbatim, with no control", () => {
+		render(
+			<Transcript
+				pid="9"
+				entries={[
+					video({
+						tool_state: "failed",
+						error: "This generation failed before producing output.",
+					}),
+				]}
+			/>,
+		);
+		expect(
+			screen.getByText("This generation failed before producing output."),
+		).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
+	});
+
+	it("the cancel conflict still reads 'already finished', never an error", () => {
+		render(
+			<Transcript
+				pid="9"
+				entries={[
+					video({
+						tool_state: "failed",
+						details: liveDetails({ error_type: "media_already_completed" }),
+					}),
+				]}
+			/>,
+		);
+		expect(screen.getByText("already finished")).toBeTruthy();
+		expect(screen.queryByText("failed")).toBeNull();
+	});
+});

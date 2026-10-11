@@ -627,10 +627,11 @@ VISION_MODEL = ModelSpec(provider="test", model_id="sees", context_window=1_000_
 CONSTRAINT = "NEVER touch billing.py"
 
 #: Turn count and per-turn filler sized so ``compact_to_archive`` actually
-#: RENDERS PNG frames instead of taking its archive-text early return.
+#: RENDERS PNG frames instead of taking its archive-text early return, AND so
+#: those pages keep their images under the replay policy.
 #:
-#: This is load-bearing, not arbitrary. ``compact_to_archive`` returns
-#: ``Archive(frames=[], ...)`` when the serialized history is under
+#: The first half is load-bearing, not arbitrary. ``compact_to_archive``
+#: returns ``Archive(frames=[], ...)`` when the serialized history is under
 #: ``2 * _edge_chars_for(shape, context_window)``, so a small fixture exercises
 #: the text path while asserting ``strategy == "snapcompact"`` — which is how
 #: the first version of these tests claimed to cover image replay while
@@ -638,8 +639,13 @@ CONSTRAINT = "NEVER touch billing.py"
 #: size: 6 frames and ~155k chars of archive text. Shrinking it silently
 #: returns the tests to the text-only path, so ``_assert_frames_rendered``
 #: fails loudly rather than letting that pass unnoticed.
+#:
+#: The second half is the replay policy: natural-prose pages bill cheaper as
+#: text than as frames and replay as text, which would silently move these
+#: tests off the very image path they exist to pin. High-entropy filler
+#: tokenizes far above one frame's visual-token bill and keeps its images.
 FRAME_TURNS = 12
-FRAME_WORDS = 2000
+DENSE_CHUNK = ("ZXCVBNMASDFGHJKLqwertyuiop1234567890mMnBvC" * 500)[:14_000]
 
 
 def _snapcompact_payload(session: Session) -> dict[str, Any]:
@@ -672,7 +678,7 @@ async def _talk_to_frame_size(session: Session) -> None:
     """Open with the constraint, then bury it under enough history to image."""
     await session.prompt(f"{CONSTRAINT} " + "detail " * 30)
     for index in range(FRAME_TURNS):
-        await session.prompt(f"question {index} " + "detail " * FRAME_WORDS)
+        await session.prompt(f"question {index} " + DENSE_CHUNK)
 
 
 @pytest.mark.asyncio
@@ -705,6 +711,18 @@ async def test_resume_after_an_advisory_snapcompact_pass(tmp_path, monkeypatch):
     # The point of this test: real PNG frames, not the archive-text fallback.
     frame_count = _assert_frames_rendered(session)
     assert frame_count > 0
+    # Under the replay policy the pass may carry some pages as text; the image
+    # blocks a resume must bring back are the frames the archive says it
+    # replays (its image-kind pages), and there must be at least one or this
+    # test proves nothing about the image path.
+    from local_operator.compaction.snapcompact import Archive, replayed_frame_count
+
+    payload = _snapcompact_payload(session)
+    replayed_frames = replayed_frame_count(Archive.model_validate(payload))
+    assert replayed_frames > 0, (
+        "the archive replays no frames under the policy, so this test would prove "
+        "nothing about the image replay it exists to pin"
+    )
 
     directory = session._transcript.directory
     await session.dispose()
@@ -735,9 +753,9 @@ async def test_resume_after_an_advisory_snapcompact_pass(tmp_path, monkeypatch):
     replayed_images = [
         block for block in (rendered.content or []) if isinstance(block, ImageContent)
     ]
-    assert len(replayed_images) == frame_count, (
-        f"resume replayed {len(replayed_images)} image blocks for {frame_count} archived "
-        "frames — the image-replay path did not round trip"
+    assert len(replayed_images) == replayed_frames, (
+        f"resume replayed {len(replayed_images)} image blocks for {replayed_frames} "
+        "replayable frames — the image-replay path did not round trip"
     )
     # Each frame must be non-empty PNG data: a present-but-empty block is the
     # shape a decode failure leaves behind.
@@ -1181,8 +1199,12 @@ async def test_the_preserve_cap_bounds_the_task_boundary_floor(tmp_path, monkeyp
     await session._plan_compaction(respect_threshold=True)
 
     assert captured, "find_cut_point was never reached"
-    # 100,000, not the 300,000 the window-derived cap would have allowed.
-    assert captured[-1] == 100_000
+    # The FIRST call carries the floor-derived budget — 100,000, not the
+    # 300,000 the window-derived cap would have allowed. A retry at the base
+    # budget may follow when the widened walk finds nothing (the
+    # preserve-floor fallback); the capped figure is what the floor may hand
+    # the cut, and it can never exceed this.
+    assert captured[0] == 100_000
     await session.dispose()
 
 
@@ -1228,8 +1250,9 @@ async def test_the_preserve_cap_tightens_the_advisor_hint_clamp(tmp_path, monkey
     await session._plan_compaction(respect_threshold=True)
 
     assert captured, "find_cut_point was never reached"
-    # Clamped to the new cap, where the window-derived cap gave 300,000.
-    assert captured[-1] == 100_000
+    # Clamped to the new cap, where the window-derived cap gave 300,000. The
+    # clamped figure rides the FIRST call; a base-budget retry may follow.
+    assert captured[0] == 100_000
     await session.dispose()
 
 

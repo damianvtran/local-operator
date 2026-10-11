@@ -1367,6 +1367,23 @@ class ToolContext(BaseModel):
     record_resolved_path: Callable[[str, bool], None] | None = Field(
         default=None, exclude=True, repr=False
     )
+    # The channel-spend ingest seam (``docs/design/spend-channels.md``): a tool
+    # that spends money OUTSIDE the token path (image, web search, voice)
+    # builds a frozen ``session.channel_spend.ChannelSpendRecord`` and hands it
+    # here; the session folds it, journals it and publishes it. Declared rather
+    # than probed because every capability a built-in tool looks for is
+    # declared (see the class docstring). ``None`` is the documented "this host
+    # does not track channels" value — an emission site must skip QUIETLY then,
+    # never fail the call; a record it never records is money nobody can see,
+    # which is today's behaviour and strictly better than a broken turn.
+    #
+    # The parameter is typed ``Any`` because ``harness`` must not import the
+    # session package: ``session`` imports ``harness``, and a module-level
+    # import here would close that cycle. The record's OWN module is a leaf
+    # precisely so the tools can import it directly.
+    record_channel_spend: Callable[[Any], None] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     session_id: str = ""
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
@@ -1548,6 +1565,23 @@ class ToolContext(BaseModel):
     # advertised at all (createIf) rather than advertised and always
     # failing.
     jobs: JobManagerProtocol | None = None
+    #: True on a call the harness runs as a MONITOR CHECK (one tick of an
+    #: armed watch): unattended — no turn, no user waiting, nothing that
+    #: could carry a rehomed call forward. A cancellation of such a call is
+    #: teardown or the scheduler's own deadline, never a steering redirect,
+    #: so a tool that would otherwise convert the cancel into a background
+    #: job must stop the call instead. Read by bash's cancel handler; set
+    #: by ``Session._run_monitor_check``.
+    monitor_check: bool = False
+    # The video lane's durable-record writer (``Session.journal_video_job``):
+    # appends one ``video_job_v1`` transcript row. Declared rather than probed
+    # for, per this class's contract; ``None`` on a host that cannot journal
+    # (a reduced host or a test) — the video runner then logs and continues,
+    # losing restart durability for that transition but never the generation.
+    # Typed as a plain callable: the payload is the record mapping
+    # ``local_operator.video.records.build_record`` returns, and this module
+    # must not import that module's way up the graph.
+    journal_video_job: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     # Set by the session on each inbound ``lop send`` delivery so a blocking
     # ``wait`` can return early and let the model read its mailbox. Declared
     # rather than probed for, per this class's contract above. ``None`` means
@@ -2798,6 +2832,18 @@ class LoopConfig(BaseModel):
         default=None, exclude=True
     )
     has_steering_messages: Callable[[], bool] | None = Field(default=None, exclude=True)
+    #: Run-scoped opt-in: drain the steering queue ONCE before this run's first
+    #: event/request, instead of only from the second inner iteration onward.
+    #: Set by a host whose run exists BECAUSE of the queue — a session opening
+    #: a turn for an idle-admitted steer — so the run's first call carries the
+    #: queued message rather than spending an empty warm-up call and delivering
+    #: it on a continuation. A run whose opening drain finds the queue already
+    #: emptied retires BEFORE its first event: no ``agent_start``/``agent_end``
+    #: pair, no provider call (the session documents the same silent settle for
+    #: a dropped turn in ``_drop_pre_aborted_turn``). Off by default, so every
+    #: ordinary turn keeps the historical shape where a steer can never appear
+    #: in its first request (the loop comment carries the full rationale).
+    drain_steering_on_open: bool = False
     #: Asks the host whether a boundary-respecting cancel is pending. Consulted
     #: at the post-tool boundary, where every call in the batch has produced a
     #: paired result and the next model request has not yet been spent — so a

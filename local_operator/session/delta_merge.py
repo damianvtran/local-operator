@@ -28,6 +28,11 @@ applies it; this module only answers "which stream is this frame a fragment of")
   concatenates nothing. Deliberately not folded by the runtime's compact pass
   (which predates this family's volume); the desktop bridge folds it, and the
   key lives here so its spelling exists once.
+* ``supplement_progress`` — SELF-REPLACING too, by construction (memo §2.7):
+  each frame re-sends the supplement job's current state (``decided`` →
+  ``running`` with its ``stage`` → ``done``/``failed``) and the durable copy is
+  the journal row, so a fold keeps the newest beat and drops the superseded
+  ones. §3.1 row 14 puts the family in the desktop bridge's keep-newest fold.
 * ``aside_delta`` — mergeable too, but its stream identity is on the FRAME (the
   ``req``), not the payload, so ``mergeable_frame_key`` answers for it.
 
@@ -81,29 +86,42 @@ def mergeable_delta_key(payload: Mapping[str, Any]) -> str | None:
 def mergeable_snapshot_key(payload: Mapping[str, Any]) -> str | None:
     """The stream one queued frame is a SNAPSHOT of, or ``None``.
 
-    ``tool_execution_update`` is the family this answers for: each frame
-    re-sends the tool's CURRENT LIVE VIEW — for ``bash`` a bounded ~128 KiB
-    output tail, for ``eval`` a bounded display, never the whole transcript —
-    and the family's self-replacing contract is that the newest frame
-    supersedes the earlier ones (the settled result rides
-    ``tool_execution_end``). That contract is why a fold keeps the newest frame
-    of a run instead of concatenating. The frames arrive as a chunk stream
-    during a tool run, so a viewer stalled behind one queues an unbroken run of
-    them that a fold can collapse to the single newest frame.
+    Two self-replacing families answer here:
+
+    * ``tool_execution_update``: each frame re-sends the tool's CURRENT LIVE
+      VIEW — for ``bash`` a bounded ~128 KiB output tail, for ``eval`` a
+      bounded display, never the whole transcript — and the family's
+      self-replacing contract is that the newest frame supersedes the earlier
+      ones (the settled result rides ``tool_execution_end``). That contract is
+      why a fold keeps the newest frame of a run instead of concatenating. The
+      frames arrive as a chunk stream during a tool run, so a viewer stalled
+      behind one queues an unbroken run of them that a fold can collapse to
+      the single newest frame.
+    * ``supplement_progress``: a supplement job's beats are self-replacing by
+      construction (memo §2.7) — each frame re-sends the job's CURRENT state
+      (``decided`` -> ``running`` with its ``stage`` -> ``done``/``failed``,
+      and ``cancelling`` for a cut in flight) and the durable copy is the
+      journal row, so a fold keeps the newest beat and drops the superseded
+      ones. §3.1 row 14: the desktop bridge's keep-newest fold.
 
     Keyed in the same namespace as :func:`mergeable_delta_key` (the family is
     part of the key), so a tool-output frame can never fold into a
-    ``message_update`` or ``reasoning_delta`` beside it.
+    ``message_update`` or ``reasoning_delta`` beside it, and neither can a
+    supplement beat.
 
-    A frame with no ``tool_call_id`` is not a stream this function can identify,
-    so it is left alone rather than keyed as one nameless stream all such frames
-    would share — the same rule :func:`mergeable_frame_key` applies to an
-    ``aside_delta`` with no ``req``.
+    A frame with no ``tool_call_id`` (or no ``job``) is not a stream this
+    function can identify, so it is left alone rather than keyed as one
+    nameless stream all such frames would share — the same rule
+    :func:`mergeable_frame_key` applies to an ``aside_delta`` with no ``req``.
     """
-    if payload.get("type") != "tool_execution_update":
-        return None
-    call_id = payload.get("tool_call_id")
-    return None if not call_id else f"tool_execution_update:{call_id}"
+    kind = payload.get("type")
+    if kind == "tool_execution_update":
+        call_id = payload.get("tool_call_id")
+        return None if not call_id else f"tool_execution_update:{call_id}"
+    if kind == "supplement_progress":
+        job = payload.get("job")
+        return None if not job else f"supplement_progress:{job}"
+    return None
 
 
 def mergeable_frame_key(frame: Mapping[str, Any]) -> str | None:

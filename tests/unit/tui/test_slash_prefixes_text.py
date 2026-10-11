@@ -79,6 +79,17 @@ PREFIXES_TEXT_POLICY = {
     "approvals": True,
     # The colour theme name.
     "theme": True,
+    # The language tag (`auto` or a shipped locale), `/theme`'s class exactly:
+    # a value from an inline list the handler reads and applies. Anything else
+    # is refused with the option list — nothing after `/language` is ever
+    # forwarded to a model.
+    "language": True,
+    # --- a command whose trailing text is its OWN instruction ----------------
+    # `cancel | retry | adjust <text>`: the words are the supplement job's
+    # control vocabulary, read by the handler and sent to the generator — never
+    # a message to this conversation and never a value from an inline list.
+    # ANY shape below for the same fact: the command owns whatever follows it.
+    "highlights": True,
     # --- everything else: the trailing text is prose, never an argument -------
     "help": False,
     # The legend takes no argument at all — `/sidebar`'s shape: a trailing
@@ -202,6 +213,10 @@ ARGUMENT_SHAPE_POLICY = {
     "analytics": ArgumentShape.WORD,
     # The same target vocabulary `/stop <target>` takes.
     "stop": ArgumentShape.WORD,
+    # The command's own control vocabulary (`cancel | retry | adjust <text>`),
+    # read by the handler: the whole line after the word belongs to it, so ANY
+    # (the `credential` shape) — one of the boolean-carried rows.
+    "highlights": ArgumentShape.ANY,
     # WORD rather than NONE, and the criterion is worth spelling out because the
     # desktop does NOT run this command (no `desktop_destination`, so
     # `POST /commands` answers 422 "Unknown command"). What the shape decides
@@ -295,6 +310,9 @@ ARGUMENT_SHAPE_POLICY = {
     "effort": ArgumentShape.ANY,
     "approvals": ArgumentShape.ANY,
     "theme": ArgumentShape.ANY,
+    # The language tag, `/theme`'s row again: a boolean carries it, the handler
+    # reads the word, and an unknown one is refused with the option list.
+    "language": ArgumentShape.ANY,
     # ...and ONE row neither boolean carries, because the text it owns is REFUSED
     # rather than consumed. The command route answers typed text with "Enter
     # credentials in the masked credential form, not command text", so the text
@@ -368,6 +386,11 @@ def test_the_vocabulary_is_exactly_the_desktop_argument_set() -> None:
         "effort",
         "approvals",
         "theme",
+        # A language tag, `/theme`'s row class exactly: a value the inline
+        # list offers and the handler consumes or refuses, never a prompt.
+        "language",
+        # the command's own control vocabulary (not a prompt, not a list value)
+        "highlights",
     }
 
 

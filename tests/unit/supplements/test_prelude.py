@@ -21,6 +21,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -40,11 +41,19 @@ GZIP_CAP = 4608
 
 #: The pinned pair. Change these ONLY with a rebuilt pair, a bumped PRELUDE_VERSION and the
 #: size table in prelude/BUILD.md. The sizes are the numbers the PR reports.
-PINNED_CSS_BYTES = 2044
-PINNED_JS_BYTES = 8202
-PINNED_GZIP_BYTES = 4607
-PINNED_DIGEST = "84545fe0244dc3ee4cb2b285bb55435d0f32926902769e448e3c4a6c3924aa36"
-PINNED_VERSION = 1
+#:
+#: PRELUDE_VERSION 2 (memo §8 F9): the `div.ttl` table title and its stylesheet rule were
+#: stripped -- the component is body-only (§2.8, operator directive 2026-10-10) -- which is
+#: what moved CSS 2,044 -> 2,008 B, JS 8,202 -> 8,047 B and gzip 4,607 -> 4,562 B.
+#:
+#: PRELUDE_VERSION 3: the ROOT element paints `--lo-canvas`, so a live theme flip keeps the
+#: surface's token instead of the UA canvas. CSS 2,008 -> 2,056 B, gzip 4,562 -> 4,573 B; JS
+#: untouched at 8,047 B. 35 B gzip of headroom against the 4,608 B cap is what is left.
+PINNED_CSS_BYTES = 2056
+PINNED_JS_BYTES = 8047
+PINNED_GZIP_BYTES = 4573
+PINNED_DIGEST = "8cf8b4902dbadbe8fbc0421d953796febbd79ad16673a8e8f5e2402e5d42f05e"
+PINNED_VERSION = 3
 
 
 @pytest.fixture
@@ -112,6 +121,53 @@ def test_the_prelude_makes_no_network_or_storage_calls() -> None:
     ):  # fmt: skip
         assert needle not in js, needle
     assert js.count("parent.postMessage") == 1
+
+
+#: The root element's rule and the dark block, as the minified build writes them.
+_ROOT_RULE = re.compile(r"html\[data-ready\]\{([^}]*)\}")
+_DARK_RULE = re.compile(r":root\[data-mode=dark\]\{([^}]*)\}")
+
+
+def _declarations(rule: re.Pattern[str], css: str) -> dict[str, str]:
+    match = rule.search(css)
+    assert match is not None, f"the stylesheet has no rule matching {rule.pattern}"
+    out: dict[str, str] = {}
+    for declaration in match.group(1).split(";"):
+        if ":" in declaration:
+            name, _, value = declaration.partition(":")
+            out[name.strip()] = value.strip()
+    return out
+
+
+def test_the_root_element_paints_the_canvas_token_as_the_frames_ground() -> None:
+    """The frame's ground is `--lo-canvas` from the ROOT element (the live theme-flip defect).
+
+    WHY THIS IS A STYLE PIN AND WHAT IT DOES NOT PROVE. The behaviour tests below run the
+    prelude's JS against a stub DOM, which has no CSS engine, so nothing in this suite can
+    read a computed or a painted colour: a stub that modelled "what a root with no background
+    falls back to" would be this file asserting its own assumption. What is pinned is the
+    style contract the defect came from -- the ROOT element declares the canvas token as its
+    background (a root with no background is what let the UA canvas show through: #ffffff on
+    a light flip, #121212 on a dark one, measured in local-operator-mobile PR #83), and the
+    dark block declares a canvas token of its own, so the ground does not depend on which
+    direction the theme moved. The rendered proof -- the real assembled document, mounted in
+    a sandboxed `data:` frame, flipped both ways, ground read from the painted pixels and
+    from the frame's own computed style -- is in the PR that added this test.
+
+    WHAT THIS PIN COVERS, PRECISELY: the two directions are NOT asserted symmetrically here.
+    The assertions below read the ROOT's declaration and the DARK block's own `--lo-canvas`;
+    the light ground is the `:root` default `--lo-canvas:#fff`, left implicit because a light
+    push overrides it inline. So the LIGHT arm rests on the rendered evidence named above, and
+    this docstring should not be read as "the pin proves both directions".
+    """
+    css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
+    root = _declarations(_ROOT_RULE, css)
+    assert root.get("background") == "var(--lo-canvas)"
+    assert root.get("visibility") == "visible"
+    assert _declarations(_DARK_RULE, css).get("--lo-canvas") == "#121212"
+    # Exactly one element paints the ground: `body` stays transparent by design, so the token
+    # is the frame's canvas rather than a box painted inside it.
+    assert re.search(r"body\{[^}]*background:transparent", css) is not None
 
 
 # --------------------------------------------------------------------------------------
@@ -369,3 +425,43 @@ def test_the_script_inside_the_assembled_document_is_the_one_that_echoes_the_non
     by_type = {p["t"]: p for p in posts}
     assert "n" not in by_type["ready"]
     assert [by_type[t]["n"] for t in ("pong", "resize", "error")] == ["host-minted"] * 3
+
+
+@needs_node
+def test_the_component_draws_no_title_anywhere(tmp_path: Path) -> None:
+    """F9 (memo §8) + §2.8's no-chrome rule: a component is body-only, so the table must not
+    draw its dataset title.
+
+    This is the before/after discriminator for the `div.ttl` strip: `prelude.src.js` used to
+    prepend `o.title || data.title` as a visible `div.ttl`, and the drawn nodes are inspected
+    here rather than the source, so re-adding a title line by any route (helper, markup, a new
+    class name that the CSS still styles) fails. The labelling the DATA needs stays: the
+    column headers are asserted present, so the test cannot pass by drawing nothing.
+    """
+    title = "Latency by region (ms)"
+    out = _run(
+        {
+            "data": {
+                "lat": {
+                    "title": title,
+                    "columns": ["region", "ms"],
+                    "rows": [["us-east", 120], ["eu-west", 143], ["ap-south", 211.25]],
+                }
+            },
+            "steps": [
+                theme("n"),
+                {"draw": 'LO.table(document.getElementById("c"), "lat")'},
+            ],
+        },
+        tmp_path,
+    )
+    nodes = out["nodes"]
+    assert [n for n in nodes if n["cls"] == "ttl"] == [], "a title node class is drawn"
+    assert title not in " ".join(n["text"] for n in nodes), "the dataset title is drawn"
+    drawn = " ".join(n["text"] for n in nodes)
+    for header in ("region", "ms"):
+        assert header in drawn, f"column header {header!r} is not drawn"
+    # The table is drawn INSIDE the figure; the only child the figure may hold is the scroll
+    # wrap, never a title line before it.
+    figure = next(n for n in nodes if n["tag"] == "figure")
+    assert figure["text"] == ""

@@ -61,6 +61,7 @@ from local_operator.server.routes import (
     desktop_tunnel,
     desktop_wakes,
     health,
+    i18n,
     jobs,
     models,
     schedules,
@@ -72,6 +73,7 @@ from local_operator.server.routes import (
     transcription,
     tts,
 )
+from local_operator.server.utils import local_tokens
 from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.static_roots import (
     host_is_acceptable,
@@ -357,6 +359,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # started further down, once the scheduler is up and the record exists.
         reload_stop = asyncio.Event()
         reload_watch = serve_reload.install(app, stop=reload_stop)
+        # THE LOCAL SURFACE KEYS (file-serving RFC §4.1): minted before the
+        # record exists, for the same reason claim_key is -- a reader that finds
+        # the record a millisecond later must find the credential it needs. The
+        # generation counter lives beside the records and bumps once per
+        # announced boot, so a surface holding a pre-restart token is
+        # classifiable as stale (Phase A: treated as absent, logged once). The
+        # seed and the URL signing key never leave this process; see
+        # ``server/utils/local_tokens.py``.
+        serve_dir = session_registry.ensure_run_dir(config_dir, serve_registry.SERVE_RUN_DIRNAME)
+        surface_keys = local_tokens.mint_process_keys(
+            generation=local_tokens.bump_generation(serve_dir / local_tokens.GENERATION_FILENAME)
+        )
         serve_record = serve_registry.build_record(
             instance_id=app.state.instance_id,
             announced=announced,
@@ -367,6 +381,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # signal handlers all answer None, and all three would be lying if
             # this read `listener_fd is not None` instead.
             reloadable=reload_watch is not None,
+            access_token=surface_keys.access_token,
+            boot_generation=surface_keys.generation,
         )
         # The config root resolved above, passed explicitly: the publisher pins
         # the directory it publishes into for its whole life, so a heartbeat can
@@ -778,6 +794,10 @@ async def desktop_validation_error(request: Request, error: RequestValidationErr
 
 
 app.include_router(capabilities.router)
+# The i18n catalogue surface, beside the capability that advertises it. Public
+# like the capability route it is negotiated through; nothing calls it until a
+# client sees `features.i18n`, so it ships dark without a switch.
+app.include_router(i18n.router)
 # Aida's two routes, beside the capabilities that advertise them. Registered
 # unconditionally (the handlers answer `enabled: false` themselves): hiding
 # the routes on the env switch would make the desktop's discovery loop read a
@@ -939,6 +959,45 @@ async def desktop_origin_cors(request: Request, call_next):
 
 
 @app.middleware("http")
+async def host_admission(request: Request, call_next):
+    """Answer the DNS-rebinding ``Host`` rule for EVERY route, before the router.
+
+    WHY GLOBAL (P1.5, RFC §3.6 follow-up d). The rule arrived with
+    ``/v1/static/*`` -- the first routes a rebinding page could read bytes
+    through -- but the page it defends against is same-origin with the daemon on
+    ANY path, and a rule that changes with the route family is a rule the
+    attacker picks. The pre-extension audit found no supported client that dials
+    this app by DNS name: the desktop app, its discovery/health probes and this
+    CLI dial ``127.0.0.1`` literals, the TUI is in-process, and the tunnel
+    gateway forwards to the relay harness port (4098), not this app (gateway.py
+    ``harness``/``headers``; ``tunnels/cli.py``). No exemption is granted, and a
+    caller reaching this loopback-only listener through a port-forward sends the
+    literal it dialed -- which passes.
+
+    PLACEMENT. Registered INSIDE :func:`static_response_policy` so a refused
+    static request still leaves with the static response policy's headers (the
+    R8 test asserts ``nosniff`` on exactly that 403) and OUTSIDE the CORS
+    machinery, so no preflight is answered for a name that may not be here. It
+    runs before the router, so the refusal cannot become a file-existence
+    signal on any route that reads files.
+
+    The predicate and its admitted forms live in
+    :func:`~local_operator.server.utils.static_roots.host_is_acceptable`; one
+    sentence covers every route, so a refused caller learns nothing about which
+    family it aimed at.
+    """
+    # Absent in a `--reload` child (the address arrives by environment and is
+    # consumed): the predicate then admits only IP literals and `localhost`,
+    # which is what a dev server is reached by.
+    announced = getattr(request.app.state, serve_registry.ANNOUNCED_STATE_ATTR, None)
+    if host_is_acceptable(request.headers.get("host"), announced[0] if announced else None):
+        return await call_next(request)
+    return JSONResponse(
+        status_code=403, content={"detail": "This Host is not allowed to reach this server."}
+    )
+
+
+@app.middleware("http")
 async def static_response_policy(request: Request, call_next):
     """Harden every ``/v1/static/*`` response: CSP, ``nosniff``, no foreign CORS grant.
 
@@ -959,30 +1018,26 @@ async def static_response_policy(request: Request, call_next):
     admitted allowlist -- and with NO allowlist installed (the app-managed
     default) for every origin, which is the case the echo was exploitable in. A
     page can still *cause* a request (an ``<img>`` needs no grant); it can no
-    longer *read* the answer, and the root allowlist
-    (``utils/static_roots.py``) bounds what it could have caused.
+    longer *read* the answer, and what bounds what it could have caused is now
+    the connection's posture (``static_roots.connection_mode`` -- unclamped
+    serving only on loopback-accepted sockets), the Host check
+    (:func:`host_admission` above it), and this middleware's response policy,
+    not a served-root allowlist (which survives only as the rooted fallback;
+    RFC §3).
 
-    THE HOST CHECK is the one thing here that is not about headers: a DNS-rebinding
-    page is same-origin with the daemon, so no CORS decision reaches it (review R8).
-    The ``Host`` it sends is its own name; see
-    :func:`~local_operator.server.utils.static_roots.host_is_acceptable` for what is
-    admitted and why the app's renderer is unaffected. It is answered HERE, before
-    the router, so the refusal cannot become a file-existence signal.
+    THE HOST CHECK is not here: a DNS-rebinding page is same-origin with the
+    daemon, so no CORS decision reaches it (review R8), and since P1.5
+    (RFC §3.6) the check covers EVERY route via :func:`host_admission`,
+    registered one layer INSIDE this one -- so a refused static request still
+    leaves with this middleware's headers while the rule itself belongs to the
+    app, not to this family. The predicate and its admitted forms live in
+    :func:`~local_operator.server.utils.static_roots.host_is_acceptable`.
 
     The policy is in ``utils/static_roots.py`` so it is testable without an app.
     """
     if not is_static_path(request.url.path):
         return await call_next(request)
-    # Absent in a `--reload` child (the address arrives by environment and is
-    # consumed): the check then admits only IP literals and `localhost`, which is
-    # what a dev server is reached by.
-    announced = getattr(request.app.state, serve_registry.ANNOUNCED_STATE_ATTR, None)
-    if host_is_acceptable(request.headers.get("host"), announced[0] if announced else None):
-        response = await call_next(request)
-    else:
-        response = JSONResponse(
-            status_code=403, content={"detail": "This Host is not allowed to reach this server."}
-        )
+    response = await call_next(request)
     allowed = desktop_posture().origins
     for name, value in response_policy(request.url.path, allowed).items():
         response.headers[name] = value
@@ -991,6 +1046,48 @@ async def static_response_policy(request: Request, call_next):
         # `del` on an absent key is a no-op in Starlette's MutableHeaders.
         del response.headers["access-control-allow-origin"]
         del response.headers["access-control-allow-credentials"]
+    return response
+
+
+def is_desktop_supplement_path(path: str) -> bool:
+    """Whether ``path`` is in the desktop supplement family.
+
+    The family is the session's whole ``/supplements/`` namespace: the document
+    read route and the control-op write routes beside it
+    (``/v1/desktop/sessions/{session_id}/supplements/{digest}/document`` and
+    ``.../supplements/{job}/{cancel,steer,restart}``,
+    ``routes/desktop_sessions.py``). The match is on the namespace rather than
+    on the routes, so a route added beside them is covered without a second
+    policy site. A named predicate rather than an inline condition in the
+    middleware below, so the family's scope is stated once.
+    """
+    prefix = "/v1/desktop/sessions/"
+    if not path.startswith(prefix):
+        return False
+    session, sep, _rest = path[len(prefix) :].partition("/supplements/")
+    return bool(sep) and bool(session) and "/" not in session
+
+
+@app.middleware("http")
+async def desktop_supplement_response_policy(request: Request, call_next):
+    """The executing-document family's response policy: ``nosniff`` + ``no-store``.
+
+    WHY A MIDDLEWARE AND NOT PER-HANDLER HEADERS. The pair has to ride the error
+    responses too -- the ladder's 404, the digest gate's 422 and the bearer
+    dependency's 401 never pass through the handler that sets the pair on its
+    200 -- and #2134 R4 is the lesson that a policy attached only to the success
+    path is silently absent where it matters. Registered LAST, so it is
+    OUTERMOST and observes every response this family can produce. D5
+    (``docs/design/file-serving-and-surface-convergence.md``) names the pair for
+    this family: ``nosniff`` on a JSON reply, ``no-store`` for bearer-gated
+    session documents (``managed_desktop_boundary`` already applies that half to
+    everything under ``/v1/desktop/``; this adds the other).
+    """
+    if not is_desktop_supplement_path(request.url.path):
+        return await call_next(request)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 

@@ -73,13 +73,22 @@ def test_compact_schema_and_prompt_omit_repeated_action_ids() -> None:
     assert compact["properties"]["observation_id"]["pattern"] == r"\S"
     assert public_reply_schema() == legacy
     assert build_system_prompt() == build_system_prompt(action_binding=LEGACY_ACTION_BINDING)
-    # The legacy prompt is byte-frozen on purpose, and the digest moved once:
-    # the "finish" bullet gained the sentence that states the completion gate's
-    # contract (the reason the model is told to check the newest observation
-    # against the task before declaring done). Re-pin deliberately, never by
-    # pasting whatever the run printed.
+    # The legacy prompt is byte-frozen on purpose, and the digest moved three
+    # times: the "finish" bullet gained the sentence that states the completion
+    # gate's contract (the reason the model is told to check the newest
+    # observation against the task before declaring done); the observation-
+    # binding change made the legacy binding sentence state the rule the
+    # decoder actually enforces -- a batch binds by stating the observation_id
+    # on at least one of its actions, omissions inherit that binding, and a
+    # batch stating none or a different observation is refused; and the
+    # reply-shape change made the "public_observations" paragraph state that a
+    # reply must carry at least one action, with a "wait" for a note that has
+    # no work behind it -- the repair the note-only and empty-object refusals
+    # kept paying a round trip for. This movement was verified as a prompt diff
+    # against the base (exactly that one sentence), not re-pinning whatever a
+    # run printed.
     assert hashlib.sha256(build_system_prompt().encode()).hexdigest() == (
-        "6c94d6494b605e791b77af73d0bbb1cbf411773d730670f2f255f3cf19fa2b29"
+        "068de08db33e14fc84ab62f6aabd126ddf3686306b2a1baf58caab54dc16d648"
     )
     assert '"observation_id": "<current observation id>"' in build_system_prompt(
         action_binding=COMPACT_ACTION_BINDING

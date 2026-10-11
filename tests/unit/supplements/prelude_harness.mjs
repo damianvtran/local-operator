@@ -12,7 +12,7 @@
 // usage: node prelude_harness.mjs <prelude.js> <scenario.json>
 //   scenario = {width, data, steps:[{host:{...}} | {other:{...}} | {flush:true} | {size:true}
 //                                    | {error:"msg"} | {draw:"LO.bar(...)"}
-//                                    | {script:"..."}]}
+//                                    | {call:"LO.fmt(1.5,{unit:'ms'})"} | {script:"..."}]}
 //   `script` runs a component's inline script as the browser would: a throw is NOT fatal to
 //   the page, it becomes the window `error` event ("Uncaught <error>"). That is how a
 //   component that fails during parse -- before the host's theme push -- is reproduced.
@@ -78,6 +78,11 @@ ctx.window = ctx;
 vm.runInContext(fs.readFileSync(preludePath, "utf8"), ctx);
 
 const fire = (type, ev) => (listeners[type] || []).forEach((f) => f(ev));
+// `{call: "<expression>"}` evaluates an expression in the prelude's context and returns its
+// `String(…)` form. It exists for the Python mirror of `LO.fmt`: the two implementations are
+// compared on the same vectors here, so a divergence is a test failure and not a
+// docstring promise (test_validate.py).
+const calls = [];
 const flush = () => { const f = frames.splice(0); f.forEach((x) => x && x()); };
 for (const step of scenario.steps ?? []) {
   if (step.host) fire("message", { source: parent, data: step.host });
@@ -86,12 +91,23 @@ for (const step of scenario.steps ?? []) {
   else if (step.size) { vm.runInContext("LO.size()", ctx); flush(); }
   else if (step.error) fire("error", { message: step.error });
   else if (step.draw) { vm.runInContext(step.draw, ctx); flush(); }
+  else if (step.call) calls.push({ expr: step.call, value: String(vm.runInContext(step.call, ctx)) });
   else if (step.script) {
     try { vm.runInContext(step.script, ctx); } catch (e) { fire("error", { message: "Uncaught " + String(e) }); }
   }
 }
 
 const texts = [];
+// Non-SVG element/attribute inventory, added for the F9 no-chrome assertion: the table's
+// drawn title was a `div.ttl`, which `texts` (an SVG-only walk) cannot see. Reports tag,
+// class and text of every element under the target so a test can state "no node carries
+// class ttl and the dataset title is nowhere in the drawn output".
+const nodes = [];
+const walkNodes = (n) => {
+  if (n.tag) nodes.push({ tag: n.tag, cls: n.attrs.class || "", text: n._text || "" });
+  for (const c of n.children) if (typeof c === "object") walkNodes(c);
+};
+walkNodes(target);
 const walk = (n, dx, dy) => {
   if (n.tag === "g" && n.attrs.transform) {
     const m = /translate\(([-\d.]+),([-\d.]+)\)/.exec(n.attrs.transform);
@@ -112,4 +128,4 @@ walk(target, 0, 0);
 let svgW = 0;
 const findSvg = (n) => { if (n.tag === "svg") svgW = +n.attrs.viewBox.split(" ")[2]; for (const c of n.children) if (typeof c === "object") findSvg(c); };
 findSvg(target);
-process.stdout.write(JSON.stringify({ posts, texts, svgW }));
+process.stdout.write(JSON.stringify({ posts, texts, nodes, calls, svgW }));

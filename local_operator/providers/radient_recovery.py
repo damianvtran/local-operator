@@ -640,6 +640,23 @@ def usage_limit_recovery_line_sync(*, store: AuthStore | None = None) -> str:
     return recovery_line(get_recovery_facts_sync(store=store))
 
 
+def recovery_facts_cached() -> RecoveryFacts | None:
+    """The process cache's facts when a probe has already answered, else ``None``.
+
+    The FACTS-level cached arm, for a caller that must not probe AND must not
+    reduce the answer to one sentence — the pre-emptive quota notice
+    (``tui/quota_notice``) needs the facts themselves, because the shared
+    classifier (``account_state``) names ``unverified`` from them and PR1's
+    lesson is that classifying from sentence text is how two spellings of one
+    state drift apart. ``None`` means exactly one thing: only a probe could
+    decide, and the caller renders its own neutral answer. The "no stored
+    credential" read is NOT consulted here — unlike
+    :func:`usage_limit_recovery_line_cached`, this returns only what a probe
+    has actually established.
+    """
+    return _cached_facts(time.monotonic())
+
+
 def usage_limit_recovery_line_cached(*, store: AuthStore | None = None) -> str | None:
     """The sentence when this process ALREADY knows it, else ``None``.
 

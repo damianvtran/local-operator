@@ -1220,7 +1220,7 @@ async def test_attachment_bytes_are_not_cached_by_any_shared_cache(tmp_path, mon
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = DesktopSessions(tmp_path)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.get(
             f"/v1/desktop/sessions/0123456789ab/attachments/{ref.digest}",
             headers={"Authorization": "Bearer token"},
@@ -1344,7 +1344,7 @@ async def test_search_finds_a_session_by_what_was_said_in_it(tmp_path, monkeypat
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = DesktopSessions(tmp_path)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         denied = client.get("/v1/desktop/sessions/search?q=retention")
         assert denied.status_code in (401, 403)
         response = client.get(
@@ -1387,7 +1387,7 @@ async def test_search_is_declared_before_the_session_id_route(tmp_path, monkeypa
     monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = DesktopSessions(tmp_path)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.get(
             "/v1/desktop/sessions/search?q=", headers={"Authorization": "Bearer token"}
         )
@@ -1410,7 +1410,7 @@ async def test_an_oversized_or_invalid_query_is_refused_without_echoing_it(tmp_p
     app.state.desktop_sessions = DesktopSessions(tmp_path)
     secret_looking = "x" * 300
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         too_long = client.get(
             f"/v1/desktop/sessions/search?q={secret_looking}",
             headers={"Authorization": "Bearer token"},
@@ -3810,7 +3810,7 @@ async def test_child_transcript_route_is_bearer_gated_and_no_store(tmp_path, mon
     app.state.desktop_sessions = DesktopSessions(tmp_path)
     path = f"/v1/desktop/sessions/{PARENT_ID}/children/{CHILD_ID}/transcript"
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         assert client.get(path).status_code == 401
         assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
         forbidden = client.get(
@@ -3877,7 +3877,7 @@ async def test_child_attachment_route_is_bearer_gated_and_no_store(tmp_path, mon
     app.state.desktop_sessions = DesktopSessions(tmp_path)
     path = f"/v1/desktop/sessions/{PARENT_ID}/children/{CHILD_ID}/attachments/{ref.digest}"
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         assert client.get(path).status_code == 401
         headers = {"Authorization": "Bearer token"}
         response = client.get(path, headers=headers)
@@ -5708,6 +5708,49 @@ async def test_a_latched_daemon_gets_no_successor_from_the_retire_frame(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_the_retire_frame_publishes_the_honest_projection_before_any_engage(tmp_path) -> None:
+    """THE HONESTY UPDATE IS NOT THE ENGAGE'S TO DECLINE (2026-10-10 incident).
+
+    Session 62480a153ced served ``frontend.streaming: true`` for 6+ minutes
+    during the daemon-wide update rollover: the retire raced its turn-end
+    delta, the successor-snapshot repair was declined by the daemon latch, and
+    this callback published nothing that could restate the claim — so mounted
+    viewers kept steering (mode="steer" on the 10:05:24 and 10:07:59 presses)
+    and painted the stuck "thinking" indicator off a bit nothing could clear.
+    The replacement is now published FIRST — before the engage attempt — and
+    the latch's decline only ever declines the SUCCESSOR.
+    """
+    from local_operator.mobile.attach_client import RETIRING_REASON
+    from local_operator.session.attached import AttachedSession
+
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path), retiring=lambda: True)
+    remote = await AttachedSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=module._no_takeover
+    )
+    bridge.remote = remote
+    remote.set_refresh_callback(bridge._on_runtime_retired)
+    # The incident's exact shape: the claim raced the retirement into the
+    # facade and its canonical mirror. ``_drop_liveness_claim`` corrects both,
+    # and this frame is what must carry that correction to mounted viewers.
+    remote._streaming = True
+    store = remote._frontend_store
+    assert store is not None, "cold() installs the synthesised canonical state"
+    store.replace(store.state.model_copy(update={"streaming": True}))
+
+    remote._on_disconnected(RETIRING_REASON)
+
+    frames = [frame for frame, _size in bridge.replay if frame["type"] == "frontend.replace"]
+    assert frames, "the retire published nothing; the served claim would stand"
+    payload = frames[-1]["payload"]
+    assert (
+        payload["frontend"]["snapshot"]["streaming"] is False
+    ), "the replacement must carry the dropped claim, not restate it"
+    assert payload["cold"] is True, "a retired facade reports itself as cold"
+    assert bridge.warm_task is None, "a latched daemon's retire frame started a runtime"
+    assert remote.is_streaming is False
+
+
+@pytest.mark.asyncio
 async def test_concurrent_move_waits_for_refusal_rollback(move_api) -> None:
     client, app, root = move_api
     before, refused, accepted = (root / name for name in ("before", "refused", "accepted"))
@@ -6726,17 +6769,20 @@ async def test_a_legacy_viewer_cannot_mount_across_a_move(move_api, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkeypatch) -> None:
-    """The additive query flag is what a mounted legacy viewer is judged by.
+    """The additive query flags are what a mounted viewer's subscription carries.
 
-    Without it a renderer negotiates nothing and the route refuses it for the
-    duration of a move — an actionable 409 rather than a silent stale paint —
-    and with it the subscription is admitted carrying the flag the move's own
-    precondition reads back.
+    ``frontend_replace`` is the one the move fence reads: without it a renderer
+    negotiates nothing and the route refuses it for the duration of a move — an
+    actionable 409 rather than a silent stale paint — and with it the
+    subscription is admitted carrying the flag the move's own precondition reads
+    back. ``supplements`` (memo §2.7) is the same kind of declaration on its own
+    parameter: the route forwards it into the subscription exactly as the client
+    sent it.
 
     The stream body is stubbed because ``ASGITransport`` buffers a response
     until the app RETURNS, and the real generator is an SSE loop that only ends
-    when the client leaves; the subject here is the two hand-offs on either side
-    of the response — the query flag into the subscription, and the refusal into
+    when the client leaves; the subject here is the hand-offs on either side of
+    the response — the query flags into the subscription, and the refusal into
     the status code — not the frames themselves.
     """
     client, app, root = move_api
@@ -6745,12 +6791,15 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
     pool = app.state.desktop_sessions
     sid = await pool.create(str(before))
     url = f"/v1/desktop/sessions/{sid}/events"
-    negotiated: list[bool] = []
+    # Recorded as the PAIR each call carried: the route builds the subscription
+    # from both additive flags, and a spy that watched only ``frontend_replace``
+    # would let the supplements half be dropped without a failure.
+    negotiated: list[tuple[bool, bool]] = []
     real_subscribe = module.DesktopSessionBridge.subscribe
 
-    def spy(self, *, frontend_replace: bool = False):  # noqa: ANN001
-        negotiated.append(frontend_replace)
-        return real_subscribe(self, frontend_replace=frontend_replace)
+    def spy(self, *, frontend_replace: bool = False, supplements: bool = False):  # noqa: ANN001
+        negotiated.append((frontend_replace, supplements))
+        return real_subscribe(self, frontend_replace=frontend_replace, supplements=supplements)
 
     async def no_frames(*args, **kwargs):  # noqa: ANN002, ANN003
         # An async generator with nothing to yield: the response completes
@@ -6765,11 +6814,24 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         legacy = await client.get(url)
         assert legacy.status_code == 409, legacy.text
         assert "Update the desktop app" in legacy.json()["detail"]
-        assert negotiated == [False], "the legacy mount did not present itself as legacy"
+        assert negotiated == [(False, False)], "the legacy mount did not present itself as legacy"
         admitted = await client.get(url, params={"frontend_replace": 1})
         assert admitted.status_code == 200, admitted.text
-        assert negotiated == [False, True], "the route dropped the negotiated flag"
+        assert negotiated == [
+            (False, False),
+            (True, False),
+        ], "the route dropped the negotiated flag"
         bridge.move_in_progress = False
+        # The supplements declaration is the same hand-off on its own parameter
+        # (memo §2.7): ``?supplements=1`` must arrive as True, with the
+        # replacement flag still at its default.
+        declared = await client.get(url, params={"supplements": 1})
+        assert declared.status_code == 200, declared.text
+        assert negotiated == [
+            (False, False),
+            (True, False),
+            (False, True),
+        ], "the route dropped the supplements declaration"
 
 
 @pytest.mark.asyncio
@@ -7224,7 +7286,7 @@ def test_the_messages_route_accepts_prose_that_opens_with_a_command_word(monkeyp
     headers = {"Authorization": "Bearer policy-token"}
     body = {"request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         for text in MESSAGE_DRAFTS:
             response = client.post(
                 "/v1/desktop/sessions/0badc0ffee00/messages",
@@ -7288,7 +7350,7 @@ def test_the_command_route_and_the_admission_rule_share_one_derivation(monkeypat
         ("logout", "openai"),
     ]
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         for command, args in cases:
             spec = slash_command_for("/" + command)
             assert spec is not None
@@ -7344,7 +7406,7 @@ def test_the_credential_route_refuses_text_the_admission_rule_calls_the_commands
     assert command_argument_is_used(spec, canary) is True
     assert command_argument_is_used(spec, "my pass phrase") is True
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         for text in (f"/credential {canary}", f"/cred {canary}"):
             refused = client.post(
                 "/v1/desktop/sessions/0badc0ffee00/messages",

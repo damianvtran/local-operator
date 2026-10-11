@@ -1815,3 +1815,51 @@ def sessions_row_summary(args: Mapping[str, object]) -> str:
             parts.append(query)
         return " · ".join(parts)
     return op
+
+
+# ---------------------------------------------------------------------------
+# Turn supplements: the ROW-IDENTITY decision (memo §2.7/§3.2)
+# ---------------------------------------------------------------------------
+#
+# The supplement block's CONTENT decision is ``supplements.contract.reader_disposition``
+# (which both hosts import, so "paint as preparing / as the settled block / as
+# cancelled·Retry / as nothing" is one function). What is left for the surfaces is the
+# question below — "is this raw row one of ours, and what does it say" — and it lives
+# here for this module's stated reason: a decision made in one renderer is a decision the
+# other will not make. The TUI folds the mapping a live beat carries and the mapping the
+# lazy read (``supplements_for``) serves; the phone fold sees raw transcript-entry payloads.
+# Both are read here, once.
+#
+# PROVENANCE NOTE, measured on this branch: supplement rows are ``ENTRY_CUSTOM`` journal
+# entries, so they do NOT ride either replay mode (``build_llm_history`` and the audit
+# replay both skip them — probed directly), and the TUI lane's replay mechanism is the C0
+# read op rather than a history-fold arm. This reader is what that op's answers and the
+# live payloads have in common.
+
+
+def supplement_row_details(row: Any) -> Mapping[str, Any] | None:
+    """The ``details`` of a ``supplement_v1`` row, or ``None`` when not one of ours.
+
+    Accepts the two shapes a surface actually holds:
+
+    * a raw transcript-entry payload mapping — ``{"custom_type": "supplement_v1",
+      "details": {...}}`` — which is what ``Transcript.latest_custom`` returns and what
+      the phone fold walks;
+    * a wrapped entry — ``{"payload": {...}}`` — for a caller holding the entry rather
+      than its payload.
+
+    A row whose ``custom_type`` matches but whose ``details`` is not a mapping answers
+    ``None``: a malformed row paints nothing rather than raising on a render path, the
+    same rule ``supplements.contract``'s readers follow.
+    """
+    from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+    if not isinstance(row, Mapping):
+        return None
+    payload: Any = row.get("payload", row)
+    if not isinstance(payload, Mapping):
+        return None
+    if str(payload.get("custom_type", "")) != SUPPLEMENT_CUSTOM_TYPE:
+        return None
+    details = payload.get("details")
+    return details if isinstance(details, Mapping) else None

@@ -22,7 +22,7 @@ generate, status, result, cancel, all under ``/v1/tools/media/*`` with a
 bearer. FAL rides its queue API natively (``sync_mode: false``) and we use the
 response-carried ``status_url``/``response_url``/``cancel_url`` — with
 fallback derivation from the app path, which reproduces the OLD client's
-hardcoded ``[redacted]…`` exactly (verified: ``clients/fal.py:170,198``
+hardcoded ``fal-ai/flux/requests…`` exactly (verified: ``clients/fal.py:170,198``
 hardcode ``fal-ai/flux`` while posting to ``model_path`` — a latent bug for
 any other model; the response-carried URLs are the fix, and the fallback
 derives from the model actually used). OpenAI is a single synchronous request
@@ -405,9 +405,10 @@ def progress_details(
 # v0 payload notes (lane-verified): generate/status/result/cancel are flat
 # passthroughs except ``model``/``provider``, so the params model maps
 # straight onto the wire; the model list is read LIVE per call and no model id
-# is pinned anywhere in this tree (the default is whichever image model the
-# hub currently marks ``default: true``); ``cost_usd`` comes back on generate
-# and is surfaced, not budgeted against.
+# is pinned anywhere in this tree (an un-pinned GENERATION resolves the row
+# marked ``default: true``, an un-pinned EDIT the row marked
+# ``edit_default: true`` — see ``_pick_radient_model``); ``cost_usd`` comes
+# back on generate and is surfaced, not budgeted against.
 
 #: Where the hub's media routes hang. Paths, not hosts: the host is the
 #: resolved Radient base URL, so a staging hub needs no code change.
@@ -427,35 +428,54 @@ RADIENT_ERROR_TYPES = frozenset(
     {"media_rejected", "media_failed", "media_rate_limited", "media_unavailable"}
 )
 
-#: Radient's edit refusal — the ONE home of this sentence, shared by the rung's
-#: own skip and the cascade's capability pre-record (``cascade._edit_skip_message``)
-#: so the two cannot drift. WHY a skip and not an attempt: agent-server's media
-#: route forwards every body key verbatim to FAL, and the ``source_url`` →
-#: ``image_url`` mapping exists only on the LEGACY ``/v1/tools/images/generate``
-#: adapter this client does not call — so a ``source_url`` edit today is either a
-#: silent, BILLED text-to-image or a rejection, and the client cannot tell which.
-#: The enabling PR (hub exposes capability + maps sources) flips
-#: ``RUNG_SPECS[RADIENT].sources`` beside wiring ``image_url``/``image_urls``.
-RADIENT_EDIT_SKIP_MESSAGE = (
-    "Radient cannot edit yet — its media route has no source handling; "
-    "use another signed-in provider"
-)
+# Radient's EDIT wire (hub media slice, live 2026-10-10): a source rides the
+# canonical ``image_url`` — a data URI or an https URL — and ``source_url``
+# plus every alias is REFUSED hub-side (400, fail-closed before any vendor
+# call, never a silent billed text-to-image), so the pre-slice key is deleted
+# rather than kept as a fallback. Three constraints the hub's pins impose and
+# this wire honours, each measured live (prod validation on radient PR #111):
+# - a ``prompt`` ALWAYS rides an edit: the vendor queues prompt-less submits
+#   but fails them at execution (unbilled; the failure surfaces as a 503 from
+#   the hub's result read);
+# - an explicit ``image_size`` ALWAYS rides the wire: the gpt-2.5 edit and
+#   flux-2-max/pro edit pins refuse an absent or ``auto`` size at quote time;
+# - per-pin SOURCE ceilings (gpt-2.5 16 / grok 3 / seedream 10) are live
+#   listing facts (``sources``/``max_sources``/``mask`` on every row), never
+#   constants here — v1 sends a SINGLE source, and a multi-source wire must
+#   read the ceiling off the row it is about to send to.
 
 
 def _bearer_headers(credential: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
 
 
-def _pick_radient_model(payload: dict[str, Any], requested: str | None) -> str:
+def _pick_radient_model(
+    payload: dict[str, Any], requested: str | None, *, editing: bool = False
+) -> str:
     """The model id to run, read off the live list; never a pinned default.
 
     ``requested`` wins verbatim — the caller may pin any id the hub serves,
     and a bad id fails at generate and fails FORWARD (rung failure), which is
-    the honest outcome for a free-text field. With none requested, the first
-    image model the hub marks ``default: true`` wins; failing that, the first
-    image model listed. A list with no usable image row raises
-    ``invalid_response`` so the rung fails forward with a readable reason
-    instead of submitting a nonsense model id.
+    the honest outcome for a free-text field. A non-source pin pinned WITH a
+    source fails forward at the hub too (400 ``media_rejected``, no vendor
+    call, no charge) — the hub's fail-closed contract, not something this
+    picker second-guesses.
+
+    With none requested the pick depends on the request:
+
+    - an EDIT (``editing``) resolves the row the hub marks ``edit_default``:
+      the listing's ``default: true`` is a TEXT-TO-IMAGE pin (flux2pro), and
+      sending it with a source is the hub's 400 ``media_rejected`` — while
+      the edit default is the same pin the hub's own blank-model auto-resolve
+      names in the response, so the two routes agree. A list with no
+      ``edit_default`` row raises ``invalid_response`` rather than falling
+      back to the T2I default (the fail-closed twin of the hub's own rule);
+    - a generation keeps the old read: the first ``default: true`` image row,
+      failing that the first image row listed.
+
+    Either way a list with no usable image row raises ``invalid_response`` so
+    the rung fails forward with a readable reason instead of submitting a
+    nonsense model id.
     """
     if requested:
         return requested
@@ -463,7 +483,7 @@ def _pick_radient_model(payload: dict[str, Any], requested: str | None) -> str:
     if not isinstance(rows, list):
         nested = payload.get("data")
         rows = nested if isinstance(nested, list) else []
-    candidates: list[tuple[bool, str]] = []
+    candidates: list[tuple[bool, bool, str]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -472,12 +492,21 @@ def _pick_radient_model(payload: dict[str, Any], requested: str | None) -> str:
         model_id = row.get("id") or row.get("model") or row.get("name")
         if not isinstance(model_id, str) or not model_id:
             continue
-        candidates.append((bool(row.get("default")), model_id))
-    for is_default, model_id in candidates:
+        candidates.append((bool(row.get("edit_default")), bool(row.get("default")), model_id))
+    if editing:
+        for is_edit_default, _is_default, model_id in candidates:
+            if is_edit_default:
+                return model_id
+        raise APIError(
+            "Radient's media list carries no edit default; pin a model for the edit.",
+            status_code=None,
+            code="invalid_response",
+        )
+    for _is_edit_default, is_default, model_id in candidates:
         if is_default:
             return model_id
     if candidates:
-        return candidates[0][1]
+        return candidates[0][2]
     raise APIError(
         "Radient returned no usable image model in its media list.",
         status_code=None,
@@ -609,19 +638,15 @@ async def run_radient(
     """Rung 1: the Radient hub's media tools. See the module docstring.
 
     ``credential`` is the bearer the cascade resolved (``SecretStr`` unwrapped
-    at the boundary); ``source_url`` is the img2img data URI when the caller
-    supplied one — an EDIT request, which this rung currently REFUSES before
-    any network call (see :data:`RADIENT_EDIT_SKIP_MESSAGE`). The walk for a
-    generation: live model list → affordability (optimistic on any probe
-    failure) → submit → poll → result → bounded downloads.
+    at the boundary); ``source_url`` is the img2img source — an EDIT request —
+    mapped to the hub's canonical ``image_url`` (the pre-slice key, refused
+    hub-side, was deleted with the skip path it existed for). A ``prompt``
+    always rides an edit and ``image_size`` is always explicit: both are
+    pin-level hub requirements, not defaults (see the edit-wire notes above
+    the error vocabulary). The walk: live model list → affordability
+    (optimistic on any probe failure) → submit → poll → result → bounded
+    downloads.
     """
-    if source_url is not None:
-        # Defence in depth: the cascade's capability filter pre-records this
-        # skip WITHOUT calling, so this branch serves direct callers and pins
-        # the declaration-matches-behaviour test. Before the models-list
-        # fetch on purpose — no probe runs for an edit this route cannot
-        # serve.
-        raise RungSkipped(RADIENT_EDIT_SKIP_MESSAGE, reason_class="unsupported")
     base = base_url.rstrip("/")
     async with _client_scope(client) as http:
         models_payload = await _request_json(
@@ -633,7 +658,7 @@ async def run_radient(
             secrets=(credential,),
             headers=_bearer_headers(credential),
         )
-        model_id = _pick_radient_model(models_payload, model)
+        model_id = _pick_radient_model(models_payload, model, editing=source_url is not None)
         unit_price = _radient_unit_price(models_payload, model_id)
 
         affordable = await _radient_affordable(
@@ -657,7 +682,9 @@ async def run_radient(
         if strength is not None:
             body["strength"] = strength
         if source_url is not None:
-            body["source_url"] = source_url
+            # Canonical single-source field: the hub maps it per pin and
+            # refuses ``source_url`` and aliases (never a silent billed T2I).
+            body["image_url"] = source_url
 
         generate = await _request_json(
             http,

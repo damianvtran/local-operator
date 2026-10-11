@@ -281,7 +281,11 @@ async def test_create_agent_success(dummy_registry: AgentRegistry):
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Host": "127.0.0.1:1111"},
+    ) as ac:
         response = await ac.post("/v1/agents", json=create_payload.model_dump())
 
     assert response.status_code == 201
@@ -322,7 +326,11 @@ async def test_create_agent_invalid_data(dummy_registry: AgentRegistry):
     )  # Invalid empty name
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Host": "127.0.0.1:1111"},
+    ) as ac:
         response = await ac.post("/v1/agents", json=invalid_payload.model_dump())
 
     assert response.status_code == 400

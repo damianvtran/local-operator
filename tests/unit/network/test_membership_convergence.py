@@ -1326,19 +1326,75 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     a = _make(devices, "a", mode=HUB)
     b = _make(devices, "b", mode=HUB)
     record = _init_network(a.server)
+    # THE BASELINE FOR THE SECOND WAIT BELOW, taken BEFORE the join: a's admit-time
+    # ``contact_peers`` pass starts on a handshake thread of its own once the joiner's
+    # result frame is sent, and may still be in flight when this test is already past
+    # the dial.
+    admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
     link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
     assert link is not None, reason
 
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
+    assert a_link is not None
+
+    # LET a's OWN ESTABLISHMENT PULL SETTLE BEFORE THE DUE WINDOW IS ARMED. b's dial
+    # returns when b is satisfied, but a's listener side runs its own ``net_member_list``
+    # pull for this link on a handshake thread of its own (``register_link``), and that
+    # pull STAMPS ``member_pulled_at`` when its answer lands. Armed too early, the arm
+    # below (``= 0.0``) is overwritten by that late stamp, the link reads as pulled
+    # moments ago, the kicked pass finds it NOT DUE and answers from the cadence
+    # without ever entering ``_pull_members`` — "the kicked pass never entered the
+    # pull" (CI shards 2026-10-09/10; the margin between the two threads is ~1 ms on a
+    # quiet host, measured, and a starved runner turns it into a coin flip). The stamp
+    # is the event: it is written exactly once per establishment pull, so waiting for
+    # it leaves no other writer racing the arm.
+    assert net_fixtures.wait_for(
+        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+    ), "a's establishment pull never stamped the link"
+
+    # AND LET THE ADMIT-TIME PASS COMPLETE TOO, or one writer the test does not
+    # control can still restamp the link behind the arm below (agent review round 1,
+    # MINOR — the residual behind QA round 1's one green miss): the same listener
+    # runs a ``contact_peers`` pass after sending the result frame, and starved
+    # across the dial it reads the REPLACEMENT link while that link is due
+    # (``member_pulled_at == 0.0``), pulling it: "a second stamp on the same link",
+    # landing after the arm and reinstating the not-due skip. The pass bumps
+    # ``_membership_seq`` exactly once, at completion, after every pull it made has
+    # stamped, so waiting for the bump leaves no unprompted pass in flight when the
+    # due window is armed.
+    assert net_fixtures.wait_for(
+        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0
+    ), "a's admit-time contact_peers pass never completed"
+
+    # AND NO INBOUND HANDSHAKE MAY STILL BE IN FLIGHT EITHER, closing the sibling
+    # shape a probe for this change found: the establishment wait above can observe
+    # the ADMIT pass's restamp first while ``register_link``'s own establishment
+    # pull is still in flight — and THAT pull's stamp can then land behind the arm
+    # below, the same not-due skip from the other side. A ``_handshake_slots`` slot
+    # is the right signal because it is acquired once per inbound connection
+    # (``_accept_loop``) and released only in ``_handshake_inbound``'s ``finally`` —
+    # i.e. when the WHOLE inbound work returns: ``register_link``'s establishment
+    # pull (the stamp) and a pair listener's ``contact_peers`` (the admit restamp)
+    # included — so "all slots free" is exactly "no unprompted inbound writer can
+    # still stamp this link". The two inbound connections on a here are the join's
+    # and the dial's. ``_value`` is read because the semaphore exposes nothing else,
+    # and is only ever compared against the cap that built it.
+    def _all_inbound_done() -> bool:
+        return a.server._handshake_slots._value == a.server.settings.max_handshakes  # noqa: SLF001
+
+    assert net_fixtures.wait_for(
+        _all_inbound_done, timeout_s=10.0
+    ), "an inbound handshake can still restamp the link"
+
     # A completed pass first: the fallback must BE this one, so make it answer with
-    # b's table (a real pull — the link is up).
+    # b's table (a real pull — the link is up, and the zero makes it due).
+    a_link.member_pulled_at = 0.0
     first = a.server.refresh_membership()[record.network_id]  # noqa: SLF001
     assert first.answered == [b.device_id], first
 
     # Make the NEXT pull hang, and re-open the link's due window so the pass the
     # read triggers actually enters the hung pull.
-    a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
-    assert a_link is not None
     a_link.member_pulled_at = 0.0
     release = threading.Event()
 

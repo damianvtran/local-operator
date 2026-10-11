@@ -76,6 +76,18 @@ rather than matched. Those words name a delegation (`task(agent='<role>')`) or a
 once landed on a session whose *title* simply contained "manager". The refusal
 names the teams that define the role and asks for a `pid`/`session`.
 
+Don't send a message that is only an acknowledgement or a status with no ask;
+say 'reply needed' if you need one — the receiver may stay silent (`no_reply`).
+End a peer turn that needs no reply with `no_reply` — the fully quiet end: no
+completion row, no unread mark. A written reply is readable but silent: a
+completion row, unread-marked, with no toast, banner, phone push or
+announcement; it waits in the transcript for the user to look. Assistant
+text comes back to the sender only on a mesh send (`peer=…`), whose receipt
+carries the turn's last assistant text; on the same-machine path only the
+delivery detail returns, so a bare acknowledgement reaches nobody. When the
+user must decide or know something, use `ask`: it is the only route that
+actively reaches them.
+
 ### Worked examples
 
 A non-urgent hand-off the peer folds into whatever it does next — it stays

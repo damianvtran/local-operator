@@ -9,6 +9,7 @@
  * reopen ourselves.
  */
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { supplementsFromWire } from "./lib/supplement";
 import type {
 	Capabilities,
 	SessionProjection,
@@ -43,12 +44,22 @@ function normalizeSubagent(row: SubagentRow): SubagentRow {
 }
 
 export function normalizeProjection(incoming: SessionProjection): SessionProjection {
-	return {
+	const projection: SessionProjection = {
 		...incoming,
 		transcript: list(incoming.transcript),
 		todos: list(incoming.todos).map(normalizeTodoPhase),
 		subagents: list(incoming.subagents).map(normalizeSubagent),
 	};
+	/* Turn supplements: the sibling map is re-read through its ONE reader at
+	   this last trust boundary, like every nested shape beside it — a beat
+	   whose anchor/state does not parse is dropped rather than rendered from
+	   a guess. ABSENT stays absent: the daemon emits the key only when it
+	   carries beats, and every renderer reads a missing key and an empty map
+	   the same way (the distinction is deliberately not laundered here). */
+	if (incoming.supplements !== undefined) {
+		projection.supplements = supplementsFromWire(incoming.supplements);
+	}
+	return projection;
 }
 
 export interface ProjectionSlot {
@@ -66,6 +77,13 @@ let sessionsConnected = false;
    "unchanged" — and the voice mic's rule for it is the rule for
    ``available: false``: hide. */
 let capabilities: Capabilities | null = null;
+/* The RELAY's resolved language, off the ``config`` stream
+   (``/api/config/events``, wave-5 slice D): the same frame semantics the
+   desktop feed publishes — ``{changed_keys, language}`` — and ``null`` until
+   the first frame lands (or forever, on a daemon without the route: absence,
+   not an error). Also mirrored onto ``<html lang>`` so assistive tech and
+   future catalogues read one value. */
+let language: string | null = null;
 /* The pins the user has ASKED FOR and the daemon has not answered for yet,
    held as the value that was asked for. An overlay on the server's list, never
    a rewrite of it, and the distinction is the whole point.
@@ -192,6 +210,10 @@ export function publishMarkNotice(notice: MarkNotice | null): void {
 /** The daemon's capability answer (``capabilities`` on the list payload). */
 export function useCapabilities(): Capabilities | null {
 	return useSyncExternalStore(subscribe, () => capabilities);
+}
+
+export function useLanguage(): string | null {
+	return useSyncExternalStore(subscribe, () => language);
 }
 
 export function useProjection(sessionId: string): ProjectionSlot {
@@ -345,6 +367,112 @@ export function retainSessionListStream(): () => void {
 		if (listStreamRefs === 0 && listStreamClose) {
 			listStreamClose();
 			listStreamClose = null;
+		}
+	};
+}
+
+/* ------------------------------------------------------------------ */
+/* Config stream (resolved language), refcounted                       */
+/* ------------------------------------------------------------------ */
+
+const CONFIG_STREAM_PATH = "/api/config/events";
+
+let configStreamClose: (() => void) | null = null;
+let configStreamCancel: (() => void) | null = null;
+let configStreamRefs = 0;
+
+function applyConfigFrame(data: string): void {
+	try {
+		const payload = JSON.parse(data) as {
+			changed_keys?: string[];
+			language?: string;
+		};
+		if (typeof payload.language !== "string" || !payload.language) return;
+		language = payload.language;
+		/* The daemon serves the shell with lang="en"; the resolved language is
+		   the authoritative one from the moment it arrives. Guarded because the
+		   store also runs under vitest's node environment. */
+		if (typeof document !== "undefined") {
+			document.documentElement.lang = payload.language;
+		}
+		emit();
+	} catch {
+		/* A malformed frame is dropped; the next one repaints. */
+	}
+}
+
+/* Probe ONCE whether this daemon serves the config stream.
+
+   An older daemon answers 404 on ``/api/config/events``. The EventSource
+   wrapper cannot see that status (its error event carries none), so
+   subscribing blind would retry a route that will never exist with the full
+   15 s backoff — forever, on every load. One probe fetch settles it: headers
+   land immediately even for a live event-stream (``fetch`` resolves on them;
+   the body is then cancelled).
+
+   ONLY 404 is PERMANENT absence (CI round 1, MINOR-3). Every other non-ok
+   answer — a 5xx behind a restarting proxy, a captive portal, a tunnel that
+   is not up yet — is TRANSIENT and branches to the retry path, so it
+   self-heals instead of disabling live language for the whole load; a
+   NETWORK failure is the same retry. A daemon that disappears AFTER a
+   successful probe keeps the stream wrapper's normal reconnect behaviour;
+   the probe covers the mixed-version load. */
+async function configEndpointPresence(): Promise<"present" | "absent" | "retry"> {
+	try {
+		const res = await fetch(CONFIG_STREAM_PATH, {
+			headers: { Accept: "text/event-stream" },
+		});
+		const isStream =
+			(res.headers.get("content-type") ?? "").includes("text/event-stream");
+		try {
+			await res.body?.cancel();
+		} catch {
+			/* dropping the probe's body is best-effort */
+		}
+		if (res.ok && isStream) return "present";
+		return res.status === 404 ? "absent" : "retry";
+	} catch {
+		return "retry";
+	}
+}
+
+export function retainConfigStream(): () => void {
+	configStreamRefs++;
+	if (configStreamRefs === 1) {
+		let disposed = false;
+		let attempt = 0;
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		const start = async () => {
+			if (disposed) return;
+			const presence = await configEndpointPresence();
+			if (disposed) return;
+			if (presence === "retry") {
+				const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** attempt++);
+				timer = setTimeout(start, delay);
+				return;
+			}
+			if (presence === "absent") return; // 404: no subscription, no retries
+			configStreamClose = openEventStream(
+				CONFIG_STREAM_PATH,
+				"config",
+				applyConfigFrame,
+				() => {},
+				() => {},
+			);
+		};
+		configStreamCancel = () => {
+			disposed = true;
+			if (timer) clearTimeout(timer);
+			configStreamClose?.();
+			configStreamClose = null;
+		};
+		void start();
+	}
+	return () => {
+		configStreamRefs--;
+		if (configStreamRefs === 0) {
+			configStreamCancel?.();
+			configStreamCancel = null;
 		}
 	};
 }
