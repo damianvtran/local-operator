@@ -612,8 +612,9 @@ def _host_name(host_header: str) -> str:
     else:
         name = value.rsplit(":", 1)[0] if value.count(":") == 1 else value
     # One trailing dot is the FQDN spelling of the same authority (``localhost.``,
-    # ``mac.lan.`` -- browsers and some resolvers emit it). ONE, not all: ``.``
-    # and ``..`` stay distinct, refused names. Applied to both sides of the
+    # ``mac.lan.`` -- browsers and some resolvers emit it). ONE, not all: a lone
+    # ``.`` is left alone and ``..`` collapses to it; neither is an IP literal
+    # or ``localhost``, so both refuse. Applied to both sides of the
     # announced-name compare below, so ``mac.lan.`` matches an announced
     # ``mac.lan`` exactly as the client dialed it.
     return name[:-1] if name.endswith(".") and name != "." else name
