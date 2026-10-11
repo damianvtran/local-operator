@@ -1199,8 +1199,12 @@ async def test_the_preserve_cap_bounds_the_task_boundary_floor(tmp_path, monkeyp
     await session._plan_compaction(respect_threshold=True)
 
     assert captured, "find_cut_point was never reached"
-    # 100,000, not the 300,000 the window-derived cap would have allowed.
-    assert captured[-1] == 100_000
+    # The FIRST call carries the floor-derived budget — 100,000, not the
+    # 300,000 the window-derived cap would have allowed. A retry at the base
+    # budget may follow when the widened walk finds nothing (the
+    # preserve-floor fallback); the capped figure is what the floor may hand
+    # the cut, and it can never exceed this.
+    assert captured[0] == 100_000
     await session.dispose()
 
 
@@ -1246,8 +1250,9 @@ async def test_the_preserve_cap_tightens_the_advisor_hint_clamp(tmp_path, monkey
     await session._plan_compaction(respect_threshold=True)
 
     assert captured, "find_cut_point was never reached"
-    # Clamped to the new cap, where the window-derived cap gave 300,000.
-    assert captured[-1] == 100_000
+    # Clamped to the new cap, where the window-derived cap gave 300,000. The
+    # clamped figure rides the FIRST call; a base-budget retry may follow.
+    assert captured[0] == 100_000
     await session.dispose()
 
 

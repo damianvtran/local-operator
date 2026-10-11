@@ -18789,6 +18789,39 @@ class Session:
             keep_recent = max(keep_recent, capped_hint)
 
         cut = await self._offloaded(compaction_api, "find_cut_point", llm_history, keep_recent)
+        if (cut is None or cut <= 0) and keep_recent > settings.keep_recent_tokens:
+            # A WIDENED PRESERVE WINDOW CAN SPAN THE WHOLE COMPACTABLE
+            # WINDOW: the task floor (the incident's source) and a clamped
+            # advisor hint both ride this guard. When the last genuine user
+            # turn is older than the current kept window, the floor
+            # re-measures that same span on every turn; the widened walk
+            # then stops exactly at the preserved-block boundary, where the
+            # summarizable count sees nothing but the marker and
+            # already-preserved turns (both deliberately excluded) and
+            # ``find_cut_point`` answers ``None``. The refusal then RECURS
+            # rather than healing — measured live on session 439818272d84:
+            # eight hours and 400k->549k provider tokens of growth with zero
+            # passes, ended only when a typed user message re-anchored the
+            # floor — and the automatic gate has nobody to tell. The cap on
+            # the floor documents this failure's remedy for the too-large
+            # case ("revert to plain recency behaviour"); this retry extends
+            # it to the shape a token cap cannot see: a span large RELATIVE to
+            # what remains summarizable, not necessarily in absolute tokens.
+            # Plain recency can never keep less than the base the floor
+            # widens, and when recency also finds nothing the refusal below
+            # still reports it.
+            recency_cut = await self._offloaded(
+                compaction_api, "find_cut_point", llm_history, settings.keep_recent_tokens
+            )
+            if recency_cut is not None and recency_cut > 0:
+                logger.warning(
+                    "compaction preserve window (task floor or a clamped advisor hint) "
+                    "spanned the compactable window: falling back to the plain recency "
+                    "window (keep_recent %s -> %s)",
+                    keep_recent,
+                    settings.keep_recent_tokens,
+                )
+                cut = recency_cut
         if cut is None or cut <= 0:
             # ``find_cut_point`` is the ONE definition of "worth summarizing":
             # the kept window has to reach ``keep_recent_tokens`` and at least
