@@ -1193,6 +1193,17 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
         "/v1/desktop/sessions/{session_id}/interrupt",
         {"request_id": "01234567-89ab-cdef-0123-456789abcdef"},
     ),
+    # The job rail's cancel (the video phase's route): it takes a bridge like
+    # every other row, so on a latched daemon it must answer the typed refusal
+    # and claim no receipt — the row is what proves the new route is INSIDE the
+    # door rather than beside it. It sits after ``/interrupt`` here for the same
+    # reason it does in the route table: both are stop-work controls, and BOTH
+    # must refuse once the daemon has latched.
+    _DoorRoute(
+        "cancel_job",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/jobs/abcdef012345/cancel",
+    ),
     # The child reader's LIVE half (design § 1). A row for the same reason
     # ``/interrupt`` and ``/mcp/credentials`` carry one: the open takes a bridge
     # from the door, so on a latched daemon it must answer the typed refusal and

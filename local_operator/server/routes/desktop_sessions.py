@@ -51,6 +51,7 @@ from local_operator.server.models.desktop_sessions import (
     DraftReceipt,
     HistoryPage,
     InterruptReceipt,
+    JobCancelReceipt,
     MessageAdmission,
     MoveReceipt,
     NotificationClaim,
@@ -4809,6 +4810,143 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
                 retry_safe=True,
             )
         )
+
+
+#: The job id a desktop cancel names, bounded the way the wire spells it
+#: (``desktop-contract``'s ``jobId``: 1..64 characters). Deliberately NOT
+#: patterned to the manager's 12-hex mint: ``AsyncJobManager.get`` also
+#: resolves historical attempt ALIASES, and the lookup — never a regex — is
+#: the one arbiter of whether an id names a job.
+JobId = Annotated[str, Path(min_length=1, max_length=64)]
+
+#: What a job cancel's refusal means, as an HTTP status. One table for every
+#: refusal this route can surface, so the same mistake can never mean two
+#: different statuses depending on which side raised it.
+_JOB_STATUS_FOR_CODE = {
+    # Our own payload could not be read — a protocol bug, not user input; the
+    # same client-error class the wake/monitor ladders reserve for it.
+    "jobs_invalid": 422,
+    # The roster does not know the id: the frozen ``not_found`` class.
+    "jobs_not_found": 404,
+    # The row exists but was not running — the press asked for a stop that
+    # cannot happen (it settled first, or a retried cancel arrived late).
+    "jobs_not_cancelled": 409,
+    # No manager attached — a session SHAPE, like the wake surface's
+    # "unavailable" arm, so 409 rather than a transport 503.
+    "jobs_unavailable": 409,
+    # No live runtime to ask, or no receipt from the one asked: nothing was
+    # cancelled and the client's move is to come back (the sibling routes' 503).
+    "jobs_owner_unavailable": 503,
+}
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/jobs/{job_id}/cancel",
+    response_model=CRUDResponse[JobCancelReceipt],
+)
+async def cancel_job(session_id: str, job_id: JobId, request: Request) -> Any:
+    """Cancel ONE background job on this conversation — the job rail's server half.
+
+    ``POST`` rather than the wake/monitor cancels' ``DELETE``, and the
+    difference is the resource's fate (the contract's own note): a cancelled
+    wake or monitor is GONE from its listing, while a cancelled job is a row
+    that stays and settles — the press is an action ON it, so the route is one
+    too.
+
+    WHO CANCELS. ``AsyncJobManager.cancel`` is the engine's one cancel call —
+    the same call ``jobs op='cancel'`` makes — and the manager lives in the
+    process that owns the session, so this route resolves the owner first and
+    DELEGATES through ``route_shared_slash("jobs", …)`` to
+    ``serving._jobs_slash`` inside that process (the wakes/monitors ladder's
+    shape, deliberately the same seam). Nothing here cancels anything itself,
+    and nothing here is a second mechanism: the runner's own cancellation
+    semantics — a video runner's bounded ``best_effort_cancel`` — apply
+    identically whoever asked.
+
+    THE PRESS IS AN ACKNOWLEDGEMENT, NOT AN OUTCOME (the honesty rule every
+    surface keeps): a 2xx says the manager received the cancel and signalled
+    the job; only the job's own settle paints ``cancelled``. A refusal is a
+    sentence the surface renders where it asked — the frozen ``not_found``
+    phrase for an unknown id (the engine authors it from its own wording map,
+    so no client has to substitute for it) and the engine's own "not
+    cancelled (status: …)" sentence for a row that settled first.
+
+    NO RECEIPT JOURNAL, the wake/monitor cancels' own reading: a retried
+    cancel about a job the first attempt already stopped answers an honest
+    refusal rather than a second side effect, so there is no duplicate a
+    journal would prevent — and the call site sends no request id for one to
+    claim on.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(await _cancel_job_on_owner(bridge, session_id, job_id))
+
+
+async def _cancel_job_on_owner(bridge: Any, session_id: str, job_id: str) -> dict[str, Any]:
+    """Ask the session's runtime to cancel one job, inside its own process.
+
+    The route never holds a manager: job state lives in the runtime's
+    ``AsyncJobManager``, and with no live owner there is nothing to reach (job
+    state does not persist outside a runtime the way wake/monitor state does,
+    so unlike those surfaces there is no cold path here — only an honest
+    refusal). A RECOVERING facade is not folded into "no owner": it is dialled
+    like a live one, and a dial that cannot be served is the ladder's 503
+    (``runtime_unreachable``) — the interrupt route's own distinction, one
+    rung over.
+    """
+    if not bridge.remote.owner_reachable and not bridge.remote.recovering:
+        raise _job_refusal(
+            503,
+            "jobs_owner_unavailable",
+            "The conversation has no live runtime, so the job cannot be cancelled.",
+            session_id=session_id,
+        )
+    payload = json.dumps({"op": "cancel", "job_id": job_id})
+    outcome = await bridge.remote.route_shared_slash("jobs", payload)
+    if not isinstance(outcome, Mapping):
+        # NOT a job refusal the runtime decided: the bridge answered nothing
+        # at all (no ack shape from the owner). Nothing was cancelled, and the
+        # client's move is to come back — the wake/monitor twins' 503 sentence
+        # for the same state.
+        raise _job_refusal(
+            503,
+            "jobs_owner_unavailable",
+            "The conversation's runtime answered nothing for this job.",
+            session_id=session_id,
+        )
+    if outcome.get("kind") == "error":
+        data = outcome.get("data") or {}
+        code = str(data.get("code") or "jobs_refused")
+        raise _job_refusal(
+            _JOB_STATUS_FOR_CODE.get(code, 409),
+            code,
+            str(outcome.get("text") or "The job was refused."),
+            session_id=session_id,
+        )
+    data = outcome.get("data") or {}
+    if not str(data.get("job_id") or ""):
+        # AN OWNER THAT DOES NOT KNOW THE WORD. An older build falls through
+        # the routed dispatch to its configuration notice — a non-error shape
+        # with no job id — and reporting THAT as a receipt would be a silently
+        # dead cancel with a 2xx (the class the wake/monitor routes exist to
+        # remove), so an answer without a job id is treated as "no receipt".
+        raise _job_refusal(
+            503,
+            "jobs_owner_unavailable",
+            "The conversation's runtime did not confirm the job cancel.",
+            session_id=session_id,
+        )
+    return {"job_id": str(data.get("job_id")), "cancelled": bool(data.get("cancelled"))}
+
+
+def _job_refusal(status: int, code: str, message: str, *, session_id: str = "") -> HTTPException:
+    """A job refusal, in the shape the wake and monitor surfaces' refusals use,
+    so the desktop client unwraps all three families with one reader. The
+    status is the caller's (the map's, or the ladder's own)."""
+    detail: dict[str, Any] = {"code": code, "message": message}
+    if session_id:
+        detail["session_id"] = session_id
+    return HTTPException(status, detail)
 
 
 @router.post(
