@@ -1,0 +1,14 @@
+{
+  "wire.errors.settings.config_retrieve_failed": "Error al recuperar la configuración: {error}",
+  "wire.errors.settings.config_unreadable": "No se puede leer el archivo de configuración. Repáralo antes de guardar.",
+  "wire.errors.settings.config_update_failed": "Error al actualizar la configuración: {error}",
+  "wire.errors.settings.credential_key_empty": "La clave de la credencial no puede estar vacía",
+  "wire.errors.settings.credential_retrieve_failed": "Error al recuperar las credenciales: {error}",
+  "wire.errors.settings.credential_update_failed": "Error al actualizar la credencial: {error}",
+  "wire.errors.settings.inline_credentials": "Usa un endpoint sin credenciales incrustadas ni parámetros de consulta.",
+  "wire.errors.settings.invalid_value": "{error}",
+  "wire.errors.settings.no_update_fields": "No se proporcionó ningún campo de actualización válido",
+  "wire.errors.settings.not_registered": "Este ajuste no está registrado.",
+  "wire.errors.settings.system_prompt_retrieve_failed": "Error al recuperar el prompt del sistema: {error}",
+  "wire.errors.settings.system_prompt_update_failed": "Error al actualizar el prompt del sistema: {error}"
+}

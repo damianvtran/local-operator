@@ -1,4 +1,385 @@
 {
   "schema": 1,
-  "entries": []
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.status",
+      "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 7 keys, mechanical+idiom clean (one/many/other renders verified); 'trabajo' judged correct; 1 MINOR fit note on tunnel.parked accepted (no maxCells; normal-width unaffected) — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.transcript",
+      "source_sha256": "bc4e3f558a065106dfbe264755001d48008b218124f44334bfed90bb8535dfdd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 10 keys; mechanical/idiom/terminology clean; queued strict-prefix + esc offer verified; sender.unknown matches harness comms.py vocabulary; 1 NIT: record 'runtime' as kept-English in the es guide — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.exec",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.incidents",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.notices",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "d134d64acc2cd356309ca0947d926f494683c47c833b1fd9f94ec4ae44ca76f5",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 recheck passed: 21 fix-round keys verified vs en (merge/pull/commit English; gating prefix exact; backoff unified), residual sweep + regression scan clean; valns OK 747 keys; sha 5e04c5d3 — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.welcome",
+      "source_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-1 audit FAILED (4 MAJOR/1 MINOR/1 NIT - term divergences); fix round applied 6/6; round-2 recheck PASSED (labels settings-exact; widths <=57/59; keyed ex-sub 28/30; valns OK). Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.settings",
+      "source_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 12 keys; valns OK; check.py catalogue checks clean for this namespace; mechanical+idiom+terminology clean (parámetros de consulta, prompt del sistema, credencial split adjudicated) — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.status",
+      "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 7 keys, byte/ICU/linguistic clean; 0 findings; accepted démarrage…/en cours/configuration/tâche/accès distant; QA note: watch parked-band fit at narrow width. Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.exec",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.incidents",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.notices",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash",
+      "source_sha256": "d845ea63edb7290bce9657a5411df748f78c4ec97bc447ec16395c7a8f2e8658",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 recheck passed: 5 fix keys verified vs en (add/remove typed subverbs byte-exact; approvals/effort fitted trades kept; workstreams=flujos de trabajo; read typed); changed set = the 5; valns OK; 0 B/M — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.transcript",
+      "source_sha256": "bc4e3f558a065106dfbe264755001d48008b218124f44334bfed90bb8535dfdd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 10 keys; bytes/ICU/renders verified (0/1/2/1e6/1.5M); strict prefix + esc offer literal; comms.py vocab match; 1 NIT: record 'runtime' kept-English in fr guide — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "d134d64acc2cd356309ca0947d926f494683c47c833b1fd9f94ec4ae44ca76f5",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 recheck passed: 4/4 round-1 fixes verified on sha d927c21b (changed set = exactly the 4 keys; chunks-merge + byte-identity proof); valns OK 747 keys; check.py ok; render smoke 745/747+2; clusters clean — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.slash",
+      "source_sha256": "d845ea63edb7290bce9657a5411df748f78c4ec97bc447ec16395c7a8f2e8658",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Audit passed: 51 keys; key set/order, typed tokens (add/remove etc.), ICU/UTF-8/U+202F verified; 1 MINOR (btw 'Posez'→'Poser' style, recorded); fit NITs accepted (5 rows wrap at 100-col, mirrors es disposition); approvals keeps scope — correct. Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.settings",
+      "source_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 12 keys; valns OK; codepoint/typography + code-semantics checks (not_registered='déclaré', identifiants intégrés vs settings.py guard) clean; 0 findings. Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.welcome",
+      "source_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 recheck passed: 7/7 fixes verified (labels settings-byte-exact); changed set = exactly the 7 keys; widths 54/56 37/39 53/55 57/59 55/57 53/55 48/50; pool max 59 unchanged; valns+check.py OK 30 keys. Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    }
+  ]
 }
