@@ -52244,9 +52244,13 @@ class OperatorApp(App[None]):
             )
         attach = getattr(session, "attach_team", None)
         if not callable(attach):
+            # The contract sentence the TUI-local handler prints (M12
+            # follow-up, #2072): say what this session can still do, not just
+            # what it cannot — the follower and routed seams must agree here.
             return SlashResult(
                 kind="notice",
-                text="this session cannot run a team. /team chart <name> shows a roster",
+                text="this session can list and chart teams, but not run one. "
+                "/team chart <name> shows a roster",
                 style="warning",
             )
         # Read BEFORE the attach: it is the team a TEAM SWITCH displaces, and

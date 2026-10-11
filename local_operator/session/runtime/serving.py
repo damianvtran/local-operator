@@ -8192,10 +8192,14 @@ class ServingSessionHandle(SessionHandle):
             detach = getattr(session, "attach_team", None)
             if not callable(detach):
                 # Same shape as the attach guard below: state what this session
-                # can do rather than promising a detach it cannot perform.
+                # can do rather than promising a detach it cannot perform. The
+                # sentence is the CONTRACT's own (see
+                # ``tui/app.py::_team_detach_receipt``), byte-for-byte, so the
+                # three refusal surfaces cannot drift (M12 follow-up, #2072).
                 return SlashResult(
                     kind="notice",
-                    text="this session cannot run a team, so there is no team to detach",
+                    text="this session can list and chart teams, but not run one, "
+                    "so there is no team to detach",
                     style="warning",
                 )
             # Read BEFORE the call, and off the OBJECT rather than its name
@@ -8267,7 +8271,8 @@ class ServingSessionHandle(SessionHandle):
             # refusal because nothing on screen says which one you got.
             return SlashResult(
                 kind="notice",
-                text="this session cannot run a team. /team chart <name> shows a roster",
+                text="this session can list and chart teams, but not run one. "
+                "/team chart <name> shows a roster",
                 style="warning",
             )
         # Read BEFORE the attach: it is the team a TEAM SWITCH displaces, and
