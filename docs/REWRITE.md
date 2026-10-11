@@ -249,10 +249,18 @@ Skills (deliberate design choices, user-requested):
     discarded history serialized, whitespace-collapsed, rendered onto PNG
     bitmap frames of pixel-font text (Pillow `ImageDraw.text`, monospace
     bitmap rendering) that vision models read back. `Archive { frames, text,
-    text_head, text_tail }` stored in the CompactionEntry's `preserve_data`
-    so later compactions re-render from text rather than carrying old PNGs.
-    Tool results truncated to 2000 chars, useless pairs dropped, head/tail
-    plain-text edges with the imaged middle (foveation: 3 HQ edge frames).
+    text_head, text_tail, middle_kinds, page_digests }` stored in the
+    CompactionEntry's `preserve_data` so later compactions re-render from
+    text rather than carrying old PNGs. Tool results truncated to 2000 chars,
+    useless pairs dropped, head/tail plain-text edges with the imaged middle
+    (foveation: 3 HQ edge frames). Replay is per middle page
+    (`middle_kinds`): a page whose source text stays cheaper than its frame
+    even under the worst measured provider/local tokenizer divergence (1.9x,
+    see `compaction/tokens.py`'s slope notes) replays as that exact text
+    instead of the PNG; pages where the frame wins keep their image, and
+    `page_digests` binds each page string to the frame rendered from it, so
+    a replay can prove what it carries. Legacy archives (no kinds) replay
+    as frames throughout.
     Per-provider shapes (Anthropic ~1568-1932px wide bw, OpenAI 1568, Google
     flat-billed any size). Budgets: max 80 frames, ~5024 tokens/frame
     estimate. Requires image input support; falls back to context-full with
