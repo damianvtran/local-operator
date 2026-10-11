@@ -604,6 +604,8 @@ _CALL_COLUMNS = (
     "outcome",
     "usage_reported",
     *_DECODE_MEASURE_COLUMNS,
+    "billing_basis",
+    "cost_source",
 )
 
 #: Columns added AFTER the first shipped schema. A database created by an older
@@ -665,6 +667,12 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("decode_us", "INTEGER NOT NULL DEFAULT 0"),
     ("decode_tokens", "INTEGER NOT NULL DEFAULT 0"),
     ("decode_calls", "INTEGER NOT NULL DEFAULT 0"),
+    # The inference billing labels (PR-3, design §3.4). Old rows read the
+    # DEFAULTS — ``not_tracked``/``none`` — which is the truth about them: no
+    # basis was ever recorded, and a historic row must not be retro-labelled
+    # from a mapping that did not exist when it was written.
+    ("billing_basis", "TEXT NOT NULL DEFAULT 'not_tracked'"),
+    ("cost_source", "TEXT NOT NULL DEFAULT 'none'"),
 )
 
 #: Columns added to the ``session_daily`` ROLLUP after it first shipped, in the
@@ -818,11 +826,13 @@ _CHANNEL_ROLLUP_UPSERT = (
 #: The cross-channel reporting view: ``calls`` mapped to
 #: ``channel='inference'`` UNION ALL ``channel_calls``, one column shape so a
 #: reader can query "all spend" without knowing which table a row lives in.
-#: Inference ``billing_basis`` is ``not_tracked`` for every historic row — the
-#: calls ledger gains its own basis columns in the follow-up slice, and because
-#: a VIEW has no ALTER path, this definition is re-created WHENEVER the stored
-#: one differs (``_view_sql_is_current`` — not on every open, which cost a
-#: write lock per launch and grew pinned WALs before round 2, M-2), so the
+#: Inference ``billing_basis``/``cost_source`` come from the calls ledger's OWN
+#: two columns (this slice); a row written before them — or a database migrated
+#: forward — reads the ALTER defaults ``not_tracked``/``none``, which is the
+#: truth about it rather than a retro-label. Because a VIEW has no ALTER path,
+#: this definition is re-created WHENEVER the stored one differs
+#: (``_view_sql_is_current`` — not on every open, which cost a write lock per
+#: launch and grew pinned WALs before round 2, M-2), so the
 #: updated shape is picked up without a migration.
 #: ``amount_micro`` is NULL when ``cost_known = 0``: the calls ledger's ``0``
 #: for an unpriced call is exactly the fabricated zero the channel side
@@ -852,8 +862,8 @@ SELECT
   1 AS units,
   'calls' AS unit,
   CASE WHEN cost_known = 1 THEN cost_micro ELSE NULL END AS amount_micro,
-  'not_tracked' AS billing_basis,
-  'none' AS cost_source,
+  billing_basis,
+  cost_source,
   '' AS price_version,
   CASE WHEN ok = 1 THEN 'ok' ELSE 'failed' END AS status,
   request_id
@@ -1185,6 +1195,8 @@ def _row_values(
         snapshot.decode_us,
         snapshot.decode_tokens,
         snapshot.decode_calls,
+        snapshot.billing_basis,
+        snapshot.cost_source,
     )
 
 

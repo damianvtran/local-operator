@@ -68,6 +68,7 @@ def _entry_owners() -> dict[str, str]:
         TITLE_SIDECAR_NAME,
     )
     from local_operator.scratchpad import SCRATCHPAD_DIRNAME
+    from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.placement import MESH_STAMP_NAME
     from local_operator.session.retention import (
@@ -111,6 +112,11 @@ def _entry_owners() -> dict[str, str]:
         # The eval kernel's restart marker (``tools.eval``): carried so a moved
         # session's first cell still learns its namespace was left behind.
         KERNEL_MARKER_NAME: "local_operator.tools.eval",
+        # The pending-voice markers (``session.channel_spend``): copied, so a
+        # session moved while a voice charge is still unfoled arrives with the
+        # fact the published object states (sync.COPY_SET_NAMES's comment has
+        # the full argument).
+        PENDING_SIDECAR_NAME: "session.channel_spend",
         # The copy machinery's own two: a replica's cursor (never inside a session)
         # and the move's boot marker, which lives in a staging directory and is
         # deleted by the promote (a crash can leave one inside a promoted session,
@@ -495,6 +501,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/network/types.py": (
         1,
         "``PEERS_RUN_DIRNAME`` (``run/peers``): the mesh's run directory under the store root",
+    ),
+    "local_operator/network/rollouts.py": (
+        1,
+        "``ROLLOUTS_DIRNAME`` (``rollouts``): the rollout RECORDS directory under "
+        "``<config>/network/rollouts`` — a device-local orchestration store beside "
+        "the approval store above, never an entry of a session directory and never "
+        "carried in one",
     ),
     "local_operator/network/sync.py": (
         6,

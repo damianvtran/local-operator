@@ -474,6 +474,22 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "completion_notice row builder — never a peer's wire value; the module "
         "joined the scan with the mesh half's MeshRefusal import",
     ),
+    # S3a's own reads of the MEMBER's receipt sentence: ``detail`` is where the
+    # classified answer's prose (RU §6.1's "2 sessions busy since 10:02" class)
+    # lands in the record's per-member entry, and these two sites PASS it there
+    # — ``step_record`` writes it into the receipt and the member's state line,
+    # ``_audit_member_state`` into the origin's member row's ``reason``. Same
+    # contract as ``update_peer`` above (the member's own words, never
+    # re-worded; the gloss's vocabulary does not cover a member's receipt).
+    ("local_operator/network/rollouts.py", "step_record", "detail"): (
+        2,
+        "the member's own receipt prose, passed onto the record's receipts "
+        "verbatim (RU §6.1's detail field is FOR a reader)",
+    ),
+    ("local_operator/network/rollouts.py", "_audit_member_state", "detail"): (
+        1,
+        "the member's own receipt prose, passed into the origin's member row",
+    ),
 }
 
 _ROOT = Path(local_operator.__file__).parent

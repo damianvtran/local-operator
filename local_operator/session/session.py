@@ -246,7 +246,10 @@ from local_operator.session.channel_spend import (
     fold_records,
 )
 from local_operator.session.channel_spend import now_ms as channel_now_ms
-from local_operator.session.channel_spend import records_from_details
+from local_operator.session.channel_spend import (
+    read_pending_records,
+    records_from_details,
+)
 from local_operator.session.credential_binding import (
     SESSION_BINDING_CUSTOM_TYPE,
     CredentialBinding,
@@ -11105,14 +11108,23 @@ class Session:
         """
         return self.spend if self._spend_recorded else None
 
-    def accrue_spend(self, micro: int | None, identity: dict[str, str] | None = None) -> int:
+    def accrue_spend(
+        self,
+        micro: int | None,
+        identity: dict[str, str] | None = None,
+        basis: str | None = None,
+    ) -> int:
         """Accrue ONE provider call and schedule its durable record.
 
         The single entry point every accrual site calls (the frontend store's
         per-call branch, its turn-end remainder, and detached leaf calls), so
         the addition happens in one place and cannot be billed twice.
+        ``basis`` is the call's billing basis (PR-3): the frontend store labels
+        every call from the same raw usage stamps the analytics record reads,
+        and a caller that omits it records the call with no basis — the wire
+        reads that as ``not_tracked`` rather than guessing.
         """
-        index = self.spend.accrue(micro, identity)
+        index = self.spend.accrue(micro, identity, basis=basis)
         self._spend_live_calls += 1
         self.schedule_spend_persist()
         return index
@@ -11618,6 +11630,37 @@ class Session:
                 publish(self)
             except Exception:  # noqa: BLE001 — a publish must never break a turn
                 logger.debug("channel spend publish failed", exc_info=True)
+
+    def pending_channel_records(self) -> list[dict[str, Any]]:
+        """The §4.2 fallback markers this fold does NOT already hold.
+
+        The route-level voice emitters mirror their records to analytics
+        (best-effort — the recorder may drop a copy) and cannot append to this
+        process's journal (see ``channel_spend.write_pending_record``), so they
+        drop a marker in the session directory's sidecar. Publishing reads it
+        so the wire can state WHY voice money is absent from the total instead
+        of hiding the gap; entries whose ``record_id`` the fold holds are
+        excluded, which is what retires a marker once a future owner-append
+        folds the record.
+
+        Best-effort and cheap: one stat/read of a small file, and ``[]`` for a
+        session with no sidecar (the overwhelming majority) or an unreadable
+        one — a lost marker degrades to "nothing pending", never a broken
+        publish.
+        """
+        try:
+            directory = getattr(self._transcript, "directory", None)
+            if directory is None:
+                return []
+            entries = read_pending_records(directory)
+        except Exception:  # noqa: BLE001 — a marker read must never break a publish
+            logger.debug("channel pending read failed", exc_info=True)
+            return []
+        return [
+            entry
+            for entry in entries
+            if not self.channels.has(str(entry.get("record_id", "") or ""))
+        ]
 
     def rebuild_channels_if_needed(self) -> None:
         """The adopt seam for channel history: the legacy backfill.
