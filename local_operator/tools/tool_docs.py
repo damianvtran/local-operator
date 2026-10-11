@@ -408,8 +408,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
         ),
         notes=(
             "`block` a pending item with a reason naming the decision or "
-            "service it is waiting on; `add` a mid-turn requirement instead of "
-            "rewriting the list."
+            "service it is waiting on (blocked items are accounted for at the "
+            "turn boundary, not left unwatched); `add` a mid-turn requirement "
+            "instead of rewriting the list."
         ),
     ),
     # -- send ---------------------------------------------------------------
@@ -540,10 +541,13 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "result caption's digest) makes it an edit — one source per "
             "call in v1: the bytes ride to "
             "the provider as a data URI; `strength` (0..1) applies with a "
-            "source, where supported. Edits run on FAL, OpenAI, Google, "
-            "xAI and OpenRouter; the ChatGPT-plan rung and Radient (until "
-            "its media route carries sources) skip explicitly — an edit "
-            "never silently becomes a fresh image. `model` picks a "
+            "source, where supported. Edits run on Radient, FAL, OpenAI, "
+            "Google, xAI and OpenRouter; the ChatGPT-plan rung skips "
+            "explicitly — an edit never silently becomes a fresh image. On "
+            "Radient an edit with no `model` resolves the hub's edit "
+            "default: GPT Image 2.5 sunburst edit (best single-edit "
+            "quality; it drifts across successive edits — NB2.1/flux-class "
+            "models suit multi-round revision). `model` picks a "
             "provider model id — omit it and the provider's default runs; "
             "Radient model ids are read from its live list at call time.\n"
             "\n"
@@ -561,6 +565,65 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "The generated images are attached to the session — that IS the "
             "delivery; do not re-save them to disk unless the user asks for "
             "a file."
+        ),
+    ),
+    "generate_video": ToolDocNotes(
+        notes=(
+            "ASYNC by design: the call returns a job receipt in "
+            "milliseconds and the generation runs as a background job — the "
+            "turn can end and other work can proceed. When it settles, a "
+            "completion notice lands in the transcript (a job result, as "
+            "for any background job) and the video is attached to the "
+            "session; check on it any time with `video_status`."
+            "\n\n"
+            "Providers, in append-only priority order: Radient (signed-in "
+            "account; video models are discovered from its live list), then "
+            "FAL (stored key or `FAL_API_KEY`). Failover on failure is "
+            "automatic. Modes come from the source fields: none = "
+            "text-to-video, an image = image-to-video, a video = "
+            "video-to-video (an https URL via `source_video_path`; local "
+            "video uploads are not supported yet, and v2v runs on FAL "
+            "only)."
+            "\n\n"
+            "Cost: per second of output at the provider's post-promo rate; "
+            "`duration_s` is the spend knob. The harness prompts for "
+            "approval (write tier) with a pre-spend estimate; the settled "
+            "figure the provider REPORTS rides the completion (FAL reports "
+            "none — the run is genuinely unpriced there). Radient spend "
+            "draws your account balance."
+            "\n\n"
+            "Cancelling: `jobs op='cancel', job_id=...` — it "
+            "stops the provider job where the provider supports it: "
+            "Radient's cancel applies queued jobs before they start; a "
+            "video already generating at FAL is signalled, and where a "
+            "provider cannot be stopped mid-run the record says so plainly "
+            "(it may complete upstream and bill; its result is not "
+            "retrievable). Stopping the CONVERSATION does not cancel the "
+            "job. Steering does not resume a cancelled generation — steer "
+            "by cancelling and calling again."
+            "\n\n"
+            "Restarts: a pending video job survives an app restart or "
+            "runtime rollover — its record is written to the transcript, "
+            "and the completion is delivered after the restart (a "
+            "check-wake raises the session, or `video_status` settles it). "
+            "Providers expire results on their own schedule; a job whose "
+            "result is gone settles honestly as such."
+            "\n\n"
+            "Setup for both rungs, the family/duration quirks and the "
+            "per-mode examples: `guide://video-generation`."
+        ),
+    ),
+    "video_status": ToolDocNotes(
+        notes=(
+            "Answers the state of one video job (omit `job_id` for the "
+            "newest pending one) from the durable record — live, after a "
+            "restart, or after the provider finished with nobody "
+            "watching. Returned states: running (with its stage), "
+            "completed (with model, duration, price and attachment "
+            "digest), failed or cancelled (with the reason). A completed "
+            "result is registered into the session's attachment store at "
+            "most once; a still-running job is put under observation (a "
+            "watcher job) so its completion is delivered normally."
         ),
     ),
     "grep": ToolDocNotes(

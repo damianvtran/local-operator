@@ -4495,6 +4495,12 @@ class ToolCard(ExpandableActionBlock):
         # not "stop the call" (a double-press quits; a later press re-requests
         # — design round 1, D2). The gate reads the PAINTED word through the
         # same function the state line paints with, so the two cannot drift.
+        # NOT for the video tool (surfaces programme, ruling R4): ctrl+c
+        # interrupts the TURN, and a video job is registered detached and
+        # cancelled post-turn through the job rail (`jobs op='cancel'`) — the
+        # hint would promise a stop this key does not perform (contract §4.2).
+        # The exclusion lives HERE, not in `_is_imagegen()`: the live body,
+        # settle absorption and failure arms must still apply to video.
         # When the hint cannot fit, the generic arms below run unchanged, so a
         # narrow row keeps whatever affordance it already had.
         interrupt_hint = ""
@@ -4505,6 +4511,7 @@ class ToolCard(ExpandableActionBlock):
             self._state in ("queued", "running")
             and self._is_imagegen()
             and live_word != imagegen_mod.STATE_CANCELLING
+            and not imagegen_mod.is_video_gen_tool(self.tool_name)
         ):
             if remaining - (cell_len(IMAGE_INTERRUPT_HINT) + 1) >= _SUMMARY_FLOOR:
                 interrupt_hint = IMAGE_INTERRUPT_HINT

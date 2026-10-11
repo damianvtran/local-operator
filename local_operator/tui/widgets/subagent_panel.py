@@ -1575,6 +1575,30 @@ def _paused_ids(session: Any) -> set[str]:
     return paused_child_ids(getattr(session, "_subagent_comms", None))
 
 
+def _job_id(job: Any) -> str:
+    """One job's ``id`` as a string, or a blank when its host refuses to hand it over.
+
+    NEVER raises, for :func:`row_facts`'s reason: a ``getattr`` default only
+    covers a MISSING attribute, and the hosts this widget survives -- embedders
+    and replayed ledgers whose job objects are not ``AsyncJob`` -- hand it
+    properties that RAISE, on paths (``sync``, the 1 Hz tick) where an escape is
+    an unhandled Textual message-handler exception: the whole app, for a status
+    row (post-merge review of #2189, F-3).
+
+    The failure is logged, not swallowed, and the fallback is the value the
+    ledger already means by "no id": ``_sync_rows`` skips such a job exactly as
+    it skips an empty id, and :func:`summary_counts` still reads the rest of the
+    job through :func:`row_facts` -- so the counts stay truthful and the
+    degraded, nameless presentation is what remains visible, never a crash and
+    never a fabricated row.
+    """
+    try:
+        return str(getattr(job, "id", "") or "")
+    except Exception:  # noqa: BLE001 — a job the panel cannot read may not take the app down
+        logger.warning("reading a subagent job id failed", exc_info=True)
+        return ""
+
+
 def summary_counts(jobs: Sequence[Any], *, paused_ids: set[str] | None = None) -> SummaryCounts:
     """Bucket task jobs by the state the row vocabulary already names.
 
@@ -1582,11 +1606,13 @@ def summary_counts(jobs: Sequence[Any], *, paused_ids: set[str] | None = None) -
     queued child counts as queued here exactly as its row would glyph it (a
     queued job's ``status`` is still ``running``; see :func:`status_glyph`).
     Restored rows arrive as ``interrupted``/``completed`` and bucket there.
+    The id read is :func:`_job_id`'s: a host whose ``id`` raises counts by its
+    readable fields instead of taking the tick down with it (review F-3).
     """
     counts = dict.fromkeys(SummaryCounts._fields, 0)
     paused_ids = paused_ids or set()
     for job in jobs:
-        job_id = str(getattr(job, "id", "") or "")
+        job_id = _job_id(job)
         facts = row_facts(job, fallback_id="", current=False, paused=job_id in paused_ids)
         if facts.paused and facts.status != "running":
             counts["paused"] += 1
@@ -2581,7 +2607,7 @@ class SubagentPanel(Container):
         # that empties keeps the last resolver for the rows that remain.
         self._role_display = role_display
         task_jobs = [job for job in job_rows if getattr(job, "type", "") == "task"]
-        selected_id = str(getattr(selected_job, "id", "") or "")
+        selected_id = _job_id(selected_job)
         self._selected_job_id = selected_id
         # Stripped for the same reason a row's label is: this text is
         # model-authored and reaches a header that is painted as-is.
@@ -2613,7 +2639,7 @@ class SubagentPanel(Container):
         # NOT an unconditional `True`: the 1 Hz poll lands here every second,
         # and un-hiding on each tick would make `hidden` last one second.
         self.display = self._density is not Density.HIDDEN
-        self._jobs_by_id = {str(getattr(job, "id", "") or ""): job for job in task_jobs}
+        self._jobs_by_id = {_job_id(job): job for job in task_jobs}
         self._paused_ids = _paused_ids(session)
         changed = self._sync_rows(task_jobs)
         self._apply_visibility()
@@ -2687,7 +2713,7 @@ class SubagentPanel(Container):
         seen: set[str] = set()
         order: list[str] = []
         for job in jobs:
-            job_id = str(getattr(job, "id", "") or "")
+            job_id = _job_id(job)
             if not job_id:
                 continue
             seen.add(job_id)
@@ -3011,19 +3037,34 @@ class SubagentPanel(Container):
         key at the moment it moves the counts.
         """
         jobs = list(self._jobs_by_id.values())
-        key = tuple(
-            (
+        key = tuple(self._job_key(job) for job in jobs)
+        if self._summary_counts_key != key:
+            self._summary_counts_key = key
+            self._summary_counts_value = summary_counts(jobs, paused_ids=self._paused_ids)
+        return self._summary_counts_value
+
+    def _job_key(self, job: Any) -> tuple[Any, ...]:
+        """One ledger job's contribution to the summary cache key. NEVER raises.
+
+        Guarded whole, like :func:`row_facts` and for the same reason: a
+        ``getattr`` default only covers a MISSING attribute, and the hosts this
+        widget has to survive — embedders and replayed ledgers whose job
+        objects are not ``AsyncJob`` — hand it properties that RAISE. This key
+        is read from every ``sync`` AND every 1 Hz tick, so an escape from here
+        is an unhandled Textual message-handler exception: the whole app, for a
+        status row. The fallback values are the ones :func:`row_facts` returns
+        for the same job (running, not queued, not paused), so the key still
+        names the fields the counts were derived from.
+        """
+        try:
+            return (
                 id(job),
                 getattr(job, "status", ""),
                 bool(getattr(job, "queued", False)),
                 str(getattr(job, "id", "") or "") in self._paused_ids,
             )
-            for job in jobs
-        )
-        if self._summary_counts_key != key:
-            self._summary_counts_key = key
-            self._summary_counts_value = summary_counts(jobs, paused_ids=self._paused_ids)
-        return self._summary_counts_value
+        except Exception:  # noqa: BLE001 — a job the panel cannot read may not take the app down
+            return (id(job), "running", False, False)
 
     def _ledger_has_running(self) -> bool:
         """Whether any child is live, read from the LEDGER not the rows.

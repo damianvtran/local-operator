@@ -73,6 +73,7 @@ from local_operator.session.transcript import (
     read_replay_suffix,
     read_transcript_page,
 )
+from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +230,14 @@ class DurableFoldState:
     #: ``latest_custom``. The durable projection reads the subagent roster and
     #: a child's todo snapshot from here instead of re-parsing transcripts.
     latest_customs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Newest turn-supplement row per ANCHOR (memo §3.1 row 18): the durable half
+    #: of the projection's sibling ``supplements`` map (``mobile/projection.py``),
+    #: collected from the fold window and every later append. Keep-newest by
+    #: ``version`` -- a replay cannot roll a reader back. Window-scoped by
+    #: construction: a row above the fold's window is above the phone's
+    #: transcript tail too, and the runtime read op (``supplements_for``) serves
+    #: the mounted-anchor case on demand.
+    supplements: dict[str, dict[str, Any]] = field(default_factory=dict)
     offset: int = 0
     fingerprint: _FileFingerprint | None = None
     #: Serializes rebuilds of THIS session; concurrent opens of one session pay
@@ -395,6 +404,10 @@ class DurableFoldCache:
                 custom_type = entry.payload.get("custom_type")
                 if custom_type in _TRACKED_CUSTOM_TYPES:
                     state.latest_customs[str(custom_type)] = dict(entry.payload.get("details", {}))
+                if custom_type == SUPPLEMENT_CUSTOM_TYPE:
+                    details = entry.payload.get("details")
+                    if isinstance(details, dict):
+                        _track_supplement(state.supplements, details)
         if rebuild_render:
             state.render = _fold(state.history)
         state.entry_count += len(new_entries)
@@ -526,6 +539,16 @@ class DurableFoldCache:
             if entry.type == ENTRY_PRUNE and entry.payload.get("target")
         }
         state.latest_customs = latest_customs
+        supplements: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            if entry.type != ENTRY_CUSTOM:
+                continue
+            if entry.payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
+                continue
+            details = entry.payload.get("details")
+            if isinstance(details, dict):
+                _track_supplement(supplements, details)
+        state.supplements = supplements
         # The rows this fold actually consumed. It is still the cursor/file
         # agreement invariant (the incremental path adds to it), but it now
         # counts the WINDOW rather than the file — asserting equality with the
@@ -533,6 +556,24 @@ class DurableFoldCache:
         state.entry_count = len(entries)
         state.offset = fingerprint.size
         state.fingerprint = fingerprint
+
+
+def _track_supplement(held: dict[str, dict[str, Any]], details: dict[str, Any]) -> None:
+    """Keep-newest one supplement row per anchor, by ``version``.
+
+    The same reader rule every surface applies (``contract.newest_per_anchor``,
+    ties to the later row): a row whose anchor/version is malformed is skipped,
+    never coerced, so one odd line cannot cost the map its other anchors. Shared
+    by the fold's two paths (fresh window and incremental append) so they cannot
+    disagree about what "newest" means.
+    """
+    anchor = details.get("anchor")
+    version = details.get("version")
+    if not isinstance(anchor, str) or not isinstance(version, int) or isinstance(version, bool):
+        return
+    current = held.get(anchor)
+    if current is None or version >= int(current.get("version") or 0):
+        held[anchor] = dict(details)
 
 
 def _replay(

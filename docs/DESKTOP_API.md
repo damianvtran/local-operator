@@ -1743,16 +1743,21 @@ rows.
 
 #### Scope: local journals only, and the seams
 
-**A peer's conversation keeps today's shape** — with or without the flag. A
-peer-owned id is served by different readers (`_remote_history` for the wire
-window, `_peer_stored_history` through `net_session_history` for the owner's
-stored journal), so its page is built by the OWNER and arrives over the mesh;
-stripping it here would be a second page builder for the same rows, and the
-remote-cost lane owns that change. The seam is stated rather than left to be
-discovered: when the owner-side read gains the same strip and facts, the client
-needs nothing new, because `runs_state: "unsupported"` is already the value it
-must tolerate today. A renderer MUST treat `unsupported` and an absent `runs`
-alike: draw today's page and keep its own condensation.
+**A peer's frame is built by its OWNER, and the stored read is the path that
+reaches it.** A peer-owned id is served by different readers (`_remote_history`
+for the wire window, `_peer_stored_history` through `net_session_history` for
+the owner's stored journal), and the frame — the strip, the cut and the run
+facts — is the owner-side twin of the local build
+(`relay.RelayServer._open_frame_detail`, over the owner's own journal rows).
+THE LIVE WIRE WINDOW KEEPS TODAY'S SHAPE **AND SAYS SO**: its rows are MESSAGES
+rather than journal entries (the strip's key list does not describe them), its
+run facts would need a transcript index over a journal this device does not
+hold, and it answers `runs_state: "unsupported"` when the flag was asked for.
+An owner older than the facts half answers today's page without the three keys;
+the viewer defaults them to `runs: []` / `runs_state: "unsupported"` /
+`head_cut: false`, so a renderer MUST treat `unsupported` and an absent `runs`
+alike: draw today's page and keep its own condensation — no client meets a
+value it does not already tolerate.
 
 **The relay's first frame is not served from this builder in this revision**,
 and the reason is a precondition rather than an appetite: the phone's projection
@@ -2072,7 +2077,8 @@ advertises `supplements-v1` only when it can honour the lazy read op
 (`supplements_for(anchors[]) → {anchor: newest row}`), and the viewer declares
 `supplements` on its auth frame (`auth["supplements"] = true`; the desktop live path
 declares `?supplements=1` on its events route instead — the `entry_ts` shape; that
-parameter is a frozen name today, read by no route until the routes lane lands). Only then
+parameter is read by the events route: a subscriber that declares it is the only one
+handed `supplement_progress` frames, live or from replay). Only then
 may the runtime send `supplement_progress` events or project supplement rows; a viewer
 that does not declare receives neither, so it never paints an unknown kind. Rows are
 journaled either way, reach a desktop as ordinary history entries (raw `custom` rows)
@@ -2130,8 +2136,7 @@ It arrives only AFTER the turn's `agent_end`, and it carries the `anchor`, so a 
 event (the next turn already started) still lands on the right answer. `lop exec` never
 produces one (its turns are outside the trigger), and SDK event streams are unchanged.
 Under backpressure, supplement frames fold keep-newest — the family is
-self-replacing by construction — but no fold key exists for them yet; `session/delta_merge.py`
-gains the `supplement` fold with the emitter lane.
+self-replacing by construction — and its fold key lives in `session/delta_merge.py`.
 
 **Not in this release.** No image components (v1 documents carry HTML only); no mesh
 transfer (a file or component a peer device holds reads as "on <peer>" with previews
@@ -2139,11 +2144,18 @@ disabled — `GET …/attachments/{digest}` already answers 409 `attachment_on_p
 native (phone) WebView frame is pending its own lane; and the static preview routes
 (`/v1/static/*`) are not yet token-ENFORCED -- Phase A accepts tokens and mints
 short-lived signed URLs (see the static section), but refusing is a later phase
-and the client change to present a credential is the recorded follow-up. No renderer consumes any of this yet:
-the TUI, UI, relay and native renderers are separate lanes, and the desktop document
-route is a registered 404 stub until the routes lane fills it; the `?supplements=1`
-events-route reader and the keep-newest fold are contract-frozen names still to be
-implemented, by the routes and emitter lanes respectively.
+and the client change to present a credential is the recorded follow-up. No renderer
+consumes any of this yet: the TUI, UI, relay and native renderers are separate lanes.
+The READ half is implemented (routes lane C2): the desktop document route serves the
+assembled component as `{html}` by digest (`nosniff`, `Cache-Control: no-store`, 409
+`attachment_on_peer` passed through for a peer-held blob, an unassemblable blob an
+ordinary 404), keyed by `AttachmentDigest` so a caller-supplied path can never be part
+of the request; the `?supplements=1` events-route reader gates `supplement_progress`
+per subscriber on live AND replay; and the relay serves both the document (`{html}`,
+the digest additionally reference-checked against that session's journal) and the
+recorded file callout (`row["files"][i]`, suffix-allowlisted `Content-Type` — never
+`text/html`, SVG or `+xml` — a 10 MB cap, and the §4.3 denylist re-applied per
+request).
 
 ### Verification
 
@@ -2363,10 +2375,13 @@ to.
 ### The polling cadence
 
 One task per process, started with the first subscriber and stopped with the
-last. Each tick is FOUR `os.stat` calls — `attention.db` with its two journal
+last. Each tick is FIVE `os.stat` calls — `attention.db` with its two journal
 sidecars, plus `run/mobile`, the discovery-record directory, which is where the
 status channel's edges come from — the doorbell `config_watch` already uses for
-`config.yml` — with a SQLite read only when the store actually moved, and a
+`config.yml` — plus `config.yml` ITSELF, the settings doorbell: its movement
+publishes a `config` frame naming the changed keys and the freshly resolved
+`language` (the same value `GET /v1/capabilities` carries), so a language write
+reaches the app live whichever process performed it — with a SQLite read only when the store actually moved, and a
 record read only for a record whose own file moved. That is what takes background
 detection from the 1 s poll's floor to a p50 of roughly one tick. A quiet tick
 makes no SQL and no record read at all. The revision gate stays the
@@ -2417,7 +2432,7 @@ row**; a row's metadata file is READ only when that row's stat moved, so an idle
 probe reads nothing at all (measured on this fleet: a warm probe over 34 profiles
 is 36 `stat`/`scandir` calls and ZERO file reads, 0.31 ms; the same probe with
 its stat memory cold is 1.16 ms). It runs on the catalogue probe's 1 s clock, not
-on the 100 ms tick — a quiet tick still pays exactly the four stats the doorbell
+on the 100 ms tick — a quiet tick still pays exactly the five stats the doorbell
 is budgeted for — and it is off the event loop (`asyncio.to_thread`), like every
 other probe here. The projection is a line filter rather than a YAML parse for
 the same reason: `yaml.safe_load` + re-dump of those 34 rows measures 56.95 ms,

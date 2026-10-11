@@ -57,6 +57,9 @@ def test_the_catalogue_carries_prefixes_text_on_every_row(monkeypatch):
         "effort",
         "approvals",
         "theme",
+        # C's `/language`: a value the command owns (a language tag), completed
+        # inline like the theme name above.
+        "language",
     }
 
 
@@ -126,6 +129,7 @@ def test_the_catalogue_carries_the_argument_shape_and_its_vocabulary(monkeypatch
         "effort",
         "approvals",
         "theme",
+        "language",
     }
     for row in rows:
         if row["consumes_prompt"] or row["prefixes_text"]:

@@ -90,12 +90,20 @@ def help() -> Msg:
     return Msg("wire.slash.help", {})
 
 
+def highlights() -> Msg:
+    return Msg("wire.slash.highlights", {})
+
+
 def info() -> Msg:
     return Msg("wire.slash.info", {})
 
 
 def keys() -> Msg:
     return Msg("wire.slash.keys", {})
+
+
+def language() -> Msg:
+    return Msg("wire.slash.language", {})
 
 
 def links() -> Msg:

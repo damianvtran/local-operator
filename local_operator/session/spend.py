@@ -42,6 +42,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from local_operator.session.channel_spend import BASIS_BILLED, BASIS_SUBSCRIPTION
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.session.frontend_state import CostKnowledge
 
@@ -139,6 +141,51 @@ def usage_prices_known(usage: Any) -> bool:
     from local_operator.model.configure import _usage_cost
 
     return _usage_cost(usage) is not None
+
+
+def inference_billing_labels(provider: str, usd_cost: float | None) -> tuple[str, str]:
+    """``(billing_basis, cost_source)`` for ONE inference call (PR-3, §3.4).
+
+    Called at RECORD time, with the provider id BEFORE
+    ``credential_provider_id`` collapses login flavours (``openai-device`` into
+    ``openai``): the raw id is the only place the two billing worlds are
+    distinguishable, and collapsing first is how a ChatGPT-plan call would
+    have been labelled as a metered OpenAI bill.
+
+    The three rules, in order:
+
+    - a SUBSCRIPTION-flavoured provider id (``openai``, ``openai-device``,
+      ``xai-oauth``, ``zai``, ``zai-oauth``, ``alibaba-token-plan``,
+      ``alibaba-token-plan-oauth`` — ``providers.registry``
+      ``SUBSCRIPTION_LOGIN_FLAVOURS`` is the ONE list) spends quota, not
+      dollars, so the figure is the client rate table's API-EQUIVALENT: basis
+      ``subscription_api_equivalent``, source ``catalogue``;
+    - a provider-reported receipt (``usd_cost``) IS the provider's own
+      statement: basis ``billed``, source ``provider_reported``;
+    - otherwise the figure is derived from the client's published rate table,
+      which the contract's own vocabulary calls ``billed`` (a figure derived
+      from a published rate), source ``catalogue``.
+
+    A caller with no price at all still records the call — pricing decides
+    knowledge later — so these labels describe the BILLING RELATIONSHIP and
+    never claim an amount. Rows from before the columns existed read
+    ``not_tracked``/``none`` from the schema default; they are not relabelled
+    here.
+
+    KNOWN LIMIT, said out loud rather than guessed around: ``anthropic`` and
+    ``kimi`` serve both a subscription sign-in and a plain API key under ONE
+    provider id, and a call records no credential kind, so their calls take
+    the metered reading. Threading the credential kind to the recorder is a
+    follow-up; labelling every Claude call ``subscription_api_equivalent``
+    would be the worse error.
+    """
+    from local_operator.providers.registry import subscription_login_flavour
+
+    if subscription_login_flavour(provider):
+        return BASIS_SUBSCRIPTION, "catalogue"
+    if usd_cost is not None:
+        return BASIS_BILLED, "provider_reported"
+    return BASIS_BILLED, "catalogue"
 
 
 def price_call(provider: str, model_id: str, usage: Any) -> tuple[int, bool]:
@@ -272,6 +319,10 @@ class SessionSpend:
     #: ``correct`` moves the SAME split entry it moved the total by. In-memory
     #: only, like ``_estimates``: a recalled record is already authoritative.
     _identity_keys: dict[int, str] = field(default_factory=dict, repr=False)
+    #: The billing basis each accrued call was labelled with, so a correction
+    #: moves the entry's ``bases`` split by the same delta it moves ``micro``
+    #: by. In-memory only, like its neighbours.
+    _identity_bases: dict[int, str] = field(default_factory=dict, repr=False)
     _next_index: int = field(default=0, repr=False)
 
     # -- properties -------------------------------------------------------
@@ -287,12 +338,25 @@ class SessionSpend:
 
     # -- accrual ----------------------------------------------------------
 
-    def accrue(self, micro: int | None, identity: Mapping[str, Any] | None = None) -> int:
+    def accrue(
+        self,
+        micro: int | None,
+        identity: Mapping[str, Any] | None = None,
+        *,
+        basis: str | None = None,
+    ) -> int:
         """Add one provider call. Returns a token for a later correction.
 
         ``micro is None`` (or a call the caller could not price) counts the call
         as UNPRICED, which is what makes the total an honest lower bound instead
         of a complete-looking sum that silently omitted it.
+
+        ``basis`` is the call's billing basis (PR-3), the same label the
+        analytics ledger records for the call; a caller that does not know one
+        passes nothing and the bucket stays outside every basis — the wire
+        reads that as ``not_tracked`` rather than guessing. Money is what the
+        entry's ``bases`` split tracks: an unpriced call states no basis
+        because it states no money.
         """
         index = self._next_index
         self._next_index += 1
@@ -312,12 +376,21 @@ class SessionSpend:
                     **({"provider": provider} if provider else {}),
                     **({"model_id": model_id} if model_id else {}),
                 }
-            key = self._bump_identity(provider, model_id, value)
+            key = self._bump_identity(provider, model_id, value, basis)
             if key is not None:
                 self._identity_keys[index] = key
+                if basis:
+                    # Kept even when the call is UNPRICED: the basis describes
+                    # the billing relationship, and a later correction that
+                    # prices the call must book the value into the bucket the
+                    # call always belonged to rather than dropping it into
+                    # not_tracked.
+                    self._identity_bases[index] = basis
         return index
 
-    def _bump_identity(self, provider: str, model_id: str, value: int | None) -> str | None:
+    def _bump_identity(
+        self, provider: str, model_id: str, value: int | None, basis: str | None = None
+    ) -> str | None:
         """Fold ONE call into the by-identity split. Returns its bucket key.
 
         A call with neither provider nor model is NOT attributed: an
@@ -347,6 +420,17 @@ class SessionSpend:
             entry["unpriced"] += 1
         else:
             entry["micro"] += value
+            if basis:
+                # ``bases: {basis: micro}`` is ADDITIVE on the entry: an old
+                # record has no key and its row reads ``not_tracked``, which
+                # is exactly what a basis nobody recorded deserves. Created
+                # lazily so an entry whose calls never stated a basis gains no
+                # empty dict that a reader could mistake for data.
+                bases = entry.get("bases")
+                if not isinstance(bases, dict):
+                    bases = {}
+                    entry["bases"] = bases
+                bases[basis] = int(bases.get(basis, 0)) + value
         return key
 
     def correct(self, index: int, micro: int | None) -> int:
@@ -394,19 +478,42 @@ class SessionSpend:
         or the call was unattributed.
         """
         key = self._identity_keys.pop(index, None)
+        basis = self._identity_bases.pop(index, None)
         if key is None or previous == value:
             return
         entry = self.by_identity.get(key)
         if entry is None:
             return
+
+        def _move_basis(delta: int) -> None:
+            """Move the entry's ``bases`` split by the same delta, when stated.
+
+            A call with no recorded basis moves nothing here: its money still
+            shows in ``micro`` and stays OUT of every basis bucket, which is
+            the same honest reading the wire gives a legacy entry. The dict is
+            CREATED on the first booking — an unpriced call accrues with its
+            basis held but no money, and the correction that prices it is what
+            gives the bucket its first value.
+            """
+            if not basis:
+                return
+            bases = entry.get("bases")
+            if not isinstance(bases, dict):
+                bases = {}
+                entry["bases"] = bases
+            bases[basis] = int(bases.get(basis, 0)) + delta
+
         if previous is None and value is not None:
             entry["unpriced"] -= 1
             entry["micro"] += value
+            _move_basis(value)
         elif previous is not None and value is None:
             entry["unpriced"] += 1
             entry["micro"] -= previous
+            _move_basis(-previous)
         elif previous is not None and value is not None:
             entry["micro"] += value - previous
+            _move_basis(value - previous)
 
     def adjust(self, delta_micro: int) -> bool:
         """Apply a turn-level remainder, which is not a call.
@@ -522,6 +629,21 @@ class SessionSpend:
                     "micro": int(entry.get("micro", 0) or 0),
                     "calls": int(entry.get("calls", 0) or 0),
                     "unpriced": int(entry.get("unpriced", 0) or 0),
+                    # ADDITIVE (PR-3): the basis split rides each entry only
+                    # when the calls actually recorded one, so a record from
+                    # before the key reads exactly as it was written — the
+                    # wire then says the basis is not tracked rather than
+                    # reconstructing one it never observed.
+                    **(
+                        {
+                            "bases": {
+                                str(name): int(amount or 0)
+                                for name, amount in entry["bases"].items()
+                            }
+                        }
+                        if isinstance(entry.get("bases"), dict) and entry["bases"]
+                        else {}
+                    ),
                 }
                 for key, entry in self.by_identity.items()
             }
@@ -598,6 +720,15 @@ def _parse_identity_split(raw: Any) -> dict[str, dict[str, Any]]:
             "calls": calls,
             "unpriced": unpriced,
         }
+        bases = entry.get("bases")
+        if isinstance(bases, Mapping):
+            parsed = {
+                str(name): int(amount)
+                for name, amount in bases.items()
+                if _as_int(amount) is not None and int(amount) > 0
+            }
+            if parsed:
+                out[str(key)]["bases"] = parsed
     return out
 
 

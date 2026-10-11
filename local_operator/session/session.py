@@ -246,7 +246,10 @@ from local_operator.session.channel_spend import (
     fold_records,
 )
 from local_operator.session.channel_spend import now_ms as channel_now_ms
-from local_operator.session.channel_spend import records_from_details
+from local_operator.session.channel_spend import (
+    read_pending_records,
+    records_from_details,
+)
 from local_operator.session.credential_binding import (
     SESSION_BINDING_CUSTOM_TYPE,
     CredentialBinding,
@@ -306,6 +309,7 @@ from local_operator.supplements.trigger import (
     snapshot_messages,
 )
 from local_operator.tools.builtin import (
+    blocked_todos,
     open_todos,
     restore_todos,
     todo_fingerprint,
@@ -313,6 +317,11 @@ from local_operator.tools.builtin import (
 )
 from local_operator.tools.deferral import deferred_tool_names, tool_deferral_enabled
 from local_operator.tools.tool_docs import chain_tool_docs
+
+# The video lane's record vocabulary: the custom-row name the journal writes
+# and the boot scan reads. stdlib-only module (its own docstring pins that),
+# so importing it here costs the session's import graph nothing.
+from local_operator.video.records import VIDEO_JOB_CUSTOM_TYPE
 
 if TYPE_CHECKING:
     # Type-only: the session must never pull the MCP stack in at import time.
@@ -706,6 +715,14 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # the derived prune finds nothing to undo. Appended last for the same
     # prefix reason as `sessions` above.
     "no_reply",
+    # The video pair rides the same shape: `jobs` (and the credential probe)
+    # exists only on a live session's own context, so the factory's warm pass
+    # refuses BOTH builders and this merge is what mounts them on a real
+    # session — without these two names the tools are advertised to nobody
+    # (round-1 QA blocker Q1; the same failure `no_reply` records above).
+    # Appended last for the same prefix reason as `sessions`.
+    "generate_video",
+    "video_status",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -1101,27 +1118,71 @@ def _state_section_text(body: Any, heading: str) -> str:
     return f"{heading}\n{text}"
 
 
-def _todo_reminder_text(pending: list[dict[str, str]]) -> str:
+def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, str]]) -> str:
     """The nudge the continuation guardrail injects (``_todo_continuation``).
 
+    TWO groups, because the guardrail's work set has two obligations and stating
+    them as one would be wrong in both directions. ``pending`` items are work
+    that must not be left running: the paragraph below asks for it to be resumed
+    or honestly resolved, and names the three exits (done / block / drop) because
+    "keep going" alone is what produces work marked done that was never done.
+    ``blocked`` items are parked work whose condition may have cleared, may need
+    the user, or may need something watching it: letting those end a turn
+    silently is how a session parked six items for ~14 hours outside every
+    pending-only check. Blocked is reconciled, not forbidden — the model may
+    still finish, but it must say what it did with each one.
+
+    Each group's paragraph appears ONLY when its group is non-empty: a blocked
+    row under a "do not end the turn while pending items remain" instruction, or
+    a reconciliation instruction under a list with nothing blocked, reads as an
+    instruction about work that does not exist. A caller passing both empty gets
+    the bare header — the guardrail never does (it returns ``[]`` first), but the
+    function stays total.
+
     Wrapped in ``<system-reminder>`` and labelled as harness-injected: the model
-    reads it as a user turn, and without the label it would answer the user
-    about a message the user never sent. Items are listed verbatim so the model
-    resolves the texts the tool will actually match, and the three honest exits
-    are named because "keep going" alone is what produces work marked done that
-    was never done. Compact on purpose — it is injected at every boundary.
+    reads it as a user turn, and without the label it would answer the user about
+    a message the user never sent. Items are listed verbatim so the model
+    resolves the texts the tool will actually match, and a blocked row carries
+    its reason because the reason IS the condition the model is asked to
+    re-check. Compact on purpose — it is injected at every boundary.
     """
-    items = "\n".join(f"- {item['text']}" for item in pending)
+    rows = [f"- {item['text']}" for item in pending]
+    for item in blocked:
+        # The row keeps the panel's ``— blocked`` form (``tui/widgets/
+        # todo_panel.py``, and the tool's own receipt) rather than inventing a
+        # second spelling of the state. A blocked item always carries a reason
+        # (``block`` requires one), but a hand-edited or pre-``reason`` store
+        # need not, and the state is still named without it — dropping the whole
+        # clause would render a parked item as plain pending work.
+        reason = item.get("reason")
+        rows.append(
+            f"- {item['text']} — blocked: {reason}" if reason else f"- {item['text']} — blocked"
+        )
+    paragraphs: list[str] = []
+    if pending:
+        paragraphs.append(
+            "Do not end the turn while pending items remain: either keep "
+            "working, or resolve each one honestly — `todo done` when it is "
+            "finished, `todo block` with a reason when it needs a user decision "
+            "or an external service, `todo drop` when it is no longer needed. "
+            "If the decision is the user's to make, put it to them with the "
+            "`ask` tool."
+        )
+    if blocked:
+        paragraphs.append(
+            "Before you finish, account for each blocked item: check whether "
+            "its condition still holds. If it has cleared, resume the work; if "
+            "the decision is the user's, raise it with the `ask` tool; if it "
+            "waits on an external condition, make sure a wake or monitor is "
+            "armed to revisit it. Do not leave a blocked item that nothing is "
+            "watching."
+        )
+    body = "\n".join([*rows, *paragraphs])
     return (
         "<system-reminder>\n"
         "Injected by the harness at the turn boundary. Not from the user, and "
         "not shown to them.\n"
-        f"These todo items are still open:\n{items}\n"
-        "Do not end the turn while items are open. Either keep working, or "
-        "resolve each one honestly: `todo done` when it is finished, "
-        "`todo block` with a reason when it needs a user decision or an "
-        "external service, `todo drop` when it is no longer needed. If the "
-        "decision is the user's to make, put it to them with the `ask` tool.\n"
+        f"These todo items are still open:\n{body}\n"
         "</system-reminder>"
     )
 
@@ -1663,7 +1724,7 @@ def _is_persistable_message(message: AgentMessage) -> bool:
     return not message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
 
 
-def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, str], ...]:
+def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, str, str], ...]:
     """The todo fingerprint a reminder was built from, normalized for compare.
 
     Read back through an explicit tuple/str coercion rather than trusted as
@@ -1673,20 +1734,24 @@ def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, st
     malformed one) compares equal to nothing and expires, which is the safe
     direction: a nudge that may be lying is worth less than one turn without it.
 
-    ARITY MUST MATCH ``builtin.todo_fingerprint`` (design §5.3): it now emits
-    3-tuples ``(phase_name, text, status)``, so this filter keeps ``len == 3``.
-    If this stayed at 2 while the source grew to 3, EVERY stamped item would be
-    dropped, the stamped side would compare empty against a non-empty current
-    fingerprint, and every reminder would expire on every render — the latch
-    errs safe (keeps nudging) so 'does it nudge' still passes while the
+    ARITY MUST MATCH ``builtin.todo_fingerprint`` (design §5.3): it emits
+    4-tuples ``(phase_name, text, status, reason)``, so this filter keeps
+    ``len == 4``. The reason is part of it because the reminder renders the
+    reason and a re-``block`` rewrites it in place without touching the status:
+    a 3-tuple stamp would keep asserting the old condition after the model
+    corrected it, and this expiry check is the only thing that retires the stale
+    row. If this filter kept fewer elements than the source, EVERY stamped item
+    would be dropped, the stamped side would compare empty against a non-empty
+    current fingerprint, and every reminder would expire on every render — the
+    latch errs safe (keeps nudging) so 'does it nudge' still passes while the
     no-second-nudge suppression silently breaks. The phased no-second-nudge
     guardrail test is what catches a regression here.
     """
     stamped = details.get("fingerprint") or ()
     return tuple(
-        (str(item[0]), str(item[1]), str(item[2]))
+        (str(item[0]), str(item[1]), str(item[2]), str(item[3]))
         for item in stamped
-        if isinstance(item, (list, tuple)) and len(item) == 3
+        if isinstance(item, (list, tuple)) and len(item) == 4
     )
 
 
@@ -3109,6 +3174,15 @@ class Session:
         #: disposal is held durably instead. Never set for a ``--loop``/goal
         #: run (``continuation is not None``): its turns are the run's work.
         self._one_shot_exit = False
+        #: Declared by a HEADLESS print host at entry
+        #: (``Session.declare_headless_host``, called from ``run_print_mode``).
+        #: A HOST FACT, deliberately not a latch: unlike ``_one_shot_exit`` it
+        #: arms no departure pair, and its one consumer is the turn-supplements
+        #: predicate's rule 6 (via ``RunProvenance.headless``), which must refuse
+        #: EVERY ``run_print_mode`` shape -- including the ``--loop``/``--loop-goal``
+        #: runs whose one-shot declaration is skipped on purpose (their turns are
+        #: the run's work, not teardown leftovers).
+        self._headless_host = False
         self._job_label = job_label
         #: The role a subagent was launched as (``task(agent=...)``), for the
         #: ``agent_type`` field forwarded hooks receive. Empty on a top-level
@@ -3852,17 +3926,18 @@ class Session:
         # last guardrail nudge in THIS user turn, so a model that yields twice
         # with a byte-identical list is not nudged a second time. Reset per user
         # turn in _run_turn_pipeline; see :meth:`_todo_continuation`.
-        # Both fingerprints are the phase-aware 3-tuple form
-        # ``(phase_name, text, status)`` that ``builtin.todo_fingerprint`` now
-        # emits (phased-todos change): the reminder latch and the persistence
+        # Both fingerprints are the phase-aware 4-tuple form
+        # ``(phase_name, text, status, reason)`` that ``builtin.todo_fingerprint``
+        # now emits (phased-todos change; the reason joined in the blocked-reason
+        # remediation): the reminder latch and the persistence
         # latch both compare against that source, so their annotations must match
         # its arity or a comparison silently degrades.
-        self._todo_reminder_fingerprint: tuple[tuple[str, str, str], ...] | None = None
+        self._todo_reminder_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
         # The todo fingerprint that was last WRITTEN to the transcript, so the
         # post-turn snapshot only appends when the list actually moved. Seeded
         # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
         # turn after a restore does not re-persist an unchanged restored list.
-        self._persisted_todo_fingerprint: tuple[tuple[str, str, str], ...] | None = None
+        self._persisted_todo_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
         # Project-continuation latch: the stale-set fingerprint captured at the
         # last project nudge in THIS user turn — the sorted
         # ``(project_id, status, int(progress_updated_at or 0))`` tuples of the
@@ -4677,11 +4752,13 @@ class Session:
         A reminder is a POINT-IN-TIME assertion — "these items are still open" —
         so it expires the instant any item changes status. It lives on in
         ``_context.messages`` (follow-ups are never removed from the live list),
-        and once the model has done the work, replaying it keeps insisting that
-        finished or blocked work is still open. That is a lie the model then has
-        to spend a turn arguing with, and it is the same staleness the renderer's
-        newest-only rule guards against for TWO reminders; this covers the one
-        reminder that simply went out of date.
+        and once the model has done the work, replaying it keeps insisting on a
+        list that is no longer there: an item it has finished, or one it has
+        since blocked — whose row (with its reason) and whose separate
+        reconciliation ask this reminder does not carry. That is a lie the model
+        then has to spend a turn arguing with, and it is the same staleness the
+        renderer's newest-only rule guards against for TWO reminders; this covers
+        the one reminder that simply went out of date.
 
         It lives on the session rather than in :func:`_default_convert_to_llm`
         because staleness needs the session id, and that function must stay a
@@ -5300,6 +5377,10 @@ class Session:
         # so the notice is in the live context the first turn reads. Deduped on
         # the token, so a second open of the same session is silent.
         await self._journal_restored_cut_off()
+        # Cold-follow conversion for pending video jobs: a record that
+        # outlived its runtime gets its check-wake ensured here, before the
+        # first turn — see ``_boot_video_jobs``.
+        await self._boot_video_jobs()
         if self._resume_catchup_text is not None and not self._resume_catchup_sent:
             # A catch-up still pending after the pump: the re-armed fire lands
             # at (or microseconds before) the grace deadline, and a COLD
@@ -11027,14 +11108,23 @@ class Session:
         """
         return self.spend if self._spend_recorded else None
 
-    def accrue_spend(self, micro: int | None, identity: dict[str, str] | None = None) -> int:
+    def accrue_spend(
+        self,
+        micro: int | None,
+        identity: dict[str, str] | None = None,
+        basis: str | None = None,
+    ) -> int:
         """Accrue ONE provider call and schedule its durable record.
 
         The single entry point every accrual site calls (the frontend store's
         per-call branch, its turn-end remainder, and detached leaf calls), so
         the addition happens in one place and cannot be billed twice.
+        ``basis`` is the call's billing basis (PR-3): the frontend store labels
+        every call from the same raw usage stamps the analytics record reads,
+        and a caller that omits it records the call with no basis — the wire
+        reads that as ``not_tracked`` rather than guessing.
         """
-        index = self.spend.accrue(micro, identity)
+        index = self.spend.accrue(micro, identity, basis=basis)
         self._spend_live_calls += 1
         self.schedule_spend_persist()
         return index
@@ -11540,6 +11630,37 @@ class Session:
                 publish(self)
             except Exception:  # noqa: BLE001 — a publish must never break a turn
                 logger.debug("channel spend publish failed", exc_info=True)
+
+    def pending_channel_records(self) -> list[dict[str, Any]]:
+        """The §4.2 fallback markers this fold does NOT already hold.
+
+        The route-level voice emitters mirror their records to analytics
+        (best-effort — the recorder may drop a copy) and cannot append to this
+        process's journal (see ``channel_spend.write_pending_record``), so they
+        drop a marker in the session directory's sidecar. Publishing reads it
+        so the wire can state WHY voice money is absent from the total instead
+        of hiding the gap; entries whose ``record_id`` the fold holds are
+        excluded, which is what retires a marker once a future owner-append
+        folds the record.
+
+        Best-effort and cheap: one stat/read of a small file, and ``[]`` for a
+        session with no sidecar (the overwhelming majority) or an unreadable
+        one — a lost marker degrades to "nothing pending", never a broken
+        publish.
+        """
+        try:
+            directory = getattr(self._transcript, "directory", None)
+            if directory is None:
+                return []
+            entries = read_pending_records(directory)
+        except Exception:  # noqa: BLE001 — a marker read must never break a publish
+            logger.debug("channel pending read failed", exc_info=True)
+            return []
+        return [
+            entry
+            for entry in entries
+            if not self.channels.has(str(entry.get("record_id", "") or ""))
+        ]
 
     def rebuild_channels_if_needed(self) -> None:
         """The adopt seam for channel history: the legacy backfill.
@@ -13632,6 +13753,7 @@ class Session:
                 items=tuple(self._turn_items),
                 job_id=self._job_id,
                 one_shot=self._one_shot_exit,
+                headless=self._headless_host,
                 settled_mark=self._turns_settled,
                 triggers=frozenset(self._run_triggers),
             )
@@ -15654,6 +15776,11 @@ class Session:
             # failure behind session 835fbcafdc27). Re-bound every turn for
             # the same reason the rest of this context is rebuilt.
             journal_credential=self.journal_credential_change,
+            # The video lane's durable-record door: the ``generate_video``
+            # runner and the ``video_status`` tool cannot write transcript
+            # rows themselves, and this method is the ONE append path for
+            # ``video_job_v1`` records (see ``journal_video_job``).
+            journal_video_job=self.journal_video_job,
             # The send tool's own notice hook, wired for the same reason and
             # with the same shape: the tool cannot write a transcript row
             # itself, and the gate (``send.journal_unconfirmed``, default off) is
@@ -16897,6 +17024,68 @@ class Session:
         except OSError:
             logger.warning("could not journal credential binding change", exc_info=True)
 
+    async def journal_video_job(self, record: dict[str, Any]) -> None:
+        """Append one durable ``video_job_v1`` record (media wave-2, video phase).
+
+        The video lane's ONE transcript write path: the ``generate_video``
+        runner and the ``video_status`` tool cannot write transcript rows
+        themselves (the ``journal_credential``/``journal_send_notice``
+        precedent), so the session binds this method into the ToolContext and
+        the durable record is written here. The row is BOOKKEEPING
+        (``preserve_mtime=True`` — see ``transcript.BOOKKEEPING_CUSTOM_TYPES``):
+        a terminal transition lands minutes after the user left, and it must
+        not re-rank the session as freshly worked.
+
+        Failures PROPAGATE to the caller: the record's writers are the ones
+        that decide how to degrade (the runner logs and continues — restart
+        durability is lost for that transition, the generation is not), so
+        swallowing here would hide which writer chose what.
+        """
+        await self._transcript.append_custom(VIDEO_JOB_CUSTOM_TYPE, record, preserve_mtime=True)
+
+    async def _boot_video_jobs(self) -> None:
+        """Cold-follow conversion for pending video jobs (criterion b).
+
+        Runs once at open (``async_init``). A non-terminal ``video_job_v1``
+        record with no live job in THIS process is the restart/rollover case:
+        the generation outlived the runtime that started it. Nothing resumes
+        the dead asyncio task — impossible and not needed — the record is what
+        makes the job followable, and the check-wake is what makes the
+        successor ASK: one is ensured here when absent (the submit-time wake
+        usually survives via the spool/inbox, so the common boot is a no-op),
+        and its fire's ``video_status`` call settles or re-observes the job.
+
+        Idempotent by construction (ensure is an existence check) and
+        best-effort throughout: a boot path must never fail a session open.
+        """
+        # The directory the records actually live in: the TRANSCRIPT's own
+        # directory, not ``_session_dir()`` (which derives from the scratchpad
+        # root and reads None on a reduced host where the rows still exist).
+        # ``getattr`` mirrors ``_scratchpad_dir``'s probe of the same attr.
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None or self._disposed:
+            return
+        try:
+            from local_operator.video.jobs import VideoWakeHandle
+            from local_operator.video.records import (
+                read_video_records,
+                record_is_terminal,
+            )
+
+            records = await asyncio.to_thread(read_video_records, directory)
+            for job_id, record in records.items():
+                if record_is_terminal(record):
+                    continue
+                job = self.jobs.get(job_id) if self.jobs is not None else None
+                if job is not None and job.status in ("running", "queued"):
+                    # A live job owns its own wake lifecycle (the runner
+                    # cancels on settle); boot must not double-arm.
+                    continue
+                await VideoWakeHandle(self._wake, job_id).ensure()
+                logger.debug("video job %s is pending across this open; check-wake ensured", job_id)
+        except Exception:  # noqa: BLE001 — a boot conversion must not fail the open
+            logger.warning("video boot conversion failed", exc_info=True)
+
     async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
         """Auto-deliver one settled model-owned job back into the conversation.
 
@@ -16908,9 +17097,10 @@ class Session:
         settles even while a turn streams, because a turn can run for many
         hours and holding the row to its end bunched a marathon turn's every
         completion at its tail (2026-09-26 incident; see the streaming branch).
-        Only model-registered job types (task, backgrounded bash): host jobs
-        keep their own delivery. A job the wait tool already returned is marked
-        consumed and stays quiet, or the same result would arrive twice.
+        Only model-registered job types (task, backgrounded bash, and the
+        detached ``video`` generation): host jobs keep their own delivery. A job
+        the wait tool already returned is marked consumed and stays quiet, or the
+        same result would arrive twice.
         """
         if self._disposed or job is None:
             return
@@ -16920,7 +17110,11 @@ class Session:
         # consume nested work deliberately through its own jobs/wait tools.
         if self._job_id is not None:
             return
-        if getattr(job, "consumed", False) or job.type not in ("task", "bash"):
+        # ``video`` rides this gate as of the video phase (media wave-2): a
+        # settled video job opens the review turn exactly like a child does,
+        # and its cancellations never reach here (the manager's task-cancel
+        # arm returns before delivery, as for every type).
+        if getattr(job, "consumed", False) or job.type not in ("task", "bash", "video"):
             return
         if self._leaving_deliveries:
             # A result that arrives AFTER the departure latch must not be
@@ -17283,6 +17477,22 @@ class Session:
         if any(tool.name == "no_reply" for tool in self._tools):
             self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
 
+    def declare_headless_host(self) -> None:
+        """Declare this session's host a HEADLESS print-mode host (turn-supplements R8).
+
+        Distinct from :meth:`declare_one_shot_exit` on purpose, and the split is the
+        point: that method's semantics are the departure latches ``_run_turn``'s
+        ``finally`` arms, so ``run_print_mode`` deliberately skips it for
+        ``--loop``/``--loop-goal`` runs (their turns are the run's work, not teardown
+        leftovers). The turn-supplements predicate must still refuse EVERY headless
+        host -- "exec/SDK unaffected", ``docs/design/turn-supplements.md`` §2.2 rule 6
+        -- and reading the one-shot latch alone left exactly those runs eligible
+        (measured on a real ``lop exec --loop`` subprocess: the job was scheduled and
+        ran its pre-filter walk). This flag carries the host fact WITHOUT the latch;
+        read only through ``RunProvenance.headless``, nothing else may depend on it.
+        """
+        self._headless_host = True
+
     def retire_job_deliveries_to_transcript(self) -> None:
         """From now on, a settled job's result is durable and opens NO turn.
 
@@ -17367,6 +17577,17 @@ class Session:
         details: dict[str, Any] = {"job_id": job_id, "text": delivery}
         if held:
             details["held"] = True
+        if getattr(job, "type", "") == "video":
+            # The video receipt rides the row for the review turn (§5.3 of the
+            # video contract): digest/content_type/duration/model/cost are the
+            # facts a surface (or the model) needs to find the attachment
+            # without re-polling. The runner writes them through the structured
+            # progress channel (``latest_details``), so the delivery path stays
+            # generic — task/bash rows keep their exact two-key shape.
+            latest = getattr(job, "latest_details", None)
+            receipt = latest.get("video_receipt") if isinstance(latest, dict) else None
+            if isinstance(receipt, dict):
+                details.update(receipt)
         return CustomMessage(
             custom_type=JOB_RESULT_MESSAGE_TYPE,
             attribution="user",
@@ -17601,7 +17822,7 @@ class Session:
         self._peer_arrival.mark(HUB_MESSAGE_TYPE)
 
     async def _todo_continuation(self) -> list[AgentMessage]:
-        """The loop's follow-up hook: re-assert open todos at the yield boundary.
+        """The loop's follow-up hook: re-assert the outstanding todos at the yield.
 
         The loop ends a turn the instant the model returns no tool calls, even
         with every item still open — a steering message answered in prose was
@@ -17610,17 +17831,36 @@ class Session:
         (harness/loop.py, ``_collect_yield_injections``), so the model gets
         another turn with its own list in front of it.
 
+        The work set is pending PLUS blocked, and the two are reconciled
+        differently on purpose. Pending items may not be left running: they are
+        work the model is asked to resume or honestly resolve. Blocked items are
+        unfinished too — parked on a user decision or an external service — and
+        the failure this covers is a session that ended turns for ~14 hours over
+        six blocked items while a pending-only guardrail saw an empty work set
+        and let every yield stand. So blocked items are now ACCOUNTED for at the
+        same boundary: the reminder asks whether the condition still holds, whose
+        decision it is, and whether anything is armed to revisit it. The honest
+        stop is preserved — a blocked model may still finish its turn (the
+        paragraph asks it to account, never to invent progress), and, crucially,
+        it is not deferred forever by this hook: one accounting pass is all that
+        is owed (see the latch below). ``done`` and ``dropped`` stay out: they
+        are settled, and re-asserting them would feed the model a claim that is
+        false.
+
         Fires only while the list is MOVING. A model that yields twice with a
         byte-identical list is telling you it cannot proceed — usually it needs
         a decision only the user can make — and nudging it again would burn the
         loop's ``max_follow_up_continuations`` budget (its own, and the larger
         one: 64 against the 8 the steering/aside producers share), end the turn
         with a continuation-limit notice, and delay the user's answer by up to
-        that many model calls. The larger budget is safe precisely because the
-        latch above is what really bounds this producer — a chatty parent can no
-        longer spend the allowance a still-moving list needs. Any progress earns
-        another nudge; a fresh user turn re-arms the latch (see
-        ``_run_turn_pipeline``).
+        that many model calls. That latch is also what keeps the blocked
+        reconciliation bounded: blocking is MOVEMENT (it changes the
+        fingerprint), so it earns exactly one nudge, and the byte-identical
+        yield after the model accounts is released — one pass, not a loop. The
+        larger budget is safe precisely because the latch above is what really
+        bounds this producer — a chatty parent can no longer spend the allowance
+        a still-moving list needs. Any progress earns another nudge; a fresh
+        user turn re-arms the latch (see ``_run_turn_pipeline``).
 
         The nudge it returns is a point-in-time assertion and stops being sent
         the moment the list moves — see :meth:`_live_todo_reminders`, which
@@ -17636,7 +17876,8 @@ class Session:
         transcript as if the user had typed it.
         """
         pending = open_todos(self._session_id)
-        if not pending:
+        blocked = blocked_todos(self._session_id)
+        if not pending and not blocked:
             return []
         fingerprint = todo_fingerprint(self._session_id)
         if fingerprint == self._todo_reminder_fingerprint:
@@ -17649,7 +17890,10 @@ class Session:
                 # The fingerprint rides ALONG with the text: it is what the
                 # render path compares to decide the assertion is still true
                 # (see :meth:`_live_todo_reminders`).
-                details={"text": _todo_reminder_text(pending), "fingerprint": fingerprint},
+                details={
+                    "text": _todo_reminder_text(pending, blocked),
+                    "fingerprint": fingerprint,
+                },
             )
         ]
 
@@ -19112,10 +19356,23 @@ class Session:
             if isinstance(snap_payload, dict):
                 try:
                     from local_operator.compaction.snapcompact import (
+                        Archive,
                         frame_token_estimate_for,
+                        replayed_frame_count,
                     )
 
-                    frame_count = len(snap_payload.get("frames") or [])
+                    # Count the frames the marker will actually REPLAY, not
+                    # every stored frame: a policy archive carries its
+                    # text-carried pages as dormant PNGs (kept so builds that
+                    # predate ``middle_kinds`` still read the archive
+                    # complete), and pricing those at visual rates would
+                    # overstate the after-figure this correction exists to
+                    # state truthfully. Reviving the payload through the
+                    # model (it decodes the frames, milliseconds) is what
+                    # lets the count share the replay's own gate: an archive
+                    # about to degrade to the all-image form prices as
+                    # all-image here too.
+                    frame_count = replayed_frame_count(Archive.model_validate(snap_payload))
                     per_frame = frame_token_estimate_for(self._model.provider, self._model.model_id)
                     frame_correction = frame_count * (per_frame - IMAGE_TOKEN_ESTIMATE)
                 except Exception:  # noqa: BLE001 - a receipt must not fail the pass

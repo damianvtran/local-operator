@@ -28,6 +28,9 @@ from local_operator.session.channel_spend import (
     CHANNEL_SPEND_CUSTOM_TYPE,
     CHANNELS,
     NOT_TRACKED_MICRO,
+    PENDING_OWNER_APPEND,
+    PENDING_OWNER_APPEND_REASON,
+    PENDING_SIDECAR_NAME,
     SPEND_BREAKDOWN_ENTRY_CAP,
     ChannelSpend,
     ChannelSpendRecord,
@@ -38,7 +41,9 @@ from local_operator.session.channel_spend import (
     map_image_cost_labels,
     new_record_id,
     normalise_basis,
+    read_pending_records,
     records_from_details,
+    write_pending_record,
 )
 from local_operator.session.frontend_state import FrontendSpendChannels
 
@@ -84,6 +89,7 @@ def payload(
     child_records: list[ChannelSpendRecord] | None = None,
     tracked: bool = True,
     lost: bool = False,
+    pending: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return combine(
         fold_records(records).rows(),
@@ -92,6 +98,7 @@ def payload(
         child_records=child_records or (),
         tracked=tracked,
         lost=lost,
+        pending=pending or (),
     )
 
 
@@ -1179,6 +1186,70 @@ def test_an_inference_named_relay_cannot_sink_the_entry_below_partial() -> None:
     assert agents["subagents"]["knowledge"] == "partial", "the sibling over the same money"
 
 
+def test_inference_bases_come_from_pr3s_route_columns() -> None:
+    """PR-3 integration: the inference half states its REAL per-route bases.
+
+    The bases derive from the by-identity ``bases: {basis: micro}`` columns —
+    the same data the rows and ``by_basis`` read — so a plan-funded call
+    reads ``subscription_api_equivalent`` on both entries instead of the
+    legacy blanket ``not_tracked``, and ``not_tracked`` appears only for
+    money those columns do not attribute.
+    """
+    subscribed = payload(
+        [],
+        inference=InferenceSnapshot(
+            micro=900000,
+            calls=12,
+            priced_calls=12,
+            knowledge="exact",
+            by_identity={
+                "openai/chat": {
+                    "provider": "openai",
+                    "model_id": "gpt-5",
+                    "micro": 900000,
+                    "calls": 12,
+                    "unpriced": 0,
+                    "bases": {"subscription_api_equivalent": 900000},
+                }
+            },
+        ),
+    )
+    agents = {entry["id"]: entry for entry in subscribed["breakdown"]["by_agent"]}
+    sources = {entry["id"]: entry for entry in subscribed["breakdown"]["by_source"]}
+    assert agents["parent"]["bases"] == ["subscription_api_equivalent"]
+    assert sources["inference"]["bases"] == ["subscription_api_equivalent"]
+    assert (
+        "subscription_api_equivalent" in subscribed["vocabulary"]["bases"]
+    ), "the curated display word rides the object — no UI edit"
+
+    # Half-attributed: the unattributed remainder keeps the honest fallback,
+    # BESIDE the real spelling — never instead of it.
+    remainder = payload(
+        [],
+        inference=InferenceSnapshot(
+            micro=900000,
+            calls=13,
+            priced_calls=12,
+            knowledge="partial",
+            by_identity={
+                "openai/chat": {
+                    "provider": "openai",
+                    "model_id": "gpt-5",
+                    "micro": 800000,
+                    "calls": 12,
+                    "unpriced": 0,
+                    "bases": {"subscription_api_equivalent": 800000},
+                }
+            },
+        ),
+    )
+    entries = {entry["id"]: entry for entry in remainder["breakdown"]["by_source"]}
+    assert entries["inference"]["bases"] == [
+        "not_tracked",
+        "subscription_api_equivalent",
+    ]
+
+
 def test_custom_type_literal_is_pinned() -> None:
     """The transcript type is a compatibility surface; a rename is a migration."""
     assert CHANNEL_SPEND_CUSTOM_TYPE == "session_channel_spend.v1"
@@ -1256,3 +1327,85 @@ def test_from_details_accepts_a_row_without_by_identity() -> None:
     assert recalled is not None
     assert recalled.micro == 2_000_000
     assert recalled.by_identity == {}
+
+
+# -- PR-3: the §4.2 fallback's marker and the pending wire key -----------------
+
+
+def test_pending_voice_records_add_the_key_only_when_present() -> None:
+    """``pending`` is ADDITIVE and absent for every ordinary session.
+
+    The golden fixture asserts the exact key set of an ordinary payload; this
+    pins the other half: a session WITH unfoled voice records says so, counts
+    them, and does not move ``total_micro`` (the same total on all surfaces).
+    """
+    assert "pending" not in payload([])
+    with_pending = payload(
+        [],
+        pending=[
+            {"record_id": "tts:a", "channel": "tts", "ts_ms": 1},
+            {"record_id": "stt:b", "channel": "stt", "ts_ms": 2},
+            {"record_id": "search:c", "channel": "search", "ts_ms": 3},
+        ],
+    )
+    assert with_pending["pending"] == {
+        "voice": PENDING_OWNER_APPEND,
+        "calls": 2,
+        "reason": PENDING_OWNER_APPEND_REASON,
+    }
+    assert with_pending["total_micro"] == 0, "pending money is NOT in the total"
+
+
+def test_pending_sidecar_roundtrip_is_tolerant_and_never_raises(tmp_path: Path) -> None:
+    """One appended line per voice record; junk lines are skipped, not fatal."""
+    record = ChannelSpendRecord(
+        record_id="tts:abc",
+        channel="tts",
+        provider="elevenlabs",
+        units=25,
+        unit="chars",
+        amount_micro=1000,
+        billing_basis="billed",
+        cost_source="server_reported",
+        ts_ms=1760000000000,
+    )
+    assert write_pending_record(tmp_path, record) is True
+    sidecar = tmp_path / PENDING_SIDECAR_NAME
+    with open(sidecar, "a", encoding="utf-8") as handle:
+        handle.write("{not json\n")
+    entries = read_pending_records(tmp_path)
+    assert len(entries) == 1
+    assert entries[0] == {
+        "record_id": "tts:abc",
+        "channel": "tts",
+        "ts_ms": 1760000000000,
+        "reason": PENDING_OWNER_APPEND,
+    }
+
+    # A non-voice channel is never written, and a missing directory is skipped
+    # rather than created (a foreign/never-materialised session id).
+    image = ChannelSpendRecord(record_id="image:x", channel="image", amount_micro=1)
+    assert write_pending_record(tmp_path, image) is False
+    assert read_pending_records(tmp_path / "missing") == []
+    assert write_pending_record(tmp_path / "never-made", record) is False
+
+
+def test_pending_calls_counts_unique_charges_not_marker_lines() -> None:
+    """Q6 (QA round 1): a retried emission writes a second identical marker.
+
+    Analytics holds ONE row, one fold retires both markers, and the money is
+    counted once — so the wire's count must read one request, not the number
+    of lines a crash-and-retry happens to have left in the sidecar.
+    """
+    with_pending = payload(
+        [],
+        pending=[
+            {"record_id": "tts:one", "channel": "tts", "ts_ms": 1},
+            {"record_id": "tts:one", "channel": "tts", "ts_ms": 2},
+        ],
+    )
+    assert with_pending["pending"]["calls"] == 1
+    # A marker without a record_id cannot be retired by the fold, so it cannot
+    # join the count either (it would never go away).
+    orphan = payload([], pending=[{"channel": "tts", "ts_ms": 3}])
+    assert "pending" not in orphan

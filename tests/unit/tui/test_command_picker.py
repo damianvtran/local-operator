@@ -1014,7 +1014,27 @@ async def test_tab_still_completes_a_short_fuzzy_query() -> None:
         await pilot.press("slash", "l", "g")
         assert app.editor._picker.is_open(), "the picker closed on a fuzzy-only query"
         await pilot.press("tab")
-        assert app.editor.text in ("/login ", "/logout "), app.editor.text
+        # `/highlights` is why the completed candidates are no longer just the
+        # two abbreviations the gate was designed around: `l…g` is a subsequence
+        # of `highlights` exactly as it is of `login`/`logout`, all three score
+        # 2, and the engine breaks the tie by registration order (`highlights`
+        # sits in the turn-control family ahead of `login` — see
+        # `test_completion_takes_the_top_match_when_ambiguous`). The gate's
+        # promise, which is what this pins, is that Tab still COMPLETES a
+        # fuzzy-only query; which of the tied rows it lands on is the engine's
+        # documented ranking, not a second decision here.
+        # `/language` (C) joins the tie the same way the note above records:
+        # `l…g` is a subsequence of it too, all four score 2, and the engine
+        # breaks the tie by registration order. The gate's promise, which is
+        # what this pins, is that Tab still COMPLETES a fuzzy-only query;
+        # which of the tied rows it lands on is the engine's documented
+        # ranking, not a second decision here.
+        assert app.editor.text in (
+            "/language ",
+            "/highlights ",
+            "/login ",
+            "/logout ",
+        ), app.editor.text
         assert app.submissions == [], "Tab must never send"
 
 

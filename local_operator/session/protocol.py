@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 142 public members and a POSITIVE
+    than stylistic. This protocol carries 146 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -699,7 +699,13 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``{entry id: ts}`` join had a seam to read (``Mesh wire honesty`` §S1), 142
     once the desktop interrupt route needed ``canonical_current`` so a press could
     not be answered ``idle`` from a mirror that says it is mid-resync, owes a
-    canonical re-sync, or is recovering from a dropped socket), so recompute it
+    canonical re-sync, or is recovering from a dropped socket, 146 once the
+    supplement contract's facade surface arrived — ``supplements_for`` (the
+    mount-time lazy read) and the three ``/highlights`` controls
+    (``supplement_cancel``/``supplement_steer``/``supplement_restart``), one rung
+    adding four because they are one contract's surface: a facade that could be
+    read for rows but not act on them would answer the command with a probe miss
+    on this class alone), so recompute it
     rather
     than adjusting it by the size of your own change.
 
@@ -1960,6 +1966,41 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         The owner's answer carries what it cancelled; a viewer answers with the
         empty outcome, because only the owner holds the wake writer.
         """
+        ...
+
+    # The turn-supplement contract's facade surface (memo §2.7) — all four
+    # members of it, because a facade that could be READ for rows but not ACT
+    # on them would answer ``/highlights`` with a probe miss on this class
+    # alone. ``tui/app.py`` reads ``supplements_for`` through literal
+    # duck-probes (the mount-time lazy read and the terminal beat's row
+    # upgrade) and the three controls through the ``/highlights`` dispatch's
+    # computed lookup. Only the FACADE forwards these to an owner: a
+    # session-hosted owner runs no supplement jobs at all — the runner lives
+    # on ``ServingSessionHandle`` (memo §2.2, "host scope follows from the
+    # seam") — so its readers' ``callable`` checks answering "not callable"
+    # is the truthful outcome, never a silent gap.
+
+    async def supplements_for(self, anchors: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """``{anchor: newest supplement row}`` for the anchors asked about.
+
+        The lazy read a surface makes when an answer row mounts (memo §2.11),
+        and how supplement rows are replayed (they are custom entries the
+        history fold does not carry). A detached or recovering facade answers
+        ``{}`` rather than raising: a read that cannot run paints nothing, and
+        raising would turn "no rows yet" into an error path on every resume.
+        """
+        ...
+
+    async def supplement_cancel(self, anchor: str, job: str) -> str:
+        """Cancel a running supplement job; a settled one answers neutrally."""
+        ...
+
+    async def supplement_steer(self, anchor: str, job: str, text: str) -> str:
+        """Cut the in-flight attempt and start version + 1 with ``text``."""
+        ...
+
+    async def supplement_restart(self, anchor: str, job: str) -> str:
+        """Start version + 1 with the previous instruction (the Retry)."""
         ...
 
 

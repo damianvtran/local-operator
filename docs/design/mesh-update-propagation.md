@@ -222,6 +222,18 @@ within the connect budget is `unreachable`; the record stays `active` and the ca
 until the window (24 h, RU §6.1) ends — "caught on next contact", with the cadence as the
 contact detector (Q3).
 
+> **Errata — the codeless refusal (S3a implementation, 2026-10-10).** The
+> `not_authorised -> skipped (no_grant)` row above describes the DESIGNED answer;
+> the wire does not carry it that way yet. Every authoriser refusal — a missing
+> grant, a stale epoch, a reconcile-phase reconciliation — crosses **codeless**
+> by design (`wire.refusal_frame` withholds which guard fired), and some of them
+> self-heal. S3a therefore records a codeless refusal as `refused` with **no
+> capability claimed**, retried on the same cadence as `unreachable` with the
+> rollout-scoped row dedupe (≥3 ticks, one `update_member_state`); only a **coded
+> `not_authorised`** frame — the security-reviewed authoriser change the S3a PR
+> names as its S3b/follow-up trigger — parks the rollout-scoped
+> `skipped (no_grant)` with RU §2's remedy.
+
 *The first release.* No member advertises `mesh-update-v1` or holds the grant before this
 ships, so the release carrying it is the last that needs a hand update on each existing
 member, and the grant itself is a node-side act (RU §2): by hand once per existing member, on
