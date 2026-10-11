@@ -1367,6 +1367,26 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
         lambda: a.server._membership_seq > admit_seq, timeout_s=10.0
     ), "a's admit-time contact_peers pass never completed"
 
+    # AND NO INBOUND HANDSHAKE MAY STILL BE IN FLIGHT EITHER, closing the sibling
+    # shape a probe for this change found: the establishment wait above can observe
+    # the ADMIT pass's restamp first while ``register_link``'s own establishment
+    # pull is still in flight — and THAT pull's stamp can then land behind the arm
+    # below, the same not-due skip from the other side. A ``_handshake_slots`` slot
+    # is the right signal because it is acquired once per inbound connection
+    # (``_accept_loop``) and released only in ``_handshake_inbound``'s ``finally`` —
+    # i.e. when the WHOLE inbound work returns: ``register_link``'s establishment
+    # pull (the stamp) and a pair listener's ``contact_peers`` (the admit restamp)
+    # included — so "all slots free" is exactly "no unprompted inbound writer can
+    # still stamp this link". The two inbound connections on a here are the join's
+    # and the dial's. ``_value`` is read because the semaphore exposes nothing else,
+    # and is only ever compared against the cap that built it.
+    def _all_inbound_done() -> bool:
+        return a.server._handshake_slots._value == a.server.settings.max_handshakes  # noqa: SLF001
+
+    assert net_fixtures.wait_for(
+        _all_inbound_done, timeout_s=10.0
+    ), "an inbound handshake can still restamp the link"
+
     # A completed pass first: the fallback must BE this one, so make it answer with
     # b's table (a real pull — the link is up, and the zero makes it due).
     a_link.member_pulled_at = 0.0
