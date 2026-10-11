@@ -153,7 +153,13 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
                     f"generate.py: {namespace}: arguments of {key!r} sanitise to "
                     f"duplicate identifiers {sanitised}; rename one in the catalogue"
                 )
-            signature = ", ".join(f"*, {safe}: {ann}" for safe, (_, ann) in zip(sanitised, params))
+            # ONE bare ``*`` introduces the keyword-only block: emitting it per
+            # parameter (``*, a: str, *, b: str``) is a SyntaxError and only
+            # ever went unnoticed while every message carried one argument —
+            # the analytics slice's first two-argument message caught it.
+            signature = "*, " + ", ".join(
+                f"{safe}: {ann}" for safe, (_, ann) in zip(sanitised, params)
+            )
             pairs = ", ".join(f'"{name}": {safe}' for safe, (name, _) in zip(sanitised, params))
         else:
             signature = ""
