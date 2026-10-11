@@ -1,13 +1,13 @@
 {
   "version": 1,
   "tracked": true,
-  "total_micro": 1016000,
+  "total_micro": 1536000,
   "knowledge": "partial",
   "by_basis": {
     "billed": 53000,
     "subscription_api_equivalent": 53000,
     "estimated": 10000,
-    "not_tracked_micro": 900000,
+    "not_tracked_micro": 1420000,
     "not_tracked_calls": 1
   },
   "rows": [
@@ -92,7 +92,117 @@
     }
   ],
   "children": {
-    "total_micro": 0,
+    "total_micro": 520000,
     "knowledge": "exact"
+  },
+  "breakdown": {
+    "by_agent": [
+      {
+        "id": "parent",
+        "label": "Parent agent",
+        "amount_micro": 1016000,
+        "knowledge": "partial",
+        "unstated_records": 1,
+        "bases": [
+          "billed",
+          "estimated",
+          "not_tracked",
+          "subscription_api_equivalent"
+        ]
+      },
+      {
+        "id": "subagents",
+        "label": "Subagents",
+        "amount_micro": 520000,
+        "knowledge": "exact",
+        "unstated_records": 0,
+        "bases": [
+          "billed",
+          "not_tracked"
+        ]
+      }
+    ],
+    "by_source": [
+      {
+        "id": "inference",
+        "label": "Inference",
+        "amount_micro": 1400000,
+        "knowledge": "exact",
+        "unstated_records": 0,
+        "bases": [
+          "not_tracked"
+        ]
+      },
+      {
+        "id": "image",
+        "label": "Image",
+        "amount_micro": 126000,
+        "knowledge": "partial",
+        "unstated_records": 1,
+        "bases": [
+          "billed",
+          "subscription_api_equivalent"
+        ]
+      },
+      {
+        "id": "search",
+        "label": "Search",
+        "amount_micro": 8000,
+        "knowledge": "exact",
+        "unstated_records": 0,
+        "bases": [
+          "estimated"
+        ]
+      },
+      {
+        "id": "read",
+        "label": "Read",
+        "amount_micro": 2000,
+        "knowledge": "exact",
+        "unstated_records": 0,
+        "bases": [
+          "estimated"
+        ]
+      }
+    ]
+  },
+  "vocabulary": {
+    "channels": {
+      "inference": {
+        "label": "Inference"
+      },
+      "image": {
+        "label": "Image"
+      },
+      "search": {
+        "label": "Search"
+      },
+      "read": {
+        "label": "Read"
+      }
+    },
+    "bases": {
+      "billed": {
+        "label": "billed",
+        "source_class": "paygo",
+        "marker": "billed"
+      },
+      "subscription_api_equivalent": {
+        "label": "API-equivalent",
+        "source_class": "subscription",
+        "marker": "API-equivalent \u00b7 subscription",
+        "note": "You're on a subscription, so API-equivalent amounts are list-price equivalents \u2014 not what you are charged."
+      },
+      "estimated": {
+        "label": "estimated",
+        "source_class": "paygo",
+        "marker": "estimated"
+      },
+      "not_tracked": {
+        "label": "not tracked",
+        "source_class": "unknown",
+        "marker": "not tracked"
+      }
+    }
   }
 }
