@@ -207,7 +207,10 @@ error and never to a zero.
   `label` is core's display word (`CHANNEL_LABELS`, else `id.capitalize()`);
   `amount_micro` is the entry's STATED sum (`null`, never 0, when nothing was
   sized); `knowledge` is the worst rung of its contributors, so an entry can
-  never read exacter than its money; `unstated_records` is a COUNT of records
+  never read exacter than its money — nor, carrying stated money, read
+  `unknown` (an unsized-record contributor is rated at the ENTRY level,
+  reading `partial` exactly as the session and `subagents` read the same
+  bundle); `unstated_records` is a COUNT of records
   with no stated amount and no failure (the failed-unbilled presumption
   counts nothing); `bases` are the distinct basis spellings inside the entry.
   An entry exists only on activity — no fabricated zeros — and a partition
