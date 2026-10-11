@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "provenance": "Authored for lane C1a against docs/design/turn-supplements.md \u00a75.2. Labels are the class definitions' expected outcome, reviewed as data in the PR; the operator's dogfood week is the acceptance measure.",
+  "provenance": "Authored for lane C1a against docs/design/turn-supplements.md \u00a75.2. Labels are the class definitions' expected outcome, reviewed as data in the PR; the operator's dogfood week is the acceptance measure. Revised 2026-10-10: the five benchmark turns with expect_files carry the write call that produces the file; the eight benchmark answers are distinct tables.",
   "turns": [
     {
       "id": "g01",
@@ -529,9 +529,11 @@
       "class": "benchmark",
       "user": "Benchmark the three hosts",
       "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
-      "tool": "",
-      "call": {},
-      "result": "",
+      "tool": "write",
+      "call": {
+        "path": "bench/hosts.csv"
+      },
+      "result": "ok",
       "files": {
         "bench/hosts.csv": "host,req_per_s,p50_ms\nA,120,12\nB,340,9\nC,90,22\n"
       },
@@ -545,12 +547,14 @@
       "id": "g36",
       "class": "benchmark",
       "user": "Profile the endpoints",
-      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
-      "tool": "",
-      "call": {},
-      "result": "",
+      "answer": "Results:\n\n| endpoint | req_per_s | p95_ms |\n|---|---|---|\n| /health | 610 | 12 |\n| /v1/embed | 480 | 40 |\n| /v1/chat | 210 | 85 |\n| /v1/files | 95 | 160 |\n\n/health answers the most requests; /v1/files has the slowest tail.",
+      "tool": "write",
+      "call": {
+        "path": "bench/endpoints.tsv"
+      },
+      "result": "ok",
       "files": {
-        "bench/endpoints.tsv": "host,req_per_s,p50_ms\nA,120,12\nB,340,9\nC,90,22\n"
+        "bench/endpoints.tsv": "endpoint\treq_per_s\tp95_ms\n/health\t610\t12\n/v1/embed\t480\t40\n/v1/chat\t210\t85\n/v1/files\t95\t160\n"
       },
       "expect_files": [
         "bench/endpoints.tsv"
@@ -562,7 +566,7 @@
       "id": "g37",
       "class": "benchmark",
       "user": "Compare p50 across regions",
-      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "answer": "Results:\n\n| region | p50_ms | p99_ms |\n|---|---|---|\n| us-east | 9 | 41 |\n| eu-west | 21 | 88 |\n| ap-south | 34 | 120 |\n\nus-east is fastest; ap-south's p99 is the outlier.",
       "tool": "",
       "call": {},
       "result": "",
@@ -575,12 +579,14 @@
       "id": "g38",
       "class": "benchmark",
       "user": "Chart the build times",
-      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
-      "tool": "",
-      "call": {},
-      "result": "",
+      "answer": "Results:\n\n| step | cold_s | warm_s |\n|---|---|---|\n| checkout | 12 | 3 |\n| compile | 148 | 22 |\n| link | 31 | 9 |\n| package | 26 | 7 |\n\nCompile dominates the cold build; warm rebuilds are far cheaper.",
+      "tool": "write",
+      "call": {
+        "path": "bench/builds.csv"
+      },
+      "result": "ok",
       "files": {
-        "bench/builds.csv": "host,req_per_s,p50_ms\nA,120,12\nB,340,9\nC,90,22\n"
+        "bench/builds.csv": "step,cold_s,warm_s\ncheckout,12,3\ncompile,148,22\nlink,31,9\npackage,26,7\n"
       },
       "expect_files": [
         "bench/builds.csv"
@@ -592,7 +598,7 @@
       "id": "g39",
       "class": "benchmark",
       "user": "Measure the cache hit rate",
-      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "answer": "Results:\n\n| tier | hit_rate_pct | misses |\n|---|---|---|\n| L1 | 94 | 612 |\n| L2 | 71 | 2890 |\n| disk | 23 | 7704 |\n\nL1 absorbs most lookups; disk misses are the tail.",
       "tool": "",
       "call": {},
       "result": "",
@@ -605,12 +611,14 @@
       "id": "g40",
       "class": "benchmark",
       "user": "Run the load test and compare",
-      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
-      "tool": "",
-      "call": {},
-      "result": "",
+      "answer": "Results:\n\n| concurrency | rps | error_rate_pct |\n|---|---|---|\n| 10 | 180 | 0.0 |\n| 50 | 620 | 0.1 |\n| 100 | 880 | 0.8 |\n| 200 | 810 | 2.4 |\n\nThroughput peaks at 100 concurrent; errors climb past that.",
+      "tool": "write",
+      "call": {
+        "path": "bench/load.json"
+      },
+      "result": "ok",
       "files": {
-        "bench/load.json": "host,req_per_s,p50_ms\nA,120,12\nB,340,9\nC,90,22\n"
+        "bench/load.json": "[\n  {\n    \"concurrency\": 10,\n    \"rps\": 180,\n    \"error_rate_pct\": 0.0\n  },\n  {\n    \"concurrency\": 50,\n    \"rps\": 620,\n    \"error_rate_pct\": 0.1\n  },\n  {\n    \"concurrency\": 100,\n    \"rps\": 880,\n    \"error_rate_pct\": 0.8\n  },\n  {\n    \"concurrency\": 200,\n    \"rps\": 810,\n    \"error_rate_pct\": 2.4\n  }\n]\n"
       },
       "expect_files": [
         "bench/load.json"
@@ -622,7 +630,7 @@
       "id": "g41",
       "class": "benchmark",
       "user": "Break down the spend by model",
-      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
+      "answer": "Results:\n\n| model | calls | tokens_m | cost_usd |\n|---|---|---|---|\n| claude-sonnet | 412 | 8.9 | 18.40 |\n| gpt-mid | 96 | 1.2 | 2.70 |\n| jev-1.13 | 88 | 2.1 | 1.75 |\n| deepseek-flash | 233 | 3.4 | 0.31 |\n\nTotal spend was $23.16, led by claude-sonnet.",
       "tool": "",
       "call": {},
       "result": "",
@@ -635,12 +643,14 @@
       "id": "g42",
       "class": "benchmark",
       "user": "Compare the SDK sizes",
-      "answer": "Results:\n\n| host | req_per_s | p50_ms |\n|---|---|---|\n| A | 120 | 12 |\n| B | 340 | 9 |\n| C | 90 | 22 |\n\nB is the strongest.",
-      "tool": "",
-      "call": {},
-      "result": "",
+      "answer": "Results:\n\n| sdk | size_kb |\n|---|---|\n| python | 1840 |\n| javascript | 962 |\n| java | 720 |\n| go | 410 |\n| rust | 365 |\n\nPython ships the largest surface; rust the smallest.",
+      "tool": "write",
+      "call": {
+        "path": "bench/sdks.csv"
+      },
+      "result": "ok",
       "files": {
-        "bench/sdks.csv": "host,req_per_s,p50_ms\nA,120,12\nB,340,9\nC,90,22\n"
+        "bench/sdks.csv": "sdk,size_kb\npython,1840\njavascript,962\njava,720\ngo,410\nrust,365\n"
       },
       "expect_files": [
         "bench/sdks.csv"
