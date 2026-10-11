@@ -1447,7 +1447,28 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: differently), and the base figure equals the video fold's merged head
 #: (28,158) byte for byte, so nothing else has moved the prefix since.
 #: Ceiling = head + the 55-token band.
-BUDGET_BILLED_TOKENS = 28_506
+#: RAISED 28,506 -> 28,729 for the end-state verification principle added
+#: to ``prompts_md/system.md`` ("Verify the end state before you call it
+#: done."): one added bullet to the standing-instruction head, which rides the
+#: cached prefix of every request on every surface. CLEAN ARM, NAMED: fresh
+#: `HOME` + `LOCAL_OPERATOR_CONFIG_DIR` per tree, both trees measured with
+#: this script back to back on the same machine:
+#:
+#:   base (origin/main 7ec9a8e25b)  79,246 chars = ~28,506 billed
+#:   head (this branch)             79,713 chars = ~28,674 billed
+#:   delta                             +467 chars = ~+168
+#:
+#: The delta is the one bullet and nothing else: ``tool_inventory`` (785),
+#: ``environment`` (81), ``knowledge`` (854) and ``tool_schemas`` (52,130)
+#: are byte-identical to base on both trees, and the child arm moves by the
+#: SAME +467 chars (reported as +167 there — the arms' totals round the same
+#: 467 differently). The bullet exists because a read of finished evaluation
+#: trajectories found agents reporting success with the requested outcome
+#: unverified; the principle is general to every surface (CLI, TUI, mobile,
+#: evaluation runs), and it cannot move to a guide: it must be resident
+#: BEFORE the model forms a completion claim, which is exactly the moment a
+#: lookup would not happen. Ceiling = head + the 55-token band.
+BUDGET_BILLED_TOKENS = 28_729
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1526,7 +1547,18 @@ BUDGET_BILLED_TOKENS = 28_506
 #:   delta                              +816 chars = ~+294
 #:
 #: Ceiling = head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 25_551
+#: RAISED 25,551 -> 25,773 (with the top arm, same tree, same clean-arm
+#: environment): the child arm carries the same standing-instruction head
+#: and moves by the SAME +467 chars — reported as +167 here because this
+#: arm's total rounds the shared 467 chars differently (the check that the
+#: delta is that one bullet and nothing else):
+#:
+#:   base (origin/main 7ec9a8e25b)  71,029 chars = ~25,550 billed
+#:   head (this branch)             71,496 chars = ~25,718 billed
+#:   delta                             +467 chars = ~+167
+#:
+#: Ceiling = head + the 55-token band.
+BUDGET_CHILD_BILLED_TOKENS = 25_773
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
