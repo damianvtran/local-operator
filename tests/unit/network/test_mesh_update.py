@@ -141,7 +141,7 @@ def _stub_pass(
     monkeypatch.setattr(
         meshupdate,
         "refresh_runtimes",
-        lambda root, *, targets, budget=None: (list(outcomes), ""),
+        lambda root, *, budget=None: (list(outcomes), ""),
     )
     monkeypatch.setattr(
         meshupdate,
@@ -789,7 +789,11 @@ def test_the_receipt_counts_kept_only_working_runtimes(
 def test_the_sweep_passes_outcomes_through_and_degrades_to_a_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A sweep that cannot run is a note on the receipt, never a failed pass."""
+    """A sweep that cannot run is a note on the receipt, never a failed pass.
+
+    F1: the ask set is the sweep's OWN read and ``only_pids`` is ALWAYS passed
+    — pinned here, because the dialled set must not exceed the sized set.
+    """
     from pathlib import Path as _Path
     from types import SimpleNamespace
 
@@ -797,6 +801,7 @@ def test_the_sweep_passes_outcomes_through_and_degrades_to_a_note(
 
     outcomes = [_Outcome("moved"), _Outcome("busy")]
     seen: list[dict[str, Any]] = []
+    reads: list[Any] = []
 
     async def _fake(*, timeout_s: float, own_pid: int, only_pids: Any, _root: Any) -> list[Any]:
         seen.append({"timeout_s": timeout_s, "only_pids": only_pids})
@@ -804,16 +809,50 @@ def test_the_sweep_passes_outcomes_through_and_degrades_to_a_note(
 
     monkeypatch.setattr(control, "refresh_all", _fake)
     targets = [SimpleNamespace(pid=11), SimpleNamespace(pid=12)]
-    got, note = meshupdate.refresh_runtimes(_Path("/nonexistent"), targets=targets)
+    monkeypatch.setattr(
+        meshupdate, "live_session_targets", lambda root: reads.append(root) or targets
+    )
+    got, note = meshupdate.refresh_runtimes(_Path("/nonexistent"))
     assert got == outcomes and note == ""
-    assert seen[0]["only_pids"] is None, seen  # two targets fit the budget: all asked
+    assert reads, "the sweep must read the live set it sizes on"
+    # Both targets fit the budget — and they are still NAMED as the ask set, so
+    # ``refresh_all`` cannot dial anything this call did not size for (F1).
+    assert seen[0]["only_pids"] == frozenset({11, 12}), seen
 
     async def _boom(*, timeout_s: float, own_pid: int, only_pids: Any, _root: Any) -> list[Any]:
         raise OSError("registry unreadable")
 
     monkeypatch.setattr(control, "refresh_all", _boom)
-    got, note = meshupdate.refresh_runtimes(_Path("/nonexistent"), targets=targets)
+    got, note = meshupdate.refresh_runtimes(_Path("/nonexistent"))
     assert got == [] and "could not run" in note, note
+
+
+def test_the_sweep_returns_early_when_no_time_remains(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F3a: the zero-budget early return — observed, not stubbed.
+
+    Deleting the guard in ``refresh_runtimes`` left the whole file green before
+    this cell existed (the reviewer's mutation probe); it asserts the REAL
+    function returns the degrade note WITHOUT reading the registry or dialling
+    anything, so the guard's removal goes red — the path would then read the
+    live set and dial at the floor.
+    """
+    from pathlib import Path as _Path
+
+    from local_operator.session.runtime import control
+
+    called: list[str] = []
+
+    async def _boom(*args: Any, **kwargs: Any) -> list[Any]:
+        called.append("refresh_all")
+        raise AssertionError("refresh_all must not be called with no budget left")
+
+    monkeypatch.setattr(control, "refresh_all", _boom)
+    monkeypatch.setattr(
+        meshupdate, "live_session_targets", lambda root: called.append("read") or []
+    )
+    got, note = meshupdate.refresh_runtimes(_Path("/x"), budget=0.0)
+    assert got == [] and note == "no time remained for the runtime sweep", (got, note)
+    assert called == [], called
 
 
 def test_the_sweep_chunks_a_live_set_past_its_budget(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -836,13 +875,92 @@ def test_the_sweep_chunks_a_live_set_past_its_budget(monkeypatch: pytest.MonkeyP
         return []
 
     monkeypatch.setattr(control, "refresh_all", _fake)
-    targets = [SimpleNamespace(pid=i + 1) for i in range(200)]
-    got, note = meshupdate.refresh_runtimes(_Path("/x"), targets=targets, budget=60.0)
+    monkeypatch.setattr(
+        meshupdate,
+        "live_session_targets",
+        lambda root: [SimpleNamespace(pid=i + 1) for i in range(200)],
+    )
+    got, note = meshupdate.refresh_runtimes(_Path("/x"), budget=60.0)
     assert got == []
     assert seen[0]["timeout_s"] == meshupdate.REFRESH_MIN_PER_CALL_S, seen
     # 60 s of budget at a 0.5 s floor = 120 dials; the other 80 are not asked.
     assert seen[0]["only_pids"] == frozenset(range(1, 121)), seen
     assert "the live set (200) exceeds the sweep budget; 80 not asked" in note, note
+
+
+def test_a_failed_classic_install_carries_the_installers_own_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F3b: the classic arm's capture branch (no runner → subprocess), observed.
+
+    Both other classic cells inject a runner — and the generation-route capture
+    cell patches only its own route — so this branch shipped unexecuted; it
+    patches the subprocess seam itself and asserts uv's own words ride the
+    raised sentence, with the attestation pair withdrawn on the failure.
+    """
+    from local_operator import update as update_mod
+
+    class _Proc:
+        returncode = 3
+        stdout = ""
+        stderr = "error: Permission denied (os error 13)"
+
+    monkeypatch.setattr(meshupdate.subprocess, "run", lambda *a, **kw: _Proc())
+    stubs: dict[str, list[Any]] = {"attested": [], "withdrawn": [], "marker": []}
+    monkeypatch.setattr(
+        update_mod, "note_doomed_runtimes", lambda root, **kw: stubs["attested"].append(root) or []
+    )
+
+    def _withdraw(attested: Any, **kw: Any) -> None:
+        stubs["withdrawn"].append(1)
+
+    monkeypatch.setattr(update_mod, "withdraw_involuntary_stops", _withdraw)
+    monkeypatch.setattr(
+        update_mod, "write_source_marker", lambda root, **kw: stubs["marker"].append(1) or True
+    )
+
+    with pytest.raises(update_mod.UpdateError) as caught:
+        meshupdate._install_classic("0.99.0", runner=None, update_mod=update_mod)
+    message = str(caught.value)
+    assert "installer exited 3" in message, message
+    assert "Permission denied" in message, message
+    assert stubs["withdrawn"] == [1] and stubs["marker"] == [], stubs
+
+
+def test_the_reengage_total_is_capped_at_the_nominal_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: the 120 s nominal is a CAP under a fat slow-op remainder.
+
+    A fake clock advances 90 s per engage with a 500 s budget: with the cap,
+    total = min(120, 500) so engages 1 (left 120) and 2 (left 30) run and 3 is
+    skipped; the old ``max(0, budget)`` (total 500) would run all three — the
+    cell goes red on a revert.
+    """
+    from pathlib import Path as _Path
+    from types import SimpleNamespace
+
+    records = [
+        SimpleNamespace(session_id="s1"),
+        SimpleNamespace(session_id="s2"),
+        SimpleNamespace(session_id="s3"),
+    ]
+    outcomes = [
+        _Outcome("moved", "s1"),
+        _Outcome("unreachable", "s2"),
+        _Outcome("draining", "s3"),
+    ]
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(meshupdate.time, "monotonic", lambda: clock["t"])
+
+    def _engage(record: Any, *, root: Any, deadline_s: float) -> str:
+        clock["t"] += 90.0
+        return ""
+
+    monkeypatch.setattr(meshupdate, "_engage_successor", _engage)
+    engaged, note = meshupdate.reengage_displaced(_Path("/x"), records, outcomes, budget=500.0)
+    assert engaged == 2, engaged
+    assert "1 not re-engaged inside the budget" in note, note
 
 
 def test_reengage_targets_only_the_displaced_and_reports_failures(
@@ -975,7 +1093,7 @@ def test_the_roll_starts_only_after_the_install_sweep_and_reengage(
         state["current"] = version
         return meshupdate.METHOD_GENERATION
 
-    def _sweep(root: Any, *, targets: Any, budget: Any = None) -> tuple[list[Any], str]:
+    def _sweep(root: Any, *, budget: Any = None) -> tuple[list[Any], str]:
         log.append("sweep")
         return [], ""
 
@@ -1016,7 +1134,7 @@ def test_the_tail_runs_under_the_pass_lock(
     lock_path = server_a.root / "network" / "update.lock"
     held: list[bool] = []
 
-    def _sweep(root: Any, *, targets: Any, budget: Any = None) -> tuple[list[Any], str]:
+    def _sweep(root: Any, *, budget: Any = None) -> tuple[list[Any], str]:
         fd = open(lock_path, "a+")
         try:
             fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1062,7 +1180,7 @@ def test_the_tail_degrades_when_the_slow_budget_is_nearly_spent(
     monkeypatch.setattr(meshupdate, "install_build", _install)
     budgets: list[Any] = []
 
-    def _sweep(root: Any, *, targets: Any, budget: Any = None) -> tuple[list[Any], str]:
+    def _sweep(root: Any, *, budget: Any = None) -> tuple[list[Any], str]:
         budgets.append(budget)
         return [], "no time remained for the runtime sweep"
 

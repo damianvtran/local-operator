@@ -653,27 +653,32 @@ def live_session_targets(root: Path) -> list[Any]:
         return []
 
 
-def refresh_runtimes(
-    root: Path, *, targets: Sequence[Any], budget: float | None = None
-) -> tuple[list[Any], str]:
+def refresh_runtimes(root: Path, *, budget: float | None = None) -> tuple[list[Any], str]:
     """Ask every live runtime to move to the build on disk — RU §4.2 step 4. NEVER raises.
 
-    ``control.refresh_all`` IS ``lop refresh --all``: sequential asks over the
-    live set, each runtime judging its own ``may_refresh`` and answering with
-    its own sentence — nothing is signalled, nothing is stopped, and a busy
-    runtime answers ``busy`` and keeps its intact tree. ``targets`` is the
-    pass's snapshot: an ask is a dial to a PID, so the snapshot decides WHO is
-    asked (and with whom the tail's counts are compared); ``refresh_all`` still
-    re-reads the registry for the records themselves.
+    ``control.refresh_all`` IS ``lop refresh --all``: sequential asks, each
+    runtime judging its own ``may_refresh`` and answering with its own
+    sentence — nothing is signalled, nothing is stopped, and a busy runtime
+    answers ``busy`` and keeps its intact tree.
 
-    THE PER-CALL TIMEOUT IS THE BUDGET DIVIDED ACROSS THE LIVE SET, with the
-    arithmetic that makes the TOTAL honest (QA round 1, Q-2 + agent review
-    round 1, M2): a floor alone let ``2 s × live`` exceed the nominal budget
-    past 30 live sessions, so the ask is also CHUNKED — at most
-    ``budget / per_call`` targets are asked and the rest are named in the
-    note — and the whole sweep runs inside ``budget`` (the remaining slow-op
-    time when the caller clamped it, the nominal
-    :data:`REFRESH_SWEEP_DEADLINE_S` otherwise).
+    THE SWEEP SIZES ON AND DIALLS THE SAME SET (agent review round 2, F1).
+    ``live_session_targets`` is the ask set AND the sizer, read here at sweep
+    time; ``only_pids`` is ALWAYS passed, so ``refresh_all`` cannot dial a
+    record this call did not size for — the earlier shape passed ``None`` in
+    the ≤-askable branch, letting its re-read dial an unbounded live set at up
+    to 10 s per dial (the overrun this budget exists to close, reachable
+    exactly where the sizing read is best-effort). A runtime that STARTS
+    mid-pass is deliberately not asked: it loaded the build already on disk,
+    so there is nothing to move it to.
+
+    THE ARITHMETIC (QA round 1, Q-2 + agent review round 1, M2): per-call is
+    the budget divided across the live set, floored at
+    :data:`REFRESH_MIN_PER_CALL_S` and capped at the control module's default;
+    the dialled set is capped at ``ceil(nominal / per_call)`` targets, so the
+    sequential total is bounded by ``nominal`` plus at most ONE per-call
+    timeout — for ANY live count, including the under-read case the old shape
+    left open. ``nominal`` is the remaining slow-op time when the caller
+    clamped it, the nominal :data:`REFRESH_SWEEP_DEADLINE_S` otherwise.
 
     Returns ``(outcomes, note)``; a sweep that could not run at all returns no
     outcomes and a note, never an exception — the install already succeeded,
@@ -682,19 +687,18 @@ def refresh_runtimes(
     """
     from local_operator.session.runtime import control
 
-    slots = max(len(targets), 1)
     nominal = REFRESH_SWEEP_DEADLINE_S if budget is None else min(REFRESH_SWEEP_DEADLINE_S, budget)
     if nominal <= 0:
         return [], "no time remained for the runtime sweep"
+    live = live_session_targets(root)
+    slots = max(len(live), 1)
     per_call = min(max(nominal / slots, REFRESH_MIN_PER_CALL_S), control.DEFAULT_REFRESH_TIMEOUT_S)
     askable = max(1, math.ceil(nominal / per_call - 1e-9))
-    only: frozenset[int] | None = None
+    only = frozenset(int(getattr(t, "pid", 0) or 0) for t in live[:askable])
     note = ""
-    if len(targets) > askable:
-        only = frozenset(int(getattr(t, "pid", 0) or 0) for t in targets[:askable])
+    if len(live) > askable:
         note = (
-            f"the live set ({len(targets)}) exceeds the sweep budget; "
-            f"{len(targets) - askable} not asked"
+            f"the live set ({len(live)}) exceeds the sweep budget; {len(live) - askable} not asked"
         )
     try:
         outcomes = asyncio.run(
@@ -757,15 +761,21 @@ def reengage_displaced(
     is named in the PR rather than invented silently here.
 
     ``budget`` is the remaining time the caller's clamp left (None = the
-    nominal :data:`REENGAGE_BUDGET_S`); it is checked before each engage AND
-    passed into the engage as its own deadline, so the total cannot exceed it
-    by one full engage (agent review round 1, M2's tail note).
+    nominal :data:`REENGAGE_BUDGET_S`); the loop's total is the SMALLER of
+    that and the nominal (agent review round 2, F2), and it is checked before
+    each engage AND passed into the engage as its own deadline too, so the
+    total cannot exceed it by one full engage (agent review round 1, M2's
+    tail note).
     """
     by_id = {str(getattr(record, "session_id", "")): record for record in records}
     engaged = 0
     failed = 0
     skipped = 0
-    total = REENGAGE_BUDGET_S if budget is None else max(0.0, budget)
+    # THE NOMINAL TOTAL IS A CAP, NOT JUST A DEFAULT (agent review round 2,
+    # F2): a clotted slow-op remainder must not let the loop — and the pass
+    # lock behind it — run past the documented budget, so the caller's
+    # remaining time can only TIGHTEN it.
+    total = REENGAGE_BUDGET_S if budget is None else min(REENGAGE_BUDGET_S, max(0.0, budget))
     deadline = time.monotonic() + total
     for outcome in outcomes:
         if str(getattr(outcome, "method", "")) not in _DISPLACED_METHODS:
@@ -1147,7 +1157,7 @@ def _execute_validated(
         # (agent review round 1, M2).
         tail_budget = None if remaining is None else max(0.0, remaining - TAIL_RESERVE_S)
         tail_started = time.monotonic()
-        outcomes, sweep_note = refresh_runtimes(root, targets=snapshot, budget=tail_budget)
+        outcomes, sweep_note = refresh_runtimes(root, budget=tail_budget)
         moved, kept = count_pass_outcomes(outcomes)
         left = (
             None
