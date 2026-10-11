@@ -219,7 +219,7 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # any alias added or dropped — the one thing this line exists to
             # notice. Update the number when you intend to change the offered
             # alias surface; a diff here is the review prompt.
-            assert sum(len(row["aliases"]) for row in catalog) == 9
+            assert sum(len(row["aliases"]) for row in catalog) == 10
             created = await client.post(
                 "/v1/desktop/sessions", json={"request_id": request_id(), "cwd": str(workspace)}
             )
