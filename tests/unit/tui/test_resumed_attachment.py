@@ -524,6 +524,43 @@ async def test_the_follower_detach_refusal_names_what_the_session_can_do(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_the_follower_attach_refusal_names_what_the_session_can_do(tmp_path) -> None:
+    """The attach half of the no-team refusal, byte-pinned on the follower seam.
+
+    M12 follow-up (#2072/#2078): the follower seam said "this session cannot
+    run a team. /team chart …" where the TUI-local handler says what the
+    session CAN do — the same drift shape as the detach refusal above. The
+    routed twin is pinned in ``tests/unit/session/test_team_agent_precedence``
+    ``::TestTheRoutedCommands``, so the surfaces cannot disagree silently.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    agents, teams = _registries(tmp_path)
+
+    class NoRunTeamSession(Session):
+        attach_team = None  # type: ignore[assignment]
+
+    resumed = _session(tmp_path, agents, teams, session_cls=NoRunTeamSession)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+
+        result = app._team_attach_slash_result("lopdev", resumed.team_registry, SlashResult)
+
+        assert result.kind == "notice"
+        assert result.style == "warning"
+        assert result.text == (
+            "this session can list and chart teams, but not run one. "
+            "/team chart <name> shows a roster"
+        )
+        assert result.data == {}
+
+
+@pytest.mark.asyncio
 async def test_the_team_listing_footer_advertises_the_detach_verb(tmp_path) -> None:
     """Design round 1, D3: the verb that LEAVES the state is advertised where the
     listing that invites the state is painted — mirroring ``Detach: /agent
