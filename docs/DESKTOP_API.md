@@ -2145,11 +2145,11 @@ native (phone) WebView frame is pending its own lane; and the static preview rou
 (`/v1/static/*`) are not yet token-ENFORCED -- Phase A accepts tokens and mints
 short-lived signed URLs (see the static section), but refusing is a later phase
 and the client change to present a credential is the recorded follow-up. Shipped since
-this contract's head: two renderer lanes have landed -- the TUI (core v0.68.27: the file
-callouts, the `N more` disclosure and the state line; an HTML component is skipped silently,
-no placeholder) and the desktop UI (local-operator-ui v0.34.14: the same callouts and state
-line, each component in a sandboxed frame with its one `Source: ...` caption) -- while the
-relay web renderer is in review (core PR #2222) and the native phone renderer is a separate
+this contract's head: two renderer lanes consume the wire today -- the TUI (the file
+callouts, the `N more` disclosure and the state line; an HTML component is skipped
+silently, no placeholder) and the desktop UI (the same callouts and state line, each
+component in a sandboxed frame with its one `Source: ...` caption) -- while the relay
+web renderer is in review (core PR #2222) and the native phone renderer is a separate
 lane, not shipped.
 The READ half is implemented (routes lane C2): the desktop document route serves the
 assembled component as `{html}` by digest (`nosniff`, `Cache-Control: no-store`, 409
