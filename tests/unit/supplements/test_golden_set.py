@@ -198,10 +198,12 @@ async def test_the_60_turns_are_balanced_and_labelled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_deliverable_class_shows_its_file_and_only_its_file(tmp_path) -> None:
+async def test_every_written_file_shows_and_nothing_else_does(tmp_path) -> None:
     measured = await _measure(want_graphics=False)
-    # The files half is on: EVERY deliverable turn shows its written path and NOTHING else
-    # does. The missing-file list is empty by the previous test, so this pins the positive
-    # direction -- a heuristic that returned nothing would pass every other assertion here.
-    deliverable_ids = [t["id"] for t in _turns() if t["class"] == "deliverable"]
-    assert measured.shown == deliverable_ids, measured.shown
+    # The files half is on: EVERY turn the fixture labels with expect_files -- every
+    # deliverable turn, and the benchmark turns that carry files -- shows it, and NOTHING
+    # else does. The missing-file list is empty by the previous test, so this pins the
+    # positive direction -- a heuristic that returned nothing would pass every other
+    # assertion here.
+    expecting_ids = [t["id"] for t in _turns() if t["expect_files"]]
+    assert measured.shown == expecting_ids, measured.shown
