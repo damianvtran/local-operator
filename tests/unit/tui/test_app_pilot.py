@@ -96,6 +96,9 @@ class _FakeJobs:
     ``running_bash_jobs`` does the same for backgrounded shell work, which the
     stop ladder deliberately SPARES and now names when confirming a stop — so a
     test needs to be able to say "a build is also running" as plainly.
+    ``running_video_jobs`` is the same fact for the media lane's detached jobs
+    (remediation round 1: they are spared too, and both the stop confirmation
+    and the band's jobs rung count them).
     """
 
     def __init__(self, session: "FakeSession") -> None:
@@ -109,6 +112,10 @@ class _FakeJobs:
         rows += [
             SimpleNamespace(id=f"bash{i}", status="running", type="bash", queued=False)
             for i in range(self._session.running_bash_jobs)
+        ]
+        rows += [
+            SimpleNamespace(id=f"video{i}", status="running", type="video", queued=False)
+            for i in range(self._session.running_video_jobs)
         ]
         return rows
 
@@ -359,6 +366,11 @@ class FakeSession:
         #: exists so a build outlives the turn). Staged separately from
         #: `running_children` because the ladder treats them as opposites.
         self.running_bash_jobs = 0
+        #: The media lane's detached video jobs, which outlive a stop for the
+        #: same class of reason (contract §4.3) — staged for the stop
+        #: confirmation's spared count and the band's rung, both of which count
+        #: them beside `bash` (remediation round 1).
+        self.running_video_jobs = 0
         #: The job ledger the app counts children in. A real manager's rows are
         #: what `_job_count` reads, so the fake presents the same shape rather
         #: than having the app special-case a test double.

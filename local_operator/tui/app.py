@@ -12453,6 +12453,7 @@ class OperatorApp(App[None]):
         mcp_servers = list(getattr(state, "mcp_servers", []) or [])
         task_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "task"]
         bash_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "bash"]
+        video_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "video"]
         # Search spend rides the band cell here too. This path renders the
         # STORE's cumulative model cost rather than `_spend_total()` (which
         # already folds search spend in), so without this the canonical
@@ -12501,7 +12502,13 @@ class OperatorApp(App[None]):
             # is the hidden dock's only liveness cue, so a follower's band must
             # not go silent where the owner's would not (round 1, U2).
             subagents=sum(1 for j in task_jobs if j.status == "running"),
-            jobs=sum(1 for j in bash_jobs if j.status == "running" and not j.queued),
+            # Video rides the same rung here as the owner's band's
+            # `_job_count("bash") + _job_count("video")`, so the two cannot
+            # disagree about one session (the parity rule this block already
+            # states for `subagents`).
+            jobs=sum(
+                1 for j in (*bash_jobs, *video_jobs) if j.status == "running" and not j.queued
+            ),
             mcp=McpStatus(
                 configured=len(mcp_servers),
                 connected=sum(1 for server in mcp_servers if server.status == "connected"),
@@ -25890,13 +25897,18 @@ class OperatorApp(App[None]):
         if stopped:
             text = f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
             # Sparing backgrounded `bash` is deliberate (`background=true`
-            # exists so a build outlives the turn) and genuinely surprising
-            # to a user who just escalated a stop, which reads as "stop all
-            # of it". Naming the survivors here, and only when there ARE
-            # any, prevents the "I stopped everything, why is the build
-            # still running" question at the one moment the answer is
-            # wanted (D3, design round 1). Unconditional, it would be noise.
-            spared = self._job_count("bash")
+            # exists so a build outlives the turn), and the media lane's video
+            # jobs outlive a stop for the same class of reason (the job is
+            # detached; contract §4.3) — both are genuinely surprising to a
+            # user who just escalated a stop, which reads as "stop all of
+            # it". Naming the survivors here, and only when there ARE any,
+            # prevents the "I stopped everything, why is the build still
+            # running" question at the one moment the answer is wanted (D3,
+            # design round 1). Unconditional, it would be noise. Video joins
+            # the count (remediation round 1, folded from the reviewer's
+            # observation): the sentence's own remedy — "jobs cancel to stop"
+            # — is exactly a video job's cancel rail (`jobs op='cancel'`).
+            spared = self._job_count("bash") + self._job_count("video")
             if spared:
                 text += (
                     f"; {spared} background job{'s' if spared != 1 else ''} "
@@ -34035,7 +34047,12 @@ class OperatorApp(App[None]):
     def _poll_subagents(self) -> None:
         """Repaint the counter segments only when a running count changes."""
         agents = self._job_count("task")
-        jobs = self._job_count("bash")
+        # The jobs rung carries the video family too (§5.4's post-turn row): a
+        # video generation is a detached job whose card settles with the
+        # submit receipt (R5), so between submit and completion THIS counter is
+        # its only live presence — one number on the existing rung, never a
+        # second band row. Same predicate shape as `bash` (running, not queued).
+        jobs = self._job_count("bash") + self._job_count("video")
         # Delegated spend BEFORE the equality gate, because it moves on ticks
         # where the counts do not: a single child working for two minutes holds
         # `agents` at 1 the whole time while its bill climbs, so gating the
@@ -37003,12 +37020,17 @@ class OperatorApp(App[None]):
             self.screen.set_focus(None)
 
     def _job_count(self, kind: str) -> int:
-        """Jobs of one ``kind`` the band counts — ``task`` (subagents) or ``bash``.
+        """Jobs of one ``kind`` the band counts — ``task`` (subagents),
+        ``bash`` (backgrounded shell) or ``video`` (the media lane's detached
+        jobs).
 
-        The two are counted separately because they are different things an
+        The kinds are counted separately because they are different things an
         operator tracks: a subagent is delegated reasoning with no other
         representation on screen, while a backgrounded shell command already has
-        a tool card. Summing them would hide which kind is running.
+        a tool card. Summing them would hide which kind is running. ``video``
+        rides the same rungs as ``bash`` at the callers (the band's §5.4
+        post-turn row and the stop notice's spared count); it is named here so a
+        later reader cannot "simplify" the two-term callers back to one.
 
         ``task`` INCLUDES children still queued behind the capacity gate;
         ``bash`` does not. The asymmetry is the point. This counter is the

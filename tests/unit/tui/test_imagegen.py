@@ -38,17 +38,45 @@ def _ink_name(style: Style | str | None) -> str | None:
 # --- detection -------------------------------------------------------------
 
 
-def test_the_detection_set_is_one_tool_and_one_predicate() -> None:
-    """One tool, frozen by name: image-to-image is a parameter of it, not a
-    second tool, so a set that grows a sibling would silently widen every
-    renderer keyed off ``is_image_gen_tool``."""
-    assert imagegen.IMAGE_GEN_TOOLS == frozenset({"generate_image"})
+def test_the_detection_set_carries_the_two_media_tools_and_the_exclusion_subset() -> None:
+    """The set is the programme's ONE surface edit (R1: "add ``generate_video``
+    there first, then emit"): the video tool joins so the live body, settle
+    absorption and failure body follow with zero edits — the widening is
+    INTENDED, and the ONE renderer that must not follow (the in-turn interrupt
+    hint — a video job is not interruptible in-turn, contract §4.2 / ruling R4)
+    reads its own predicate at its own gate instead of subtracting the name
+    here: the card must keep wearing the variant. A set that silently grew a
+    sibling would re-arm every hint the exclusion never saw, which is why this
+    pin moves ONLY when a media tool is added everywhere at once."""
+    assert imagegen.IMAGE_GEN_TOOLS == frozenset({"generate_image", "generate_video"})
     assert imagegen.is_image_gen_tool("generate_image")
+    # The variant applies to video — that is the point of the shared set.
+    assert imagegen.is_image_gen_tool("generate_video")
     # Case and surrounding space tolerated the way the card's other name tests
     # are, so a producer that shouts the name still reaches the variant.
     assert imagegen.is_image_gen_tool(" Generate_Image ")
-    for other in ("generate_altered_image", "bash", "read", "", "generate_image_v2"):
+    assert imagegen.is_image_gen_tool(" Generate_Video ")
+    for other in (
+        "generate_altered_image",
+        "generate_image_v2",
+        "generate_video_v2",
+        "generate_audio",
+        "bash",
+        "read",
+        "",
+    ):
         assert not imagegen.is_image_gen_tool(other), other
+
+    # The exclusion predicate is the hint gate's reader (R4): same tolerance,
+    # same negative controls, plus the drift guard — the video subset must stay
+    # INSIDE the detection set, or a rename that edited one and not the other
+    # would silently re-arm the hint for video.
+    assert imagegen.VIDEO_GEN_TOOLS == frozenset({"generate_video"})
+    assert imagegen.is_video_gen_tool("generate_video")
+    assert imagegen.is_video_gen_tool(" Generate_Video ")
+    for other in ("generate_image", "generate_video_v2", "videogen", "bash", "read", ""):
+        assert not imagegen.is_video_gen_tool(other), other
+    assert imagegen.VIDEO_GEN_TOOLS <= imagegen.IMAGE_GEN_TOOLS
 
 
 # --- state vocabulary ------------------------------------------------------
