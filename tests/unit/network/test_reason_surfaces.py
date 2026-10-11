@@ -445,6 +445,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "``AbortSignal.reason``: the abort's own reason, authored in this process by "
         "the canceller for the abort line of the tool result, never a peer's prose",
     ),
+    # The todo store's own blocked-item reason, read by ``todo_fingerprint`` to
+    # build the guardrail's latch fingerprint: authored on this device by the
+    # ``todo`` tool's ``block`` op, never a peer's value, and COMPARED in that
+    # tuple rather than rendered — the one surface that shows it is the
+    # turn-boundary reminder, which addresses the MODEL as the condition to
+    # re-check, not a person.
+    ("local_operator/tools/builtin.py", "todo_fingerprint", "reason"): (
+        1,
+        "the todo store's own blocked reason (authored by the todo tool's block "
+        "op), compared in the latch fingerprint — never rendered for a person",
+    ),
     # ``mobile/daemon.py`` joined this scan with the mesh half's own import
     # (``MeshRefusal``) — the base file named ``local_operator.network`` nowhere.
     # The read below predates that and is not a mesh value: it is the session's
