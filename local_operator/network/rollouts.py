@@ -28,21 +28,24 @@ WHAT THIS FILE OWNS (RU §8.2 item 3, first half; the trigger note §4/§6):
   second source of truth) and :func:`cancel_record` (state ``abandoned`` plus
   the closing row).
 
-DORMANCY, BY CONSTRUCTION — and this is the S3a contract, not an accident:
-**no production path opens a record in this slice.** The trigger
-(``open_after_update``, called by ``lop update`` / ``/update``) is S3b's; the
-only callers of :func:`open_record` in this tree are its tests. A relay with
-the driver registered and an empty rollouts directory scans, finds nothing and
-writes nothing — no record, no audit row, no ask — so S3a ships inert in
-production and becomes reachable exactly when S3b's hook lands. The dormancy
-cell in ``tests/unit/network/test_rollouts.py`` observes that directly.
+THE TRIGGER (S3b) — :func:`open_after_update`, called by ``lop update``'s two
+successful-install exits and by the TUI's ``/update``. It reads the store and
+writes files, never the network: the policy (``network.rollout_on_update``,
+default :data:`DEFAULT_ROLLOUT_ON_UPDATE`), one record per network this device
+belongs to with at least one other active member, and the durable
+``update_rollout_started`` row. The relay's driver is still the only thing
+that calls a peer. A device with no members — or a move that is not strictly
+newer, or a suppressed run — opens no record: the dormancy the S3a cell
+observed stays true wherever there is nothing to roll.
 
-WHAT IS DELIBERATELY NOT HERE (S3b's, named so the halves stay honest): the
-``open_after_update`` hook and its front-end call sites; the
-``network.rollout_on_update`` setting and ``lop update --no-roll``;
-``update_rollout_suppressed``; the summary PRINT (the summary TEXT lives here,
-as :func:`summary`). And, per the approved split and the note's §9.3: the
-link-open nudge is deferred — the cadence is the contact detector.
+WHAT IS DELIBERATELY NOT HERE: the summary PRINT (the summary TEXT lives
+here, as :func:`summary`, and the front ends print what
+:func:`open_after_update` returns); the manual verbs' ``--all``/``--status``
+and the peers-row rollout segment (the visibility slice's). And, per the
+approved split and the note's §9.3: the link-open nudge is deferred — the
+cadence is the contact detector. The coded ``not_authorised`` frame the r2
+errata names stays a follow-up: a codeless refusal is recorded non-claiming
+and retried (:func:`classify_answer`), never guessed as the missing grant.
 
 WHY THE DRIVER IS A THREAD OF ITS OWN (note §4): an apply is a slow call
 bounded at 900 s plus its reply margin; driving it on the definitions
@@ -59,6 +62,7 @@ import secrets
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
@@ -124,6 +128,21 @@ RULE_REFUSAL_CODES: tuple[str, ...] = ("target_not_published", "editable_install
 ROLLOUT_STARTED = "update_rollout_started"
 MEMBER_STATE = "update_member_state"
 ROLLOUT_DONE = "update_rollout_done"
+ROLLOUT_SUPPRESSED = "update_rollout_suppressed"
+
+#: The trigger's policy default (``network.rollout_on_update``): roll after an
+#: update moves to a strictly newer version. ``off`` is the other value; the
+#: registry's enum carries both (settings_io's ``mesh_updates`` section), and
+#: ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins this
+#: constant against the registry default.
+DEFAULT_ROLLOUT_ON_UPDATE = "auto"
+ROLLOUT_POLICY_VALUES: frozenset[str] = frozenset({"auto", "off"})
+
+#: The closed authority token the trigger writes (note §6): the primary
+#: decided under the operator's standing instruction. The manual verbs' token
+#: is ``operator_command`` (a future path); a record opened without one carries
+#: no authority object, and the driver reads that as "not policy-driven".
+AUTHORITY_STANDING_INSTRUCTION = "standing_instruction"
 
 
 # ---------------------------------------------------------------------------
@@ -248,22 +267,29 @@ def open_record(
     origin: str,
     target: Mapping[str, str],
     members: Sequence[Mapping[str, str]],
+    authority: Mapping[str, str] | None = None,
     root: Path | None = None,
     window_s: float = WINDOW_S,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Open one rollout record, superseding any older ``active`` one for the network.
 
-    S3b CALLS THIS — from ``open_after_update`` at the two update exits and
-    ``/update``. In S3a the tests are the only callers (the dormancy contract;
-    see the module docstring). ``members`` is the snapshot, in network order,
-    each ``{"device": …, "name": …}``; every member starts ``pending``.
+    :func:`open_after_update` (the S3b trigger) is the production caller; the
+    tests call this directly. ``members`` is the snapshot, in network order,
+    each ``{"device": …, "name": …}`` — plus the member's INITIAL STATE when
+    the snapshot already knows it without a call (round 1, M3): a pool member
+    arrives ``{"state": "skipped", "code": "unsupported_kind"}``, so that arm
+    is produced here rather than being a dead branch, and a reader never sees
+    the pod as ``pending`` for the moment before the pass would have learned
+    it. Everything else starts ``pending``.
 
-    ``unsupported_kind`` (the §3 exclusion of pool-kind members "before any
-    call") has NO PRODUCING PATH in S3a (round 1, M3): it is S3b's snapshot
-    call — an initial-state field in this mapping, or a documented
-    one-mutate-after-open — and is named here so nothing builds on an arm
-    that cannot fire.
+    ``authority`` is WHO DECIDED (note §3/§6), written into the record in the
+    same step that creates it: ``{"authority": "standing_instruction",
+    "policy": "auto", "via": "update"|"snapshot"|"tui"}`` on the trigger
+    path; ``None`` when no authority object applies (the tests, a future
+    operator-command path). The driver reads it before every ask — a
+    ``standing_instruction`` record halts when the policy is no longer
+    ``auto`` (note §5).
 
     The supersede is part of the open (RU §6.3): a second update mid-pass
     re-snapshots, and the older record keeps its history, marked
@@ -286,8 +312,8 @@ def open_record(
             {
                 "device": str(member.get("device") or ""),
                 "name": str(member.get("name") or ""),
-                "state": "pending",
-                "code": "",
+                "state": str(member.get("state") or "pending"),
+                "code": str(member.get("code") or ""),
                 "detail": "",
                 "version": "",
                 "next_ask_at": 0.0,
@@ -297,6 +323,8 @@ def open_record(
             for member in members
         ],
     }
+    if authority is not None:
+        record["authority"] = dict(authority)
     ensure_rollouts_dir(root)
     _write_record(record, root)
     for path in active_record_paths(root):
@@ -345,6 +373,32 @@ def member_terminal(member: Mapping[str, Any]) -> bool:
     return True
 
 
+#: The ``skipped`` codes no later re-run can move (round 1, R1-2): the
+#: member's kind cannot run updates at all, or its build predates the frames.
+#: ``no_grant`` is deliberately NOT one — a later grant makes that member
+#: rollable, so closing with the nudge stays honest for it.
+UNROLLABLE_SKIP_CODES: frozenset[str] = frozenset({"unsupported_kind", "predates_rolling_updates"})
+
+
+def _rollable_remainder(record: Mapping[str, Any]) -> bool:
+    """Could a later ``lop network update`` still move a remaining member? (R1-2)
+
+    The closing nudge ("re-run ``lop network update`` to roll what remains")
+    must not fire for a remainder that only holds members no re-run can move —
+    a ``skipped (unsupported_kind)`` pool member, or a build that predates the
+    frames — or the sentence promises an action that cannot work. The skip
+    itself stays NAMED in the summary's sets; only the nudge is withheld.
+    """
+    for member in record.get("members", []):
+        state = str(member.get("state") or "")
+        if state in DONE_STATES:
+            continue
+        if state == "skipped" and str(member.get("code") or "") in UNROLLABLE_SKIP_CODES:
+            continue
+        return True
+    return False
+
+
 def _mark_applying(record: dict[str, Any], device: str) -> bool:
     """Set one member to the in-flight ``applying`` state before its ask.
 
@@ -384,10 +438,18 @@ def summary(record: Mapping[str, Any]) -> str:
         groups.setdefault(label, []).append(str(member.get("name") or member.get("device") or "?"))
     parts = "; ".join(f"{label}: {', '.join(names)}" for label, names in sorted(groups.items()))
     count = len(record.get("members", []))
-    line = f"rollout {record.get('id')} is {record.get('state')} to {count} peers ({parts})"
-    if record.get("state") == "done" and any(
-        str(member.get("state")) not in DONE_STATES for member in record.get("members", [])
-    ):
+    state = str(record.get("state") or "")
+    # The count reads "(s)" (the repo's convention), and the OPEN line says
+    # what the roll is about to DO — it is an ask, not a status adjective
+    # (round 1, D1/D2: "is active to 1 peers" was neither plural nor speech a
+    # person uses). The closing states keep a plain reader-only fallback.
+    lead = (
+        f"will ask {count} peer(s) to move to this build"
+        if state == "active"
+        else f"is {state}: {count} peer(s)"
+    )
+    line = f"rollout {record.get('id')} {lead} ({parts})"
+    if state == "done" and _rollable_remainder(record):
         line += (
             "; this rollout is no longer active — re-run `lop network update` to roll what remains"
         )
@@ -591,7 +653,7 @@ def _close_record(
         done = sum(1 for m in record.get("members", []) if str(m.get("state")) in DONE_STATES)
         total = len(record.get("members", []))
         counts = f"{done} of {total} moved"
-        if state == "done" and done < total:
+        if state == "done" and _rollable_remainder(record):
             counts += (
                 "; this rollout is no longer active — re-run `lop network update` "
                 "to roll what remains"
@@ -626,7 +688,15 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
     FRESH ``net_update`` probe — an apply returns, or times out, before the
     next member is asked (serial by construction). The record is re-read
     before each member so ``--cancel`` (and a supersede) stops the pass at
-    the next boundary without any other command.
+    the next member boundary.
+
+    THE SWITCH IS RE-READ BEFORE EVERY ASK (note §5): a policy-driven roll
+    (``standing_instruction``) halts at the next member boundary when
+    ``network.rollout_on_update`` is no longer ``auto`` — no other command
+    needed. The record stays ``active`` (the manual verbs still work under
+    either policy, and a later ``auto`` resumes it); an apply already in
+    flight inside ``update_peer`` finishes and is recorded — an install
+    cannot be recalled.
     """
     from local_operator.network import meshupdate
 
@@ -656,6 +726,15 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
             continue
         if float(member.get("next_ask_at") or 0.0) > moment:
             continue
+        # THE SWITCH, RE-READ BEFORE EVERY ASK (note §5): only a
+        # policy-driven record halts — a manual/operator_command one (or one
+        # with no authority object) is not this switch's to stop.
+        authority = current.get("authority") or {}
+        if (
+            str(authority.get("authority") or "") == AUTHORITY_STANDING_INSTRUCTION
+            and rollout_policy(root) != "auto"
+        ):
+            return
         device = str(member.get("device") or "")
         # The PRE-ASK outcome state, kept for the audit comparison below: the
         # ``applying`` marker is an in-flight fact, not an outcome, so comparing
@@ -910,6 +989,255 @@ def latest_active(  # noqa: SIM108 — the loop is clearer than a comprehension 
     return best
 
 
+# ---------------------------------------------------------------------------
+# The trigger (S3b): a completed update opens the records
+# ---------------------------------------------------------------------------
+
+
+def rollout_policy(root: Path | None = None) -> str:
+    """``network.rollout_on_update``, re-read fresh; default ``auto``.
+
+    THE ONE READER, because two consumers must agree: the HOOK (a fresh update
+    process, which reads it once at its own start — note Q5) and the DRIVER
+    (which re-reads it before every ask, so ``off`` halts a policy-driven roll
+    at the next member boundary — note §5; the reason the setting's registry
+    section is LIVE). Through ``store.read_config``, the one reader this
+    package uses, so the key a front end reads and the key the relay reads
+    cannot land in different places.
+
+    AN UNRECOGNISED VALUE READS AS THE DEFAULT — the registry refuses anything
+    else on write, and a hand-edited typo must not read as a silent ``off``.
+    But a hand-edit of the WORD ``off`` is not a typo, and YAML parses the
+    unquoted spelling as a boolean: the registry's own writer quotes it (so a
+    `/settings` write round-trips as the string), while ``rollout_on_update:
+    off`` typed into ``config.yml`` arrives here as ``False``. A boolean reads
+    as the obvious word — off for ``False``, the default for ``True`` — because
+    falling back to ``auto`` there would be the unsafe direction for the one
+    key whose job is stopping a roll.
+    """
+    from local_operator.network import store
+
+    raw = store.read_config(("network", "rollout_on_update"), DEFAULT_ROLLOUT_ON_UPDATE, root=root)
+    if isinstance(raw, bool):
+        return DEFAULT_ROLLOUT_ON_UPDATE if raw else "off"
+    value = str(raw or "")
+    return value if value in ROLLOUT_POLICY_VALUES else DEFAULT_ROLLOUT_ON_UPDATE
+
+
+@dataclass(frozen=True)
+class RolloutOpen:
+    """What :func:`open_after_update` did: the lines to show, and any failure.
+
+    ``lines`` carries one :func:`summary` per opened record — the update's own
+    summary is the operator's first sight of the roll (RU §7.3), so the TEXT
+    is owned here and each front end renders it on its own surface (the CLI
+    prints it; ``/update`` shows it as a notice). ``failure`` is the one
+    sentence a front end shows when the hook could not queue anything — with
+    the next step its siblings carry ("updated, but the mesh roll could not be
+    queued: … — run `lop network update` to roll by hand"; round 1, D3) —
+    because the install is already in and nothing here may change an exit code.
+    """
+
+    lines: tuple[str, ...] = ()
+    failure: str = ""
+
+
+def _member_snapshot(record: Any) -> list[dict[str, str]]:
+    """One network's roll set from the store record, in network order.
+
+    Every other ACTIVE member, self out; a pool member rides the mapping
+    already ``skipped``/``unsupported_kind`` — note §3's exclusion "before any
+    call", recorded so the summary can say why the pod was not rolled (RU
+    §7.3's own example). Names may be empty; the summary falls back to the
+    device id. A member's grant and its feature string are deliberately NOT
+    filtered here: the requester cannot read the receiver's row, so an absent
+    grant is learned from the member's own answer, never guessed (the §3
+    scope sentence; ``definitions.unholdable_capability``'s docstring is the
+    same rule, and pre-filtering with the local row would skip every member
+    whose grant lives only on the other end).
+    """
+    snapshot: list[dict[str, str]] = []
+    for member in record.active_members():
+        if str(member.device_id) == str(record.self_device_id):
+            continue
+        row = {"device": str(member.device_id), "name": str(member.name or "")}
+        if str(member.kind) == "pool":
+            row["state"] = "skipped"
+            row["code"] = "unsupported_kind"
+        snapshot.append(row)
+    return snapshot
+
+
+def open_after_update(
+    before: str,
+    after: str,
+    *,
+    via: str,
+    no_roll: bool = False,
+    root: Path | None = None,
+    now: float | None = None,
+) -> RolloutOpen:
+    """The update front ends' hook: open the mesh's rollout records. NEVER raises.
+
+    Called between the services tail and the machine report line on ``lop
+    update``'s two successful-install exits (PyPI ``via="update"``, snapshot
+    ``via="snapshot"``) and by the TUI's ``/update`` (``via="tui"``). It reads
+    the store and writes files — no network: the relay is the only driver
+    (note §3), and the services tail may have just rolled it, which is why
+    this is a file write rather than a call.
+
+    FIRES ONLY WHEN ALL HOLD (note §3):
+    (1) the install moved to a STRICTLY newer version — ``update.parse_version``
+        on both sides, the comparator ``readiness.compare_builds`` uses. A
+        snapshot that keeps the last tag's version has nothing for members to
+        do, and an unparsable side proves no move, so both fire nothing;
+    (2) the policy is ``auto`` and ``--no-roll`` was not given;
+    (3) this device has at least one other active member, else no record and
+        no row.
+    One record per active network with members, in the store's stable order
+    (the walk of ``DefinitionsSyncer._targets``), the target the version just
+    installed — members move to that version exactly, never "latest" (RU §3).
+    ``source_ref`` stays empty on this path: it is provenance the member never
+    fetches (RU §2 rule 4), the wire target is built live from the asking
+    relay's own stamp (``meshupdate.update_peer``), and this process's marker
+    names the tree it is superseding.
+
+    A suppressed run (``off`` or ``--no-roll``, with ≥1 member) writes ONE
+    ``update_rollout_suppressed`` row and opens nothing (note §5/§6). A failure
+    of the hook itself must not touch the exit code, so every exception is
+    caught and reported as the one sentence (note §3).
+    """
+    # Hoisted above the ``try`` (R1-1, round 1): the ``except`` returns the
+    # lines already opened, and a failure BEFORE the loop must find it bound.
+    lines: list[str] = []
+    try:
+        # Function-local, not module-level: this module is on the relay's
+        # import path and ``update`` pulls httpx and the installer machinery.
+        from local_operator.update import parse_version
+
+        parsed_after = parse_version(str(after))
+        parsed_before = parse_version(str(before))
+        if parsed_after is None or parsed_before is None or parsed_after <= parsed_before:
+            return RolloutOpen()
+
+        from local_operator.network import store
+
+        networks: list[tuple[Any, list[dict[str, str]]]] = []
+        for record in store.list_networks(root):
+            if str(record.trust) != "active" or not str(record.self_device_id):
+                continue
+            snapshot = _member_snapshot(record)
+            if snapshot:
+                networks.append((record, snapshot))
+        if not networks:
+            return RolloutOpen()
+
+        policy = rollout_policy(root)
+        if no_roll or policy != "auto":
+            _audit_rollout_suppressed(via=via, policy=policy, no_roll=no_roll, root=root)
+            return RolloutOpen()
+
+        moment = time.time() if now is None else now
+        for record, snapshot in networks:
+            opened = open_record(
+                network=str(record.network_id),
+                origin=str(record.self_device_id),
+                target={"version": str(after), "source_ref": ""},
+                members=snapshot,
+                authority={
+                    "authority": AUTHORITY_STANDING_INSTRUCTION,
+                    "policy": policy,
+                    "via": str(via),
+                },
+                root=root,
+                now=moment,
+            )
+            _audit_rollout_started(opened, before=str(before), root=root)
+            lines.append(summary(opened))
+        return RolloutOpen(lines=tuple(lines))
+    except Exception as exc:  # noqa: BLE001 — the install already succeeded (note §3)
+        # R1-1 (round 1): lines opened before the failure are RETURNED, not
+        # discarded — those networks' records are on disk and will be driven,
+        # so both front ends render lines-then-sentence and the operator is
+        # never told "could not be queued" for a network where it was.
+        return RolloutOpen(
+            lines=tuple(lines),
+            failure=(
+                f"updated, but the mesh roll could not be queued: {exc} — "
+                "run `lop network update` to roll by hand"
+            ),
+        )
+
+
+def _audit_rollout_started(
+    record: Mapping[str, Any], *, before: str, root: Path | None = None
+) -> None:
+    """The record's OPENING row — durable, best-effort (note §6).
+
+    The authority decision, written in the same step that opens the record:
+    ``authority`` is a closed token, ``via`` names the front end, ``target``
+    and ``from`` are the move, ``members`` is the snapshot's size. Written
+    through its own short-lived writer rather than a relay's: the relay may be
+    mid-restart at this moment (the services tail just rolled it), which is the
+    same reason the record is a file.
+    """
+    try:
+        from local_operator.network.audit import AuditEvent, AuditLog
+
+        authority = record.get("authority") or {}
+        event = AuditEvent(
+            event=ROLLOUT_STARTED,
+            actor="self",
+            subject=str(record.get("id") or ""),
+            outcome="ok",
+            network_id=str(record.get("network") or ""),
+            detail={
+                "rollout": str(record.get("id") or ""),
+                "authority": str(authority.get("authority") or ""),
+                "policy": str(authority.get("policy") or ""),
+                "via": str(authority.get("via") or ""),
+                "target": str((record.get("target") or {}).get("version") or ""),
+                "from": str(before),
+                "members": str(len(record.get("members", []))),
+            },
+        )
+        log = AuditLog.from_config(root)
+        log.record(event)
+        log.close()
+    except Exception:  # noqa: BLE001 — best-effort, same as every other row
+        pass
+
+
+def _audit_rollout_suppressed(
+    *, via: str, policy: str, no_roll: bool, root: Path | None = None
+) -> None:
+    """The suppressed row (note §5/§6): an update moved, a switch stopped the roll.
+
+    Batched, not durable — it records a decision NOT to act, remade at the next
+    update. ``flag`` names the per-run override when that is what stopped it;
+    ``policy`` is what the key said at the time.
+    """
+    try:
+        from local_operator.network.audit import AuditEvent, AuditLog
+
+        event = AuditEvent(
+            event=ROLLOUT_SUPPRESSED,
+            actor="self",
+            outcome="ok",
+            cause="policy",
+            detail={
+                "via": str(via),
+                "policy": str(policy),
+                "flag": "--no-roll" if no_roll else "",
+            },
+        )
+        log = AuditLog.from_config(root)
+        log.record(event)
+        log.close()
+    except Exception:  # noqa: BLE001 — best-effort, same as every other row
+        pass
+
+
 def install(server: "RelayServer") -> None:
     """Register the driver's start and stop hooks. This slice serves no ops.
 
@@ -920,8 +1248,9 @@ def install(server: "RelayServer") -> None:
     ``RelayServer.stop()`` (round 5, Q-R5-1: a driver that outlived the relay
     kept ticking a root the caller believed quiet, and its ``time.sleep``
     boundaries were visible to any process-global patch of ``time.sleep``).
-    The driver is what S3b's trigger will wake into work; until then it scans
-    empty directories.
+    The driver is what the trigger wakes with work (:func:`open_after_update`
+    writes the record; this thread asks the peers), and it still scans empty
+    directories quietly on a device with no records.
     """
     server.register_ops(
         {},

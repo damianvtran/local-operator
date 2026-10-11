@@ -30,7 +30,11 @@ from typing import Any, cast
 import pytest
 
 from local_operator.network import cli as net_cli
-from local_operator.network import meshupdate, rollouts
+from local_operator.network import meshupdate, rollouts, types
+from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
+    _pair,
+    devices,
+)
 
 
 def _live(record_id: str, root: Path | None = None) -> dict[str, Any]:
@@ -72,7 +76,11 @@ class _Server:
 
 
 def _open(
-    root: Path | None, *, devices: list[str], network: str = "n1", now: float = 1000.0
+    root: Path | None,
+    *,
+    devices: list[str],  # noqa: F811 — the fixture import above shares the name
+    network: str = "n1",
+    now: float = 1000.0,
 ) -> dict[str, Any]:
     return rollouts.open_record(
         network=network,
@@ -162,6 +170,13 @@ def test_the_summary_names_queued_and_skipped(tmp_path: Path) -> None:
     line = rollouts.summary(record)
     # RU §7.3 NAMES the sets (round 1, M4): counts alone hid WHO was skipped.
     assert "queued: d_a" in line and "skipped (no_grant): d_b" in line, line
+    # Round 1, D1/D2: the open line is an ask in speech a person uses, and the
+    # count reads "(s)" — the repo's convention — even at one.
+    assert "will ask 2 peer(s) to move to this build" in line, line
+    one = _open(root, devices=["d_c"], network="n2")
+    assert "will ask 1 peer(s) to move to this build" in rollouts.summary(one), rollouts.summary(
+        one
+    )
 
 
 def test_a_concurrent_open_does_not_retire_a_newer_record(tmp_path: Path) -> None:
@@ -798,3 +813,463 @@ def test_a_member_frame_carries_the_rollout_id_into_the_members_rows(
     assert reply["state"] == "busy"
     assert seen["rollout"] == "ro_abc123", seen
     assert server.audit.rows[-1].detail["rollout"] == "ro_abc123", server.audit.rows
+
+
+# ---------------------------------------------------------------------------
+# The trigger (S3b, note §3/§5/§6): a completed update opens the records
+# ---------------------------------------------------------------------------
+
+
+def _seed_mesh(
+    root: Path,
+    *,
+    members: list[tuple[str, types.MemberKind]] = [("d_a", "device")],
+    network_id: str = "n_trigger00000000000000000000001",
+    name: str = "home-net",
+    self_id: str = "d_origin",
+    trust: types.TrustState = "active",
+) -> None:
+    """One network record on disk, the shape the trigger's walk reads."""
+    from local_operator.network import store
+
+    record = types.NetworkRecord(
+        network_id=network_id,
+        name=name,
+        trust=trust,
+        self_device_id=self_id,
+        members=[
+            types.MemberRecord(device_id=self_id, name="origin"),
+            *[
+                types.MemberRecord(device_id=device, name=device, kind=kind)
+                for device, kind in members
+            ],
+        ],
+    )
+    store.save(record, root)
+
+
+def _set_policy(root: Path, value: str) -> None:
+    """Write the key the way ``/settings`` does — the one writer ``ConfigManager`` has.
+
+    Hand-writing YAML is what this helper exists NOT to do: an unquoted ``off``
+    parses as a boolean, which is the very ambiguity ``rollout_policy`` maps —
+    pinned separately, through the raw-write cell below.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    settings_io.write_setting(
+        ConfigManager(root),
+        settings_io.BY_KEY["network.rollout_on_update"],
+        value,
+        notify=False,
+    )
+
+
+def _set_policy_raw(root: Path, text: str) -> None:
+    """Write ``values.network.rollout_on_update`` verbatim, as a hand edit would."""
+    from local_operator.config import CONFIG_FILE_NAME
+
+    Path(root).mkdir(parents=True, exist_ok=True)
+    (Path(root) / CONFIG_FILE_NAME).write_text(
+        f"values:\n  network:\n    rollout_on_update: {text}\n", encoding="utf-8"
+    )
+
+
+def _audit_rows(root: Path, event: str) -> list[dict[str, Any]]:
+    audit = rollouts.rollouts_dir(root).parent / "audit.jsonl"
+    if not audit.exists():
+        return []
+    lines = [json.loads(line) for line in audit.read_text().splitlines() if line.strip()]
+    return [row for row in lines if row.get("event") == event]
+
+
+def test_the_trigger_opens_a_record_naming_its_authority(tmp_path: Path) -> None:
+    root = tmp_path / "cfg"
+    _seed_mesh(root, members=[("d_a", "device"), ("d_b", "device")])
+    result = rollouts.open_after_update("0.27.0", "0.28.0", via="update", root=root, now=1000.0)
+    assert result.failure == "", result.failure
+    assert len(result.lines) == 1, result.lines
+    record = rollouts.latest_active(root=root)
+    assert record is not None, "the trigger opened no record"
+    assert record["state"] == "active"
+    assert record["network"] == "n_trigger00000000000000000000001"
+    assert record["origin"] == "d_origin"
+    assert record["target"] == {"version": "0.28.0", "source_ref": ""}, record["target"]
+    # WHO DECIDED rides the record in the same step that opens it (note §3/§6).
+    assert record["authority"] == {
+        "authority": "standing_instruction",
+        "policy": "auto",
+        "via": "update",
+    }, record.get("authority")
+    states = [(m["device"], m["state"], m["code"]) for m in record["members"]]
+    assert states == [("d_a", "pending", ""), ("d_b", "pending", "")], states
+    # RU §7.3: the summary is the operator's first sight of the roll, and it
+    # NAMES the queued set.
+    assert "queued: d_a, d_b" in result.lines[0], result.lines
+    # The durable opening row (note §6): one per record, carrying the decision.
+    rows = _audit_rows(root, rollouts.ROLLOUT_STARTED)
+    assert len(rows) == 1, rows
+    assert rows[0]["network_id"] == record["network"]
+    detail = rows[0]["detail"]
+    assert detail["rollout"] == record["id"]
+    assert detail["authority"] == "standing_instruction"
+    assert detail["policy"] == "auto"
+    assert detail["via"] == "update"
+    assert detail["target"] == "0.28.0"
+    assert detail["from"] == "0.27.0"
+    assert detail["members"] == "2"
+
+
+def test_the_trigger_opens_one_record_per_network_in_store_order(tmp_path: Path) -> None:
+    root = tmp_path / "cfg"
+    _seed_mesh(root, network_id="n_trigger00000000000000000000001", name="a-net")
+    _seed_mesh(
+        root,
+        network_id="n_trigger00000000000000000000002",
+        name="b-net",
+        members=[("d_c", "device")],
+    )
+    result = rollouts.open_after_update("0.27.0", "0.28.0", via="snapshot", root=root, now=1000.0)
+    assert len(result.lines) == 2, result.lines
+    records = [rollouts.read_record(p.stem, root) for p in rollouts.active_record_paths(root)]
+    nets = sorted(str(r["network"]) for r in records if r is not None)
+    assert nets == [
+        "n_trigger00000000000000000000001",
+        "n_trigger00000000000000000000002",
+    ], nets
+    assert len(_audit_rows(root, rollouts.ROLLOUT_STARTED)) == 2
+
+
+def test_the_trigger_fires_only_for_a_strictly_newer_parseable_move(tmp_path: Path) -> None:
+    root = tmp_path / "cfg"
+    _seed_mesh(root)
+    for before, after in (
+        ("0.28.0", "0.28.0"),  # a snapshot that keeps the last tag's version
+        ("0.28.0", "0.27.0"),  # a deliberate rollback
+        ("", "0.28.0"),  # no before to compare
+        ("0.28.0", "main"),  # an unparsable after
+    ):
+        result = rollouts.open_after_update(before, after, via="update", root=root, now=1000.0)
+        assert result == rollouts.RolloutOpen(), (before, after, result)
+    assert rollouts.latest_active(root=root) is None
+    assert not rollouts.rollouts_dir(root).exists(), "a fired-nothing run created the dir"
+    assert _audit_rows(root, rollouts.ROLLOUT_STARTED) == []
+    assert _audit_rows(root, rollouts.ROLLOUT_SUPPRESSED) == []
+
+
+def test_no_roll_suppresses_with_one_row_and_no_record(tmp_path: Path) -> None:
+    root = tmp_path / "cfg"
+    _seed_mesh(root)
+    result = rollouts.open_after_update(
+        "0.27.0", "0.28.0", via="update", no_roll=True, root=root, now=1000.0
+    )
+    assert result.lines == () and result.failure == ""
+    assert rollouts.latest_active(root=root) is None
+    assert not rollouts.rollouts_dir(root).exists()
+    rows = _audit_rows(root, rollouts.ROLLOUT_SUPPRESSED)
+    assert len(rows) == 1, rows
+    assert rows[0]["cause"] == "policy"
+    assert rows[0]["detail"] == {"via": "update", "policy": "auto", "flag": "--no-roll"}, rows[0]
+
+
+def test_policy_off_suppresses_and_the_row_says_which_half_stopped_it(tmp_path: Path) -> None:
+    root = tmp_path / "cfg"
+    _seed_mesh(root)
+    _set_policy(root, "off")
+    assert rollouts.rollout_policy(root) == "off"
+    result = rollouts.open_after_update("0.27.0", "0.28.0", via="snapshot", root=root, now=1000.0)
+    assert result.lines == () and result.failure == ""
+    assert rollouts.latest_active(root=root) is None
+    rows = _audit_rows(root, rollouts.ROLLOUT_SUPPRESSED)
+    assert len(rows) == 1, rows
+    assert rows[0]["detail"] == {"via": "snapshot", "policy": "off", "flag": ""}, rows[0]
+
+
+def test_rollout_policy_defaults_and_an_unrecognised_value_reads_as_auto(tmp_path: Path) -> None:
+    root = tmp_path / "cfg"
+    assert rollouts.rollout_policy(root) == "auto", "an absent store is the default policy"
+    _set_policy(root, "off")
+    assert rollouts.rollout_policy(root) == "off"
+    # The WRITE path refuses anything else (the registry's schema), and a
+    # hand-edited typo must not read as a silent off either.
+    with pytest.raises(ValueError, match="auto, off"):
+        _set_policy(root, "banana")
+    _set_policy_raw(root, "banana")
+    assert rollouts.rollout_policy(root) == "auto"
+    # A hand-typed unquoted `off`/`on` arrives as a YAML boolean: it reads as
+    # the obvious word, and never as the unsafe fallback (auto) for the word
+    # `off`.
+    _set_policy_raw(root, "off")
+    assert rollouts.rollout_policy(root) == "off"
+    _set_policy_raw(root, "on")
+    assert rollouts.rollout_policy(root) == "auto"
+
+
+def test_a_pool_member_rides_skipped_unsupported_kind_and_the_summary_says_so(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cfg"
+    _seed_mesh(root, members=[("d_a", "device"), ("d_pod", "pool")])
+    result = rollouts.open_after_update("0.27.0", "0.28.0", via="update", root=root, now=1000.0)
+    record = rollouts.latest_active(root=root)
+    assert record is not None
+    assert [(m["device"], m["state"], m["code"]) for m in record["members"]] == [
+        ("d_a", "pending", ""),
+        ("d_pod", "skipped", "unsupported_kind"),
+    ], record["members"]
+    assert "skipped (unsupported_kind): d_pod" in result.lines[0], result.lines
+
+
+def test_a_network_with_no_other_members_and_an_untrusted_network_open_nothing(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cfg"
+    _seed_mesh(root, members=[])  # this device alone
+    _seed_mesh(
+        root,
+        network_id="n_trigger00000000000000000000002",
+        name="b-net",
+        members=[("d_c", "device")],
+        trust="untrusted",
+    )
+    result = rollouts.open_after_update("0.27.0", "0.28.0", via="update", root=root, now=1000.0)
+    assert result == rollouts.RolloutOpen(), result
+    assert rollouts.latest_active(root=root) is None
+    assert _audit_rows(root, rollouts.ROLLOUT_STARTED) == []
+
+
+def test_a_hook_failure_is_one_sentence_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    _seed_mesh(root)
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("no space left on device")
+
+    monkeypatch.setattr(rollouts, "open_record", _boom)
+    result = rollouts.open_after_update("0.27.0", "0.28.0", via="tui", root=root, now=1000.0)
+    assert result.lines == ()
+    assert result.failure == (
+        "updated, but the mesh roll could not be queued: no space left on device — "
+        "run `lop network update` to roll by hand"
+    ), result.failure
+    assert rollouts.latest_active(root=root) is None
+
+
+def test_a_partial_multi_network_open_keeps_the_lines_it_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1 (round 1): a failure on network N loses nothing already queued.
+
+    Every opened record is on disk and will be driven, so its summary line
+    must reach the front ends WITH the failure sentence — otherwise the
+    operator is told "could not be queued" for a network where it was.
+    """
+    root = tmp_path / "cfg"
+    _seed_mesh(root, network_id="n_trigger00000000000000000000001", name="a-net")
+    _seed_mesh(
+        root,
+        network_id="n_trigger00000000000000000000002",
+        name="b-net",
+        members=[("d_c", "device")],
+    )
+    real = rollouts.open_record
+    calls: list[str] = []
+
+    def flaky(*, network: str, **kwargs: Any) -> Any:
+        calls.append(network)
+        if len(calls) == 2:
+            raise OSError("no space left on device")
+        return real(network=network, **kwargs)
+
+    monkeypatch.setattr(rollouts, "open_record", flaky)
+    result = rollouts.open_after_update("0.27.0", "0.28.0", via="update", root=root, now=1000.0)
+
+    assert len(calls) == 2, calls
+    assert len(result.lines) == 1, result.lines
+    assert "will ask 1 peer(s) to move to this build" in result.lines[0], result.lines
+    assert result.failure is not None and "could not be queued" in result.failure, result.failure
+    # The first network's record is on disk — the driver will find and resume it.
+    assert rollouts.latest_active(root=root) is not None
+
+
+def test_the_closing_nudge_is_withheld_for_an_unrollable_remainder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2 (round 1): the nudge must not name a remainder no re-run can move.
+
+    A ``skipped (unsupported_kind)`` member — the pool shape this slice's open
+    seeds — can never be rolled by a later ``lop network update``, so the
+    sentence would promise an action that cannot work. The skip stays NAMED in
+    the sets; only the nudge is withheld, and a rollable remainder still gets
+    it (the other direction below).
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    _seed_mesh(root, members=[("d_a", "device"), ("d_pod", "pool")])
+    rollouts.open_after_update("0.27.0", "0.28.0", via="update", root=root, now=1000.0)
+    record = rollouts.latest_active(root=root)
+    assert record is not None
+    _scripted(monkeypatch, [_answer("done", version="0.28.0")])
+    rollouts.step_record(cast(Any, server), record["id"], now=2000.0)
+    closed = _live(record["id"], root)
+    assert closed["state"] == "done", closed
+    rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
+    assert rows and "1 of 2 moved" in rows[-1].detail["counts"], rows
+    assert "no longer active" not in rows[-1].detail["counts"], rows[-1].detail
+    assert "skipped (unsupported_kind): d_pod" in rollouts.summary(closed), rollouts.summary(closed)
+
+    # The other direction: a rollable remainder keeps the nudge — re-running
+    # really can move a deferred member.
+    other = _open(root, devices=["d_e"], network="n2")
+    _member(other, "d_e").update({"state": "deferred", "code": "busy"})
+    other["state"] = "done"
+    assert "no longer active" in rollouts.summary(other), rollouts.summary(other)
+
+
+def test_the_switch_halts_a_policy_driven_roll_at_the_next_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Note §5: the thread re-reads the key before every ask; off halts, on resumes."""
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = rollouts.open_record(
+        network="n1",
+        origin="d_origin",
+        target={"version": "0.28.0", "source_ref": ""},
+        members=[{"device": "d_a", "name": "a"}, {"device": "d_b", "name": "b"}],
+        authority={"authority": "standing_instruction", "policy": "auto", "via": "update"},
+        root=root,
+        now=1000.0,
+    )
+    asked = _scripted(
+        monkeypatch,
+        [_answer("busy", reason="2 sessions"), _answer("busy"), _answer("busy"), _answer("done")],
+    )
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    assert asked == ["d_a", "d_b"], asked  # one step asks every member that is due
+
+    _set_policy(root, "off")
+    # Both members sit inside their 300 s cadence floors here: this run reaches
+    # no boundary, so it says nothing about the switch — the next one does.
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.5)
+    assert asked == ["d_a", "d_b"], asked
+    # Both floors have passed, d_b is due and non-terminal: with the switch off
+    # the pass stops before its ask — no other command needed (note §5).
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
+    assert asked == ["d_a", "d_b"], "the pass asked a member while the policy was off"
+
+    # Nothing was lost: flipping it back on resumes at the same boundary.
+    _set_policy(root, "auto")
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
+    assert asked == ["d_a", "d_b", "d_a", "d_b"], asked
+    assert _member(_live(record["id"], root), "d_b")["state"] == "done"
+
+
+def test_a_record_without_authority_is_not_the_switchs_to_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a ``standing_instruction`` record answers to the policy key."""
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])  # the tests' own open: no authority object
+    _set_policy(root, "off")
+    asked = _scripted(monkeypatch, [_answer("done")])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    assert asked == ["d_a"], "a non-policy record was halted by the switch"
+
+
+# ---------------------------------------------------------------------------
+# The activation proof (S3b): a real update exit opens the record, and the real
+# serial pass drives a real member over a real link.
+# ---------------------------------------------------------------------------
+
+
+def test_a_real_update_exit_opens_the_roll_and_the_pass_moves_a_real_member(
+    devices: Any,  # noqa: F811 — the relay suite's fixture, imported above
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both halves of the slice, wired: ``update_command`` queues the roll; the
+    driver rolls a granted member over loopback TCP and the record closes.
+
+    THE RIG IS THE MESH SUITE'S OWN (``test_relay_e2e``'s ``devices``): two
+    real relays on loopback, real identities, a real pairing ceremony, a real
+    grant on the member's own row, real ``net_update`` frames. The origin is
+    ``server_b`` (the joiner), the member ``server_a`` — the orientation
+    ``test_mesh_update`` uses. The seams are the two install boundaries S1's
+    own cells already write through (``install_build``, plus
+    ``current_member_version``/``check_published``) and the pass tail; every
+    frame between the two ends is the production path.
+
+    ``update_command`` runs against the origin's root with only its install
+    seam (``perform_upgrade``) and its services stage replaced: its exits, the
+    hook, the record write and the summary print are the production paths this
+    slice adds (the summary is asserted where the exit is driven, in
+    ``tests/unit/test_update.py``).
+    """
+    from unittest.mock import patch
+
+    from local_operator import update as update_mod
+    from tests.unit.network.test_mesh_update import (
+        _concrete_member,
+        _grant,
+        _set_peer_endpoints,
+        _stub_pass,
+    )
+
+    server_a, server_b, host, port = devices
+    record, _host, _port = _pair(devices, monkeypatch)
+    _set_peer_endpoints(server_b, record, server_a.identity.device_id, [f"{host}:{port}"])
+    _grant(server_a, record, server_b.identity.device_id)
+    state = _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "busy_sessions", lambda root: (0, ""))
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    monkeypatch.setattr(
+        meshupdate, "origin_target", lambda: {"version": "0.99.0", "source_ref": ""}
+    )
+    _stub_pass(monkeypatch)
+    calls: list[str] = []
+
+    def _install(version: str, *, runner: Any = None) -> str:
+        calls.append(version)
+        state["current"] = version  # the install MOVED the member's build
+        return meshupdate.METHOD_GENERATION
+
+    monkeypatch.setattr(meshupdate, "install_build", _install)
+
+    # The origin's own update — a strictly newer move through the real exit.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    with (
+        patch.object(
+            update_mod,
+            "check_latest",
+            return_value=update_mod.VersionCheck(installed="0.98.0", latest="0.99.0", behind=True),
+        ),
+        patch.object(update_mod, "install_kind", return_value=update_mod.InstallKind.UV_TOOL),
+        patch.object(update_mod, "is_git_snapshot", return_value=False),
+        patch.object(update_mod, "perform_upgrade", return_value="0.99.0"),
+        patch.object(update_mod, "_services_stage", return_value=None),
+    ):
+        assert update_mod.update_command(check=False) == 0
+
+    trigger = rollouts.latest_active(root=server_b.root)
+    assert trigger is not None, "the update exit opened no record"
+    assert trigger["state"] == "active"
+    assert trigger["authority"] == {
+        "authority": "standing_instruction",
+        "policy": "auto",
+        "via": "update",
+    }, trigger.get("authority")
+    assert [m["device"] for m in trigger["members"]] == [server_a.identity.device_id]
+
+    # The pass runs where it runs in production — one step of the relay's
+    # driver — against the real member over the real link.
+    rollouts.step_record(server_b, str(trigger["id"]))
+    after = _live(str(trigger["id"]), server_b.root)
+    member = _member(after, server_a.identity.device_id)
+    assert member["state"] == "done", member
+    assert member["version"] == "0.99.0", member
+    assert calls == ["0.99.0"], calls
+    assert after["state"] == "done", after["state"]

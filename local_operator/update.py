@@ -6995,8 +6995,39 @@ def _emit_update_report(*, install_version: str, target: str, stage: StageReport
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
 
+def _roll_after_update(*, before: str, after: str, via: str, roll: bool) -> None:
+    """S3b's post-install hook: queue the mesh's rollout, render what it queued.
+
+    Called from the two successful-install exits between ``_run_services_tail``
+    and ``_emit_update_report`` — the summary precedes the frozen report line
+    — and NOT from the no-install exit or the daemon-refresh child (note §3:
+    that child runs concurrent repairs behind marker lines the desktop parses,
+    and it also runs when nothing was installed).
+
+    EVERYTHING here is best-effort: the install is already in, so the hook's
+    own contract is that it never raises and never changes an exit code (note
+    §3) — a failure is one sentence on stderr. The import is function-local
+    because ``update`` is on ``lop``'s startup path and ``network`` is not
+    (``tests/unit/test_import_graph.py``).
+    """
+    from local_operator.network import rollouts
+
+    result = rollouts.open_after_update(before=before, after=after, via=via, no_roll=not roll)
+    for line in result.lines:
+        print(line)
+    if result.failure:
+        print(result.failure, file=sys.stderr)
+
+
 def _generation_upgrade(
-    total: int, *, services: bool = True, install_version: str = "", target: str = ""
+    total: int,
+    *,
+    services: bool = True,
+    install_version: str = "",
+    target: str = "",
+    roll: bool = True,
+    before_version: str = "",
+    via: str = "snapshot",
 ) -> int:
     """The tail every successful install shares: report, prune, refresh, succeed.
 
@@ -7012,6 +7043,13 @@ def _generation_upgrade(
     leaving a daemon where it is. The process's single machine-readable report
     line (:func:`_emit_update_report`) is emitted last, after every human line
     the successful exit prints.
+
+    ``roll``/``before_version``/``via`` are S3b's trigger inputs (note §3):
+    ``via`` names the front end, ``before_version`` is the version the pointer
+    named when the command started (captured by the caller, because by hook
+    time ``disk_build`` describes the generation just installed), and
+    ``roll=False`` is ``--no-roll``. The hook writes the mesh's rollout record
+    between the services tail and the report line.
     """
     _print_current_generation()
     for line in prune_notice_lines(
@@ -7019,11 +7057,14 @@ def _generation_upgrade(
     ):
         print(line)
     stage = _run_services_tail(services=services)
+    _roll_after_update(before=before_version, after=install_version, via=via, roll=roll)
     _emit_update_report(install_version=install_version, target=target, stage=stage)
     return total
 
 
-def _snapshot_command(value: str, *, services: bool = True, allow_downgrade: bool = False) -> int:
+def _snapshot_command(
+    value: str, *, services: bool = True, allow_downgrade: bool = False, roll: bool = True
+) -> int:
     """``lop update --from-snapshot <dir-or-ref>``: install a local build.
 
     The in-repo half of what the out-of-tree ``lop-update`` script does today,
@@ -7068,6 +7109,14 @@ def _snapshot_command(value: str, *, services: bool = True, allow_downgrade: boo
             file=sys.stderr,
         )
         return 1
+    # THE HOOK'S ``before`` (S3b), captured before any install work: by the
+    # time the hook runs, ``disk_build`` describes the generation just
+    # installed, and the trigger's strictly-newer gate must compare the MOVE,
+    # not the result with itself. Unreadable (None) stays "" — both sides must
+    # parse for the hook to fire, and a snapshot that changes only the source
+    # ref has nothing for members to do (note §3, condition 1).
+    stamp_before = disk_build()
+    before_version = str(stamp_before.version) if stamp_before is not None else ""
     try:
         snapshot = resolve_snapshot(value)
     except UpdateError as exc:
@@ -7232,7 +7281,13 @@ def _snapshot_command(value: str, *, services: bool = True, allow_downgrade: boo
             # sits outside the guard.
             _remove_tree(snapshot.path)
     return _generation_upgrade(
-        0, services=services, install_version=installed_version, target=installed_version
+        0,
+        services=services,
+        install_version=installed_version,
+        target=installed_version,
+        roll=roll,
+        before_version=before_version,
+        via="snapshot",
     )
 
 
@@ -7245,6 +7300,7 @@ def update_command(
     from_snapshot: str | None = None,
     services: bool = True,
     allow_downgrade: bool = False,
+    roll: bool = True,
 ) -> int:
     """``lop update``, ``lop update --check``, ``--from-snapshot`` and the repair.
 
@@ -7291,7 +7347,9 @@ def update_command(
         if check:
             print("--check compares against PyPI; --from-snapshot installs a tree", file=sys.stderr)
             return 1
-        return _snapshot_command(from_snapshot, services=services, allow_downgrade=allow_downgrade)
+        return _snapshot_command(
+            from_snapshot, services=services, allow_downgrade=allow_downgrade, roll=roll
+        )
 
     if allow_downgrade:
         print(
@@ -7368,5 +7426,6 @@ def update_command(
     for line in pruned:
         print(line)
     stage = _run_services_tail(services=services)
+    _roll_after_update(before=result.installed, after=installed, via="update", roll=roll)
     _emit_update_report(install_version=installed, target=result.latest, stage=stage)
     return 0

@@ -234,6 +234,37 @@ contact detector (Q3).
 > names as its S3b/follow-up trigger — parks the rollout-scoped
 > `skipped (no_grant)` with RU §2's remedy.
 
+> **Errata — the trigger's implementation (S3b, 2026-10-11).** Two points this
+> note left to its implementation, settled in the S3b PR:
+>
+> - **Registration (Q5): a section of its own, not `network`.** The key stays
+>   `network.rollout_on_update` and stays stored in the config file's `network:`
+>   block (RU §3); the registry `Section`, though, is **`mesh_updates`, Scope
+>   LIVE** — the policy is live in both consumers (each update front end reads
+>   it at its own start; the relay's driver re-reads it before every ask, §5),
+>   while every key under `network` is read once at relay start and that
+>   section's description says so. Scope is uniform within a section by
+>   construction (AGENTS.md), so the honest label is a section of its own —
+>   the `session_cleanup`/`memory_guard` split, read off `SECTIONS`.
+> - **The coded refusal stays a follow-up.** The r2 errata above stands: S3b
+>   ships the documented non-claiming path (a codeless `refused` is retried on
+>   the cadence, §4) and does NOT change the authoriser. The coded
+>   `not_authorised` frame remains the named security-reviewed follow-up, with
+>   no producer at this head — and `meshupdate.update_peer` already maps a
+>   coded frame to `no_grant` + RU §2's remedy the day one lands.
+>
+> **Errata — round 1 (2026-10-11).** The review folds, recorded here because
+> each settles the note's own words: the open summary reads **"will ask N
+> peer(s) to move to this build"** (D2 — the line is an ask, and counts read
+> "(s)" at any N, D1); the closing nudge fires only when a member a re-run
+> could still move remains (R1-2) — a `skipped (unsupported_kind)` /
+> `predates_rolling_updates` remainder no longer draws a promise that cannot
+> be kept, while the skip stays named in the sets; a partial multi-network
+> open returns the lines it already opened alongside the failure sentence
+> (R1-1); and that sentence (§3 above) now carries its siblings' next step —
+> **"updated, but the mesh roll could not be queued: … — run `lop network
+> update` to roll by hand"** (D3).
+
 *The first release.* No member advertises `mesh-update-v1` or holds the grant before this
 ships, so the release carrying it is the last that needs a hand update on each existing
 member, and the grant itself is a node-side act (RU §2): by hand once per existing member, on

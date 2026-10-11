@@ -1797,6 +1797,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "start the serves, e.g. a script that owns their launch."
         ),
     )
+    # S3b's per-run override of the mesh-roll switch (note §5): the roll is
+    # otherwise queued when this update moves to a newer version and
+    # `network.rollout_on_update` is `auto`. `lop network update` remains
+    # available by hand under either policy; a propagated update never reaches
+    # this flag (the member executor installs directly, not through this verb).
+    update_parser.add_argument(
+        "--no-roll",
+        dest="no_roll",
+        action="store_true",
+        help=(
+            "Do not queue a mesh rollout for this update, whatever "
+            "`network.rollout_on_update` says; `lop network update` still rolls by hand."
+        ),
+    )
 
     # The NON-RUNTIME SERVICES, as one verb group. A service is a long-lived
     # non-conversational process (a serve daemon, the mobile daemon, the browser
@@ -14814,6 +14828,7 @@ def main() -> int:
                 from_snapshot=getattr(args, "from_snapshot", None),
                 services=not bool(getattr(args, "no_services", False)),
                 allow_downgrade=bool(getattr(args, "allow_downgrade", False)),
+                roll=not bool(getattr(args, "no_roll", False)),
             )
         elif args.subcommand == "services":
             # Lazy for the same reason as ``update``: this pulls the serve

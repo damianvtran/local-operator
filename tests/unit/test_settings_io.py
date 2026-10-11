@@ -91,6 +91,11 @@ def _consumer_defaults() -> dict[str, object]:
     # ``NetworkSettings.from_config`` resolves an absent key against
     # ``DEFAULT_MAX_HANDSHAKES``, so a registry default that disagrees with it is a
     # page advertising a number the accept loop will not honour.
+    #
+    # The mesh-roll switch is the same shape, from ITS reader: ``rollouts``'
+    # ``rollout_policy`` resolves an absent ``network.rollout_on_update`` against
+    # ``DEFAULT_ROLLOUT_ON_UPDATE``, and the registry row's own default must be the
+    # same value or the page would advertise a policy the driver does not apply.
     from local_operator.network.credentials import GRANT_TTL_S
     from local_operator.network.credentials.github import DEFAULT_REPOSITORIES
     from local_operator.network.relay import (
@@ -99,6 +104,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_MAX_HANDSHAKES,
         DEFAULT_PORT,
     )
+    from local_operator.network.rollouts import DEFAULT_ROLLOUT_ON_UPDATE
 
     # The mesh sync cadence, from the module whose watcher reads it
     # (``SyncSettings.from_config`` falls back to exactly these).
@@ -252,6 +258,10 @@ def _consumer_defaults() -> dict[str, object]:
         "network.listen_address": DEFAULT_LISTEN_ADDRESS,
         "network.port": DEFAULT_PORT,
         "network.max_handshakes": DEFAULT_MAX_HANDSHAKES,
+        # Read fresh by every update front end and re-read by the rollout driver
+        # (``rollouts.rollout_policy`` resolves an absent key against exactly
+        # this constant — the reader's own fallback, not a restatement).
+        "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
         "network.credentials.grant_ttl_s": GRANT_TTL_S,
