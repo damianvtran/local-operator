@@ -314,6 +314,11 @@ from local_operator.tools.builtin import (
 from local_operator.tools.deferral import deferred_tool_names, tool_deferral_enabled
 from local_operator.tools.tool_docs import chain_tool_docs
 
+# The video lane's record vocabulary: the custom-row name the journal writes
+# and the boot scan reads. stdlib-only module (its own docstring pins that),
+# so importing it here costs the session's import graph nothing.
+from local_operator.video.records import VIDEO_JOB_CUSTOM_TYPE
+
 if TYPE_CHECKING:
     # Type-only: the session must never pull the MCP stack in at import time.
     # It only holds the manager the composition root hands it.
@@ -706,6 +711,14 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # the derived prune finds nothing to undo. Appended last for the same
     # prefix reason as `sessions` above.
     "no_reply",
+    # The video pair rides the same shape: `jobs` (and the credential probe)
+    # exists only on a live session's own context, so the factory's warm pass
+    # refuses BOTH builders and this merge is what mounts them on a real
+    # session — without these two names the tools are advertised to nobody
+    # (round-1 QA blocker Q1; the same failure `no_reply` records above).
+    # Appended last for the same prefix reason as `sessions`.
+    "generate_video",
+    "video_status",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -5300,6 +5313,10 @@ class Session:
         # so the notice is in the live context the first turn reads. Deduped on
         # the token, so a second open of the same session is silent.
         await self._journal_restored_cut_off()
+        # Cold-follow conversion for pending video jobs: a record that
+        # outlived its runtime gets its check-wake ensured here, before the
+        # first turn — see ``_boot_video_jobs``.
+        await self._boot_video_jobs()
         if self._resume_catchup_text is not None and not self._resume_catchup_sent:
             # A catch-up still pending after the pump: the re-armed fire lands
             # at (or microseconds before) the grace deadline, and a COLD
@@ -15654,6 +15671,11 @@ class Session:
             # failure behind session 835fbcafdc27). Re-bound every turn for
             # the same reason the rest of this context is rebuilt.
             journal_credential=self.journal_credential_change,
+            # The video lane's durable-record door: the ``generate_video``
+            # runner and the ``video_status`` tool cannot write transcript
+            # rows themselves, and this method is the ONE append path for
+            # ``video_job_v1`` records (see ``journal_video_job``).
+            journal_video_job=self.journal_video_job,
             # The send tool's own notice hook, wired for the same reason and
             # with the same shape: the tool cannot write a transcript row
             # itself, and the gate (``send.journal_unconfirmed``, default off) is
@@ -16897,6 +16919,68 @@ class Session:
         except OSError:
             logger.warning("could not journal credential binding change", exc_info=True)
 
+    async def journal_video_job(self, record: dict[str, Any]) -> None:
+        """Append one durable ``video_job_v1`` record (media wave-2, video phase).
+
+        The video lane's ONE transcript write path: the ``generate_video``
+        runner and the ``video_status`` tool cannot write transcript rows
+        themselves (the ``journal_credential``/``journal_send_notice``
+        precedent), so the session binds this method into the ToolContext and
+        the durable record is written here. The row is BOOKKEEPING
+        (``preserve_mtime=True`` — see ``transcript.BOOKKEEPING_CUSTOM_TYPES``):
+        a terminal transition lands minutes after the user left, and it must
+        not re-rank the session as freshly worked.
+
+        Failures PROPAGATE to the caller: the record's writers are the ones
+        that decide how to degrade (the runner logs and continues — restart
+        durability is lost for that transition, the generation is not), so
+        swallowing here would hide which writer chose what.
+        """
+        await self._transcript.append_custom(VIDEO_JOB_CUSTOM_TYPE, record, preserve_mtime=True)
+
+    async def _boot_video_jobs(self) -> None:
+        """Cold-follow conversion for pending video jobs (criterion b).
+
+        Runs once at open (``async_init``). A non-terminal ``video_job_v1``
+        record with no live job in THIS process is the restart/rollover case:
+        the generation outlived the runtime that started it. Nothing resumes
+        the dead asyncio task — impossible and not needed — the record is what
+        makes the job followable, and the check-wake is what makes the
+        successor ASK: one is ensured here when absent (the submit-time wake
+        usually survives via the spool/inbox, so the common boot is a no-op),
+        and its fire's ``video_status`` call settles or re-observes the job.
+
+        Idempotent by construction (ensure is an existence check) and
+        best-effort throughout: a boot path must never fail a session open.
+        """
+        # The directory the records actually live in: the TRANSCRIPT's own
+        # directory, not ``_session_dir()`` (which derives from the scratchpad
+        # root and reads None on a reduced host where the rows still exist).
+        # ``getattr`` mirrors ``_scratchpad_dir``'s probe of the same attr.
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None or self._disposed:
+            return
+        try:
+            from local_operator.video.jobs import VideoWakeHandle
+            from local_operator.video.records import (
+                read_video_records,
+                record_is_terminal,
+            )
+
+            records = await asyncio.to_thread(read_video_records, directory)
+            for job_id, record in records.items():
+                if record_is_terminal(record):
+                    continue
+                job = self.jobs.get(job_id) if self.jobs is not None else None
+                if job is not None and job.status in ("running", "queued"):
+                    # A live job owns its own wake lifecycle (the runner
+                    # cancels on settle); boot must not double-arm.
+                    continue
+                await VideoWakeHandle(self._wake, job_id).ensure()
+                logger.debug("video job %s is pending across this open; check-wake ensured", job_id)
+        except Exception:  # noqa: BLE001 — a boot conversion must not fail the open
+            logger.warning("video boot conversion failed", exc_info=True)
+
     async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
         """Auto-deliver one settled model-owned job back into the conversation.
 
@@ -16908,9 +16992,10 @@ class Session:
         settles even while a turn streams, because a turn can run for many
         hours and holding the row to its end bunched a marathon turn's every
         completion at its tail (2026-09-26 incident; see the streaming branch).
-        Only model-registered job types (task, backgrounded bash): host jobs
-        keep their own delivery. A job the wait tool already returned is marked
-        consumed and stays quiet, or the same result would arrive twice.
+        Only model-registered job types (task, backgrounded bash, and the
+        detached ``video`` generation): host jobs keep their own delivery. A job
+        the wait tool already returned is marked consumed and stays quiet, or the
+        same result would arrive twice.
         """
         if self._disposed or job is None:
             return
@@ -16920,7 +17005,11 @@ class Session:
         # consume nested work deliberately through its own jobs/wait tools.
         if self._job_id is not None:
             return
-        if getattr(job, "consumed", False) or job.type not in ("task", "bash"):
+        # ``video`` rides this gate as of the video phase (media wave-2): a
+        # settled video job opens the review turn exactly like a child does,
+        # and its cancellations never reach here (the manager's task-cancel
+        # arm returns before delivery, as for every type).
+        if getattr(job, "consumed", False) or job.type not in ("task", "bash", "video"):
             return
         if self._leaving_deliveries:
             # A result that arrives AFTER the departure latch must not be
@@ -17367,6 +17456,17 @@ class Session:
         details: dict[str, Any] = {"job_id": job_id, "text": delivery}
         if held:
             details["held"] = True
+        if getattr(job, "type", "") == "video":
+            # The video receipt rides the row for the review turn (§5.3 of the
+            # video contract): digest/content_type/duration/model/cost are the
+            # facts a surface (or the model) needs to find the attachment
+            # without re-polling. The runner writes them through the structured
+            # progress channel (``latest_details``), so the delivery path stays
+            # generic — task/bash rows keep their exact two-key shape.
+            latest = getattr(job, "latest_details", None)
+            receipt = latest.get("video_receipt") if isinstance(latest, dict) else None
+            if isinstance(receipt, dict):
+                details.update(receipt)
         return CustomMessage(
             custom_type=JOB_RESULT_MESSAGE_TYPE,
             attribution="user",

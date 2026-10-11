@@ -26641,6 +26641,11 @@ async def execute_jobs(
             # actually stop something:
             #   * a bash/eval row has no comms record, so a stamp would invent an
             #     actor for a job that never had one;
+            #   * a video row likewise has no comms record (its durable state is
+            #     the ``video_job_v1`` transcript record, never the subagent
+            #     roster), and the manager's cancel still reaches it through the
+            #     runner's bounded provider cancel — so the type gate below is
+            #     deliberately left covering ``task`` only;
             #   * a row that is ALREADY settled is the tool's own normal
             #     "was not cancelled" outcome, not an error — stamping it put
             #     `stopped by jobs-tool` on a COMPLETED child (design/QA round 1, Q1,
@@ -26802,7 +26807,7 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
         name="jobs",
         label="List jobs",
         description=(
-            "Inspect background jobs (task/bash). op='list' shows every "
+            "Inspect background jobs (task/bash/video). op='list' shows every "
             "running and recently-settled job with its id, status and age — "
             "'up' is how long a running job has been going, 'wait' is how long "
             "a parked one has been waiting for a slot, 'ago' is how long since "

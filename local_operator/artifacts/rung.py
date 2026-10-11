@@ -111,6 +111,16 @@ class RungSpec:
     #: listing) and pinned by tests; nothing sends a mask in v1, and the
     #: Radient rung keeps False until a mask wire reads that per-pin row.
     mask: bool = False
+    #: Which SOURCE MEDIA kinds this rung's source path accepts (``"image"``,
+    #: ``"video"``, or both). The video phase's additive field: ``sources``
+    #: says HOW MANY sources a rung takes, this says WHAT a source may be, so
+    #: an i2v request (one image) and a v2v request (one video) can both ride
+    #: ``sources=SINGLE`` and still be filtered precisely — a rung declaring
+    #: ``{"image"}`` is skipped, never called, for a v2v request. Empty (the
+    #: default) means the declaration is not made; like every capability
+    #: field here it is bound by the same rule — declared only in the change
+    #: that wires the corresponding path.
+    source_kinds: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -141,6 +151,14 @@ class CancelHandle:
     #: A response-carried cancel URL (or the derived fallback), when the
     #: provider has one.
     cancel_url: str | None = None
+    #: A provider job's poll/read URLs, when its transport carries them
+    #: (FAL's queue API response is the one today). Added for the video
+    #: lane's durable ``video_job_v1`` record, which must be able to resume
+    #: observing a job whose process died: the record's ``provider_ref``
+    #: carries exactly these. The image lane-visible cancel path ignores
+    #: them; ``clear()`` clears them like every other field.
+    status_url: str | None = None
+    result_url: str | None = None
     credential: Optional["SecretStr"] = field(default=None)
 
     def clear(self) -> None:
@@ -149,6 +167,8 @@ class CancelHandle:
         self.model = None
         self.base_url = None
         self.cancel_url = None
+        self.status_url = None
+        self.result_url = None
         self.credential = None
 
 

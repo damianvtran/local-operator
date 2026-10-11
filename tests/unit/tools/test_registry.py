@@ -147,16 +147,22 @@ def _force_browser_available(monkeypatch):
     reads the session's store root (``context.session_dir``), which this
     factory's context does not carry, so the whole-table assertions force the
     predicate the same way.
+
+    ``generate_video``/``video_status`` joined them with the video phase: the
+    pair's gate reads the machine's video credentials
+    (``video.availability``); the job manager their second gate reads is
+    already on this factory's context (``jobs`` is in the default table).
     """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
     from local_operator.code_requests import tool as code_requests_tool
-    from local_operator.tools import image_tool
+    from local_operator.tools import image_tool, video_tool
 
     monkeypatch.setattr(
         image_tool.image_availability, "image_provider_reachable", lambda *a, **k: True
     )
     monkeypatch.setattr(code_requests_tool, "code_requests_available", lambda context: True)
+    monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
 
 
 def test_default_set_builds_all_builtin_tools() -> None:
@@ -261,12 +267,17 @@ def test_default_set_drops_no_reply_without_the_quiet_end_door() -> None:
     assert without == [name for name in withdoor if name != "no_reply"]
 
 
-def test_no_reply_is_appended_last_in_both_tables() -> None:
+def test_the_newest_appends_stay_last_in_both_tables() -> None:
     """Appending never shifts a provider-visible array prefix — the prompt
-    cache keys on that array — so both tables must END with the tool, not
-    merely contain it (docs §8)."""
-    assert DEFAULT_TOOL_NAMES[-1] == "no_reply"
-    assert list(TOOL_BUILDERS)[-1] == "no_reply"
+    cache keys on that array — so both tables must END with the newest
+    entries, not merely contain them (docs §8). Round-1 review V7: the video
+    pair first sat BEFORE ``code_requests``/``no_reply`` while its comment
+    claimed the end, which shifted those two; it now truly ends both
+    tables."""
+    assert DEFAULT_TOOL_NAMES[-2:] == ["generate_video", "video_status"]
+    assert list(TOOL_BUILDERS)[-2:] == ["generate_video", "video_status"]
+    assert DEFAULT_TOOL_NAMES[-3] == "no_reply"
+    assert list(TOOL_BUILDERS)[-3] == "no_reply"
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:

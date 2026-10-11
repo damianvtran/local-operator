@@ -1371,6 +1371,36 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: would re-ship the silent-T2I class this lane exists to kill. The ratchet
 #: moves to the file's 55-token band (measured head + 55) so the next
 #: addition finds it as tight as this one did.
+#:
+#: RAISED 27,270 -> 28,159 for the VIDEO PHASE's harness lane
+#: (``feat/video-generation``, #2191): the two new createIf tools
+#: (``generate_video`` + ``video_status``) land their schemas on every session
+#: whose machine carries a video credential — the same machinery
+#: ``generate_image`` has. Measured with THIS script on the clean arm
+#: (``env -i`` HOME + config dir, the arm CI renders), both trees on the
+#: merge base (``origin/main`` 8b6ed6b854):
+#:
+#:   base  75,756 chars = ~27,250   (20 tokens of headroom at the old ratchet)
+#:   head  78,128 chars = ~28,104   (this branch)
+#:   delta     +2,372 chars = ~+854
+#:
+#: Components, each measured and closed exactly: +2,340 chars in
+#: ``tool_schemas`` (the two new parameter schemas — ``generate_video``
+#: 1,844 + ``video_status`` 490 — plus +6 from the ``jobs`` description's new
+#: "(task/bash/video)" word, per round-1 review O2) and +32 chars in
+#: ``tool_inventory`` (the two names on the listing lines); every other
+#: counter byte-identical to base. The child arm moves by the SAME +2,372
+#: chars (below), which is the check that the delta is these two tools and
+#: nothing else — both are createIf-gated on the credential, not on the
+#: parent session.
+#:
+#: The raise is the capability's honest cost, not a regression to trim: one
+#: tool is what a model must SEE to start a generation at all (modes, source
+#: fields, the knobs), the other is the only callable that answers a pending
+#: job after a restart. Deferral was considered and rejected in the PR: it
+#: needs its measured adoption bar (``tools/deferral.py``) and a brand-new
+#: tool has no measurement to sit on.
+#:
 #: RAISED 27,270 -> 27,337 for SYS1 (the user's preferred language rides the
 #: stable prefix): every real session's head now carries the model-facing
 #: language sentence, so the guard must measure the shape that ships. The
@@ -1384,10 +1414,21 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:       backend language setting — the mechanism that lets the model answer,
 #:       and address the user, in their language at all.
 #:
-#: The raise is exactly the feature's cost (+67), so the ceiling keeps the
-#: band the entries above it set; the tighten band below (1,200) is not in
-#: play.
-BUDGET_BILLED_TOKENS = 27_337
+#: MERGED RE-MEASURE 2026-10-10 (the #2191 fold): the raises above land on
+#: ONE tree for the first time. Measured with this script on the clean arm,
+#: both trees, origin/main (9de8199ef5) vs the folded branch head:
+#:
+#:   base (origin/main 9de8199ef5)  75,942 chars = ~27,317 billed
+#:   merged head                    78,279 chars = ~28,158 billed
+#:   delta                          +2,337 chars = ~+841
+#:
+#: The base figure already contains the SYS1 sentence, so it is not
+#: double-counted here; the delta is the video pair's contribution at its
+#: merged revision (the entry above's +2,372 was measured before the
+#: round-1..3 wire-text edits) and it is IDENTICAL on the child arm
+#: (below) — the check that the delta is the pair and nothing else.
+#: Ceiling = merged head + the 55-token band.
+BUDGET_BILLED_TOKENS = 28_213
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1427,6 +1468,16 @@ BUDGET_BILLED_TOKENS = 27_337
 #:   delta      +94 chars = ~+34
 #:
 #: Band normalized to the 55-token band, as the top arm's entry states.
+#: Band normalized to the 55-token band, as the top arm's entry states.
+#:
+#: RAISED (with the top arm, same day, same trees) 24,315 -> 25,203: the
+#: child arm carries the video pair too (createIf on the machine, not the
+#: parent) and moves by the SAME +2,372 chars = ~+853:
+#:
+#:   base  67,539 chars = ~24,295   (20 tokens of headroom at the old ratchet)
+#:   head  69,911 chars = ~25,148
+#:   delta     +2,372 chars = ~+853
+#:
 #: RAISED 24,315 -> 24,382 for SYS1: the same sentence the top arm carries,
 #: same +186 chars = +67 billed (only the tool inventory differs between the
 #: arms). Measured on both trees with ``--kind child``:
@@ -1435,7 +1486,16 @@ BUDGET_BILLED_TOKENS = 27_337
 #:   head (this branch)                    67,725 chars = ~24,362 billed
 #:
 #: The raise is exactly the feature's cost, as the top arm's entry states.
-BUDGET_CHILD_BILLED_TOKENS = 24_382
+#:
+#: MERGED RE-MEASURE (with the top arm, same fold, same trees):
+#:
+#:   base (origin/main 9de8199ef5)  67,725 chars = ~24,362 billed
+#:   merged head                    70,062 chars = ~25,202 billed
+#:   delta                          +2,337 chars = ~+840
+#:
+#: The same +2,337 the top arm moves by. Ceiling = merged head + the
+#: 55-token band.
+BUDGET_CHILD_BILLED_TOKENS = 25_257
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
