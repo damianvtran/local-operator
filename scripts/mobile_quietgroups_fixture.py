@@ -6,7 +6,7 @@ Login at http://127.0.0.1:<port>. The password is NOT fixed and never printed:
 pass it as the second argument (or set ``LOP_MOBILE_FIXTURE_PASSWORD``) — the
 sibling fixtures' note on why a literal here would be a reusable credential.
 
-Seven sessions, one per state the relay web's quiet-group bar ships in slice S4
+Six sessions, one per state the relay web's quiet-group bar ships in slice S4
 of the quiet-turn design (``docs/design/quiet-turns.md`` §5 + §8), tapped from
 the list with the shot script beside this file:
 
@@ -34,16 +34,20 @@ the list with the shot script beside this file:
 * ``Quiet group wake only``     — two wake receipts: ``Wake messages · 2``.
 * ``Quiet group single``        — ONE peer receipt: not a group at all, the
   ordinary card keeps its row. The control frame.
-* ``Quiet group window cut``    — 160 rows so the client's 120-row window cuts
-  INSIDE them: the visible window begins exactly at a ten-receipt group's
-  first row (entries 40..49), which is the loaded-but-off-window case the
-  S4-R1-2 copy read is about — ``N+`` beside the "show 40 more loaded"
-  affordance, whose two claims disagree about whether those rows are loaded.
+
+A SEVENTH STATE — the loaded-but-off-window window cut — was written and then
+RETIRED by the first capture run on the folded tree (recorded on PR #2160):
+since #2113 the transcript AUTO-GROWS its window the moment the top edge comes
+into reach (``onScroll``: ``if (hiddenCount > 0) setWindowSize(n + PAGE)``),
+and the client no longer renders the "show N more loaded" button at all — so
+the ``N+``-over-loaded-rows state cannot be held still; the growth dissolves it
+before any stable scroll position shows it. Its session was removed rather
+than left photographing a state the shipped client cannot produce.
 
 WHY NO ON-DISK TRANSCRIPTS ARE SEEDED. ``_history_page`` serves pages from
 ``config_dir()/sessions/<id>/transcript.jsonl``; absent, it answers
-``([], False)``. That empty answer is what makes the resolved and window-cut
-settles deterministic: a seeded transcript would page real older rows in,
+``([], False)``. That empty answer is what makes the resolved settle
+deterministic: a seeded transcript would page real older rows in,
 moving the very edge under test — and the durable fold does not classify peer
 messages at all (``durable.py`` has no peer handling; the live projection
 classifies them from ``details.sender``, ``projection.py``), so a disk seed
@@ -175,32 +179,6 @@ def _single_entries() -> list[TranscriptEntry]:
     ]
 
 
-def _window_cut_entries() -> list[TranscriptEntry]:
-    """160 rows so the client's 120-row tail window begins exactly at the first
-    row of a ten-receipt group (entries 40..49): ``N+`` over a settled
-    ``hasMore`` is then the loaded-but-off-window state, not the unloaded one.
-
-    The window is the LAST 120 of 160, so entries 0..39 sit above it and the
-    ten receipts open the visible slice — the position ``topGroup`` needs."""
-    entries: list[TranscriptEntry] = []
-    for index in range(20):
-        entries.append(_line(f"qg-k-u{index}", "user", f"note {index + 1} — desk follow-up"))
-        entries.append(_line(f"qg-k-a{index}", "assistant", "logged."))
-    for index in range(10):
-        entries.append(
-            _peer(
-                f"qg-k-{40 + index}",
-                f"Receipt {index + 1} — the queue drained in order.",
-                880500 + index,
-                "Aida" if index % 2 == 0 else "research",
-            )
-        )
-    for index in range(55):
-        entries.append(_line(f"qg-k-u2-{index}", "user", f"tail note {index + 1}"))
-        entries.append(_line(f"qg-k-a2-{index}", "assistant", "logged."))
-    return entries
-
-
 def _projection(
     session_id: str, name: str, pid: int, entries: list[TranscriptEntry]
 ) -> SessionProjection:
@@ -226,9 +204,6 @@ async def main() -> None:
         _projection("quietgroups-mixed", "Quiet group mixed", 900304, _mixed_entries()),
         _projection("quietgroups-wake", "Quiet group wake only", 900305, _wake_entries()),
         _projection("quietgroups-single", "Quiet group single", 900306, _single_entries()),
-        _projection(
-            "quietgroups-windowcut", "Quiet group window cut", 900307, _window_cut_entries()
-        ),
     ):
         record = SessionRecord(
             pid=projection.pid,
