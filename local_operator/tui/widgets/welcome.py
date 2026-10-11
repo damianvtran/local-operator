@@ -734,6 +734,7 @@ TIP_GLYPH = NOTICE_GLYPHS["info"]
 #: step and start reading as one animation.
 TIP_ROTATE_INTERVAL_S = 12.0
 
+
 #: Narrowest width that gets a tip at all.
 #:
 #: Below this the row holds a command and a word or two of its reason, which is
@@ -752,13 +753,24 @@ TIP_ROTATE_INTERVAL_S = 12.0
 #: Narrowest width that gets a tip at all — see the block comment above the
 #: original definition; the keyed entries are measured at their WORST-CASE key
 #: so the answer stays a function of terminal width alone.
-TIP_MIN_WIDTH = max(
-    *(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE)),
-    *(
-        cell_len(f"{TIP_GLYPH} {template.format(key='x' * KEY_BUDGET_CELLS)}")
-        for template, _ in KEYED_TIPS
-    ),
-)
+def _tip_min_width() -> int:
+    """The pool's width budget — the single expression behind the binding.
+
+    Narrowest width that gets a tip at all; the keyed entries are measured at
+    their WORST-CASE key so the answer stays a function of terminal width
+    alone. The locale refresh (:func:`_reload_copy`) re-runs THIS builder
+    (round-1 F2: it was the one value mirrored rather than built).
+    """
+    return max(
+        *(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE)),
+        *(
+            cell_len(f"{TIP_GLYPH} {template.format(key='x' * KEY_BUDGET_CELLS)}")
+            for template, _ in KEYED_TIPS
+        ),
+    )
+
+
+TIP_MIN_WIDTH = _tip_min_width()
 
 #: Warning body without its remedy, for widths that cannot hold the full
 #: `— /login <provider>` tail. A half-printed command is worse than none: the
@@ -777,11 +789,14 @@ def _reload_copy() -> None:
     per-render strings) reads the active locale at each call and follows on
     its own.
 
-    The four composites go through their builders — the pool's single
-    expression, so this function and the import-time bindings cannot drift.
-    The scalar assignments below mirror the one-line definitions above; the
-    slice test pins each one against the fixture catalogue, so a mirror that
-    went stale fails loudly rather than half-translating the splash.
+    The composites go through their builders — each value's single
+    expression, so this function and the import-time bindings cannot drift:
+    the pools via ``_tips``/``_keyed_tips``/``_hints``/``_hints_setup`` and
+    the width budget via :func:`_tip_min_width` (round-1 F2: the budget was
+    the one mirror without one). The scalar assignments below mirror the
+    one-line definitions above; the live-locale tests pin each one against
+    the fixture catalogue, so a mirror that went stale fails loudly rather
+    than half-translating the splash.
     """
     global MODEL_PENDING, MODEL_SETUP, HINTS, HINTS_SETUP, HINT_KEY_WIDTH_TIGHT
     global KEYED_TIPS, TIP_PASTE, TIP_MESH, TIPS, TIP_SETUP, TIP_MIN_WIDTH, WARNING_SHORT
@@ -795,13 +810,7 @@ def _reload_copy() -> None:
     KEYED_TIPS = _keyed_tips()
     TIPS = _tips()
     TIP_SETUP = _t(tui_welcome.tip_setup(login=RECOMMENDED_LOGIN.title()))
-    TIP_MIN_WIDTH = max(
-        *(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE)),
-        *(
-            cell_len(f"{TIP_GLYPH} {template.format(key='x' * KEY_BUDGET_CELLS)}")
-            for template, _ in KEYED_TIPS
-        ),
-    )
+    TIP_MIN_WIDTH = _tip_min_width()
     WARNING_SHORT = _t(tui_welcome.status_login_required_short())
 
 

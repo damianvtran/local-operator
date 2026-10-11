@@ -50,8 +50,11 @@ PREVIOUS_ENGLISH: dict[str, str] = {
     "fast": "Toggle faster output at premium pricing",
     "theme": "Switch color theme; arrows preview live",
     # Registered by the C slice, not migrated by S2: `/language`'s description
-    # is new English by design (the same runtime path, one new key).
-    "language": "Show or set the language; auto follows the system",
+    # is new English by design (the same runtime path, one new key). Round-1
+    # D3: "the language" → "the UI language" — the old reading left it open
+    # whether the agent's output language was in play (it is a different
+    # thing, SYS1's §2.9).
+    "language": "Show or set the UI language; auto follows the system",
     "provider": "List providers and their login/usage state",
     "settings": "Change every setting on one page",
     "sidebar": "Show or hide conversations; 'focus' keys the list",

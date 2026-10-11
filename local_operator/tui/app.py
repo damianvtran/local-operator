@@ -349,6 +349,7 @@ from local_operator.tui.terminal_title import (
     cwd_label,
     terminal_title_enabled,
 )
+from local_operator.tui.widgets import welcome as welcome_mod
 from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
 from local_operator.tui.widgets.aside_panel import (
     ASIDE_PROMPT,
@@ -531,12 +532,13 @@ from local_operator.tui.widgets.usage_panel import (
     UsageRefreshRequested,
 )
 from local_operator.tui.widgets.wake_panel import WakePanel
-from local_operator.tui.widgets.welcome import (
-    MODEL_PENDING,
-    MODEL_SETUP,
-    WelcomeView,
-    session_welcome_info,
-)
+
+# The band's two catalogued words are read THROUGH THE MODULE at every use
+# site, never copied into this module's namespace: a locale move re-materialises
+# `welcome`'s attributes (slice C's refresh registry), so a from-import would
+# freeze this module's copy at boot — the band would keep painting `connecting…`
+# while the splash showed the moved word (round-1 F1, reproduced).
+from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
@@ -6287,7 +6289,7 @@ class OperatorApp(App[None]):
     def _turn_notified(self) -> bool:
         return self._interaction.turn.notified
         self._status = StatusLine(self.query_one("#status-band", Static))
-        self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
+        self._status.update(model_label=welcome_mod.MODEL_PENDING, cwd=os.getcwd())
         # Attached AFTER the first `update`, so the first STABLE title already
         # carries the working directory it falls back to while the conversation
         # is unnamed. Attaching first would leave a bare `lo ›` on screen for
@@ -11700,7 +11702,7 @@ class OperatorApp(App[None]):
         self._set_welcome_visible(True)
 
         self._status = StatusLine(self.query_one("#status-band", Static))
-        self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
+        self._status.update(model_label=welcome_mod.MODEL_PENDING, cwd=os.getcwd())
         # And the composer's visibility flags (``display.composer.*``) on the
         # boot frame: a band or segment the user hid must never be painted and
         # then removed. Straight after the band exists, before the first
@@ -16091,7 +16093,7 @@ class OperatorApp(App[None]):
             # session still booting rather than one waiting on the user. The
             # constant comes from the shared tui.status catalogue (T2), the same
             # source the splash resolves, so band and splash agree by construction.
-            self._status.update(model_label=MODEL_SETUP, model_name="", streaming=False)
+            self._status.update(model_label=welcome_mod.MODEL_SETUP, model_name="", streaming=False)
 
     async def _reload_session(
         self, *, keep_context: bool = False, preserve_outgoing: bool = False
@@ -16664,7 +16666,7 @@ class OperatorApp(App[None]):
         # session's first turn happened to end.
         self._status.update(
             connection="",
-            model_label=MODEL_PENDING,
+            model_label=welcome_mod.MODEL_PENDING,
             # Cleared with the label it describes: a name left standing beside
             # `MODEL_PENDING` would be the dead session's model.
             model_name="",
