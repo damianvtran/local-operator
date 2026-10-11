@@ -41,6 +41,10 @@ real touches, shoots 390x844 and 360x780 at dpr 2, writes
 | wake-only | Quiet group wake only | `Wake messages · 2` | two rows |
 | single-receipt | Quiet group single | one receipt is not a group — the ordinary card | the same card |
 
+Light set (`light/`): `collapsed-minimum` + `expanded` at 390, captured by
+the design round (design r1) — canvas `#f5f0e6`, label 12px, bar measured
+44px; the designer's own `light-report.json` rides beside the frames.
+
 ## The retired window-cut state (measured, PR #2160)
 
 A seventh state — a group cut by the client's window with the count stated as

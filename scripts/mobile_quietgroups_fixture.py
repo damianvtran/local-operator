@@ -71,6 +71,7 @@ import uvicorn
 import scripts.probe_isolation  # noqa: F401  -- must be the first local import
 from local_operator.mobile.daemon import MobileDaemon, SessionEntry, build_app
 from local_operator.mobile.types import (
+    EntryKind,
     SessionProjection,
     SessionRecord,
     TranscriptEntry,
@@ -122,7 +123,7 @@ def _tool(entry_id: str, call_id: str, summary: str) -> TranscriptEntry:
     )
 
 
-def _line(entry_id: str, kind: str, text: str) -> TranscriptEntry:
+def _line(entry_id: str, kind: EntryKind, text: str) -> TranscriptEntry:
     return TranscriptEntry(id=entry_id, kind=kind, text=text)
 
 
