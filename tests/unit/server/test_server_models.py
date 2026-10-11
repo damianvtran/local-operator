@@ -73,7 +73,7 @@ def client(monkeypatch):
     if not had_env_config or previous is None:
         app.state.env_config = get_env_config()
     try:
-        yield TestClient(app)
+        yield TestClient(app, headers={"Host": "127.0.0.1:1111"})
     finally:
         if had_env_config:
             app.state.env_config = previous
@@ -573,7 +573,7 @@ def discovery_client(tmp_path, monkeypatch):
     previous_desktop_auth = getattr(app.state, "desktop_auth", None)
     app.state.desktop_auth = None
     try:
-        yield TestClient(app), tmp_path, fetched
+        yield TestClient(app, headers={"Host": "127.0.0.1:1111"}), tmp_path, fetched
     finally:
         created = getattr(app.state, "desktop_auth", None)
         if created is not None:

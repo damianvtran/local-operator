@@ -121,7 +121,11 @@ async def test_update_config_invalid_values(test_app_client, mock_config_manager
     """Test updating configuration with invalid values."""
     # Create a transport and client directly to test error handling
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Host": "127.0.0.1:1111"},
+    ) as ac:
         # Simulate an error by patching the config manager to raise an exception
         app.state.config_manager.update_config = lambda _: (_ for _ in ()).throw(
             ValueError("Invalid configuration value")

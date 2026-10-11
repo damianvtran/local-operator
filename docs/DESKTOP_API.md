@@ -176,7 +176,8 @@ gate to cover them is a separate, larger decision and is recorded rather than
 made here.
 
 `/v1/static/*` is the one of those four that now carries its own hardening
-(`server/utils/static_roots.py`), because it is the one that reads arbitrary files:
+(`server/utils/static_roots.py`), because it is the one that reads arbitrary files
+(except the Host check below, which since P1.5 covers every route of the app):
 
 - **The bound is the connection, not a directory list.** `lop serve` refuses every
   non-loopback bind (`0.0.0.0`, `::`, LAN addresses, non-loopback-resolving names:
@@ -195,12 +196,18 @@ made here.
   `403` does not say whether the file exists and names the remedy. `..` is refused
   outright in both postures. This design is
   `docs/design/file-serving-and-surface-convergence.md` §3.
-- **Host check.** A `Host` that is a DNS name other than `localhost` (or the
-  daemon's own `--host`) is refused with `403`, so a DNS-rebinding page, which is
-  same-origin and needs no CORS grant, cannot use the route. IP literals pass (the
-  app dials `http://127.0.0.1:<port>`); a wildcard/empty announced host fails
-  closed -- only IP literals and `localhost` are admitted and a DNS name is refused
-  (the former wildcard-bind bypass is deleted).
+- **Host check -- every route, not just this family (P1.5, RFC §3.6).** A `Host`
+  that is a DNS name other than `localhost` (or the daemon's own `--host`) is
+  refused with `403` on every route of the app, so a DNS-rebinding page, which is
+  same-origin and needs no CORS grant, cannot use any of them. Admitted: IP
+  literals (the app dials `http://127.0.0.1:<port>`), `localhost` in its port,
+  case and trailing-dot spellings, and the daemon's announced bind when it is a
+  specific name; a wildcard/empty announced host fails closed -- only IP literals
+  and `localhost` pass and a DNS name is refused (the former wildcard-bind bypass
+  is deleted); an absent `Host` passes (HTTP/1.0 clients; no browser omits it).
+  No route or client exemption exists: the shipped surfaces and the CLI dial
+  `127.0.0.1` literals, and a tunnel or SSH port-forward presents the literal it
+  dialed.
 - **Response policy.** Every response, errors included, carries `nosniff` and a
   `Content-Security-Policy` ending in `frame-ancestors` (the app only), and no CORS
   grant is made to an origin that is not on the admitted allowlist -- including, unlike
