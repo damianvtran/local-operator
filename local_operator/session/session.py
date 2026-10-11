@@ -18790,9 +18790,11 @@ class Session:
 
         cut = await self._offloaded(compaction_api, "find_cut_point", llm_history, keep_recent)
         if (cut is None or cut <= 0) and keep_recent > settings.keep_recent_tokens:
-            # THE FLOOR CAN SPAN THE WHOLE COMPACTABLE WINDOW. When the last
-            # genuine user turn is older than the current kept window, the
-            # floor re-measures that same span on every turn; the widened walk
+            # A WIDENED PRESERVE WINDOW CAN SPAN THE WHOLE COMPACTABLE
+            # WINDOW: the task floor (the incident's source) and a clamped
+            # advisor hint both ride this guard. When the last genuine user
+            # turn is older than the current kept window, the floor
+            # re-measures that same span on every turn; the widened walk
             # then stops exactly at the preserved-block boundary, where the
             # summarizable count sees nothing but the marker and
             # already-preserved turns (both deliberately excluded) and
@@ -18813,8 +18815,9 @@ class Session:
             )
             if recency_cut is not None and recency_cut > 0:
                 logger.warning(
-                    "compaction preserve floor spanned the compactable window: falling "
-                    "back to the plain recency window (keep_recent %s -> %s)",
+                    "compaction preserve window (task floor or a clamped advisor hint) "
+                    "spanned the compactable window: falling back to the plain recency "
+                    "window (keep_recent %s -> %s)",
                     keep_recent,
                     settings.keep_recent_tokens,
                 )
