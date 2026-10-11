@@ -1743,16 +1743,21 @@ rows.
 
 #### Scope: local journals only, and the seams
 
-**A peer's conversation keeps today's shape** — with or without the flag. A
-peer-owned id is served by different readers (`_remote_history` for the wire
-window, `_peer_stored_history` through `net_session_history` for the owner's
-stored journal), so its page is built by the OWNER and arrives over the mesh;
-stripping it here would be a second page builder for the same rows, and the
-remote-cost lane owns that change. The seam is stated rather than left to be
-discovered: when the owner-side read gains the same strip and facts, the client
-needs nothing new, because `runs_state: "unsupported"` is already the value it
-must tolerate today. A renderer MUST treat `unsupported` and an absent `runs`
-alike: draw today's page and keep its own condensation.
+**A peer's frame is built by its OWNER, and the stored read is the path that
+reaches it.** A peer-owned id is served by different readers (`_remote_history`
+for the wire window, `_peer_stored_history` through `net_session_history` for
+the owner's stored journal), and the frame — the strip, the cut and the run
+facts — is the owner-side twin of the local build
+(`relay.RelayServer._open_frame_detail`, over the owner's own journal rows).
+THE LIVE WIRE WINDOW KEEPS TODAY'S SHAPE **AND SAYS SO**: its rows are MESSAGES
+rather than journal entries (the strip's key list does not describe them), its
+run facts would need a transcript index over a journal this device does not
+hold, and it answers `runs_state: "unsupported"` when the flag was asked for.
+An owner older than the facts half answers today's page without the three keys;
+the viewer defaults them to `runs: []` / `runs_state: "unsupported"` /
+`head_cut: false`, so a renderer MUST treat `unsupported` and an absent `runs`
+alike: draw today's page and keep its own condensation — no client meets a
+value it does not already tolerate.
 
 **The relay's first frame is not served from this builder in this revision**,
 and the reason is a precondition rather than an appetite: the phone's projection
