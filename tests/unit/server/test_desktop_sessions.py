@@ -1220,7 +1220,7 @@ async def test_attachment_bytes_are_not_cached_by_any_shared_cache(tmp_path, mon
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = DesktopSessions(tmp_path)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.get(
             f"/v1/desktop/sessions/0123456789ab/attachments/{ref.digest}",
             headers={"Authorization": "Bearer token"},
@@ -1344,7 +1344,7 @@ async def test_search_finds_a_session_by_what_was_said_in_it(tmp_path, monkeypat
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = DesktopSessions(tmp_path)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         denied = client.get("/v1/desktop/sessions/search?q=retention")
         assert denied.status_code in (401, 403)
         response = client.get(
@@ -1387,7 +1387,7 @@ async def test_search_is_declared_before_the_session_id_route(tmp_path, monkeypa
     monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = DesktopSessions(tmp_path)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.get(
             "/v1/desktop/sessions/search?q=", headers={"Authorization": "Bearer token"}
         )
@@ -1410,7 +1410,7 @@ async def test_an_oversized_or_invalid_query_is_refused_without_echoing_it(tmp_p
     app.state.desktop_sessions = DesktopSessions(tmp_path)
     secret_looking = "x" * 300
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         too_long = client.get(
             f"/v1/desktop/sessions/search?q={secret_looking}",
             headers={"Authorization": "Bearer token"},
@@ -3810,7 +3810,7 @@ async def test_child_transcript_route_is_bearer_gated_and_no_store(tmp_path, mon
     app.state.desktop_sessions = DesktopSessions(tmp_path)
     path = f"/v1/desktop/sessions/{PARENT_ID}/children/{CHILD_ID}/transcript"
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         assert client.get(path).status_code == 401
         assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
         forbidden = client.get(
@@ -3877,7 +3877,7 @@ async def test_child_attachment_route_is_bearer_gated_and_no_store(tmp_path, mon
     app.state.desktop_sessions = DesktopSessions(tmp_path)
     path = f"/v1/desktop/sessions/{PARENT_ID}/children/{CHILD_ID}/attachments/{ref.digest}"
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         assert client.get(path).status_code == 401
         headers = {"Authorization": "Bearer token"}
         response = client.get(path, headers=headers)
@@ -7286,7 +7286,7 @@ def test_the_messages_route_accepts_prose_that_opens_with_a_command_word(monkeyp
     headers = {"Authorization": "Bearer policy-token"}
     body = {"request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         for text in MESSAGE_DRAFTS:
             response = client.post(
                 "/v1/desktop/sessions/0badc0ffee00/messages",
@@ -7350,7 +7350,7 @@ def test_the_command_route_and_the_admission_rule_share_one_derivation(monkeypat
         ("logout", "openai"),
     ]
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         for command, args in cases:
             spec = slash_command_for("/" + command)
             assert spec is not None
@@ -7406,7 +7406,7 @@ def test_the_credential_route_refuses_text_the_admission_rule_calls_the_commands
     assert command_argument_is_used(spec, canary) is True
     assert command_argument_is_used(spec, "my pass phrase") is True
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         for text in (f"/credential {canary}", f"/cred {canary}"):
             refused = client.post(
                 "/v1/desktop/sessions/0badc0ffee00/messages",

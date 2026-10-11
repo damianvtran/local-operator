@@ -959,6 +959,45 @@ async def desktop_origin_cors(request: Request, call_next):
 
 
 @app.middleware("http")
+async def host_admission(request: Request, call_next):
+    """Answer the DNS-rebinding ``Host`` rule for EVERY route, before the router.
+
+    WHY GLOBAL (P1.5, RFC §3.6 follow-up d). The rule arrived with
+    ``/v1/static/*`` -- the first routes a rebinding page could read bytes
+    through -- but the page it defends against is same-origin with the daemon on
+    ANY path, and a rule that changes with the route family is a rule the
+    attacker picks. The pre-extension audit found no supported client that dials
+    this app by DNS name: the desktop app, its discovery/health probes and this
+    CLI dial ``127.0.0.1`` literals, the TUI is in-process, and the tunnel
+    gateway forwards to the relay harness port (4098), not this app (gateway.py
+    ``harness``/``headers``; ``tunnels/cli.py``). No exemption is granted, and a
+    caller reaching this loopback-only listener through a port-forward sends the
+    literal it dialed -- which passes.
+
+    PLACEMENT. Registered INSIDE :func:`static_response_policy` so a refused
+    static request still leaves with the static response policy's headers (the
+    R8 test asserts ``nosniff`` on exactly that 403) and OUTSIDE the CORS
+    machinery, so no preflight is answered for a name that may not be here. It
+    runs before the router, so the refusal cannot become a file-existence
+    signal on any route that reads files.
+
+    The predicate and its admitted forms live in
+    :func:`~local_operator.server.utils.static_roots.host_is_acceptable`; one
+    sentence covers every route, so a refused caller learns nothing about which
+    family it aimed at.
+    """
+    # Absent in a `--reload` child (the address arrives by environment and is
+    # consumed): the predicate then admits only IP literals and `localhost`,
+    # which is what a dev server is reached by.
+    announced = getattr(request.app.state, serve_registry.ANNOUNCED_STATE_ATTR, None)
+    if host_is_acceptable(request.headers.get("host"), announced[0] if announced else None):
+        return await call_next(request)
+    return JSONResponse(
+        status_code=403, content={"detail": "This Host is not allowed to reach this server."}
+    )
+
+
+@app.middleware("http")
 async def static_response_policy(request: Request, call_next):
     """Harden every ``/v1/static/*`` response: CSP, ``nosniff``, no foreign CORS grant.
 
@@ -981,31 +1020,24 @@ async def static_response_policy(request: Request, call_next):
     page can still *cause* a request (an ``<img>`` needs no grant); it can no
     longer *read* the answer, and what bounds what it could have caused is now
     the connection's posture (``static_roots.connection_mode`` -- unclamped
-    serving only on loopback-accepted sockets), the Host check below, and this
-    middleware's response policy, not a served-root allowlist (which survives
-    only as the rooted fallback; RFC §3).
+    serving only on loopback-accepted sockets), the Host check
+    (:func:`host_admission` above it), and this middleware's response policy,
+    not a served-root allowlist (which survives only as the rooted fallback;
+    RFC §3).
 
-    THE HOST CHECK is the one thing here that is not about headers: a DNS-rebinding
-    page is same-origin with the daemon, so no CORS decision reaches it (review R8).
-    The ``Host`` it sends is its own name; see
-    :func:`~local_operator.server.utils.static_roots.host_is_acceptable` for what is
-    admitted and why the app's renderer is unaffected. It is answered HERE, before
-    the router, so the refusal cannot become a file-existence signal.
+    THE HOST CHECK is not here: a DNS-rebinding page is same-origin with the
+    daemon, so no CORS decision reaches it (review R8), and since P1.5
+    (RFC §3.6) the check covers EVERY route via :func:`host_admission`,
+    registered one layer INSIDE this one -- so a refused static request still
+    leaves with this middleware's headers while the rule itself belongs to the
+    app, not to this family. The predicate and its admitted forms live in
+    :func:`~local_operator.server.utils.static_roots.host_is_acceptable`.
 
     The policy is in ``utils/static_roots.py`` so it is testable without an app.
     """
     if not is_static_path(request.url.path):
         return await call_next(request)
-    # Absent in a `--reload` child (the address arrives by environment and is
-    # consumed): the check then admits only IP literals and `localhost`, which is
-    # what a dev server is reached by.
-    announced = getattr(request.app.state, serve_registry.ANNOUNCED_STATE_ATTR, None)
-    if host_is_acceptable(request.headers.get("host"), announced[0] if announced else None):
-        response = await call_next(request)
-    else:
-        response = JSONResponse(
-            status_code=403, content={"detail": "This Host is not allowed to reach this server."}
-        )
+    response = await call_next(request)
     allowed = desktop_posture().origins
     for name, value in response_policy(request.url.path, allowed).items():
         response.headers[name] = value
