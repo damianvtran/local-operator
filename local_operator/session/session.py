@@ -306,6 +306,7 @@ from local_operator.supplements.trigger import (
     snapshot_messages,
 )
 from local_operator.tools.builtin import (
+    blocked_todos,
     open_todos,
     restore_todos,
     todo_fingerprint,
@@ -1114,27 +1115,71 @@ def _state_section_text(body: Any, heading: str) -> str:
     return f"{heading}\n{text}"
 
 
-def _todo_reminder_text(pending: list[dict[str, str]]) -> str:
+def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, str]]) -> str:
     """The nudge the continuation guardrail injects (``_todo_continuation``).
 
+    TWO groups, because the guardrail's work set has two obligations and stating
+    them as one would be wrong in both directions. ``pending`` items are work
+    that must not be left running: the paragraph below asks for it to be resumed
+    or honestly resolved, and names the three exits (done / block / drop) because
+    "keep going" alone is what produces work marked done that was never done.
+    ``blocked`` items are parked work whose condition may have cleared, may need
+    the user, or may need something watching it: letting those end a turn
+    silently is how a session parked six items for ~14 hours outside every
+    pending-only check. Blocked is reconciled, not forbidden — the model may
+    still finish, but it must say what it did with each one.
+
+    Each group's paragraph appears ONLY when its group is non-empty: a blocked
+    row under a "do not end the turn while pending items remain" instruction, or
+    a reconciliation instruction under a list with nothing blocked, reads as an
+    instruction about work that does not exist. A caller passing both empty gets
+    the bare header — the guardrail never does (it returns ``[]`` first), but the
+    function stays total.
+
     Wrapped in ``<system-reminder>`` and labelled as harness-injected: the model
-    reads it as a user turn, and without the label it would answer the user
-    about a message the user never sent. Items are listed verbatim so the model
-    resolves the texts the tool will actually match, and the three honest exits
-    are named because "keep going" alone is what produces work marked done that
-    was never done. Compact on purpose — it is injected at every boundary.
+    reads it as a user turn, and without the label it would answer the user about
+    a message the user never sent. Items are listed verbatim so the model
+    resolves the texts the tool will actually match, and a blocked row carries
+    its reason because the reason IS the condition the model is asked to
+    re-check. Compact on purpose — it is injected at every boundary.
     """
-    items = "\n".join(f"- {item['text']}" for item in pending)
+    rows = [f"- {item['text']}" for item in pending]
+    for item in blocked:
+        # The row keeps the panel's ``— blocked`` form (``tui/widgets/
+        # todo_panel.py``, and the tool's own receipt) rather than inventing a
+        # second spelling of the state. A blocked item always carries a reason
+        # (``block`` requires one), but a hand-edited or pre-``reason`` store
+        # need not, and the state is still named without it — dropping the whole
+        # clause would render a parked item as plain pending work.
+        reason = item.get("reason")
+        rows.append(
+            f"- {item['text']} — blocked: {reason}" if reason else f"- {item['text']} — blocked"
+        )
+    paragraphs: list[str] = []
+    if pending:
+        paragraphs.append(
+            "Do not end the turn while pending items remain: either keep "
+            "working, or resolve each one honestly — `todo done` when it is "
+            "finished, `todo block` with a reason when it needs a user decision "
+            "or an external service, `todo drop` when it is no longer needed. "
+            "If the decision is the user's to make, put it to them with the "
+            "`ask` tool."
+        )
+    if blocked:
+        paragraphs.append(
+            "Before you finish, account for each blocked item: check whether "
+            "its condition still holds. If it has cleared, resume the work; if "
+            "the decision is the user's, raise it with the `ask` tool; if it "
+            "waits on an external condition, make sure a wake or monitor is "
+            "armed to revisit it. Do not leave a blocked item that nothing is "
+            "watching."
+        )
+    body = "\n".join([*rows, *paragraphs])
     return (
         "<system-reminder>\n"
         "Injected by the harness at the turn boundary. Not from the user, and "
         "not shown to them.\n"
-        f"These todo items are still open:\n{items}\n"
-        "Do not end the turn while items are open. Either keep working, or "
-        "resolve each one honestly: `todo done` when it is finished, "
-        "`todo block` with a reason when it needs a user decision or an "
-        "external service, `todo drop` when it is no longer needed. If the "
-        "decision is the user's to make, put it to them with the `ask` tool.\n"
+        f"These todo items are still open:\n{body}\n"
         "</system-reminder>"
     )
 
@@ -1676,7 +1721,7 @@ def _is_persistable_message(message: AgentMessage) -> bool:
     return not message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
 
 
-def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, str], ...]:
+def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, str, str], ...]:
     """The todo fingerprint a reminder was built from, normalized for compare.
 
     Read back through an explicit tuple/str coercion rather than trusted as
@@ -1686,20 +1731,24 @@ def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, st
     malformed one) compares equal to nothing and expires, which is the safe
     direction: a nudge that may be lying is worth less than one turn without it.
 
-    ARITY MUST MATCH ``builtin.todo_fingerprint`` (design §5.3): it now emits
-    3-tuples ``(phase_name, text, status)``, so this filter keeps ``len == 3``.
-    If this stayed at 2 while the source grew to 3, EVERY stamped item would be
-    dropped, the stamped side would compare empty against a non-empty current
-    fingerprint, and every reminder would expire on every render — the latch
-    errs safe (keeps nudging) so 'does it nudge' still passes while the
+    ARITY MUST MATCH ``builtin.todo_fingerprint`` (design §5.3): it emits
+    4-tuples ``(phase_name, text, status, reason)``, so this filter keeps
+    ``len == 4``. The reason is part of it because the reminder renders the
+    reason and a re-``block`` rewrites it in place without touching the status:
+    a 3-tuple stamp would keep asserting the old condition after the model
+    corrected it, and this expiry check is the only thing that retires the stale
+    row. If this filter kept fewer elements than the source, EVERY stamped item
+    would be dropped, the stamped side would compare empty against a non-empty
+    current fingerprint, and every reminder would expire on every render — the
+    latch errs safe (keeps nudging) so 'does it nudge' still passes while the
     no-second-nudge suppression silently breaks. The phased no-second-nudge
     guardrail test is what catches a regression here.
     """
     stamped = details.get("fingerprint") or ()
     return tuple(
-        (str(item[0]), str(item[1]), str(item[2]))
+        (str(item[0]), str(item[1]), str(item[2]), str(item[3]))
         for item in stamped
-        if isinstance(item, (list, tuple)) and len(item) == 3
+        if isinstance(item, (list, tuple)) and len(item) == 4
     )
 
 
@@ -3865,17 +3914,18 @@ class Session:
         # last guardrail nudge in THIS user turn, so a model that yields twice
         # with a byte-identical list is not nudged a second time. Reset per user
         # turn in _run_turn_pipeline; see :meth:`_todo_continuation`.
-        # Both fingerprints are the phase-aware 3-tuple form
-        # ``(phase_name, text, status)`` that ``builtin.todo_fingerprint`` now
-        # emits (phased-todos change): the reminder latch and the persistence
+        # Both fingerprints are the phase-aware 4-tuple form
+        # ``(phase_name, text, status, reason)`` that ``builtin.todo_fingerprint``
+        # now emits (phased-todos change; the reason joined in the blocked-reason
+        # remediation): the reminder latch and the persistence
         # latch both compare against that source, so their annotations must match
         # its arity or a comparison silently degrades.
-        self._todo_reminder_fingerprint: tuple[tuple[str, str, str], ...] | None = None
+        self._todo_reminder_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
         # The todo fingerprint that was last WRITTEN to the transcript, so the
         # post-turn snapshot only appends when the list actually moved. Seeded
         # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
         # turn after a restore does not re-persist an unchanged restored list.
-        self._persisted_todo_fingerprint: tuple[tuple[str, str, str], ...] | None = None
+        self._persisted_todo_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
         # Project-continuation latch: the stale-set fingerprint captured at the
         # last project nudge in THIS user turn — the sorted
         # ``(project_id, status, int(progress_updated_at or 0))`` tuples of the
@@ -4690,11 +4740,13 @@ class Session:
         A reminder is a POINT-IN-TIME assertion — "these items are still open" —
         so it expires the instant any item changes status. It lives on in
         ``_context.messages`` (follow-ups are never removed from the live list),
-        and once the model has done the work, replaying it keeps insisting that
-        finished or blocked work is still open. That is a lie the model then has
-        to spend a turn arguing with, and it is the same staleness the renderer's
-        newest-only rule guards against for TWO reminders; this covers the one
-        reminder that simply went out of date.
+        and once the model has done the work, replaying it keeps insisting on a
+        list that is no longer there: an item it has finished, or one it has
+        since blocked — whose row (with its reason) and whose separate
+        reconciliation ask this reminder does not carry. That is a lie the model
+        then has to spend a turn arguing with, and it is the same staleness the
+        renderer's newest-only rule guards against for TWO reminders; this covers
+        the one reminder that simply went out of date.
 
         It lives on the session rather than in :func:`_default_convert_to_llm`
         because staleness needs the session id, and that function must stay a
@@ -17701,7 +17753,7 @@ class Session:
         self._peer_arrival.mark(HUB_MESSAGE_TYPE)
 
     async def _todo_continuation(self) -> list[AgentMessage]:
-        """The loop's follow-up hook: re-assert open todos at the yield boundary.
+        """The loop's follow-up hook: re-assert the outstanding todos at the yield.
 
         The loop ends a turn the instant the model returns no tool calls, even
         with every item still open — a steering message answered in prose was
@@ -17710,17 +17762,36 @@ class Session:
         (harness/loop.py, ``_collect_yield_injections``), so the model gets
         another turn with its own list in front of it.
 
+        The work set is pending PLUS blocked, and the two are reconciled
+        differently on purpose. Pending items may not be left running: they are
+        work the model is asked to resume or honestly resolve. Blocked items are
+        unfinished too — parked on a user decision or an external service — and
+        the failure this covers is a session that ended turns for ~14 hours over
+        six blocked items while a pending-only guardrail saw an empty work set
+        and let every yield stand. So blocked items are now ACCOUNTED for at the
+        same boundary: the reminder asks whether the condition still holds, whose
+        decision it is, and whether anything is armed to revisit it. The honest
+        stop is preserved — a blocked model may still finish its turn (the
+        paragraph asks it to account, never to invent progress), and, crucially,
+        it is not deferred forever by this hook: one accounting pass is all that
+        is owed (see the latch below). ``done`` and ``dropped`` stay out: they
+        are settled, and re-asserting them would feed the model a claim that is
+        false.
+
         Fires only while the list is MOVING. A model that yields twice with a
         byte-identical list is telling you it cannot proceed — usually it needs
         a decision only the user can make — and nudging it again would burn the
         loop's ``max_follow_up_continuations`` budget (its own, and the larger
         one: 64 against the 8 the steering/aside producers share), end the turn
         with a continuation-limit notice, and delay the user's answer by up to
-        that many model calls. The larger budget is safe precisely because the
-        latch above is what really bounds this producer — a chatty parent can no
-        longer spend the allowance a still-moving list needs. Any progress earns
-        another nudge; a fresh user turn re-arms the latch (see
-        ``_run_turn_pipeline``).
+        that many model calls. That latch is also what keeps the blocked
+        reconciliation bounded: blocking is MOVEMENT (it changes the
+        fingerprint), so it earns exactly one nudge, and the byte-identical
+        yield after the model accounts is released — one pass, not a loop. The
+        larger budget is safe precisely because the latch above is what really
+        bounds this producer — a chatty parent can no longer spend the allowance
+        a still-moving list needs. Any progress earns another nudge; a fresh
+        user turn re-arms the latch (see ``_run_turn_pipeline``).
 
         The nudge it returns is a point-in-time assertion and stops being sent
         the moment the list moves — see :meth:`_live_todo_reminders`, which
@@ -17736,7 +17807,8 @@ class Session:
         transcript as if the user had typed it.
         """
         pending = open_todos(self._session_id)
-        if not pending:
+        blocked = blocked_todos(self._session_id)
+        if not pending and not blocked:
             return []
         fingerprint = todo_fingerprint(self._session_id)
         if fingerprint == self._todo_reminder_fingerprint:
@@ -17749,7 +17821,10 @@ class Session:
                 # The fingerprint rides ALONG with the text: it is what the
                 # render path compares to decide the assertion is still true
                 # (see :meth:`_live_todo_reminders`).
-                details={"text": _todo_reminder_text(pending), "fingerprint": fingerprint},
+                details={
+                    "text": _todo_reminder_text(pending, blocked),
+                    "fingerprint": fingerprint,
+                },
             )
         ]
 
