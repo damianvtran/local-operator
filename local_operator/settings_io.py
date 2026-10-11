@@ -723,6 +723,24 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_LAUNCH,
         _t(_ws.network_description()),
     ),
+    # Split out of ``network`` (the trigger note's Q5, settled by reading
+    # ``SECTIONS``): this policy is read LIVE — every update front end reads it
+    # fresh at its own start, and the relay's rollout driver re-reads it before
+    # every ask, so a roll already running halts at its next member boundary —
+    # while every key under ``network`` is read once at relay start and that
+    # section's description says so ("All take effect when the relay
+    # restarts"). Scope is uniform within a section by construction (AGENTS.md,
+    # "Adding a configuration key"), so saying something true here means a
+    # section of its own — the same split ``session_cleanup`` and
+    # ``memory_guard`` took. The KEY and its config-file path stay under
+    # ``network`` (RU §3: "defaulted in the config file's existing ``network:``
+    # section"); only the registry's grouping moved.
+    Section(
+        "mesh_updates",
+        _t(_ws.mesh_updates_title()),
+        Scope.LIVE,
+        _t(_ws.mesh_updates_description()),
+    ),
     # The Aida keys. Scope LIVE, with the caveats stated in the description
     # rather than hidden behind a dishonest label: the pause flag is delivered
     # to every live process by the config watcher on its 2 s tick (that IS the
@@ -4514,6 +4532,35 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=1.0,
         maximum=3650.0,
         help=(_t(_ws.network_audit_max_age_days_help())),
+    ),
+    # THE SWITCH (S3b; mesh-update-propagation.md §5): auto-roll is reachable
+    # only when this reads ``auto``. A per-run ``lop update --no-roll``
+    # overrides it; the manual verbs (``lop network update``) work under
+    # either. Stored under the ``network`` block — the config-file location is
+    # the design's ("beside ``keepalive_s``, ``link_idle_s``", RU §3) — while
+    # the SECTION above is ``mesh_updates`` for the scope reason stated on it.
+    # The default mirrors ``rollouts.DEFAULT_ROLLOUT_ON_UPDATE``, which
+    # ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins.
+    Setting(
+        key="network.rollout_on_update",
+        path=("network", "rollout_on_update"),
+        section="mesh_updates",
+        label=_t(_ws.network_rollout_on_update_label()),
+        kind=Kind.ENUM,
+        default="auto",
+        help=_t(_ws.network_rollout_on_update_help()),
+        choices=(
+            Choice(
+                "auto",
+                _t(_ws.network_rollout_on_update_choice_auto_label()),
+                _t(_ws.network_rollout_on_update_choice_auto_description()),
+            ),
+            Choice(
+                "off",
+                _t(_ws.network_rollout_on_update_choice_off_label()),
+                _t(_ws.network_rollout_on_update_choice_off_description()),
+            ),
+        ),
     ),
     # THE RELAY'S OWN LIMIT, and the one an operator needs exactly when a peer
     # cannot connect: §2.1's cap on UNAUTHENTICATED connections in flight. The slot

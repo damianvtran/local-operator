@@ -815,6 +815,17 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: ``/v1/static/*`` routes straight off ``config.yml`` (``read_config_values``) and no
 #: ``Session`` holds it. Proven in ``tests/unit/server/test_static_roots.py::
 #: test_a_write_from_another_process_takes_effect_without_a_restart``.
+#: ``mesh_updates`` is host-owned in the ``runtime`` shape: its one key gates what an
+#: UPDATE does next, not what a session does. The update front ends read it at their
+#: own start (``update._roll_after_update`` → ``rollouts.open_after_update``) and the
+#: relay's rollout driver re-reads it before every ask
+#: (``rollouts.rollout_policy``), so ``off`` halts a policy-driven roll at its next
+#: member boundary. No ``Session`` holds it, so a probe here could watch nothing
+#: move. The live halves are proven where they live:
+#: ``tests/unit/network/test_rollouts.py`` drives the driver's halt (off mid-roll →
+#: no next ask; auto → the ask proceeds) and the reader's shapes, and
+#: ``tests/unit/test_update.py`` drives the front-end exits through the real
+#: ``update_command`` (the record it opens; the suppression row ``--no-roll`` writes).
 HOST_OWNED_LIVE_SECTIONS = {
     "hub",
     "appearance",
@@ -827,6 +838,7 @@ HOST_OWNED_LIVE_SECTIONS = {
     "wakes",
     "speech",
     "static",
+    "mesh_updates",
 }
 
 

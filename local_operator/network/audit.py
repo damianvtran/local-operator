@@ -271,6 +271,12 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "update_rollout_started",
         "update_member_state",
         "update_rollout_done",
+        # S3b's suppression row: an update moved but the switch (``off`` or
+        # ``--no-roll``) stopped the roll before any record opened. Registered
+        # here with the other three because ``_sanitize_detail`` whitelists by
+        # ``DETAIL_KEYS`` — an unregistered name renders with NO detail,
+        # silently.
+        "update_rollout_suppressed",
     }
 )
 
@@ -522,6 +528,10 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "update_member_state": frozenset({"rollout", "state", "code", "reason", "method", "version"}),
     "update_rollout_done": frozenset({"rollout", "counts"}),
+    # The suppression row (S3b): which front end moved (``via``), what the key
+    # said (``policy``) and the per-run override when it was the flag that
+    # stopped the roll (``flag``, empty when the policy did).
+    "update_rollout_suppressed": frozenset({"via", "policy", "flag"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second

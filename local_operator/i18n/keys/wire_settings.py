@@ -1190,6 +1190,14 @@ def memory_guard_title() -> Msg:
     return Msg("wire.settings.memory_guard.title", {})
 
 
+def mesh_updates_description() -> Msg:
+    return Msg("wire.settings.mesh_updates.description", {})
+
+
+def mesh_updates_title() -> Msg:
+    return Msg("wire.settings.mesh_updates.title", {})
+
+
 def model_description() -> Msg:
     return Msg("wire.settings.model.description", {})
 
@@ -1432,6 +1440,30 @@ def network_port_help() -> Msg:
 
 def network_port_label() -> Msg:
     return Msg("wire.settings.network_port.label", {})
+
+
+def network_rollout_on_update_choice_auto_description() -> Msg:
+    return Msg("wire.settings.network_rollout_on_update.choice.auto.description", {})
+
+
+def network_rollout_on_update_choice_auto_label() -> Msg:
+    return Msg("wire.settings.network_rollout_on_update.choice.auto.label", {})
+
+
+def network_rollout_on_update_choice_off_description() -> Msg:
+    return Msg("wire.settings.network_rollout_on_update.choice.off.description", {})
+
+
+def network_rollout_on_update_choice_off_label() -> Msg:
+    return Msg("wire.settings.network_rollout_on_update.choice.off.label", {})
+
+
+def network_rollout_on_update_help() -> Msg:
+    return Msg("wire.settings.network_rollout_on_update.help", {})
+
+
+def network_rollout_on_update_label() -> Msg:
+    return Msg("wire.settings.network_rollout_on_update.label", {})
 
 
 def network_sync_debounce_s_help() -> Msg:
