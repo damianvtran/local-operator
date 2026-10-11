@@ -1208,6 +1208,16 @@ class AttachClient:
             # simply never sends event frames — the caller gates on
             # ``record.protocol >= 4`` before relying on the relay.
             auth["events"] = True
+            # THE VIEWER'S HALF of the supplements two-half gate (memo §2.7),
+            # declared only on an EVENT-CONSUMING client and only when the owner
+            # advertises the capability: without it the runtime still journals
+            # every row but fans no ``supplement_progress`` beat to this
+            # connection. Every core client in this build folds or renders the
+            # family (the desktop bridge gates it per subscriber; the mobile
+            # projection keeps it in a map old app builds ignore), so this is a
+            # declaration of what THIS build can receive, never a grant.
+            if SUPPLEMENTS_CAPABILITY in record.capabilities:
+                auth["supplements"] = True
         if self._frontend_state:
             auth["frontend_state"] = True
         if self._display_window and "display-history-window-v1" in record.capabilities:

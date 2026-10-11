@@ -1062,6 +1062,12 @@ class ServingSessionHandle(SessionHandle):
             config_dir=config_dir,
             seam=getattr(session, "supplement_seam", None),
         )
+        # The detached maintenance pass (sweep.py; memo-style housekeeping of orphaned
+        # component blobs and stale rows). SCHEDULED here, never awaited -- the pass is
+        # interval-gated, bounded and runs off the loop's critical path by construction,
+        # and disposal reaps it (``SupplementRunner.cancel``). Scheduling is a no-op when
+        # the feature is disabled.
+        self._supplements.schedule_sweep(loop)
         # Same shape as ``on_turn_settled``: the session flips the record's
         # ``started`` bit the first time a real turn runs (see
         # ``_run_turn_pipeline``), and the registrant owns the publish.

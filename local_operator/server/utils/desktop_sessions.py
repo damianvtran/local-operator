@@ -30,7 +30,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from anyio import CancelScope
 from fastapi import HTTPException
@@ -45,7 +45,7 @@ from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 # every existing caller and test stays put; there is ONE definition, in the
 # host-free module (see its docstring).
 from local_operator.harness.rows import visible_transcript_rows  # noqa: F401
-from local_operator.harness.types import ModelSpec
+from local_operator.harness.types import ModelSpec, SupplementProgressEvent
 from local_operator.resume import (
     ORIGIN_AGENT_CONFIG,
     ORIGIN_SUBAGENT,
@@ -1185,6 +1185,27 @@ class LegacySubscriberDuringMove(Exception):
     """
 
 
+#: The live family the supplements lane gates PER VIEWER (memo §2.7): a viewer that did
+#: not send ``?supplements=1`` must never receive a ``supplement_progress`` frame, because
+#: an older renderer would paint the unknown family visibly. Taken from the event CLASS
+#: rather than re-spelled, so the gate and the event cannot drift.
+SUPPLEMENT_EVENT_TYPE: Final = SupplementProgressEvent.model_fields["type"].default
+
+
+def supplement_event_frame(frame: Mapping[str, Any]) -> bool:
+    """Whether one bridge frame is the supplement family's live beat.
+
+    The frame shape is ``{"type": "event", "payload": <event dump>}``; the family is
+    named on the PAYLOAD. One predicate for both places the bridge hands frames to a
+    viewer (live ``publish`` and the ``events`` replay), so the gate cannot hold on one
+    path and leak on the other.
+    """
+    if frame.get("type") != "event":
+        return False
+    payload = frame.get("payload")
+    return isinstance(payload, Mapping) and payload.get("type") == SUPPLEMENT_EVENT_TYPE
+
+
 @dataclass(eq=False)
 class DesktopSubscription:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -1198,6 +1219,14 @@ class DesktopSubscription:
     #: False for every existing caller, which is what makes the move path
     #: refuse rather than silently leave a mounted viewer stale.
     frontend_replace: bool = False
+    #: Whether this subscriber negotiated ``supplements-v1`` (the events route's
+    #: ``?supplements=1``, memo §2.7): only then does the bridge hand it
+    #: ``supplement_progress`` frames -- live or from replay. False for every
+    #: caller that does not know the flag, which is what keeps an older renderer
+    #: from meeting an event family it would paint as unknown (the same two-half
+    #: negotiation the runtime's attach gate runs, with the query parameter as
+    #: this transport's half).
+    supplements: bool = False
     expires: float = 0.0
     overflow: bool = False
     #: False until ``events`` has finished the OPEN handshake -- i.e. until the
@@ -2310,6 +2339,14 @@ class DesktopSessionBridge:
                 self.replay_bytes -= removed
         for sub in self.subscribers.values():
             if sub.overflow or sub.dwelling:
+                continue
+            # PER-VIEWER NEGOTIATION, and it gates LIVE and REPLAY alike because
+            # every frame either path can hand out passes through here first (the
+            # replay list is filtered again in ``events`` for frames published
+            # before this subscription existed). A viewer that never declared
+            # ``supplements`` must not meet the family at all: an older renderer
+            # would paint the unknown event visibly (memo §2.7).
+            if not sub.supplements and supplement_event_frame(frame):
                 continue
             if sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES:
                 if sub.opened:
@@ -5015,13 +5052,19 @@ class DesktopSessionBridge:
             return
         await remote.withdraw_desktop_watch()
 
-    def subscribe(self, *, frontend_replace: bool = False) -> DesktopSubscription:
+    def subscribe(
+        self, *, frontend_replace: bool = False, supplements: bool = False
+    ) -> DesktopSubscription:
         """Register one event subscriber.
 
         ``frontend_replace`` records whether this subscriber's renderer
         understands the desktop-only ``frontend.replace`` frame. It defaults to
         False, so a caller that does not know the flag negotiates nothing and
         the move path treats it as a viewer that must not be left stale.
+
+        ``supplements`` is the same shape for the supplements family (memo §2.7):
+        the events route reads ``?supplements=1`` and passes it here, and only a
+        subscriber that declared it is handed ``supplement_progress`` frames.
         """
         if len(self.subscribers) >= SUBSCRIBER_COUNT:
             raise ValueError("Too many event subscribers")
@@ -5036,7 +5079,7 @@ class DesktopSessionBridge:
                 "A working-directory move is in progress; this viewer cannot follow it. "
                 "Update the desktop app, then reconnect."
             )
-        sub = DesktopSubscription(frontend_replace=frontend_replace)
+        sub = DesktopSubscription(frontend_replace=frontend_replace, supplements=supplements)
         self.subscribers[sub.id] = sub
         return sub
 
@@ -5054,7 +5097,14 @@ class DesktopSessionBridge:
             first = self.replay[0][0]["seq"] if self.replay else cutoff + 1
             gap = epoch != self.epoch or after_seq < first - 1 or after_seq > cutoff
             replay = (
-                [f for f, _ in self.replay if after_seq < f["seq"] <= cutoff] if not gap else []
+                [
+                    f
+                    for f, _ in self.replay
+                    if after_seq < f["seq"] <= cutoff
+                    and (sub.supplements or not supplement_event_frame(f))
+                ]
+                if not gap
+                else []
             )
             snapshot = await self.snapshot(entry_times=entry_times, open_frame=open_frame)
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
@@ -6740,6 +6790,66 @@ class DesktopSessions:
                 raise KeyError("Unknown attachment")
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
+
+        return await asyncio.to_thread(read)
+
+    async def supplement_document(self, session_id: str, digest: str) -> str:
+        """The assembled HTML document of one stored supplement component.
+
+        THE SAME STORE, A DIFFERENT FAMILY (file-serving RFC §2 D5). A supplement
+        component is an agent-written DOCUMENT THAT EXECUTES in an opaque-origin
+        frame, so it must never ride the general media family or the path-addressed
+        ``/v1/static/html`` family; it is served by digest only, from this
+        device's content-addressed store, through the one assembler
+        (``supplements.document.assemble_stored_component``). The reply is
+        ``{html}`` JSON -- never ``text/html`` -- because no host may navigate a
+        frame to a URL (memo §4.1); the frame mounts the returned bytes at an
+        opaque origin under the document's own meta CSP.
+
+        Digest resolution is :meth:`attachment`'s, deliberately: the read is the
+        store's own (``get`` verifies the digest against the bytes, so a bit-rotted
+        file resolves as missing), the session id is an EXISTENCE check rather
+        than a binding (the store is shared across conversations by design), and a
+        PEER's conversation whose bytes are not in this device's store raises
+        :class:`PeerAttachmentUnavailable` -- which the route family maps to the
+        409 ``attachment_on_peer`` the memo names, so the desktop paints
+        "on <peer>" rather than a 404 that would read as deleted. A local copy of
+        a moved conversation still serves its bytes here.
+
+        A missing blob and a blob that cannot assemble are the same answer --
+        ``KeyError``, an ordinary 404 -- because the reader's remedy is identical
+        (the frame-level "Couldn't render this graphic" line, memo §2.8), and the
+        store's contract already says an unresolvable reference is ordinary. The
+        caller decides nothing about the document; it may not add, strip or edit
+        bytes (one assembler, memo §2.6).
+        """
+
+        def read() -> str:
+            from local_operator.session.remote_open import remote_row_for
+            from local_operator.supplements.document import assemble_stored_component
+
+            store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                row = remote_row_for(session_id, self.root)
+                if row is None or store.get(digest) is None:
+                    if row is not None:
+                        # The conversation exists, the bytes are not HERE: name the
+                        # device (409 attachment_on_peer), never 404 a live row.
+                        raise PeerAttachmentUnavailable(session_id, row)
+                    raise KeyError("Unknown session")
+            resolved = store.get(digest)
+            if resolved is None:
+                raise KeyError("Unknown supplement component")
+            data_b64, _mime_type = resolved
+            try:
+                return assemble_stored_component(base64.b64decode(data_b64).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                # Stored bytes that do not assemble are not renderable -- the same
+                # reader remedy as a missing blob, so the same ordinary 404.
+                raise KeyError("Unknown supplement component") from None
 
         return await asyncio.to_thread(read)
 
