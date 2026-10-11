@@ -128,9 +128,12 @@ def test_a_bad_op_is_an_invalid_arguments_error(config_home: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_write_reaches_a_subscribed_watcher_in_process(config_home: Path) -> None:
-    """The agent origin, end to end: the tool's write notifies the process's
-    config watcher synchronously — the same fan-out the TUI repaints from."""
+async def test_the_tool_write_is_unattributed_and_converges_on_disk(config_home: Path) -> None:
+    """The approval boundary (CI round 3): the TOOL's write must not reach an
+    in-process listener — ``source="local"`` means "the operator", and this
+    tool can run in a process that holds a live approval gate — while the file
+    still converges for every observer, arriving at the writer's own watcher as
+    a DISK change (tighten-only for any live gate)."""
     from local_operator.config_watch import process_watcher
 
     watcher = process_watcher(config_home)
@@ -140,8 +143,11 @@ async def test_the_write_reaches_a_subscribed_watcher_in_process(config_home: Pa
     try:
         result = await _execute({"op": "set", "key": "language", "value": "en"})
         assert result.is_error is False
-        assert [change.changed_keys for change in seen] == [{"language"}]
-        assert [change.source for change in seen] == ["local"]
+        assert seen == []  # no local attribution
+        change = watcher.poll_now()
+        assert change is not None
+        assert change.source == "disk"
+        assert change.changed_keys == {"language"}
     finally:
         await watcher.stop()
 

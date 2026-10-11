@@ -18172,27 +18172,40 @@ async def execute_setting(
 ) -> ToolResult:
     """Read or write ONE settings-registry row; the sanctioned agent write path.
 
-    THE SAME FUNNEL AS EVERY OTHER SURFACE: writes go through
+    THE SEAM, NOT THE FACADE: this tool never touches ``settings_io`` — it calls
+    ``local_operator.settings_control``, whose every write is UNATTRIBUTED
+    (``notify=False``). That is an approval-boundary requirement, not a
+    layering preference: ``source="local"`` means "a write the operator made
+    through the facade in the process holding the gate"
+    (``harness.approval.loosening_is_authorised``), and this tool can execute
+    inside processes that hold a live gate (the embedded TUI, ``lop exec``) —
+    a notified write from here would let the gated party mint that attribution
+    and loosen the gate that constrains it. Unattributed, the write is what it
+    factually is — a file edit on the agent's behalf: it may tighten a live
+    gate and may never loosen one, and every observer (the process's own
+    ConfigWatcher on its next poll, the machine-wide desktop feed, clients
+    re-reading ``GET /v1/capabilities``) sees exactly that.
+
+    EVERYTHING ELSE IS STILL THE ONE FUNNEL: ``settings_control.apply`` calls
     ``settings_io.write_setting`` — the function the TUI's /settings page, the
     desktop's ``PATCH /v1/settings`` and ``lop config edit`` all pass through —
-    so registry validation, the sub-mapping merge rule, the config-watcher
-    notification and the language change event are the same ones every other
-    origin gets. A tool-local re-spelling of any of those is how a second truth
-    is born, and the user's language must have exactly one.
+    so registry validation, the sub-mapping merge rule, the clear-to-unset
+    gesture and the cascade contract are the same ones every other origin
+    gets. A tool-local re-spelling of any of those is how a second truth is
+    born, and the user's language must have exactly one.
 
     Runs in whatever process executes the turn (a server turn's child process
-    included): the write is a FILE write, and every live observer — the
-    session process's ConfigWatcher, the machine-wide desktop feed — sees it
-    from the file, exactly as it sees a hand edit.
+    included): the write is a FILE write, and every live observer sees it from
+    the file, exactly as it sees a hand edit.
     """
     try:
         params = SettingParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "setting", exc)
-    from local_operator import settings_io
+    from local_operator import settings_control
 
     manager = ConfigManager(config_dir())
-    setting = settings_io.resolve_key(params.key.strip())
+    setting = settings_control.resolve(params.key.strip())
     if setting is None:
         return _error(
             tool_call_id,
@@ -18201,7 +18214,7 @@ async def execute_setting(
             "and `lop config list` show (for example 'language').",
         )
     if params.op == "get":
-        value = settings_io.read_setting(manager, setting)
+        value = settings_control.read(manager, setting)
         return _text(
             tool_call_id,
             "setting",
@@ -18209,49 +18222,29 @@ async def execute_setting(
                 {
                     "key": setting.key,
                     "value": value,
-                    "is_default": settings_io.is_default(manager, setting),
+                    "is_default": settings_control.is_default(manager, setting),
                 },
                 ensure_ascii=False,
             ),
             details={"key": setting.key},
         )
-    if setting.kind is settings_io.Kind.CASCADE:
-        # Cascade keys are edited under a BASE-SNAPSHOT contract (the route's
-        # ``SettingEdit.base``): an unchanged chain from a stale screen must
-        # never overwrite a newer chain. This tool has no snapshot field, and
-        # writing raw through ``write_setting`` would accept shapes
-        # ``_normalize_chains`` drops on read — a silent divergence is the one
-        # outcome the shared funnel exists to prevent — so the key is REFUSED,
-        # explicitly, with the alternative named.
-        return _error(
-            tool_call_id,
-            "setting",
-            f"Setting '{setting.key}' is a cascade edited with an original-snapshot "
-            "contract. Use the /settings page, `lop config edit`, or PATCH "
-            "/v1/settings with `base` — this tool does not carry the snapshot.",
-        )
     try:
-        settings_io._require_readable_config(manager)
-        if setting.empty_unsets and params.value == "":
-            # The clear-to-unset gesture, mirrored from the route and the CLI
-            # (their arm is exactly this one: ``empty_unsets`` + the empty
-            # string): deleting the key is what makes it read as its default
-            # again — storing a literal "" would report a deliberate choice
-            # the user never made.
-            settings_io.reset_setting(manager, setting)
-        else:
-            settings_io.write_setting(manager, setting, params.value)
-    except settings_io.ConfigUnreadableError:
+        # The seam owns the route-mirror semantics (cascade refusal, the
+        # clear-to-unset arm, the readability guard) and the unattributed
+        # write; its refusals arrive as ValueError/ConfigUnreadableError and
+        # are surfaced verbatim below.
+        settings_control.apply(manager, setting, params.value)
+    except settings_control.ConfigUnreadableError:
         return _error(
             tool_call_id,
             "setting",
             "The configuration file cannot be read. Repair it before saving.",
         )
     except ValueError as exc:
-        # The registry's own refusal, verbatim: the message the /settings page
-        # shows for the same value, never a tool-local paraphrase.
+        # The registry's / the contract's own refusal, verbatim: the sentence
+        # the /settings page shows for the same input, never a paraphrase.
         return _error(tool_call_id, "setting", str(exc))
-    value = settings_io.read_setting(manager, setting)
+    value = settings_control.read(manager, setting)
     return _text(
         tool_call_id,
         "setting",
@@ -18259,7 +18252,7 @@ async def execute_setting(
             {
                 "key": setting.key,
                 "value": value,
-                "is_default": settings_io.is_default(manager, setting),
+                "is_default": settings_control.is_default(manager, setting),
             },
             ensure_ascii=False,
         ),
