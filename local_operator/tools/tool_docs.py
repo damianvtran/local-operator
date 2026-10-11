@@ -408,8 +408,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
         ),
         notes=(
             "`block` a pending item with a reason naming the decision or "
-            "service it is waiting on; `add` a mid-turn requirement instead of "
-            "rewriting the list."
+            "service it is waiting on (blocked items are accounted for at the "
+            "turn boundary, not left unwatched); `add` a mid-turn requirement "
+            "instead of rewriting the list."
         ),
     ),
     # -- send ---------------------------------------------------------------

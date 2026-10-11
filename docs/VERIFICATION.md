@@ -1845,6 +1845,48 @@ replaces the list), `block` with a mandatory reason, `drop`, and a fix to
 model closing three items watched two stay open and would then be nagged about
 items it believed it had closed.
 
+## Blocked items are reconciled at the yield boundary (2026-10-10)
+
+The same guardrail, one gap further out. Its work set was **pending-only**, and
+`block` is exactly what a model uses to stop honestly — so a session parked six
+items on an external condition and ended turns for ~14 hours while the guardrail
+saw an empty list at every yield and let each one stand. The honest stop was
+never the bug; the missing ACCOUNT was.
+
+`builtin.blocked_todos` is `open_todos`'s mirror (blocked subset, copies, phased
+flattening), the work set is pending + blocked, and `_todo_reminder_text` states
+the two obligations in separate paragraphs because they are not the same demand:
+pending items may not be left running (resume, or resolve honestly), while a
+blocked item may legitimately end the turn once the model has said whether its
+condition still holds and what is watching it. Each paragraph is emitted only
+when its group is non-empty, so no instruction refers to work that is not on the
+list. The latch is unchanged and is what bounds the new pass: blocking is
+MOVEMENT, so a block earns exactly ONE reconciliation nudge, and the
+byte-identical yield after the model accounts releases the turn — reconciled,
+never forbidden, and never a loop. Still invisible to the user: the panel and
+the transcript carry nothing new.
+
+The round-1 fix follows from the same shape. A blocked row RENDERS its reason,
+so the reason is part of what a reminder asserts — but it was not part of the
+fingerprint, and `block` on an already-blocked item rewrites `reason` in place
+and leaves the status alone. A model that re-blocked an item with a corrected
+condition therefore produced no movement the latch could see: the live reminder
+kept rendering the old wait and the expiry check could never retire it, i.e. a
+stale claim the model had no way to correct. `todo_fingerprint` is now
+`(phase_name, text, status, reason)` with `reason = str(item.get("reason") or
+"")`, and `session.py:_stamped_todo_fingerprint` filters `len == 4` in lockstep
+(design §5.3) — the same coupled edit, one element wider.
+
+Evidence: `tests/unit/session/test_todo_guardrail.py` (17 tests — the
+blocked-only list firing a single reconciliation and releasing, the mixed
+pending+blocked text with each group's paragraph appearing only with its items,
+a fresh user turn re-arming a parked list, a re-blocked reason expiring the live
+reminder AND re-arming the latch, and the unchanged latch, renderer, expiry and
+phased-`open_todos` cases) and
+`tests/unit/session/test_todo_steering_e2e.py::test_blocking_an_item_earns_one_reconciliation_nudge`
+(5 requests through the real `Session`, `AgentLoop` and `todo` tool: the block,
+then the accounting turn that carries the reminder, then release).
+
 ## Two review rounds' findings, and what they cost to miss (2026-08-17)
 
 Both round-1 reviews requested changes on defects the 4177-test suite was green
