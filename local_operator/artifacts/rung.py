@@ -106,8 +106,10 @@ class RungSpec:
     #: send path yet (v1 sends at most one source).
     max_sources: int = 0
     #: Whether the rung's edit path accepts a mask beside the source.
-    #: DECLARED for the coming capability surface (the Radient media route
-    #: will expose one) and pinned by tests; nothing sends a mask in v1.
+    #: DECLARED for the capability surface the Radient media route now
+    #: exposes per pin (its gpt-2.5 edit pins carry ``mask`` on the live
+    #: listing) and pinned by tests; nothing sends a mask in v1, and the
+    #: Radient rung keeps False until a mask wire reads that per-pin row.
     mask: bool = False
     #: Which SOURCE MEDIA kinds this rung's source path accepts (``"image"``,
     #: ``"video"``, or both). The video phase's additive field: ``sources``

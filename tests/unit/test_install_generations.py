@@ -1324,6 +1324,97 @@ class TestPruning:
         assert middle not in plan.removed, "the margin must protect a FINISHED build"
         assert in_flight.is_dir()
 
+    def test_a_bumped_directory_mtime_cannot_evict_the_running_tree(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """QA round 1 on #2173, T7: the evicted generation was the updater's own.
+
+        The harness had ``rm``'d a stray file inside a stale generation, which moves
+        that DIRECTORY's mtime; the prune picked its victim by mtime, so the touched
+        tree jumped AHEAD of the one the updater was RUNNING from — unreferenced at
+        that instant, because the install had already flipped ``current`` onto the
+        new build. The victim was the running tree, and the command then died on a
+        lazy ``local_operator.services`` import AFTER its install had landed
+        (``ModuleNotFoundError``, rc=1; the #2173 QA matrix, T7).
+
+        BOTH halves are pinned on the one state, because either alone leaves the
+        shape reachable: the tree this process runs from is kept by IDENTITY, and
+        the eviction order is the name (creation order) rather than the touchable
+        mtime — so the bump neither saves the oldest generation nor moves the
+        eviction onto its neighbour.
+        """
+        generations = [_install(f"0.52.{index}") for index in range(5)]
+        running = generations[1]
+        # The process this prune runs in imports from ``running``; the string is
+        # the shape a record names, and this seam is the one the record readers
+        # are exercised through.
+        monkeypatch.setattr(
+            update_mod,
+            "process_install_root",
+            lambda: str(running / "tools" / "local-operator"),
+        )
+        # THE HARNESS'S ACT, exactly: removing a file inside the oldest
+        # generation's directory, which is what moves that directory's mtime to
+        # now (the shape recorded in the #2173 QA matrix, incident 2).
+        stray = generations[0] / "stray-file.txt"
+        stray.write_text("x", encoding="utf-8")
+        stray.unlink()
+
+        plan = update_mod.prune_generations()
+
+        assert running.is_dir(), "the tree this process is running from must never be evicted"
+        assert running not in plan.removed
+        assert plan.removed == (generations[0],), [path.name for path in plan.removed]
+        assert generations[2].is_dir() and generations[3].is_dir()
+
+    def test_the_tree_this_process_runs_from_is_never_a_candidate(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Order alone cannot close the class: the running tree can be the OLDEST.
+
+        An update run from an old tree after two later generations were installed
+        leaves a running generation that creation order would pick first, so the
+        protection has to be the identity a record carries as ``install_root`` —
+        never a sort position. The margin then counts the running tree like any
+        other reference, so this prune reclaims what it safely can: nothing, here,
+        because the two remaining unreferenced generations fill ``keep``.
+        """
+        generations = [_install(f"0.53.{index}") for index in range(4)]
+        running = generations[0]
+        monkeypatch.setattr(
+            update_mod,
+            "process_install_root",
+            lambda: str(running / "tools" / "local-operator"),
+        )
+
+        plan = update_mod.prune_generations()
+
+        assert running.is_dir()
+        assert plan.removed == (), [path.name for path in plan.removed]
+        assert "the tree this process is running from" in {
+            decision.reason for decision in plan.decisions
+        }, plan.decisions
+
+    def test_an_mtime_bump_cannot_reorder_which_dead_generation_is_evicted(
+        self, home: Path
+    ) -> None:
+        """With no running-tree protection in play, the order must still be the name.
+
+        This process runs from a checkout's venv, not a generation, so the only
+        property exercised is the eviction order: the oldest by NAME goes, the mtime
+        bump on it changes nothing, and — the direction that picked the QA victim —
+        the bump cannot divert the eviction onto its NEWER neighbour.
+        """
+        generations = [_install(f"0.54.{index}") for index in range(4)]
+        stray = generations[0] / "stray-file.txt"
+        stray.write_text("x", encoding="utf-8")
+        stray.unlink()
+
+        plan = update_mod.prune_generations()
+
+        assert plan.removed == (generations[0],), [path.name for path in plan.removed]
+        assert generations[1].is_dir(), "the bump must not move the eviction onto its neighbour"
+
     def test_a_generation_named_only_by_a_boot_record_is_kept(self, home: Path) -> None:
         """I1a: the ~1.2 s before the first heartbeat is a boot record's window.
 

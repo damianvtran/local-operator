@@ -278,6 +278,14 @@ FAULT_EXECUTION = "execution"  # the tool ran and failed (HTTP 500, missing file
 # empty ``is_error`` tool_result content with a 400, and other providers
 # serialize "" — one placeholder block keeps the wire legal for every client.
 EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
+#: ``ToolResult.details`` keys whose values can carry file CONTENT the caller
+#: wrote, and so take the SAME mask as the result text wherever a result is
+#: redacted (see ``AgentLoop._redact_details``). The file tools' rendered diff
+#: is the one such field today; extended deliberately, never by sweeping every
+#: string in the dict — ``details`` also carries counters and identity values
+#: (``added``/``removed``/``path``/``spill`` handles) whose readers compare
+#: exact values.
+_CONTENT_BEARING_DETAIL_KEYS = ("diff",)
 # Steering-interrupt poll interval for ``interruptible`` tools mid-run.
 STEERING_INTERRUPT_POLL_S = 0.25
 
@@ -3978,7 +3986,20 @@ class AgentLoop:
                                     planned.args,
                                     execution_context.cwd,
                                     nested_verdict,
-                                )
+                                ),
+                                # The same policy for the details half: this
+                                # result crosses back into arbitrary Python
+                                # WITH its details (``model_dump`` below), and
+                                # a write driven from eval quotes its bytes in
+                                # ``details['diff']`` like any other.
+                                "details": await self._redact_details(
+                                    result.details,
+                                    config.redact_tool_result,
+                                    name,
+                                    planned.args,
+                                    execution_context.cwd,
+                                    nested_verdict,
+                                ),
                             }
                         )
                     result.duration_s = time.monotonic() - started
@@ -4898,12 +4919,27 @@ class AgentLoop:
     ) -> None:
         for result in results:
             content: list[Content] = list(result.content)
+            details = result.details
             # Redact BEFORE the empty-result backfill: a redacted secret is
             # still text, so an image-only result is untouched and a genuinely
             # empty one still gets the placeholder it needs to serialize.
             if redact is not None:
                 content = await self._redact_content(
                     content,
+                    redact,
+                    result.tool_name,
+                    _call_arguments(context, result.tool_call_id),
+                    _session_cwd(context),
+                    _exempt_source_verdict(context, result.tool_call_id),
+                )
+                # The details half of the same policy: a ``write``/``edit``
+                # result quotes the bytes it wrote in ``details['diff']``, and
+                # that text rides into ``provider_payload`` (the transcript,
+                # the settled card, every replay). See
+                # :meth:`_redact_details` for why the mask belongs at this
+                # seam and not at the diff's source.
+                details = await self._redact_details(
+                    details,
                     redact,
                     result.tool_name,
                     _call_arguments(context, result.tool_call_id),
@@ -4924,10 +4960,13 @@ class AgentLoop:
             # painted a blank column. One definition, so every producer of a
             # tool row agrees by construction.
             #
-            # ``content`` rides in on a copy of the result because the
-            # redaction and empty-result backfill above have already rewritten
-            # it; the ToolResult itself must not be mutated.
-            message = Message.tool_result(result.model_copy(update={"content": content}))
+            # ``content`` (and, when the hook ran, ``details``) rides in on a
+            # copy of the result because the redaction and empty-result
+            # backfill above have already rewritten it; the ToolResult itself
+            # must not be mutated.
+            message = Message.tool_result(
+                result.model_copy(update={"content": content, "details": details})
+            )
             context.messages.append(message)
             new_messages.append(message)
 
@@ -5010,6 +5049,102 @@ class AgentLoop:
                 index += 1
             else:
                 out.append(item)
+        return out
+
+    @staticmethod
+    async def _redact_details(
+        details: dict[str, Any] | None,
+        redact: Callable[[str], str],
+        tool_name: str,
+        arguments: Mapping[str, Any] | None,
+        session_cwd: str | None = None,
+        exempt_verdict: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """Mask the content-bearing text of a result's ``details`` OFF the loop.
+
+        **The channel this closes (follow-up to PR #2140, Aida-directed).**
+        ``write`` and ``edit`` render a unified diff of the file's before/after
+        into ``details['diff']`` (``tools/builtin._diff_details``), and the
+        stored row keeps it: ``Message.tool_result`` lifts ``details`` into
+        ``provider_payload['details']``, which the persisted transcript, the
+        settled tool card's expanded view, the mobile projection and every
+        replay read. A real credential written through ``write`` was masked in
+        the result TEXT (the sibling seam above) and left QUOTED in that diff,
+        so the transcript carried exactly the value the text scrub had removed.
+
+        **The mask belongs HERE, not at the diff's source.** ``_diff_details``
+        builds the diff from the bytes the executor actually wrote, and those
+        bytes are ground truth — the write itself stays byte-exact (the
+        standing rule: the harness must never alter what a tool writes). The
+        source cannot both describe the true bytes and stay masked. This seam
+        redacts a COPY built for storage and display: the executor's own
+        ``ToolResult``, the disk and the live event that already left for the
+        UI are all untouched, while the stored copy, the replay and the
+        transcript get the mask the result text already had.
+
+        **Only the content-bearing keys, and only their strings.**
+        :data:`_CONTENT_BEARING_DETAIL_KEYS` names them (the file tools' diff
+        today). The other keys in the same dict — ``added``/``removed``
+        counters, the ``path``, ``spill`` handles — keep their exact values,
+        because their readers parse and compare them (the diff badge, compaction
+        pruning, the spill reader).
+
+        **A sibling of :meth:`_redact_content`, not a fusion**, because the two
+        fire at different rates: the content scan is every result's hot path,
+        while a content-bearing details field exists only on the file tools'
+        results, so the common case must pay nothing — the walk below decides
+        ON the loop and only then crosses to the worker. The worker repeats the
+        tool-identity/exemption publish for the same reason
+        :meth:`_redact_content` does: the host's hook reads it to name the call
+        in the shape report, and a bare executor spelling would drop it.
+        """
+        if not details:
+            return details
+        # The ORDER here is the rebuild's order below: every string of each
+        # key's value, list/tuple items only (a non-``str`` item cannot carry
+        # text and rides back through untouched).
+        texts: list[str] = []
+        for key in _CONTENT_BEARING_DETAIL_KEYS:
+            value = details.get(key)
+            if isinstance(value, str):
+                texts.append(value)
+            elif isinstance(value, (list, tuple)):
+                texts.extend(item for item in value if isinstance(item, str))
+        if not texts:
+            return details  # decided ON the loop: the common result pays no hop
+
+        def _run() -> list[str]:
+            with (
+                tool_source(tool_name, arguments),
+                exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
+            ):
+                return [redact(text) for text in texts]
+
+        masked = await asyncio.to_thread(_run)
+        out = dict(details)
+        index = 0
+        for key in _CONTENT_BEARING_DETAIL_KEYS:
+            value = details.get(key)
+            if isinstance(value, str):
+                out[key] = masked[index]
+                index += 1
+            elif isinstance(value, (list, tuple)):
+                rebuilt: list[Any] = []
+                for item in value:
+                    if isinstance(item, str):
+                        rebuilt.append(masked[index])
+                        index += 1
+                    else:
+                        # Not text, so it neither takes a mask nor shifts one:
+                        # the index advances only over the strings the
+                        # collection phase banked (review round 1, R-2 — an
+                        # enumerated position put the mask one ahead for every
+                        # non-``str`` item and read past the list).
+                        rebuilt.append(item)
+                # Same concrete sequence back, so a consumer that checks the
+                # container type (the card accepts any Sequence, but a future
+                # one may not) sees exactly the shape it stored.
+                out[key] = list(rebuilt) if isinstance(value, list) else tuple(rebuilt)
         return out
 
     @staticmethod

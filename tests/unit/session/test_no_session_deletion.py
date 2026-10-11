@@ -992,6 +992,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.replace",
         "FrontendStateStore.replace(state) — an in-memory paint swap, not a path",
     ),
+    # The refresh-retire drop's version of the row above, and the same reading:
+    # its one `.replace` is `store.replace(state)` on the session's in-memory
+    # FrontendStateStore (it clears the canonical mirror's stale streaming bit),
+    # and the function takes no path at all — it reads `self._frontend_store`
+    # and the session id it logs, nothing else.
+    (
+        "local_operator/session/attached.py::AttachedSession._drop_liveness_claim",
+        "<path>.replace",
+        "FrontendStateStore.replace(state) — an in-memory claim drop, not a path",
+    ),
     # Same shape as the browser-bridge/keys writers below: a temp FILE inside
     # the secrets directory replacing master.key in that same directory. Both
     # paths come from `keys.key_path()`, which is `config_dir()/secrets/` plus
@@ -2866,6 +2876,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # a path operation, and this function holds no session-directory path at
         # all (it is handed a plain directory string).
         "local_operator/session/attached.py::AttachedSession._publish_working_directory",
+        # Same receiver, same reason, one function over: the refresh-retire drop
+        # swaps the in-memory frontend state (clearing the stale streaming bit)
+        # and holds no session-directory path at all.
+        "local_operator/session/attached.py::AttachedSession._drop_liveness_claim",
         "local_operator/session/frontend_state.py::FrontendStateStore.checkpoint",  # tmp -> FILE
         "local_operator/session/attached.py::AttachedSession._install_frontend",  # facade
         "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",  # facade

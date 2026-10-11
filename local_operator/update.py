@@ -4138,6 +4138,32 @@ class PrunePlan:
         return tuple(decision for decision in self.decisions if not decision.removed)
 
 
+def _running_generation() -> Path | None:
+    """The generation THIS process imports from, or ``None`` when it is not one of ours.
+
+    THE PRUNE'S OWN REFERENCE, and the one no record can carry for it: an
+    updater process runs from the generation it is REPLACING, and the pointer
+    flip lands before the prune — so mid-flow the running tree is named by
+    neither the pointer nor any namespace :func:`referenced_install_roots`
+    reads. The keep margin covered it only incidentally, through a sort
+    position, and on 2026-10-10 that was the exact thing a directory mtime
+    bump moved (the #2173 QA victim; see :func:`prune_generations`).
+
+    Identity is the fix, resolved the way a record's ``install_root`` is: the
+    process's own install root is its venv (``<gen>/tools/local-operator`` —
+    ``process_install_root`` reads ``sys.prefix``), and the generation it
+    belongs to is two levels up. Only a path that IS one of our generations
+    may claim a generation (:func:`_is_generation_install`), so an editable
+    checkout or a plain ``uv tool`` install protects nothing — and an answer
+    that cannot be established is simply absent, which leaves every other rule
+    in the caller exactly as it was.
+    """
+    root = Path(process_install_root())
+    if not _is_generation_install(root):
+        return None
+    return _real(root.parent.parent)
+
+
 def prune_generations(
     *,
     keep: int = DEFAULT_KEEP_GENERATIONS,
@@ -4148,11 +4174,24 @@ def prune_generations(
     """Delete the generations nothing can still be importing from.
 
     RETENTION IS STRUCTURAL, NOT A COUNT. A generation is kept when it is the
-    pointer's target, when a live or persisted record names its install root, or
-    when it is one of the last ``keep`` generations nothing refers to. The first
-    two are the reason this is safe to run while the machine is busy: a runtime's
-    own tree is never a candidate, and the count is only the margin for a session
-    that has no record yet.
+    pointer's target, when a live or persisted record names its install root,
+    when it is the tree this process is running from, or when it is one of the
+    last ``keep`` generations nothing refers to. The first three are the reason
+    this is safe to run while the machine is busy: a runtime's own tree is never
+    a candidate, and the count is only the margin for a session that has no
+    record yet.
+
+    THE EVICTION ORDER IS THE NAME, NOT THE mtime, AND THE RUNNING TREE IS KEPT
+    BY IDENTITY (2026-10-10, QA round 1 on #2173's install flow). The pick used
+    to be the oldest directory mtime, and a single ``rm`` inside a stale
+    generation moves that directory's mtime to now — the harness did exactly
+    that, the touched tree jumped ahead, and the victim became the generation
+    the updater was RUNNING from, which is unreferenced mid-flow because the
+    install has already flipped ``current``. The name is ``<stamp>-<token>``
+    (``_new_generation_id``), so name order IS creation order and no touch can
+    move it; the mtime remains the right read where the question is AGE, not
+    order — the in-flight rule below — and that direction is fail-closed (a
+    fresher mtime keeps the tree).
 
     EVERY REMOVAL IS ATTESTED FIRST (:func:`note_doomed_runtimes`), because this is
     the one place in the harness that deletes an install out from under runtimes
@@ -4251,6 +4290,15 @@ def prune_generations(
         except OSError:  # pragma: no cover — an unresolvable reference keeps nothing extra
             continue
     wanted |= named_by_a_record
+    # THE TREE THIS PROCESS IS RUNNING FROM IS NEVER A CANDIDATE (see
+    # _running_generation): the updater imports from the generation it is
+    # REPLACING, and this prune runs after the flip, so mid-flow that tree is
+    # named by no pointer and no record. Order cannot carry this protection —
+    # the running generation can be the oldest name in the store — so it is
+    # the identity of the path, added here where every reference is assembled.
+    running = _running_generation()
+    if running is not None:
+        wanted.add(running)
     entries = sorted(
         # ``is_dir()`` follows symlinks, so it admits a link to a directory; the
         # layout never writes one there (``_reserve_generation`` uses ``mkdir``),
@@ -4258,7 +4306,16 @@ def prune_generations(
         # of our generations, so it is not a pruning candidate at all (review
         # round 4, R4-1: this is the shape that handed one to the remover).
         (path for path in generations.iterdir() if path.is_dir() and not path.is_symlink()),
-        key=lambda path: (path.stat().st_mtime, path.name),
+        # SORTED BY NAME, NEVER BY mtime (2026-10-10, QA round 1 on #2173's
+        # install flow): the name is ``<stamp>-<token>``, timestamp first, so
+        # name order IS creation order — and unlike the directory mtime it
+        # cannot be moved by anything that merely touches the tree. Under mtime
+        # order, one ``rm`` inside a stale generation moved that directory's
+        # mtime to now, the touched tree jumped AHEAD of the one the updater
+        # was running from, and the running tree became the victim. mtime
+        # remains the right read where the question is AGE, not order — the
+        # in-flight rule below — and that direction is fail-closed.
+        key=lambda path: path.name,
     )
 
     def _marker(path: Path) -> bool:
@@ -4286,6 +4343,9 @@ def prune_generations(
         resolved = _real(path)
         if current is not None and resolved == _real(current):
             decisions.append(PruneDecision(path, False, "the pointer's target"))
+            continue
+        if running is not None and resolved == running:
+            decisions.append(PruneDecision(path, False, "the tree this process is running from"))
             continue
         if resolved in named_by_a_record:
             decisions.append(PruneDecision(path, False, "a live or saved session record names it"))

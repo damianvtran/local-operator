@@ -241,7 +241,14 @@ MEASURED_TOKENS: dict[str, int] = {
     #: +63 tokens over the 730 the slimming wave measured — re-measured
     #: deliberately with this change, then again after the context-budget
     #: round trimmed the schema description (795 -> 793).
-    "generate_image": 793,
+    #: RE-MEASURED 2026-10-10 (hub media slice harness co-flip,
+    #: ``feat/radient-edit-sources``): 793 -> 838 is the ONLY entry that moved
+    #: — Radient re-joins the edit sentence as a capable rung, the ChatGPT-plan
+    #: skip is stated alone, and the un-pinned edit's hub default (sunburst
+    #: edit + its drift caveat) is documented. Doc-only: the wire description
+    #: and schema are untouched, so ``bench_context_budget.py``'s arms are
+    #: unmoved by this change.
+    "generate_image": 838,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries

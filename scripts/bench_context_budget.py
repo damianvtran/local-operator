@@ -59,6 +59,7 @@ sys.path.insert(0, str(REPO))
 
 import local_operator  # noqa: E402
 from local_operator.harness.types import AgentTool  # noqa: E402
+from local_operator.i18n.resolve import preferred_language_line  # noqa: E402
 from local_operator.prompts_api import (  # noqa: E402
     CHANNEL_ASK,
     CHANNEL_HUB,
@@ -1398,9 +1399,36 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: fields, the knobs), the other is the only callable that answers a pending
 #: job after a restart. Deferral was considered and rejected in the PR: it
 #: needs its measured adoption bar (``tools/deferral.py``) and a brand-new
-#: tool has no measurement to sit on. Band normalized to the 55-token band
-#: (measured head + 55).
-BUDGET_BILLED_TOKENS = 28_159
+#: tool has no measurement to sit on.
+#:
+#: RAISED 27,270 -> 27,337 for SYS1 (the user's preferred language rides the
+#: stable prefix): every real session's head now carries the model-facing
+#: language sentence, so the guard must measure the shape that ships. The
+#: worst case is rendered — the longest display name (``zh-CN``) through the
+#: real ``preferred_language_line``, so the guard's text cannot drift from
+#: production. Measured with this script on both trees, one after the other:
+#:
+#:   baseline (origin/main f29d9e7fbe)     75,756 chars = ~27,250 billed
+#:   head (this branch)                    75,942 chars = ~27,317 billed
+#:     = +186 chars = +67 billed: one sentence, parameterised by the one
+#:       backend language setting — the mechanism that lets the model answer,
+#:       and address the user, in their language at all.
+#:
+#: MERGED RE-MEASURE 2026-10-10 (the #2191 fold): the raises above land on
+#: ONE tree for the first time. Measured with this script on the clean arm,
+#: both trees, origin/main (9de8199ef5) vs the folded branch head:
+#:
+#:   base (origin/main 9de8199ef5)  75,942 chars = ~27,317 billed
+#:   merged head                    78,279 chars = ~28,158 billed
+#:   delta                          +2,337 chars = ~+841
+#:
+#: The base figure already contains the SYS1 sentence, so it is not
+#: double-counted here; the delta is the video pair's contribution at its
+#: merged revision (the entry above's +2,372 was measured before the
+#: round-1..3 wire-text edits) and it is IDENTICAL on the child arm
+#: (below) — the check that the delta is the pair and nothing else.
+#: Ceiling = merged head + the 55-token band.
+BUDGET_BILLED_TOKENS = 28_213
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1440,6 +1468,7 @@ BUDGET_BILLED_TOKENS = 28_159
 #:   delta      +94 chars = ~+34
 #:
 #: Band normalized to the 55-token band, as the top arm's entry states.
+#: Band normalized to the 55-token band, as the top arm's entry states.
 #:
 #: RAISED (with the top arm, same day, same trees) 24,315 -> 25,203: the
 #: child arm carries the video pair too (createIf on the machine, not the
@@ -1449,8 +1478,24 @@ BUDGET_BILLED_TOKENS = 28_159
 #:   head  69,911 chars = ~25,148
 #:   delta     +2,372 chars = ~+853
 #:
-#: Band normalized to the 55-token band, as the top arm's entry states.
-BUDGET_CHILD_BILLED_TOKENS = 25_203
+#: RAISED 24,315 -> 24,382 for SYS1: the same sentence the top arm carries,
+#: same +186 chars = +67 billed (only the tool inventory differs between the
+#: arms). Measured on both trees with ``--kind child``:
+#:
+#:   baseline (origin/main f29d9e7fbe)     67,539 chars = ~24,295 billed
+#:   head (this branch)                    67,725 chars = ~24,362 billed
+#:
+#: The raise is exactly the feature's cost, as the top arm's entry states.
+#:
+#: MERGED RE-MEASURE (with the top arm, same fold, same trees):
+#:
+#:   base (origin/main 9de8199ef5)  67,725 chars = ~24,362 billed
+#:   merged head                    70,062 chars = ~25,202 billed
+#:   delta                          +2,337 chars = ~+840
+#:
+#: The same +2,337 the top arm moves by. Ceiling = merged head + the
+#: 55-token band.
+BUDGET_CHILD_BILLED_TOKENS = 25_257
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
@@ -1473,6 +1518,11 @@ TIGHTEN_WHEN_HEADROOM_EXCEEDS = 1_200
 #: instructions, ~8k of repo guidance after truncation).
 _SAMPLE_USER_INSTRUCTIONS = "- A standing operator preference line.\n" * 150
 _SAMPLE_REPO_GUIDANCE = "Project convention paragraph explaining a rule.\n" * 170
+#: SYS1: every real session's head now carries the user's preferred-language
+#: line, and the guard measures the WORST case — the longest display name
+#: (``zh-CN``, 15 chars above ``en``). Rendered through the real function so
+#: the guard cannot drift from the shipped sentence.
+_SAMPLE_LANGUAGE_LINE = preferred_language_line("zh-CN")
 
 
 def tool_schema_chars(tools: list[AgentTool]) -> int:
@@ -1541,6 +1591,7 @@ def measure_start_context(
         date_str="2026-01-01",
         user_instructions=user_instructions,
         repo_guidance=repo_guidance,
+        language_line=_SAMPLE_LANGUAGE_LINE,
         # THE WORST CASE, AND IT MUST BE STATED: ``interactive`` defaults to
         # ``None``, which renders NO ``<interactivity>`` block at all (a host with
         # no runtime probe — an ``exec`` run, a scheduled run, a plain CLI). The
