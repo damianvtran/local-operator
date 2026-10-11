@@ -489,7 +489,15 @@ def check_catalogues() -> list[str]:
             try:
                 translated = catalogues.load_catalogue(locale, namespace)
             except catalogues.CatalogueNotFound:
-                problems.append(f"{locale}/{namespace}: missing (en has it)")
+                # PER-NAMESPACE COVERAGE (2026-10-11 amendment, docs/design/
+                # i18n.md §6): a locale that does not carry a namespace is NOT
+                # an error — a namespace born after the locale's last
+                # translation wave (an extraction slice's child) rides
+                # en-fallback (§2.5) until its own wave lands, and the
+                # per-namespace ship gate (`generate.py::_shipped_locales`)
+                # decides whether the locale is offered at all. Only PRESENT
+                # files are validated below: key parity, arguments and plural
+                # categories against en, exactly as before.
                 continue
             except catalogues.CatalogueInvalid as exc:
                 problems.append(f"{locale}/{namespace}: {exc}")

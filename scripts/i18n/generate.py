@@ -192,19 +192,46 @@ def _render_keys_init(modules: list[str]) -> str:
     )
 
 
+def _en_sha(namespace: str) -> str | None:
+    """The current ``en`` hash for ``namespace``, or ``None`` when absent.
+
+    ``None`` never equals a ledger's ``source_sha256`` string, so a carried
+    namespace with no ``en`` counterpart (a renamed child still on disk)
+    fails the freshness comparison instead of raising through the gate.
+    """
+    try:
+        return catalogues.catalogue_sha256("en", namespace)
+    except catalogues.CatalogueNotFound:
+        return None
+
+
 def _shipped_locales() -> list[str]:
     """The shipped set: en, plus locales with complete, fresh ledger passes.
 
     Freshness is the §6 gate: an entry counts iff its ``source_sha256`` equals
     the CURRENT hash of the en file for that namespace. A stale entry is not a
-    pass; a locale with any namespace missing or stale is not shipped.
+    pass; a locale with any of ITS OWN namespaces missing or stale is not
+    shipped.
+
+    PER-NAMESPACE since the 2026-10-11 amendment (docs/design/i18n.md §6): the
+    set a locale is judged over is the set it CARRIES — the catalogue files
+    that exist for that locale — not every namespace that exists in ``en``. A
+    new en-only namespace (an extraction slice's child, before its translation
+    wave) therefore does not un-ship passing locales; clients read that
+    namespace from ``en`` (per-namespace fallback, §2.5). The gate's
+    guarantees are unchanged: a locale ships only namespaces whose audits
+    passed against the CURRENT en bytes, and a stale member still un-ships the
+    locale. The earlier all-en-namespaces reading assumed §9's ordering (all
+    extraction before any shipping wave); once the programme interleaved the
+    two, it would have un-shipped every locale on every extraction slice that
+    adds a namespace (measured 2026-10-11: one new en namespace dropped the
+    generated set es/fr → en only).
     """
     shipped: set[str] = {"en"}
     if not LEDGER.is_file():
         return [loc for loc in SUPPORTED_LOCALES if loc in shipped]
     ledger = _read_json(LEDGER)
     entries = ledger.get("entries", []) if isinstance(ledger, dict) else []
-    en_namespaces = catalogues.namespaces("en")
     by_locale: dict[str, dict[str, dict[str, Any]]] = {}
     for entry in entries:
         if not isinstance(entry, dict):
@@ -219,11 +246,17 @@ def _shipped_locales() -> list[str]:
         record = by_locale.get(locale)
         if not record:
             continue
+        try:
+            carried = catalogues.namespaces(locale)
+        except catalogues.CatalogueNotFound:
+            continue
+        if not carried:
+            continue
         if all(
             (entry := record.get(namespace)) is not None
             and entry.get("status") == "passed"
-            and entry.get("source_sha256") == catalogues.catalogue_sha256("en", namespace)
-            for namespace in en_namespaces
+            and entry.get("source_sha256") == _en_sha(namespace)
+            for namespace in carried
         ):
             shipped.add(locale)
     return [loc for loc in SUPPORTED_LOCALES if loc in shipped]
