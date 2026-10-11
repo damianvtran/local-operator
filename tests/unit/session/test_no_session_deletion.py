@@ -475,6 +475,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "the replace, in the same directory under <config>/network/",
     ),
     (
+        "local_operator/network/rollouts.py::_write_record",
+        "os.replace",
+        # S3a's rollout record write: the path is <config>/network/rollouts/
+        # ro_<id>.json — config-root- and record-derived, never a session id —
+        # and this is ``os.replace``, which refuses DIRECTORIES outright
+        # (EISDIR/ENOTEMPTY), so no directory under `sessions/` can be
+        # removed through it.
+        "Atomic replace of <config>/network/rollouts/ro_<id>.json; "
+        "os.replace cannot target a directory",
+    ),
+    (
         "local_operator/network/store.py::_quarantine",
         "os.replace",
         "Sets an unparsable network record or parked decision aside as <name>.corrupt, "
