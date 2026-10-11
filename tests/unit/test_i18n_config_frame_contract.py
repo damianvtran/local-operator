@@ -40,9 +40,13 @@ def test_the_baseline_spelling_is_the_empty_change_list() -> None:
 
 
 def test_both_surfaces_build_the_frame_through_the_shared_module() -> None:
-    """MECHANICAL pin: each surface's source contains a call to
-    ``config_frame_payload``. A future edit that re-inlines the dict (the
-    drift this file exists to prevent) drops the call and fails here."""
+    """MECHANICAL pin, two clauses (CI round 1, NIT-1 strengthened it):
+
+    1. each surface's source CALLS ``config_frame_payload`` at all; and
+    2. neither surface contains an INLINE dict literal carrying the frame's
+       two literal keys — because a surviving call next to a re-inlined frame
+       (the drift this file exists to prevent) would pass clause 1 alone.
+    """
     for relative in _SURFACES:
         source = (_TREE / relative).read_text(encoding="utf-8")
         tree = ast.parse(source, filename=relative)
@@ -52,3 +56,18 @@ def test_both_surfaces_build_the_frame_through_the_shared_module() -> None:
             if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "config_frame_payload"
         ]
         assert calls, f"{relative} does not build the config frame through i18n.frames"
+        re_inlined = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Dict)
+            and {
+                key.value
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            >= {"changed_keys", "language"}
+        ]
+        assert not re_inlined, (
+            f"{relative} re-inlines a config frame payload (both frame keys in one dict "
+            "literal) — build it through i18n.frames.config_frame_payload instead"
+        )

@@ -397,25 +397,29 @@ function applyConfigFrame(data: string): void {
    subscribing blind would retry a route that will never exist with the full
    15 s backoff — forever, on every load. One probe fetch settles it: headers
    land immediately even for a live event-stream (``fetch`` resolves on them;
-   the body is then cancelled), so a 404 or a non-event-stream answer means
-   ABSENT — no subscription, no retries — while a NETWORK failure means "ask
-   again later" (this retainer's own small backoff). A daemon that disappears
-   AFTER a successful probe keeps the stream wrapper's normal reconnect
-   behaviour; the probe covers the mixed-version load. */
-async function configEndpointPresent(): Promise<boolean | "retry"> {
+   the body is then cancelled).
+
+   ONLY 404 is PERMANENT absence (CI round 1, MINOR-3). Every other non-ok
+   answer — a 5xx behind a restarting proxy, a captive portal, a tunnel that
+   is not up yet — is TRANSIENT and branches to the retry path, so it
+   self-heals instead of disabling live language for the whole load; a
+   NETWORK failure is the same retry. A daemon that disappears AFTER a
+   successful probe keeps the stream wrapper's normal reconnect behaviour;
+   the probe covers the mixed-version load. */
+async function configEndpointPresence(): Promise<"present" | "absent" | "retry"> {
 	try {
 		const res = await fetch(CONFIG_STREAM_PATH, {
 			headers: { Accept: "text/event-stream" },
 		});
-		const ok =
-			res.ok &&
+		const isStream =
 			(res.headers.get("content-type") ?? "").includes("text/event-stream");
 		try {
 			await res.body?.cancel();
 		} catch {
 			/* dropping the probe's body is best-effort */
 		}
-		return ok;
+		if (res.ok && isStream) return "present";
+		return res.status === 404 ? "absent" : "retry";
 	} catch {
 		return "retry";
 	}
@@ -429,14 +433,14 @@ export function retainConfigStream(): () => void {
 		let timer: ReturnType<typeof setTimeout> | null = null;
 		const start = async () => {
 			if (disposed) return;
-			const presence = await configEndpointPresent();
+			const presence = await configEndpointPresence();
 			if (disposed) return;
 			if (presence === "retry") {
 				const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** attempt++);
 				timer = setTimeout(start, delay);
 				return;
 			}
-			if (!presence) return; // absent: no subscription, no retries
+			if (presence === "absent") return; // 404: no subscription, no retries
 			configStreamClose = openEventStream(
 				CONFIG_STREAM_PATH,
 				"config",

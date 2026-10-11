@@ -4753,9 +4753,17 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=4)
-        daemon.attach_config_subscriber(queue)
 
         async def stream():
+            # ATTACH ON FIRST PULL, not at route time (CI round 1, MINOR-1): a
+            # response nobody consumes — a client that vanishes between the
+            # call and the first read — must not leave its queue and fan-out
+            # behind, which a route-time attach did (one leaked subscriber,
+            # visible in ``config_subscribers``, per never-started stream).
+            # The sibling per-session stream carries the same lesson, and
+            # ``SessionEventResponse`` below closes this generator on the
+            # send-raise path too, so the finally's detach cannot be skipped.
+            daemon.attach_config_subscriber(queue)
             try:
                 # ``to_thread``: the resolver falls back to constructing a
                 # ConfigManager (a YAML parse) when no watcher snapshot exists,
@@ -4780,7 +4788,7 @@ def build_app(daemon: MobileDaemon):
             finally:
                 daemon.detach_config_subscriber(queue)
 
-        return StreamingResponse(
+        return SessionEventResponse(
             stream(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},

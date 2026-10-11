@@ -88,17 +88,36 @@ describe("retainConfigStream", () => {
 		}
 	});
 
-	it("treats an older daemon's 404 as ABSENT: no subscription, no retries", async () => {
+	it("treats an older daemon's 404 as ABSENT: probed ONCE, no subscription, no retries", async () => {
 		vi.useFakeTimers();
 		vi.stubGlobal("EventSource", FakeEventSource);
-		vi.stubGlobal(
-			"fetch",
-			vi.fn().mockResolvedValue(new Response("not found", { status: 404 })),
-		);
+		const fetchMock = vi.fn().mockResolvedValue(new Response("not found", { status: 404 }));
+		vi.stubGlobal("fetch", fetchMock);
 		const close = retainConfigStream();
 		try {
 			await vi.advanceTimersByTimeAsync(60_000);
+			/* Exactly ONE probe (CI round 1, MINOR-2): a re-probing regression
+			   must fail here, not just the "no subscription" half. */
+			expect(fetchMock).toHaveBeenCalledTimes(1);
 			expect(FakeEventSource.instances).toHaveLength(0);
+		} finally {
+			close();
+		}
+	});
+
+	it("self-heals a transient 5xx: retry, then subscribe — only 404 is absence", async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal("EventSource", FakeEventSource);
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(new Response("boom", { status: 503 }))
+			.mockResolvedValue(configOk());
+		vi.stubGlobal("fetch", fetchMock);
+		const close = retainConfigStream();
+		try {
+			await vi.advanceTimersByTimeAsync(1200);
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(FakeEventSource.instances).toHaveLength(1);
 		} finally {
 			close();
 		}
