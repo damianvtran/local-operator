@@ -83,6 +83,7 @@ from local_operator.evaluation.runner.public_reply import (
     normalise_public_reply,
     public_reply_contract,
     public_reply_schema,
+    read_action_sequence,
     tolerated_fields_note,
 )
 from local_operator.harness.reply_channel import (
@@ -596,6 +597,15 @@ def validation_diagnostic(error: ValidationError) -> str:
 #: second-batch messages name the limit, the alternative and the rule. Rewriting
 #: one of these would throw away the only part of this that was ever measured.
 #:
+#: ``batch-shape`` deliberately LEFT this set when the decoder learned to read
+#: one-action replies and action SEQUENCES (2026-10-11). The rule sentence stays
+#: verbatim as the hint's prefix -- the class table and every sealed artifact
+#: are read through it -- but after those tolerances the population left under
+#: the class is overwhelmingly "no action stated at all": an empty object, a
+#: note-only envelope, a sole value that is not a decision. None of those are
+#: repaired by the bare rule; the hint now appends the accepted shape and the
+#: one way to send a note with no work (see ``rejection_hint``).
+#:
 #: ``env-version-misplaced`` is deliberately NOT here even though the decoder
 #: now names its defect: naming the misplaced key is only half the repair, and
 #: the half it cannot state -- the accepted LAYOUT -- is what this class needs,
@@ -609,7 +619,6 @@ _PRESERVED_HINTS = frozenset(
     {
         "envelope-shape",
         "second-batch",
-        "batch-shape",
         "adapter-capability",
         "empty-reply",
     }
@@ -772,6 +781,22 @@ def rejection_hint(
 
     if class_key in _PRESERVED_HINTS:
         return reason
+    if class_key == "batch-shape":
+        # The rule sentence stays verbatim as the PREFIX -- the class table and
+        # every sealed artifact are read through it -- but it is no longer the
+        # whole hint. The decoder reads one-action replies and action sequences
+        # now, so the population left here is the replies that state NO action
+        # at all: over the sealed corpus recounted 2026-10-11, 31 of the 46
+        # refusals left are that shape (23 ``{}``, 8 note-only), and those need
+        # the accepted reply itself, plus the one action that answers "a note
+        # and no work". The example is built from the schema against the
+        # observation in hand, so the hint cannot advertise a shape the decoder
+        # would refuse.
+        return (
+            reason + ' -- reply with one JSON object whose "actions" array holds '
+            "at least one action; when a note is all you have to send, make the "
+            'action a "wait". For example: ' + _example_json(surface, observation, shape)
+        )
     if class_key == "env-version-misplaced":
         # Appended rather than replaced, as ``out-of-frame-coordinate`` does: the
         # decoder's sentence already names the key that landed in the wrong
@@ -1463,7 +1488,8 @@ fence:
 
 This is a MODEL-REPLY object, not the adapter protocol. "public_observations"
 is optional -- a string of at most {MAX_PUBLIC_OBSERVATIONS_CHARS} characters,
-where empty is valid. Record only concise NEW factual data
+where empty is valid. The reply must carry at least one action: when a note is
+all you have to send, make the action a "wait". Record only concise NEW factual data
 or visible progress observed on the CURRENT screen that may be needed later,
 because old screenshots are removed before text summarization. Do not repeat
 prior notes, invent facts, record credentials/secrets, or provide deliberation,
@@ -1628,17 +1654,41 @@ def parse_decision(
     Strict about the DECISION, not about the framing around it. The framing is
     normalised by :func:`normalise_public_reply` before anything here validates:
     a bare action array, an ``action_batch`` wrapper, the full envelope, any of
-    those inside one generic tool-call serialization, and any of those followed
-    by text all reach this function as the same decision. What survives as a
-    refusal is what cannot be read as a decision -- malformed or duplicated JSON,
-    a stale observation binding, two action arrays that could each be the one
-    meant.
+    those inside one generic tool-call serialization, one action object written
+    as a sentence, a SEQUENCE of one-action objects written without the array
+    (:func:`read_action_sequence`), and any of those followed by text all reach
+    this function as the same decision. What survives as a refusal is what
+    cannot be read as a decision -- malformed or duplicated JSON, a stale
+    observation binding, two action arrays that could each be the one meant, a
+    reply that states no action at all, and material a reply carried after the
+    one thing this decoder read.
     """
 
     decoded, trailing, leading_framing_bytes = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
-    actions, note, tolerated_fields = normalise_public_reply(decoded, action_binding=action_binding)
+    trailing_read_as_sequence = False
+    if trailing:
+        # The reply carried more than its first value, and its first value was
+        # not itself a decision (a complete envelope followed by text is
+        # tolerated below, unchanged). Try the whole payload as a SEQUENCE of
+        # single actions -- the objects of the array, the brackets never
+        # written. Only when that reads does the reply's first value stop being
+        # the thing to judge: a sequence that does not read leaves ``at_end``
+        # to hold the refusal it always had rather than execute the head and
+        # silently drop the remainder.
+        sequence = read_action_sequence(payload)
+        if sequence is not None:
+            actions, note, tolerated_fields = sequence, None, ()
+            trailing_read_as_sequence = True
+        else:
+            actions, note, tolerated_fields = normalise_public_reply(
+                decoded, action_binding=action_binding, at_end=False
+            )
+    else:
+        actions, note, tolerated_fields = normalise_public_reply(
+            decoded, action_binding=action_binding
+        )
     if action_binding == COMPACT_ACTION_BINDING:
         try:
             actions = bind_compact_actions(decoded, actions, observation.observation_id)
@@ -1696,7 +1746,18 @@ def parse_decision(
     # context carries verbatim. It is redacted at the runner's resolved-secret
     # boundary before replay.
     public_reply = payload.strip() if note is not None else None
-    if trailing:
+    if trailing_read_as_sequence:
+        # The remainder was not ignored -- it was read as the reply's other
+        # actions -- so it gets its own reading rather than the ignored-text
+        # line below. Logged in the same style and for the same reason: a
+        # tolerance nobody can observe is indistinguishable from the harness
+        # quietly mangling a reply, and the count is what says what ran.
+        logger.warning(
+            "decision was assembled from the single-action objects of an "
+            "actions sequence (array brackets never written): %d action(s) read",
+            len(actions),
+        )
+    elif trailing:
         # Tolerated, but never silent. A model that reliably appends junk is a
         # signal worth seeing -- it may point at a prompt or provider problem
         # -- and a tolerance nobody can observe is indistinguishable from the
