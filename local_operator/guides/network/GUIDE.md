@@ -920,7 +920,9 @@ command, so a re-login or a token rotation needs no gesture on the node):
 `network.credentials.github.repositories` (search it in `/settings`),
 `owner/repo` entries, e.g. `damianvtran/scratch`. This list is the git helper's
 allow-list, and it is the enforced bound on every route: empty is a refusal,
-never "everything". The designation travels WITH the grant — the borrowing
+never "everything" — an empty list reads like a bug but is the contract
+working: every push is refused until the owner designates at least one
+repository. The designation travels WITH the grant — the borrowing
 device writes the owner's list into its own config before the git child runs —
 so a node does not maintain one by hand.
 
@@ -933,6 +935,14 @@ and no other host's helpers see the token. A source that is configured but
 broken refuses BY NAME (e.g. a malformed App key) and is never silently
 downgraded to a wider one; the refusal sentence and `lop network doctor` name
 the arm and the repair.
+
+**The helper is a carrier, not a file: stripping the token environment strips
+the delivery itself.** The token it serves is whatever `GH_TOKEN`/`GITHUB_TOKEN`
+its own environment carries — the borrowing session injects them per command —
+so a probe that unsets them first (`env -u GH_TOKEN -u GITHUB_TOKEN git push …`,
+or a helper started outside an injected session) proves nothing: it reports on
+the stripped probe, not the brokering. The check that counts is the lane's own
+push: designated repositories serve, everything else refuses by silence.
 
 What ends a borrowed GitHub token **depends on the source that served it**,
 and the `credential revoke` receipt says which applies:
@@ -996,7 +1006,8 @@ device — see "Credentials on a peer"; `lop network mcp state` names the keys t
 device still needs), the model and provider logins
 it serves or borrows
 (`lop network credentials`), a git identity seeded from this device's where the
-node has none (one it already has is never overwritten), and the run's own
+node has none (one it already has is never overwritten — and no signing key
+travels: a node without one commits fine on this repository), and the run's own
 provisioning receipts — `invite`, `pre_read`, `install`, `join`, `anchor`,
 `relay`, `grants`, `provision`, `verify` — readable in
 `lop network approvals run <id> --json`.
@@ -1059,6 +1070,13 @@ on whichever side is behind: for a behind node, `lop update` there (the same
 updater the onboarding card drives), and its supervised relay rolls onto the
 new build; re-check afterwards.
 
+To read what a node actually installed, the marker is per-generation:
+`~/.local/share/lop/generations/<stamp>/tools/local-operator/.lop-source` —
+reached through `~/.local/share/lop/current` — reading `pypi <version>` for a
+released install (a ref line for an unreleased build). The marker sits inside
+the generation it describes, so a check at the store root
+(`~/.local/share/lop/`) finds nothing.
+
 ### Session capability is wired at session start
 
 A credential shared while a session is already running is invisible to it: the
@@ -1071,6 +1089,22 @@ session (or restart that one). A session that was already brokering picks up a
 newly shared key on the next pull without a restart — and
 `lop network credentials` prints `note: '…' is now available to borrow on this
 device…` at the moment a pull makes a key newly borrowable.
+
+### The contract, in one worked example
+
+Offload a lane that must edit a file and push it to a designated repository —
+say `damianvtran/scratch`, an entry in the owner's
+`network.credentials.github.repositories`. The push works from the node because
+the designation rides with the grant: the git helper there serves
+`https://github.com` for exactly the repositories the owner designated, per
+command, leaving no credential file behind. Point the same push at a repository
+outside the designation and it is refused by silence — `fatal: could not read
+Username for 'https://github.com'` — which is the contract working, not a
+broken share. And if the lane's checks also run the repository's JS toolchain,
+they die with `node: command not found` however well the credentials were
+brokered: the node runs what its own disk has, and the mesh moves credentials
+and definitions, never installers. That is the contract in one lane: what
+inherits, what is lent per command, and what must already be on the node.
 
 ## When something looks wrong
 
@@ -1368,11 +1402,18 @@ The relay's own log is `logs/network.log`, and its LaunchAgent is
 
 **Capability vocabulary** — one list, the authorizer's:
 `admin`, `broker_credential`, `list`, `view`, `prompt`, `steer`, `stop`,
-`slash`, `delete`, `move` — plus the two onboarding scopes, granted per member
-(`read` and `drive` do not carry them; an `admin` member holds the full
-vocabulary, so read the member row, not the role name): `approve` (answer
-approval prompts for sessions on that device) and `unattended` (start sessions
-there without approval prompts, and carry unattended authority into creates and
-moves aimed at it). Roles map onto the rest (`read` is viewer-shaped, `drive`
-adds `prompt`/`steer`/`stop`/`slash`, `admin` is the full set);
-`lop network show <network> --json` prints each member's granted list.
+`slash`, `delete`, `move` — plus three scopes granted per member (`read` and
+`drive` do not carry them; an `admin` member holds the full vocabulary, so read
+the member row, not the role name): `approve` (answer approval prompts for
+sessions on that device), `unattended` (start sessions there without approval
+prompts, and carry unattended authority into creates and moves aimed at it),
+and `update` (the rolling-updates grant: ask that device to install a newer
+build from its OWN update channel — the ask names only a version, never code;
+downgrades are refused, and a live busy session refuses the ask). `approve`,
+`unattended` and `update` are the self-decided scopes: the deciding device
+records them in a peer's row in its OWN record without an admin row — a
+drive-role device can make this grant itself — because each governs the
+deciding device's own sessions and install. Roles map onto the rest (`read` is
+viewer-shaped, `drive` adds `prompt`/`steer`/`stop`/`slash`, `admin` is the
+full set); `lop network show <network> --json` prints each member's granted
+list.
