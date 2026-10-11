@@ -76,10 +76,14 @@ def test_compact_schema_and_prompt_omit_repeated_action_ids() -> None:
     # The legacy prompt is byte-frozen on purpose, and the digest moved once:
     # the "finish" bullet gained the sentence that states the completion gate's
     # contract (the reason the model is told to check the newest observation
-    # against the task before declaring done). Re-pin deliberately, never by
-    # pasting whatever the run printed.
+    # against the task before declaring done). It moved a second time for the
+    # observation-binding change: the legacy binding sentence now states the
+    # rule the decoder actually enforces -- a batch binds by stating the
+    # observation_id on at least one of its actions, omissions inherit that
+    # binding, and a batch stating none or a different observation is refused.
+    # Re-pin deliberately, never by pasting whatever the run printed.
     assert hashlib.sha256(build_system_prompt().encode()).hexdigest() == (
-        "6c94d6494b605e791b77af73d0bbb1cbf411773d730670f2f255f3cf19fa2b29"
+        "ef58a54d51b360d09cba4f5e9b6e739014331ce51b9ac6cbc1ce90085ea589b1"
     )
     assert '"observation_id": "<current observation id>"' in build_system_prompt(
         action_binding=COMPACT_ACTION_BINDING
