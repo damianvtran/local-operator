@@ -1,0 +1,260 @@
+{
+  "collapsed-minimum-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "collapsed-resolved-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "scroll": {
+      "top": 0,
+      "max": 213,
+      "cx": 195,
+      "cy": 370
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 213,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "expanded-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "press": {
+      "pressed": false
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "mixed-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "wake-only-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "single-receipt-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "collapsed-minimum-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "collapsed-resolved-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "scroll": {
+      "top": 0,
+      "max": 296,
+      "cx": 180,
+      "cy": 338
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 296,
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "expanded-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "press": {
+      "pressed": false
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "mixed-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "wake-only-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "single-receipt-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360
+  }
+}

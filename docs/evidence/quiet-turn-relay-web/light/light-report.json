@@ -1,0 +1,730 @@
+{
+  "collapsed-minimum-light-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": {
+      "box": {
+        "top": 71,
+        "bottom": 115,
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 44
+      },
+      "text": "\u25b8Peer messages\u00b73+",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390,
+    "styles": {
+      "theme": "localOperatorLight",
+      "canvasVar": "#f5f0e6",
+      "inkDimVar": "#6c675c",
+      "bar": {
+        "style": {
+          "color": "rgb(33, 30, 24)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 71,
+          "bottom": 115,
+          "left": 12,
+          "right": 378,
+          "width": 366,
+          "height": 44
+        },
+        "expanded": "false"
+      },
+      "chevron": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 82,
+          "bottom": 104,
+          "left": 12,
+          "right": 28,
+          "width": 16,
+          "height": 22
+        }
+      },
+      "label": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 84,
+          "bottom": 102,
+          "left": 32,
+          "right": 118,
+          "width": 86,
+          "height": 17
+        },
+        "text": "Peer messages"
+      },
+      "count": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 84,
+          "bottom": 102,
+          "left": 129,
+          "right": 145,
+          "width": 15,
+          "height": 17
+        },
+        "text": "3+"
+      },
+      "groundFromBar": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "groundFromScroller": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "bodyScrollW": 390,
+      "innerW": 390
+    },
+    "settled": false
+  },
+  "expanded-light-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "press": {
+      "pressed": true,
+      "text": "\u25b8Peer messages\u00b73+"
+    },
+    "bar": {
+      "box": {
+        "top": 71,
+        "bottom": 115,
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 44
+      },
+      "text": "\u25bePeer messages\u00b73+",
+      "expanded": "true"
+    },
+    "receipts": 4,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390,
+    "styles": {
+      "theme": "localOperatorLight",
+      "canvasVar": "#f5f0e6",
+      "inkDimVar": "#6c675c",
+      "bar": {
+        "style": {
+          "color": "rgb(33, 30, 24)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 71,
+          "bottom": 115,
+          "left": 12,
+          "right": 378,
+          "width": 366,
+          "height": 44
+        },
+        "expanded": "true"
+      },
+      "chevron": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 82,
+          "bottom": 104,
+          "left": 12,
+          "right": 28,
+          "width": 16,
+          "height": 22
+        }
+      },
+      "label": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 84,
+          "bottom": 102,
+          "left": 32,
+          "right": 118,
+          "width": 86,
+          "height": 17
+        },
+        "text": "Peer messages"
+      },
+      "count": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 84,
+          "bottom": 102,
+          "left": 129,
+          "right": 145,
+          "width": 15,
+          "height": 17
+        },
+        "text": "3+"
+      },
+      "groundFromBar": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "groundFromScroller": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "bodyScrollW": 390,
+      "innerW": 390
+    },
+    "settled": true
+  },
+  "mixed-light-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": {
+      "box": {
+        "top": 114,
+        "bottom": 158,
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 44
+      },
+      "text": "\u25b8Messages\u00b72",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390,
+    "styles": {
+      "theme": "localOperatorLight",
+      "canvasVar": "#f5f0e6",
+      "inkDimVar": "#6c675c",
+      "bar": {
+        "style": {
+          "color": "rgb(33, 30, 24)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 114,
+          "bottom": 158,
+          "left": 12,
+          "right": 378,
+          "width": 366,
+          "height": 44
+        },
+        "expanded": "false"
+      },
+      "chevron": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 125,
+          "bottom": 147,
+          "left": 12,
+          "right": 28,
+          "width": 16,
+          "height": 22
+        }
+      },
+      "label": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 127,
+          "bottom": 145,
+          "left": 32,
+          "right": 89,
+          "width": 57,
+          "height": 17
+        },
+        "text": "Messages"
+      },
+      "count": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 127,
+          "bottom": 145,
+          "left": 100,
+          "right": 108,
+          "width": 7,
+          "height": 17
+        },
+        "text": "2"
+      },
+      "groundFromBar": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "groundFromScroller": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "bodyScrollW": 390,
+      "innerW": 390
+    },
+    "settled": true
+  },
+  "collapsed-minimum-light-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": {
+      "box": {
+        "top": 71,
+        "bottom": 115,
+        "left": 12,
+        "right": 348,
+        "width": 336,
+        "height": 44
+      },
+      "text": "\u25b8Peer messages\u00b73+",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360,
+    "styles": {
+      "theme": "localOperatorLight",
+      "canvasVar": "#f5f0e6",
+      "inkDimVar": "#6c675c",
+      "bar": {
+        "style": {
+          "color": "rgb(33, 30, 24)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 71,
+          "bottom": 115,
+          "left": 12,
+          "right": 348,
+          "width": 336,
+          "height": 44
+        },
+        "expanded": "false"
+      },
+      "chevron": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 82,
+          "bottom": 104,
+          "left": 12,
+          "right": 28,
+          "width": 16,
+          "height": 22
+        }
+      },
+      "label": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 84,
+          "bottom": 102,
+          "left": 32,
+          "right": 118,
+          "width": 86,
+          "height": 17
+        },
+        "text": "Peer messages"
+      },
+      "count": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 84,
+          "bottom": 102,
+          "left": 129,
+          "right": 145,
+          "width": 15,
+          "height": 17
+        },
+        "text": "3+"
+      },
+      "groundFromBar": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "groundFromScroller": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "bodyScrollW": 360,
+      "innerW": 360
+    },
+    "settled": true
+  },
+  "expanded-light-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "press": {
+      "pressed": true,
+      "text": "\u25b8Peer messages\u00b73+"
+    },
+    "bar": {
+      "box": {
+        "top": 71,
+        "bottom": 115,
+        "left": 12,
+        "right": 348,
+        "width": 336,
+        "height": 44
+      },
+      "text": "\u25bePeer messages\u00b73+",
+      "expanded": "true"
+    },
+    "receipts": 4,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360,
+    "styles": {
+      "theme": "localOperatorLight",
+      "canvasVar": "#f5f0e6",
+      "inkDimVar": "#6c675c",
+      "bar": {
+        "style": {
+          "color": "rgb(33, 30, 24)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 71,
+          "bottom": 115,
+          "left": 12,
+          "right": 348,
+          "width": 336,
+          "height": 44
+        },
+        "expanded": "true"
+      },
+      "chevron": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 82,
+          "bottom": 104,
+          "left": 12,
+          "right": 28,
+          "width": 16,
+          "height": 22
+        }
+      },
+      "label": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 84,
+          "bottom": 102,
+          "left": 32,
+          "right": 118,
+          "width": 86,
+          "height": 17
+        },
+        "text": "Peer messages"
+      },
+      "count": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 84,
+          "bottom": 102,
+          "left": 129,
+          "right": 145,
+          "width": 15,
+          "height": 17
+        },
+        "text": "3+"
+      },
+      "groundFromBar": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "groundFromScroller": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "bodyScrollW": 360,
+      "innerW": 360
+    },
+    "settled": true
+  },
+  "mixed-light-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": {
+      "box": {
+        "top": 114,
+        "bottom": 158,
+        "left": 12,
+        "right": 348,
+        "width": 336,
+        "height": 44
+      },
+      "text": "\u25b8Messages\u00b72",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360,
+    "styles": {
+      "theme": "localOperatorLight",
+      "canvasVar": "#f5f0e6",
+      "inkDimVar": "#6c675c",
+      "bar": {
+        "style": {
+          "color": "rgb(33, 30, 24)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 114,
+          "bottom": 158,
+          "left": 12,
+          "right": 348,
+          "width": 336,
+          "height": 44
+        },
+        "expanded": "false"
+      },
+      "chevron": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "14px",
+          "lineHeight": "21.7px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 125,
+          "bottom": 147,
+          "left": 12,
+          "right": 28,
+          "width": 16,
+          "height": 22
+        }
+      },
+      "label": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 127,
+          "bottom": 145,
+          "left": 32,
+          "right": 89,
+          "width": 57,
+          "height": 17
+        },
+        "text": "Messages"
+      },
+      "count": {
+        "style": {
+          "color": "rgb(108, 103, 92)",
+          "fontSize": "12px",
+          "lineHeight": "17.4px",
+          "background": "rgba(0, 0, 0, 0)",
+          "fontWeight": "400"
+        },
+        "rect": {
+          "top": 127,
+          "bottom": 145,
+          "left": 100,
+          "right": 108,
+          "width": 7,
+          "height": 17
+        },
+        "text": "2"
+      },
+      "groundFromBar": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "groundFromScroller": {
+        "tag": "BODY",
+        "cls": "",
+        "bg": "rgb(245, 240, 230)"
+      },
+      "bodyScrollW": 360,
+      "innerW": 360
+    },
+    "settled": false
+  }
+}
