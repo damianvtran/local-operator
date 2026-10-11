@@ -2019,6 +2019,7 @@ def test_a_language_write_publishes_one_config_frame(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     monkeypatch.delenv("LOP_LANG", raising=False)
 
+    from local_operator.i18n.frames import config_frame_payload
     from local_operator.i18n.resolve import resolve_language
 
     feed = _feed(root)
@@ -2031,10 +2032,10 @@ def test_a_language_write_publishes_one_config_frame(tmp_path, monkeypatch):
 
     frames = _config_frames(_queued(subscription))
     assert len(frames) == 1, frames
-    assert frames[0]["payload"]["changed_keys"] == ["language"]
-    # The frame carries the RESOLVED language — the same value
-    # ``GET /v1/capabilities`` serves — rather than a re-derivation: one truth.
-    assert frames[0]["payload"]["language"] == resolve_language()
+    # The payload is the SHARED builder's output, byte-for-byte: the one
+    # contract this surface keeps with the relay daemon's /api/config/events
+    # (tests/unit/test_i18n_config_frame_contract.py pins the builder itself).
+    assert frames[0]["payload"] == config_frame_payload(["language"], resolve_language())
     asyncio.run(feed.close())
 
 
