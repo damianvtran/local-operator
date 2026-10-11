@@ -7163,6 +7163,8 @@ class ServingSessionHandle(SessionHandle):
             return await self._wake_slash(session, args, SlashResult)
         if command == "monitor":
             return await self._monitor_slash(session, args, SlashResult)
+        if command == "jobs":
+            return await self._jobs_slash(session, args, SlashResult)
         if command == "highlights":
             # Supplement actions (memo §3.2 T5) as a routed verb: the follower's
             # typed command and the phone composer land here with the VERB only,
@@ -7573,6 +7575,97 @@ class ServingSessionHandle(SessionHandle):
 
     @staticmethod
     def _monitor_failure(SlashResult: Any, text: str, code: str) -> Any:
+        """One shape for every refusal this command produces, so the route can
+        map a code to a status without reading prose."""
+        return SlashResult(kind="error", text=text, data={"code": code})
+
+    async def _jobs_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Run one job mutation INSIDE the session that owns the manager.
+
+        Reached from the desktop by
+        ``POST /v1/desktop/sessions/{id}/jobs/{job_id}/cancel`` when a live
+        runtime holds the session (see ``routes/desktop_sessions``), never by
+        a user typing ``/jobs``: the name is a routed-command word in the
+        ladder above, not a registry entry, so no palette row exists for it
+        and no terminal offers it (``wake``/``monitor``/``desktop_mcp`` are
+        the same shape of internal word).
+
+        WHY THIS PATH EXISTS. ``AsyncJobManager`` state lives only in the
+        process that owns the session — there is no file or index an external
+        writer could reach (the wake/monitor surfaces' cold paths exist
+        because THEIR state persists; a job's does not) — so a cancel has to
+        reach the owner's own manager. The call below is the SAME one
+        ``jobs op='cancel'`` makes (``AsyncJobManager.cancel``: abort the
+        signal, cancel the task, await it), deliberately not a second
+        mechanism, so the runner's own cancellation semantics — a video
+        runner's bounded ``best_effort_cancel`` — apply identically whoever
+        asked. Only the refusal classes are this side's own, and they are
+        typed as codes so the route maps a status without reading prose.
+        """
+        import json
+
+        try:
+            payload = json.loads(arg) if arg and arg.strip() else {}
+            if not isinstance(payload, dict):
+                raise ValueError("job payload must be an object")
+        except (TypeError, ValueError):
+            # The caller is our own route, so this is a protocol bug rather
+            # than user input; refusing in the same typed shape keeps the
+            # route's error mapping in one place instead of adding a case.
+            return self._jobs_failure(
+                SlashResult, "The job request could not be read.", "jobs_invalid"
+            )
+
+        op = str(payload.get("op") or "")
+        job_id = str(payload.get("job_id") or "")
+        if op != "cancel":
+            return self._jobs_failure(SlashResult, f"Unknown job operation {op!r}.", "jobs_invalid")
+
+        manager = getattr(session, "jobs", None)
+        if manager is None:
+            # The jobs tool's own sentence for the same state (``execute_jobs``
+            # in ``tools/builtin``), so a cancel and a ``jobs op='cancel'`` on
+            # one session cannot describe it two ways.
+            return self._jobs_failure(
+                SlashResult,
+                "job tracking is not available in this session (no job manager attached).",
+                "jobs_unavailable",
+            )
+
+        job = manager.get(job_id)
+        if job is None:
+            # The frozen phrase from the engine's own wording map
+            # (``tools/image_tool``'s ``_CANCEL_PHRASES``, quoted rather than
+            # respelled): the class the rail renders for a refused/unknown-job
+            # cancel — "the frozen ``not_found``-class phrase, never a generic
+            # error" (design spec §2.2).
+            from local_operator.tools.image_tool import _CANCEL_PHRASES
+
+            return self._jobs_failure(SlashResult, _CANCEL_PHRASES["not_found"], "jobs_not_found")
+
+        cancelled = await manager.cancel(job.id)
+        if not cancelled:
+            # The row passed the lookup but the manager still refused: it
+            # settled in the window between. The tool's own honest sentence
+            # for this outcome, kept so the two callers report one thing —
+            # the press asked for a stop that cannot happen, and must not be
+            # painted as one.
+            return self._jobs_failure(
+                SlashResult,
+                f"job {job.id} was not cancelled (status: {job.status})",
+                "jobs_not_cancelled",
+            )
+        # ``notice`` rather than ``block``: the caller is a route that reads
+        # ``data``, and a notice is what the frontier renderer prints for a
+        # receipt it has nothing special to do with.
+        return SlashResult(
+            kind="notice",
+            text=f"cancelled job {job.id} ({job.label})",
+            data={"job_id": job.id, "cancelled": True},
+        )
+
+    @staticmethod
+    def _jobs_failure(SlashResult: Any, text: str, code: str) -> Any:
         """One shape for every refusal this command produces, so the route can
         map a code to a status without reading prose."""
         return SlashResult(kind="error", text=text, data={"code": code})

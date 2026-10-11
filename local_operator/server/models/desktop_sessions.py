@@ -1235,6 +1235,28 @@ class InterruptReceipt(BaseModel):
     replayed: bool = False
 
 
+class JobCancelReceipt(BaseModel):
+    """What a job cancel was ACKNOWLEDGED as, and nothing more.
+
+    THE PRESS IS AN ACKNOWLEDGEMENT, NOT AN OUTCOME — the honesty rule every
+    surface keeps (design spec §2.1): ``cancelled`` here means the session's
+    manager received the cancel and signalled the job's runner; the row itself
+    paints ``cancelled`` only when its own settle lands. That is also why
+    there is no status field: after ``AsyncJobManager.cancel`` returns, the
+    manager row reads ``cancelled`` while the runner is still unwinding, and
+    any word about the job's state would be a claim this moment cannot
+    support — the job row's next wire state is the outcome's own evidence.
+
+    The UI reads no field off this receipt (its call site is typed
+    ``unknown`` and converges on the canonical re-read either way); the
+    fields exist for the route's tests and any later reader, not for a
+    surface to paint from.
+    """
+
+    job_id: str
+    cancelled: bool
+
+
 class MoveReceipt(BaseModel):
     """What a working-directory change did, and where it left the session.
 
