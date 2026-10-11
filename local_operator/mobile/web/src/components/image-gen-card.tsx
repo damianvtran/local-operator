@@ -48,6 +48,19 @@
  * are SLOTS (optional props) that the transcript does not wire yet — the
  * named surface op is not defined — and are demonstrated in tests only.
  *
+ * VIDEO WEARS THE SAME CARD WITH ONE EXCLUSION, AND ONE WORD (surfaces
+ * programme, R1/R4). `generate_video` is a member of the detection set, so
+ * the live body, the settle absorption and the failure body follow with zero
+ * edits — with the ONE THING THIS CARD MUST NOT DO FOR VIDEO: offer the
+ * cancel control. A video job is registered detached and cancelled
+ * POST-TURN (`jobs op='cancel'`; contract §4.2), never by a turn interrupt,
+ * so the queued and running branches withhold the control (the frozen §5.4
+ * relay row — there is no post-turn surface on the phone it could belong
+ * to, and an in-turn control would stop the conversation, not the job). A
+ * feed-carried `cancelling` still paints the same hold for video: that word
+ * is the wire's own, not a press, so nothing is promised by painting it.
+ * The done line is the ONE material string: `video ready`.
+ *
  * THE GENERATING BODY IS GATED ON A GENERATION HAVING STARTED (the
  * desktop's F3 rule, mirrored — `view.generating` in the adapter): the
  * tile, the bar and the log tail render while `running`, and during a
@@ -249,15 +262,7 @@ export function ImageGenCard({
 								   when a fraction lands. */
 								<span aria-hidden className="min-w-0 flex-1" />
 							)}
-							{view.state === "running" ? (
-								<button
-									type="button"
-									onClick={() => void cancel()}
-									className={CANCEL_BUTTON}
-								>
-									cancel
-								</button>
-							) : (
+							{view.state === "cancelling" ? (
 								/* The hold, spelled out. Never "cancelled": the
 								   press is a request and this state ends when the
 								   wire settles one way or the other. The test id is
@@ -271,6 +276,17 @@ export function ImageGenCard({
 								>
 									cancelling…
 								</span>
+							) : view.material === "video" ? null : (
+								/* The control, withheld for video (R4 — the header's
+								   video note): a video job is not interruptible in-turn,
+								   so no press here could keep a turn-interrupt's promise. */
+								<button
+									type="button"
+									onClick={() => void cancel()}
+									className={CANCEL_BUTTON}
+								>
+									cancel
+								</button>
 							)}
 						</div>
 						{view.logs.length > 0 ? (
@@ -332,7 +348,9 @@ export function ImageGenCard({
 								))}
 							</div>
 						) : null}
-						<p className={STATE_LINE}>image ready</p>
+						<p className={STATE_LINE}>
+							{view.material === "video" ? "video ready" : "image ready"}
+						</p>
 					</div>
 				) : view.state === "failed" ? (
 					<div className="flex flex-col gap-1 pt-0.5 pb-1.5 pl-6 pr-1.5">
@@ -399,13 +417,17 @@ export function ImageGenCard({
 									? ` · ${view.queuePosition} ahead`
 									: ""}
 							</p>
-							<button
-								type="button"
-								onClick={() => void cancel()}
-								className={CANCEL_BUTTON}
-							>
-								cancel
-							</button>
+							{view.material === "video" ? null : (
+								/* Withheld for video (R4 — the header's video note): a
+								   video job is cancelled post-turn, so no control here. */
+								<button
+									type="button"
+									onClick={() => void cancel()}
+									className={CANCEL_BUTTON}
+								>
+									cancel
+								</button>
+							)}
 						</div>
 					</div>
 				)}

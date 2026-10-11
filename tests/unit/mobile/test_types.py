@@ -106,6 +106,20 @@ def test_peer_message_rejects_non_bool_wake() -> None:
         validate_control_frame({"op": "peer_message", "text": "hi", "wake": "yes"})
 
 
+def test_job_cancel_accepts_the_job_id_and_rejects_malformed_ones() -> None:
+    """The job rail's control (video programme §2.2, contract §4.1): the job's
+    own id is the whole body, typed at the wire so an empty or non-string id
+    is refused before any lookup for "" happens on the far side."""
+    validate_control_frame({"op": "job_cancel", "req": 3, "job_id": "job-abc123"})
+    for bad in (
+        {"op": "job_cancel"},
+        {"op": "job_cancel", "job_id": ""},
+        {"op": "job_cancel", "job_id": 7},
+    ):
+        with pytest.raises(ValueError, match="job_id must be a non-empty string"):
+            validate_control_frame(bad)
+
+
 def test_complete_aside_rejects_a_non_bool_instruction_flag() -> None:
     """The flag is TYPED, because a coerced value flips the wrap silently.
 

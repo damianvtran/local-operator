@@ -9356,6 +9356,48 @@ class ServingSessionHandle(SessionHandle):
         }
 
     @_on_session_loop
+    async def job_cancel(self, job_id: str) -> str:
+        """``job_cancel``: cancel ONE background job by id — the rail's only mechanism.
+
+        Lands on :meth:`AsyncJobManager.cancel`, the engine call the ``jobs``
+        tool's ``op='cancel'`` already makes (contract §4.1): a phone or a
+        delegated surface requests the same stop the agent could, and the
+        runner's own cancellation semantics are what the settle then states —
+        for a media walk, ``best_effort_cancel`` and its receipt token. This
+        op never paints an outcome of its own.
+
+        An unknown id is a refusal in words (the dispatcher renders it as the
+        error frame); a job that already settled is the neutral reading the
+        tool itself returns — the caller wanted it stopped and it is stopped.
+        Optional capability, getattr-probed by the dispatch — no
+        ``PROTOCOL_VERSION`` move.
+
+        THE DELIBERATE OMISSION (review round 1, R1-2). The ``jobs`` TOOL's
+        cancel path additionally attributes a deliberate stop for ``task``
+        rows — ``SubagentComms.begin_stop`` stamps ``ended_by``/
+        ``cancel_reason`` and stages the durable ``subagent-stop-<job>.v1.json``
+        receipt — and this op deliberately does NOT. The two paths agree on
+        the engine call and the receipt words; the attribution is left out
+        rather than mirrored because the actor for a phone- or peer-issued
+        cancel has no name in the wire's vocabulary yet (a new ``stopped by …``
+        string every surface would render), and the right home for the
+        alignment is a stop-issue helper shared with ``tools/builtin.py``, not
+        a second inline copy of the stamp sequence. THE CONDITION TO REVISIT:
+        when a task-job stop rides this op — a carrier cancelling ``task`` /
+        subagent rows through the rail — align it via that shared helper
+        first. Blast radius today is nil: v1 mounts no carrier, and the video
+        jobs this op was built for are not ``task`` rows.
+        """
+        self._check_loop_thread()
+        job = self._session.jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"unknown job {job_id}")
+        cancelled = await self._session.jobs.cancel(job_id)
+        if not cancelled:
+            return f"job {job_id} was not cancelled (status: {job.status})"
+        return f"cancelled job {job_id} ({job.label})"
+
+    @_on_session_loop
     async def refresh(self) -> None:
         self._refresh_state()
         self._refresh_todos()
