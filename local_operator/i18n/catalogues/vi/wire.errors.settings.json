@@ -1,0 +1,14 @@
+{
+  "wire.errors.settings.config_retrieve_failed": "Lỗi khi truy xuất cấu hình: {error}",
+  "wire.errors.settings.config_unreadable": "Không thể đọc tệp cấu hình. Sửa lại tệp trước khi lưu.",
+  "wire.errors.settings.config_update_failed": "Lỗi khi cập nhật cấu hình: {error}",
+  "wire.errors.settings.credential_key_empty": "Khóa thông tin xác thực không được để trống",
+  "wire.errors.settings.credential_retrieve_failed": "Lỗi khi truy xuất thông tin xác thực: {error}",
+  "wire.errors.settings.credential_update_failed": "Lỗi khi cập nhật thông tin xác thực: {error}",
+  "wire.errors.settings.inline_credentials": "Dùng endpoint không có thông tin xác thực nhúng hoặc tham số truy vấn.",
+  "wire.errors.settings.invalid_value": "{error}",
+  "wire.errors.settings.no_update_fields": "Không có trường cập nhật hợp lệ nào được cung cấp",
+  "wire.errors.settings.not_registered": "Cài đặt này không được đăng ký.",
+  "wire.errors.settings.system_prompt_retrieve_failed": "Lỗi khi truy xuất prompt hệ thống: {error}",
+  "wire.errors.settings.system_prompt_update_failed": "Lỗi khi cập nhật prompt hệ thống: {error}"
+}

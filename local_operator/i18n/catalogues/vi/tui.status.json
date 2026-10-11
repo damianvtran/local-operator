@@ -1,0 +1,9 @@
+{
+  "tui.status.agents": "{count, plural, other {# tác nhân}}",
+  "tui.status.band.starting": "đang khởi động…",
+  "tui.status.band.working": "đang làm việc",
+  "tui.status.jobs": "{count, plural, other {# tác vụ}}",
+  "tui.status.model.connecting": "đang kết nối…",
+  "tui.status.model.setup": "thiết lập",
+  "tui.status.tunnel.parked": "truy cập từ xa đã tắt"
+}

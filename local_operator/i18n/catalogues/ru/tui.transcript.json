@@ -1,0 +1,12 @@
+{
+  "tui.transcript.ask.key_name": "{keys} (имя ключа)",
+  "tui.transcript.ask.not_answered": "без ответа",
+  "tui.transcript.ask.not_provided": "не предоставлено",
+  "tui.transcript.attach.receipt": "↑ прикреплено {count, plural, one {# изображение} few {# изображения} many {# изображений} other {# изображения}}",
+  "tui.transcript.catchup.headline": "наверстывание — {label}",
+  "tui.transcript.catchup.missed": "{count, plural, one {# пропущенное пробуждение} few {# пропущенных пробуждения} many {# пропущенных пробуждений} other {# пропущенных пробуждения}}",
+  "tui.transcript.queued.newest": "· в очереди до следующего рантайма — esc вернёт его",
+  "tui.transcript.queued.older": "· в очереди до следующего рантайма",
+  "tui.transcript.sender.pid": "pid {pid}",
+  "tui.transcript.sender.unknown": "другая сессия"
+}
