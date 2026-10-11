@@ -21,6 +21,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -44,11 +45,15 @@ GZIP_CAP = 4608
 #: PRELUDE_VERSION 2 (memo §8 F9): the `div.ttl` table title and its stylesheet rule were
 #: stripped -- the component is body-only (§2.8, operator directive 2026-10-10) -- which is
 #: what moved CSS 2,044 -> 2,008 B, JS 8,202 -> 8,047 B and gzip 4,607 -> 4,562 B.
-PINNED_CSS_BYTES = 2008
+#:
+#: PRELUDE_VERSION 3: the ROOT element paints `--lo-canvas`, so a live theme flip keeps the
+#: surface's token instead of the UA canvas. CSS 2,008 -> 2,056 B, gzip 4,562 -> 4,573 B; JS
+#: untouched at 8,047 B. 35 B gzip of headroom against the 4,608 B cap is what is left.
+PINNED_CSS_BYTES = 2056
 PINNED_JS_BYTES = 8047
-PINNED_GZIP_BYTES = 4562
-PINNED_DIGEST = "c5024e1f77e5e9d7435f0f89a79d0b0e041aa245970f92f1abd1d980f4d1237f"
-PINNED_VERSION = 2
+PINNED_GZIP_BYTES = 4573
+PINNED_DIGEST = "8cf8b4902dbadbe8fbc0421d953796febbd79ad16673a8e8f5e2402e5d42f05e"
+PINNED_VERSION = 3
 
 
 @pytest.fixture
@@ -116,6 +121,47 @@ def test_the_prelude_makes_no_network_or_storage_calls() -> None:
     ):  # fmt: skip
         assert needle not in js, needle
     assert js.count("parent.postMessage") == 1
+
+
+#: The root element's rule and the dark block, as the minified build writes them.
+_ROOT_RULE = re.compile(r"html\[data-ready\]\{([^}]*)\}")
+_DARK_RULE = re.compile(r":root\[data-mode=dark\]\{([^}]*)\}")
+
+
+def _declarations(rule: re.Pattern[str], css: str) -> dict[str, str]:
+    match = rule.search(css)
+    assert match is not None, f"the stylesheet has no rule matching {rule.pattern}"
+    out: dict[str, str] = {}
+    for declaration in match.group(1).split(";"):
+        if ":" in declaration:
+            name, _, value = declaration.partition(":")
+            out[name.strip()] = value.strip()
+    return out
+
+
+def test_the_root_element_paints_the_canvas_token_as_the_frames_ground() -> None:
+    """The frame's ground is `--lo-canvas`, in BOTH directions (the live theme-flip defect).
+
+    WHY THIS IS A STYLE PIN AND WHAT IT DOES NOT PROVE. The behaviour tests below run the
+    prelude's JS against a stub DOM, which has no CSS engine, so nothing in this suite can
+    read a computed or a painted colour: a stub that modelled "what a root with no background
+    falls back to" would be this file asserting its own assumption. What is pinned is the
+    style contract the defect came from -- the ROOT element declares the canvas token as its
+    background (a root with no background is what let the UA canvas show through: #ffffff on
+    a light flip, #121212 on a dark one, measured in local-operator-mobile PR #83), and the
+    dark block declares a canvas token of its own, so the ground does not depend on which
+    direction the theme moved. The rendered proof -- the real assembled document, mounted in
+    a sandboxed `data:` frame, flipped both ways, ground read from the painted pixels and
+    from the frame's own computed style -- is in the PR that added this test.
+    """
+    css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
+    root = _declarations(_ROOT_RULE, css)
+    assert root.get("background") == "var(--lo-canvas)"
+    assert root.get("visibility") == "visible"
+    assert _declarations(_DARK_RULE, css).get("--lo-canvas") == "#121212"
+    # Exactly one element paints the ground: `body` stays transparent by design, so the token
+    # is the frame's canvas rather than a box painted inside it.
+    assert re.search(r"body\{[^}]*background:transparent", css) is not None
 
 
 # --------------------------------------------------------------------------------------
