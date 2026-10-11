@@ -4306,7 +4306,10 @@ def _cap_spend_channel_rows_in_place(channels: Any) -> None:
     Shared by both routes on purpose: the object rides the attach snapshot AND
     every refresh delta, and a bound placed only at the snapshot boundary holds
     for the first frame and leaks on every one after it (the rule this file
-    records for the job fields).
+    records for the job fields). The phone's own read
+    (``FrontendStateStore.spend_channels_copy``) reuses this bound as well, so
+    the mobile projection and the desktop frame cap the same list the same way
+    instead of agreeing by inspection.
     """
     if not isinstance(channels, dict):
         return
@@ -5978,6 +5981,33 @@ class FrontendStateStore:
                 "output_tokens": int(usage.output_tokens),
             }
         return dict(state.child_costs), pair
+
+    def spend_channels_copy(self) -> dict[str, Any] | None:
+        """A fresh SERIALISED copy of the published ``spend_channels`` object.
+
+        The second sibling of :meth:`spend_context_copy`, for the same reason
+        it exists: the phone's per-event refresh (``serving``/``tui_handle``
+        ``_refresh_state``) cannot read this field through ``read_field`` — the
+        allow-list admits only deeply immutable scalars, and this is a model —
+        and cannot afford :meth:`state`'s whole-state deep copy per folded
+        event. The dump is taken with ``mode="json"``, the same serialisation
+        the desktop sync frame uses (``sync_wire_payload``), and runs through
+        the SAME row cap (``_cap_spend_channel_rows_in_place``) so the phone
+        and the desktop see one bounded shape rather than two spellings of it;
+        the cap GROUPS the remainder into an ``other`` row and leaves
+        ``by_basis``/``total_micro`` exact, so nothing is lost by it.
+
+        ``None`` (not an empty dict) when the store publishes no object: the
+        projection's field then stays absent on the wire, which its consumers
+        read as "this runtime publishes no channel ledger" — the same absence
+        the desktop frame's dropped key means.
+        """
+        channels = self._state.spend_channels
+        if channels is None:
+            return None
+        dumped = channels.model_dump(mode="json")
+        _cap_spend_channel_rows_in_place(dumped)
+        return dumped
 
     def read_label(self, name: str) -> str:
         """One DERIVED label of the state, WITHOUT cloning the whole state.

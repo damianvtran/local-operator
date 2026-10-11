@@ -664,3 +664,68 @@ def test_pending_voice_records_mark_the_published_object(tmp_path: Path) -> None
         assert after.total_micro == 1000
 
     asyncio.run(scenario())
+
+
+def test_spend_channels_copy_is_the_wire_shape_bounded_and_fresh(tmp_path: Path) -> None:
+    """PR-2: the phone's read — serialised, capped, fresh; None when unpublished.
+
+    The sibling of ``spend_context_copy``: the projection's per-event refresh
+    reads the object through this seam rather than ``state`` (which deep-copies
+    the whole state) or ``read_field`` (whose allow-list is scalars only). Four
+    properties, in the order the failure modes matter: a fresh dict (mutating
+    the copy must not touch the store's state), the SAME ``mode="json"``
+    serialisation the desktop sync frame ships (one shape for both surfaces),
+    the shared row cap (13 named rows group into the cap's ``other`` row — the
+    sum survives, the list does not grow), and ``None`` — not ``{}`` — when the
+    store publishes nothing, so the projection's field stays off the wire.
+    """
+    from local_operator.session.frontend_state import (
+        SPEND_CHANNEL_ROW_CAP,
+        CostKnowledge,
+        FrontendSessionState,
+        FrontendSpendChannelRow,
+        FrontendSpendChannels,
+        FrontendStateStore,
+    )
+
+    empty = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="test-epoch"))
+    assert empty.spend_channels_copy() is None, "absence is None, never an empty object"
+
+    rows = [
+        FrontendSpendChannelRow(
+            channel="image",
+            provider=f"p{index}",
+            amount_micro=1_000,
+            knowledge=CostKnowledge.EXACT,
+            basis=["estimated"],
+        )
+        for index in range(SPEND_CHANNEL_ROW_CAP + 1)
+    ]
+    store = FrontendStateStore(
+        FrontendSessionState(
+            session_id="s1",
+            epoch="test-epoch",
+            spend_channels=FrontendSpendChannels(
+                tracked=True,
+                total_micro=13_000,
+                knowledge=CostKnowledge.EXACT,
+                rows=rows,
+            ),
+        )
+    )
+
+    copy = store.spend_channels_copy()
+    assert copy is not None
+    assert (copy["version"], copy["tracked"], copy["total_micro"]) == (1, True, 13_000)
+    assert len(copy["rows"]) == SPEND_CHANNEL_ROW_CAP + 1, "the cap groups, never drops"
+    assert copy["rows"][-1]["channel"] == "other"
+    grouped = sum(
+        row["amount_micro"] for row in copy["rows"] if isinstance(row.get("amount_micro"), int)
+    )
+    assert grouped == 13_000, "the grouped remainder keeps the table's money whole"
+
+    copy["total_micro"] = 0
+    copy["rows"].clear()
+    assert store.state.spend_channels is not None
+    assert store.state.spend_channels.total_micro == 13_000, "the copy is the caller's"
+    assert len(store.state.spend_channels.rows) == SPEND_CHANNEL_ROW_CAP + 1

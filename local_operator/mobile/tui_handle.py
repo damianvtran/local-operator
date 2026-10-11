@@ -1928,6 +1928,7 @@ class TuiSessionHandle(SessionHandle):
                 context_window=store.read_field("context_window"),
                 context_is_estimate=store.read_field("context_is_estimate"),
                 usage=usage,
+                spend_channels=store.spend_channels_copy(),
             )
         comms = getattr(session, "_subagent_comms", None)
         if comms is not None:

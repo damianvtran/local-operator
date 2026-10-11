@@ -564,10 +564,35 @@ def test_the_spend_and_context_block_rides_the_wire_and_defaults_when_absent() -
     projection.context_tokens = 12_400
     projection.context_window = 200_000
     projection.context_is_estimate = True
+    # The published per-channel object (PR-2): a plain dict on the wire, carried
+    # as-is — the runtime store serialised it already, so the projection must
+    # not re-shape it. Integer micro-USD and the backend's own knowledge rung.
+    projection.spend_channels = {
+        "version": 1,
+        "tracked": True,
+        "total_micro": 961_000,
+        "knowledge": "partial",
+        "by_basis": {"billed": 900_000, "estimated": 61_000},
+        "rows": [
+            {
+                "channel": "inference",
+                "provider": "anthropic",
+                "model": "claude-sonnet-5-5",
+                "label": "anthropic/claude-sonnet-5-5",
+                "units": 10.0,
+                "unit": "calls",
+                "amount_micro": 900_000,
+                "knowledge": "exact",
+                "basis": ["billed"],
+            }
+        ],
+        "pending": {"voice": "pending_owner_append", "calls": 2},
+    }
 
     wire = projection.to_json()
     for name in _SPEND_CONTEXT_FIELDS:
         assert name in wire, name
+    assert wire["spend_channels"] == projection.spend_channels
 
     rebuilt = _projection_from_json(wire, _record())
     assert rebuilt.cumulative_parent_cost == 1.25
@@ -578,8 +603,13 @@ def test_the_spend_and_context_block_rides_the_wire_and_defaults_when_absent() -
     assert rebuilt.context_tokens == 12_400
     assert rebuilt.context_window == 200_000
     assert rebuilt.context_is_estimate is True
+    assert rebuilt.spend_channels == projection.spend_channels
 
-    absent = {key: value for key, value in wire.items() if key not in _SPEND_CONTEXT_FIELDS}
+    absent = {
+        key: value
+        for key, value in wire.items()
+        if key not in _SPEND_CONTEXT_FIELDS and key != "spend_channels"
+    }
     default = _projection_from_json(absent, _record())
     assert default.cumulative_parent_cost is None
     assert default.child_costs == {}
@@ -589,6 +619,11 @@ def test_the_spend_and_context_block_rides_the_wire_and_defaults_when_absent() -
     assert default.context_tokens is None
     assert default.context_window is None
     assert default.context_is_estimate is None
+    assert default.spend_channels is None
+    # And the None form is POPPED rather than sent as null: absence is the
+    # capability proxy (an old daemon never emits the key), so a null would be
+    # the false claim that the runtime has a channel ledger and it is empty.
+    assert "spend_channels" not in SessionProjection(session_id="s1", pid=1).to_json()
 
 
 # --- images on an ask answer (ask-attachments-v1) ---------------------------
