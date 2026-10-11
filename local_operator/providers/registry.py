@@ -1172,6 +1172,36 @@ def credential_provider_id(provider_id: str) -> str:
     return (definition.store_credentials_as or definition.id) if definition else provider_id
 
 
+#: The login-flavour provider ids whose sign-in is a SUBSCRIPTION (a plan or
+#: quota), so a call they serve spends no metered dollars and the client-side
+#: figure beside it is an API-EQUIVALENT, never a bill (PR-3, design §3.4).
+#:
+#: WHY AN EXPLICIT SET rather than "every id whose ``store_credentials_as``
+#: differs": that test also covers ``openai-api-key``, ``anthropic-key`` and
+#: ``radient-key`` — pasted-key logins that alias onto a provider but bill by
+#: the token, and labelling their calls subscription-flavoured would be a
+#: wrong number wearing a plan's authority. Each id here is one whose ONLY
+#: login is the subscription sign-in, so the id alone settles the question.
+#:
+#: NOT here, and deliberately: ``anthropic`` and ``kimi``, which serve a
+#: subscription sign-in AND a plain API key under one id — a call records no
+#: credential kind, so their calls take the metered reading (the known limit
+#: ``session.spend.inference_billing_labels`` documents).
+SUBSCRIPTION_LOGIN_FLAVOURS: frozenset[str] = frozenset(
+    {
+        "openai-device",
+        "xai-oauth",
+        "zai-oauth",
+        "alibaba-token-plan-oauth",
+    }
+)
+
+
+def subscription_login_flavour(provider_id: str) -> bool:
+    """Whether ``provider_id`` names a subscription sign-in (see the set above)."""
+    return str(provider_id or "").strip().lower() in SUBSCRIPTION_LOGIN_FLAVOURS
+
+
 def resolve_env_key(provider_id: str) -> str | None:
     """Resolve the provider's API key from the environment.
 

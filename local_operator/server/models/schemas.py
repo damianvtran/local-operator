@@ -1141,6 +1141,17 @@ class SpeechRequest(BaseModel):
             "Omitted when unset so the provider can auto-detect."
         ),
     )
+    session_id: Optional[str] = Field(
+        None,
+        description=(
+            "Optional conversation id this synthesis belongs to (PR-3). Additive "
+            "and tolerant: a daemon that predates the field ignores it, a current "
+            "one records the call's cost against the session (analytics, and the "
+            "pending marker the session's published spend can state). Omitted "
+            "when unset — the call is then recorded with no session, never "
+            "guessed onto one."
+        ),
+    )
 
     @field_validator("language_code", mode="before")
     @classmethod
