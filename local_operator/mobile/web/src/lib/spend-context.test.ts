@@ -287,13 +287,51 @@ describe("channelBreakdown (PR-2: the phone's chips)", () => {
 		{ channel: "image", amount_micro: 53_000 },
 		{ channel: "tts", amount_micro: null },
 	];
-	it("is null without an object, and untracked is its own statement", () => {
+	it("is null without an object", () => {
 		expect(channelBreakdown({ spend_channels: undefined })).toBeNull();
+	});
+	it("draws rows ALWAYS and gates the untracked notice on evidence (M-4)", () => {
+		// The desktop section's own gate, mirrored: a marker-less session ALONE
+		// is not a disclosure — degradation needs evidence — so `exact` keeps
+		// silent and `partial`/`unknown` carry the notice.
 		expect(
 			channelBreakdown({
-				spend_channels: { version: 1, tracked: false, total_micro: 0, rows: [] },
+				spend_channels: {
+					version: 1,
+					tracked: false,
+					total_micro: 210_000,
+					knowledge: "exact",
+					rows: [],
+				},
 			}),
-		).toEqual({ tracked: false, chips: [], hiddenCount: 0 });
+		).toEqual({ chips: [], hiddenCount: 0, untrackedNotice: false });
+		expect(
+			channelBreakdown({
+				spend_channels: {
+					version: 1,
+					tracked: false,
+					total_micro: 210_000,
+					knowledge: "partial",
+					rows: [],
+				},
+			})?.untrackedNotice,
+		).toBe(true);
+		// RECOVERED ROWS ARE DRAWN (the dropped-rows bug this fixes): a
+		// backfilled session has no marker but real recovered rows, and they
+		// render beside the notice rather than being discarded by `tracked`.
+		const recovered = channelBreakdown({
+			spend_channels: {
+				version: 1,
+				tracked: false,
+				total_micro: 53_000,
+				knowledge: "partial",
+				rows: [{ channel: "image", amount_micro: 53_000, basis: ["estimated"] }],
+			},
+		});
+		expect(recovered?.chips.map((chip) => `${chip.label} ${chip.text}`)).toEqual([
+			"image $0.053",
+		]);
+		expect(recovered?.untrackedNotice).toBe(true);
 	});
 	it("spells every row's own amount, $— for the unstated", () => {
 		const breakdown = channelBreakdown({
@@ -316,6 +354,29 @@ describe("channelBreakdown (PR-2: the phone's chips)", () => {
 		});
 		expect(breakdown?.chips).toHaveLength(4);
 		expect(breakdown?.chips[0].label).toBe("model-0");
+		expect(breakdown?.hiddenCount).toBe(2);
+	});
+	it("gives named channels the chip budget, keeping wire order (m2)", () => {
+		// The backend cap's own selection shape: two inference rows head the
+		// wire, and a plain "first four" would spend the whole budget on them.
+		// Named channels win; inference takes what is left; wire order kept.
+		const rows = [
+			{ channel: "inference", label: "provider/a", amount_micro: 1_000 },
+			{ channel: "inference", label: "provider/b", amount_micro: 1_000 },
+			{ channel: "image", amount_micro: 2_000 },
+			{ channel: "tts", amount_micro: 3_000 },
+			{ channel: "search", amount_micro: 4_000 },
+			{ channel: "read", amount_micro: 5_000 },
+		];
+		const breakdown = channelBreakdown({
+			spend_channels: { version: 1, tracked: true, total_micro: 16_000, rows },
+		});
+		expect(breakdown?.chips.map((chip) => chip.label)).toEqual([
+			"image",
+			"tts",
+			"search",
+			"read",
+		]);
 		expect(breakdown?.hiddenCount).toBe(2);
 	});
 	it("marks subscription quota and only when no billed claim rides beside it", () => {

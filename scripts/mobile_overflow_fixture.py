@@ -1095,6 +1095,10 @@ def _spend_populated_projection() -> SessionProjection:
             "subscription_api_equivalent": 50_000,
             "estimated": 103_000,
         },
+        # CANONICAL WIRE ORDER (review round 1, A3): the producer emits ALL
+        # inference rows first (``_inference_rows(inference) +
+        # _channel_rows(records)``), so the two inference identities head the
+        # list and the metered channels follow.
         rows=[
             {
                 "channel": "inference",
@@ -1106,6 +1110,16 @@ def _spend_populated_projection() -> SessionProjection:
                 "amount_micro": 900_000,
                 "knowledge": "exact",
                 "basis": ["billed"],
+                "price_versions": [],
+            },
+            {
+                "channel": "inference",
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "label": "openai/gpt-5.4",
+                "amount_micro": 50_000,
+                "knowledge": "exact",
+                "basis": ["subscription_api_equivalent"],
                 "price_versions": [],
             },
             {
@@ -1126,16 +1140,126 @@ def _spend_populated_projection() -> SessionProjection:
                 "basis": [],
                 "price_versions": [],
             },
+        ],
+    )
+
+
+def _spend_capped_projection() -> SessionProjection:
+    """More rows than chips: the `· +N more` remainder, named channels kept.
+
+    Six rows against a four-chip cap, with the inference pair at the wire's
+    head, so the frame shows the CAP'S SELECTION rather than just its count:
+    named channels win the budget (the m2 fix), the two inference rows fall
+    into the remainder with them, and the cue reads `· +2 more`.
+    """
+    rows = [
+        {
+            "channel": "inference",
+            "provider": "anthropic",
+            "model": "claude-sonnet-5-5",
+            "label": "anthropic/claude-sonnet-5-5",
+            "amount_micro": 40_000,
+            "knowledge": "exact",
+            "basis": ["billed"],
+            "price_versions": [],
+        },
+        {
+            "channel": "inference",
+            "provider": "openai",
+            "model": "gpt-5.4",
+            "label": "openai/gpt-5.4",
+            "amount_micro": 10_000,
+            "knowledge": "exact",
+            "basis": ["subscription_api_equivalent"],
+            "price_versions": [],
+        },
+        {
+            "channel": "image",
+            "provider": "radient",
+            "model": "gpt-image-2",
+            "amount_micro": 20_000,
+            "knowledge": "exact",
+            "basis": ["estimated"],
+            "price_versions": [],
+        },
+        {
+            "channel": "tts",
+            "provider": "elevenlabs",
+            "amount_micro": 30_000,
+            "knowledge": "exact",
+            "basis": ["billed"],
+            "price_versions": [],
+        },
+        {
+            "channel": "search",
+            "provider": "tavily",
+            "amount_micro": 250,
+            "knowledge": "exact",
+            "basis": ["estimated"],
+            "price_versions": [],
+        },
+        {
+            "channel": "read",
+            "provider": "browser",
+            "amount_micro": 100,
+            "knowledge": "exact",
+            "basis": ["estimated"],
+            "price_versions": [],
+        },
+    ]
+    return _spend_projection(
+        "spend-capped",
+        900018,
+        tracked=True,
+        knowledge="exact",
+        total_micro=100_350,
+        rows=rows,
+    )
+
+
+def _spend_untracked_exact_projection() -> SessionProjection:
+    """Marker-less AND exact: NO disclosure (the desktop M-4 gate).
+
+    Degradation needs evidence: with no recovered rows and nothing lost, a
+    marker-less session's own figure is exact, so the row must read like any
+    other — no `channels not tracked`, no lower-bound mark. This is the shape
+    that proves the notice is evidence-gated rather than keyed on `tracked`
+    alone.
+    """
+    return _spend_projection(
+        "spend-untracked-exact",
+        900019,
+        tracked=False,
+        knowledge="exact",
+        total_micro=210_000,
+        rows=[],
+    )
+
+
+def _spend_recovered_projection() -> SessionProjection:
+    """Marker-less WITH recovered rows: the chips AND the disclosure.
+
+    A backfilled session (no start marker, rows recovered from the journal's
+    sidecar): the rows must DRAW — gating chips on `tracked` silently dropped
+    exactly this evidence — and the untracked notice stands beside them
+    because the combiner's rung is `partial` (something may be missing).
+    """
+    return _spend_projection(
+        "spend-recovered",
+        900020,
+        tracked=False,
+        knowledge="partial",
+        total_micro=53_000,
+        rows=[
             {
-                "channel": "inference",
-                "provider": "openai",
-                "model": "gpt-5.4",
-                "label": "openai/gpt-5.4",
-                "amount_micro": 50_000,
+                "channel": "image",
+                "provider": "radient",
+                "model": "gpt-image-2",
+                "amount_micro": 53_000,
                 "knowledge": "exact",
-                "basis": ["subscription_api_equivalent"],
+                "basis": ["estimated"],
                 "price_versions": [],
-            },
+            }
         ],
     )
 
@@ -1356,10 +1480,17 @@ async def main() -> None:
         _ended_ask_projection(),
         # PR-2's session-status spend states: the published object populated,
         # an untracked conversation, and an unknown total — the three readings
-        # the phone's second line and its marks exist for.
+        # the phone's second line and its marks exist for — plus the states
+        # review/QA round 1 asked to be re-capturable from the committed rig:
+        # the `· +N more` cap, a marker-less-exact session (NO disclosure, the
+        # M-4 gate) and a marker-less session with recovered rows (chips AND
+        # the notice).
         _spend_populated_projection(),
         _spend_untracked_projection(),
         _spend_unknown_projection(),
+        _spend_capped_projection(),
+        _spend_untracked_exact_projection(),
+        _spend_recovered_projection(),
     ]
     # The ANSWERABLE queued-ask session is not in that list: it is served by a
     # real runtime below, so its projection arrives over the relay's own dial

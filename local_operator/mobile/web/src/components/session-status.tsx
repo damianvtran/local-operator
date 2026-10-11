@@ -82,7 +82,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 	const breakdown = channelBreakdown(projection);
 	const hasBreakdown =
 		breakdown !== null &&
-		(breakdown.chips.length > 0 || breakdown.hiddenCount > 0 || !breakdown.tracked);
+		(breakdown.chips.length > 0 || breakdown.hiddenCount > 0 || breakdown.untrackedNotice);
 	const hasRow = Boolean(spend.text || context.spelling);
 	if (!hasRow && !hasBreakdown) return null;
 	return (
@@ -125,25 +125,33 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 				   above it, wrapping on a 390-px screen rather than shedding chips
 				   silently. Every amount here is the backend's own row amount —
 				   never a re-sum of the total — and `sub-equiv` marks subscription
-				   quota so it cannot be read as billed dollars (design §5.1). */
+				   quota so it cannot be read as billed dollars (design §5.1). ROWS
+				   DRAW ALWAYS (the desktop M-4 gate): a marker-less session that
+				   carries recovered rows shows them, and the untracked disclosure
+				   appears BESIDE them only when the object itself shows something
+				   is missing. */
 				<div
 					data-testid="session-status-channels"
 					className="flex flex-wrap items-baseline gap-x-2 border-b border-hairline px-3 pb-1 font-mono text-mono-sm tabular-nums text-ink-muted"
 				>
-					{breakdown.tracked ? (
-						breakdown.chips.map((chip, index) => (
-							<span key={`${chip.label}-${index}`} data-testid="session-status-channel">
-								{chip.label} {chip.text}
-								{chip.subEquivalent ? (
-									<span className="text-ink-dim"> sub-equiv</span>
-								) : null}
-							</span>
-						))
-					) : (
-						<span data-testid="session-status-channels-untracked">channels not tracked</span>
-					)}
+					{breakdown.chips.map((chip, index) => (
+						<span key={`${chip.label}-${index}`} data-testid="session-status-channel">
+							{chip.label} {chip.text}
+							{chip.subEquivalent ? (
+								<span className="text-ink-dim"> sub-equiv</span>
+							) : null}
+						</span>
+					))}
+					{breakdown.untrackedNotice ? (
+						<span data-testid="session-status-channels-untracked">
+							channels not tracked
+						</span>
+					) : null}
 					{breakdown.hiddenCount > 0 ? (
-						<span className="text-ink-dim">+{breakdown.hiddenCount} more</span>
+						/* The TUI's own separator (design round 1, D1): `· +N more`
+						   reads as one more segment of the same line, where a bare
+						   `+N more` scanned as a stray token. */
+						<span className="text-ink-dim">· +{breakdown.hiddenCount} more</span>
 					) : null}
 				</div>
 			) : null}

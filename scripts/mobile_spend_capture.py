@@ -86,11 +86,14 @@ SPEND_PROBE = """
 })()
 """
 
-#: The three fixture sessions, each with the one line its frame exists to show.
+#: The fixture sessions, each with the one line its frame exists to show.
 SESSIONS = [
     ("spend-populated", "named chips, one $— row, one sub-equiv chip"),
     ("spend-untracked", "the untracked disclosure beside a marked total"),
     ("spend-unknown", "the unpriceable total ($—) with a billed signal"),
+    ("spend-capped", "more rows than chips: `· +N more`, named channels kept"),
+    ("spend-untracked-exact", "marker-less and exact: NO disclosure (M-4)"),
+    ("spend-recovered", "marker-less with recovered rows: chips AND the notice"),
 ]
 
 LIGHT_THEME = "localOperatorLight"
