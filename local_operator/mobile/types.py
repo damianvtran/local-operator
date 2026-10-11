@@ -1106,6 +1106,16 @@ class SessionProjection:
     context_is_estimate: bool | None = None
     version: int = 0  # projection epoch; the phone drops stale repaints
     attention: dict[str, Any] = field(default_factory=dict)
+    #: Turn supplements (memo §2.7/§3.1 row 18; probe P5's fallback): the newest
+    #: beat per anchor, as a SIBLING MAP rather than a new ``kind`` in
+    #: ``transcript``. A projection is ONE snapshot fanned to every subscriber, so
+    #: a per-viewer ``kind`` is not expressible here; an unknown entry kind is
+    #: rendered visibly by older app builds, while an unknown sibling key is
+    #: ignored by them (loose JSON, tolerantly rebuilt). New clients render the
+    #: blocks from this map; the wire name matches the journal's anchor key.
+    #: Emitted only when non-empty (see ``to_json``): an empty map is absence,
+    #: and the frame pin holds a supplement-free frame to the parent's bytes.
+    supplements: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -1120,6 +1130,15 @@ class SessionProjection:
             data.pop("asks", None)
         if self.asks_open is None:
             data.pop("asks_open", None)
+        # An EMPTY supplement map is absence, not information: the map exists
+        # only to carry beats, and the reader rebuilds a payload without the key
+        # to the empty default (``_projection_from_json``; pinned by the
+        # loose-wire test). Shipping ``{}`` on every frame grew the wire for
+        # every session without beats — exactly the cost-only inflation the
+        # offloop frame pin (a digest of the emitted frame) exists to catch —
+        # so the key goes out only when it carries beats.
+        if not self.supplements:
+            data.pop("supplements", None)
         return data
 
     def __post_init__(self) -> None:

@@ -2077,7 +2077,8 @@ advertises `supplements-v1` only when it can honour the lazy read op
 (`supplements_for(anchors[]) → {anchor: newest row}`), and the viewer declares
 `supplements` on its auth frame (`auth["supplements"] = true`; the desktop live path
 declares `?supplements=1` on its events route instead — the `entry_ts` shape; that
-parameter is a frozen name today, read by no route until the routes lane lands). Only then
+parameter is read by the events route: a subscriber that declares it is the only one
+handed `supplement_progress` frames, live or from replay). Only then
 may the runtime send `supplement_progress` events or project supplement rows; a viewer
 that does not declare receives neither, so it never paints an unknown kind. Rows are
 journaled either way, reach a desktop as ordinary history entries (raw `custom` rows)
@@ -2135,8 +2136,7 @@ It arrives only AFTER the turn's `agent_end`, and it carries the `anchor`, so a 
 event (the next turn already started) still lands on the right answer. `lop exec` never
 produces one (its turns are outside the trigger), and SDK event streams are unchanged.
 Under backpressure, supplement frames fold keep-newest — the family is
-self-replacing by construction — but no fold key exists for them yet; `session/delta_merge.py`
-gains the `supplement` fold with the emitter lane.
+self-replacing by construction — and its fold key lives in `session/delta_merge.py`.
 
 **Not in this release.** No image components (v1 documents carry HTML only); no mesh
 transfer (a file or component a peer device holds reads as "on <peer>" with previews
@@ -2144,11 +2144,18 @@ disabled — `GET …/attachments/{digest}` already answers 409 `attachment_on_p
 native (phone) WebView frame is pending its own lane; and the static preview routes
 (`/v1/static/*`) are not yet token-ENFORCED -- Phase A accepts tokens and mints
 short-lived signed URLs (see the static section), but refusing is a later phase
-and the client change to present a credential is the recorded follow-up. No renderer consumes any of this yet:
-the TUI, UI, relay and native renderers are separate lanes, and the desktop document
-route is a registered 404 stub until the routes lane fills it; the `?supplements=1`
-events-route reader and the keep-newest fold are contract-frozen names still to be
-implemented, by the routes and emitter lanes respectively.
+and the client change to present a credential is the recorded follow-up. No renderer
+consumes any of this yet: the TUI, UI, relay and native renderers are separate lanes.
+The READ half is implemented (routes lane C2): the desktop document route serves the
+assembled component as `{html}` by digest (`nosniff`, `Cache-Control: no-store`, 409
+`attachment_on_peer` passed through for a peer-held blob, an unassemblable blob an
+ordinary 404), keyed by `AttachmentDigest` so a caller-supplied path can never be part
+of the request; the `?supplements=1` events-route reader gates `supplement_progress`
+per subscriber on live AND replay; and the relay serves both the document (`{html}`,
+the digest additionally reference-checked against that session's journal) and the
+recorded file callout (`row["files"][i]`, suffix-allowlisted `Content-Type` — never
+`text/html`, SVG or `+xml` — a 10 MB cap, and the §4.3 denylist re-applied per
+request).
 
 ### Verification
 

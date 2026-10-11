@@ -6769,17 +6769,20 @@ async def test_a_legacy_viewer_cannot_mount_across_a_move(move_api, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkeypatch) -> None:
-    """The additive query flag is what a mounted legacy viewer is judged by.
+    """The additive query flags are what a mounted viewer's subscription carries.
 
-    Without it a renderer negotiates nothing and the route refuses it for the
-    duration of a move — an actionable 409 rather than a silent stale paint —
-    and with it the subscription is admitted carrying the flag the move's own
-    precondition reads back.
+    ``frontend_replace`` is the one the move fence reads: without it a renderer
+    negotiates nothing and the route refuses it for the duration of a move — an
+    actionable 409 rather than a silent stale paint — and with it the
+    subscription is admitted carrying the flag the move's own precondition reads
+    back. ``supplements`` (memo §2.7) is the same kind of declaration on its own
+    parameter: the route forwards it into the subscription exactly as the client
+    sent it.
 
     The stream body is stubbed because ``ASGITransport`` buffers a response
     until the app RETURNS, and the real generator is an SSE loop that only ends
-    when the client leaves; the subject here is the two hand-offs on either side
-    of the response — the query flag into the subscription, and the refusal into
+    when the client leaves; the subject here is the hand-offs on either side of
+    the response — the query flags into the subscription, and the refusal into
     the status code — not the frames themselves.
     """
     client, app, root = move_api
@@ -6788,12 +6791,15 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
     pool = app.state.desktop_sessions
     sid = await pool.create(str(before))
     url = f"/v1/desktop/sessions/{sid}/events"
-    negotiated: list[bool] = []
+    # Recorded as the PAIR each call carried: the route builds the subscription
+    # from both additive flags, and a spy that watched only ``frontend_replace``
+    # would let the supplements half be dropped without a failure.
+    negotiated: list[tuple[bool, bool]] = []
     real_subscribe = module.DesktopSessionBridge.subscribe
 
-    def spy(self, *, frontend_replace: bool = False):  # noqa: ANN001
-        negotiated.append(frontend_replace)
-        return real_subscribe(self, frontend_replace=frontend_replace)
+    def spy(self, *, frontend_replace: bool = False, supplements: bool = False):  # noqa: ANN001
+        negotiated.append((frontend_replace, supplements))
+        return real_subscribe(self, frontend_replace=frontend_replace, supplements=supplements)
 
     async def no_frames(*args, **kwargs):  # noqa: ANN002, ANN003
         # An async generator with nothing to yield: the response completes
@@ -6808,11 +6814,24 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         legacy = await client.get(url)
         assert legacy.status_code == 409, legacy.text
         assert "Update the desktop app" in legacy.json()["detail"]
-        assert negotiated == [False], "the legacy mount did not present itself as legacy"
+        assert negotiated == [(False, False)], "the legacy mount did not present itself as legacy"
         admitted = await client.get(url, params={"frontend_replace": 1})
         assert admitted.status_code == 200, admitted.text
-        assert negotiated == [False, True], "the route dropped the negotiated flag"
+        assert negotiated == [
+            (False, False),
+            (True, False),
+        ], "the route dropped the negotiated flag"
         bridge.move_in_progress = False
+        # The supplements declaration is the same hand-off on its own parameter
+        # (memo §2.7): ``?supplements=1`` must arrive as True, with the
+        # replacement flag still at its default.
+        declared = await client.get(url, params={"supplements": 1})
+        assert declared.status_code == 200, declared.text
+        assert negotiated == [
+            (False, False),
+            (True, False),
+            (False, True),
+        ], "the route dropped the supplements declaration"
 
 
 @pytest.mark.asyncio
