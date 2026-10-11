@@ -87,13 +87,13 @@ Changed in the round-2 remediation:
 {
   "version": 1,
   "tracked": true,
-  "total_micro": 1016000,
+  "total_micro": 1536000,
   "knowledge": "partial",
   "by_basis": {
     "billed": 53000,
     "subscription_api_equivalent": 53000,
     "estimated": 10000,
-    "not_tracked_micro": 900000,
+    "not_tracked_micro": 1420000,
     "not_tracked_calls": 1
   },
   "rows": [
@@ -178,11 +178,98 @@ Changed in the round-2 remediation:
     }
   ],
   "children": {
-    "total_micro": 0,
+    "total_micro": 520000,
     "knowledge": "exact"
   }
 }
 ```
+
+### Additive keys: `breakdown` + `vocabulary` (composer-hover slice)
+
+Two keys ride the SAME v1 object. Version stays 1 and the capability gate is
+unchanged: every reader here reads by key, so an old reader ignores the new
+sections, and an object WITHOUT them is what an old producer looks like — a
+new reader falls back to the row list and its legacy word maps, never to an
+error and never to a zero.
+
+- **`breakdown` = `{by_agent, by_source}` — TWO complete partitions of the
+  same `total_micro`,** each independently reconcilable (`Σ entries ==
+  total_micro`; `amount_micro: null` entries contribute nothing and are never
+  0). `by_agent` is `parent` (inference + the session's own stated records)
+  vs `subagents` (the children block: ledger lump + relayed records).
+  `by_source` is per channel, tree-wide: `inference` carries the token half
+  plus the children LEDGER lump (that lump is priced from `Usage` components,
+  so inference is its honest home), and every other entry carries that
+  channel's own stated records plus relayed child records. **A reader must
+  never ADD the two partitions together** — they are two views of one total —
+  and must not re-derive any number from `rows`.
+- An entry is `{id, label, amount_micro, knowledge, unstated_records, bases}`:
+  `label` is core's display word (`CHANNEL_LABELS`, else `id.capitalize()`);
+  `amount_micro` is the entry's STATED sum (`null`, never 0, when nothing was
+  sized); `knowledge` is the worst rung of its contributors, so an entry can
+  never read exacter than its money; `unstated_records` is a COUNT of records
+  with no stated amount and no failure (the failed-unbilled presumption
+  counts nothing); `bases` are the distinct basis spellings inside the entry.
+  An entry exists only on activity — no fabricated zeros — and entries past
+  `SPEND_BREAKDOWN_ENTRY_CAP` (12) group into the `other` entry with their
+  money summed, worst rung applied and counts preserved. Published list order
+  IS the render order.
+- **`vocabulary` = core's display words** for the ids and spellings THIS
+  object carries (`{channels: {id: {label}}, bases: {spelling: {label,
+  source_class, marker, note?}}}`). A value in `CHANNEL_LABELS`/`BASIS_META`
+  is curated; anything else is ECHOED (`source_class: "unknown"`, no note) so
+  a new category renders with zero UI edits and a foreign spelling never
+  wears the subscription claim's words. `note` is the ONE explanatory line a
+  surface renders when money on that basis is present (subscription's
+  API-equivalent note only) — absent for pay-as-you-go money.
+
+```json
+{
+  "breakdown": {
+    "by_agent": [
+      {"id": "parent", "label": "Parent agent", "amount_micro": 1016000,
+       "knowledge": "partial", "unstated_records": 1,
+       "bases": ["billed", "estimated", "not_tracked", "subscription_api_equivalent"]},
+      {"id": "subagents", "label": "Subagents", "amount_micro": 520000,
+       "knowledge": "exact", "unstated_records": 0,
+       "bases": ["billed", "not_tracked"]}
+    ],
+    "by_source": [
+      {"id": "inference", "label": "Inference", "amount_micro": 1400000,
+       "knowledge": "exact", "unstated_records": 0, "bases": ["not_tracked"]},
+      {"id": "image", "label": "Image", "amount_micro": 126000,
+       "knowledge": "partial", "unstated_records": 1,
+       "bases": ["billed", "subscription_api_equivalent"]},
+      {"id": "search", "label": "Search", "amount_micro": 8000,
+       "knowledge": "exact", "unstated_records": 0, "bases": ["estimated"]},
+      {"id": "read", "label": "Read", "amount_micro": 2000,
+       "knowledge": "exact", "unstated_records": 0, "bases": ["estimated"]}
+    ]
+  },
+  "vocabulary": {
+    "channels": {"inference": {"label": "Inference"}, "image": {"label": "Image"},
+                 "search": {"label": "Search"}, "read": {"label": "Read"}},
+    "bases": {
+      "billed": {"label": "billed", "source_class": "paygo", "marker": "billed"},
+      "subscription_api_equivalent": {
+        "label": "API-equivalent", "source_class": "subscription",
+        "marker": "API-equivalent · subscription",
+        "note": "You're on a subscription, so API-equivalent amounts are list-price equivalents — not what you are charged."},
+      "estimated": {"label": "estimated", "source_class": "paygo", "marker": "estimated"},
+      "not_tracked": {"label": "not tracked", "source_class": "unknown", "marker": "not tracked"}
+    }
+  }
+}
+```
+
+The object above is the golden fixture (`tests/fixtures/spend_channels_v1.json`,
+regenerated by its golden test); its two ADDITIVE sections follow below — that
+fragment is the fixture's `breakdown` + `vocabulary` verbatim. The scenario is
+the design note's §4.3: the five records, a children ledger of 500,000 µ$ and
+ONE relayed child `image` record of 20,000 µ$ — so both partitions reconcile
+to the same `total_micro = 1536000`, `by_source.image` carries 126,000 (its
+own 106,000 + the relayed 20,000), and `by_agent` carries `parent` 1,016,000
+beside `subagents` 520,000.
 
 ### Field semantics
 
@@ -195,6 +282,8 @@ Changed in the round-2 remediation:
 | `by_basis` | `billed`/`subscription_api_equivalent`/`estimated`/`not_tracked_micro` are micro-USD sums that add up to `total_micro`; `not_tracked_calls` is a COUNT of records with NO stated amount. A record with a stated amount and a `not_tracked` basis lands in `not_tracked_micro` (m1/Q10). |
 | `rows` | Aggregated rows: inference by provider/model (`label` = the identity bucket) then one row per (channel, provider, model, unit). `amount_micro: null` = nothing in that group was sized. `basis` lists the bases present; `price_versions` lists the labels. |
 | `children` | The subagent/forked-children contribution already inside `total_micro` (PR-1: the children's inference ledger; relayed child channel records join in the follow-up). Optional `reason` (string) qualifies a degraded knowledge — a resumed parent that cannot re-read earlier children's journals says so (m4/Q9). |
+| `breakdown` | ADDITIVE (composer-hover slice): two complete, independently reconcilable partitions of `total_micro` — `by_agent` (parent/subagents) and `by_source` (per channel). Never add the two together; entries carry their own knowledge rung and an `other` group past the entry cap. Absent = old producer. |
+| `vocabulary` | ADDITIVE: core's display words for the channel ids and basis spellings this object carries (`label`/`source_class`/`marker`/optional `note`). A registered value curates, an unknown one is echoed with `source_class: "unknown"` and never a subscription claim. Absent = old producer; a surface then keeps its legacy word maps. |
 
 ### Knowledge matrix
 

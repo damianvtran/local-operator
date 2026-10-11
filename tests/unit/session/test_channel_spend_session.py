@@ -554,9 +554,40 @@ def test_child_channel_spend_reaches_the_parent_total_once(tmp_path: Path) -> No
         assert [
             row.channel for row in published(parent._frontend_state_store).rows
         ] == [], "a child's record is not the parent's own row"
+
+        # The breakdown places the relayed money exactly once, on BOTH
+        # partitions (design §4.5): this parent has no inference and no own
+        # records, so by_agent is the subagents entry alone and by_source's
+        # search entry carries the relayed record — each summing to the same
+        # total, never to each other's.
+        breakdown = published(parent._frontend_state_store).breakdown
+        assert breakdown is not None
+        agents = {entry.id: entry for entry in breakdown.by_agent}
+        assert set(agents) == {"subagents"}, "no own spend: the child is the whole story"
+        assert agents["subagents"].amount_micro == 8000
+        assert agents["subagents"].knowledge == "exact"
+        sources = {entry.id: entry for entry in breakdown.by_source}
+        assert set(sources) == {"search"}
+        assert sources["search"].amount_micro == 8000
+        total = published(parent._frontend_state_store).total_micro
+        assert sum(entry.amount_micro or 0 for entry in breakdown.by_agent) == total
+        assert sum(entry.amount_micro or 0 for entry in breakdown.by_source) == total
+        vocabulary = published(parent._frontend_state_store).vocabulary
+        assert vocabulary is not None
+        assert set(vocabulary.channels) == {"search"}, "ids cover rows and breakdown"
+        assert set(vocabulary.bases) == {"estimated"}
+
         # Replaying the same child record changes nothing (record_id dedup).
         parent._absorb_child_channel_spend(child.channels.rows()[0])
         assert published(parent._frontend_state_store).children.total_micro == 8000
+        assert published(parent._frontend_state_store).breakdown is not None
+        assert (
+            sum(
+                entry.amount_micro or 0
+                for entry in published(parent._frontend_state_store).breakdown.by_agent
+            )
+            == 8000
+        ), "a replayed relay must not double the breakdown either"
 
     asyncio.run(main())
 
