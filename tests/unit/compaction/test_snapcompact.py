@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from local_operator.compaction.api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from local_operator.compaction.snapcompact import (
+    CROSS_RULER_SLOPE_MARGIN,
     DEFAULT_MAX_FRAMES,
     EDGE_WINDOW_FRACTION,
     FRAME_DATA_BYTES_BUDGET,
@@ -19,6 +20,8 @@ from local_operator.compaction.snapcompact import (
     HQ_EDGE_FRAMES,
     MAX_FRAMES,
     Archive,
+    _middle_page_kinds,
+    _page_digest,
     archive_summary,
     compact_to_archive,
     estimate_archive_tokens,
@@ -264,8 +267,8 @@ def _constructed_archive(kinds: str) -> Archive:
     tests can pin arbitrary kind sequences: each page is exactly
     ``lines_per_frame`` short lines of the openai shape — the page-break
     condition ``_paginate`` uses — so ``_middle_pages`` reproduces the pages
-    by construction. Frames are real renders, so a replay's carrier is
-    checkable per page.
+    by construction, and the digests are written the way a pass writes them.
+    Frames are real renders, so a replay's carrier is checkable per page.
     """
     shape = resolve_shape("openai", "gpt-5.5")
     pages = _constructed_pages(kinds)
@@ -279,6 +282,7 @@ def _constructed_archive(kinds: str) -> Archive:
         text_tail=tail,
         shape_id=shape.id,
         middle_kinds=kinds,
+        page_digests=[_page_digest(page) for page in pages],
     )
 
 
@@ -483,7 +487,18 @@ def test_compact_frames_are_valid_pngs():
 
 
 def _large_archive() -> Archive:
-    return compact_to_archive(_conversation_messages(200), "anthropic", "claude-sonnet-4-5")
+    """A real pass whose pages ALL flip to text under the carrier margin.
+
+    Sized so every page's local estimate (~600-860 tokens) clears the margin
+    threshold (``per_frame / CROSS_RULER_SLOPE_MARGIN`` ≈ 1,733 tokens for
+    the anthropic shape) with room. The earlier fixture (200 rounds at
+    ``payload=400``) sat at ~1,900 and the margin now keeps its frames —
+    tests that need the all-TEXT regime use this fixture, tests that need
+    images build dense content or a constructed archive.
+    """
+    return compact_to_archive(
+        _conversation_messages(700, payload=100), "anthropic", "claude-sonnet-4-5"
+    )
 
 
 def test_history_blocks_order_text_images_text():
@@ -529,7 +544,13 @@ def test_history_blocks_policy_all_text_middle_is_char_complete():
 
 
 def test_history_blocks_policy_all_image_matches_legacy():
-    """An all-image policy archive replays exactly as the legacy path does."""
+    """An all-image policy archive replays exactly as the legacy path does.
+
+    Up to foveation: with more images than the HQ budget a policy archive
+    puts the elision marker where the missing pages stood (after its first
+    kept frames), while the legacy path puts it before all frames — both
+    orders are pinned in ``test_history_blocks_foveates_long_middle``.
+    """
     archive = _constructed_archive("iii")
     legacy = archive.model_copy(update={"middle_kinds": ""})
     assert history_blocks(archive) == history_blocks(legacy)
@@ -541,17 +562,36 @@ def test_history_blocks_degrades_to_images_on_unreconcilable_kinds():
     for broken in ("ti", "tixx", "iiiiii", "TTii"):
         patched = archive.model_copy(update={"middle_kinds": broken})
         assert history_blocks(patched) == legacy
-    # A missing/foreign shape cannot re-derive the pages either, and neither
-    # can text whose edges no longer slice it.
-    assert history_blocks(archive.model_copy(update={"shape_id": "foreign"})) == legacy
+        # The guide and the replay disagreeing about which frames a degrade
+        # carries was round-1 review MINOR-1: the surfaces share one gate.
+        assert replayed_frame_count(patched) == len(patched.frames)
+        assert "image frame" in archive_summary(patched, "openai", "gpt-5.5")
+    # A missing/foreign shape cannot re-derive the pages either, nor can text
+    # whose edges no longer slice it, nor digests that do not match — the
+    # gate binds the page STRINGS, not just their count.
+    no_shape = archive.model_copy(update={"shape_id": "foreign"})
+    assert history_blocks(no_shape) == legacy
+    assert replayed_frame_count(no_shape) == len(no_shape.frames)
+    assert "image frame" in archive_summary(no_shape, "openai", "gpt-5.5")
     assert history_blocks(archive.model_copy(update={"text": archive.text + "XYZ"})) == legacy
+    tampered = archive.model_copy(update={"page_digests": ["deadbeef"] * 4})
+    assert history_blocks(tampered) == legacy
+    assert replayed_frame_count(tampered) == len(tampered.frames)
+    dropped = archive.model_copy(update={"page_digests": []})
+    assert history_blocks(dropped) == legacy
 
 
 def test_replayed_frame_count():
-    assert replayed_frame_count("tiit", 4) == 2
-    assert replayed_frame_count("", 4) == 4  # legacy: every stored frame replays
-    assert replayed_frame_count("tix", 3) == 3  # junk spelling degrades to legacy
-    assert replayed_frame_count("ti", 7) == 7  # length mismatch degrades
+    assert replayed_frame_count(_constructed_archive("tiit")) == 2
+    assert replayed_frame_count(_constructed_archive("iiii")) == 4  # all-image policy
+    legacy = _constructed_archive("iiii").model_copy(update={"middle_kinds": ""})
+    assert replayed_frame_count(legacy) == 4  # legacy: every stored frame replays
+    junk = _constructed_archive("tiit").model_copy(update={"middle_kinds": "tixx"})
+    assert replayed_frame_count(junk) == 4  # junk spelling degrades to legacy
+    short = _constructed_archive("tiit").model_copy(update={"middle_kinds": "ti"})
+    assert replayed_frame_count(short) == 4  # length mismatch degrades
+    no_digests = _constructed_archive("tiit").model_copy(update={"page_digests": []})
+    assert replayed_frame_count(no_digests) == 4  # unproven pages degrade
 
 
 def test_history_blocks_elides_over_budget():
@@ -624,6 +664,7 @@ def test_persisted_archive_replays_real_pngs():
 
     assert revived.frames == archive.frames  # byte-for-byte, not merely decodable
     assert revived.middle_kinds == archive.middle_kinds
+    assert revived.page_digests == archive.page_digests
     frames = [b for b in history_blocks(revived) if b["kind"] == "images"][0]["frames"]
     assert base64.b64decode(frames[0]).startswith(b"\x89PNG\r\n\x1a\n")
     with Image.open(io.BytesIO(base64.b64decode(frames[0]))) as img:
@@ -631,8 +672,9 @@ def test_persisted_archive_replays_real_pngs():
 
 
 def test_archive_json_dump_keeps_its_persisted_shape():
-    """``_archive_to_json`` delegates to the model now; already-persisted
-    transcripts only keep loading if the emitted dict is unchanged."""
+    """``_archive_to_json`` delegates to the model now; the emitted shape is a
+    contract both ways — new keys are additive with replay-safe defaults, and
+    payloads written before them keep loading."""
     archive = _large_archive()
     payload = _archive_to_json(archive)
     assert set(payload) == {
@@ -643,12 +685,21 @@ def test_archive_json_dump_keeps_its_persisted_shape():
         "shape_id",
         "truncated_chars",
         "middle_kinds",
+        "page_digests",
         "created_at",
     }
     assert payload["middle_kinds"] == archive.middle_kinds
+    assert payload["page_digests"] == archive.page_digests
     assert payload["frames"] == [base64.b64encode(f).decode("ascii") for f in archive.frames]
     assert payload["created_at"] == archive.created_at.isoformat()
     assert json.loads(json.dumps(payload)) == payload
+
+    # A payload written before the replay-policy keys existed: both default
+    # to the all-image replay (no kinds -> no policy path).
+    older = {k: v for k, v in payload.items() if k not in ("middle_kinds", "page_digests")}
+    revived = Archive.model_validate(older)
+    assert revived.middle_kinds == ""
+    assert revived.page_digests == []
 
 
 def test_malformed_persisted_frame_is_a_validation_error():
@@ -735,8 +786,8 @@ def test_strategy_for_model_both_branches():
 
 
 def test_middle_kinds_flips_chat_pages_to_text_and_keeps_dense_images():
-    """Per-page policy: text where it bills cheaper, image where it does not."""
-    sparse = compact_to_archive(_conversation_messages(200), "anthropic", "claude-sonnet-4-5")
+    """Per-page policy: text where it clears the margin, image where not."""
+    sparse = _large_archive()
     assert sparse.frames
     assert set(sparse.middle_kinds) == {"t"}
     # Frames are still rendered for the text pages: an archive read by a
@@ -748,6 +799,27 @@ def test_middle_kinds_flips_chat_pages_to_text_and_keeps_dense_images():
     assert dense.middle_kinds.count("i") >= len(dense.frames) - 1
 
 
+def test_middle_page_kinds_keeps_pages_the_slope_margin_does_not_clear():
+    """The flip must clear the worst measured provider/local divergence.
+
+    ``CROSS_RULER_SLOPE_MARGIN`` exists because the flip compares a local
+    estimate against a provider figure (see the constant): a page cheaper
+    only on the local ruler keeps its frame."""
+    per_frame = frame_token_estimate_for("anthropic", "claude-sonnet-4-5")
+    filler = "ZXCVBNMASDFGHJKLqwertyuiop1234567890mMnBvC" * 100
+    small, large = filler[:1900], filler[:4200]
+    small_tokens = estimate_tokens(Message.assistant(small))
+    large_tokens = estimate_tokens(Message.assistant(large))
+    # Premises, so the test fails loudly if tokenization drifts out of band:
+    # the small page clears the margin; the large one is cheaper on the LOCAL
+    # ruler alone and only the margin keeps its frame.
+    assert small_tokens * CROSS_RULER_SLOPE_MARGIN < per_frame
+    assert large_tokens * CROSS_RULER_SLOPE_MARGIN >= per_frame
+    assert large_tokens < per_frame
+    kinds = _middle_page_kinds([small, large], "anthropic", "claude-sonnet-4-5")
+    assert kinds == "ti"
+
+
 def test_estimate_archive_tokens():
     """The estimator prices the REPLAY: text carried plus frames sent."""
     all_image = _constructed_archive("iii")
@@ -757,7 +829,7 @@ def test_estimate_archive_tokens():
     # A fully text-carried middle drops the frame term: the estimate is just
     # the archived text, because the flipped pages join back to it exactly.
     flipped = _large_archive()
-    assert replayed_frame_count(flipped.middle_kinds, len(flipped.frames)) == 0
+    assert replayed_frame_count(flipped) == 0
     assert estimate_archive_tokens(flipped) == estimate_tokens(Message.assistant(flipped.text))
 
     # Legacy archives price every stored frame, exactly as before.
