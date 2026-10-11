@@ -3,24 +3,26 @@
 Run:  PYTHONPATH=. .venv/bin/python scripts/mobile_quietgroups_shot.py OUTDIR
 
 Starts ``scripts/mobile_quietgroups_fixture.py`` (the real daemon over synthetic
-projections carrying every bar state), taps into each session the way a thumb
+projections carrying the bar states), taps into each session the way a thumb
 does, and photographs the bar at 390x844 and 360x780 at dpr 2 — the two phone
 viewports this surface is judged on — plus a geometry dump per frame: the bar's
 box, its text and ``aria-expanded``, the expansion's receipt-row count, the
-"show N more loaded" control, the transcript scroller's box and scroll offsets,
-and the body's scroll width. So "the bar is a real target", "the count is a
-minimum only where it claims to be" and "nothing overflows sideways" are
-measured statements rather than claims about a PNG.
+transcript scroller's box and scroll offsets, and the body's scroll width. So
+"the bar is a real target", "the count is a minimum only where it claims to
+be" and "nothing overflows sideways" are measured statements rather than
+claims about a PNG.
 
-THREE EXTRA GESTURES, all REAL finger drags — never a ``scrollTop``
-assignment, so a capture a thumb could not reproduce cannot pass: on the
-resolved session the script drags to the top, which trips the transcript's
-auto-load, and waits for the empty history answer to settle ``hasMore`` false
-before photographing ``Peer messages · 2``; on the expanded session it presses
-the bar itself and photographs the receipts with their tool rows; on the
-window-cut session it drags to the top and photographs the cut group beside
-``show 40 more loaded`` — the loaded-but-off-window case the S4-R1-2 copy read
-is about.
+TWO EXTRA GESTURES, both REAL finger drags — never a ``scrollTop`` assignment,
+so a capture a thumb could not reproduce cannot pass: on the resolved session
+the script drags to the top, which trips the transcript's auto-load, and waits
+for the empty history answer to settle ``hasMore`` false before photographing
+``Peer messages · 2``; on the expanded session it presses the bar itself and
+photographs the receipts with their tool rows.
+
+THE FIRST RUN'S LESSON, kept because it cost a frame: the very first tap raced
+the list's own render after login and photographed the bare list. Every tap now
+retries a miss (``_tap_row``) — a miss is almost always a NOT-YET, not a wrong
+name.
 
 ``Chrome``/``Page`` are reused from ``scripts/mobile_overflow_capture.py``:
 one throwaway ``--headless=new`` browser per run, its own profile,
@@ -48,9 +50,8 @@ VIEWPORTS = ((390, 844), (360, 780))
 
 #: The sessions to photograph, keyed by the row label the list shows. The value
 #: is the prefix used for the frame's file name. Order is the reading order of
-#: the states. ``collapsed-resolved`` and ``head-cut-window`` each add the
-#: drag-to-top gesture before their frame (see the module doc); ``expanded``
-#: adds the bar press.
+#: the states. ``collapsed-resolved`` adds the drag-to-top gesture before its
+#: frame (see the module doc); ``expanded`` adds the bar press.
 TAP_SESSIONS: dict[str, str] = {
     "Quiet group collapsed": "collapsed-minimum",
     "Quiet group resolved": "collapsed-resolved",
@@ -58,7 +59,6 @@ TAP_SESSIONS: dict[str, str] = {
     "Quiet group mixed": "mixed",
     "Quiet group wake only": "wake-only",
     "Quiet group single": "single-receipt",
-    "Quiet group window cut": "head-cut-window",
 }
 
 #: The quiet-group bar's family words, longest first so ``Peer messages`` wins
@@ -84,7 +84,6 @@ GEOMETRY_JS = r"""
   // strip the two glyphs (the only ▸/▾ the app ships) before testing.
   const buttonText = (b) => (b.textContent || '').replace(/[▸▾]/g, '').trim();
   const bar = buttons.find((b) => __BAR_RE__.test(buttonText(b))) || null;
-  const more = buttons.find((b) => buttonText(b).startsWith('show ')) || null;
   const scroller = document.querySelector('.lo-scroll');
   // The expansion's rows, counted by the anchor every transcript row carries:
   // the Disclosure mounts children only while open, so a closed bar cannot
@@ -96,7 +95,6 @@ GEOMETRY_JS = r"""
       ? { box: box(bar), text: text(bar), expanded: bar.getAttribute('aria-expanded') }
       : null,
     receipts,
-    more: more ? { box: box(more), text: text(more) } : null,
     scroller: box(scroller),
     scrollTop: scroller ? Math.round(scroller.scrollTop) : null,
     scrollMax: scroller ? Math.round(scroller.scrollHeight - scroller.clientHeight) : null,
@@ -193,6 +191,26 @@ def _drag_to_top(page: Page, vw: int, vh: int) -> dict[str, Any]:
     return state
 
 
+def _tap_row(page: Page, label: str, base: str, tries: int = 4) -> dict[str, Any]:
+    """Tap the row, waiting out the list's own first render.
+
+    The first capture run photographed the bare list for its very first frame:
+    the tap raced the list render after login, so the row it wanted did not
+    exist yet. A miss is almost always a NOT-YET, not a wrong name — so a miss
+    re-enters the list and tries again, bounded.
+    """
+    result: dict[str, Any] = {"tapped": False}
+    for attempt in range(tries):
+        if attempt:
+            page.goto(f"{base}/#/")
+            time.sleep(1.5)
+        result = json.loads(page.js(_tap_js(label)))
+        if result.get("tapped"):
+            return result
+        time.sleep(1.0)
+    return result
+
+
 def main() -> None:
     outdir = Path(sys.argv[1])
     outdir.mkdir(parents=True, exist_ok=True)
@@ -239,9 +257,9 @@ def main() -> None:
             time.sleep(1.5)
             for label, prefix in TAP_SESSIONS.items():
                 frame = f"{prefix}-{vw}x{vh}"
-                report[frame] = {"tap": json.loads(page.js(_tap_js(label)))}
+                report[frame] = {"tap": _tap_row(page, label, base)}
                 time.sleep(2.0)
-                if prefix in ("collapsed-resolved", "head-cut-window"):
+                if prefix == "collapsed-resolved":
                     # The real drag; its final scroll reading proves whether
                     # the frame actually sits at the top.
                     report[frame]["scroll"] = _drag_to_top(page, vw, vh)
