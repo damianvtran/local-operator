@@ -7,6 +7,10 @@ Two layers, because each can regress alone:
   are assembled from ``app.state`` and the headers/CORS are applied by a
   middleware in ``server/app.py`` -- neither exists at the unit layer.
 
+The Host check grew up with this family but is APP-WIDE since P1.5 (RFC §3.6
+follow-up d): ``host_admission`` answers it for every route, and the live matrix
+below exercises non-static routes (``/health``, ``/v1/agents``) deliberately.
+
 Why this matters (turn-supplements S-6/F6): the routes used to serve any readable
 file whose extension passed a mime allowlist, to any origin. Every guard below has
 a counterpart test that fails when the guard is removed; the PR body records the
@@ -488,7 +492,9 @@ def test_the_macos_data_volume_firmlink_counts_as_an_ancestor_of_home():
     assert static_roots.root_refusal(data) is not None
 
 
-# ------------------------------------------------------------------------ Host check
+# ------------------------------------------------------------------- Host check
+# One predicate, one sentence, every route (P1.5, RFC §3.6): the matrix below is
+the app-wide rule; the live half exercises non-static routes on purpose.
 
 
 @pytest.mark.parametrize(
@@ -501,6 +507,15 @@ def test_the_macos_data_volume_firmlink_counts_as_an_ancestor_of_home():
         ("rebind.attacker.test:8080", "127.0.0.1", False),
         ("rebind.attacker.test", None, False),
         ("localhost.attacker.test", "127.0.0.1", False),
+        # P1.5 forms: the trailing-dot FQDN spelling and case are the same
+        # authority, and the announced-name compare normalises both sides the
+        # same way. One dot only: ``..`` is not a name.
+        ("localhost.", None, True),
+        ("localhost.:1111", "127.0.0.1", True),
+        ("mac.lan.:1111", "mac.lan", True),
+        ("Mac.Lan:1111", "mac.lan", True),
+        ("rebind.attacker.test.", "127.0.0.1", False),
+        ("..", "127.0.0.1", False),
         # S-3: userinfo is not an authority, and neither is an empty Host. A browser
         # sends neither, so they need not pass -- and the ``:`` split would read the
         # attacker's name out of the first two.
@@ -830,9 +845,25 @@ async def test_a_rebinding_host_is_refused_before_the_file_is_looked_at(
 
 
 @pytest.mark.asyncio
-async def test_other_routes_ignore_the_host_check(test_app_client):
-    response = await test_app_client.get("/v1/agents", headers={"Host": "rebind.attacker.test"})
-    assert response.status_code != 403 or "Host is not allowed" not in response.text
+async def test_every_route_refuses_a_rebinding_host(test_app_client):
+    """P1.5: the rule belongs to the app, not the static family (RFC §3.6).
+
+    The refusal is the same on a plain read and the health probe every client
+    polls -- and the existing static test remains the third case -- so a refused
+    caller learns nothing about which family it aimed at. The admitted forms
+    (port, case, trailing dot) are exercised live on the health probe.
+    """
+    refusals = {}
+    for path in ("/health", "/v1/agents"):
+        rebound = await test_app_client.get(path, headers={"Host": "rebind.attacker.test:8080"})
+        assert rebound.status_code == 403
+        refusals[path] = rebound.json()["detail"]
+    # One sentence for every route; no per-family oracle.
+    assert len(set(refusals.values())) == 1
+
+    for spelling in ("127.0.0.1:1111", "LOCALHOST:1111", "localhost.:1111"):
+        admitted = await test_app_client.get("/health", headers={"Host": spelling})
+        assert admitted.status_code == 200
 
 
 @pytest.mark.asyncio

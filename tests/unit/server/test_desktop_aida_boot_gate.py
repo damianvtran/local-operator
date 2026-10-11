@@ -94,7 +94,7 @@ def test_a_cloud_boot_is_not_auto_activated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calls: Calls
 ) -> None:
     root = _boot(tmp_path, monkeypatch, token=None, terminal=False)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         _settle_boot(client)
     assert calls == [], "a cloud/automation boot must not auto-create her"
     assert not (root / "aida").exists()
@@ -105,7 +105,7 @@ def test_a_desktop_managed_boot_is_auto_activated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calls: Calls
 ) -> None:
     _boot(tmp_path, monkeypatch, token="desktop-token", terminal=False)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         _settle_boot(client)
     assert len(calls) == 1, "a daemon the desktop app spawned auto-activates her"
 
@@ -114,7 +114,7 @@ def test_a_terminal_boot_is_auto_activated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calls: Calls
 ) -> None:
     _boot(tmp_path, monkeypatch, token=None, terminal=True)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         _settle_boot(client)
     assert len(calls) == 1, "a daemon run from a terminal auto-activates her"
 
@@ -135,7 +135,7 @@ def test_a_redirected_home_boot_is_not_auto_activated(
     Mutation: drop the HOME term from the boot hook — ``calls`` becomes 1.
     """
     root = _boot(tmp_path, monkeypatch, token=None, terminal=True, home_is_users=False)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         _settle_boot(client)
     assert calls == [], "a redirected-home boot must not auto-create her"
     assert not (root / "aida").exists()
@@ -159,7 +159,7 @@ def test_a_desktop_token_boot_under_a_redirected_home_still_activates(
     whose HOME is not the user's) → ``calls`` becomes [] → red.
     """
     _boot(tmp_path, monkeypatch, token="desktop-token", terminal=False, home_is_users=False)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         _settle_boot(client)
     assert len(calls) == 1, "the desktop plane's token is an app-issued human signal"
 
@@ -175,7 +175,7 @@ def test_an_explicit_ensure_still_creates_her_on_a_cloud_install(
     from local_operator import aida as aida_pkg
 
     root = _boot(tmp_path, monkeypatch, token=None, terminal=False)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         _settle_boot(client)
     assert not (root / "aida").exists()
 

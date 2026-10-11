@@ -45,7 +45,7 @@ def client(isolated_root: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
     app.state.config_manager = ConfigManager(config_dir=isolated_root)
     transport = httpx.ASGITransport(app=app)
-    headers = {"Authorization": f"Bearer {TOKEN}"}
+    headers = {"Authorization": f"Bearer {TOKEN}", "Host": "127.0.0.1:1111"}
     client = httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers)
     return client
 
@@ -298,7 +298,7 @@ async def test_the_read_payload_carries_the_configured_name(
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
     app.state.config_manager = ConfigManager(config_dir=isolated_root)
     transport = httpx.ASGITransport(app=app)
-    headers = {"Authorization": f"Bearer {TOKEN}"}
+    headers = {"Authorization": f"Bearer {TOKEN}", "Host": "127.0.0.1:1111"}
     async with httpx.AsyncClient(
         transport=transport, base_url="http://test", headers=headers
     ) as http:
@@ -332,7 +332,7 @@ async def test_disabled_install_answers_get_and_refuses_post(client, isolated_ro
     # instance more than once"), and the fresh construction is also what the
     # desktop does after a settings change.
     transport = httpx.ASGITransport(app=app)
-    headers = {"Authorization": f"Bearer {TOKEN}"}
+    headers = {"Authorization": f"Bearer {TOKEN}", "Host": "127.0.0.1:1111"}
     async with httpx.AsyncClient(
         transport=transport, base_url="http://test", headers=headers
     ) as http:

@@ -74,7 +74,11 @@ async def test_lifespan_publishes_the_record_and_health_identifies_it(
         assert record["instance_id"] == app.state.instance_id
 
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"Host": "127.0.0.1:1111"},
+        ) as client:
             response = await client.get("/health")
         result = response.json()["result"]
         assert response.status_code == 200

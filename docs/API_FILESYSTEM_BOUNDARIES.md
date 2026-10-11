@@ -79,6 +79,14 @@ a single-user machine. The RFC's phased tokens start permissive (Phase A
 accepts a token, does not require one), so they do not change this;
 enforcement arrives in later phases gated on the compat matrix.
 
+**The Host rule covers every route.** The DNS-rebinding `Host` check applies to
+the whole API, not only the static family (P1.5, RFC §3.6): a DNS-name (or
+wildcard/empty) `Host` is refused with the same `403` on every route, while IP
+literals, `localhost` spellings and a specifically announced bind pass. An
+absent `Host` (HTTP/1.0) passes -- no browser omits it. Every shipped surface
+and the CLI dial `127.0.0.1` literals, and an SSH port-forward presents the
+literal it dialed, so none needs an exemption.
+
 Canonical resolution followed immediately by opening the canonical target is
 portable, but not race-free against a concurrent local process replacing path
 components. Such a process is outside this remote-input confinement threat
