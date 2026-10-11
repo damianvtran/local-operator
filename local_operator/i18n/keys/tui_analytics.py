@@ -154,20 +154,20 @@ def search_by_provider() -> Msg:
     return Msg("tui.analytics.search.by_provider", {})
 
 
-def search_counted_read(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.search.counted_read", {"count": count})
+def search_counted_read(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.search.counted_read", {"count": count, "shown": shown})
 
 
-def search_counted_search(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.search.counted_search", {"count": count})
+def search_counted_search(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.search.counted_search", {"count": count, "shown": shown})
 
 
-def search_incl_free_read(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.search.incl_free_read", {"count": count})
+def search_incl_free_read(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.search.incl_free_read", {"count": count, "shown": shown})
 
 
-def search_incl_free_search(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.search.incl_free_search", {"count": count})
+def search_incl_free_search(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.search.incl_free_search", {"count": count, "shown": shown})
 
 
 def search_incl_money_read(*, money: str) -> Msg:
@@ -178,12 +178,12 @@ def search_incl_money_search(*, money: str) -> Msg:
     return Msg("tui.analytics.search.incl_money_search", {"money": money})
 
 
-def search_incl_unpriced_read(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.search.incl_unpriced_read", {"count": count})
+def search_incl_unpriced_read(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.search.incl_unpriced_read", {"count": count, "shown": shown})
 
 
-def search_incl_unpriced_search(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.search.incl_unpriced_search", {"count": count})
+def search_incl_unpriced_search(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.search.incl_unpriced_search", {"count": count, "shown": shown})
 
 
 def search_meta_bars(*, meta: str) -> Msg:
@@ -202,28 +202,34 @@ def search_note_join(*, note: str, read_note: str) -> Msg:
     return Msg("tui.analytics.search.note_join", {"note": note, "read_note": read_note})
 
 
-def search_note_read_full(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.search.note_read_full", {"count": count})
+def search_note_read_full(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.search.note_read_full", {"count": count, "shown": shown})
 
 
-def search_note_read_partial(*, count: int | float, unpriced: str) -> Msg:
-    return Msg("tui.analytics.search.note_read_partial", {"count": count, "unpriced": unpriced})
+def search_note_read_partial(*, count: int | float, shown: str, unpriced: str) -> Msg:
+    return Msg(
+        "tui.analytics.search.note_read_partial",
+        {"count": count, "shown": shown, "unpriced": unpriced},
+    )
 
 
-def search_note_read_unpriced(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.search.note_read_unpriced", {"count": count})
+def search_note_read_unpriced(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.search.note_read_unpriced", {"count": count, "shown": shown})
 
 
-def search_note_search_full(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.search.note_search_full", {"count": count})
+def search_note_search_full(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.search.note_search_full", {"count": count, "shown": shown})
 
 
-def search_note_search_partial(*, count: int | float, unpriced: str) -> Msg:
-    return Msg("tui.analytics.search.note_search_partial", {"count": count, "unpriced": unpriced})
+def search_note_search_partial(*, count: int | float, shown: str, unpriced: str) -> Msg:
+    return Msg(
+        "tui.analytics.search.note_search_partial",
+        {"count": count, "shown": shown, "unpriced": unpriced},
+    )
 
 
-def search_note_search_unpriced(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.search.note_search_unpriced", {"count": count})
+def search_note_search_unpriced(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.search.note_search_unpriced", {"count": count, "shown": shown})
 
 
 def search_row_session() -> Msg:
@@ -304,8 +310,8 @@ def table_empty() -> Msg:
     return Msg("tui.analytics.table.empty", {})
 
 
-def table_subagent_suffix(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.table.subagent_suffix", {"count": count})
+def table_subagent_suffix(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.table.subagent_suffix", {"count": count, "shown": shown})
 
 
 def table_tok_s(*, value: str) -> Msg:
@@ -352,7 +358,7 @@ def totals_calls_measured() -> Msg:
     return Msg("tui.analytics.totals.calls_measured", {})
 
 
-def totals_calls_meta(*, count: int | float) -> Msg:
+def totals_calls_meta(*, count: str) -> Msg:
     return Msg("tui.analytics.totals.calls_meta", {"count": count})
 
 
@@ -371,8 +377,8 @@ def totals_days_empty() -> Msg:
     return Msg("tui.analytics.totals.days_empty", {})
 
 
-def totals_days_with_usage(*, count: int | float) -> Msg:
-    return Msg("tui.analytics.totals.days_with_usage", {"count": count})
+def totals_days_with_usage(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.analytics.totals.days_with_usage", {"count": count, "shown": shown})
 
 
 def totals_decode() -> Msg:

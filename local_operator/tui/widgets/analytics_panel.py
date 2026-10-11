@@ -396,11 +396,17 @@ def _counted_kinds(snapshot: SearchSpendSnapshot) -> str:
     same ladder it renders (round-3 MAJOR-2).
     """
     if snapshot.searches:
-        counted = _t(tui_analytics.search_counted_search(count=snapshot.searches))
+        counted = _t(
+            tui_analytics.search_counted_search(
+                count=snapshot.searches, shown=str(snapshot.searches)
+            )
+        )
         if snapshot.reads:
-            counted = f"{counted} · " + _t(tui_analytics.search_counted_read(count=snapshot.reads))
+            counted = f"{counted} · " + _t(
+                tui_analytics.search_counted_read(count=snapshot.reads, shown=str(snapshot.reads))
+            )
         return counted
-    return _t(tui_analytics.search_counted_read(count=snapshot.reads))
+    return _t(tui_analytics.search_counted_read(count=snapshot.reads, shown=str(snapshot.reads)))
 
 
 def search_component_text(snapshot: SearchSpendSnapshot | None) -> str:
@@ -444,13 +450,19 @@ def search_component_text(snapshot: SearchSpendSnapshot | None) -> str:
         unpriced_reads = max(0, snapshot.unpriced_reads)
         unpriced_searches = max(0, snapshot.unpriced_searches - unpriced_reads)
         if unpriced_searches:
-            return _t(tui_analytics.search_incl_unpriced_search(count=unpriced_searches))
-        return _t(tui_analytics.search_incl_unpriced_read(count=unpriced_reads))
+            return _t(
+                tui_analytics.search_incl_unpriced_search(
+                    count=unpriced_searches, shown=str(unpriced_searches)
+                )
+            )
+        return _t(
+            tui_analytics.search_incl_unpriced_read(count=unpriced_reads, shown=str(unpriced_reads))
+        )
     count = snapshot.reads if reads_only else snapshot.searches
     key = (
         tui_analytics.search_incl_free_read if reads_only else tui_analytics.search_incl_free_search
     )
-    return _t(key(count=count))
+    return _t(key(count=count, shown=str(count)))
 
 
 def search_spend_section(
@@ -612,7 +624,7 @@ def search_spend_section(
             else tui_analytics.search_counted_search
         )
         if not unpriced:
-            return (_t(counted(count=n)),)
+            return (_t(counted(count=n, shown=str(n))),)
         full = (
             tui_analytics.search_note_read_full
             if kind == "read"
@@ -624,13 +636,16 @@ def search_spend_section(
             else tui_analytics.search_note_search_unpriced
         )
         if unpriced == n:
-            return (_t(full(count=n)), _t(short(count=n)))
+            return (_t(full(count=n, shown=str(n))), _t(short(count=n, shown=str(n))))
         partial = (
             tui_analytics.search_note_read_partial
             if kind == "read"
             else tui_analytics.search_note_search_partial
         )
-        return (_t(partial(count=n, unpriced=str(unpriced))), _t(short(count=n)))
+        return (
+            _t(partial(count=n, shown=str(n), unpriced=str(unpriced))),
+            _t(short(count=n, shown=str(n))),
+        )
 
     def total_notes() -> tuple[str, ...]:
         """The total's own counts, in the kinds it actually has.
@@ -1189,7 +1204,7 @@ def build_report(
         return lines
 
     # -- headline totals -----------------------------------------------------
-    calls_meta = _t(tui_analytics.totals_calls_meta(count=aggregate.calls))
+    calls_meta = _t(tui_analytics.totals_calls_meta(count=str(aggregate.calls)))
     if aggregate.ok_calls != aggregate.calls:
         # Failed-call count is real information, not chrome — keep it in the meta.
         calls_meta += " " + _t(
@@ -1386,7 +1401,9 @@ def build_report(
         # span and misstated sparse usage (review D3). Singular "day" for one
         # (review D4). The empty case keeps a static title (no count to state).
         if daily:
-            day_title = _t(tui_analytics.totals_days_with_usage(count=len(daily)))
+            day_title = _t(
+                tui_analytics.totals_days_with_usage(count=len(daily), shown=str(len(daily)))
+            )
         else:
             day_title = _t(tui_analytics.totals_days_empty())
         # The window's grand total rides the section meta ahead of the metric
@@ -2061,7 +2078,9 @@ def _row_suffix(row: SessionRow) -> str:
     """
     if not row.expandable:
         return ""
-    return " " + _t(tui_analytics.table_subagent_suffix(count=row.descendants))
+    return " " + _t(
+        tui_analytics.table_subagent_suffix(count=row.descendants, shown=str(row.descendants))
+    )
 
 
 def _row_prefix(depth: int, marker: str = "") -> str:
