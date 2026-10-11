@@ -2040,6 +2040,85 @@ async def test_the_band_counts_queued_children_so_a_hidden_dock_is_never_silent(
 
 
 @pytest.mark.asyncio
+async def test_the_band_counts_running_video_jobs_on_the_jobs_rung() -> None:
+    """§5.4's post-turn row for the video lane: a video generation is a
+    detached job whose card settles with the submit receipt (R5), so the ▣
+    counter is its only live presence between submit and completion. It rides
+    the EXISTING jobs rung — same family, one number, no second band row — so
+    it must be counted (running, not queued) exactly where a backgrounded
+    shell job is, on both the owner path (this test) and the follower's
+    snapshot path (same predicate, mirrored in ``_apply_frontend_state``)."""
+    session = FakeSession()
+    video = _Job("vid-1", "Video generation (i2v, 8s)")
+    video.type = "video"
+    bash = _Job("bash-1", "build")
+    bash.type = "bash"
+    session.jobs = _fake_jobs(video, bash)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._poll_subagents()
+        await pilot.pause()
+        assert app._status is not None
+        assert app._status._jobs == 2, "video must ride the same rung as bash"
+
+        # A settled video job leaves the rung, and a queued one was never on
+        # it (`_job_count`'s non-task rule: a queued shell command still has
+        # its card, and a video job is never admitted as queued).
+        video.status = "settled"
+        queued = _Job("vid-2", "Video generation (t2v, 5s)")
+        queued.type = "video"
+        queued.queued = True
+        session.jobs = _fake_jobs(video, bash, queued)
+        app._poll_subagents()
+        await pilot.pause()
+        assert app._status._jobs == 1
+
+
+@pytest.mark.asyncio
+async def test_the_follower_path_counts_running_video_jobs_too() -> None:
+    """The follower path (``_apply_frontend_state``) mirrors the owner's rung:
+    the reviewer probed all four cases correct on head (review round 1,
+    MINOR); this pins the behaviour so the two readings of one session cannot
+    drift apart — the parity rule the follower block already states for
+    ``subagents``. The follower reads ``state.jobs`` rows type-exactly:
+    running video + running bash count; queued video does not; task rides its
+    own counter."""
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+        JobState,
+    )
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        state = FrontendSessionState(
+            session_id="session-1",
+            epoch="1",
+            effective_model=FrontendModelSpec(provider="test", model_id="model"),
+            jobs=[
+                JobState(id="vid-1", type="video", status="running"),
+                JobState(id="bash-1", type="bash", status="running"),
+                JobState(id="vid-2", type="video", status="running", queued=True),
+                JobState(id="sub-1", type="task", status="running"),
+            ],
+        )
+        app._apply_frontend_state(state)
+        await pilot.pause()
+        assert app._status is not None
+        assert app._status._jobs == 2, "running video + bash, queued video excluded"
+        assert app._status._subagents == 1, "task rides its own rung"
+
+
+@pytest.mark.asyncio
 async def test_the_gate_admitting_a_queued_child_updates_the_summary_caption() -> None:
     """Round 2 Q2/F7: the counts memo must see a queued→running promotion.
 
