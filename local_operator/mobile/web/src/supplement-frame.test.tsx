@@ -7,9 +7,10 @@
 // happy-dom fires TWO `load` events per iframe mount (measured here: a bare
 // probe counts 2 for one `src` assignment), while a real engine fires one. The
 // component's second-`load` rule is deliberately unconditional — a blocked
-// navigation ALSO fires a second `load` on Chrome 155 (the desktop lane's
-// measurement), so a rule that tolerated a second event would tolerate the
-// attack — which means every happy-dom frame is torn down moments after it
+// navigation fires a second `load` when it is attempted after the first load
+// (Chrome 155, the desktop lane's measurement, timed by QA round 1 Q2), so a
+// rule that tolerated a second event would tolerate the attack — which means
+// every happy-dom frame is torn down moments after it
 // mounts. Tests that need a LIVE frame (the theme push, the nonce echo, the
 // resize clamp applied to the box, a real `message` from `frame.contentWindow`)
 // are therefore impossible here and their coverage is the browser rig recorded
@@ -92,6 +93,22 @@ describe("the teardown arms", () => {
 		const fallback = container.querySelector("[data-supplement-frame-fallback]");
 		expect(fallback?.getAttribute("data-supplement-frame-fallback")).toBe("second-load");
 		expect(fallback?.textContent).toContain("Couldn't render this graphic");
+	});
+
+	it("a new document on the same instance starts its own load count", () => {
+		// Agent review round 1, R3: the counter must not carry across a
+		// document swap on a reused instance — without the reset, the new
+		// document's FIRST load counts as the hostile second one and tears
+		// down a frame the host itself mounted.
+		const { container, rerender } = render(
+			<SupplementFrame component={COMPONENT} documentHtml="<html>one</html>" />,
+		);
+		fireEvent.load(frameOf(container));
+			expect(container.querySelector("iframe")).toBeTruthy();
+		rerender(<SupplementFrame component={COMPONENT} documentHtml="<html>two</html>" />);
+		fireEvent.load(frameOf(container));
+		expect(container.querySelector("iframe")).toBeTruthy();
+		expect(container.querySelector("[data-supplement-frame-fallback]")).toBeNull();
 	});
 
 	it("fails a frame that never posts ready inside the watchdog", () => {

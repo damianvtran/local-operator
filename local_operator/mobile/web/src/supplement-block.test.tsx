@@ -6,7 +6,8 @@
 // in `supplement-frame.test.tsx` and, for the real thing, by the browser rig
 // recorded on the PR.
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "./api";
 import { SupplementBlock } from "./components/supplement-block";
 import { Transcript } from "./components/transcript";
@@ -33,9 +34,81 @@ vi.mock("./api", async (importOriginal) => {
 	return { ...original, ...api };
 });
 
+/*
+ * THE MOUNT GATE'S OBSERVER (U3). `FrameSlot` reads `IntersectionObserver`
+ * before it may fetch a document, and happy-dom ships a stub whose `observe`
+ * is a TODO — its callback never fires, so the gate would hold every document
+ * forever and no rendered test could see a fetch. The suite installs the real
+ * behaviour instead: an observation reports the element as in view. The gate
+ * test overrides it with `ManualIntersectionObserver` and fires it by hand.
+ */
+class FiredIntersectionObserver implements IntersectionObserver {
+	readonly root = null;
+	readonly rootMargin = "0px";
+	readonly thresholds: readonly number[] = [0];
+	private readonly callback: IntersectionObserverCallback;
+
+	constructor(callback: IntersectionObserverCallback) {
+		this.callback = callback;
+	}
+
+	observe(target: Element): void {
+		this.callback([{ isIntersecting: true, target } as IntersectionObserverEntry], this);
+	}
+
+	unobserve(): void {}
+
+	disconnect(): void {}
+
+	takeRecords(): IntersectionObserverEntry[] {
+		return [];
+	}
+}
+
+/** The hand-fired observer: nothing reports until `fire()`. */
+class ManualIntersectionObserver implements IntersectionObserver {
+	readonly root = null;
+	readonly rootMargin = "0px";
+	readonly thresholds: readonly number[] = [0];
+	private readonly callback: IntersectionObserverCallback;
+	private readonly targets: Element[] = [];
+
+	constructor(callback: IntersectionObserverCallback) {
+		this.callback = callback;
+		manualObserver = this;
+	}
+
+	observe(target: Element): void {
+		this.targets.push(target);
+	}
+
+	unobserve(): void {}
+
+	disconnect(): void {}
+
+	takeRecords(): IntersectionObserverEntry[] {
+		return [];
+	}
+
+	fire(): void {
+		this.callback(
+			this.targets.map((target) => ({ isIntersecting: true, target }) as IntersectionObserverEntry),
+			this,
+		);
+	}
+}
+
+let manualObserver: ManualIntersectionObserver | null = null;
+
+beforeEach(() => {
+	manualObserver = null;
+	vi.stubGlobal("IntersectionObserver", FiredIntersectionObserver);
+});
+
 afterEach(() => {
 	cleanup();
 	vi.clearAllMocks();
+	vi.unstubAllGlobals();
 });
 
 const ANCHOR = "b2c3d4e5f60718293a4b5c6d7e8f90a1";
@@ -209,6 +282,10 @@ describe("the files half", () => {
 		fireEvent.click(screen.getByText("2 more files"));
 		expect(screen.getByText("archive/one.txt")).toBeTruthy();
 		expect(screen.getByText("archive/two.txt")).toBeTruthy();
+		// The label TOGGLES with the state, the desktop's grammar (U2):
+		// `2 more files` ⇄ `Show fewer`.
+		expect(screen.getByText("Show fewer")).toBeTruthy();
+		expect(screen.queryByText("2 more files")).toBeNull();
 	});
 
 	it("previews a text callout in place, by the row's own index", async () => {
@@ -250,8 +327,9 @@ describe("the components half", () => {
 	it("mounts the head frame's document and fetches the tail only through the Show all disclosure", async () => {
 		// The live iframe itself cannot be asserted in happy-dom (see the frame
 		// test's header: its two `load` events tear a frame down), so this pins
-		// the MOUNTING LADDER: the head slot fetches on render, the tail's fetch
-		// happens only once the disclosure is opened — the memo's own condition
+		// the MOUNTING LADDER: the head slot fetches once the viewport gate
+		// reports (immediately, in these tests), the tail's fetch happens only
+		// once the disclosure is opened — the memo's own condition
 		// for mounting beyond the budget (an explicit action).
 		const second = component({ attachment: "c".repeat(32), title: "second" });
 		render(
@@ -267,6 +345,30 @@ describe("the components half", () => {
 		fireEvent.click(screen.getByText("Show all 1 graphic"));
 		await waitFor(() => expect(api.getSupplementDocument).toHaveBeenCalledTimes(2));
 		expect(api.getSupplementDocument).toHaveBeenLastCalledWith("s1", "c".repeat(32));
+		// The graphics disclosure toggles its words the same way (U2).
+		expect(screen.getByText("Show fewer")).toBeTruthy();
+		expect(screen.queryByText("Show all 1 graphic")).toBeNull();
+	});
+
+	it("waits for the viewport gate before fetching a document (§2.11; U3)", async () => {
+		// Manual gate: nothing may fetch until the observer reports the slot
+		// approaching the viewport — the memo's "mounts only when its answer
+		// row is in the viewport", the desktop slot's own rule.
+		vi.stubGlobal("IntersectionObserver", ManualIntersectionObserver);
+		render(
+			<SupplementBlock
+				beat={beat({ components: [component()] })}
+				sessionId="s1"
+				jobLive={false}
+			/>,
+		);
+		// The slot (and its reserved box + caption) is there; the fetch is not.
+		expect(screen.getByText("Source: data/bench.csv")).toBeTruthy();
+		expect(manualObserver).not.toBeNull();
+		expect(api.getSupplementDocument).not.toHaveBeenCalled();
+		act(() => manualObserver?.fire());
+		await waitFor(() => expect(api.getSupplementDocument).toHaveBeenCalledTimes(1));
+		expect(api.getSupplementDocument).toHaveBeenLastCalledWith("s1", "a".repeat(32));
 	});
 
 	it("a failed document fetch paints the frame-level fallback, not a hole", async () => {

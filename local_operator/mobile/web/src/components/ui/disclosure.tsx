@@ -51,7 +51,13 @@ export function Disclosure({
 	headerClassName,
 	hintClassName,
 }: {
-	header: ReactNode;
+	/** The header's content: a static node, or a FUNCTION of the open state for
+	    a header whose WORDS toggle with it — the supplement disclosures swap
+	    `N more files` / `Show all N graphics` ⇄ `Show fewer` exactly as the
+	    desktop's disclosure does (its controlled `open` feeds the same
+	    conditional, `supplement-row.tsx`; UX round 1, U2). The state stays
+	    owned here either way, so the label cannot disagree with the panel. */
+	header: ReactNode | ((open: boolean) => ReactNode);
 	children: ReactNode;
 	defaultOpen?: boolean;
 	/** Hold the panel shut regardless of its own state. The one caller is the
@@ -97,7 +103,7 @@ export function Disclosure({
 			>
 				{/* The chevron stops inviting a tap that would do nothing. */}
 				<Chevron open={shown} className={cn(forceClosed && HELD_DIM)} />
-				{header}
+				{typeof header === "function" ? header(shown) : header}
 				{forceClosed ? (
 					/* Says why it is inert, in the row itself, at no vertical cost.
 					   `shrink-0` so a long panel label truncates before this does —

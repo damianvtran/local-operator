@@ -15,9 +15,11 @@
  *     request is issued; and
  *   - THIS component counts `load` events: the second `load` is a hostile
  *     navigation or a blocked attempt (measured on Chrome 155: a blocked
- *     navigation fires a second `load` too), so the frame is torn down into
- *     the frame-level fallback line and every later message from it is
- *     dropped.
+ *     navigation fires a second `load` when it is attempted after the
+ *     frame's first `load`; attempted during the initial parse it does not,
+ *     and the ping watchdog's `no-pong` ends that attempt instead — QA
+ *     round 1, Q2), so the frame is torn down into the frame-level fallback
+ *     line and every later message from it is dropped.
  *
  * THE MESSAGE WIRE (host side) is exactly the contract's: the host sends
  * `{lo:"supplement-host", t:"theme", mode, vars, nonce}` (the nonce minted per
@@ -183,6 +185,15 @@ export function SupplementFrame({
 	 */
 	useEffect(() => {
 		if (documentHtml === null) return;
+		/*
+		 * A NEW DOCUMENT STARTS A NEW LOAD COUNT. The mount effect below re-runs
+		 * for a new `documentHtml` on the SAME frame instance, and the counter
+		 * must not carry over: without this reset, the new document's first
+		 * `load` counts as the hostile SECOND load and tears down a frame the
+		 * host itself mounted (agent review round 1, R3 — instances are keyed
+		 * by attachment today, so this is future-proofing, not a live defect).
+		 */
+		loadCountRef.current = 0;
 		const frameEl = frameRef.current;
 		if (!frameEl) return;
 		nonceRef.current = mintNonce();
@@ -379,8 +390,10 @@ export function SupplementFrame({
 		loadCountRef.current = count;
 		if (count > 1) {
 			// The second load is a hostile navigation OR a blocked attempt (a
-			// blocked navigation fires a second `load` too, measured on Chrome
-			// 155). Either way this frame is not the document the host mounted.
+			// blocked navigation fires a second `load` when the attempt lands
+			// after the first load, measured on Chrome 155; a parse-time attempt
+			// is reached by the ping watchdog instead — QA round 1, Q2). Either
+			// way this frame is not the document the host mounted.
 			console.debug(HOSTILE_TEARDOWN_LOG);
 			fail("second-load");
 			return;
@@ -410,6 +423,10 @@ export function SupplementFrame({
 				 * `· Retry`, the row's own `supplement_restart` arm where the
 				 * job is settled. Absent handler, absent control — the block
 				 * wires nothing when no session is addressable.
+				 *
+				 * `px-2`: the word alone measured 30 px wide, under the surface's
+				 * 44 px touch rule the audit sweeps for (D1/U1 — same fix as the
+				 * state line's Retry).
 				 */}
 				{onRetry && (
 					<>
@@ -418,7 +435,7 @@ export function SupplementFrame({
 						</span>
 						<button
 							type="button"
-							className="min-h-11 text-ink-dim"
+							className="min-h-11 px-2 text-ink-dim"
 							data-supplement-frame-retry=""
 							onClick={() => onRetry()}
 						>
