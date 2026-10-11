@@ -54372,16 +54372,29 @@ class OperatorApp(App[None]):
         """
         self._streaming_block = None
 
-    def _ensure_streaming_block(self) -> AssistantBlock:
-        """The block for the message being streamed, mounted on first use."""
+    def _ensure_streaming_block(self, text: str) -> AssistantBlock:
+        """The block for the message being streamed, with ``text`` applied.
+
+        ``text`` is the accumulated message text, and on the MOUNT it is
+        applied BEFORE the block is appended. The quiet-group fold reads every
+        mounted append as it lands (``note_quiet_append``) and freezes that
+        reading, so a block appended before its first text would be read as an
+        assistant row with no visible prose — interior to a group — and a
+        later receipt could then fold the bar over a real, streaming answer.
+        Mounting with the text applied is the order the replay path already
+        uses (``session_presentation`` commits the text before appending).
+        """
         block = self._streaming_block
         if block is None:
             block = AssistantBlock()
+            block.update_text(text)
             self._streaming_block = block
             self._append_block(block)
             # Only on the MOUNT, not on every delta: the deltas arrive at 30 Hz
             # and would all re-derive the same phrase.
             self._refresh_working_activity()
+            return block
+        block.update_text(text)
         return block
 
     def _ensure_reasoning_block(self) -> ReasoningBlock:
@@ -54468,7 +54481,7 @@ class OperatorApp(App[None]):
         # thinking-then-answer in the transcript even when both updates land in
         # the same frame.
         self._retire_reasoning_block()
-        self._ensure_streaming_block().update_text(message.text)
+        self._ensure_streaming_block(message.text)
 
     def on_assistant_message_end(self, message: AssistantMessageEnd) -> None:
         # A tool-only call ends its message with no prose at all, so this is the
@@ -54511,7 +54524,10 @@ class OperatorApp(App[None]):
                 block.finalize_text()
             self._refresh_working_activity()
             return
-        block = self._ensure_streaming_block()
+        # TUI-020: adopt the authoritative text carried by the event — applied
+        # by the ensure call, which folds it into the MOUNT as well (the order
+        # the quiet-group fold's reading of the row requires).
+        block = self._ensure_streaming_block(message.text)
         # ONE classification for this event, made BEFORE anything renders and
         # read by both consumers below: the rail mark, and `display.narration`'s
         # removal further down. Two separate reads of the same two fields is how
@@ -54522,8 +54538,6 @@ class OperatorApp(App[None]):
             stop_reason=message.stop_reason,
             has_tool_calls=message.has_tool_calls,
         )
-        # TUI-020: adopt the authoritative text carried by the event.
-        block.update_text(message.text)
         block.completion_anchor_id = message.message_id
         block.navigation_anchor_id = message.message_id
         # MARKED before `finalize_text()`, which is what commits the rows AND
