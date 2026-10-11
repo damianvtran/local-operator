@@ -37,6 +37,7 @@ from local_operator.i18n import catalogues
 from local_operator.i18n import resolve as resolve_mod
 from local_operator.i18n import text
 from local_operator.paths import CONFIG_DIR_ENV
+from local_operator.tui import app as app_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets import status_line as status_line_mod
 from local_operator.tui.widgets import welcome as welcome_mod
@@ -48,12 +49,24 @@ from tests.unit.tui.test_app_pilot import FakeSession, _factory
 def _restore_locale() -> Iterator[None]:
     """The active locale is PROCESS state the app moves; put it back.
 
-    The move back runs the real refreshers again — by then the monkeypatched
-    root is gone, so the widgets' constants end at their `en` values rather
-    than at this file's markers.
+    The move back runs the real refreshers, so it must read a LIVE catalogue
+    root. The test body's own root (a `tmp_path` tree it patched in) can be
+    GONE by teardown time — `tmp_path`'s cleanup and the monkeypatch undo
+    finalise in an order this fixture cannot see — and a refresh against a
+    deleted tree degrades every re-materialised constant to message codes
+    (the failure this pin was written from: welcome's pool read as
+    `tui.welcome.tip.resume`). So the move back pins the root to the one
+    THIS fixture captured at setup, while it was still the real tree, and
+    hands the patched value back afterwards for monkeypatch's own undo.
     """
+    real_root = catalogues.catalogue_root()
     yield
-    text.set_active_locale("en")
+    patched = catalogues._CATALOGUES
+    catalogues._CATALOGUES = real_root
+    try:
+        text.set_active_locale("en")
+    finally:
+        catalogues._CATALOGUES = patched
 
 
 @pytest.fixture(autouse=True)
@@ -167,6 +180,9 @@ async def test_a_running_switch_swaps_the_band_and_the_splash(
         # ...the band's, and keymap's tip templates (welcome's pool reads them).
         assert status_line_mod.TUNNEL_PARKED_TEXT == "FR:parked"
         assert keymap_mod.BY_ID["keymap.resume"].tip == "FR {key} resumes"
+        # The width budget re-materialises through its builder too (round-1
+        # F2: it was the one mirror without one).
+        assert welcome_mod.TIP_MIN_WIDTH == welcome_mod._tip_min_width()
         # Per-call resolutions follow without any re-materialiser.
         assert status_line_mod.format_tunnel(True) == "FR:parked"
         assert status_line_mod.format_agents(2) == "2 FR-agents"
@@ -230,3 +246,36 @@ async def test_a_write_from_this_process_applies_silently(
         assert status_line_mod.TUNNEL_PARKED_TEXT == "FR:parked"
         # Silent: the page (or the command) already showed its own receipt.
         assert [n for n in _notices(app) if "config.yml changed" in n] == []
+
+
+@pytest.mark.asyncio
+async def test_the_app_paints_the_swapped_words_through_the_welcome_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F1 (round 1): the app must not carry its own bound copies of the words.
+
+    Reproduced before the fix: after a locale move, ``welcome.MODEL_PENDING``
+    read the new catalogue while the app's from-imported copy stayed at the
+    boot ``en``, so the band painted the old word. The pin drives the two REAL
+    paint paths (``_reset_band_for_swap``, ``_enter_setup_state``) and reads
+    the band through its public render entry; the ``hasattr`` asserts keep the
+    from-import class from coming back.
+    """
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(config_dir))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _boot(pilot, app)
+        _ship_fr(monkeypatch, tmp_path)
+        app._run_slash_command("/language fr")
+        await pilot.pause()
+        status = app._status
+        assert status is not None
+        app._reset_band_for_swap()
+        assert "FR:connecting…" in status.render_text(200).plain
+        app._enter_setup_state()
+        assert "FR:setup" in status.render_text(200).plain
+    # And the class itself: no from-imported copies survive on the app module.
+    assert not hasattr(app_mod, "MODEL_PENDING")
+    assert not hasattr(app_mod, "MODEL_SETUP")

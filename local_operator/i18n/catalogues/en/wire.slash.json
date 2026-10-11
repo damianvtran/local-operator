@@ -22,7 +22,7 @@
   "wire.slash.highlights": "Cancel, retry or steer the highlights under an answer",
   "wire.slash.info": "Install, version, and running sessions on this machine",
   "wire.slash.keys": "Show the keyboard legend",
-  "wire.slash.language": "Show or set the language; auto follows the system",
+  "wire.slash.language": "Show or set the UI language; auto follows the system",
   "wire.slash.links": "Open a link from this conversation in a browser",
   "wire.slash.login": "Authenticate a provider",
   "wire.slash.logout": "Remove stored provider credentials",
