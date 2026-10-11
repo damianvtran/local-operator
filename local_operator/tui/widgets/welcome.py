@@ -88,7 +88,7 @@ from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
 from local_operator import terminals
-from local_operator.i18n.keys import tui_welcome
+from local_operator.i18n.keys import tui_status, tui_welcome
 from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import tr
 from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
@@ -124,6 +124,10 @@ from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 # measured on exactly the text a user reads; the en-only context sidecar
 # (`tui.welcome.context.json`) carries the per-entry maxCells contract.
 _t = tr("tui.welcome")
+#: The status namespace (T2): the model row's state words are catalogued with the
+#: band's, because the two surfaces MUST agree on them (D1) — a single key
+#: resolved here and by ``status_line`` is how they cannot drift.
+_s = tr("tui.status")
 
 #: The real local-operator mark, downsampled from the shipped raster asset
 #: (``static/local-operator-icon-2-light-clear.png``, also the app icon in
@@ -263,8 +267,9 @@ def mark_pulse_color(phase: float) -> str:
 
 
 #: Placeholder while the session factory is still being awaited. The band uses
-#: the same word for the same state, so the two never disagree on screen.
-MODEL_PENDING = "connecting…"
+#: the same word for the same state, so the two never disagree on screen — both
+#: resolve ``tui.status.model.connecting`` through the i18n runtime (T2).
+MODEL_PENDING = _s(tui_status.model_connecting())
 
 #: The model row's word in the first-run SETUP state — no session, no model,
 #: the app parked waiting on the user's `/login`. This is the same word the
@@ -273,8 +278,9 @@ MODEL_PENDING = "connecting…"
 #: `MODEL_PENDING` sentinel up here made the splash read `connecting…` while
 #: the band read `setup`, so the first screen a new user sees told them "it's
 #: busy, wait" (the opposite of "you need to act") and looked hung (D1). The
-#: two MUST answer "what state is this" with the same word.
-MODEL_SETUP = "setup"
+#: two MUST answer "what state is this" with the same word. Resolved from
+#: ``tui.status.model.setup`` (T2) — the same key the status band resolves.
+MODEL_SETUP = _s(tui_status.model_setup())
 
 #: The few affordances a first-time user actually needs. ``/`` and ``/help``
 #: are kept separate on purpose: one is the inline picker, the other prints the

@@ -44,6 +44,8 @@ from local_operator.harness.jobs import (
     model_fallback_badge,
 )
 from local_operator.herdr.reporter import HerdrReporter, state_from_title
+from local_operator.i18n.keys import tui_status
+from local_operator.i18n.text import tr
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.session.frontend_state import (
     format_context_tokens as _format_context_tokens,
@@ -199,7 +201,12 @@ ICON_TUNNEL = ICON_APPROVALS
 #: is not what they can act on from there. The card is clamped to the terminal and
 #: has the room to name the cause. A reader who meets both without this note sees
 #: two names for one fact; with it, one is the lamp and the other the diagnosis.
-TUNNEL_PARKED_TEXT = "remote access off"
+#: Resolved through the i18n runtime (T2): the en catalogue's tui.status.tunnel.parked
+#: is the one source for this word, so a translation wave moves it like every
+#: other band string and this constant never drifts from the catalogued copy.
+_t = tr("tui.status")
+
+TUNNEL_PARKED_TEXT = _t(tui_status.tunnel_parked())
 
 #: Fork tag for the WINDOW/TAB title of a fork that has not named itself yet.
 #: The same word, brackets and case the /resume picker's row marker uses
@@ -889,7 +896,10 @@ def format_agents(count: int) -> str:
     """
     if count <= 0:
         return ""
-    return f"{count} agent" if count == 1 else f"{count} agents"
+    # ICU plural via the catalogue (T2): en renders '1 agent' / '2 agents' byte
+    # for byte with the pre-extraction f-string, and a wave changes the plural
+    # categories where the language's rules say so rather than in a branch here.
+    return _t(tui_status.agents(count=count))
 
 
 def format_jobs(count: int) -> str:
@@ -902,7 +912,8 @@ def format_jobs(count: int) -> str:
     """
     if count <= 0:
         return ""
-    return f"{count} job" if count == 1 else f"{count} jobs"
+    # ICU plural via the catalogue (T2); see format_agents.
+    return _t(tui_status.jobs(count=count))
 
 
 def format_tunnel(parked: bool) -> str:
@@ -2452,7 +2463,9 @@ class StatusLine:
             if parts:
                 left.append(f" {_SEP_LEFT} ", style=seam)
             left.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
-            left.append(" starting…", style=muted)
+            # Catalogued caption (T2); the leading space is the segment join,
+            # composed here so the catalogue value stays the bare word.
+            left.append(f" {_t(tui_status.band_starting())}", style=muted)
         elif self._streaming:
             # The aggregate working LINE (WorkingBlock) carries the shimmer; the
             # band keeps a quiet activity glyph so a still frame still reads
@@ -2469,7 +2482,7 @@ class StatusLine:
             # is only the caption.
             left.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
             if not shimmer_enabled():
-                left.append(" working", style=dim)
+                left.append(f" {_t(tui_status.band_working())}", style=dim)
         return left
 
     def _right_text(
