@@ -2,7 +2,9 @@
   "locales": [
     "en",
     "fr",
-    "es"
+    "es",
+    "ru",
+    "vi"
   ],
   "schema": 1
 }

@@ -1,0 +1,9 @@
+{
+  "tui.status.agents": "{count, plural, one {# агент} few {# агента} many {# агентов} other {# агента}}",
+  "tui.status.band.starting": "запуск…",
+  "tui.status.band.working": "работает",
+  "tui.status.jobs": "{count, plural, one {# задание} few {# задания} many {# заданий} other {# задания}}",
+  "tui.status.model.connecting": "подключение…",
+  "tui.status.model.setup": "настройка",
+  "tui.status.tunnel.parked": "удалённый доступ отключён"
+}
