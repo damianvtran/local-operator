@@ -2907,10 +2907,12 @@ class PeerMessageBlock(ExpandableActionBlock):
             if parts:
                 return " · ".join(parts)
             # Nothing identifying at all. The one case that still needs prose,
-            # because a bare `·`-joined empty list says nothing — and it shares
-            # the wording `_summary` falls back to, and `harness/comms.py`
-            # before it, so the three do not drift.
-            return "another session"
+            # because a bare `·`-joined empty list says nothing — and it
+            # resolves the SAME catalogue key `_summary` falls back to (and
+            # `harness/comms.py`'s vocabulary before it), so the three do not
+            # drift: review round 1 (R1) found this sibling still a raw
+            # literal, invisible to a sink-only ratchet.
+            return _t(tui_transcript.sender_unknown())
 
         header = _compose(bits)
         if not model:

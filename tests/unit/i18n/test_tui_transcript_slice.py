@@ -96,6 +96,31 @@ async def test_the_real_rows_paint_the_golden_copy() -> None:
         assert _en("tui.transcript.queued.newest") in built.plain
 
 
+def test_the_expanded_peer_header_fallback_resolves_through_the_catalogue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1 (review round 1): the SIBLING fallback, on the expanded card's path.
+
+    ``PeerMessageBlock._compose()``'s no-identity fallback is the same state as
+    ``_summary()``'s, and a raw literal there is exactly what the ceiling-0
+    ratchet cannot see (it is not a render sink). The first assertion pins the
+    value; the second proves the path READS the catalogue — a raw literal
+    would not move when the resolver is replaced.
+    """
+    block = tx.PeerMessageBlock("hi", {})
+    assert _en("tui.transcript.sender.unknown") in block._header()
+
+    seen: list[str] = []
+
+    def spy(msg: Msg) -> str:
+        seen.append(msg.code)
+        return "⟪catalogue⟫"
+
+    monkeypatch.setattr(tx, "_t", spy)
+    assert "⟪catalogue⟫" in block._header()
+    assert "tui.transcript.sender.unknown" in seen
+
+
 def test_unknown_messages_degrade_to_their_code() -> None:
     resolve = tr("tui.transcript")
     assert resolve(Msg("tui.transcript.nope", {})) == "tui.transcript.nope"
