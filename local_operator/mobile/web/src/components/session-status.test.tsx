@@ -254,13 +254,88 @@ describe("SessionStatus — the published spend object (PR-2)", () => {
 		const { container } = render(
 			<SessionStatus
 				projection={projection({
-					spend_channels: { version: 1, tracked: false, total_micro: 0, rows: [] },
+					spend_channels: {
+						version: 1,
+						tracked: false,
+						total_micro: 0,
+						knowledge: "partial",
+						rows: [],
+					},
 				})}
 			/>,
 		);
 		expect(
-			container.querySelector('[data-testid="session-status-channels-untracked"]')?.textContent,
+			container
+				.querySelector('[data-testid="session-status-channels-untracked"]')
+				?.textContent?.trim(),
 		).toBe("channels not tracked");
+	});
+
+	it("keeps the untracked disclosure silent when nothing is missing (M-4)", () => {
+		// A marker-less session whose own figure is `exact` has no evidence of
+		// missing spend, so it reads like any other — the desktop gate's rule.
+		const { container } = render(
+			<SessionStatus
+				projection={projection({
+					spend_channels: {
+						version: 1,
+						tracked: false,
+						total_micro: 210_000,
+						knowledge: "exact",
+						rows: [],
+					},
+				})}
+			/>,
+		);
+		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
+		expect(container.querySelector('[data-testid="session-status-spend"]')?.textContent).toBe(
+			"$0.210",
+		);
+	});
+
+	it("draws RECOVERED rows on a marker-less session, notice beside them", () => {
+		// The dropped-rows bug: a backfilled session has no marker but real
+		// recovered rows, and they must render — with the disclosure that the
+		// recovered set may be incomplete.
+		const { container } = render(
+			<SessionStatus
+				projection={projection({
+					spend_channels: {
+						version: 1,
+						tracked: false,
+						total_micro: 53_000,
+						knowledge: "partial",
+						rows: [{ channel: "image", amount_micro: 53_000, basis: ["estimated"] }],
+					},
+				})}
+			/>,
+		);
+		expect(
+			container.querySelector('[data-testid="session-status-channel"]')?.textContent?.trim(),
+		).toBe("image $0.053");
+		expect(
+			container
+				.querySelector('[data-testid="session-status-channels-untracked"]')
+				?.textContent?.trim(),
+		).toBe("channels not tracked");
+	});
+
+	it("names the remainder with the TUI's separator: `· +N more` (D1)", () => {
+		const many = Array.from({ length: 6 }, (_, index) => ({
+			channel: "image",
+			provider: `p${index}`,
+			amount_micro: 1_000,
+			basis: ["estimated"],
+		}));
+		const { container } = render(
+			<SessionStatus
+				projection={projection({
+					spend_channels: { version: 1, tracked: true, total_micro: 6_000, rows: many },
+				})}
+			/>,
+		);
+		const channels = container.querySelector('[data-testid="session-status-channels"]');
+		expect(channels?.textContent).toContain("· +2 more");
 	});
 
 	it("shows no breakdown line at all without a published object", () => {

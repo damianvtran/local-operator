@@ -395,7 +395,11 @@ export interface SpendChannels {
 	tracked: boolean;
 	total_micro: number;
 	knowledge?: string;
-	/** Money per billing basis; the buckets reconcile to `total_micro`. */
+	/** Money per billing basis; the buckets reconcile to `total_micro`.
+	    `billed`/`subscription_api_equivalent`/`estimated`/`not_tracked_micro`
+	    are micro-USD SUMS (subscription dollars stay in their own bucket,
+	    never added into `billed`), and `not_tracked_calls` is a COUNT of rows
+	    whose amount could not be stated — a call count, not money. */
 	by_basis?: Record<string, number>;
 	rows?: SpendChannelRow[];
 	children?: Record<string, unknown>;

@@ -44,7 +44,7 @@
  * screen has no hover), and the `nodec`/`short` context forms (they exist for
  * the TUI's narrow subagent rows; the phone renders one reading).
  */
-import type { SessionProjection } from "../types";
+import type { SessionProjection, SpendChannelRow } from "../types";
 import { pyFixed } from "./fixed-point";
 
 /** `CostKnowledge` (`session/frontend_state.py`), as the wire carries it. */
@@ -539,35 +539,49 @@ export type ChannelChip = {
 };
 
 export type ChannelBreakdown = {
-	tracked: boolean;
 	chips: ChannelChip[];
 	/** Rows past `CHANNEL_CHIP_CAP`, as a COUNT — never their money: the total
 	    is line 1's, and a second money sum here is the disagreement the
 	    published object exists to end. */
 	hiddenCount: number;
+	/** The `channels not tracked` disclosure — TRUE only when the object itself
+	    says nothing was recorded AND `knowledge` shows something is actually
+	    missing (see the rules below). */
+	untrackedNotice: boolean;
 };
 
 /**
  * The breakdown line's data, from the published object only — never re-summed.
  *
  * `null` when no object is published (an older daemon: the legacy row renders
- * alone). `tracked: false` is a STATEMENT about a pre-feature session and the
- * caller renders `channels not tracked` in plain words, the same disclosure
- * the TUI's `/session` section and the API carry (design D3: never an implied
- * `$0` of channel spend).
+ * alone).
  *
- * The chip cap is a PHONE-WIDTH bound, not a data bound: the backend already
- * caps the row list (grouping the remainder into an `other` row whose money
- * the total still holds), and the chip count is further reduced to four named
- * rows with an honest `+N more` count — a count, deliberately not a sum, so a
- * narrow screen can never become a second arithmetic site.
+ * ROWS ARE DRAWN ALWAYS — the phone mirrors the desktop section's M-4 gate
+ * verbatim (`session_panel._draw_spend_channels`, review round 2). The dropped
+ * rows this fixes: a TRACKED object draws its rows, and so does a marker-less
+ * one that carries RECOVERED rows (a backfilled session); gating chips on
+ * `tracked` silently discarded exactly the recovered evidence the disclosure
+ * exists to explain.
+ *
+ * `untrackedNotice` follows the same gate: `tracked: false` ALONE is not a
+ * disclosure — degradation needs evidence (see `channel_spend.combine`), so the
+ * notice appears only when something is actually missing (the combiner's rung
+ * is not `exact`; a marker-less session whose own figure is exact reads like
+ * any other). It is the same rule the TUI's `/session` note applies.
+ *
+ * The chip cap is a PHONE-WIDTH bound, not a data bound, and it mirrors the
+ * backend cap's own selection shape: NAMED channels win the budget
+ * (`_cap_spend_channel_rows_in_place`'s m2 fix) — inference rows take what is
+ * left rather than filling the line and pushing every metered channel into
+ * the remainder — and the final list keeps wire order. Rows past the cap are
+ * an honest `· +N more` COUNT, deliberately not a sum, so a narrow screen can
+ * never become a second arithmetic site.
  */
 export function channelBreakdown(state: PublishedSpendInput): ChannelBreakdown | null {
 	const published = state.spend_channels;
 	if (!published || typeof published !== "object") return null;
-	if (!published.tracked) return { tracked: false, chips: [], hiddenCount: 0 };
 	const rows = Array.isArray(published.rows) ? published.rows : [];
-	const chips: ChannelChip[] = rows.slice(0, CHANNEL_CHIP_CAP).map((row) => {
+	const chips: ChannelChip[] = selectChipRows(rows).map((row) => {
 		const amount = row.amount_micro;
 		return {
 			label: row.channel === "inference" ? inferenceShortLabel(row) : String(row.channel),
@@ -578,7 +592,31 @@ export function channelBreakdown(state: PublishedSpendInput): ChannelBreakdown |
 			subEquivalent: isSubEquivalentBasis(row.basis),
 		};
 	});
-	return { tracked: true, chips, hiddenCount: Math.max(0, rows.length - CHANNEL_CHIP_CAP) };
+	return {
+		chips,
+		hiddenCount: Math.max(0, rows.length - CHANNEL_CHIP_CAP),
+		untrackedNotice: published.tracked !== true && rung(published.knowledge) !== "exact",
+	};
+}
+
+/**
+ * `CHANNEL_CHIP_CAP` rows of `rows`, named channels first, wire order kept.
+ *
+ * The desktop cap's own selection, ported (`SPEND_CHANNEL_ROW_CAP`'s m2 fix):
+ * inference fills the wire's head (up to `IDENTITY_CAP` rows of ONE channel),
+ * so a plain "first four" would let inference filler push every metered
+ * channel into the remainder and the phone could not name a single one. Every
+ * non-inference row keeps its place up to the cap; inference rows take what is
+ * left. Identity-based, so duplicate rows can never mis-select.
+ */
+function selectChipRows(rows: SpendChannelRow[]): SpendChannelRow[] {
+	if (rows.length <= CHANNEL_CHIP_CAP) return rows;
+	const named = rows.filter((row) => row.channel !== "inference");
+	const inference = rows.filter((row) => row.channel === "inference");
+	const keptNamed = named.slice(0, CHANNEL_CHIP_CAP);
+	const keptInference = inference.slice(0, Math.max(0, CHANNEL_CHIP_CAP - keptNamed.length));
+	const kept = new Set<SpendChannelRow>([...keptNamed, ...keptInference]);
+	return rows.filter((row) => kept.has(row));
 }
 
 /** The model half of an inference row's `provider/model` label, or a fallback
