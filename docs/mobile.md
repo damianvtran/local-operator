@@ -370,7 +370,7 @@ relay routes are live today (`GET /api/sessions/{id}/supplements/{digest}/docume
 `GET /api/sessions/{id}/supplements/{job}/file?i=<n>`): `gate()` authenticates the
 caller first, the document's digest is reference-checked against the session's journal,
 and a 404 means only a missing supplement or file -- what a phone still lacks is the
-renderer, so it paints nothing until `mobile/web` lands.
+renderer, so it paints nothing until `mobile/web`'s supplement frame lands (PR #2222).
 
 Row and event shapes (newest version per anchor; the stale-row rule; the live-only
 `running`/`cancelling` states): `docs/DESKTOP_API.md`, §"Turn supplements". Not in this
