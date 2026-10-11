@@ -1965,11 +1965,12 @@ def test_the_probe_is_a_reader(tmp_path):
     asyncio.run(feed.close())
 
 
-def test_a_quiet_tick_costs_four_stats_and_no_record_reads(tmp_path):
+def test_a_quiet_tick_costs_five_stats_and_no_record_reads(tmp_path):
     """THE I/O BUDGET, as a COUNT. One extra stat is the whole cost of watching.
 
-    The record doorbell is one ``os.stat`` on ``run/mobile`` added to a tick that
-    already made three (the attention store and its two journal sidecars), and on
+    The record doorbell is one ``os.stat`` on ``run/mobile`` and the settings
+    doorbell one on ``config.yml``, added to a tick that already made three (the
+    attention store and its two journal sidecars), and on
     a store where nothing moved it must read NOTHING: not one record, not the
     wake index, no SQL. Every later byte on this path is paid per event rather
     than per tick, which is the difference between this and the whole-list refetch
@@ -1995,9 +1996,158 @@ def test_a_quiet_tick_costs_four_stats_and_no_record_reads(tmp_path):
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)
     assert _statuses(_queued(subscription)) == []
-    assert counts["stat"] + counts["lstat"] <= 4, counts
+    assert counts["stat"] + counts["lstat"] <= 5, counts
     assert counts["record_reads"] == 0, counts
     assert counts["scandir"] == 0, counts
+    asyncio.run(feed.close())
+
+
+def _config_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [frame for frame in frames if frame["type"] == "config"]
+
+
+def test_a_language_write_publishes_one_config_frame(tmp_path, monkeypatch):
+    """The settings doorbell (wave 4 slice A): a language write reaches the stream.
+
+    The write is made THE WAY every origin makes it — a ``config.yml`` edit — so
+    the frame is origin-agnostic by construction: the TUI page, the desktop
+    route, the agent's ``setting`` tool and a hand edit are all this one file
+    write, and the doorbell cannot tell (or need to tell) them apart.
+    """
+    root = tmp_path
+    (root / "config.yml").write_text("values:\n  language: auto\n", encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    from local_operator.i18n.resolve import resolve_language
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+
+    (root / "config.yml").write_text("values:\n  language: en\n", encoding="utf-8")
+    _tick(feed)
+
+    frames = _config_frames(_queued(subscription))
+    assert len(frames) == 1, frames
+    assert frames[0]["payload"]["changed_keys"] == ["language"]
+    # The frame carries the RESOLVED language — the same value
+    # ``GET /v1/capabilities`` serves — rather than a re-derivation: one truth.
+    assert frames[0]["payload"]["language"] == resolve_language()
+    asyncio.run(feed.close())
+
+
+def test_a_write_through_the_settings_funnel_publishes_the_config_frame(tmp_path, monkeypatch):
+    """The origin half end to end: drive ``settings_io.write_setting`` — the one
+    funnel the TUI page, the desktop route and the agent's ``setting`` tool all
+    call — and the doorbell must see a real settings write, not only a raw file
+    swap."""
+    root = tmp_path
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    # The FIRST write on a virgin config dir materializes config.yml (the
+    # manager's in-memory defaults + the written key), which would make the
+    # doorbell's first frame list every default. Real life never looks like
+    # that — the file exists long before the agent's write — so seed it, then
+    # baseline on the seeded state and assert the deltas are EXACT.
+    manager = ConfigManager(root)
+    setting = settings_io.resolve_key("language")
+    assert setting is not None
+    settings_io.write_setting(manager, setting, "auto")
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+
+    settings_io.write_setting(manager, setting, "en")
+    _tick(feed)
+
+    frames = _config_frames(_queued(subscription))
+    assert len(frames) == 1, frames
+    assert frames[0]["payload"]["changed_keys"] == ["language"]
+    asyncio.run(feed.close())
+
+
+def test_the_settings_baseline_does_not_replay(tmp_path, monkeypatch):
+    """Same no-replay rule as every other channel: a language configured before
+    the client connected is what its own capabilities read already shows, and
+    announcing it would be a frame about last week."""
+    root = tmp_path
+    (root / "config.yml").write_text("values:\n  language: en\n", encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+    _tick(feed)
+
+    assert _config_frames(_queued(subscription)) == []
+    asyncio.run(feed.close())
+
+
+def test_a_touch_without_a_value_change_publishes_nothing(tmp_path, monkeypatch):
+    """The values compare is the frame's gate, not the stat: rewriting the same
+    bytes (or an mtime-only touch) must publish nothing, or a sync tool flipping
+    timestamps would ring the doorbell forever."""
+    root = tmp_path
+    body = "values:\n  language: en\n"
+    (root / "config.yml").write_text(body, encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+
+    (root / "config.yml").write_text(body, encoding="utf-8")
+    _tick(feed)
+
+    assert _config_frames(_queued(subscription)) == []
+    asyncio.run(feed.close())
+
+
+def test_a_broken_config_announces_nothing_and_is_never_renamed(tmp_path, monkeypatch):
+    """Review round 1, MINOR-3(a): an unreadable config publishes NO frame —
+    there is nothing truthful to name — and the FEED never renames the file:
+    the raw read keeps the last good snapshot, so the repair is what publishes.
+    (A `ConfigManager` construction would move the malformed file aside; this
+    path must never be the thing that does.)"""
+    root = tmp_path
+    (root / "config.yml").write_text("values:\n  language: en\n", encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+
+    broken = "values: [not, a, mapping\n"
+    (root / "config.yml").write_text(broken, encoding="utf-8")
+    _tick(feed)
+
+    assert _config_frames(_queued(subscription)) == []
+    assert list(root.glob("config.yml.bad.*")) == []
+    assert (root / "config.yml").read_text(encoding="utf-8") == broken
+
+    # THE REPAIR is the change that publishes, diffed against the last good
+    # snapshot so it names exactly what moved across the broken window.
+    (root / "config.yml").write_text(
+        "values:\n  language: en\n  auto_save_conversation: false\n", encoding="utf-8"
+    )
+    _tick(feed)
+    frames = _config_frames(_queued(subscription))
+    assert len(frames) == 1, frames
+    assert frames[0]["payload"]["changed_keys"] == ["auto_save_conversation"]
     asyncio.run(feed.close())
 
 

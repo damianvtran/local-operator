@@ -18203,6 +18203,151 @@ def build_read_variable_tool() -> AgentTool:
 
 
 # ---------------------------------------------------------------------------
+# setting — read and write one /settings registry row
+# ---------------------------------------------------------------------------
+
+#: The tool's ops. Two, deliberately: "reset to the registry default" is
+#: expressed as a SET (language's tri-state `auto` included) — a third op would
+#: be a second spelling of the same write, and the registry's own validation is
+#: what decides whether a value is legal. Nothing here re-spells it.
+SETTING_OPS = ("get", "set")
+
+
+class SettingParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["get", "set"] = Field(
+        description="'get' reads one setting; 'set' writes it (validated by the registry)."
+    )
+    key: str = Field(
+        description="Registry key, as `/settings` and `lop config list` show it, e.g. 'language'."
+    )
+    value: Any = Field(
+        default=None,
+        description=(
+            "The value to write (op='set' only); the row's kind decides its type — "
+            '`true`, 42, or a string like "fr".'
+        ),
+    )
+
+
+async def execute_setting(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Read or write ONE settings-registry row; the sanctioned agent write path.
+
+    THE SEAM, NOT THE FACADE: this tool never touches ``settings_io`` — it calls
+    ``local_operator.settings_control``, whose every write is UNATTRIBUTED
+    (``notify=False``). That is an approval-boundary requirement, not a
+    layering preference: ``source="local"`` means "a write the operator made
+    through the facade in the process holding the gate"
+    (``harness.approval.loosening_is_authorised``), and this tool can execute
+    inside processes that hold a live gate (the embedded TUI, ``lop exec``) —
+    a notified write from here would let the gated party mint that attribution
+    and loosen the gate that constrains it. Unattributed, the write is what it
+    factually is — a file edit on the agent's behalf: it may tighten a live
+    gate and may never loosen one, and every observer (the process's own
+    ConfigWatcher on its next poll, the machine-wide desktop feed, clients
+    re-reading ``GET /v1/capabilities``) sees exactly that.
+
+    EVERYTHING ELSE IS STILL THE ONE FUNNEL: ``settings_control.apply`` calls
+    ``settings_io.write_setting`` — the function the TUI's /settings page, the
+    desktop's ``PATCH /v1/settings`` and ``lop config edit`` all pass through —
+    so registry validation, the sub-mapping merge rule, the clear-to-unset
+    gesture and the cascade contract are the same ones every other origin
+    gets. A tool-local re-spelling of any of those is how a second truth is
+    born, and the user's language must have exactly one.
+
+    Runs in whatever process executes the turn (a server turn's child process
+    included): the write is a FILE write, and every live observer sees it from
+    the file, exactly as it sees a hand edit.
+    """
+    try:
+        params = SettingParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "setting", exc)
+    from local_operator import settings_control
+
+    manager = ConfigManager(config_dir())
+    setting = settings_control.resolve(params.key.strip())
+    if setting is None:
+        return _error(
+            tool_call_id,
+            "setting",
+            f"Unknown setting key: {params.key!r}. Keys are the strings /settings "
+            "and `lop config list` show (for example 'language').",
+        )
+    if params.op == "get":
+        value = settings_control.read(manager, setting)
+        return _text(
+            tool_call_id,
+            "setting",
+            json.dumps(
+                {
+                    "key": setting.key,
+                    "value": value,
+                    "is_default": settings_control.is_default(manager, setting),
+                },
+                ensure_ascii=False,
+            ),
+            details={"key": setting.key},
+        )
+    try:
+        # The seam owns the route-mirror semantics (cascade refusal, the
+        # clear-to-unset arm, the readability guard) and the unattributed
+        # write; its refusals arrive as ValueError/ConfigUnreadableError and
+        # are surfaced verbatim below.
+        settings_control.apply(manager, setting, params.value)
+    except settings_control.ConfigUnreadableError:
+        return _error(
+            tool_call_id,
+            "setting",
+            "The configuration file cannot be read. Repair it before saving.",
+        )
+    except ValueError as exc:
+        # The registry's / the contract's own refusal, verbatim: the sentence
+        # the /settings page shows for the same input, never a paraphrase.
+        return _error(tool_call_id, "setting", str(exc))
+    value = settings_control.read(manager, setting)
+    return _text(
+        tool_call_id,
+        "setting",
+        json.dumps(
+            {
+                "key": setting.key,
+                "value": value,
+                "is_default": settings_control.is_default(manager, setting),
+            },
+            ensure_ascii=False,
+        ),
+        details={"key": setting.key},
+    )
+
+
+def build_setting_tool() -> AgentTool:
+    return AgentTool(
+        name="setting",
+        label="Setting",
+        description=(
+            "Read or change one setting from the /settings registry by key "
+            "(e.g. 'language'); writes are validated by the same registry, and "
+            "surfaces observe the change live. See `read tool://setting`."
+        ),
+        parameters=SettingParams.model_json_schema(),
+        approval_tier="write",
+        # Two settings writes on one config.yml are a read-modify-write race;
+        # exclusive serializes them (the edit tool's stated reason, verbatim).
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_setting,
+    )
+
+
+# ---------------------------------------------------------------------------
 # browser — detect and drive the CMUX browser
 # ---------------------------------------------------------------------------
 
