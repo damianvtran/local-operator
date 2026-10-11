@@ -209,10 +209,13 @@ async def test_a_chat_shaped_archive_replays_its_middle_as_verbatim_text(tmp_pat
     the replayed marker's text equals the archive's own bounded source, head
     to tail, and the frames the pass still rendered are compatibility cargo,
     not what the model reads."""
-    stream = ScriptedStream(["reply"] * 8)
+    stream = ScriptedStream(["reply"] * 48)
     session = make_session(tmp_path, stream, model=VISION_MODEL)
-    for index in range(6):
-        await session.prompt(f"question {index} " + "detail " * 3000)
+    # Short-line chat: every page's local estimate lands four times below the
+    # margin threshold, so ALL pages flip to text and the run is decisively
+    # the fleet-dominant regime rather than a near-tie.
+    for index in range(40):
+        await session.prompt(f"question {index}\n" + ("detail " * 5 + "\n") * 90)
 
     outcome = await session.compact_now()
     assert outcome.strategy == "snapcompact"
@@ -692,6 +695,7 @@ async def test_the_snapcompact_frame_correction_is_priced_once(tmp_path):
     the invariant directly on a real snapcompact pass.
     """
     from local_operator.compaction.snapcompact import (
+        Archive,
         frame_token_estimate_for,
         replayed_frame_count,
     )
@@ -718,12 +722,12 @@ async def test_the_snapcompact_frame_correction_is_priced_once(tmp_path):
 
     entries = [e for e in session._transcript.entries() if e.type == "compaction"]
     snap = entries[-1].payload["preserve_data"]["snapcompact"]
-    frames = snap.get("frames") or []
     # The receipt prices the frames the marker REPLAYS (the image-kind pages),
     # not every stored frame: a policy archive carries its text-carried pages
     # as dormant PNGs for older builds, and those must not be billed as
-    # images.
-    frame_count = replayed_frame_count(str(snap.get("middle_kinds") or ""), len(frames))
+    # images. Read through the same gate the replay reads, so a degraded
+    # archive prices as all-image on both sides.
+    frame_count = replayed_frame_count(Archive.model_validate(snap))
     per_frame = frame_token_estimate_for(session._model.provider, session._model.model_id)
     correction = frame_count * (per_frame - IMAGE_TOKEN_ESTIMATE)
     assert correction > 0, "fixture replays no frames — the invariant is untested"
@@ -822,6 +826,7 @@ async def test_a_snapcompact_pass_that_shrinks_takes_the_proportional_arm(tmp_pa
     ratio is what decides it.
     """
     from local_operator.compaction.snapcompact import (
+        Archive,
         frame_token_estimate_for,
         replayed_frame_count,
     )
@@ -853,13 +858,11 @@ async def test_a_snapcompact_pass_that_shrinks_takes_the_proportional_arm(tmp_pa
 
     entries = [e for e in session._transcript.entries() if e.type == "compaction"]
     snap = entries[-1].payload["preserve_data"]["snapcompact"]
-    frames = snap.get("frames") or []
     per_frame = frame_token_estimate_for(session._model.provider, session._model.model_id)
-    # Priced over the frames the marker REPLAYS: this chat-shaped fixture's
-    # pages all flip to text, so the correction is zero here and the ratio
-    # alone must land the receipt (a positive correction is exercised by
-    # test_the_snapcompact_frame_correction_is_priced_once).
-    correction = replayed_frame_count(str(snap.get("middle_kinds") or ""), len(frames)) * (
+    # Priced over the frames the marker REPLAYS (through the replay's own
+    # gate): this chat-shaped fixture flips every page the margin clears, and
+    # whatever does not flip is priced as the frame the replay will send.
+    correction = replayed_frame_count(Archive.model_validate(snap)) * (
         per_frame - IMAGE_TOKEN_ESTIMATE
     )
 

@@ -715,10 +715,10 @@ async def test_resume_after_an_advisory_snapcompact_pass(tmp_path, monkeypatch):
     # blocks a resume must bring back are the frames the archive says it
     # replays (its image-kind pages), and there must be at least one or this
     # test proves nothing about the image path.
-    from local_operator.compaction.snapcompact import replayed_frame_count
+    from local_operator.compaction.snapcompact import Archive, replayed_frame_count
 
     payload = _snapcompact_payload(session)
-    replayed_frames = replayed_frame_count(str(payload.get("middle_kinds") or ""), frame_count)
+    replayed_frames = replayed_frame_count(Archive.model_validate(payload))
     assert replayed_frames > 0, (
         "the archive replays no frames under the policy, so this test would prove "
         "nothing about the image replay it exists to pin"

@@ -19112,6 +19112,7 @@ class Session:
             if isinstance(snap_payload, dict):
                 try:
                     from local_operator.compaction.snapcompact import (
+                        Archive,
                         frame_token_estimate_for,
                         replayed_frame_count,
                     )
@@ -19122,11 +19123,12 @@ class Session:
                     # predate ``middle_kinds`` still read the archive
                     # complete), and pricing those at visual rates would
                     # overstate the after-figure this correction exists to
-                    # state truthfully.
-                    frame_count = replayed_frame_count(
-                        str(snap_payload.get("middle_kinds") or ""),
-                        len(snap_payload.get("frames") or []),
-                    )
+                    # state truthfully. Reviving the payload through the
+                    # model (it decodes the frames, milliseconds) is what
+                    # lets the count share the replay's own gate: an archive
+                    # about to degrade to the all-image form prices as
+                    # all-image here too.
+                    frame_count = replayed_frame_count(Archive.model_validate(snap_payload))
                     per_frame = frame_token_estimate_for(self._model.provider, self._model.model_id)
                     frame_correction = frame_count * (per_frame - IMAGE_TOKEN_ESTIMATE)
                 except Exception:  # noqa: BLE001 - a receipt must not fail the pass
