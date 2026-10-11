@@ -871,8 +871,10 @@ def rejection_hint(
                 "for you to state: send the actions themselves."
             )
         return (
-            "every action must carry the "
-            f'"observation_id" of the observation being answered: "{observation.observation_id}"'
+            "state the "
+            f'"observation_id" of the observation being answered ("{observation.observation_id}") '
+            "on at least one action; actions that omit it inherit that binding, and a batch "
+            "that states no binding, or a different observation, is refused"
         )
     if class_key == "field-invalid":
         return _field_invalid_hint(reason, observation, surface, shape)
@@ -1403,10 +1405,11 @@ def build_system_prompt(
         "current observation. Omit observation_id from individual actions; if you "
         "include legacy per-action IDs, every one must match the top-level ID."
         if compact
-        else 'Every action is an object whose type is given by the key "kind" (NOT "type"),\n'
-        'and every action must carry the "observation_id" of the observation you are\n'
-        "looking at right now: that echo is what binds a decision to the screen it was\n"
-        "made about, and a batch naming any other observation is refused. These are the"
+        else 'Every action is an object whose type is given by the key "kind" (NOT "type").\n'
+        'A batch must state the "observation_id" of the observation you are looking at\n'
+        "right now on at least one of its actions -- every action that omits it inherits\n"
+        "that binding: the echo is what binds a decision to the screen it was made about,\n"
+        "and a batch naming no observation, or any other one, is refused. These are the"
     )
     shape_intro = (
         "\nThese are the only permitted shapes:" if compact else "\nonly permitted shapes:"
@@ -1645,17 +1648,47 @@ def parse_decision(
                 class_key="observation-binding",
             ) from error
     elif action_binding == LEGACY_ACTION_BINDING:
-        # Legacy schemas still require every per-action ID. Check those values
-        # against the pending observation before ActionBatch can normalize them.
-        for action in actions:
+        # A batch may state its binding ONCE -- on any one action -- and omit it
+        # on the others; the omissions inherit the stated id. Binding a whole
+        # batch to one screen once is a natural model decision, and the harness
+        # can complete the echo itself rather than spending a corrective round
+        # trip on a formality. The shape this admits is the one read out of a
+        # sealed 2026-09 OSWorld rejection: a two-action batch bound on its first
+        # action only, refused as observation-binding. Refused turns ran ~10% of
+        # that campaign's calls (137 of 1340) and tracked task failure. What must
+        # NOT move: a stated id that names a DIFFERENT observation refuses the
+        # whole batch -- an action meant for a screen the environment has moved
+        # past must never be admitted by filling in its siblings -- and a batch
+        # that states no id at all is still refused, because with nothing stated
+        # a stale batch would silently inherit the CURRENT observation, which is
+        # the one failure this check exists to stop. A batch of non-objects is
+        # not this check's business and falls through to validation unchanged.
+        # Both refusals raise the sentence the class table and every sealed
+        # artifact were read with, so old and new bundles bucket identically;
+        # only where an omitted id is completed changed.
+        mappings = [action for action in actions if isinstance(action, Mapping)]
+        for action in mappings:
             if (
-                isinstance(action, Mapping)
-                and action.get("observation_id") != observation.observation_id
+                "observation_id" in action
+                and action["observation_id"] != observation.observation_id
             ):
                 raise ActionBatchRefused(
                     "actions at indexes [0] bind to a different observation_id",
                     class_key="observation-binding",
                 )
+        if mappings and not any("observation_id" in action for action in mappings):
+            raise ActionBatchRefused(
+                "actions at indexes [0] bind to a different observation_id",
+                class_key="observation-binding",
+            )
+        actions = [
+            (
+                {**action, "observation_id": observation.observation_id}
+                if isinstance(action, Mapping) and "observation_id" not in action
+                else action
+            )
+            for action in actions
+        ]
     else:
         raise ValueError("action_binding must be 'legacy' or 'compact'")
     # Keep the visible response, not a reconstruction from its actions, whenever
