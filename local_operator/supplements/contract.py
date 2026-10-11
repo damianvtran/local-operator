@@ -150,6 +150,12 @@ class SupplementDetails(TypedDict):
     tokens_out: NotRequired[int]
     cost_usd: NotRequired[float]
     error: NotRequired[str]
+    #: The generator's own notes on the row: one line per bound that touched the job and per
+    #: adjustment it made (turn/component caps, the cost cap reached before a repair). A
+    #: bound that fired after blocks had passed is recorded HERE, never in ``error``, because
+    #: the frozen reader paints the settled block only for ``state="done"`` and a done row
+    #: must not read as a failure (round-1 review R4/R7; see the memo §2.5 amendment).
+    detail: NotRequired[list[str]]
     #: The operator's "not useful" signal (``supplement_dismiss`` writes
     #: ``state=skipped, dismissed=true``); surfaces hide the row.
     dismissed: NotRequired[bool]
@@ -214,7 +220,8 @@ def reader_disposition(row: Mapping[str, Any], *, job_live: bool) -> ReaderDispo
     if row.get("error") == SUPERSEDED_ERROR or row.get("dismissed") or state == "skipped":
         return "nothing"
     if state == "done":
-        # A finish with nothing to show renders nothing: no header, no reserved frame.
+        # A finish with nothing to show renders nothing at all: no line, no reserved frame
+        # (the block never draws a header — memo §2.8, 2026-10-10 amendment).
         return (
             "block"
             if (row.get("files") or row.get("components") or row.get("images"))

@@ -47,9 +47,11 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "qwencloud",
         "scratchpad",
         "sessions",
+        "skills",
         "system-tools",
         "teams",
         "tunnel",
+        "video-generation",
     ]
     assert all(guide.resource_type == "guide" for guide in guides)
     assert all(40 <= len(guide.description) <= 180 for guide in guides)
@@ -91,6 +93,14 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("list available agents or spawn a subagent", "agents"),
         ("set up phone access so I can drive lop from my mobile", "mobile"),
         ("generate an image of a cat", "image-generation"),
+        ("generate a video from a photo", "video-generation"),
+        # The edit lane's router-honest row: "image to image" is vocabulary
+        # the lexical router can see (measured 2026-10-10), so the
+        # post-hub-slice edit capability is routable. A task that only says
+        # "change the headline on this photo" is NOT matched by this router
+        # and is deliberately not asserted here — don't pin what it cannot
+        # see.
+        ("image to image edit of a product photo", "image-generation"),
         ("what are the highlights under my answer and how do I turn them off", "highlights"),
         ("create a Radient personal tunnel with OpenCode routes and billing", "tunnel"),
         ("why is my usage blank", "qwencloud"),
@@ -118,6 +128,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
         (
             "check the review rounds and CI on this pull request",
             "code-requests",
+        ),
+        (
+            "how do skills work and how do I add one for a user",
+            "skills",
         ),
     ],
 )

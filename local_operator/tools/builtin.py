@@ -4806,6 +4806,21 @@ async def execute_bash(
         # whose completion auto-delivers when the session is idle. A REAL
         # abort (Ctrl+C, jobs cancel) still kills: that is a stop, not a
         # redirect.
+        if context is not None and context.monitor_check:
+            # EXCEPT a monitor check: it is UNATTENDED, so no steer may
+            # interrupt it and a cancel here is teardown or the scheduler's
+            # deadline. The detach branch below cannot tell those from a
+            # steer and would return a "job … steering interrupted" NOTICE
+            # as the call's result — the scheduler records it as the check's
+            # OUTPUT and adopts it as the diff baseline (measured live: m28's
+            # post-restart delta ran against exactly that notice text), and
+            # the detached command outlives the check with no consumer. Kill
+            # and let the cancel propagate: the check path turns a deadline
+            # into a failed check and a teardown into a cancelled task,
+            # never into output.
+            _kill()
+            _reap_synchronously()
+            raise
         if signal is not None and signal.aborted:
             _kill()
             raise
@@ -10868,11 +10883,11 @@ def _contained(path: Path, confinement: ToolConfinement | None) -> bool:
 
     WHY RESOLUTION AND NOT ``lstat``: a symlink is a name INSIDE the root whose
     target is somewhere else, and every sibling reader (``read``, ``write``,
-    ``edit``, ``grep``, the shell) judges the [redacted] target -- so this must
+    ``edit``, ``grep``, the shell) judges the RESOLVED target -- so this must
     too, or ``glob`` becomes the one reader with a different rule (review
     round 1, R-1: ``linkapp/**/*`` through a root symlink listed 500 of 1335
     entries of the gated apparatus tree; ``linkapp/*`` listed its three top
-    directories). Fail-closed: a path that cannot be [redacted] cannot be shown
+    directories). Fail-closed: a path that cannot be resolved cannot be shown
     to be inside. ``confinement is None`` is the free-session default and keeps
     the old behaviour byte for byte.
     """
@@ -12077,11 +12092,25 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
     """Copies of the ``pending`` items for ``session_id`` (``[]`` when there
     are none, or the id is unknown).
 
-    THE single definition of "open" that the session's continuation guardrail
-    (``Session._todo_continuation``) fires on, so the tool and the guardrail
-    cannot disagree about whether a turn may end. ``blocked`` is excluded on
-    purpose: it is the escape hatch that lets a model stop honestly instead of
-    marking work done it did not do, and nudging it would defeat that.
+    The pending SUBSET of the work the session's continuation guardrail
+    (``Session._todo_continuation``) reconciles at the yield boundary: work that
+    must not be silently left running, because a model that stops with it in
+    hand has neither done it nor said why not. THE single definition of
+    "pending", so the tool and the guardrail cannot disagree about what still
+    demands work.
+
+    ``blocked`` is deliberately NOT here, and that is not an exemption from the
+    guardrail any more: blocked work is unfinished and is reconciled at the same
+    boundary through :func:`blocked_todos`, which the guardrail ALSO draws on.
+    The split is about what the two groups demand. A pending item may not be left
+    running, so the guardrail nudges the model back to work. A blocked item may
+    legitimately end a turn — it is the escape hatch that lets a model stop
+    honestly instead of marking work done it did not do — but stopping on it is
+    now ACCOUNTED for rather than merely permitted: the model must say whether
+    the condition still holds and that something is watching it. Keeping the two
+    groups in separate functions is what lets the reminder state the two
+    obligations separately; folding blocked into this function would restore the
+    old behaviour of pushing a blocked model to invent progress.
 
     Mirrors only the SESSION-ID branch of :func:`_todo_store_and_key`. A host
     that attaches its own store to ``ToolContext.todos`` (harness/types.py:449;
@@ -12092,8 +12121,9 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
 
     Pending items are flattened across ALL phases (phase-then-item order): the
     guardrail asks "is there open work?", and a phase boundary does not change
-    the answer. The returned dicts are plain item dicts (no phase key), so
-    ``_todo_reminder_text`` needs no change.
+    the answer. The returned dicts are plain item dicts (no phase key), which is
+    the shape ``_todo_reminder_text`` renders (it takes the blocked list
+    alongside this one and formats each group itself).
     """
     raw = TODO_STORE.get(session_id)
     if not raw:
@@ -12103,6 +12133,42 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
         for phase in _as_phases(raw)
         for item in phase["items"]
         if item.get("status") == "pending"
+    ]
+
+
+def blocked_todos(session_id: str) -> list[dict[str, str]]:
+    """Copies of the ``blocked`` items for ``session_id`` (``[]`` when there
+    are none, or the id is unknown).
+
+    :func:`open_todos`'s mirror — same store branch, same copy semantics, same
+    phase flattening (read its docstring for the host-attached
+    ``ToolContext.todos`` caveat and the plain-item-dict shape) — over the
+    ``blocked`` status instead of ``pending``.
+
+    The second half of the guardrail's work set: ``Session._todo_continuation``
+    reconciles pending AND blocked at the yield boundary. Blocked items are
+    unfinished work parked on a user decision or an external service, and a
+    model that ends a turn on one may still stop honestly — but it must ACCOUNT
+    for it. A blocked item nothing is watching is how a session ended turns for
+    ~14 hours over six parked items while the pending-only guardrail saw an
+    empty list and let every yield stand.
+
+    A separate function rather than a status parameter on :func:`open_todos`
+    because the two feed DIFFERENT obligations in the reminder: pending items
+    are work to resume or resolve, blocked items are conditions to re-check and
+    to arm something for. Keeping them apart is what lets the reminder state the
+    two obligations separately; folding blocked into ``open_todos`` would push a
+    blocked model to invent progress, which is the behaviour that function
+    exists to prevent.
+    """
+    raw = TODO_STORE.get(session_id)
+    if not raw:
+        return []
+    return [
+        dict(item)
+        for phase in _as_phases(raw)
+        for item in phase["items"]
+        if item.get("status") == "blocked"
     ]
 
 
@@ -12167,8 +12233,9 @@ def restore_todos(session_id: str, phases: list[dict[str, Any]]) -> None:
     ]
 
 
-def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str], ...]:
-    """``(phase_name, text, status)`` for EVERY item, phase-then-item order.
+def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str, str], ...]:
+    """``(phase_name, text, status, reason)`` for EVERY item, phase-then-item
+    order.
 
     What the guardrail's no-progress latch compares between two yields. The
     FULL list, not the pending subsequence: an item moving from ``done`` to
@@ -12177,6 +12244,17 @@ def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str], ...]:
     tuple because with phases a rename or an item moving between phases is also
     movement the model made — a 2-tuple would be blind to it and read a list
     that changed as stuck.
+
+    The REASON rides in for the same reason, one status over: ``block`` on an
+    item that is already blocked rewrites ``reason`` in place and leaves the
+    status alone (``builtin.py``, the ``block`` arm), and the reminder RENDERS
+    that reason as the condition the model is asked to re-check. A latch blind
+    to it would call a re-blocked item unmoved, so ``_todo_reminder_text`` would
+    keep asserting the old condition and ``_live_todo_reminders`` would never
+    expire it — a stale claim the model has no way to correct. ``or ""`` because
+    a missing key and an empty string are the same fact (no reason recorded), and
+    two spellings of one fact must not read as movement; every item that is not
+    blocked therefore contributes ``""``.
 
     CROSS-FILE COUPLING (design §5.3): the arity of this tuple is mirrored by
     ``session.py:_stamped_todo_fingerprint``, which filters the stamped copy to
@@ -12192,7 +12270,12 @@ def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str], ...]:
     if not raw:
         return ()
     return tuple(
-        (str(phase["name"]), str(item.get("text", "")), str(item.get("status", "pending")))
+        (
+            str(phase["name"]),
+            str(item.get("text", "")),
+            str(item.get("status", "pending")),
+            str(item.get("reason") or ""),
+        )
         for phase in _as_phases(raw)
         for item in phase["items"]
     )
@@ -18116,6 +18199,151 @@ def build_read_variable_tool() -> AgentTool:
         concurrency="shared",
         interruptible=False,
         execute=execute_read_variable,
+    )
+
+
+# ---------------------------------------------------------------------------
+# setting — read and write one /settings registry row
+# ---------------------------------------------------------------------------
+
+#: The tool's ops. Two, deliberately: "reset to the registry default" is
+#: expressed as a SET (language's tri-state `auto` included) — a third op would
+#: be a second spelling of the same write, and the registry's own validation is
+#: what decides whether a value is legal. Nothing here re-spells it.
+SETTING_OPS = ("get", "set")
+
+
+class SettingParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["get", "set"] = Field(
+        description="'get' reads one setting; 'set' writes it (validated by the registry)."
+    )
+    key: str = Field(
+        description="Registry key, as `/settings` and `lop config list` show it, e.g. 'language'."
+    )
+    value: Any = Field(
+        default=None,
+        description=(
+            "The value to write (op='set' only); the row's kind decides its type — "
+            '`true`, 42, or a string like "fr".'
+        ),
+    )
+
+
+async def execute_setting(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Read or write ONE settings-registry row; the sanctioned agent write path.
+
+    THE SEAM, NOT THE FACADE: this tool never touches ``settings_io`` — it calls
+    ``local_operator.settings_control``, whose every write is UNATTRIBUTED
+    (``notify=False``). That is an approval-boundary requirement, not a
+    layering preference: ``source="local"`` means "a write the operator made
+    through the facade in the process holding the gate"
+    (``harness.approval.loosening_is_authorised``), and this tool can execute
+    inside processes that hold a live gate (the embedded TUI, ``lop exec``) —
+    a notified write from here would let the gated party mint that attribution
+    and loosen the gate that constrains it. Unattributed, the write is what it
+    factually is — a file edit on the agent's behalf: it may tighten a live
+    gate and may never loosen one, and every observer (the process's own
+    ConfigWatcher on its next poll, the machine-wide desktop feed, clients
+    re-reading ``GET /v1/capabilities``) sees exactly that.
+
+    EVERYTHING ELSE IS STILL THE ONE FUNNEL: ``settings_control.apply`` calls
+    ``settings_io.write_setting`` — the function the TUI's /settings page, the
+    desktop's ``PATCH /v1/settings`` and ``lop config edit`` all pass through —
+    so registry validation, the sub-mapping merge rule, the clear-to-unset
+    gesture and the cascade contract are the same ones every other origin
+    gets. A tool-local re-spelling of any of those is how a second truth is
+    born, and the user's language must have exactly one.
+
+    Runs in whatever process executes the turn (a server turn's child process
+    included): the write is a FILE write, and every live observer sees it from
+    the file, exactly as it sees a hand edit.
+    """
+    try:
+        params = SettingParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "setting", exc)
+    from local_operator import settings_control
+
+    manager = ConfigManager(config_dir())
+    setting = settings_control.resolve(params.key.strip())
+    if setting is None:
+        return _error(
+            tool_call_id,
+            "setting",
+            f"Unknown setting key: {params.key!r}. Keys are the strings /settings "
+            "and `lop config list` show (for example 'language').",
+        )
+    if params.op == "get":
+        value = settings_control.read(manager, setting)
+        return _text(
+            tool_call_id,
+            "setting",
+            json.dumps(
+                {
+                    "key": setting.key,
+                    "value": value,
+                    "is_default": settings_control.is_default(manager, setting),
+                },
+                ensure_ascii=False,
+            ),
+            details={"key": setting.key},
+        )
+    try:
+        # The seam owns the route-mirror semantics (cascade refusal, the
+        # clear-to-unset arm, the readability guard) and the unattributed
+        # write; its refusals arrive as ValueError/ConfigUnreadableError and
+        # are surfaced verbatim below.
+        settings_control.apply(manager, setting, params.value)
+    except settings_control.ConfigUnreadableError:
+        return _error(
+            tool_call_id,
+            "setting",
+            "The configuration file cannot be read. Repair it before saving.",
+        )
+    except ValueError as exc:
+        # The registry's / the contract's own refusal, verbatim: the sentence
+        # the /settings page shows for the same input, never a paraphrase.
+        return _error(tool_call_id, "setting", str(exc))
+    value = settings_control.read(manager, setting)
+    return _text(
+        tool_call_id,
+        "setting",
+        json.dumps(
+            {
+                "key": setting.key,
+                "value": value,
+                "is_default": settings_control.is_default(manager, setting),
+            },
+            ensure_ascii=False,
+        ),
+        details={"key": setting.key},
+    )
+
+
+def build_setting_tool() -> AgentTool:
+    return AgentTool(
+        name="setting",
+        label="Setting",
+        description=(
+            "Read or change one setting from the /settings registry by key "
+            "(e.g. 'language'); writes are validated by the same registry, and "
+            "surfaces observe the change live. See `read tool://setting`."
+        ),
+        parameters=SettingParams.model_json_schema(),
+        approval_tier="write",
+        # Two settings writes on one config.yml are a read-modify-write race;
+        # exclusive serializes them (the edit tool's stated reason, verbatim).
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_setting,
     )
 
 
@@ -26626,6 +26854,11 @@ async def execute_jobs(
             # actually stop something:
             #   * a bash/eval row has no comms record, so a stamp would invent an
             #     actor for a job that never had one;
+            #   * a video row likewise has no comms record (its durable state is
+            #     the ``video_job_v1`` transcript record, never the subagent
+            #     roster), and the manager's cancel still reaches it through the
+            #     runner's bounded provider cancel — so the type gate below is
+            #     deliberately left covering ``task`` only;
             #   * a row that is ALREADY settled is the tool's own normal
             #     "was not cancelled" outcome, not an error — stamping it put
             #     `stopped by jobs-tool` on a COMPLETED child (design/QA round 1, Q1,
@@ -26787,7 +27020,7 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
         name="jobs",
         label="List jobs",
         description=(
-            "Inspect background jobs (task/bash). op='list' shows every "
+            "Inspect background jobs (task/bash/video). op='list' shows every "
             "running and recently-settled job with its id, status and age — "
             "'up' is how long a running job has been going, 'wait' is how long "
             "a parked one has been waiting for a slot, 'ago' is how long since "

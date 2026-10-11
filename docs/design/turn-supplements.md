@@ -50,14 +50,18 @@ failed, and the HTML is untrusted on every surface.
 | C | Restraint, never delay or fail, security, honesty, persistence outside model context, model/cost, config, lanes | §2.3–§2.11, §4, §5, §6 |
 
 **The names.**
-- User-facing: **"Highlights"**. The row header reads "Highlights" (files plus graphics); the
-  loading line reads "Preparing highlights…". The operator's own wording, "generating
-  supporting graphics", is the fallback if design prefers it.
-- Two conditions ride the name (round-1 design review D6): (a) the settled row always names its
-  contents — counts and names (`2 files · 1 graphic`), never the bare word; (b) no new
-  text-selection copy in the same window says "highlight", so the two senses cannot drift.
-- "Highlights" stays the umbrella for the block; the files half reads as "Files" or as the
-  contents themselves, never as "supporting graphics".
+- User-facing: **"Highlights"** — settings, docs and the ledger's word for the block. **The
+  block itself renders with no header, label or title chrome on any surface**: no section
+  heading, no "Highlights" label, no separator labelled as such, no badge or chip announcing
+  the block. It appears seamlessly directly under the final answer's text, and the reader
+  takes the relationship from position; spacing and rhythm, never a label, carry the seam
+  (operator directive, 2026-10-10 — supersedes round-1 D6(a)'s naming line). The loading line
+  reads "Preparing highlights…"; the operator's own wording, "generating supporting graphics",
+  is the fallback if design prefers it.
+- No new text-selection copy in the same window says "highlight", so the two senses cannot
+  drift (round-1 design review D6(b)).
+- "Highlights" stays the umbrella for the block; the files half appears as the file rows
+  themselves — the contents name themselves — never under a "supporting graphics" label.
 - Code name: keep **`supplement`**. Code reads `supplement`, `SupplementJob`, `supplement_v1`.
   The reason is that "supplement" names what the thing is to the turn (something attached
   after it), while "highlights" names what it is to the reader. Code needs the first and UI
@@ -196,8 +200,11 @@ Both stamp `provider_payload[RENDERED_INJECTION_KEY]` (`session.py:8155`, `:8267
 5. **No goal loop is running.** `handle._goal_loop is None or not running`, and the run's
    opener was not a judge continuation. Rule 1 already excludes judge continuations; rule 5
    also covers `/loop` turns typed as the `/loop` seed.
-6. **Not a headless one-shot host.** `session._one_shot_exit` is False
-   (`session.py:15712-15731`; set by `run_print_mode`, `headless_print.py:601-604`).
+6. **Not a headless host.** `session._one_shot_exit` is False
+   (`session.py:15712-15731`; set by `run_print_mode`, `headless_print.py:601-604`) **and**
+   `RunProvenance.headless` is False (`Session.declare_headless_host`, also declared by
+   `run_print_mode`) — the second covers the `--loop`/`--loop-goal` runs whose one-shot
+   declaration is deliberately skipped (their turns are the run's work).
 
 **Coverage of the cases the brief names:**
 
@@ -213,7 +220,7 @@ Both stamp `provider_payload[RENDERED_INJECTION_KEY]` (`session.py:8155`, `:8267
 | Goal-loop / judge continuation, spooled owner chrome | not eligible | `RENDERED_INJECTION_KEY` |
 | Spooled *real* owner prompt (sent during an update window) | eligible | `harness_injected` False on a typed spool row |
 | Subagent run | not eligible | `_job_id` |
-| `lop exec` text / `--json`, `run_print_mode` | not eligible | `_one_shot_exit` (rule 6). The text arm's stdout is the last assistant `MessageEnd` (`headless_print.py:260-265`); the `--json` arm dumps **every** event (`headless_print.py:209-218`), so rule 6 is load-bearing there, not belt-and-braces — §5.1 pins a no-`supplement_progress` assertion on it (round-1 review R7). |
+| `lop exec` text / `--json`, `run_print_mode` | not eligible | `_one_shot_exit`/`headless` (rule 6). The text arm's stdout is the last assistant `MessageEnd` (`headless_print.py:260-265`); the `--json` arm dumps **every** event (`headless_print.py:209-218`), so rule 6 is load-bearing there, not belt-and-braces — §5.1 pins a no-`supplement_progress` assertion on it (round-1 review R7). |
 | SDK `open_session(mode="own")` | **not eligible by default** | the SDK constructs `create_session` with no `ServingSessionHandle` (`sdk.py:584-590`), so the runtime subscriber (§2.1) is never installed. That absence is the contract: SDK event streams stay unchanged. |
 | SDK `deliver()` to a runtime / `lop send` | eligible only if it carries a typed `PromptErrand` | it rides the runtime's ordinary prompt path |
 
@@ -352,7 +359,8 @@ Reasons:
   "decision": {"vendor": "radient", "files_p": {...}, "graphics_p": 0.83, "skipped": null},
   "instruction": "make it a table",            // steer text that produced this version
   "model": "anthropic/claude-…", "turns": 2, "tokens_in": 9120, "tokens_out": 2210,
-  "cost_usd": 0.0123, "error": "", "at": 1791...
+  "cost_usd": 0.0123, "error": "", "at": 1791...,
+  "detail": ["bound:cost cap: $0.0410 of $0.05 reached before repair"]  // generator notes: bound records live HERE, never in "error" on a done row (round-1 review R4/R7)
 }
 ```
 
@@ -430,9 +438,10 @@ in the fork is a new `job` id. Nothing else is needed.
 
 Why isolated: the generator needs the **evidence**, not the conversation. A warm-prefix
 request would put a design prompt in the session's cache lineage, and on a different model
-there is no prefix to share anyway. The system prompt is the Appendix A text: **972 o200k
-tokens** (968 cl100k), measured with tiktoken 0.14 on this exact text. It is cache-stable
-across jobs.
+there is no prefix to share anyway. The system prompt is the Appendix A text: **1,140 o200k
+tokens** (1,137 cl100k), 4,672 chars, measured with tiktoken 0.14 on this exact text
+(re-measured for the body-only amendment; the pre-amendment text was 972/968 on 3,919 chars).
+It is cache-stable across jobs.
 
 **Evidence.** The generator is given only:
 - the user message (≤ 2k chars);
@@ -458,12 +467,19 @@ process, the same redaction boundary classification-layer §6 requires for outbo
 - `TIMEOUT_S` 90 s wall for the whole job;
 - `MAX_OUTPUT_TOKENS` 6000 per turn;
 - `MAX_COMPONENTS` 3;
-- `MAX_JOB_COST_USD` 0.20, a soft cap checked between turns against the ledger-priced
-  snapshot. §5.3's envelope is **per job** (≈ $0.04-0.08 for the whole job, repair turn
-  included), so 0.20 = **2 × the $0.08 high end of that per-job envelope + $0.04 of headroom**.
-  It is not a per-turn figure with a third turn added, which is how the round-1 wording could
-  be read (round-1 review R3; round-2 R2-6).
-Any bound firing → `state=failed`, `error="bound:<name>"`, with valid blocks so far kept.
+- `MAX_JOB_COST_USD` 1.00, a soft cap checked between turns against the ledger-priced
+  snapshot. It is sized to cover roughly one Opus-class turn, where the old 0.20 was derived
+  from §5.3's measured **per-job** envelope (≈ $0.04-0.08 for the whole job at Sonnet-class,
+  repair turn included) — the envelope stays a measurement; nothing derives from it now
+  (operator directive, 2026-10-10). The units contract is unchanged: the cap is only checked
+  between turns, never a per-turn figure with a third turn added (round-1 review R3;
+  round-2 R2-6).
+Any bound firing ends the job. With NO block kept the row is `state=failed`,
+`error="bound:<name>"`; when valid blocks so far exist they are KEPT, the row is
+`state="done"` -- the only state the frozen reader paints as a settled block -- and the bound
+is recorded in the row's `detail` list (round-1 review R4/R7: the original "failed with the
+blocks kept" was unpaintable under the frozen reader rule, so the record moved rather than
+the rule). The turn cap and the per-turn token cap record the same way when they touch a job.
 
 **Fail-open.** Every exception → `failed`, a debug log, and no notice. A generator failure is
 never surfaced as an error in the transcript; the indicator settles to a quiet "Couldn't
@@ -480,15 +496,17 @@ The prelude is:
 - `prelude.js`: `LO.table/bar/line/el/fmt/color/onTheme/onSize/size`, plus the width-redraw
   and theme listener.
 
-Measured on a working spike (Appendix C), after the round-2 label-layout fix — **2,044 B CSS +
-8,180 B JS raw (minified build, esbuild 0.28.2); 4,538 B gzip combined** (one method for every
-figure here: `cat` the pair through `gzip -9`; the spike's `BUILD.md` carries it, `measure.py`
-re-derives it). Budget: **≤ 11 KB raw / ≤ 4.5 KB gzip** — 1,040 B and 70 B spare. Round 2 moved
+Measured on the vendored pair (the row-per-build table is `prelude/BUILD.md`) — **2,008 B CSS
++ 8,047 B JS raw (minified build, esbuild 0.28.2); 4,562 B gzip combined** (one method for every
+figure here: `cat` the pair through `gzip -9`; the spike's `measure.py` re-derives it). Budget:
+**≤ 11 KB raw / ≤ 4.5 KB gzip** — 1,209 B and 46 B spare. Round 2 moved
 the caps: D2-1's anchoring fix (measure the composed top-tick label, reserve its width, fall
 back inside the plot when the space is short) plus D2-2/D2-4's label fitting cost **+474 B gzip /
 +1,089 B raw** against the pre-fix pair through the same tool, and the old caps had 29 B of gzip
 headroom. The caps are self-imposed; that fix is not. Any further addition must trim rather than
-extend — the App. B guard (+412 B gzip) still does not fit.**
+extend — the App. B guard (+412 B gzip) still does not fit.** (The pair's own history: the spike
+row above, then C0's nonce echo, then C1b's `div.ttl` title strip, which took it from the C0
+build's 2,044 / 8,202 raw and 4,607 gzip.)**
 
 Trade-offs:
 
@@ -681,12 +699,13 @@ known, graphics queued" (which paints as `queued`).
 
 Steer and cancel render as a **pair** — `Adjust…` · `Cancel`, one `text-meta`/`ink-dim` line — never one hover-only while the other persists; on touch surfaces both are visible, tap targets ≥ 44 px (D10).
 
-**Block anatomy (round-1 design D1).**
-- Files-only with ≤ 2 files and no components: **one line, no header** — the contents themselves (`2 files: report.md, bench.csv`), never the bare word "Highlights" (§0).
-- Otherwise: the header line ("Highlights", always with counts and names), up to `MAX_FEATURED` file rows, the "N more" affordance — **expand in place, bounded at the stored ≤ 20** — then components.
+**Block anatomy (round-1 design D1; header rule amended 2026-10-10).**
+- **No header, label or title — on any surface (TUI, UI, relay, native).** The block starts directly with its content, seamlessly under the answer's text; spacing and rhythm alone carry the seam (§0). No section heading, no "Highlights" label, no separator labelled as such, no badge or chip.
+- Files-only with ≤ 2 files and no components: **one line** — the contents themselves (`2 files: report.md, bench.csv`), never the bare word "Highlights".
+- Otherwise: up to `MAX_FEATURED` file rows, the "N more" affordance — **expand in place, bounded at the stored ≤ 20** — then components, with no header line before them.
 - **Aggregate frame budget:** frames mount automatically only within a cumulative `min(480 px, 40 vh)` of block height; anything beyond (MAX_COMPONENTS is 3) sits behind one disclosure (`Show all N graphics`) that expands in place on an explicit user action. Each frame still answers to its own [120, 480] clamp (§2.11).
-- **Condensed turns:** the block condenses with its turn — one line, **no frames mounted while condensed** — and restores on expand (§2.11). A `done` row with zero components and zero files renders **nothing** (no header, no reserved frame space); a files-only finish reserves no frame space.
-- **Captions, one place (D13):** the helper prints the component title and unit inside the document (D2, App. A); the host chrome renders exactly one `Source: …` line (§2.10); a model-supplied in-document `caption` is suppressed where it would restate the source. The reserved box carries the title as its label while the document loads.
+- **Condensed turns:** the block condenses with its turn — one line, **no frames mounted while condensed** — and restores on expand (§2.11). A `done` row with zero components and zero files renders **nothing** (no reserved frame space); a files-only finish reserves no frame space.
+- **Captions, one place (D13):** the helper draws no title line — the component's `title` is its name for tooling and accessibility, never visible chrome; the document prints only the data labelling it needs (axis labels, units, series names, column headers, value labels; D2, App. A). The host chrome renders exactly one `Source: …` line (§2.10); a model-supplied in-document `caption` is suppressed where it would restate the source or echo the question. The reserved box holds its space while the document loads and draws no title.
 - `branding.md` §7 (one quiet line, not a card, UI `branding.md:837-896` *(scout)*): the
   indicator is a line. The settled block is content, not chrome; the frame stays borderless
   and transparent (Appendix B).
@@ -746,7 +765,11 @@ task per session. Rules:
   of evidence values. They must be declared as columns named `"… (derived: a/b)"`, and the
   validator recomputes them. Anything else fails validation → repair turn → drop.
 - Inline numeric literals in component scripts beyond layout constants are rejected by a
-  static scan (§4.2): `\d{3,}` outside `viewBox`/style is a reject reason.
+  static scan (§4.2): `\d{3,}` outside the structural attribute values (`viewBox`, SVG
+  geometry, `style`) is a reject reason. The scan verifies **readable numerals** — element
+  text and data-bearing attributes — not drawn geometry: a chart whose shape encodes a value
+  its text does not state is outside a lexical scan's reach by construction, and §5's
+  golden-set spot-check is that boundary's control (round-2 review R2-1/R2-2).
 - Every component carries `source` (required). Surfaces render it as one caption line,
   `Source: bench.csv (rows 1-12)` — `text-meta`, `ink-muted`, single line, ellipsis with
   the full text available; the caption idiom of §2.8 means chrome and a model `caption`
@@ -808,7 +831,7 @@ default constant beside its consumer and a `_consumer_defaults` entry (`AGENTS.m
 | `supplements.maxTurns` | int / `2` | 1..4 |
 | `supplements.maxOutputTokens` | int / `6000` | per generator turn |
 | `supplements.timeoutS` | int / `90` | whole job |
-| `supplements.maxCostUsd` | float / `0.20` | soft per-job cap — 2 × the measured **per-job** high end ($0.08) plus $0.04 of headroom, so a job inside its envelope is never stopped mid-repair; §5.3, round-1 R3/round-2 R2-6 |
+| `supplements.maxCostUsd` | float / `1.00` | soft per-job cap, checked between turns — sized to cover roughly one Opus-class turn; deliberately **not** derived from §5.3's measured Sonnet-class envelope ($0.04-0.08/job); round-1 R3/round-2 R2-6, operator directive 2026-10-10 |
 | `supplements.maxFeatured` | int / `4` | the "N more" threshold |
 | `supplements.denyPrefixes` | list[str] / `[]` | paths under these prefixes are never candidate files — the adoption knob for a machine holding customer data (round-1 S-R8) |
 
@@ -981,7 +1004,7 @@ as hostile — a guard bug must not silently become an exfil path;
 | Surface | Delivery | Why this one (evidence) |
 |---|---|---|
 | **UI (Electron renderer)** | `<iframe sandbox="allow-scripts" src="data:text/html;base64,…">` — the delivery **P1 decides** between (1) the `data:` URL, (2) a dedicated custom protocol, (3) `blob:`. The html comes from `sessions.supplementDocument` via main (bearer added in main); the CSP meta rides inside the document. | **Acceptance, settled at P1:** *the initial document loads AND the CSP is enforced* (the inline component script runs under the document's own policy; no embedder-policy inheritance surprise). The spec basis is contested — fetch's "is local" includes `data:`, whose policy-container step would inherit the initiator's CSP list, while Chromium has drifted by navigation method (crbug 40053796) — and the memo asserts neither reading. `srcdoc` inherits the renderer's `script-src 'self' …` (UI `index.html:31-32`) and is rejected. **Option 2's requirements are fixed now:** `registerSchemesAsPrivileged({scheme:"lo-supplement", privileges:{standard:true, secure:false, corsEnabled:false, bypassCSP:false}})`, its handler serves only stored digests with the §4.1 document policy as a response header + `X-Content-Type-Options: nosniff` + `Cache-Control: no-store`, and the frame keeps `sandbox="allow-scripts"` so the origin stays opaque either way. `secure:true` is the one to avoid: a secure context re-opens `RTCPeerConnection` (CSP does not govern WebRTC), `navigator.clipboard` and `crypto.subtle`. P1 records `window.isSecureContext` and `typeof RTCPeerConnection` for the winner — those are what decide whether the fallback is a downgrade (§9). Size: ≤ 64 KB documents are fine as data: URLs. |
-| **Relay web** | `<iframe sandbox="allow-scripts" src="data:text/html;base64,…">` (same as UI), HTML fetched as JSON from the relay route. **Never** a relay-served `text/html` URL. **Navigation control (this host has no interception point):** the relay page adds a parent-document CSP `frame-src data:` **as a `<meta http-equiv>` in `mobile/web/index.html`** — a response header does not survive the tunnel (§2.7) — and that policy is the **load-bearing** control: the embedding document's `frame-src` governs navigations of an already-loaded child frame (script-, `meta refresh`- and embedder-initiated alike) and blocks them **before the request is issued** (measured on Chrome 155; w3c/webappsec-csp#509). The host also counts the frame's `load` events — the **second** `load` is a hostile navigation **or a blocked attempt** (measured: a blocked navigation fires a second `load` too) — so it tears the frame down and renders the frame-level `Couldn't render this graphic` line (§2.8), one debug line; the teardown is the belt, the CSP is the control (round-1 R1/S-R1; round-2 S-R2-1). | The relay has no CSP meta (`mobile/web/index.html`, verified: no CSP, no existing frames), so srcdoc would also work there. One delivery for both web hosts is chosen to keep the code path and the security probe single. An opaque origin sends `Origin: null`, which fails `cross_origin_mutation` (`daemon.py:4188-4205` *(scout)*) and the gateway's origin check (`gateway.py:583-595` *(scout)*). Tunnel header stripping is irrelevant because every policy rides in-document (§2.7). |
+| **Relay web** | `<iframe sandbox="allow-scripts" src="data:text/html;base64,…">` (same as UI), HTML fetched as JSON from the relay route. **Never** a relay-served `text/html` URL. **Navigation control (this host has no interception point):** the relay page adds a parent-document CSP `frame-src data:` **as a `<meta http-equiv>` in `mobile/web/index.html`** — a response header does not survive the tunnel (§2.7) — and that policy is the **load-bearing** control: the embedding document's `frame-src` governs navigations of an already-loaded child frame (script-, `meta refresh`- and embedder-initiated alike) and blocks them **before the request is issued** (measured on Chrome 155; w3c/webappsec-csp#509). The host also counts the frame's `load` events — the **second** `load` is a hostile navigation **or a blocked attempt** (measured: a blocked navigation fires a second `load` when it is attempted **after** the frame's first `load`; attempted during the initial parse it does not, and that attempt ends via the ping watchdog's `no-pong` — same fallback line; QA round 1 Q2) — so it tears the frame down and renders the frame-level `Couldn't render this graphic` line (§2.8), one debug line; the teardown is the belt, the CSP is the control (round-1 R1/S-R1; round-2 S-R2-1). | The relay has no CSP meta (`mobile/web/index.html`, verified: no CSP, no existing frames), so srcdoc would also work there. One delivery for both web hosts is chosen to keep the code path and the security probe single. An opaque origin sends `Origin: null`, which fails `cross_origin_mutation` (`daemon.py:4188-4205` *(scout)*) and the gateway's origin check (`gateway.py:583-595` *(scout)*). Tunnel header stripping is irrelevant because every policy rides in-document (§2.7). |
 | **Native** | `react-native-webview` with `source={{html, baseUrl:"about:blank"}}`, `originWhitelist={["about:*"]}` (P4), `javaScriptEnabled`, `incognito`, `sharedCookiesEnabled={false}`, `thirdPartyCookiesEnabled={false}`, `allowFileAccess={false}`, `allowUniversalAccessFromFileURLs={false}`, `setSupportMultipleWindows={false}`, `onShouldStartLoadWithRequest` → **one-shot**: allow exactly the first request, deny everything after (not URL-matched — see below), `onOpenWindow` deny, **no `injectedJavaScript`**. Theme is pushed with `postMessage(JSON)`. The prelude listens on both `window` and `document` `message` events (an Android quirk), and its outbound calls use `window.ReactNativeWebView.postMessage` when present. | There is no WebView today (`package.json:36-69` *(scout)*). The tunnel credential is set per-fetch by the app (`profile.ts:257-297` *(scout)*), so an incognito WebView holds no credential. Whether it shares the platform cookie jar on the custom route is probe P5; `incognito` + `sharedCookiesEnabled=false` is the belt either way. |
 | **TUI** | HTML is never rendered. Image components only (none generated in v1, §8). | — |
 
@@ -1021,16 +1044,20 @@ should land as its own UI PR **immediately — this week** (§8 F6). The supplem
 round adds one row mounting the *preview* sandbox with the S1-S11 set, because it is the
 closest existing analogue.
 
-> **Status (core PR #2134, remediation round 1).** The *allow-root* half of the route fix
-> landed in core: `/v1/static/*` now serves only a regular file inside a served root (agent
-> home, session scratchpads, uploads, a running session's cwd below `$HOME`, `static.roots`),
-> refuses a non-loopback `Host`, drops its CORS grant for every non-admitted origin, and
-> carries `nosniff` + a CSP ending in `frame-ancestors` on every response. The UI sandbox
-> half is local-operator-ui PR #931. **Still open:** the *desktop-bearer* half -- the routes
-> stay unauthenticated because `<img>/<iframe src>` cannot carry a header; the fix is a
-> short-lived signed query token minted by an authenticated endpoint and verified in core,
-> which needs the UI lane. Known cost until the UI reads local file bytes over IPC: previews
-> and thumbnails of files outside every root 403 (see `docs/DESKTOP_API.md`).
+> **Status (core PR #2134, remediation round 1; refreshed for the file-serving RFC,
+> core P1).** The *allow-root* half of the route fix landed in core: `/v1/static/*`
+> now serves unclamped for connections accepted on loopback -- any readable regular
+> file -- with the served-roots clamp kept only as the rooted fallback posture
+> (`docs/design/file-serving-and-surface-convergence.md` §3); it refuses a
+> non-loopback `Host` (fail-closed for a wildcard/empty announced host), drops its
+> CORS grant for every non-admitted origin, and carries `nosniff` + a CSP ending in
+> `frame-ancestors` on every response. The UI sandbox half is local-operator-ui PR
+> #931. **Still open:** the *desktop-bearer* half -- the routes stay unauthenticated
+> because `<img>/<iframe src>` cannot carry a header; the fix is a short-lived signed
+> query token minted by an authenticated endpoint and verified in core, which needs
+> the UI lane. Known cost until the UI reads local file bytes over IPC: the
+> `<img>`-observable existence/dimension signal now covers the disk rather than a
+> root list (accepted residual, RFC §7e).
 
 ### 4.2 Host-side validation (defence in depth, not the boundary)
 
@@ -1239,9 +1266,11 @@ explicitly. A one-line opt-in for "files I edited" is not in v1.
   - decision ≈ $0.0001/eligible turn (the classification layer's documented range);
   - generator ≈ 9-15k input + 1-2.5k output tokens/job, so at Sonnet-class list prices
     ≈ $0.04-0.08/job.
-  - This is why `maxCostUsd` defaults to **0.20** — 2 × the $0.08 high end of the per-job
-    envelope plus $0.04 of headroom, both figures per job (round-1 R3; round-2 R2-6) — and the
-    open question Q1 exists.
+  - The envelope stays the measurement, not the derivation: `maxCostUsd` defaults to **1.00**,
+    sized to cover roughly one Opus-class turn so a strong model's job is not stopped at its
+    first between-turns check (operator directive, 2026-10-10; the units — checked between
+    turns, never a per-turn figure — sat in round-1 R3; round-2 R2-6). The open question Q1
+    exists.
 
 ### 5.4 QA matrix (qa-tester, per lane, real app)
 
@@ -1259,7 +1288,7 @@ Visual evidence is required for every UI-bearing lane (AGENTS.md "Visual validat
 means before/after frames, the brand themes plus 2 others, and a frame mid-theme-switch.
 
 **Added captures (round-1 design D9), per UI-bearing lane, in addition to the matrix above:**
-- loading (the reserved box, title as its label); empty (a done row renders nothing; files-only
+- loading (the reserved box holds space — no title drawn, §2.8); empty (a done row renders nothing; files-only
   reserves no frame space); error (the frame-level fallback line + the failed line); supersede
   (the line disappears; no Retry);
 - populated extremes: 4 files + "N more" collapsed and expanded; 3 frames against the
@@ -1343,8 +1372,8 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
   frame's *own* CSP does not constrain its own navigation, so a reader who takes that sentence
   for the embedding policy's too deletes the relay's only pre-request control. A failure here is
   a security hold, not a QA nit.
-- **Prelude size budget.** The build is 4,538 B gzip against the re-stated ≤ 4.5 KB cap (70 B
-  spare) and 10,224 B raw against ≤ 11 KB (1,040 B spare); caps, method and why they moved are
+- **Prelude size budget.** The build is 4,562 B gzip against the re-stated ≤ 4.5 KB cap (46 B
+  spare) and 10,055 B raw against ≤ 11 KB (1,209 B spare); caps, method and why they moved are
   in §2.6. Any addition must re-measure and, at this margin, trim: the App. B accent guard is
   **+412 B gzip measured on that same method** (the spike's `measure.py`), so it is still
   deliberately not in v1. This is the round-2 residue with the widest blast radius — the cap
@@ -1395,9 +1424,9 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
 4. **F4 — "files I edited" opt-in** for code turns.
 5. **F5 — native share/open** (`expo-sharing`, a new dependency).
 6. **F6 — `HtmlPreview` sandbox.** Confirmed and sharpened (round-1 S-R3): `allow-scripts` +
-   `allow-[redacted]` + `allow-forms` on an **unauthenticated** backend route
+   `allow-same-origin` + `allow-forms` on an **unauthenticated** backend route
    (`/v1/static/html`, outside both the sensitive-prefix boundary and the legacy gate) — i.e.
-   [redacted] script execution with arbitrary-path reads. **Land it as its own UI PR
+   unauthenticated same-origin script execution with arbitrary-path reads. **Land it as its own UI PR
    immediately — this week**; it must not wait on supplements. *Status: the allow-root half
    closed in core #2134; signed-token URLs (the bearer half) remain open — see the status
    note in §4.1.*
@@ -1407,6 +1436,16 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
    feeding errors into turn 2). Not in v1, because it would need a browser engine in the
    runtime.
 9. Unifying the UI's `mentioned-files.ts` with core `supplements/candidates.py`.
+10. **F9 — the prelude's table title (`div.ttl`). CLOSED by lane C1b.** The vendored prelude
+    (`local_operator/supplements/prelude/prelude.src.js`) rendered the `div.ttl` table title,
+    which contradicts §2.8's no-chrome rule. The strip landed with C1b: `.ttl` is gone from the
+    sources and the stylesheet, the minified pair was rebuilt per `prelude/BUILD.md` (which now
+    carries a row per build), the prelude fixtures and the Appendix C reference were
+    regenerated, `PRELUDE_VERSION` is 2 so served documents re-derive, and the size budget was
+    re-measured rather than assumed — **2,008 B CSS + 8,047 B JS raw, 4,562 B gzip** (from
+    4,607; §2.6, App. C). The guard that keeps it closed is a drawn-node assertion in
+    `tests/unit/supplements/test_prelude.py`: no node carries the `ttl` class, the dataset title
+    appears nowhere in the output, and the column headers do.
 
 ---
 
@@ -1459,7 +1498,7 @@ bounded scan of the run's messages (target ≤ 5 ms, measured in C1's evidence).
 
 | # | Question | Recommendation |
 |---|---|---|
-| Q1 | **Default-on for graphics, and the per-job cap.** Files are free; graphics cost ≈ $0.04-0.08 per generated job at Sonnet-class (estimate, §5.3), and only on eligible turns that pass the decision. | `supplements.enabled=true`, `files=true`, **`graphics=true` once a renderer ships** (§6), `maxCostUsd=0.20` (2 × the per-job envelope high end + $0.04 headroom; R3, units per R2-6 — the cap is only checked between turns). Add a daily cap only if the dogfood week shows > $1/day. |
+| Q1 | **Default-on for graphics, and the per-job cap.** Files are free; graphics cost ≈ $0.04-0.08 per generated job at Sonnet-class (estimate, §5.3), and only on eligible turns that pass the decision. | `supplements.enabled=true`, `files=true`, **`graphics=true` once a renderer ships** (§6), `maxCostUsd=1.00` (sized to cover roughly one Opus-class turn, not derived from the $0.04-0.08 Sonnet-class envelope estimate; R3, units per R2-6 — the cap is only checked between turns). Add a daily cap only if the dogfood week shows > $1/day. |
 | Q2 | **Which model "auto" prefers** when several design-capable models are logged in (the ladder order in §2.5). | Sonnet-class first: the best measured HTML/SVG quality per dollar in prior design work. Revisit with the §5.3 arms. |
 | Q3 | **The user-facing name.** | "Highlights" (§0). The alternative is "Supporting graphics" if the files half should stay unnamed. |
 | Q4 | **Should answering a queued ask make the follow-up answer eligible?** The answer is the operator's input, but it replies to the agent's question. | No in v1 (precision). Revisit if the dogfood week shows missed charts after ask answers. |
@@ -1472,10 +1511,11 @@ Everything else in this memo is decided; a reviewer who disagrees should name th
 
 ## Appendix A — the generator prompt (the fork's system prompt, and only there)
 
-This doubles as the fork's design guidelines. Measured: **972 tokens (o200k_base), 968
-(cl100k_base), 3,919 chars**, with tiktoken 0.14 on this exact text. It is held verbatim in
+This doubles as the fork's design guidelines. Measured: **1,140 tokens (o200k_base), 1,137
+(cl100k_base), 4,672 chars**, with tiktoken 0.14 on this exact text (the pre-amendment text
+measured 972 / 968 / 3,919; §2.8's body-only clauses are what moved it). It is held verbatim in
 `supplements/prompt.py` as `GENERATOR_SYSTEM_PROMPT`, and a unit test pins its token count
-within ±5 %.
+within ±5 % -- and compares the constant to this fence, so the two cannot drift.
 
 ```text
 You make supporting graphics for an answer the user has already read. Output 0-3 components, or NONE. NONE is the right answer whenever a graphic would not make the answer faster to understand than the text already does.
@@ -1490,15 +1530,16 @@ HONESTY (hard rules)
 
 PICK THE FORM
 - Compare categories: bar (horizontal when labels are long or >6 bars). Change over time: line. Part of whole with ≤5 parts: stacked bar, never pie/donut. Distribution: histogram-style bar. Exact lookup, >12 rows or mixed units: table. Flow/steps: simple ordered list or small SVG diagram.
-- One idea per component. Lead with the answer's main point in a short title (sentence case, no trailing period); pass it as `title` — the helper prints it visibly. Keep category labels ≤ 12 characters (this is a guide for the writing, not a render rule: the helper thins labels by width and truncates one only when its slot cannot hold it, keeping the full text in the tooltip).
+- One idea per component. Name it in a short `title` (sentence case, no trailing period) for tooling and accessibility — the title is **never drawn** (no visible title line). Keep category labels ≤ 12 characters (this is a guide for the writing, not a render rule: the helper thins labels by width and truncates one only when its slot cannot hold it, keeping the full text in the tooltip).
 - Axis/columns name the quantity AND unit ("Latency (ms)"). Start bar axes at zero. Sort bars by value unless order is meaningful.
 - ≤6 series. Colour never carries meaning alone: label series directly or use LO.line's dash patterns and the legend.
 - Dense data → table with right-aligned tabular numerals (LO.table does this).
 
 LOOK
 - The host injects the stylesheet and theme; do not set colours, fonts or backgrounds except via var(--lo-*) and LO.color(i). Background stays transparent; no borders, cards or shadows around the component; use spacing and var(--lo-hairline) rules.
+- **Body-only.** No title line, header, badge or caption chrome, and nothing that restates the answer or echoes the question — start with the data. Spacing and rhythm carry the component's own structure and the seam with the answer above; nothing is announced.
 - Body text 13px; captions 12px var(--lo-ink-muted); axis text 12px. Must work from the 220px canvas-open column to 900px wide: no fixed widths, use viewBox SVG (LO helpers redraw on width changes).
-- Pass `title` and `unit`: the helper prints both visibly (a title line; the unit on the top axis tick). An unlabelled chart is a rendering bug.
+- Pass `title` and `unit` always: the title names the component (never drawn); the unit prints on the top axis tick. Draw only the labelling the data needs — axis labels, units, series names, column headers, value labels — an unlabelled chart is a rendering bug.
 - Keep height content-sized, under ~480px; split rather than scroll.
 - No animation, transitions, or external fonts. Values stay readable without hover — tooltips are enhancement only (relay/native have no hover). **Accepted loss (round-2 D2-4):** where a label is still truncated on a no-hover surface, the full text is unreachable there — the axis titles and the data's own precision carry the meaning, and the fixture set (App. C) shows the worst case rather than assuming it away.
 
@@ -1574,17 +1615,21 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
   `measure.py` which re-derives every size figure) — exists in the architect
   scratchpad and is attached to the C0 PR as the starting point; the round-1 remediation
   **and the round-2 label-layout fix** are folded in.
-- **Size:** 2,044 B CSS + 8,180 B JS raw (minified build, esbuild 0.28.2); **4,538 B gzip** for
+- **No-chrome status: closed.** The pair used to draw the `div.ttl` table title; C1b stripped the
+  helper, the element and its stylesheet rule (memo §8 F9, §2.8), so the rendered component is
+  body-only. The guard is `test_prelude.py`'s drawn-node assertion, not this sentence.
+- **Size:** 2,008 B CSS + 8,047 B JS raw (minified build, esbuild 0.28.2); **4,562 B gzip** for
   both (`cat` the pair through `gzip -9` — one method for the budget, the guard's cost and every
-  figure here). Budget: **≤ 11 KB raw / ≤ 4.5 KB gzip**, enforced by a unit test — 1,040 B and
-  70 B spare; round 2 moved both caps because D2-1/D2-2/D2-4's fix cost +474 B gzip / +1,089 B
+  figure here). Budget: **≤ 11 KB raw / ≤ 4.5 KB gzip**, enforced by a unit test — 1,209 B and
+  46 B spare; round 2 moved both caps because D2-1/D2-2/D2-4's fix cost +474 B gzip / +1,089 B
   raw against the pre-fix pair through the same tool (§2.6). Any addition re-measures and, at
   this margin, trims.
 - It provides:
   - `LO.data` (frozen, from `<script type="application/json" id="lo-data">`);
   - `LO.ds/col/fmt/color/el/onTheme/onSize`;
-  - `LO.table` (right-aligned tabular numerals, horizontal scroll at 320 px, title line,
-    source-precision cells);
+  - `LO.table` (right-aligned tabular numerals, horizontal scroll at 320 px, source-precision
+    cells — no title line: the component is body-only, §2.8, and the `div.ttl` draw was stripped
+    in C1b, memo F9);
   - `LO.bar` (vertical/horizontal, grouped, zero baseline, direct value labels at source
     precision, category-label step-thinning, truncate-only-when-the-slot-requires-it with the
     full text in a `<title>`, unit on the top axis tick);
@@ -1617,8 +1662,9 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
     cannot be named — and the receiving side does **not** rest on it: the parent validates
     `event.source`, the per-frame nonce (never carried in the URL), and drops messages from
     any frame whose navigation counter moved (round-1 S-R4);
-  - the rendered fixture shows the title line and the unit (D2), the **unit-swap pair** on
-    identical data (`req/s` → the top tick no longer clips; D2-1) and the six-long-category
+  - the rendered fixture shows the axis labelling and the unit on the top axis tick, no title
+    line (D2; body-only, §2.8), the **unit-swap pair** on identical data (`req/s` → the top
+    tick no longer clips; D2-1) and the six-long-category
     collision fixture at 300 and 220 px (D2-2) — labels truncated only where the slot requires
     it (D2-4) — plus source-precision values (D4) at 620 px;
     `isSecureContext`/`RTCPeerConnection` are

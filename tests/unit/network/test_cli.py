@@ -45,6 +45,9 @@ ACTIONS = (
     "doctor",
     # Peer readiness (readiness.py): the install question `doctor` does not ask.
     "ready",
+    # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md §8.2):
+    # ask one peer to move to this device's build.
+    "update",
     "identity",
     "uninstall",
     # The inviter's half of the pairing human step (mesh-transport-identity §5.3).

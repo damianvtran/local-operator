@@ -983,14 +983,18 @@ def write_source_marker(
     reader that does not recognise it degrades to "no ref", which for such an
     install is the truth.
 
-    ``note`` is the marker's one ANNOTATION slot: a trailing, single-token
-    rationale appended as a THIRD token, and only when set — so the two-token
+    ``note`` is the marker's one ANNOTATION slot: a trailing rationale appended
+    as a THIRD token (one token for every existing caller, so the two-token
     shape shared with the out-of-tree writer above stays byte-identical for
-    every existing caller. The ``--from-snapshot`` route classifier records the
-    fallback reason there (:func:`classify_snapshot_install`), so a generation
-    that asked for a release but is a source build can say WHY without anyone
-    having kept the day's terminal output. Readers take the first token's shape
-    and ignore the rest, so a note can never render as a commit.
+    them) and only when set. The ``--from-snapshot`` route classifier records
+    the fallback reason there (:func:`classify_snapshot_install`), so a
+    generation that asked for a release but is a source build can say WHY
+    without anyone having kept the day's terminal output; the deliberate-
+    downgrade override (:func:`classify_snapshot_downgrade`) appends
+    ``downgrade-allowed`` after it, so a rollback an operator asked for is
+    distinguishable from the silent one the gate refuses. Readers take the
+    first token's shape and ignore the rest, so a note can never render as a
+    commit.
 
     ORDERING IS LOAD-BEARING
     ------------------------
@@ -4134,6 +4138,32 @@ class PrunePlan:
         return tuple(decision for decision in self.decisions if not decision.removed)
 
 
+def _running_generation() -> Path | None:
+    """The generation THIS process imports from, or ``None`` when it is not one of ours.
+
+    THE PRUNE'S OWN REFERENCE, and the one no record can carry for it: an
+    updater process runs from the generation it is REPLACING, and the pointer
+    flip lands before the prune — so mid-flow the running tree is named by
+    neither the pointer nor any namespace :func:`referenced_install_roots`
+    reads. The keep margin covered it only incidentally, through a sort
+    position, and on 2026-10-10 that was the exact thing a directory mtime
+    bump moved (the #2173 QA victim; see :func:`prune_generations`).
+
+    Identity is the fix, resolved the way a record's ``install_root`` is: the
+    process's own install root is its venv (``<gen>/tools/local-operator`` —
+    ``process_install_root`` reads ``sys.prefix``), and the generation it
+    belongs to is two levels up. Only a path that IS one of our generations
+    may claim a generation (:func:`_is_generation_install`), so an editable
+    checkout or a plain ``uv tool`` install protects nothing — and an answer
+    that cannot be established is simply absent, which leaves every other rule
+    in the caller exactly as it was.
+    """
+    root = Path(process_install_root())
+    if not _is_generation_install(root):
+        return None
+    return _real(root.parent.parent)
+
+
 def prune_generations(
     *,
     keep: int = DEFAULT_KEEP_GENERATIONS,
@@ -4144,11 +4174,24 @@ def prune_generations(
     """Delete the generations nothing can still be importing from.
 
     RETENTION IS STRUCTURAL, NOT A COUNT. A generation is kept when it is the
-    pointer's target, when a live or persisted record names its install root, or
-    when it is one of the last ``keep`` generations nothing refers to. The first
-    two are the reason this is safe to run while the machine is busy: a runtime's
-    own tree is never a candidate, and the count is only the margin for a session
-    that has no record yet.
+    pointer's target, when a live or persisted record names its install root,
+    when it is the tree this process is running from, or when it is one of the
+    last ``keep`` generations nothing refers to. The first three are the reason
+    this is safe to run while the machine is busy: a runtime's own tree is never
+    a candidate, and the count is only the margin for a session that has no
+    record yet.
+
+    THE EVICTION ORDER IS THE NAME, NOT THE mtime, AND THE RUNNING TREE IS KEPT
+    BY IDENTITY (2026-10-10, QA round 1 on #2173's install flow). The pick used
+    to be the oldest directory mtime, and a single ``rm`` inside a stale
+    generation moves that directory's mtime to now — the harness did exactly
+    that, the touched tree jumped ahead, and the victim became the generation
+    the updater was RUNNING from, which is unreferenced mid-flow because the
+    install has already flipped ``current``. The name is ``<stamp>-<token>``
+    (``_new_generation_id``), so name order IS creation order and no touch can
+    move it; the mtime remains the right read where the question is AGE, not
+    order — the in-flight rule below — and that direction is fail-closed (a
+    fresher mtime keeps the tree).
 
     EVERY REMOVAL IS ATTESTED FIRST (:func:`note_doomed_runtimes`), because this is
     the one place in the harness that deletes an install out from under runtimes
@@ -4247,6 +4290,15 @@ def prune_generations(
         except OSError:  # pragma: no cover — an unresolvable reference keeps nothing extra
             continue
     wanted |= named_by_a_record
+    # THE TREE THIS PROCESS IS RUNNING FROM IS NEVER A CANDIDATE (see
+    # _running_generation): the updater imports from the generation it is
+    # REPLACING, and this prune runs after the flip, so mid-flow that tree is
+    # named by no pointer and no record. Order cannot carry this protection —
+    # the running generation can be the oldest name in the store — so it is
+    # the identity of the path, added here where every reference is assembled.
+    running = _running_generation()
+    if running is not None:
+        wanted.add(running)
     entries = sorted(
         # ``is_dir()`` follows symlinks, so it admits a link to a directory; the
         # layout never writes one there (``_reserve_generation`` uses ``mkdir``),
@@ -4254,7 +4306,16 @@ def prune_generations(
         # of our generations, so it is not a pruning candidate at all (review
         # round 4, R4-1: this is the shape that handed one to the remover).
         (path for path in generations.iterdir() if path.is_dir() and not path.is_symlink()),
-        key=lambda path: (path.stat().st_mtime, path.name),
+        # SORTED BY NAME, NEVER BY mtime (2026-10-10, QA round 1 on #2173's
+        # install flow): the name is ``<stamp>-<token>``, timestamp first, so
+        # name order IS creation order — and unlike the directory mtime it
+        # cannot be moved by anything that merely touches the tree. Under mtime
+        # order, one ``rm`` inside a stale generation moved that directory's
+        # mtime to now, the touched tree jumped AHEAD of the one the updater
+        # was running from, and the running tree became the victim. mtime
+        # remains the right read where the question is AGE, not order — the
+        # in-flight rule below — and that direction is fail-closed.
+        key=lambda path: path.name,
     )
 
     def _marker(path: Path) -> bool:
@@ -4282,6 +4343,9 @@ def prune_generations(
         resolved = _real(path)
         if current is not None and resolved == _real(current):
             decisions.append(PruneDecision(path, False, "the pointer's target"))
+            continue
+        if running is not None and resolved == running:
+            decisions.append(PruneDecision(path, False, "the tree this process is running from"))
             continue
         if resolved in named_by_a_record:
             decisions.append(PruneDecision(path, False, "a live or saved session record names it"))
@@ -5032,6 +5096,112 @@ def snapshot_route_lines(snapshot: SnapshotSource, route: SnapshotRoute) -> tupl
             "(lop-keyagent.app); only the published macOS wheel does"
         )
     return (head, tail)
+
+
+#: The ``.lop-source`` note a DELIBERATE downgrade records (the
+#: ``--allow-downgrade`` override). A note token rather than a format change:
+#: the marker's annotation slot is the one place an auditor later reads WHY a
+#: generation exists, and a rollback that was asked for must be distinguishable
+#: there from the silent one this gate refuses. Sits beside the ``FALLBACK_*``
+#: tokens as the second writer of that slot.
+DOWNGRADE_NOTE = "downgrade-allowed"
+
+
+@dataclass(frozen=True)
+class SnapshotDowngrade:
+    """Whether a ``--from-snapshot`` target would move the install BACKWARDS.
+
+    ``installed`` is the version of the install a flip would REPLACE, read
+    through the pointer (:func:`disk_build` — "the build a fresh ``lop`` would
+    load") rather than from this process: the flip is fleet-wide, ``current``
+    is what every new session and every daemon restart loads, and a command
+    that happened to run from another generation must not be able to roll the
+    pointer's install back past its own. ``target`` is the snapshot's own
+    version (the tree's ``pyproject.toml``, for both the ref and directory
+    shapes). Both sides must PARSE before this can answer yes.
+
+    ``allowed`` records that the caller passed the deliberate override; the
+    caller still refuses when it is False, and when it is True it warns loudly
+    and the marker records :data:`DOWNGRADE_NOTE`.
+    """
+
+    installed: str = ""
+    target: str = ""
+    allowed: bool = False
+
+    @property
+    def is_downgrade(self) -> bool:
+        """Both sides were readable, and the target is strictly older."""
+        return bool(self.installed and self.target)
+
+
+def classify_snapshot_downgrade(
+    snapshot: SnapshotSource, *, allow_downgrade: bool = False
+) -> SnapshotDowngrade:
+    """Classify ``snapshot`` against the install the pointer names.
+
+    THE INCIDENT THIS EXISTS FOR (2026-10-10): ``lop-update v0.68.23`` under a
+    0.68.24 install built generation ``20261010T153510Z-0.68.23``, flipped
+    ``current`` onto it, and moved the serve process and every daemon down. No
+    version-order check sat anywhere on the snapshot path: the one version
+    guard in the install (:func:`install_into_generation` step 2) is an
+    EQUALITY check, and :func:`is_behind` was wired only into the PyPI path's
+    :func:`check_latest`, which by construction only ever installs NEWER
+    versions — so an explicit older tag, the innocent-looking explicit-tag
+    install this command documents as supported, went straight through.
+
+    UNPARSEABLE SIDES DO NOT REFUSE, borrowing :func:`is_behind`'s rule: this
+    module can only order the ``X.Y.Z`` spelling it ships, and a refusal it
+    cannot defend must not block an install the caller asked for. The same
+    goes for an unreadable install side (``disk_build`` answers None for an
+    editable checkout, an absent pointer, or a tree carrying no distribution):
+    no evidence of an ordering, no refusal.
+
+    ``allow_downgrade`` is recorded in ``allowed`` rather than short-circuiting
+    the comparison, so the caller can still warn loudly and the marker can
+    still record the deliberate rollback.
+    """
+    target = parse_version(snapshot.version)
+    if target is None:
+        return SnapshotDowngrade()
+    stamp = disk_build()
+    installed = stamp.version if stamp is not None else ""
+    parsed = parse_version(installed)
+    if parsed is None or target >= parsed:
+        return SnapshotDowngrade()
+    return SnapshotDowngrade(installed=installed, target=snapshot.version, allowed=allow_downgrade)
+
+
+def snapshot_downgrade_lines(downgrade: SnapshotDowngrade, *, value: str) -> tuple[str, ...]:
+    """The refusal for a strictly older snapshot, or the deliberate warning.
+
+    ONE owner for both sentences, the same discipline as
+    :func:`snapshot_route_lines` for the wheel announcement and its fallback:
+    the refusal names the installed version, the target version and the exact
+    override command, and the warning names both versions plus what the marker
+    will say, so the two cannot drift apart. Both belong on stderr — a refusal,
+    and a warning about a state no reader should mistake for a normal upgrade.
+
+    ``value`` is the ``--from-snapshot`` argument VERBATIM, because the remedy
+    line must be a command the caller can re-run as-is from the repository the
+    ref resolves in; a resolved label (a short SHA, say) would not resolve the
+    same way for a branch or a directory.
+    """
+    if not downgrade.is_downgrade:
+        return ()
+    if downgrade.allowed:
+        return (
+            "warning: downgrading on purpose — "
+            f"current install {downgrade.installed}, snapshot {downgrade.target}; "
+            "the install marker will record downgrade-allowed",
+        )
+    return (
+        "refusing to install an older build — "
+        f"{downgrade.target} is older than this machine's current install "
+        f"({downgrade.installed}); nothing was installed.",
+        "  To downgrade deliberately, re-run from the repository: "
+        f"`lop update --from-snapshot {value} --allow-downgrade`",
+    )
 
 
 def _human_bytes(total: int) -> str:
@@ -6853,7 +7023,7 @@ def _generation_upgrade(
     return total
 
 
-def _snapshot_command(value: str, *, services: bool = True) -> int:
+def _snapshot_command(value: str, *, services: bool = True, allow_downgrade: bool = False) -> int:
     """``lop update --from-snapshot <dir-or-ref>``: install a local build.
 
     The in-repo half of what the out-of-tree ``lop-update`` script does today,
@@ -6865,6 +7035,14 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
     release), so "am I behind PyPI" is not the question being answered —
     installing the tree is. A git snapshot also still upgrades from PyPI on a
     plain ``lop update``; nothing here changes that.
+
+    The DOWNGRADE question IS gated, and it is the one thing this command
+    refuses on version alone: a target STRICTLY OLDER than the install the
+    pointer names is refused before any install work, on both routes — an
+    explicit older tag must not be able to roll the whole fleet back
+    (2026-10-10; see :func:`classify_snapshot_downgrade`). ``allow_downgrade``
+    is the deliberate override: it warns loudly on stderr and the install
+    marker records ``downgrade-allowed``.
 
     A REF THIS COMMAND RESOLVES TO A PUBLISHED RELEASE INSTALLS THE PUBLISHED
     WHEEL instead of building the tree, because that wheel is the only shape
@@ -6895,17 +7073,29 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
     except UpdateError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    # THE ROUTE DECISION, made before any install work so the loud fallback
-    # notice (or the wheel announcement) cannot end up buried behind a bundle
-    # build or a refusal — see :func:`classify_snapshot_install` for why every
-    # ambiguous case falls toward the source build.
-    route = classify_snapshot_install(snapshot)
-    shape = (
-        f"{snapshot.version}, {snapshot.install_shape}"
-        if snapshot.version
-        else snapshot.install_shape
-    )
     try:
+        # THE DOWNGRADE GATE, asked before the route is even classified: a
+        # refusal must not be buried under (or pay for) the route announcement
+        # or the PyPI consult a release-tagged classification makes, and the
+        # refusal return must still pass through the ``finally`` below so a
+        # refused ref-snapshot reclaims its extract like the bundle refusal
+        # does.
+        downgrade = classify_snapshot_downgrade(snapshot, allow_downgrade=allow_downgrade)
+        if downgrade.is_downgrade:
+            for line in snapshot_downgrade_lines(downgrade, value=value):
+                print(line, file=sys.stderr)
+            if not downgrade.allowed:
+                return 1
+        # THE ROUTE DECISION, made before any install work so the loud fallback
+        # notice (or the wheel announcement) cannot end up buried behind a
+        # bundle build or a refusal — see :func:`classify_snapshot_install` for
+        # why every ambiguous case falls toward the source build.
+        route = classify_snapshot_install(snapshot)
+        shape = (
+            f"{snapshot.version}, {snapshot.install_shape}"
+            if snapshot.version
+            else snapshot.install_shape
+        )
         # The channel is part of the message: every fallback line leads with
         # ``warning:`` on stderr (a build the operator must not mistake for
         # presence-bearing is a warning), while the wheel announcement is
@@ -6913,12 +7103,19 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
         # when the route is a fallback.
         for line in snapshot_route_lines(snapshot, route):
             print(line, file=sys.stderr if route.reason else sys.stdout, flush=True)
+        # The marker's annotation slot: the route's fallback rationale, and —
+        # when this install went backwards on purpose — the record of that, so
+        # an auditor reading the generation later can tell a deliberate
+        # rollback from the silent downgrade the gate above refuses.
+        note = route.reason
+        if downgrade.allowed:
+            note = " ".join(part for part in (note, DOWNGRADE_NOTE) if part)
         if route.install_from_wheel:
             # THE PyPI PATH: no source tree and no mobile-bundle step (the
             # wheel ships the built bundle), and the marker records
             # ``pypi <version>`` — this build genuinely has no git ref.
             try:
-                install_into_generation(None, version=route.version)
+                install_into_generation(None, version=route.version, note=note)
             except UpdateError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
@@ -7019,7 +7216,7 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
                     commit=snapshot.commit,
                     ref=snapshot.ref,
                     origin=SNAPSHOT_SOURCE_TOKEN,
-                    note=route.reason,
+                    note=note,
                 )
             except UpdateError as exc:
                 print(str(exc), file=sys.stderr)
@@ -7047,6 +7244,7 @@ def update_command(
     refresh_mobile: bool = False,
     from_snapshot: str | None = None,
     services: bool = True,
+    allow_downgrade: bool = False,
 ) -> int:
     """``lop update``, ``lop update --check``, ``--from-snapshot`` and the repair.
 
@@ -7074,6 +7272,14 @@ def update_command(
     the index (or no wish to use one) must be able to run it. Combining it with
     ``--check`` is a refusal rather than a precedence rule — the two answer
     different questions and a caller that asked for both has asked for neither.
+
+    ``allow_downgrade`` (``--allow-downgrade``) belongs to ``--from-snapshot``
+    and answers exactly one case: a target STRICTLY OLDER than the install the
+    pointer names (see :func:`_snapshot_command`). Alone — on the PyPI path,
+    the one left once the refresh flags above have answered — it is a refusal,
+    on the same rule ``--check`` follows: the PyPI path's ``behind`` gate only
+    ever installs NEWER versions, so "allow a downgrade" is a question nothing
+    on that path can answer.
     """
     if refresh_daemons:
         return _run_daemon_repair(services_only=services_only)
@@ -7085,7 +7291,15 @@ def update_command(
         if check:
             print("--check compares against PyPI; --from-snapshot installs a tree", file=sys.stderr)
             return 1
-        return _snapshot_command(from_snapshot, services=services)
+        return _snapshot_command(from_snapshot, services=services, allow_downgrade=allow_downgrade)
+
+    if allow_downgrade:
+        print(
+            "--allow-downgrade applies to --from-snapshot; "
+            "the PyPI path only installs newer versions",
+            file=sys.stderr,
+        )
+        return 1
 
     result = check_latest(force=True)
     if result.latest is None:

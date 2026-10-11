@@ -21,6 +21,21 @@ imported 3.14's ``pydantic_core`` extension under a 3.12 interpreter and died
 before it could answer a handshake, and 16 spawn tests failed with an error
 that named none of this.
 
+ORDERING IS LOAD-BEARING (2026-10-10). The base's shared-libpython metadata is
+queried, and any advertised library carried into the copy, BEFORE the copy's
+first exec. The repair used to run only after a failed probe, and on a
+uv-managed base every such probe IS a dyld abort (SIGABRT) that posts a crash
+report under ``~/Library/Logs/DiagnosticReports`` and feeds ReportCrashService:
+measured 37 ``python3.12`` reports in 24 h on the build fleet -- one per venv
+build across the hosts this helper serves -- and the service consuming that
+feed was the per-process-limit jetsam victim in 4 of 5 OOM events in the same
+window. Repairing first removes the abort on every path where the base
+advertises a shared library (where the metadata query fails there is nothing
+to carry, and the copy is still probed, with the query failure deferred into
+the message); it costs one extra healthy exec of the BASE interpreter (tens of
+ms), and a probe moved back in front of the carry would reintroduce one crash
+report per venv build.
+
 THE RULES HERE. (1) Only the RUNNING interpreter is ever copied: the ``.pth``
 is derived from it (``sysconfig`` purelib plus wherever ``pydantic`` was
 imported from), so a copy of any other interpreter is wrong by construction,
@@ -119,35 +134,50 @@ def copied_interpreter(venv: Path) -> Path:
     if executable is None:
         raise AssertionError(f"venv --copies of {base} produced no copied python3.X executable")
 
+    # Carry the base's advertised shared libpython into the copy BEFORE the
+    # copy is executed for the first time. That ordering is load-bearing: an
+    # unrepaired copy aborts in dyld (SIGABRT), and every abort posts a crash
+    # report and feeds ReportCrashService -- see the module docstring. The
+    # metadata query goes through the BASE (one healthy exec, tens of ms); its
+    # failure is deferred as query_error rather than raised, so the failure
+    # messages below can still report BOTH stages.
+    try:
+        library = _shared_libpython(base)
+        query_error = None
+    except AssertionError as error:
+        library = None
+        query_error = error
+
+    target: Path | None = None
+    if library is not None:
+        target = venv / "lib" / library.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            # Never copy2 through a pre-existing name: a symlink or hardlink
+            # at target would land the write inside the uv-managed,
+            # machine-wide interpreter the library comes from. Unlinking drops
+            # only this name; copy2 then creates a fresh inode.
+            target.unlink()
+        shutil.copy2(library, target)
+
     started = _probe(executable, "print('ok')")
     if started.returncode != 0:
-        # The one known reason a faithful copy of the running interpreter
-        # cannot start: a shared libpython the copy resolves relative to
-        # itself. Carry it across and try once more; anything else is a real
-        # failure and is reported as one.
-        try:
-            library = _shared_libpython(base)
-        except AssertionError as error:
-            # Keep BOTH stages: the copy's loader failure triggered discovery,
-            # but a failed metadata probe is not evidence that no library exists.
+        if query_error is not None:
+            # Keep BOTH stages: a failed metadata probe is not evidence that
+            # no library exists, so it stays in the message and as the cause.
             raise AssertionError(
-                f"{error}; copied interpreter {executable} (from {base}) did not start: "
+                f"{query_error}; copied interpreter {executable} (from {base}) did not start: "
                 f"{_probe_context(started)}"
-            ) from error
+            ) from query_error
         if library is None:
             raise AssertionError(
                 f"copied interpreter {executable} (from {base}) did not start and "
                 f"no shared libpython repair is supported: {started.stderr[-800:]}"
             )
-        target = venv / "lib" / library.name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(library, target)
-        started = _probe(executable, "print('ok')")
-        if started.returncode != 0:
-            raise AssertionError(
-                f"copied interpreter {executable} (from {base}) still did not start after "
-                f"copying {library} to {target}: {started.stderr[-800:]}"
-            )
+        raise AssertionError(
+            f"copied interpreter {executable} (from {base}) still did not start after "
+            f"copying {library} to {target}: {started.stderr[-800:]}"
+        )
 
     site = site_packages_of(executable)
     (site / REPO_PTH_NAME).write_text("\n".join(dependency_roots()) + "\n")

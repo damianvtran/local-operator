@@ -68,6 +68,7 @@ def _entry_owners() -> dict[str, str]:
         TITLE_SIDECAR_NAME,
     )
     from local_operator.scratchpad import SCRATCHPAD_DIRNAME
+    from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.placement import MESH_STAMP_NAME
     from local_operator.session.retention import (
@@ -111,6 +112,11 @@ def _entry_owners() -> dict[str, str]:
         # The eval kernel's restart marker (``tools.eval``): carried so a moved
         # session's first cell still learns its namespace was left behind.
         KERNEL_MARKER_NAME: "local_operator.tools.eval",
+        # The pending-voice markers (``session.channel_spend``): copied, so a
+        # session moved while a voice charge is still unfoled arrives with the
+        # fact the published object states (sync.COPY_SET_NAMES's comment has
+        # the full argument).
+        PENDING_SIDECAR_NAME: "session.channel_spend",
         # The copy machinery's own two: a replica's cursor (never inside a session)
         # and the move's boot marker, which lives in a staging directory and is
         # deleted by the promote (a crash can leave one inside a promoted session,
@@ -267,7 +273,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "
         "(beside ``exec-jobs.jsonl``), history about a SWEEP, never a file in a session",
     ),
+    "local_operator/server/utils/local_tokens.py": (
+        1,
+        "``GENERATION_FILENAME`` (``generation``): the per-boot counter beside the serve "
+        "records under ``<config>/run/serve`` — machine-local boot state a receiving "
+        "device must mint its own, never inherit; not an entry of a session directory",
+    ),
     "local_operator/config.py": (1, "``config.yml``, the store's configuration file"),
+    "local_operator/clients/radient_cost.py": (
+        1,
+        "``HEADER_PREFIX`` (``x-radient-cost-``) prefixes an HTTP RESPONSE header "
+        "name: the adapter reads the media server's cost block off the wire, and "
+        "nothing in this module is an entry of a session directory",
+    ),
     # ``STORE_DIRNAME``/``_SESSIONS_DIRNAME`` are the store ROOT's name and the
     # conversations subtree under it, not entries inside a session: they are the
     # names ``paths.py`` declares for the same directories (see the entry above),
@@ -412,11 +430,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "that gates removal: none of them is a file a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
-        2,
+        4,
         "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
         "sweep lock): the former sits at the sessions root, the latter at the config root; "
-        "neither inside a session directory. (``ROSTER_NAME`` is a session entry, already "
-        "classified by the copy set.)",
+        "neither inside a session directory. ``RESCUE_BUNDLE_PREFIX``/``RESCUE_BUNDLE_SUFFIX`` "
+        "are the FRAGMENTS of the rescue bundle's name (``reap-rescue-<tree>.bundle``), joined "
+        "to a tree's name; the result is written beside that tree inside the pad and is never "
+        "a bare session entry. "
+        "(``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
     ),
     "local_operator/session_factory.py": (
         2,
@@ -459,6 +480,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/i18n/catalogues.py": (
+        1,
+        "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "
+        "sidecar inside the packaged ``local_operator/i18n/catalogues/`` tree — package "
+        "data shipped with the wheel, never an entry of a session directory",
+    ),
     "local_operator/network/audit.py": (
         1,
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
@@ -474,6 +501,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/network/types.py": (
         1,
         "``PEERS_RUN_DIRNAME`` (``run/peers``): the mesh's run directory under the store root",
+    ),
+    "local_operator/network/rollouts.py": (
+        1,
+        "``ROLLOUTS_DIRNAME`` (``rollouts``): the rollout RECORDS directory under "
+        "``<config>/network/rollouts`` — a device-local orchestration store beside "
+        "the approval store above, never an entry of a session directory and never "
+        "carried in one",
     ),
     "local_operator/network/sync.py": (
         6,
@@ -710,6 +744,31 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the caller owns (the benchmark run root), never an entry of a session "
         "directory; a replica re-creates the reserve rather than carrying it",
     ),
+    # ---- the turn-supplement feature's rule IDS ----
+    "local_operator/supplements/denylist.py": (
+        4,
+        "``RULE_CONFIG_DIR``/``RULE_NAME``/``RULE_NAME_PREFIX``/``RULE_SUFFIX`` are rule "
+        "IDS: the tags ``is_sensitive`` returns and a surface logs to say which class "
+        "refused a path (the module's docstring: 'every rule has a stable id'). Bare "
+        "words, never entries of a session directory; they trip this guard only because "
+        "their constant names end in DIR/NAME/PREFIX/SUFFIX while their values read as "
+        "path-shaped spellings",
+    ),
+    # ---- the turn-supplement sweep: the blob STORE's own layout, none of it an
+    # ---- entry OF a session directory
+    "local_operator/supplements/sweep.py": (
+        3,
+        "``.bin``/``.json`` are the attachment store's two file-name SUFFIXES, "
+        "suffixed to a digest (``<digest>.bin``/``.json``) and never a bare entry "
+        "name: a component blob is carried by the session whose transcript "
+        "REFERENCES it, as the ``attachments/<digest>.bin``/``.json`` members "
+        "``sync._member_stamps`` derives from ``referenced_attachments_in`` (a "
+        "supplement row's ``attachment`` key is that literal reference), so neither "
+        "suffix belongs in ``COPY_SET_NAMES`` or ``EXCLUDED_ENTRIES``. "
+        "``_SESSIONS_DIRNAME`` (``sessions``) is the conversations subtree the "
+        "entries live UNDER -- the same value ``retention.py``/``search_guard.py`` "
+        "declare",
+    ),
     # ---- ID / KEY FRAGMENTS (widened guard): a ``*_PREFIX``/``*_SUFFIX`` constant is a
     # ---- FRAGMENT joined to some id or key, never a bare entry of a session directory.
     # ---- Each is declared with what it is joined to, so a future keyed session
@@ -749,7 +808,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``send-notice-`` prefixes an entry id inside the transcript's own custom rows",
     ),
-    "local_operator/terminals.py": (1, "``xterm-kitty`` is a TERM value, not a path"),
+    "local_operator/terminals.py": (
+        2,
+        "``xterm-kitty`` and ``foot`` are TERM values — terminal capability "
+        "string prefixes the OSC 8 hyperlink probe matches — never session entries",
+    ),
     "local_operator/tui/glyphs.py": (1, "``mcp__`` prefixes a tool name in the glyph table"),
     "local_operator/tui/widgets/editor.py": (
         1,

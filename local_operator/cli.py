@@ -690,8 +690,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         default="127.0.0.1",
         help=(
-            "Host address (default: 127.0.0.1). This API has no authentication; "
-            "use a non-loopback address only behind trusted access controls."
+            "Host address (default: 127.0.0.1). Loopback-only by policy: every "
+            "non-loopback bind is refused. File serving is unclamped on loopback "
+            "connections; reach this API remotely through an explicit tunnel or an "
+            "SSH port-forward."
         ),
     )
     serve_parser.add_argument(
@@ -1767,6 +1769,24 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "carrying the macOS key agent — and every other ref is built from source."
         ),
     )
+    # The deliberate-downgrade override for --from-snapshot: without it a target
+    # STRICTLY OLDER than the install the pointer names is refused before any
+    # install work (update.classify_snapshot_downgrade). Named after the flag
+    # the retired legacy installer carried; the deliberate rollback it allows
+    # rides the install marker as `downgrade-allowed`. Alone — on the PyPI
+    # path, the one left once the refresh flags have answered — it is a
+    # refusal: that path only ever installs newer versions.
+    update_parser.add_argument(
+        "--allow-downgrade",
+        dest="allow_downgrade",
+        action="store_true",
+        help=(
+            "Allow --from-snapshot to install a build OLDER than the current install "
+            "(a deliberate rollback; recorded in the install marker). Without "
+            "--from-snapshot it is refused on the PyPI path, which only installs "
+            "newer versions; the refresh flags take precedence."
+        ),
+    )
     update_parser.add_argument(
         "--no-services",
         dest="no_services",
@@ -2171,6 +2191,24 @@ def build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_global_flag(parser: argparse.ArgumentParser, flag: str, **kwargs: Any) -> None:
+    """Add one propagated flag unless the subparser already declares it (round 1, B1).
+
+    ONE option string per call, deliberately (round 2, nit): the skip below is
+    all-or-nothing, so a variadic call with a partly-present list would have
+    silently dropped the missing spellings. A single flag cannot half-apply.
+    ``lop network update`` owns its own ``--resume`` (the rollouts verb), and a
+    second declaration is an ``argparse.ArgumentError`` raised while
+    ``build_cli_parser`` runs — which is every `lop` invocation dead at build
+    time. A verb that owns a spelling keeps it; every other subparser still
+    receives the global one (and the recursion below still covers deeper
+    levels), so the propagation's own guarantee is unchanged.
+    """
+    if flag in parser._option_string_actions:
+        return
+    parser.add_argument(flag, **kwargs)
+
+
 def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
     """Re-declare the position-independent global options on every subparser.
 
@@ -2197,7 +2235,8 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
             if id(subparser) in seen:
                 continue
             seen.add(id(subparser))
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--yolo",
                 action="store_true",
                 default=argparse.SUPPRESS,
@@ -2216,7 +2255,8 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                     " without prompting"
                 ),
             )
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--resume",
                 nargs="?",
                 const=RESUME_LATEST,
@@ -2234,21 +2274,24 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
             # answers and where it runs, so silently ignoring them would be
             # worse than the parse error: the run would proceed against the
             # wrong model, in the wrong directory.
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--hosting",
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="hosting",
                 help="Hosting platform for this run (e.g. anthropic, openai, openrouter)",
             )
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--model",
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="model",
                 help="Model to use for this run",
             )
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--run-in",
                 type=str,
                 default=argparse.SUPPRESS,
@@ -4646,6 +4689,77 @@ def _print_kept(protected: list[tuple[str, str]]) -> None:
         print(f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept (--json lists every row)")
 
 
+def _content_class_counts(rows: list[Any]) -> dict[str, int]:
+    """Pads per content class, for the summary line and --json.
+
+    A pad counts once per class it contributed (a pad can carry both a merged
+    tree and stale logs); the order is the rows' fixed class order.
+    """
+    counts: dict[str, int] = {}
+    for row in rows:
+        for name in getattr(row, "classes", ()):
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _content_row_text(row: Any, verb: str) -> str:
+    """One content reclaim row: pad, size, classes and their evidence."""
+    title = row.title or "(no title)"
+    if len(title) > 16:
+        title = title[:15] + "…"
+    entries = f"{row.entries} entr{'y' if row.entries == 1 else 'ies'}"
+    tail = f"{row.reason}; {entries}"
+    bundles = getattr(row, "rescue_bundles", ())
+    if len(bundles) > 1:
+        names = ", ".join(os.path.basename(path) for path in bundles)
+        tail += f"; rescue bundles {names}"
+    elif row.rescue_bundle:
+        tail += f"; rescue bundle {os.path.basename(row.rescue_bundle)}"
+    elif row.method == "worktree-remove":
+        tail += "; worktree remove"
+    return f"  {verb:<14} {row.session:<12} {title:<16} {_format_bytes(row.bytes):>8} ({tail})"
+
+
+def _print_content(delegated: Any, verb: str) -> None:
+    """The scratchpad-content block under the delegated section.
+
+    The summary names the pads, the bytes and the per-class counts; the rows
+    name each pad's classes and entry count; the ``content kept`` rows carry
+    the reasons the pass DECLINED (unmerged/dirty trees, unreadable subtrees,
+    failed rescue bundles), so the dry run audits both directions. Capped like
+    the other listings; ``--json`` carries every row.
+    """
+    skipped = getattr(delegated, "content_skipped", None)
+    if skipped == "disabled":
+        print(
+            "  scratchpad content: off (session.cleanup.delegated.scratchpad.enabled "
+            "is off; --force runs it once)"
+        )
+        return
+    if skipped == "disabled during the pass":
+        print("  scratchpad content: switch turned off during the pass (batched stop)")
+    rows = list(getattr(delegated, "content", []))
+    kept = list(getattr(delegated, "content_kept", []))
+    classes = _content_class_counts(rows)
+    parts = ", ".join(f"{count} {name}" for name, count in classes.items())
+    low = getattr(delegated, "content_remaining", 0)
+    low_note = f"; {low} pad(s) not reached this pass" if low else ""
+    size = _format_bytes(sum(row.bytes for row in rows))
+    paren = f" ({parts})" if parts else ""
+    print(f"  scratchpad content: {verb} {len(rows)} pad(s), ~{size}{paren}{low_note}")
+    for row in rows[:_CLEANUP_TEXT_ROWS]:
+        print(_content_row_text(row, verb))
+    if len(rows) > _CLEANUP_TEXT_ROWS:
+        print(f"  ... and {len(rows) - _CLEANUP_TEXT_ROWS} more (--json lists every row)")
+    for name, reason in kept[:_CLEANUP_TEXT_ROWS]:
+        print(f"  content kept {name}  ({reason})")
+    if len(kept) > _CLEANUP_TEXT_ROWS:
+        print(
+            f"  ... and {len(kept) - _CLEANUP_TEXT_ROWS} more content keeps "
+            "(--json lists every row)"
+        )
+
+
 def sessions_cleanup_command(args: argparse.Namespace) -> int:
     """``lop sessions cleanup [--dry-run] [--force [--yes]]``.
 
@@ -4660,6 +4774,15 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     the user confirms is exactly what goes: the parent class applies its previewed
     plan, and the delegated class re-runs with ``only=<previewed names>`` at the
     preview's own clock.
+
+    The delegated section also carries the scratchpad-CONTENT block (the
+    carve-out in ``session/delegated_retention.py``): the pads it would reclaim
+    (stale output, build shapes, merged-clean git trees) and the ``content
+    kept`` reasons for what it declines, so the operator can audit both
+    directions. That phase is gated by ``session.cleanup.delegated.scratchpad.
+    enabled`` (default on; ``--force`` runs it once when off), and content
+    reclaims are the only reason a run with no session rows still proceeds to
+    confirmation — with its own confirmation sentence.
 
     A class runs when its switch is on (or ``--force``); the parent class also
     needs a limit. A dry run lists both whatever the switches say and notes it.
@@ -4764,6 +4887,21 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 max_age_hours=getattr(delegated, "hours", policy.delegated_max_age_hours),
                 within_window=getattr(delegated, "within_window", 0),
                 remaining=getattr(delegated, "remaining", 0),
+                scratchpad_enabled=policy.delegated_scratchpad_enabled,
+                scratchpad={
+                    "enabled": policy.delegated_scratchpad_enabled,
+                    "reclaimed": [
+                        dataclasses.asdict(row) for row in getattr(delegated, "content", [])
+                    ],
+                    "kept": [
+                        {"session": name, "reason": reason}
+                        for name, reason in getattr(delegated, "content_kept", [])
+                    ],
+                    "classes": _content_class_counts(getattr(delegated, "content", [])),
+                    "bytes": sum(row.bytes for row in getattr(delegated, "content", [])),
+                    "remaining": getattr(delegated, "content_remaining", 0),
+                    "skipped": getattr(delegated, "content_skipped", None),
+                },
             )
             payload["delegated"] = detail
         print(_json.dumps(payload, indent=2))
@@ -4861,6 +4999,11 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             )
             _print_cleanup_rows(delegated.removed, delegated_verb)
             _print_kept(delegated.protected)
+            if delegated_runs:
+                content_verb = (
+                    "would reclaim" if delegated_verb == "would remove" else "will reclaim"
+                )
+                _print_content(delegated, content_verb)
 
     if args.dry_run:
         if args.json:
@@ -4876,7 +5019,14 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         sections("will remove", parent_preview, delegated_preview, parent_runs, delegated_runs)
     parent_rows = len(parent_preview.removed) if parent_runs else 0
     delegated_rows = len(delegated_preview.removed) if delegated_runs else 0
-    if policy.has_any_limit and not parent_runs and not delegated_rows:
+    # Content reclaims the run would perform: only when the class and the
+    # content switch both run (or --force), mirroring the pass's own gate.
+    content_rows = (
+        len(delegated_preview.content)
+        if delegated_runs and (policy.delegated_scratchpad_enabled or force)
+        else 0
+    )
+    if policy.has_any_limit and not parent_runs and not delegated_rows and not content_rows:
         # The limits are configured but their switch is off, and the other class
         # has nothing to do: that is a REFUSAL, not "nothing to remove" — the
         # reading that made a user who saw "limits set, nothing happens" run
@@ -4887,7 +5037,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             print(f"refusing to remove sessions: {switch_hint}", file=sys.stderr)
             print("preview what the limits would remove with --dry-run", file=sys.stderr)
         return 2
-    if not parent_rows and not delegated_rows:
+    if not parent_rows and not delegated_rows and not content_rows:
         if args.json:
             emit_json(parent_preview, delegated_preview, outcome="nothing-to-do")
         else:
@@ -4896,6 +5046,17 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
 
     confirmed: bool | None = None
     total = parent_rows + delegated_rows
+    if total and content_rows:
+        prompt = (
+            f"remove {total} session(s) and reclaim scratchpad content from "
+            f"{content_rows} session(s)? type 'yes' to confirm: "
+        )
+    elif total:
+        prompt = f"remove {total} session(s)? type 'yes' to confirm: "
+    else:
+        prompt = (
+            f"reclaim scratchpad content from {content_rows} session(s)? " "type 'yes' to confirm: "
+        )
     if not args.yes:
         if not sys.stdin.isatty():
             if args.json:
@@ -4907,7 +5068,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 )
             return 2
         try:
-            answer = input(f"remove {total} session(s)? type 'yes' to confirm: ")
+            answer = input(prompt)
         except (EOFError, KeyboardInterrupt):
             answer = ""
         confirmed = answer.strip().lower() == "yes"
@@ -4941,8 +5102,9 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 now=moment,
                 budget_s=UNBOUNDED,
                 only=[c.session for c in delegated_preview.removed],
+                content_only=[row.session for row in delegated_preview.content],
             )
-            if delegated_rows
+            if delegated_rows or content_rows
             else DelegatedResult()
         )
     errors = parent_result.errors + delegated_result.errors
@@ -4952,6 +5114,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     removed = parent_result.removed + delegated_result.removed
     print(f"removed {len(removed)} session(s)")
     _print_cleanup_rows(removed, "removed")
+    if delegated_result.content:
+        print(f"reclaimed scratchpad content from {len(delegated_result.content)} session(s)")
     if errors:
         print(f"  {errors} error(s); see the log", file=sys.stderr)
     print(f"record: {record_path}")
@@ -9489,6 +9653,60 @@ def _refuse_serve_bind(host: str, port: int, exc: OSError) -> int:
     return 1
 
 
+def _serve_bind_is_loopback_only(host: str) -> bool:
+    """Whether ``host`` may be a serve bind: loopback-only, strictly (RFC §3.1).
+
+    Accepts ``127.0.0.0/8``, ``::1``, ``localhost``, and a NAME only when every
+    address it resolves to is loopback -- a name that resolves anywhere else, or
+    nowhere, is refused. Everything the answer depends on lives in one spelling:
+    the literal half is the per-connection gate's own predicate
+    (:func:`~local_operator.server.utils.static_roots.is_loopback_host`), so the
+    bind policy and the request policy cannot drift apart.
+
+    There is deliberately NO override: the file server serves unclamped on
+    loopback connections, so the listener itself must never be reachable beyond
+    them (no CLI flag re-admits a wide bind; a test pins that).
+    """
+    from local_operator.server.utils.static_roots import is_loopback_host
+
+    name = host.strip().lower()
+    if not name:
+        return False
+    if is_loopback_host(name):
+        return True
+    try:
+        infos = socket.getaddrinfo(name, None)
+    except OSError:
+        return False
+    # ``str(...)``: getaddrinfo's host part is typed ``str | int`` by the union of
+    # sockaddr shapes; a non-string would not be loopback anyway (fail-closed).
+    addresses = {str(info[4][0]) for info in infos}
+    if not addresses:
+        return False
+    return all(is_loopback_host(address) for address in addresses)
+
+
+def _refuse_non_loopback_bind(host: str, port: int) -> int:
+    """Report a serve bind this process refuses by POLICY, naming the remedy.
+
+    Same shape as :func:`_refuse_serve_bind` (exit 1, the address named),
+    because to the operator it is the same class of problem: a listener that
+    will not exist. The difference is that no spelling of this address would
+    have worked -- the policy is strict, and the remedy is not a flag but a
+    different path to the server: bind loopback, then reach it through an
+    explicit tunnel or an SSH port-forward.
+    """
+    # Brackets for a v6 literal so the address stays unambiguous (``:::1111``).
+    display = f"[{host}]" if ":" in host else host
+    print(
+        f"\n\033[1;31mError: cannot bind http://{display}:{port}: the serve API is "
+        "loopback-only by policy; bind 127.0.0.1 (or ::1 / localhost) and reach "
+        "it through an explicit tunnel or an SSH port-forward.\033[0m",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def adopt_serve_socket(fd: int, host: str) -> socket.socket:
     """Take over an already-bound listener handed across ``execve``.
 
@@ -9534,6 +9752,10 @@ def adopt_serve_socket(fd: int, host: str) -> socket.socket:
 def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
     """Start the FastAPI server using uvicorn.
 
+    The bind address is refused unless it is loopback-only, with no override
+    flag (RFC §3.1, :func:`_serve_bind_is_loopback_only`) -- for the fresh bind,
+    the ``--reload`` probe, and an adopted ``--listener-fd`` alike.
+
     ``uvicorn`` is imported HERE, not at module scope: the HTTP facade lives
     behind the ``server`` extra, so a default install (and every non-server
     entry point) must be able to ``import local_operator.cli`` without
@@ -9559,6 +9781,14 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
     depends on, and the identity check a discovery does (``/health``'s
     ``instance_id``, never the record's port) is what admits a candidate.
     """
+    # STRICT bind policy, before anything binds or adopts (RFC §3.1): the serve
+    # API is loopback-only, with no override flag -- the file server answers
+    # unclamped on loopback connections, so the listener must never be reachable
+    # beyond them. Covers the fresh bind, the --reload probe, and the
+    # --listener-fd adopt (whose socket is verified again below).
+    if not _serve_bind_is_loopback_only(host):
+        return _refuse_non_loopback_bind(host, port)
+
     try:
         import uvicorn
     except ImportError:
@@ -9595,6 +9825,21 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
             listener = adopt_serve_socket(listener_fd, host)
         except OSError as exc:
             print(f"--listener-fd {listener_fd} could not be adopted: {exc}", file=sys.stderr)
+            return 1
+        # The host ARGUMENT passed the policy above; verify the socket's REAL
+        # bound address too. Adopting is the one path where the argument is not
+        # the truth -- the descriptor was bound by a previous process image,
+        # possibly an older build -- and "no override path" (§3.1) must hold for
+        # the address actually served on, not for the spelling that was asked
+        # for. Closed on refusal: an unadopted wide listener must not sit open.
+        bound_host = str(listener.getsockname()[0])
+        if not _serve_bind_is_loopback_only(bound_host):
+            listener.close()
+            print(
+                f"\n\033[1;31mError: cannot adopt a listener bound to {bound_host}: "
+                "the serve API is loopback-only by policy.\033[0m",
+                file=sys.stderr,
+            )
             return 1
         resolved_port = listener.getsockname()[1]
     elif not reload:
@@ -14568,6 +14813,7 @@ def main() -> int:
                 refresh_mobile=bool(getattr(args, "refresh_mobile", False)),
                 from_snapshot=getattr(args, "from_snapshot", None),
                 services=not bool(getattr(args, "no_services", False)),
+                allow_downgrade=bool(getattr(args, "allow_downgrade", False)),
             )
         elif args.subcommand == "services":
             # Lazy for the same reason as ``update``: this pulls the serve

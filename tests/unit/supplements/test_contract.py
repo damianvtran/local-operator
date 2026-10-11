@@ -224,11 +224,22 @@ def test_live_only_states_never_appear_in_a_row_and_rows_never_use_other_words()
 
 
 def test_an_event_does_not_reach_exec_json_producers() -> None:
-    """Rule 6: `lop exec` never produces one. C0 adds no producer at all."""
+    """Rule 6: `lop exec` never produces one — the exec producers stay free of it.
+
+    Pinned by the EVENT, not the bare word (the module now names the feature in prose:
+    ``run_print_mode`` declares the headless host fact rule 6 reads — see
+    ``Session.declare_headless_host``). The invariant is that nothing here can render or
+    synthesise a ``supplement_progress`` event and nothing here reaches the supplements
+    package; a search for the event name is what a new producer cannot pass silently —
+    the same reasoning ``test_approval_authority_seam`` records for pins that would
+    otherwise fail on an explanation.
+    """
     import local_operator.headless_print as printing
 
     source = open(printing.__file__, encoding="utf-8").read()
-    assert "supplement" not in source
+    assert "supplement_progress" not in source
+    assert "SupplementProgressEvent" not in source
+    assert "local_operator.supplements" not in source
 
 
 # --- the wire ---------------------------------------------------------------------------

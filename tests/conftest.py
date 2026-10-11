@@ -106,6 +106,12 @@ _AMBIENT_VARS = (
     # paths untested. The kill-switch cell sets the resolved constant through
     # ``monkeypatch`` explicitly, which is where that reason is written down.
     "LOP_NO_REPLY",
+    # The turn-supplement kill switch (``supplements/policy.SUPPLEMENTS``, read from
+    # ``LOP_SUPPLEMENTS``). The same ESCAPE-HATCH class as the ask gate: the feature is the
+    # shipped default, and an inherited kill value would silently move every cell that
+    # drives it onto the "nothing happens" arm while asserting the one nobody runs. Cells
+    # that mean "off" set it through ``monkeypatch`` explicitly.
+    "LOP_SUPPLEMENTS",
     # The soft query budget's escape hatch (``tools/query_budget.ALLOW_ENV``), the
     # same ESCAPE-HATCH class and scrubbed for the same reason: an inherited value
     # would waive the stop every cell in ``test_query_budget.py`` asserts. Read off
@@ -395,6 +401,29 @@ _AMBIENT_VARS = (
     # than explained.
     "GH_TOKEN",
     "GITHUB_TOKEN",
+    # The OSC 8 hyperlink capability markers of the REAL terminal the suite is
+    # run from (``terminals.py::is_hyperlinked``, the supplement file callouts'
+    # paint decision): ``VTE_VERSION`` is exported by every VTE-based terminal
+    # (GNOME Terminal, Tilix, gnome-console) and ``KONSOLE_VERSION`` by
+    # Konsole, and both are READ as values -- a version integer compared
+    # against a minimum -- so an inherited one moves the branch: a cell
+    # painting through the ambient probe would take the link path on a VTE
+    # host while CI takes plain text, green either way. Scrubbed rather than
+    # explained: the probe's own cells pin ``is_hyperlinked`` through explicit
+    # env maps (``test_link_targets.py``) and the callout cells pin
+    # ``hyperlinks=`` (``test_supplement_surface.py``), so nothing needs a live
+    # terminal's value to survive -- and with it scrubbed no unpinned cell can
+    # silently measure the developer's machine as the terminal under test.
+    "VTE_VERSION",
+    "KONSOLE_VERSION",
+    # The hyperlink escape hatch (``terminals.py::HYPERLINKS_ENV``), the same
+    # ESCAPE-HATCH class as the ``ALLOW_*`` names above: it overrides BOTH
+    # directions of the detection every ``is_hyperlinked`` cell asserts, so an
+    # operator's exported value would move a cell onto a forced branch while
+    # it still looked like it tested the probe. Cells that mean a forced
+    # branch pass it in their own env map (``test_link_targets.py`` pins both
+    # directions that way), which keeps the opt-in visible.
+    "LOCAL_OPERATOR_HYPERLINKS",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real

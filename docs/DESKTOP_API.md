@@ -176,39 +176,134 @@ gate to cover them is a separate, larger decision and is recorded rather than
 made here.
 
 `/v1/static/*` is the one of those four that now carries its own hardening
-(`server/utils/static_roots.py`), because it is the one that reads arbitrary files:
+(`server/utils/static_roots.py`), because it is the one that reads arbitrary files
+(except the Host check below, which since P1.5 covers every route of the app):
 
-- **Served roots.** `path` must resolve (symlinks followed) to a regular file inside
-  the agent home, `<config>/sessions`, `<config>/uploads`, the working directory of a
-  running session, or a root added through `static.roots` (settings page /
-  `config.yml`) or `LOCAL_OPERATOR_STATIC_ROOTS`. A session whose working directory is
-  `$HOME` or contains it adds nothing (serving `~` is an explicit `static.roots`
-  opt-in), and a registered agent's working directory is not a source at all (it is
-  writable through the ungated `PATCH /v1/agents/<id>`). A configured root that
-  contains `$HOME` (`/`, `/Users`, `~/..`) is refused. Anything else is a `403` that
-  does not say whether the file exists and names the remedy (`static.roots`); `..` is
-  refused outright, and a dot-directory below a root (`~/.ssh` under a root at `~`) is
-  never served.
-- **Host check.** A `Host` that is a DNS name other than `localhost` (or the
-  daemon's own `--host`) is refused with `403`, so a DNS-rebinding page, which is
-  same-origin and needs no CORS grant, cannot use the route. IP literals pass (the
-  app dials `http://127.0.0.1:<port>`); a wildcard bind (`--host 0.0.0.0`) turns the
-  check off.
+- **The bound is the connection, not a directory list.** `lop serve` refuses every
+  non-loopback bind (`0.0.0.0`, `::`, LAN addresses, non-loopback-resolving names:
+  exit 1, no override flag), and the route itself serves UNCLAMPED only on a
+  connection the kernel accepted on a loopback address: `path` may be any absolute
+  path that resolves (symlinks followed) to a readable regular file. Anything else
+  -- a non-loopback, unknown or missing accepted address (fail-closed) -- gets the
+  v0.68.23 clamp: the file must resolve inside the agent home, `<config>/sessions`,
+  `<config>/uploads`, the working directory of a running session, or an explicit
+  root (`static.roots` / `LOCAL_OPERATOR_STATIC_ROOTS`; the settings row is now
+  labelled as fallback-only). In that fallback a session whose working directory is
+  `$HOME` or contains it adds nothing, a registered agent's working directory is not
+  a source at all (it is writable through the ungated `PATCH /v1/agents/<id>`), a
+  configured root that contains `$HOME` (`/`, `/Users`, `~/..`) is refused, and a
+  dot-directory below a root (`~/.ssh` under a root at `~`) is never served; the
+  `403` does not say whether the file exists and names the remedy. `..` is refused
+  outright in both postures. This design is
+  `docs/design/file-serving-and-surface-convergence.md` §3.
+- **Host check -- every route, not just this family (P1.5, RFC §3.6).** A `Host`
+  that is a DNS name other than `localhost` (or the daemon's own `--host`) is
+  refused with `403` on every route of the app, so a DNS-rebinding page, which is
+  same-origin and needs no CORS grant, cannot use any of them. Admitted: IP
+  literals (the app dials `http://127.0.0.1:<port>`), `localhost` in its port,
+  case and trailing-dot spellings, and the daemon's announced bind when it is a
+  specific name; a wildcard/empty announced host fails closed -- only IP literals
+  and `localhost` pass and a DNS name is refused (the former wildcard-bind bypass
+  is deleted); an absent `Host` passes (HTTP/1.0 clients; no browser omits it).
+  No route or client exemption exists: the shipped surfaces and the CLI dial
+  `127.0.0.1` literals, and a tunnel or SSH port-forward presents the literal it
+  dialed.
 - **Response policy.** Every response, errors included, carries `nosniff` and a
   `Content-Security-Policy` ending in `frame-ancestors` (the app only), and no CORS
   grant is made to an origin that is not on the admitted allowlist -- including, unlike
   the rest of the legacy surface, on an allowlist-less daemon, because nothing reads
   these routes with `fetch` (`<img>`/`<video>`/`<iframe src>` are not CORS-gated).
-- **Still open:** the routes are unauthenticated. The UI embeds them by `src`, which
-  cannot carry a bearer; the fix is a short-lived signed query token minted by an
-  authenticated endpoint and checked here, and it needs the UI to request it. Also
-  open: a symlink swapped inside a writable root between the check and the open
-  (TOCTOU), and a hardlink inside a root to a file outside it.
-- **Known regression until the UI follow-up lands.** Every UI consumer that passes a
-  user- or agent-named path (composer thumbnails, message attachments, video/HTML
-  previews, canvas file viewer) gets a `403` for a file outside the roots above.
-  local-operator-ui reading those bytes over IPC retires the dependency; until then the
-  remedy is `static.roots`.
+- **Still open: enforcement.** The routes accept the Phase A token and signed
+  query URLs now (the subsection below carries the contract) but refuse nothing
+  on them yet; the UI change to present either is the recorded follow-up. Also
+  open: a symlink swapped between the check and the open (TOCTOU -- robustness
+  rather than a boundary once no root list bounds the read; the recorded fix is
+  Phase 3), and the accepted `<img>`-observable residual: general mode widens
+  that path existence/dimension signal to the whole disk, and it stays bounded
+  only because the document CSP keeps a preview page off the network
+  (`connect-src https:`, `worker-src blob:` -- pinned by a core-side test; any
+  future widening is a security change through the supplements-lane review,
+  RFC §3.7 item 10).
+- **The former 403 class is retired.** Every UI consumer that passes a user- or
+  agent-named path (composer thumbnails, message attachments, video/HTML previews,
+  canvas file viewer) is served on loopback -- `~/Downloads` picks, session
+  scratchpads, agent output anywhere -- so the `static.roots` remedy is no longer
+  needed in normal operation. What stays open is enforcement of that
+  authentication (above and below): the minting half has landed, refusing
+  arrives with the design's Phases B/C.
+
+### Local surface tokens and signed URLs (Phase A, permissive)
+
+The remaining gap above is authentication, and this is its first phase
+(`docs/design/file-serving-and-surface-convergence.md` §4). It ships
+PERMISSIVE: the credentials exist, validate and are observable, but nothing
+refuses on them yet. That is deliberate -- it lets every surface adopt them
+over a compat window before the later phases switch enforcement on, with no
+mixed-version cliff.
+
+**The serve-record fields.** Every announced boot draws a 256-bit seed
+(`secrets.token_bytes(32)`) and derives two values with HKDF-SHA256 (stdlib):
+the ACCESS TOKEN below, published in the record, and a signing key that never
+leaves the process. The seed is never stored. The record gains two additive
+fields: `access_token` (`"<generation>.<secret>"`) and `boot_generation`; an
+older reader drops them, and an older record parses with empty defaults. A
+restart re-derives the secret and bumps the generation, so a token and the
+record that carried it are classifiable against each other.
+
+**Presenting the token.** A surface reads the record and sends the token as
+`X-Local-Token: <generation>.<secret>`. Phase A, on the general
+(loopback-accepted) posture: a valid token is validated and counted; an
+invalid or stale one is treated as ABSENT -- never a refusal, and every
+malformed shape classifies as invalid rather than erroring -- and the first
+sighting of each stale generation logs one WARNING line (visible at the
+daemon's default log level). Rooted-mode STATIC reads ignore tokens -- the
+observation rides the general posture -- while the sign door accepts them in
+every mode (a valid token opens it on a rooted connection too). A surface
+can compare its token's generation prefix (or the `boot_generation` it cached)
+against the record and re-read on a mismatch. The later phases turn a missing
+or invalid token on a static GET into `401` with the stable code
+`files_token_required`, so clients get one re-read-and-retry rule.
+
+**Signed URLs for `src=` loads.** `POST /v1/static/sign` mints a URL for one
+static route + path + expiry. Authentication: the local access token or the
+desktop bearer; any failure is one stable `401` (the endpoint does not reveal
+which door refused). Body and response:
+
+```jsonc
+// POST /v1/static/sign
+{"route": "images",            // one of images|videos|audio|html
+ "path":  "/Users/me/x.png",   // the path string the URL will carry
+ "ttl_s": 600}                 // optional; default 600 s, cap 3600 s
+
+// 200
+{"url": "/v1/static/images?path=%2FUsers%2Fme%2Fx.png&exp=1730000000&sig=0000000000000000...",
+ "exp": 1730000000}
+```
+
+**The canonical signed bytes** -- both ends build exactly this, nothing else:
+
+```text
+sig = HMAC-SHA256(signing_key, f"{route}\n{path}\n{exp}")    # lowercase hex
+```
+
+`route` is the id above; `path` is the DECODED query value exactly as the
+request carries it (the URL percent-encodes it for the wire and the server
+decodes before verifying -- there is no second canonicalisation dialect);
+`exp` is unix seconds in decimal. The signature binds all three, so swapping
+the path, the route or `exp`, editing `sig`, or using the URL after `exp`
+fails verification -- which runs before any filesystem resolution, so an
+invalid signature can never probe what exists.
+
+**Replay and log exposure.** A signed URL is a bearer URL: whoever holds one
+can replay it until `exp`, and it travels in the query string, so the daemon's
+access log records `path`, `exp` and `sig` on every fetch. The token itself
+never lands in a log (headers are not logged).
+
+**`<video>` Range/seek lifetime.** Streaming issues many Range GETs against
+one URL. Mint with a `ttl_s` covering the viewing session (up to the 3600 s
+cap) and re-sign when the UI's existing version/mtime key changes
+(`html-preview.tsx:137`'s re-key is the precedent); when the later phases
+enforce expiry, a stale URL is a `401`-and-re-sign, not a stream failure.
 
 The deprecated `/v1/ws` socket surface was also in that ungated set and is now
 **gone** — route, mount and fan-out — so it is no longer listed. This is a
@@ -1655,16 +1750,21 @@ rows.
 
 #### Scope: local journals only, and the seams
 
-**A peer's conversation keeps today's shape** — with or without the flag. A
-peer-owned id is served by different readers (`_remote_history` for the wire
-window, `_peer_stored_history` through `net_session_history` for the owner's
-stored journal), so its page is built by the OWNER and arrives over the mesh;
-stripping it here would be a second page builder for the same rows, and the
-remote-cost lane owns that change. The seam is stated rather than left to be
-discovered: when the owner-side read gains the same strip and facts, the client
-needs nothing new, because `runs_state: "unsupported"` is already the value it
-must tolerate today. A renderer MUST treat `unsupported` and an absent `runs`
-alike: draw today's page and keep its own condensation.
+**A peer's frame is built by its OWNER, and the stored read is the path that
+reaches it.** A peer-owned id is served by different readers (`_remote_history`
+for the wire window, `_peer_stored_history` through `net_session_history` for
+the owner's stored journal), and the frame — the strip, the cut and the run
+facts — is the owner-side twin of the local build
+(`relay.RelayServer._open_frame_detail`, over the owner's own journal rows).
+THE LIVE WIRE WINDOW KEEPS TODAY'S SHAPE **AND SAYS SO**: its rows are MESSAGES
+rather than journal entries (the strip's key list does not describe them), its
+run facts would need a transcript index over a journal this device does not
+hold, and it answers `runs_state: "unsupported"` when the flag was asked for.
+An owner older than the facts half answers today's page without the three keys;
+the viewer defaults them to `runs: []` / `runs_state: "unsupported"` /
+`head_cut: false`, so a renderer MUST treat `unsupported` and an absent `runs`
+alike: draw today's page and keep its own condensation — no client meets a
+value it does not already tolerate.
 
 **The relay's first frame is not served from this builder in this revision**,
 and the reason is a precondition rather than an appetite: the phone's projection
@@ -1984,7 +2084,8 @@ advertises `supplements-v1` only when it can honour the lazy read op
 (`supplements_for(anchors[]) → {anchor: newest row}`), and the viewer declares
 `supplements` on its auth frame (`auth["supplements"] = true`; the desktop live path
 declares `?supplements=1` on its events route instead — the `entry_ts` shape; that
-parameter is a frozen name today, read by no route until the routes lane lands). Only then
+parameter is read by the events route: a subscriber that declares it is the only one
+handed `supplement_progress` frames, live or from replay). Only then
 may the runtime send `supplement_progress` events or project supplement rows; a viewer
 that does not declare receives neither, so it never paints an unknown kind. Rows are
 journaled either way, reach a desktop as ordinary history entries (raw `custom` rows)
@@ -2042,19 +2143,31 @@ It arrives only AFTER the turn's `agent_end`, and it carries the `anchor`, so a 
 event (the next turn already started) still lands on the right answer. `lop exec` never
 produces one (its turns are outside the trigger), and SDK event streams are unchanged.
 Under backpressure, supplement frames fold keep-newest — the family is
-self-replacing by construction — but no fold key exists for them yet; `session/delta_merge.py`
-gains the `supplement` fold with the emitter lane.
+self-replacing by construction — and its fold key lives in `session/delta_merge.py`.
 
 **Not in this release.** No image components (v1 documents carry HTML only); no mesh
 transfer (a file or component a peer device holds reads as "on <peer>" with previews
 disabled — `GET …/attachments/{digest}` already answers 409 `attachment_on_peer`); the
 native (phone) WebView frame is pending its own lane; and the static preview routes
-(`/v1/static/*`) are not yet token-authenticated — short-lived signed URLs are a
-recorded follow-up that needs a client change. No renderer consumes any of this yet:
-the TUI, UI, relay and native renderers are separate lanes, and the desktop document
-route is a registered 404 stub until the routes lane fills it; the `?supplements=1`
-events-route reader and the keep-newest fold are contract-frozen names still to be
-implemented, by the routes and emitter lanes respectively.
+(`/v1/static/*`) are not yet token-ENFORCED -- Phase A accepts tokens and mints
+short-lived signed URLs (see the static section), but refusing is a later phase
+and the client change to present a credential is the recorded follow-up. Shipped since
+this contract's head: two renderer lanes consume the wire today -- the TUI (the file
+callouts, the `N more` disclosure and the state line; an HTML component is skipped
+silently, no placeholder) and the desktop UI (the same callouts and state line, each
+component in a sandboxed frame with its one `Source: ...` caption) -- while the relay
+web renderer is in review (core PR #2222) and the native phone renderer is a separate
+lane, not shipped.
+The READ half is implemented (routes lane C2): the desktop document route serves the
+assembled component as `{html}` by digest (`nosniff`, `Cache-Control: no-store`, 409
+`attachment_on_peer` passed through for a peer-held blob, an unassemblable blob an
+ordinary 404), keyed by `AttachmentDigest` so a caller-supplied path can never be part
+of the request; the `?supplements=1` events-route reader gates `supplement_progress`
+per subscriber on live AND replay; and the relay serves both the document (`{html}`,
+the digest additionally reference-checked against that session's journal) and the
+recorded file callout (`row["files"][i]`, suffix-allowlisted `Content-Type` — never
+`text/html`, SVG or `+xml` — a 10 MB cap, and the §4.3 denylist re-applied per
+request).
 
 ### Verification
 
@@ -2274,10 +2387,13 @@ to.
 ### The polling cadence
 
 One task per process, started with the first subscriber and stopped with the
-last. Each tick is FOUR `os.stat` calls — `attention.db` with its two journal
+last. Each tick is FIVE `os.stat` calls — `attention.db` with its two journal
 sidecars, plus `run/mobile`, the discovery-record directory, which is where the
 status channel's edges come from — the doorbell `config_watch` already uses for
-`config.yml` — with a SQLite read only when the store actually moved, and a
+`config.yml` — plus `config.yml` ITSELF, the settings doorbell: its movement
+publishes a `config` frame naming the changed keys and the freshly resolved
+`language` (the same value `GET /v1/capabilities` carries), so a language write
+reaches the app live whichever process performed it — with a SQLite read only when the store actually moved, and a
 record read only for a record whose own file moved. That is what takes background
 detection from the 1 s poll's floor to a p50 of roughly one tick. A quiet tick
 makes no SQL and no record read at all. The revision gate stays the
@@ -2328,7 +2444,7 @@ row**; a row's metadata file is READ only when that row's stat moved, so an idle
 probe reads nothing at all (measured on this fleet: a warm probe over 34 profiles
 is 36 `stat`/`scandir` calls and ZERO file reads, 0.31 ms; the same probe with
 its stat memory cold is 1.16 ms). It runs on the catalogue probe's 1 s clock, not
-on the 100 ms tick — a quiet tick still pays exactly the four stats the doorbell
+on the 100 ms tick — a quiet tick still pays exactly the five stats the doorbell
 is budgeted for — and it is off the event loop (`asyncio.to_thread`), like every
 other probe here. The projection is a line filter rather than a YAML parse for
 the same reason: `yaml.safe_load` + re-dump of those 34 rows measures 56.95 ms,

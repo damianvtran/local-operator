@@ -2020,3 +2020,76 @@ def test_create_speech_types_a_transport_failure_without_a_status(
 
     assert exc_info.value.status_code is None
     assert exc_info.value.body is None
+
+
+# -- PR-3: client correlation headers ------------------------------------------
+
+
+def test_correlation_headers_are_grammar_gated() -> None:
+    """The docs' grammar is ``[A-Za-z0-9._:-]{1,64}`` and the server IGNORES a bad value.
+
+    We gate client-side anyway: sending bytes the far end is documented to
+    discard is noise, and a local session id can carry a slash or exceed the
+    cap. Absence must be absence — an empty/ungrammatical value sends NOTHING
+    (the request stays byte-identical to the pre-correlation one).
+    """
+    from local_operator.clients.radient import _correlation_headers
+
+    assert _correlation_headers("sess-1", "req:1") == {
+        "X-Radient-Client-Session-Id": "sess-1",
+        "X-Radient-Client-Request-Id": "req:1",
+    }
+    assert _correlation_headers(None, None) == {}
+    assert _correlation_headers("", "") == {}
+    assert _correlation_headers("has/slash", "x" * 65) == {}
+    assert _correlation_headers("  sess-1  ", None) == {"X-Radient-Client-Session-Id": "sess-1"}
+
+
+def test_create_speech_response_sends_the_correlation_headers(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    posted = MagicMock(return_value=real_response(200, b"audio"))
+    with patch("requests.post", posted):
+        radient_client.create_speech_response(
+            input_text="hello",
+            session_id="sess-1",
+            client_request_id="req-abc",
+        )
+    headers = posted.call_args.kwargs["headers"]
+    assert headers["X-Radient-Client-Session-Id"] == "sess-1"
+    assert headers["X-Radient-Client-Request-Id"] == "req-abc"
+
+    # And an ungrammatical pair is OMITTED entirely: the old-hub tolerance.
+    posted_again = MagicMock(return_value=real_response(200, b"audio"))
+    with patch("requests.post", posted_again):
+        radient_client.create_speech_response(input_text="hello", session_id="bad/id")
+    headers = posted_again.call_args.kwargs["headers"]
+    assert "X-Radient-Client-Session-Id" not in headers
+    assert "X-Radient-Client-Request-Id" not in headers
+
+
+def test_create_transcription_sends_the_correlation_headers(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    import json as _json
+    import tempfile
+
+    body = _json.dumps(
+        {"msg": "ok", "result": {"text": "hi", "provider": "x", "status": "completed"}}
+    ).encode()
+    posted = MagicMock(return_value=real_response(200, body))
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as handle:
+        handle.write(b"audio")
+        path = handle.name
+    try:
+        with patch("requests.post", posted):
+            radient_client.create_transcription(
+                file_path=path, session_id="sess-2", client_request_id="req-def"
+            )
+        headers = posted.call_args.kwargs["headers"]
+        assert headers["X-Radient-Client-Session-Id"] == "sess-2"
+        assert headers["X-Radient-Client-Request-Id"] == "req-def"
+    finally:
+        import os as _os
+
+        _os.unlink(path)

@@ -100,6 +100,7 @@ from local_operator.harness.types import (
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
+    SupplementProgressEvent,
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -2354,6 +2355,28 @@ class ProjectionFold:
             p.model_label = f"{event.provider}/{event.model_id}"
             if event.effort:
                 p.effort = event.effort
+        elif isinstance(event, SupplementProgressEvent):
+            # Turn supplements (memo §3.1 row 18; P5's sibling map). The beat is
+            # SELF-REPLACING by construction (§2.7), so this is a keep-newest fold
+            # per anchor: a lower version than the one held is a replay or an
+            # out-of-order delivery and never overwrites state the reader already
+            # saw. The value is the beat's own fields (the live shape); the durable
+            # row, which carries the same keys plus the generator's detail lines,
+            # is what ``durable.py`` fills from the journal on a cold open.
+            held = p.supplements.get(event.anchor)
+            if held is None or event.version >= int(held.get("version") or 0):
+                p.supplements[event.anchor] = {
+                    "anchor": event.anchor,
+                    "job": event.job,
+                    "version": event.version,
+                    "state": event.state,
+                    "stage": event.stage,
+                    "elapsed_s": event.elapsed_s,
+                    "files": list(event.files),
+                    "components": list(event.components),
+                    "error": event.error,
+                    "error_type": event.error_type,
+                }
         # Unknown events are dropped by design: the fold renders a SUBSET of
         # the harness taxonomy (the phone has no use for wake/loop internals),
         # and ``extra="allow"`` on AgentEvent means matching must stay
@@ -3363,6 +3386,7 @@ class ProjectionFold:
         context_window: int | None,
         context_is_estimate: bool | None,
         usage: dict[str, int],
+        spend_channels: dict[str, Any] | None,
     ) -> None:
         """Adopt the store's spend/context block EXACTLY, then bump.
 
@@ -3391,6 +3415,14 @@ class ProjectionFold:
         p.context_window = context_window
         p.context_is_estimate = context_is_estimate
         p.usage = usage
+        # The published per-channel object (PR-2): assigned UNCONDITIONALLY on
+        # the same rule as every field above — ``None`` is a READING ("this
+        # runtime publishes no channel ledger"), never "skip this update", and
+        # a skip here would keep a stale breakdown alive after a republish that
+        # withdrew it. The caller hands the copy it owns
+        # (``spend_channels_copy``), so the fold keeps that object and a
+        # repaint never re-copies it.
+        p.spend_channels = spend_channels
         self._bump()
 
     # -- internals ----------------------------------------------------------

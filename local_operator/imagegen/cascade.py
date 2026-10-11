@@ -135,16 +135,22 @@ RUNG_SPECS: dict[str, RungSpec] = {
         route=ImageRoute.RADIENT,
         label="Radient",
         kinds=frozenset({"image"}),
-        # i2i re-joins when the hub's media route grows source handling (the
-        # enabling PR flips ``sources`` beside these two — see
-        # ``rungs.RADIENT_EDIT_SKIP_MESSAGE`` for why edits are refused until
-        # then: the route forwards every key verbatim to FAL, so a
-        # ``source_url`` edit is a silent, BILLED text-to-image or a
-        # rejection, and this client cannot tell which).
-        capabilities=frozenset({"t2i"}),
+        # i2i re-joined with the hub media slice (live 2026-10-10): the route
+        # accepts canonical ``image_url``/``image_urls`` (+ ``mask_url`` on its
+        # gpt-2.5 pins), refuses source aliases, and this rung wires the
+        # single-source ``image_url`` (``rungs.run_radient``).
+        capabilities=frozenset({"t2i", "i2i"}),
         cancel_support=CancelSupport.SIGNAL,
         cost="reported",
-        sources=SourceSupport.NONE,
+        # MULTI, because the HUB is: per-pin ceilings are live-listing facts
+        # (gpt-2.5 edit 16 / grok edit 3 / seedream edit 10 — the listing's
+        # ``max_sources`` field), and 16 is the highest live ceiling — the
+        # bound a multi-source wire must read back per pin before sending
+        # more than one. The v1 wire sends a SINGLE source, so nothing here
+        # is enforced client-side; the hub refuses an over-cap count with 400
+        # before any vendor call (no charge).
+        sources=SourceSupport.MULTI,
+        max_sources=16,
     ),
     ImageRoute.FAL: RungSpec(
         route=ImageRoute.FAL,
@@ -244,8 +250,14 @@ RUNG_SPECS: dict[str, RungSpec] = {
 #: The routes whose edit path accepts ``strength``: ``_run_route`` hands it to
 #: these only, and a successful edit on any OTHER route with ``strength`` set
 #: is recorded as ignored in the tool's ``details`` and caption (audit §ii.7)
-#: — the parameter is never dropped silently. Radient's entry is the
-#: post-hub-slice future (its edit path is skipped today), leaving FAL.
+#: — the parameter is never dropped silently. Radient stays in: its edit wire
+#: is a verbatim hub passthrough (the hub refuses only source-ish keys and
+#: maps sources), so ``strength`` reaches the pin's vendor schema wherever
+#: that schema documents it (the flux-class i2i apps); for pins whose schema
+#: is silent the vendor answer decides (the sunburst edit input schema
+#: neither declares nor forbids it — fetched 2026-10-10), and since no drop
+#: signal exists there, no ``strength_ignored`` is synthesized — the flag
+#: remains the WIRED-drop record it is on FAL's schema-guided path.
 STRENGTH_ROUTES: frozenset[ImageRoute] = frozenset({ImageRoute.RADIENT, ImageRoute.FAL})
 
 
@@ -636,14 +648,11 @@ def _no_edit_capable_message() -> str:
 def _edit_skip_message(route: str) -> str:
     """The pre-recorded skip's sentence for an available rung that cannot edit.
 
-    Radient's is the SPECIFIC sentence from beside its rung (the one a
-    signed-in user will meet first); the rest are generic. The radient
-    constant has ONE home — ``rungs.RADIENT_EDIT_SKIP_MESSAGE`` — shared by
-    this pre-record and the rung's own defence-in-depth skip, so the two
-    cannot drift.
+    One generic sentence: Radient's rung-specific text left with its skip path
+    when the hub media slice wired its edit route (``sources`` MULTI beside
+    ``rungs.run_radient``'s ``image_url`` wire), so the rungs this table can
+    still pre-record today use the generic wording.
     """
-    if route == ImageRoute.RADIENT:
-        return image_rungs.RADIENT_EDIT_SKIP_MESSAGE
     return f"{RUNG_SPECS[route].label} cannot edit images."
 
 

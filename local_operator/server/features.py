@@ -56,6 +56,13 @@ def feature_flags() -> dict[str, Any]:
         # bug, so the sentence stands alone.
         "commands": 2,
         "catalogues": 1,
+        # The catalogue route and the resolved `language` field beside this
+        # map. Additive like every key here: a client that predates it ignores
+        # it and reads exactly what it read before — which is why `i18n` is a
+        # NEW key rather than a bump of an existing one (nothing is withheld)
+        # and why no existing client changes behaviour while it is dark
+        # (M0 state: en-only, RFC §9 P1).
+        "i18n": 1,
         # The SESSIONLESS skill catalogue: `GET /v1/desktop/skills` answers
         # for an explicit `cwd` (home when omitted) with no session at all,
         # and every answer — sessionless or session form — carries `version`,
@@ -363,6 +370,17 @@ def feature_flags() -> dict[str, Any]:
         # renderer that does not see it shows the backend update action
         # instead of calling them.
         "diagnostics": 1,
+        # The per-channel spend object: `FrontendSessionState.spend_channels`
+        # (versioned, integer micro-USD — see docs/design/spend-channels.md)
+        # and the `/session` "Spend by channel" section that renders it. A NEW
+        # key on the `diagnostics` rule above: a renderer that does not see it
+        # keeps its legacy inference-only cost strip unchanged, and a NEW
+        # renderer against an old backend keeps that same legacy view rather
+        # than inventing channel rows. The field itself is additive on an
+        # `extra="allow"` model, so nothing breaks in either direction without
+        # the key; the key exists so the new renderer can tell whether the
+        # channel view is worthwhile before it renders one.
+        "cost_channels": 1,
         # The machine-wide desktop event feed and its delivery-presence
         # lease. TWO keys rather than one, because each has a consumer
         # that can be absent independently:

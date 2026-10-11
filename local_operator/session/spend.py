@@ -42,6 +42,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from local_operator.session.channel_spend import BASIS_BILLED, BASIS_SUBSCRIPTION
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.session.frontend_state import CostKnowledge
 
@@ -61,6 +63,15 @@ SESSION_SPEND_VERSION = 1
 #: directory (the attach invariant in ``transcript.py`` broken) is detectable
 #: rather than silently overwriting this process's total.
 _BOOT_ID = int(time.time())
+
+#: Cap on NAMED per-identity split entries (design §3.3): a session that walked
+#: a hundred models keeps 32 names and folds the rest into ``"other"`` so one
+#: record cannot grow without bound. The cap is enforced at accrual, the only
+#: writer.
+IDENTITY_CAP = 32
+
+#: The overflow bucket's key in :attr:`SessionSpend.by_identity`.
+IDENTITY_OTHER = "other"
 
 
 def writer_stamp() -> str:
@@ -130,6 +141,51 @@ def usage_prices_known(usage: Any) -> bool:
     from local_operator.model.configure import _usage_cost
 
     return _usage_cost(usage) is not None
+
+
+def inference_billing_labels(provider: str, usd_cost: float | None) -> tuple[str, str]:
+    """``(billing_basis, cost_source)`` for ONE inference call (PR-3, §3.4).
+
+    Called at RECORD time, with the provider id BEFORE
+    ``credential_provider_id`` collapses login flavours (``openai-device`` into
+    ``openai``): the raw id is the only place the two billing worlds are
+    distinguishable, and collapsing first is how a ChatGPT-plan call would
+    have been labelled as a metered OpenAI bill.
+
+    The three rules, in order:
+
+    - a SUBSCRIPTION-flavoured provider id (``openai``, ``openai-device``,
+      ``xai-oauth``, ``zai``, ``zai-oauth``, ``alibaba-token-plan``,
+      ``alibaba-token-plan-oauth`` — ``providers.registry``
+      ``SUBSCRIPTION_LOGIN_FLAVOURS`` is the ONE list) spends quota, not
+      dollars, so the figure is the client rate table's API-EQUIVALENT: basis
+      ``subscription_api_equivalent``, source ``catalogue``;
+    - a provider-reported receipt (``usd_cost``) IS the provider's own
+      statement: basis ``billed``, source ``provider_reported``;
+    - otherwise the figure is derived from the client's published rate table,
+      which the contract's own vocabulary calls ``billed`` (a figure derived
+      from a published rate), source ``catalogue``.
+
+    A caller with no price at all still records the call — pricing decides
+    knowledge later — so these labels describe the BILLING RELATIONSHIP and
+    never claim an amount. Rows from before the columns existed read
+    ``not_tracked``/``none`` from the schema default; they are not relabelled
+    here.
+
+    KNOWN LIMIT, said out loud rather than guessed around: ``anthropic`` and
+    ``kimi`` serve both a subscription sign-in and a plain API key under ONE
+    provider id, and a call records no credential kind, so their calls take
+    the metered reading. Threading the credential kind to the recorder is a
+    follow-up; labelling every Claude call ``subscription_api_equivalent``
+    would be the worse error.
+    """
+    from local_operator.providers.registry import subscription_login_flavour
+
+    if subscription_login_flavour(provider):
+        return BASIS_SUBSCRIPTION, "catalogue"
+    if usd_cost is not None:
+        return BASIS_BILLED, "provider_reported"
+    return BASIS_BILLED, "catalogue"
 
 
 def price_call(provider: str, model_id: str, usage: Any) -> tuple[int, bool]:
@@ -241,11 +297,32 @@ class SessionSpend:
     rebuilt: bool = False
     writer: str = ""
     last_identity: dict[str, str] | None = None
+    #: Per-IDENTITY split of this accumulator, additive in ``session_spend.v1``:
+    #: ``{"<provider>/<model>": {provider, model_id, micro, calls, unpriced}}``.
+    #: This is what gives ``/session`` and the UI an inference-by-model split
+    #: from the SAME record as the headline (design §3.3), without a second
+    #: store. Optional on read: a row written before this field existed simply
+    #: has no breakdown, and the surfaces then say "not tracked" while the
+    #: total stays exact — the one degradation that never fakes a number.
+    #:
+    #: Capped at :data:`IDENTITY_CAP` named entries; further identities fold
+    #: into an ``"other"`` bucket so a session that walked a hundred models
+    #: cannot grow this record without bound. The cap is enforced at ACCRUAL,
+    #: which is the only writer, so a resumed record is already capped.
+    by_identity: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: Per-call prices still eligible for an authoritative correction. In-memory
     #: only: a recalled record is already authoritative, and keeping the map
     #: across a resume would let a correction land against a call that this
     #: process never priced.
     _estimates: dict[int, int | None] = field(default_factory=dict, repr=False)
+    #: The by-identity key each accrued call was attributed to, so a later
+    #: ``correct`` moves the SAME split entry it moved the total by. In-memory
+    #: only, like ``_estimates``: a recalled record is already authoritative.
+    _identity_keys: dict[int, str] = field(default_factory=dict, repr=False)
+    #: The billing basis each accrued call was labelled with, so a correction
+    #: moves the entry's ``bases`` split by the same delta it moves ``micro``
+    #: by. In-memory only, like its neighbours.
+    _identity_bases: dict[int, str] = field(default_factory=dict, repr=False)
     _next_index: int = field(default=0, repr=False)
 
     # -- properties -------------------------------------------------------
@@ -261,12 +338,25 @@ class SessionSpend:
 
     # -- accrual ----------------------------------------------------------
 
-    def accrue(self, micro: int | None, identity: Mapping[str, Any] | None = None) -> int:
+    def accrue(
+        self,
+        micro: int | None,
+        identity: Mapping[str, Any] | None = None,
+        *,
+        basis: str | None = None,
+    ) -> int:
         """Add one provider call. Returns a token for a later correction.
 
         ``micro is None`` (or a call the caller could not price) counts the call
         as UNPRICED, which is what makes the total an honest lower bound instead
         of a complete-looking sum that silently omitted it.
+
+        ``basis`` is the call's billing basis (PR-3), the same label the
+        analytics ledger records for the call; a caller that does not know one
+        passes nothing and the bucket stays outside every basis — the wire
+        reads that as ``not_tracked`` rather than guessing. Money is what the
+        entry's ``bases`` split tracks: an unpriced call states no basis
+        because it states no money.
         """
         index = self._next_index
         self._next_index += 1
@@ -286,7 +376,62 @@ class SessionSpend:
                     **({"provider": provider} if provider else {}),
                     **({"model_id": model_id} if model_id else {}),
                 }
+            key = self._bump_identity(provider, model_id, value, basis)
+            if key is not None:
+                self._identity_keys[index] = key
+                if basis:
+                    # Kept even when the call is UNPRICED: the basis describes
+                    # the billing relationship, and a later correction that
+                    # prices the call must book the value into the bucket the
+                    # call always belonged to rather than dropping it into
+                    # not_tracked.
+                    self._identity_bases[index] = basis
         return index
+
+    def _bump_identity(
+        self, provider: str, model_id: str, value: int | None, basis: str | None = None
+    ) -> str | None:
+        """Fold ONE call into the by-identity split. Returns its bucket key.
+
+        A call with neither provider nor model is NOT attributed: an
+        unattributed call is exactly the remainder ``channel_spend``'s combiner
+        states as its own row, and inventing a bucket here would hide that
+        difference inside a named identity nobody served.
+        """
+        if not provider and not model_id:
+            return None
+        key = f"{provider}/{model_id}" if provider and model_id else (provider or model_id)
+        entry = self.by_identity.get(key)
+        if entry is None:
+            named = sum(1 for name in self.by_identity if name != IDENTITY_OTHER)
+            key = key if named < IDENTITY_CAP else IDENTITY_OTHER
+            entry = self.by_identity.get(key)
+            if entry is None:
+                entry = {
+                    "provider": "" if key == IDENTITY_OTHER else provider,
+                    "model_id": "" if key == IDENTITY_OTHER else model_id,
+                    "micro": 0,
+                    "calls": 0,
+                    "unpriced": 0,
+                }
+                self.by_identity[key] = entry
+        entry["calls"] += 1
+        if value is None:
+            entry["unpriced"] += 1
+        else:
+            entry["micro"] += value
+            if basis:
+                # ``bases: {basis: micro}`` is ADDITIVE on the entry: an old
+                # record has no key and its row reads ``not_tracked``, which
+                # is exactly what a basis nobody recorded deserves. Created
+                # lazily so an entry whose calls never stated a basis gains no
+                # empty dict that a reader could mistake for data.
+                bases = entry.get("bases")
+                if not isinstance(bases, dict):
+                    bases = {}
+                    entry["bases"] = bases
+                bases[basis] = int(bases.get(basis, 0)) + value
+        return key
 
     def correct(self, index: int, micro: int | None) -> int:
         """Replace an accrued call's estimate with its authoritative price.
@@ -305,6 +450,7 @@ class SessionSpend:
             return 0
         previous = self._estimates.pop(index)
         value = _as_int(micro) if micro is not None else None
+        self._correct_identity(index, previous, value)
         if value == previous:
             return 0
         if previous is None:
@@ -321,6 +467,53 @@ class SessionSpend:
             return -previous
         self.micro += value - previous
         return value - previous
+
+    def _correct_identity(self, index: int, previous: int | None, value: int | None) -> None:
+        """Move the by-identity split with the total, for ONE correction.
+
+        Without this the split and the headline drift apart the moment a
+        re-price lands, and the wire's rows would stop summing to its total —
+        the quiet disagreement between the parts and the whole that this whole
+        project exists to remove. A no-op when the correction changes nothing
+        or the call was unattributed.
+        """
+        key = self._identity_keys.pop(index, None)
+        basis = self._identity_bases.pop(index, None)
+        if key is None or previous == value:
+            return
+        entry = self.by_identity.get(key)
+        if entry is None:
+            return
+
+        def _move_basis(delta: int) -> None:
+            """Move the entry's ``bases`` split by the same delta, when stated.
+
+            A call with no recorded basis moves nothing here: its money still
+            shows in ``micro`` and stays OUT of every basis bucket, which is
+            the same honest reading the wire gives a legacy entry. The dict is
+            CREATED on the first booking — an unpriced call accrues with its
+            basis held but no money, and the correction that prices it is what
+            gives the bucket its first value.
+            """
+            if not basis:
+                return
+            bases = entry.get("bases")
+            if not isinstance(bases, dict):
+                bases = {}
+                entry["bases"] = bases
+            bases[basis] = int(bases.get(basis, 0)) + delta
+
+        if previous is None and value is not None:
+            entry["unpriced"] -= 1
+            entry["micro"] += value
+            _move_basis(value)
+        elif previous is not None and value is None:
+            entry["unpriced"] += 1
+            entry["micro"] -= previous
+            _move_basis(-previous)
+        elif previous is not None and value is not None:
+            entry["micro"] += value - previous
+            _move_basis(value - previous)
 
     def adjust(self, delta_micro: int) -> bool:
         """Apply a turn-level remainder, which is not a call.
@@ -425,6 +618,35 @@ class SessionSpend:
         }
         if self.last_identity:
             details["last_identity"] = dict(self.last_identity)
+        if self.by_identity:
+            # Only when non-empty: a row without the key is the documented
+            # "no breakdown" state, and writing an empty map would claim the
+            # same thing while looking like data.
+            details["by_identity"] = {
+                str(key): {
+                    "provider": str(entry.get("provider", "") or ""),
+                    "model_id": str(entry.get("model_id", "") or ""),
+                    "micro": int(entry.get("micro", 0) or 0),
+                    "calls": int(entry.get("calls", 0) or 0),
+                    "unpriced": int(entry.get("unpriced", 0) or 0),
+                    # ADDITIVE (PR-3): the basis split rides each entry only
+                    # when the calls actually recorded one, so a record from
+                    # before the key reads exactly as it was written — the
+                    # wire then says the basis is not tracked rather than
+                    # reconstructing one it never observed.
+                    **(
+                        {
+                            "bases": {
+                                str(name): int(amount or 0)
+                                for name, amount in entry["bases"].items()
+                            }
+                        }
+                        if isinstance(entry.get("bases"), dict) and entry["bases"]
+                        else {}
+                    ),
+                }
+                for key, entry in self.by_identity.items()
+            }
         return details
 
     @classmethod
@@ -466,7 +688,48 @@ class SessionSpend:
                 if isinstance(last_identity, Mapping)
                 else None
             ),
+            by_identity=_parse_identity_split(details.get("by_identity")),
         )
+
+
+def _parse_identity_split(raw: Any) -> dict[str, dict[str, Any]]:
+    """Parse the optional by-identity split, dropping malformed entries.
+
+    Optional by design (design §3.3): a row written before the field existed
+    reads as NO breakdown, which the surfaces render as "inference by model:
+    not tracked" beside an exact total. Never as an empty map pretending the
+    split was consulted and found empty.
+    """
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, entry in raw.items():
+        if not isinstance(entry, Mapping):
+            continue
+        micro = _as_int(entry.get("micro", 0))
+        calls = _as_int(entry.get("calls", 0))
+        unpriced = _as_int(entry.get("unpriced", 0))
+        if micro is None or calls is None or unpriced is None:
+            continue
+        if min(micro, calls, unpriced) < 0:
+            continue
+        out[str(key)] = {
+            "provider": str(entry.get("provider", "") or ""),
+            "model_id": str(entry.get("model_id", "") or ""),
+            "micro": micro,
+            "calls": calls,
+            "unpriced": unpriced,
+        }
+        bases = entry.get("bases")
+        if isinstance(bases, Mapping):
+            parsed = {
+                str(name): int(amount)
+                for name, amount in bases.items()
+                if _as_int(amount) is not None and int(amount) > 0
+            }
+            if parsed:
+                out[str(key)]["bases"] = parsed
+    return out
 
 
 def recall(transcript: Any) -> SessionSpend | None:

@@ -14,7 +14,7 @@ from contextlib import aclosing, asynccontextmanager
 from typing import Annotated, Any, Callable, Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -51,6 +51,7 @@ from local_operator.server.models.desktop_sessions import (
     DraftReceipt,
     HistoryPage,
     InterruptReceipt,
+    JobCancelReceipt,
     MessageAdmission,
     MoveReceipt,
     NotificationClaim,
@@ -60,6 +61,7 @@ from local_operator.server.models.desktop_sessions import (
     SessionList,
     SessionSearch,
     SessionSnapshot,
+    SupplementReceipt,
     WarmReceipt,
     WatchReceipt,
 )
@@ -126,6 +128,7 @@ from local_operator.slash_commands import (
     slash_command_for,
     whole_draft_command,
 )
+from local_operator.supplements.contract import STEER_TEXT_MAX_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -3624,19 +3627,35 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
 async def supplement_document(session_id: str, digest: AttachmentDigest, request: Request):
     """The assembled HTML document of one stored supplement component, as ``{html}``.
 
-    A C0 STUB: it answers 404 for every well-formed request so the contract (path, digest
-    shape, JSON-not-``text/html`` reply) is frozen and lane C2 can fill it in without a
-    route-table change. The real route (``docs/design/turn-supplements.md`` §2.7) resolves
-    the blob through the attachment store, hands it to
-    ``supplements.document.assemble_document`` and returns ``{html}`` -- JSON, never a
-    navigable ``text/html`` URL, because no host may point a frame at a URL (§4.1) -- with
-    409 ``attachment_on_peer`` passed through for a digest held by another device.
+    The document (``docs/design/turn-supplements.md`` §2.6/§2.7) is assembled by
+    ``supplements.document`` from the component blob this digest names and
+    returned as JSON -- **never** a navigable ``text/html`` URL, because no host
+    may point a frame at a URL (§4.1): the frame mounts these bytes at an opaque
+    origin under the document's own meta CSP. The route is digest-only by
+    construction: there is no caller-supplied path anywhere in the request, and
+    ``digest`` reuses :data:`AttachmentDigest`, the traversal gate of the
+    attachment route beside it (a non-matching path is a 422 before any handler
+    code runs).
 
-    ``digest`` reuses :data:`AttachmentDigest`, the traversal gate of the attachment route
-    beside it: a non-matching path is a 422 before any handler code runs.
+    Response headers are the executing-document family's (file-serving RFC D5):
+    ``X-Content-Type-Options: nosniff`` and ``Cache-Control: no-store``. The
+    digest-addressing would make an ``immutable`` cache semantically safe about
+    the bytes, and it is still the wrong header: ``managed_desktop_boundary``
+    applies ``no-store`` to everything under ``/v1/desktop/`` because these are
+    bearer-gated session documents, and D5 names ``no-store`` for this family
+    explicitly. The frame's own CSP rides INSIDE the document (the tunnel strips
+    response headers; §2.7), so no policy depends on this response's headers --
+    they are belt beside it.
+
+    A digest held by another device is 409 ``attachment_on_peer`` (passed
+    through by the error ladder); a missing or unassemblable blob is an ordinary
+    404, and the frame-level fallback line is what the reader paints (§2.8).
     """
-    raise HTTPException(
-        404, {"code": "supplement_unavailable", "message": "Highlights are not available yet."}
+    async with errors(request):
+        html = await host(request).supplement_document(session_id, digest)
+    return JSONResponse(
+        {"html": html},
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
     )
 
 
@@ -4811,6 +4830,382 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
         )
 
 
+#: The job id a desktop cancel names, bounded the way the wire spells it
+#: (``desktop-contract``'s ``jobId``: 1..64 characters). Deliberately NOT
+#: patterned to the manager's 12-hex mint: ``AsyncJobManager.get`` also
+#: resolves historical attempt ALIASES, and the lookup — never a regex — is
+#: the one arbiter of whether an id names a job.
+JobId = Annotated[str, Path(min_length=1, max_length=64)]
+
+#: What a job cancel's refusal means, as an HTTP status. One table for every
+#: refusal this route can surface, so the same mistake can never mean two
+#: different statuses depending on which side raised it.
+_JOB_STATUS_FOR_CODE = {
+    # Our own payload could not be read — a protocol bug, not user input; the
+    # same client-error class the wake/monitor ladders reserve for it.
+    "jobs_invalid": 422,
+    # The roster does not know the id: the frozen ``not_found`` class.
+    "jobs_not_found": 404,
+    # The row exists but was not running — the press asked for a stop that
+    # cannot happen (it settled first, or a retried cancel arrived late).
+    "jobs_not_cancelled": 409,
+    # No manager attached — a session SHAPE, like the wake surface's
+    # "unavailable" arm, so 409 rather than a transport 503.
+    "jobs_unavailable": 409,
+    # No live runtime to ask, or no receipt from the one asked: nothing was
+    # cancelled and the client's move is to come back (the sibling routes' 503).
+    "jobs_owner_unavailable": 503,
+}
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/jobs/{job_id}/cancel",
+    response_model=CRUDResponse[JobCancelReceipt],
+)
+async def cancel_job(session_id: str, job_id: JobId, request: Request) -> Any:
+    """Cancel ONE background job on this conversation — the job rail's server half.
+
+    ``POST`` rather than the wake/monitor cancels' ``DELETE``, and the
+    difference is the resource's fate (the contract's own note): a cancelled
+    wake or monitor is GONE from its listing, while a cancelled job is a row
+    that stays and settles — the press is an action ON it, so the route is one
+    too.
+
+    WHO CANCELS. ``AsyncJobManager.cancel`` is the engine's one cancel call —
+    the same call ``jobs op='cancel'`` makes — and the manager lives in the
+    process that owns the session, so this route resolves the owner first and
+    DELEGATES through ``route_shared_slash("jobs", …)`` to
+    ``serving._jobs_slash`` inside that process (the wakes/monitors ladder's
+    shape, deliberately the same seam). Nothing here cancels anything itself,
+    and nothing here is a second mechanism: the runner's own cancellation
+    semantics — a video runner's bounded ``best_effort_cancel`` — apply
+    identically whoever asked.
+
+    THE PRESS IS AN ACKNOWLEDGEMENT, NOT AN OUTCOME (the honesty rule every
+    surface keeps): a 2xx says the manager received the cancel and signalled
+    the job; only the job's own settle paints ``cancelled``. A refusal is a
+    sentence the surface renders where it asked — the frozen ``not_found``
+    phrase for an unknown id (the engine authors it from its own wording map,
+    so no client has to substitute for it) and the engine's own "not
+    cancelled (status: …)" sentence for a row that settled first.
+
+    NO RECEIPT JOURNAL, the wake/monitor cancels' own reading: a retried
+    cancel about a job the first attempt already stopped answers an honest
+    refusal rather than a second side effect, so there is no duplicate a
+    journal would prevent — and the call site sends no request id for one to
+    claim on.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(await _cancel_job_on_owner(bridge, session_id, job_id))
+
+
+async def _cancel_job_on_owner(bridge: Any, session_id: str, job_id: str) -> dict[str, Any]:
+    """Ask the session's runtime to cancel one job, inside its own process.
+
+    The route never holds a manager: job state lives in the runtime's
+    ``AsyncJobManager``, and with no live owner there is nothing to reach (job
+    state does not persist outside a runtime the way wake/monitor state does,
+    so unlike those surfaces there is no cold path here — only an honest
+    refusal). A RECOVERING facade is not folded into "no owner": it is dialled
+    like a live one, and a dial that cannot be served is the ladder's 503
+    (``runtime_unreachable``) — the interrupt route's own distinction, one
+    rung over.
+    """
+    if not bridge.remote.owner_reachable and not bridge.remote.recovering:
+        raise _job_refusal(
+            503,
+            "jobs_owner_unavailable",
+            "The conversation has no live runtime, so the job cannot be cancelled.",
+            session_id=session_id,
+        )
+    payload = json.dumps({"op": "cancel", "job_id": job_id})
+    outcome = await bridge.remote.route_shared_slash("jobs", payload)
+    if not isinstance(outcome, Mapping):
+        # NOT a job refusal the runtime decided: the bridge answered nothing
+        # at all (no ack shape from the owner). Nothing was cancelled, and the
+        # client's move is to come back — the wake/monitor twins' 503 sentence
+        # for the same state.
+        raise _job_refusal(
+            503,
+            "jobs_owner_unavailable",
+            "The conversation's runtime answered nothing for this job.",
+            session_id=session_id,
+        )
+    if outcome.get("kind") == "error":
+        data = outcome.get("data") or {}
+        code = str(data.get("code") or "jobs_refused")
+        raise _job_refusal(
+            _JOB_STATUS_FOR_CODE.get(code, 409),
+            code,
+            str(outcome.get("text") or "The job was refused."),
+            session_id=session_id,
+        )
+    data = outcome.get("data") or {}
+    if not str(data.get("job_id") or ""):
+        # AN OWNER THAT DOES NOT KNOW THE WORD. An older build falls through
+        # the routed dispatch to its configuration notice — a non-error shape
+        # with no job id — and reporting THAT as a receipt would be a silently
+        # dead cancel with a 2xx (the class the wake/monitor routes exist to
+        # remove), so an answer without a job id is treated as "no receipt".
+        raise _job_refusal(
+            503,
+            "jobs_owner_unavailable",
+            "The conversation's runtime did not confirm the job cancel.",
+            session_id=session_id,
+        )
+    return {"job_id": str(data.get("job_id")), "cancelled": bool(data.get("cancelled"))}
+
+
+def _job_refusal(status: int, code: str, message: str, *, session_id: str = "") -> HTTPException:
+    """A job refusal, in the shape the wake and monitor surfaces' refusals use,
+    so the desktop client unwraps all three families with one reader. The
+    status is the caller's (the map's, or the ladder's own)."""
+    detail: dict[str, Any] = {"code": code, "message": message}
+    if session_id:
+        detail["session_id"] = session_id
+    return HTTPException(status, detail)
+
+
+#: A supplement job id on a control route's path. Bounded, deliberately NOT
+#: patterned: a stale id must REACH the runtime's identity gate and be refused
+#: there (the neutral ``already finished`` receipt), not rejected as a shape
+#: error here -- and the gate, never a regex, is the one arbiter of whether an
+#: id names a job (the ``JobId`` rule above, one id space over).
+SupplementJobId = Annotated[str, Path(min_length=1, max_length=64)]
+
+
+class SupplementTarget(Input):
+    """Which of an answer's supplement rows a control op names.
+
+    ``anchor`` is the final assistant message id the row rides under -- the
+    row's own ``anchor`` key (memo §2.4), which the TUI calls
+    ``completion_anchor_id`` -- and every supplement op acts on the PAIR
+    ``(anchor, job)``. The anchor is REQUIRED rather than resolved from the job
+    id because the runtime's identity gate checks exactly this pair (C1b's
+    review R1): a route that re-derived one half from the other would be a
+    second lookup that can disagree with the one that decides. The bound
+    mirrors the shipped renderer's schema (``desktop-contract``'s
+    ``supplementAnchor``: 1..128), and journal entry ids are ``uuid4().hex``
+    (32 chars), so it admits every real anchor.
+    """
+
+    anchor: str = Field(min_length=1, max_length=128)
+
+
+class SupplementSteer(SupplementTarget):
+    """The steer's body: the target pair plus the operator's instruction.
+
+    ``text`` carries memo §2.7's bound at the wire
+    (:data:`~local_operator.supplements.contract.STEER_TEXT_MAX_CHARS`), so an
+    over-bound instruction is a 422 naming the field -- the same refusal the
+    runtime's own dispatch makes for the same text, one layer earlier, where
+    the caller's fix is a different body. A whitespace-only instruction is
+    refused here for the same reason: the dispatch would answer it with an
+    error frame ("supplement_steer needs a non-empty instruction"), which this
+    family's ladder can only render as an unreachable owner -- a false
+    statement about a body that was merely blank. The op itself still
+    normalises the text (``steer_job``'s ``" ".join(...)``): the wire forwards
+    the operator's words verbatim and the runtime is the one place they are
+    flattened.
+    """
+
+    text: str = Field(min_length=1, max_length=STEER_TEXT_MAX_CHARS)
+
+    @field_validator("text")
+    @classmethod
+    def _an_instruction_must_carry_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a steer instruction must not be blank")
+        return value
+
+
+async def _supplement_receipt(
+    remote: Any,
+    *,
+    session_id: str,
+    op: Literal["cancel", "steer", "restart"],
+    anchor: str,
+    job: str,
+    text: str = "",
+) -> dict[str, Any]:
+    """Drive one supplement control op on the session's runtime and receipt its answer.
+
+    THE ONE DISPATCH BEHIND THE THREE ROUTES BELOW, and the session DOOR stays in
+    those routes rather than moving in here: the desktop plane's refusal-matrix
+    walk (``tests/unit/server/test_serve_retire.py``) reads every module-level
+    function that obtains a bridge as a route that must be listed and gated, and
+    a helper holding the ``host(request).session(...)`` call would be a name no
+    matrix row and no router could publish. The ops themselves live on
+    the serving handle (``session/runtime/supplements.py``: ``cancel_job`` /
+    ``steer_job`` / ``restart_job``, reached over the control socket by
+    ``session/attached.py``'s facade methods), so this layer adds a way to
+    REACH them from HTTP -- one line per op mapping to
+    ``bridge.remote.supplement_*``, the interrupt route's own shape -- and not
+    a second implementation of the state machine. Both consequences are
+    deliberate: the runtime's identity gate and its journal-inside-the-write-
+    lock invariants decide every act, and the receipt vocabulary is the
+    runtime's own words (:class:`~local_operator.server.models.desktop_sessions.SupplementReceipt`).
+
+    NO RECEIPT JOURNAL (the jobs-cancel route's own reading): the shipped
+    client sends no request id for one to claim on -- these bodies carry
+    identity and nothing else -- and a retried op that finds nothing live
+    answers the neutral ``already finished`` receipt rather than a duplicate
+    side effect, so there is no duplicate a journal would prevent.
+
+    NO REACHABLE OWNER IS A REFUSAL, NOT A NO-OP: a supplement job exists only
+    in a running runtime's memory, so a session with no live runtime has
+    nothing this request could act on, and the sentence names the condition
+    rather than a remedy that cannot help. The term is REACHABILITY,
+    deliberately not ``is_cold`` (the interrupt route's lesson: a resyncing
+    viewer reads cold while its owner keeps serving), and a RECOVERING facade
+    is dialled like a live one -- a dropped socket says nothing about the job
+    -- with a dial that cannot be served answered by the shared ladder's 503
+    ``runtime_unreachable``.
+    """
+    if not remote.owner_reachable and not remote.recovering:
+        raise _job_refusal(
+            503,
+            "supplements_owner_unavailable",
+            "The conversation has no live runtime, so its highlights cannot be updated.",
+            session_id=session_id,
+        )
+    if op == "steer":
+        receipt = await remote.supplement_steer(anchor, job, text)
+    elif op == "restart":
+        receipt = await remote.supplement_restart(anchor, job)
+    else:
+        receipt = await remote.supplement_cancel(anchor, job)
+    return {"op": op, "anchor": anchor, "job": job, "receipt": str(receipt)}
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/supplements/{job}/cancel",
+    response_model=CRUDResponse[SupplementReceipt],
+)
+async def supplement_cancel(
+    session_id: str, job: SupplementJobId, body: SupplementTarget, request: Request
+):
+    """Cancel the running attempt of one supplement job (the Highlights block's Cancel).
+
+    WHY THIS ROUTE EXISTS, AND WHY HERE. The supplement control ops already
+    ride the runtime's attach channel (memo §2.7), but the desktop renderer is
+    HTTP-ONLY -- its IPC is main-process HTTP, with no attach channel to this
+    daemon's runtimes -- so the block's controls were reachable from the TUI
+    and the phone and not from the app, where a press answered 404. The fix
+    belongs in this family rather than in the client because the runtime's ops
+    are the one implementation of the semantics; the route is a door to them,
+    and there is one route per op because the shipped client names three
+    paths.
+
+    WHAT THE CALLER GETS BACK. The runtime's receipt, verbatim, in
+    ``SupplementReceipt``: ``cancelled`` when the running attempt was cut (the
+    row's own settle is the durable evidence, exactly as it is for a job
+    cancel), and the neutral ``already finished`` when there was nothing live
+    to cut -- a settled job, one this runtime forgot, or a pair the identity
+    gate refuses. THE NEUTRAL RECEIPT IS DELIBERATE (memo §2.7, reusing
+    image-gen's ``ALREADY_FINISHED_NOTE``, which "must never wear the error
+    ink or glyph"): a surface that lost a race with the job's own end must not
+    be told something happened, and a press that changed nothing must not be
+    rendered as a failure. A STALE JOB ID IS REFUSED BY THAT RECEIPT, NEVER
+    RESOLVED onto the anchor's newer job: the runtime cuts only the task
+    running under the exact ``(anchor, job)`` named (C1b's R1 identity gate),
+    and this route passes the pair through untouched -- there is no lookup here
+    that could re-point it.
+
+    AUTHORISATION and RESPONSE POLICY are the family's, not re-decided here:
+    the router's ``require_desktop`` dependency (bearer token, Origin
+    allowlist, 503 while the plane is closed) gates every route in this module;
+    a session this machine does not hold refuses through the pool's own lookup
+    (404, and a peer's row through its own typed arms); and
+    ``desktop_supplement_response_policy`` stamps ``nosniff`` +
+    ``Cache-Control: no-store`` on every status of the ``/supplements/``
+    namespace, errors included.
+
+    REFUSALS: 503 ``supplements_owner_unavailable`` for a session with no live
+    runtime (see the dispatcher above); the ladder's 404/409/503 for a session
+    it cannot resolve; 422 for a body that is not exactly ``{anchor}``; and an
+    owner that predates the op answers through the attach layer's error frame,
+    which the ladder renders as its own 503.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(
+            await _supplement_receipt(
+                bridge.remote, session_id=session_id, op="cancel", anchor=body.anchor, job=job
+            )
+        )
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/supplements/{job}/steer",
+    response_model=CRUDResponse[SupplementReceipt],
+)
+async def supplement_steer(
+    session_id: str, job: SupplementJobId, body: SupplementSteer, request: Request
+):
+    """Steer one supplement job: cut the in-flight attempt, start version + 1 with the text.
+
+    The Adjust control's op (memo §2.7). NOT a turn: it never touches the
+    session's turn lock, steering queue or model context -- it starts a new
+    GENERATOR version with the operator's instruction, and the runtime's own
+    ``steer_job`` owns every part of that distinction.
+
+    THE QUEUE RULE IS THE RUNTIME'S (memo §2.9): when the named job is not the
+    running one, the steer does not cut it -- it is queued behind the running
+    job (depth 1; a newer request replaces the queued one) and runs when that
+    job settles. The receipt is ``steering`` either way, BY DESIGN (the
+    runtime's own test pins the queued case to the same word): it reports that
+    the instruction was ACCEPTED, and this route neither claims nor implies
+    that the new version started immediately. A pair the runtime cannot act on
+    answers the neutral ``already finished`` (see ``supplement_cancel`` for the
+    full receipt vocabulary and the family's authorisation, response policy and
+    refusals).
+
+    ``text`` is bounded at the wire (``SupplementSteer``: 1..500 chars,
+    non-blank) and again by the runtime's dispatch, which is the owner of the
+    spend this op authorises.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(
+            await _supplement_receipt(
+                bridge.remote,
+                session_id=session_id,
+                op="steer",
+                anchor=body.anchor,
+                job=job,
+                text=body.text,
+            )
+        )
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/supplements/{job}/restart",
+    response_model=CRUDResponse[SupplementReceipt],
+)
+async def supplement_restart(
+    session_id: str, job: SupplementJobId, body: SupplementTarget, request: Request
+):
+    """Restart one supplement job: version + 1 with the previous instruction (the Retry).
+
+    The Retry affordance's op, offered from ``failed``/``cancelled``/``done``
+    (memo §2.7). It shares the steer's queue rule and receipt vocabulary --
+    ``restarting`` on acceptance, the neutral ``already finished`` for a pair
+    the runtime cannot act on -- and the steer's one distinction from a turn:
+    it spends a generator call, never the session's turn machinery. See
+    ``supplement_cancel`` for the family's authorisation, response policy and
+    refusals, and ``SupplementReceipt`` for the vocabulary.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(
+            await _supplement_receipt(
+                bridge.remote, session_id=session_id, op="restart", anchor=body.anchor, job=job
+            )
+        )
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/working-directory",
     response_model=CRUDResponse[MoveReceipt],
@@ -4946,6 +5341,7 @@ async def events(
     frontend_replace: int = Query(default=0, ge=0),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    supplements: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -4963,7 +5359,16 @@ async def events(
             # and the move path then refuses rather than leaving that mounted
             # viewer stale. The flag is retained on the subscription so the
             # fence in ``subscribe`` can refuse a LEGACY mount during a move.
-            sub = bridge.subscribe(frontend_replace=bool(frontend_replace))
+            #
+            # ``supplements=1`` is the same kind of declaration for the
+            # ``supplements-v1`` family (memo §2.7): only a subscriber that
+            # sends it is handed ``supplement_progress`` frames -- live or from
+            # replay -- so an older renderer never meets the family. The rows
+            # themselves are journaled either way; this gates the live carriage,
+            # not the record.
+            sub = bridge.subscribe(
+                frontend_replace=bool(frontend_replace), supplements=bool(supplements)
+            )
         except LegacySubscriberDuringMove as error:
             await context.__aexit__(None, None, None)
             raise HTTPException(409, str(error)) from None

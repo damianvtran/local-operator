@@ -315,6 +315,27 @@ async def test_a_settings_io_write_reaches_listeners_synchronously_with_source_l
 
 
 @pytest.mark.asyncio
+async def test_a_language_write_reaches_listeners_with_the_language_key_named(tmp_path) -> None:
+    """Wave 4 slice A, in-process half: the user's language is ONE registry key,
+    and a write through the one settings funnel delivers it to a live subscriber
+    synchronously — the path the TUI's repaint, the agent's ``setting`` tool and
+    the server route all share (the sibling test above proves the mechanism for
+    any key; this one pins the key the language feature rides)."""
+    watcher = process_watcher(tmp_path)
+    watcher.start()
+    recorder = Recorder()
+    watcher.subscribe(recorder)
+    try:
+        setting = settings_io.resolve_key("language")
+        assert setting is not None
+        settings_io.write_setting(ConfigManager(tmp_path), setting, "en")
+        assert [c.source for c in recorder.changes] == ["local"]
+        assert recorder.changes[0].changed_keys == {"language"}
+    finally:
+        await watcher.stop()
+
+
+@pytest.mark.asyncio
 async def test_reset_and_write_chains_also_take_the_fast_path(tmp_path) -> None:
     watcher = process_watcher(tmp_path)
     watcher.start()

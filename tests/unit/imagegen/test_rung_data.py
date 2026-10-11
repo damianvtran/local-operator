@@ -37,12 +37,15 @@ def test_every_ordered_route_has_a_spec_and_a_label() -> None:
 
 def test_the_v1_spec_facts_are_pinned() -> None:
     radient = cascade.RUNG_SPECS[ImageRoute.RADIENT]
-    # i2i re-joins with the hub slice: edits are refused until the media
-    # route learns source handling (the enabling PR flips this beside it).
-    assert radient.capabilities == frozenset({"t2i"})
+    # i2i re-joined with the hub media slice (live 2026-10-10): the flip
+    # landed beside the ``image_url`` wire in ``rungs.run_radient``. Per-pin
+    # ceilings are live-listing facts (gpt-2.5 edit 16 / grok edit 3 /
+    # seedream edit 10); 16 is the highest — the static value a multi-source
+    # wire must read back per pin before sending more than one.
+    assert radient.capabilities == frozenset({"t2i", "i2i"})
     assert radient.cancel_support == CancelSupport.SIGNAL
     assert radient.cost == "reported"
-    assert radient.sources == SourceSupport.NONE
+    assert (radient.sources, radient.max_sources) == (SourceSupport.MULTI, 16)
 
     fal = cascade.RUNG_SPECS[ImageRoute.FAL]
     assert fal.capabilities == frozenset({"t2i", "i2i"})

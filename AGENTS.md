@@ -1412,9 +1412,12 @@ gh pr ready <claim-pr-number>
 # ... independent scope-check round, merge; then:
 
 # 3. Advance the local main ref to the merged bump WITHOUT checking it out —
-#    after the compare, because nothing downstream refuses a stale ref. Both
-#    calls must print the SAME sha (`rev-parse --short` takes ONE revision, so
-#    the two refs cannot share the flag).
+#    after the compare: the snapshot path refuses a target VERSION strictly
+#    older than the install the pointer names (the downgrade gate), but a
+#    stale ref at the same version still rebuilds — so the fetch-and-compare
+#    here is still the only protection against a stale ref. Both calls must
+#    print the SAME sha (`rev-parse --short` takes ONE revision, so the two
+#    refs cannot share the flag).
 git -C ~/local-operator fetch origin
 git -C ~/local-operator rev-parse --short main
 git -C ~/local-operator rev-parse --short origin/main
@@ -1467,7 +1470,14 @@ belonged to the retired legacy installer; this build has no remote check at all
 (the compare is step 3's, and the wrong-build measurement is below), the refusal
 text survives only in
 `~/.local/bin/lop-update.legacy-uvtool.bak` **as history**, and
-`--skip-remote-check` is gone with it. So the fetch-and-compare is the release
+`--skip-remote-check` is gone with it. What the snapshot path DOES refuse,
+since 2026-10-10, is going BACKWARDS: a target whose version is STRICTLY OLDER
+than the install the pointer names is refused before any install work (the
+`lop-update v0.68.23`-under-0.68.24 incident), and `--allow-downgrade` — the
+resurrected legacy flag, reached as `lop update --from-snapshot <ref>
+--allow-downgrade` — is the deliberate override: it warns loudly and the
+install marker records `downgrade-allowed`. Version ORDER is all it gates;
+staleness is not a refusal. So the fetch-and-compare is the release
 owner's own step, never a backstop — that is why step 3 exists. It uses
 `update-ref` rather than a checkout because the root checkout is usually on
 another branch with uncommitted work, and `update-ref` moves the branch pointer
@@ -1485,13 +1495,17 @@ used to contain was retired with the legacy installer. It survives only in
 `~/.local/bin/lop-update.legacy-uvtool.bak` **as history**; its `REFUSING to
 release a stale ref` message lives there (`:154-170`), nothing runs the script,
 and the `--skip-remote-check` flag went with it. So nothing refuses a stale
-local `main`: measured on 2026-09-21,
+local `main` on the strength of its staleness: measured on 2026-09-21,
 `lop-update` built **0.61.6 from `f6eaea3d`** while `origin/main` was several
-releases ahead, and the wrong build was installed before anyone noticed. The
+releases ahead, and the wrong build was installed before anyone noticed — that
+build was newer than the install, and the downgrade gate only refuses strictly
+older versions. The
 BEFORE-install check is therefore not a fallback to a gate; it is the only
 protection there is: `git fetch origin main`, confirm `git rev-parse --short
 main` equals `git rev-parse --short origin/main`, and when in doubt name the ref
-explicitly — `lop-update <sha>` installs exactly that commit. The generation
+explicitly — `lop-update <sha>` installs exactly that commit (or refuses it if
+it is strictly older than the current install, until `--allow-downgrade` says
+otherwise). The generation
 directory name also carries the commit or version it was built from
 (`…/generations/<timestamp>-<sha-or-version>`), so every build is auditable
 after the fact, including when the marker is the `pypi <version>` form.
@@ -1516,7 +1530,10 @@ objects and is itself shallow. Measured on 2026-10-05, the stale start is what
 bit: the clone's local `main` was behind, a `fetch` advanced only `origin/main`,
 and the update archived the stale ref — installing a 0.64.4 build under a
 0.67.x fleet and moving the serve runtime down; `git reset --hard origin/main`
-in the clone and a re-run put it right in about two minutes.
+in the clone and a re-run put it right in about two minutes. Since the
+downgrade gate that install is refused before it starts (0.64.4 is strictly
+older than the pointer's install), so the mistake is loud — the fix is
+unchanged, advance the clone's own `main` first.
 
 ### Installing over a live fleet
 
@@ -1662,14 +1679,17 @@ Warnings that still hold, each of which has already cost a release:
   already points at — which is how a release once shipped the previous
   version's code under the new number. Let `gh release create --target`
   create the tag.
-- **There is no `--skip-remote-check` any more, and no gate for it to skip.**
-  The flag was retired with the legacy installer along with the compare-and-
-  refuse step, so `lop-update` installs whatever ref you name — including a
-  stale local `main`, which is how 0.61.6 was once built from an old commit
-  while main was several releases ahead. The protection is the fetch-and-compare
-  in step 3, not a flag; it exists because a stale local `main` was once
-  installed and reported as a successful release while `lop` silently downgraded
-  from 0.18.1 to 0.17.5.
+- **There is no `--skip-remote-check` any more, and no remote gate for it to
+  skip.** The flag was retired with the legacy installer along with the
+  compare-and-refuse step, so `lop-update` does not compare a ref against a
+  remote: a stale local `main` is still installed — that is how 0.61.6 was
+  built from an old commit while main was several releases ahead — and the
+  fetch-and-compare in step 3 is the protection, not a flag; it exists because
+  a stale local `main` was once installed and reported as a successful release
+  while `lop` silently downgraded from 0.18.1 to 0.17.5. Staleness is not
+  refused; going BACKWARDS is: a target strictly older than the install the
+  pointer names — `lop-update v0.68.23` under 0.68.24, 2026-10-10 — is refused
+  before any install work unless `--allow-downgrade` says otherwise.
 - **Never repoint `lop` at the editable `.venv`**; doing so couples the stable
   command back to in-progress work. Publication is always the separate final
   step: merge, bump, tag, the drained install, verify `.lop-source`, then smoke

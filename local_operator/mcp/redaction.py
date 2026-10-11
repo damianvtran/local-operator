@@ -52,7 +52,7 @@ import logging
 import threading
 from contextlib import suppress
 
-from local_operator.redaction_shapes import DETECTED_COMPONENT_FLOOR
+from local_operator.redaction_shapes import DETECTED_COMPONENT_FLOOR, scrub_values
 from local_operator.variables import VariableStore
 
 #: Redaction-only store: values to scrub, never to inject or advertise.
@@ -125,10 +125,13 @@ class StderrRedactor:
 
     The rule here: **release every complete line, hold back only the trailing
     run of bytes with no newline after it, then widen the cut backwards** so a
-    value that spans the release boundary is never split across two releases.
-    The cost of the weaker holdback is stated rather than hidden: a credential
-    that itself contains a newline cannot be scrubbed by a line-oriented sink,
-    which was already true of the per-line ``feed`` this replaces.
+    value that spans the release boundary is never split across two releases,
+    **and never end a release inside a JSON escape** (see
+    :func:`_hold_incomplete_escape` — an escape's own ``\\`` must stay with the
+    letters it pairs with, or the boundary rule cannot see it). The cost of the
+    weaker holdback is stated rather than hidden: a credential that itself
+    contains a newline cannot be scrubbed by a line-oriented sink, which was
+    already true of the per-line ``feed`` this replaces.
     """
 
     def __init__(self, values: list[str]) -> None:
@@ -155,6 +158,8 @@ class StderrRedactor:
             cut = min(cut, len(text))
         while True:
             previous = cut
+            if self._secrets and not final:
+                cut = _hold_incomplete_escape(text, cut)
             for secret in self._secrets:
                 start = text.find(secret, max(cut - len(secret) + 1, 0))
                 if 0 <= start < cut < start + len(secret):
@@ -162,9 +167,77 @@ class StderrRedactor:
             if cut == previous:
                 break
         ready, self._pending = text[:cut], text[cut:]
-        for secret in self._secrets:
-            ready = ready.replace(secret, "[redacted]")
-        return ready
+        # The shared value pass, not a substring loop repeated here: a word-like
+        # value masks on letter-run boundaries (agent review round 1, R1 — a
+        # child's stderr turned ``un<word>ally`` into ``un[redacted]ally`` while
+        # every other surface had moved), and every spelling the pass generates is
+        # masked from this sink too.
+        return scrub_values(ready, self._secrets)
+
+
+def _hold_incomplete_escape(text: str, cut: int) -> int:
+    """``cut`` moved back so a release never ends inside a JSON escape.
+
+    **Why (deferred QA Q-3, #2140; follow-up fix).** The value pass judges a
+    word-like value against the letters around it, and a JSON escape is a
+    boundary, not its last letter (``\\n``+word masks — the raw text a child
+    writes is what the transcript and the wire replay). That judgement needs the
+    escape's own ``\\`` beside the letters, and a release boundary can strand it:
+    with the cut between ``\\`` and its letter, the NEXT release begins with the
+    escape's tail (``n``, or up to four hex digits of ``\\uXXXX``) followed by
+    the word, and the boundary rule reads that tail as an ordinary letter run —
+    ``n<word>`` — and leaves the value. The narrowest reach was a real pump on an
+    oversized unterminated line (the buffer flush at ``STDERR_LINE_LIMIT``
+    publishes the two releases as separate lines, so no later whole-line pass can
+    re-join them); reproduced here 1/27 two-way cuts for ``\\n``/``\\t`` and
+    5/31 for ``\\u000a``, all closed by holding the fragment.
+
+    The hold is exact, not a wider safety margin, and each shape is decided in
+    one step per feed:
+
+    * **A trailing backslash run: PAIRING, not presence.** ``\\`` consumes two
+      characters, so an EVEN run at the release edge is already complete —
+      releasing through it is exact (its next byte is judged in the true decoded
+      context, without a backslash). Only an ODD run ends with an unpaired
+      ``\\`` that could open an escape; the cut then moves back ONE character.
+      The run is counted from its own start in one pass, and that one-byte hold
+      is the bound: a pure-backslash stream keeps ``pending`` at the class's own
+      holdback, where a per-loop-iteration walk through the run held the whole
+      thing (review round 1, R-3: three 4 KB feeds released 0/0/0 and left
+      ``pending``=12288, against the base's 4088/4096/4096 and 8).
+    * **``\\uXXXX`` fragments.** The released prefix must not end with a strict
+      prefix of that escape — ``\\u``, ``\\uH``, ``\\uHH`` or ``\\uHHH`` (the
+      longest is 5 of its 6 chars) — and the cut moves to the fragment's own
+      ``\\`` so the next release carries the whole escape beside its letters.
+
+    Longest first within the ``\\uXXXX`` scan, so the deepest fragment wins; a
+    cut already at a fragment start (or an even backslash run) returns
+    unchanged, so re-running reaches a fixpoint in at most one extra pass and
+    can never oscillate. Complete escapes are not held: a released ``\\u000a``
+    or ``\\n`` before a later word is judged fine where it lies, and holding it
+    would delay a complete line's tail for nothing (the class's line-promptness
+    contract).
+
+    Text that is not an escape at all releases either immediately or one byte
+    later (``C:\\`` at a chunk edge — the character that would decide the escape
+    has not arrived); the concatenated stream is byte-identical either way.
+    """
+    for size in (5, 4, 3, 2):
+        start = cut - size
+        if start < 0 or text[start] != "\\":
+            continue
+        if text[start + 1] == "u" and all(
+            char in "0123456789abcdefABCDEF" for char in text[start + 2 : cut]
+        ):
+            return start
+    if cut > 0 and text[cut - 1] == "\\":
+        # Counted from the run's own start in one pass, then PARITY alone
+        # decides: an even run is complete pairing and releases unchanged, an
+        # odd one ends with the unpaired backslash this hold exists for.
+        run = cut - len(text[:cut].rstrip("\\"))
+        if run % 2 == 1:
+            return cut - 1
+    return cut
 
 
 class _Filter(logging.Filter):

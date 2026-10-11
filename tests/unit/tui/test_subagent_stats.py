@@ -43,6 +43,7 @@ from local_operator.tui.widgets.subagent_panel import (
     job_stats,
     panel_layout,
     row_facts,
+    summary_counts,
 )
 from tests.unit.tui.test_band_panels import FakeSession, _async_factory, _fake_jobs
 
@@ -1496,6 +1497,84 @@ async def test_a_job_that_refuses_to_be_read_does_not_reach_the_timer() -> None:
         panel.sync(session)  # must not raise
         panel._tick()
         assert panel.display is True
+
+
+@pytest.mark.asyncio
+async def test_a_job_whose_id_refuses_to_be_read_does_not_reach_the_timer() -> None:
+    """Post-merge review F-3 (PR #2189): the id read is the same crash class as any other.
+
+    The stats fix guarded the memo key but left the three plain ``getattr(job, "id", "")``
+    reads around it -- for a host whose ``id`` RAISES, ``sync`` died at the ledger map
+    and the tick at the summary counts, the same whole-app failure on the same 1 Hz
+    path. The counts must also stay TRUTHFUL for such a job: only the id is blank,
+    everything else still reads.
+    """
+
+    class NamelessJob:
+        type = "task"
+        status = "failed"
+        label = "docs sweep"
+        start_time = 0.0
+        settled_at = None
+        queued = False
+        latest_details: Any = ["not", "a", "mapping"]
+        model_label = None
+        context_window = 0
+        usage = None
+
+        @property
+        def id(self) -> str:
+            raise RuntimeError("this ledger row lost its name plate")
+
+    # The summary counts read the id first: the row still lands in its own bucket.
+    counts = summary_counts([NamelessJob()])
+    assert counts.failed == 1
+
+    session = FakeSession()
+    session.jobs = _fake_jobs(NamelessJob())
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(SubagentPanel)
+        panel.sync(session)  # must not raise
+        panel._tick()
+        assert panel.display is True
+
+
+@pytest.mark.asyncio
+async def test_the_viewed_jobs_id_read_is_guarded_too() -> None:
+    """The fourth site of the same class: ``sync`` reads the VIEWED job's id first.
+
+    It was not in F-3's line list (the round's grep looked for ``job, "id"``), but a
+    raising ``id`` there dies on the same path before the row loop even starts, and
+    the finding's claim is about the class, not the three line numbers.
+    """
+
+    class NamelessJob:
+        type = "task"
+        status = "running"
+        label = "docs sweep"
+        start_time = 0.0
+        settled_at = None
+        queued = False
+        latest_details: Any = ["not", "a", "mapping"]
+        model_label = None
+        context_window = 0
+        usage = None
+
+        @property
+        def id(self) -> str:
+            raise RuntimeError("this ledger row lost its name plate")
+
+    unnamed = NamelessJob()
+    session = FakeSession()
+    session.jobs = _fake_jobs(unnamed)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(SubagentPanel)
+        panel.sync(session, selected_job=unnamed)  # must not raise
+        assert panel._selected_job_id == ""
 
 
 def _watch(panel: SubagentPanel) -> list[str]:

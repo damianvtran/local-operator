@@ -82,6 +82,12 @@ _ACTIONS = (
     # Peer READINESS (readiness.py): can the peers COMPLETE work offloaded to
     # them — the install question, where `doctor` is the link question. A read.
     "ready",
+    # THE SINGLE-PEER UPDATE (meshupdate.py; S1 of mesh-rolling-updates.md §8.2):
+    # ask ONE named peer to move to this device's build. It is deliberately not
+    # `lop update`, which stays "this device only" — the two must not be confused
+    # in help text or sentences. The rolling orchestration (`--all`, `--status`,
+    # `--resume`) is S3's and is absent here on purpose.
+    "update",
     "identity",
     "uninstall",
     # The credential broker's surfaces (mesh-credentials.md; build plan §2.2).
@@ -717,6 +723,58 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     )
     ready.add_argument("--peer", default="", help="One device (a name or id), or every member")
     ready.add_argument("--json", action="store_true")
+
+    # `lop network update <peer>`: the single-peer half of mesh rolling updates
+    # (mesh-rolling-updates.md §7.4). It asks ONE named peer to move to THIS
+    # device's build — the direction is authority the MEMBER holds (its `update`
+    # grant), so the ask is refused by name when that grant is absent, and a
+    # member with a turn running answers `busy` until it is idle. Nothing is
+    # ever forced: there is no `--force` here by construction.
+    update_peer_parser = actions.add_parser(
+        "update",
+        help="Ask one peer to move to this device's build",
+        description=(
+            "Ask a paired device to install the build THIS device is on. The device on "
+            "the other end decides: it needs your device's `update` grant (`lop network "
+            "member grant <network> <device-id> update` on THAT device), it must run a "
+            "build that supports rolling updates, it installs only a strictly newer "
+            "version and only from its own update channel, and it waits — a device with "
+            "a turn in flight answers `busy` and nothing is touched. This is not `lop "
+            "update`, which updates THIS device only."
+        ),
+    )
+    update_peer_parser.add_argument(
+        "peer", nargs="?", default="", help="the device to update (a name or a device id)"
+    )
+    update_peer_parser.add_argument("--json", action="store_true")
+    # S3a: the two rollouts verbs that live on this command because they act on
+    # the same machine-side orchestration the ask feeds. Both are LOCAL file
+    # mutations on the rollout record (no relay hop): `--resume` clears the
+    # retry floors, `--cancel` abandons the running rollout (an apply already
+    # in flight finishes — an install cannot be recalled — and is recorded).
+    update_peer_parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        # DEST DIFFERS ON PURPOSE (round 2, Q-R2-1): ``cli.main`` resolves a
+        # TOP-LEVEL ``--resume`` (the session resume) BEFORE subcommand
+        # dispatch, so a verb that lands its flag in ``args.resume`` has it
+        # eaten ("no session '<id>' to resume"). The verb owns its flag
+        # through its own dest; the command-line SPELLING is the design's
+        # ``--resume``, unchanged.
+        dest="rollout_resume",
+        help="clear a rollout's retry floors (default: the newest active one)",
+    )
+    update_peer_parser.add_argument(
+        "--cancel",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help="abandon a rollout (default: the newest active one)",
+    )
 
     identity = actions.add_parser("identity", help="This device's key")
     identity_actions = identity.add_subparsers(dest="identity_command")
@@ -7612,6 +7670,115 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _cmd_update(args: argparse.Namespace) -> int:
+    """``lop network update <peer>``: ask ONE peer to move to this device's build.
+
+    The direction of authority is the member's: this device only ASKS, and the
+    grant that permits the ask lives in the member's own record (its row for
+    THIS device) — which is why the refusal for a missing grant arrives from the
+    far side rather than being pre-checked here (see ``meshupdate``'s module
+    note; the pre-check that IS here is the negotiated feature string, so a peer
+    that predates rolling updates is skipped without being asked at all).
+
+    The relay is given the update hop's own budget (the peer's 900 s install
+    deadline plus its reply margin, plus the control socket's slack), never the
+    5 s default: a busy member answers in milliseconds, an idle one may be
+    installing when this call's answer arrives.
+    """
+    from local_operator.network import meshupdate
+    from local_operator.network.types import MeshRefusal
+
+    # ``--resume``/``--cancel`` FIRST: they are local record mutations, and a
+    # plain ask (peer named or not) is the only path that needs the relay hop.
+    if getattr(args, "rollout_resume", None) is not None:
+        return _cmd_rollout_resume(args)
+    if getattr(args, "cancel", None) is not None:
+        return _cmd_rollout_cancel(args)
+    peer = str(getattr(args, "peer", "") or "")
+    if not peer:
+        raise MeshRefusal(
+            "peer_required",
+            "name a device: `lop network update <peer>` (a name or a device id)",
+        )
+    payload = _relay_answer("peer_update", peer=peer, timeout=meshupdate.UPDATE_CONTROL_TIMEOUT_S)
+    label = str(payload.get("name") or peer)
+    state = str(payload.get("state") or "")
+    message = str(payload.get("message") or "")
+    version = str(payload.get("version") or "")
+    method = str(payload.get("method") or "")
+    lines: list[str] = []
+    if state == "done":
+        lines.append(f"{label} updated to {version}" + (f" (via {method})" if method else ""))
+        lines.append("the device installs it in its own tree and switches over atomically")
+    elif state == "already_on_target":
+        lines.append(f"{label} is already on {version or 'the target build'}; nothing to do")
+    elif state == "ahead_of_target":
+        lines.append(
+            message or f"{label} is ahead of this device — an update never moves backwards"
+        )
+    elif state == "busy":
+        lines.append(message or f"{label} has sessions busy; nothing has been touched")
+        lines.append(f"re-run `lop network update {peer}` when the work finishes")
+    else:
+        lines.append(f"{label}: {message or payload.get('code') or 'no answer'}")
+    return _emit(args, payload, lines)
+
+
+def _pick_rollout(args: argparse.Namespace, ident: str) -> Any:
+    """The record ``--resume``/``--cancel`` names: an id, or the newest active."""
+    from local_operator.network import rollouts
+    from local_operator.network.types import MeshRefusal
+
+    record = rollouts.read_record(ident) if ident else rollouts.latest_active()
+    if record is None:
+        raise MeshRefusal(
+            "rollout_not_found",
+            (
+                f"no rollout record {ident!r} on this device"
+                if ident
+                else "no active rollout on this device — `lop update` opens one after an "
+                "update settles, or ask one peer directly with `lop network update <peer>`"
+            ),
+        )
+    return record
+
+
+def _cmd_rollout_resume(args: argparse.Namespace) -> int:
+    """``lop network update --resume [<id>]``: clear floors; the scan is the wake."""
+    from local_operator.network import rollouts
+
+    ident = str(getattr(args, "rollout_resume", "") or "")
+    record = _pick_rollout(args, ident)
+    record = rollouts.resume_record(str(record["id"])) or record
+    # ``member_terminal``, NOT bare set membership (round 3, R3-3): a codeless-
+    # refused member is non-terminal and WILL be re-asked, so counting it as
+    # "not re-asked" undercounted the receipt (the reviewer's probe: "0
+    # member(s) will be re-asked" while the cleared member was asked).
+    waiting = [m for m in record.get("members", []) if not rollouts.member_terminal(m)]
+    lines = [
+        f"resumed {record['id']}: {len(waiting)} member(s) will be re-asked on the driver's "
+        f"next scan (≤{int(rollouts.SCAN_INTERVAL_S)} s); it does not drive"
+    ]
+    return _emit(args, record, lines)
+
+
+def _cmd_rollout_cancel(args: argparse.Namespace) -> int:
+    """``lop network update --cancel [<id>]``: abandon the rollout, closing row included."""
+    from local_operator.network import rollouts
+
+    ident = str(getattr(args, "cancel", "") or "")
+    record = _pick_rollout(args, ident)
+    record = rollouts.cancel_record(str(record["id"])) or record
+    # Same decider as the resume receipt (round 3, R3-3): a codeless refusal
+    # is not terminal, so it counts as "remained".
+    left = [m for m in record.get("members", []) if not rollouts.member_terminal(m)]
+    lines = [
+        f"abandoned {record['id']}: {len(left)} member(s) remained; an apply already in "
+        "flight finishes and is recorded by the driver"
+    ]
+    return _emit(args, record, lines)
+
+
 def _cmd_identity_show(args: argparse.Namespace) -> int:
     from local_operator.network.identity import load
 
@@ -8502,6 +8669,8 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "doctor": _cmd_doctor,
     # The readiness report: `doctor`'s sibling, one question further out.
     "ready": _cmd_ready,
+    # The single-peer update: the asking half only (meshupdate.py).
+    "update": _cmd_update,
     "identity": _guard_identity_subcommand,
     "uninstall": _cmd_uninstall,
     # ``credential`` has a sub-verb, so it needs the same "tell me what you meant"

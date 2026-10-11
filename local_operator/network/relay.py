@@ -371,6 +371,10 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_definitions",
         "net_readiness",
         "net_mcp_defs",
+        # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md
+        # §8.2). Slow by registration below: the handler may run a real install
+        # inside its own bounded deadline.
+        "net_update",
     }
 )
 
@@ -389,6 +393,10 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "definitions_sync",
         "peer_readiness",
         "mcp_defs_sync",
+        # The single-peer update's local half — a viewer asking ITS OWN relay to
+        # ask a peer (the ``peer_*`` boundary rule; the peer-scope half is
+        # ``net_update``).
+        "peer_update",
     }
 )
 
@@ -406,6 +414,14 @@ SLICE_MODULES: tuple[str, ...] = (
     # registers a tick step there), so it is installed after that module but
     # starts no thread of its own.
     "local_operator.network.mcpdefs",
+    # S1 of the mesh rolling updates: the ``update`` capability's op halves. It
+    # starts no thread of its own (the S3 rollout driver is a different slice).
+    "local_operator.network.meshupdate",
+    # S3a of the rolling updates: the rollout record and the serial pass. It
+    # serves NO ops of its own — one start hook, the ``mesh-rollout`` driver
+    # thread — and it opens no record by itself: the trigger that does is
+    # S3b's, so this slice ships inert in production by construction.
+    "local_operator.network.rollouts",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
@@ -3011,6 +3027,17 @@ SESSION_HISTORY_REPLY_BUDGET_BYTES = wire.MAX_RECORD_BYTES - SESSION_HISTORY_REP
 #: loop is stopped under it, and a parked reader is a link that never closes.
 SESSION_HISTORY_PAGE_READ_BOUND_S = 60.0
 
+#: The longest a reader waits for the page loop to ACCEPT the index refresh an
+#: open-frame read asked it to ensure (``_stored_frame_index``). One loop hop —
+#: microseconds on a live loop — and deliberately NOT the page-read bound above:
+#: that bound covers a whole decode, while this scheduling is an optimisation and
+#: a loop that cannot take it within this bound would not have carried the
+#: refresh's result into this answer anyway. The wait exists so the reply's
+#: ``building`` is a PROMISE: by the time it leaves, the refresh is provably in
+#: flight on the page loop, and the next read joins it rather than starting a
+#: second scan.
+SESSION_HISTORY_FRAME_INDEX_BOUND_S = 5.0
+
 
 #: How long THIS relay waits for a peer to answer ``net_session_history``.
 #:
@@ -4155,6 +4182,14 @@ class RelayServer:
         #: installed at CONSTRUCTION and a test builds hundreds of relays it never
         #: starts, so working here would spend their time on work no test asked for.
         self._slice_start_hooks: list[tuple[str, Callable[[], Any]]] = []
+        #: ``(name, hook)`` a slice registered to run when the relay STOPS (see
+        #: ``register_ops``, ``on_stop``). Run synchronously from ``stop()``: a
+        #: slice loop that outlives the relay keeps touching a root the caller
+        #: believes is quiet — the mesh-rollout driver did exactly that and its
+        #: boundary was visible to a co-resident test's ``time.sleep`` patch
+        #: (QA round 5, Q-R5-1) — and an asynchronous hop here would hand the
+        #: caller that same race back.
+        self._slice_stop_hooks: list[tuple[str, Callable[[], Any]]] = []
         self._slow_lock = threading.Lock()
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
@@ -4256,6 +4291,21 @@ class RelayServer:
             thread = threading.Thread(target=_run, name=f"mesh-start-{label}", daemon=True)
             thread.start()
 
+    def _run_slice_stop_hooks(self) -> None:
+        """Run each slice's stop hook, INLINE and in registration order.
+
+        WHY INLINE (QA round 5, Q-R5-1): ``stop()``'s return is when the caller
+        reads the device as quiet, and the driver this exists for is what made
+        that false — an off-thread hop would put the same race back in a
+        different shape. A hook that raises is REPORTED, and the remaining hooks
+        still run: one slice's teardown must never strand another's.
+        """
+        for label, hook in self._slice_stop_hooks:
+            try:
+                hook()
+            except Exception as exc:  # noqa: BLE001 — see the docstring
+                print(f"mesh relay: stop hook {label} failed ({exc})", file=sys.stderr)
+
     def _sweep_approvals_once(self) -> None:
         """One best-effort retention sweep for the device-local approvals store.
 
@@ -4335,6 +4385,12 @@ class RelayServer:
         narrow the race it is meant to close.
         """
         self._stop.set()
+        # SLICE LOOPS GO NEXT, before any of the link teardown below: a slice's
+        # stop hook is synchronous by contract (``register_ops``'s ``on_stop``),
+        # the driver it reaps must not tick through a teardown it would race,
+        # and "stop() returned" has to mean the device is quiet (round 5,
+        # Q-R5-1).
+        self._run_slice_stop_hooks()
         # THE MEMBERSHIP LOOP SLEEPS ON ITS OWN WAKE EVENT, so a stop must set that
         # too: without it a stop waits out up to MEMBERSHIP_PULL_PASS_S before the
         # loop notices — the same "nothing on the way in checks _stop" shape this
@@ -5814,6 +5870,7 @@ class RelayServer:
         slow: Mapping[str, float] | None = None,
         replace: bool = False,
         on_start: Mapping[str, Callable[[], Any]] | None = None,
+        on_stop: Mapping[str, Callable[[], Any]] | None = None,
     ) -> None:
         """Let a slice module serve its ops without editing this file.
 
@@ -5822,7 +5879,9 @@ class RelayServer:
         control-socket ops (:data:`SLICE_LOCAL_OPS`). ``slow`` maps a peer op to
         its owner-side deadline in seconds and moves its handler off the link's
         reader (see :data:`SLOW_OP_WORKERS`). ``on_start`` maps a LABEL to a
-        callable run once when the relay starts, on its own daemon thread.
+        callable run once when the relay starts, on its own daemon thread;
+        ``on_stop`` maps a LABEL to a callable run when the relay stops, INLINE
+        on the stopping thread.
 
         WHY ``on_start`` EXISTS. Some slice state can only be settled by a relay
         that is up: the move's crash recovery has to run when a relay starts on a
@@ -5833,6 +5892,16 @@ class RelayServer:
         M-3). Each hook runs on a DAEMON THREAD and its failure is logged and
         swallowed: a relay that refused to start because one slice's housekeeping
         raised would take every link on this device down with it.
+
+        WHY ``on_stop`` EXISTS. A slice loop started by ``on_start`` (the
+        mesh-rollout driver; the definitions syncer for its own reasons) must not
+        outlive the relay: a scan thread that keeps ticking a root the caller
+        believes quiet is a leak with a visible cost — the driver's
+        ``time.sleep`` boundary was captured by a co-resident test's
+        process-global patch and took ``test (3.12, 0)`` red twice (QA round 5,
+        Q-R5-1). ``on_stop`` hooks run INLINE on the stopping thread, in
+        registration order, so ``stop()``'s return is the moment the quiet is
+        real; a hook that raises is REPORTED and the remaining hooks still run.
 
         THE RULES, each a refusal rather than a warning:
 
@@ -5879,7 +5948,13 @@ class RelayServer:
                 raise TypeError(f"start hook {label!r} is not callable")
             if any(label == existing for existing, _hook in self._slice_start_hooks):
                 raise ValueError(f"a start hook named {label!r} is already registered")
+        for label, hook in (on_stop or {}).items():
+            if not callable(hook):
+                raise TypeError(f"stop hook {label!r} is not callable")
+            if any(label == existing for existing, _hook in self._slice_stop_hooks):
+                raise ValueError(f"a stop hook named {label!r} is already registered")
         self._slice_start_hooks.extend((label, hook) for label, hook in (on_start or {}).items())
+        self._slice_stop_hooks.extend((label, hook) for label, hook in (on_stop or {}).items())
         self._handlers.update(handlers)
         self._local_slice_handlers.update(local_handlers)
         for name in handlers:
@@ -7218,6 +7293,14 @@ class RelayServer:
         round 1, R1-1). See :func:`fit_session_history_reply`: the frame travels as
         ONE link record, and exceeding it used to close the whole link.
 
+        ``open_frame`` ASKS FOR THE OWNER-SIDE BUILD of the turn-aligned,
+        paint-only page (:meth:`_open_frame_detail`), which strips rows and adds
+        ``runs``/``runs_state``/``head_cut``; without the flag this answer is
+        byte-for-byte the page it has always been, and that is the compat rule
+        in BOTH directions — a viewer that does not ask sends today's frame, and
+        an owner older than the facts half answers a flagged one with today's
+        page (the absent fields are the client's documented ``unsupported``).
+
         OWNERSHIP IS THE CHOKEPOINT'S, not this handler's: the frame names a
         ``session_id``, so ``Authorizer._session_scope`` has already refused one
         this device does not hold before dispatch, and ``local_session_ids``
@@ -7245,16 +7328,24 @@ class RelayServer:
         raw_before = frame.get("before_id")
         before_id = str(raw_before) if raw_before else None
         limit = validate_history_limit(frame.get("limit"))
-        # THE OPEN-FRAME FLAG IS ACCEPTED AND TOLERATED. A viewer newer than this
-        # build may ask for the turn-aligned, paint-only page (``DESKTOP_API.md``
-        # §"The open frame"); the owner-side build that makes the answer different
-        # does not exist yet (``session/open_frame.py``, the facts half of this
-        # series), so the flag is validated by the SAME shared decision both
-        # halves of this read use (:func:`validate_open_frame`) and then serves
-        # today's answer, byte-for-byte. When the facts half lands, THIS is its
-        # call site: the flag is already on the frame and already trusted to be
-        # ``None`` or ``True``.
-        validate_open_frame(frame.get("open_frame"))
+        # ``open_frame`` IS BUILT HERE NOW (the facts half of ``DESKTOP_API.md``
+        # §"The open frame"; #2109 carried the flag across the stored-page seam
+        # and named this call site). With the flag the same rows this op already
+        # reads are cut to PAINTABLE rows, extended back to the oldest included
+        # run's opening user row under the module's caps, stripped, and joined
+        # with the transcript index's run facts — all through
+        # ``session/open_frame.py``'s helpers (see :meth:`_open_frame_detail`).
+        # WITHOUT it, every byte of this answer is today's: an older viewer sends
+        # no key at all, and an owner older than this change answers a flagged
+        # request with exactly this page — which is why the client must (and
+        # does) tolerate the fields being absent.
+        if validate_open_frame(frame.get("open_frame")):
+            return fit_session_history_reply(
+                frame.get("req"),
+                self._open_frame_detail(
+                    directory, session_id=session_id, before_id=before_id, limit=limit
+                ),
+            )
 
         from local_operator.harness.rows import visible_transcript_rows
 
@@ -7284,6 +7375,249 @@ class RelayServer:
                 "has_newer": page.has_newer,
             },
         )
+
+    def _open_frame_detail(
+        self,
+        directory: Path,
+        *,
+        session_id: str,
+        before_id: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        """The owner-side build of the open frame, over the rows this op already reads.
+
+        THE DESKTOP'S OWN BUILD, MIRRORED (``desktop_sessions._open_frame_history``,
+        the non-anchored arm — this op has no anchored read to mirror). ``limit``
+        counts PAINTABLE rows; the cut extends back to the oldest included run's
+        opening user row while the caps allow; non-painted bytes are stripped;
+        and the run facts come from the transcript index. All of it through
+        ``session/open_frame.py``'s helpers, so the two planes cannot cut their
+        pages differently: the cut rule is ``align_page``, the caps are
+        ``build_frame``'s, and the run join is ``publish_runs``'s.
+
+        THE ONE DELIBERATE DIFFERENCE FROM THE DESKTOP TWIN IS THE FACTS WAIT.
+        The desktop spends what is left of its 120 ms open budget awaiting the
+        index refresh; this read has no request budget to spend and runs on the
+        LINK'S READER thread, where any park is every other frame on that link's
+        latency — so a cold index starts the refresh (on the page loop, off this
+        thread: :meth:`_stored_frame_index`) and answers ``building`` at once.
+        The client's next read is the contract's own stated follow-up and joins
+        the refresh, so the facts arrive one frame later instead of on this one.
+
+        ``head_cut``/``has_more`` FOLD EXACTLY AS THE DESKTOP TWIN'S DO, and for
+        the same reasons: a page whose oldest run is a fragment says so, and a
+        cut that dropped rows the read already fetched still owes the reader a
+        "there is more above this page".
+        """
+        from local_operator.harness.rows import visible_transcript_rows
+        from local_operator.session.open_frame import (
+            OPEN_FRAME_MAX_BYTES,
+            OPEN_FRAME_MAX_EXTRA_ROWS,
+            OPEN_FRAME_MAX_RAW_PAGES,
+            OPEN_FRAME_MAX_ROWS,
+            align_page,
+            build_frame,
+            page_seq_bounds,
+            paintable,
+            served_bytes,
+            tail_head_reachable,
+        )
+
+        collected: list[dict[str, Any]] = []
+        has_more = False
+        cursor_missing = False
+        cursor = before_id
+        index: Any = None
+        for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
+            try:
+                page = self._stored_page_read(
+                    directory,
+                    before_id=cursor,
+                    # THE PAGE PLUS ITS CONTINUATION, IN ONE READ (the desktop's
+                    # QA round 1 Q3 rule): a SMALL request is the case that
+                    # suffers, because the user-row hunt would otherwise run out
+                    # of rows it never asked for. Costs nothing when the hunt is
+                    # unnecessary — the page still serves ``limit`` rows.
+                    limit=limit + OPEN_FRAME_MAX_EXTRA_ROWS,
+                )
+            except FileNotFoundError:
+                if collected:
+                    break
+                # A journal that does not exist yet: the empty page, and no
+                # promise of facts over nothing (the desktop twin's own arm).
+                # ``has_newer`` STAYS HERE, unlike the twin (review round 1,
+                # R1-2): the twin's own empty answer omits the key, while this
+                # op's plain arm always carries it (``page.has_newer``) and the
+                # frame arm's contract is today's key set PLUS the three frame
+                # keys — so a client reads the envelope it always has, either
+                # way (``reply.get``).
+                return {
+                    "entries": [],
+                    "has_more": False,
+                    "cursor_missing": bool(before_id),
+                    "has_newer": None,
+                    "runs": [],
+                    "runs_state": "unsupported",
+                    "head_cut": False,
+                }
+            if not collected:
+                cursor_missing = page.reconciled
+            has_more = page.has_more
+            rows = visible_transcript_rows([json.loads(row.to_json()) for row in page.entries])
+            if not rows:
+                break
+            collected = rows + collected
+            kept, reached = align_page(collected, limit)
+            paintable_rows = paintable(collected)
+            if reached and len(paintable(kept)) >= limit:
+                break
+            # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY — the same
+            # ordering the desktop twin documents: the page is what the client
+            # asked for and must not wait behind a scan, while the head hunt is
+            # the part that can be called off. With an index in hand the
+            # reachability test is one subtraction (``tail_head_reachable``),
+            # and a run too long to reach is left to ``runs`` rather than paid
+            # for in bytes. Only a TAIL read consults it: the shortcut is about
+            # the journal's END, and a ``before_id`` page is owed its rows.
+            if attempt == 0 and index is None and before_id is None:
+                index = self._stored_frame_index(session_id)
+            if (
+                index is not None
+                and len(paintable_rows) >= limit
+                and before_id is None
+                and not tail_head_reachable(index, limit=limit)
+            ):
+                break
+            if len(paintable_rows) >= limit + OPEN_FRAME_MAX_EXTRA_ROWS:
+                # The head hunt's own budget, in ROWS and not pages (see
+                # ``align_page``): past it the page is not aligned and the rows
+                # above the limit are ones the cut refuses to serve anyway.
+                break
+            if (
+                len(paintable_rows) >= OPEN_FRAME_MAX_ROWS
+                or served_bytes(paintable_rows) >= OPEN_FRAME_MAX_BYTES
+            ):
+                break
+            if not page.has_more:
+                break
+            cursor = str(collected[0].get("id") or "")
+            if not cursor:
+                break
+        if index is None:
+            index = self._stored_frame_index(session_id)
+        kept, reached = align_page(collected, limit)
+        result = build_frame(
+            kept,
+            index=index,
+            # ``building`` is what a cold index answers (see
+            # ``_stored_frame_index``); ``build_frame`` replaces it with
+            # ``ready`` whenever an index was in hand, whatever the run list
+            # turns out to be.
+            runs_state="building",
+            has_more=has_more,
+            cursor_missing=cursor_missing,
+            has_newer=None,
+            bounds=(
+                page_seq_bounds(
+                    index,
+                    collected,
+                    # A read with NO cursor is the journal's TAIL, so its newest
+                    # row is the newest row there is and the run window stays
+                    # open at the top (the desktop twin's own rule).
+                    reaches_eof=before_id is None,
+                )
+                if index is not None
+                else None
+            ),
+        )
+        answer: dict[str, Any] = {
+            "entries": result.entries,
+            "has_more": result.has_more,
+            "cursor_missing": result.cursor_missing,
+            "has_newer": result.has_newer,
+            "runs": result.runs,
+            "runs_state": result.runs_state,
+            "head_cut": result.head_cut,
+        }
+        # A cut that DROPPED rows the read had already fetched still owes the
+        # reader a "there is more above this page": ``has_more`` describes the
+        # page served, never the reads behind it.
+        trimmed = len(kept) < len(collected)
+        answer["has_more"] = has_more or result.capped or trimmed
+        # ``head_cut`` IS COMPUTED FROM WHAT WAS SERVED, AFTER THE CAPS (the
+        # desktop twin's F2): ``reached`` describes ``collected``, and the caps
+        # may then have dropped the oldest rows — the page's user row first — so
+        # a page could report ``head_cut: false`` while its oldest run WAS cut.
+        answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
+        return answer
+
+    def _stored_frame_index(self, session_id: str) -> Any:
+        """The transcript-index facts for one open-frame page, or ``None`` (cold).
+
+        ``fresh_resident`` IS THE READY BRANCH AND IT NEVER SCANS (two stats):
+        an index resident and current for the journal's stat is served as-is. A
+        cold index is NOT WAITED FOR here — the desktop's ``_frame_index``
+        spends what is left of its 120 ms open budget on this wait, while this
+        read has no such budget and its reply must degrade the FACTS, not the
+        page. It starts the refresh instead and answers ``building``; the
+        refresh scans on the page loop's own executor (``refresh_index`` is a
+        blocking scan and must not run on this thread or on the loop itself),
+        and ``_remember`` publishes the result for the next read — which is the
+        client's own next frame (the contract's stated follow-up), so what the
+        desktop buys with a wait the next request buys by asking again.
+
+        THE REFRESH IS SCHEDULED ON THE PAGE LOOP because ``start_refresh`` is
+        loop-resident by construction (it creates a task on the RUNNING loop),
+        and this handler runs on the LINK'S READER thread. SINGLE-FLIGHT MEANS
+        PER LOOP HERE: ``transcript_index`` joins an in-flight task only when it
+        was recorded for the same loop — a request from another loop starts a
+        FRESH task and replaces the map's entry. Every stored-page read in this
+        process shares the one page loop, so concurrent frame reads join one
+        scan; a refresh already running on ANOTHER loop (the desktop bridge's,
+        another process) is duplicated, not joined — safe (the same journal, an
+        idempotent cache write), and exactly why this side schedules its own
+        rather than assuming anyone else's scan is in flight. The submit is
+        taken under ``_page_loop_lock`` for the same reason
+        ``_stored_page_read``'s is: a ``stop`` landing between choosing the loop
+        and submitting must hand this read either the live loop or a fresh one,
+        never a closed one.
+        """
+        from local_operator.session import transcript_index as index_module
+
+        index = index_module.fresh_resident(self.root, session_id)
+        if index is not None:
+            return index
+        try:
+            with self._page_loop_lock:
+                loop = self._page_loop_locked()
+                scheduled = asyncio.run_coroutine_threadsafe(
+                    self._schedule_frame_index_refresh(session_id), loop
+                )
+            # WAIT ONLY FOR THE SCHEDULE, NEVER FOR THE SCAN: this future
+            # resolves when the loop has RUN ``start_refresh`` (which returns
+            # as soon as the task exists). By the time this read answers
+            # ``building`` the refresh is provably in flight, and the next read
+            # joins it rather than starting a second one.
+            scheduled.result(timeout=SESSION_HISTORY_FRAME_INDEX_BOUND_S)
+        except Exception:  # noqa: BLE001 — a refresh is an optimisation, not the answer
+            pass
+        return None
+
+    async def _schedule_frame_index_refresh(self, session_id: str) -> None:
+        """Create the index refresh task, on the page loop.
+
+        THE LOOP IS THE JOIN CONDITION, not just the executor: ``start_refresh``
+        joins a task only for the loop it was recorded under, and every
+        stored-page read here shares this one — so concurrent frame reads join
+        ONE scan. (A refresh already running on another loop is not joined; see
+        :meth:`_stored_frame_index` for the scope and why the duplicate is
+        safe.) A coroutine rather than a direct call because ``start_refresh``
+        reads ``asyncio.get_running_loop()`` — it must run where a loop is
+        running, which is the page loop and only the page loop on this side.
+        """
+        from local_operator.session import transcript_index as index_module
+
+        index_module.start_refresh(self.root, session_id)
 
     def _stored_page_read(self, directory: Path, *, before_id: str | None, limit: int) -> Any:
         """Drive ``load_transcript_page`` on THIS relay's ONE page loop (R1-2).

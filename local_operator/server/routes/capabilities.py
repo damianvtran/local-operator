@@ -1,7 +1,14 @@
-"""Public feature negotiation contains no credentials or configuration values."""
+"""Public feature negotiation: no credentials, and one resolved locale tag.
+
+The map is safe to serve to any local client because it carries no credentials
+and no configuration values — with exactly one deliberate exception: the
+RESOLVED ``language`` tag (a shipped-locale string, not a raw config value;
+RFC §2.5). Everything else is a build fact.
+"""
 
 from fastapi import APIRouter
 
+from local_operator.i18n.resolve import resolve_language
 from local_operator.server.desktop import desktop_posture
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
@@ -33,5 +40,11 @@ async def capabilities():
             # These version the HTTP subsystems, not renderer completion or
             # third-party authorization. No aggregate "full parity" claim.
             "features": feature_flags(),
+            # The language this backend RESOLVES to (RFC §2.5): config
+            # `language` -> LOP_LANG -> OS -> en, normalised and filtered to
+            # shipped locales. Resolved per call so a config edit reaches the
+            # client's next read without a restart; "en" until a translation
+            # wave passes audit and widens the shipped set (§6).
+            "language": resolve_language(),
         },
     )

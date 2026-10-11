@@ -309,6 +309,7 @@ async def analytics(
     until_ms: int | None = Query(default=None, ge=0),
     session_id: str | None = Query(default=None, pattern=r"^[a-f0-9]{12}$"),
     days: int = Query(default=30, ge=1, le=366),
+    months: int = Query(default=12, ge=1, le=120),
 ):
     from local_operator.analytics.store import AnalyticsStore
 
@@ -342,6 +343,41 @@ async def analytics(
                 "aggregate": dataclasses.asdict(aggregate),
                 "daily": [dataclasses.asdict(row) for row in store.daily_series(days)],
                 "daily_scope": "all_sessions",
+                # PR-2's channels section, ADDITIVE on this payload: a client
+                # that does not know the key ignores it, and an old server
+                # simply never sends it. The shape follows the envelope's own
+                # conventions rather than inventing new ones:
+                #
+                #  * ``rows`` are the windowed breakdown from the RAW channel
+                #    ledger (``channel_breakdown``), so they honour the caller's
+                #    ``since_ms``/``until_ms``/``session_id`` exactly and read
+                #    ``amount_micro``+``known_calls`` as the known/unknown pair
+                #    (a zeroed row with ``known_calls=0`` is "could not be
+                #    sized", never "free").
+                #  * ``daily``/``monthly`` are the ROLLUP series
+                #    (``channel_daily``/``channel_monthly``), which survive the
+                #    raw ledger's 90-day prune but are calendar-bucketed and
+                #    carry no session dimension — hence ``series_scope:
+                #    "all_sessions"`` beside the row scope, the same
+                #    "say which source" convention ``daily_scope`` and
+                #    ``analytics/models``'s ``scope`` use. The two sources are
+                #    named because they can legitimately disagree about a
+                #    pruned window; the payload says which is which instead of
+                #    hiding the seam.
+                "channels": {
+                    "scope": "ledger",
+                    "series_scope": "all_sessions",
+                    "rows": [
+                        dataclasses.asdict(row)
+                        for row in store.channel_breakdown(
+                            since_ms=since_ms, until_ms=until_ms, session_id=session_id
+                        )
+                    ],
+                    "daily": [dataclasses.asdict(row) for row in store.channel_daily_series(days)],
+                    "monthly": [
+                        dataclasses.asdict(row) for row in store.channel_monthly_series(months)
+                    ],
+                },
                 "session_names": {
                     sid: name
                     for sid, name in (getattr(aggregate, "session_names", None) or {}).items()
@@ -552,7 +588,15 @@ async def session_report(
     def read_report() -> dict[str, Any]:
         store = AnalyticsStore(request.app.state.config_manager.config_dir / "analytics.db")
         try:
-            report = store.session_report(session_id, recent_limit=recent_limit)
+            # ``channels=True``: the channel rows ride the report's OWN WAL
+            # snapshot (see ``AnalyticsStore.session_report``), so the PR-2
+            # ``channels`` section and the inference figures above it cannot
+            # describe two different committed states. The route does not
+            # rebuild the rows: ``dataclasses.asdict`` already recurses into the
+            # tuple, and the key set is additive for the same reason the other
+            # additive fields on this payload are — an old client ignores a key
+            # it never read.
+            report = store.session_report(session_id, recent_limit=recent_limit, channels=True)
         finally:
             store.close()
         # ALL THREE group-bys are blanked BEFORE the dump rather than

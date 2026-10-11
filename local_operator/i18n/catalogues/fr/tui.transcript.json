@@ -1,0 +1,12 @@
+{
+  "tui.transcript.ask.key_name": "{keys} (nom de clé)",
+  "tui.transcript.ask.not_answered": "sans réponse",
+  "tui.transcript.ask.not_provided": "non fourni",
+  "tui.transcript.attach.receipt": "↑ {count, plural, one {# image jointe} many {# d’images jointes} other {# images jointes}}",
+  "tui.transcript.catchup.headline": "rattrapage — {label}",
+  "tui.transcript.catchup.missed": "{count, plural, one {# réveil manqué} many {# de réveils manqués} other {# réveils manqués}}",
+  "tui.transcript.queued.newest": "· en file d’attente pour le prochain runtime — esc le récupère",
+  "tui.transcript.queued.older": "· en file d’attente pour le prochain runtime",
+  "tui.transcript.sender.pid": "pid {pid}",
+  "tui.transcript.sender.unknown": "une autre session"
+}
