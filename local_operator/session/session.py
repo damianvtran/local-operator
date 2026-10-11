@@ -3122,6 +3122,15 @@ class Session:
         #: disposal is held durably instead. Never set for a ``--loop``/goal
         #: run (``continuation is not None``): its turns are the run's work.
         self._one_shot_exit = False
+        #: Declared by a HEADLESS print host at entry
+        #: (``Session.declare_headless_host``, called from ``run_print_mode``).
+        #: A HOST FACT, deliberately not a latch: unlike ``_one_shot_exit`` it
+        #: arms no departure pair, and its one consumer is the turn-supplements
+        #: predicate's rule 6 (via ``RunProvenance.headless``), which must refuse
+        #: EVERY ``run_print_mode`` shape -- including the ``--loop``/``--loop-goal``
+        #: runs whose one-shot declaration is skipped on purpose (their turns are
+        #: the run's work, not teardown leftovers).
+        self._headless_host = False
         self._job_label = job_label
         #: The role a subagent was launched as (``task(agent=...)``), for the
         #: ``agent_type`` field forwarded hooks receive. Empty on a top-level
@@ -13649,6 +13658,7 @@ class Session:
                 items=tuple(self._turn_items),
                 job_id=self._job_id,
                 one_shot=self._one_shot_exit,
+                headless=self._headless_host,
                 settled_mark=self._turns_settled,
                 triggers=frozenset(self._run_triggers),
             )
@@ -17371,6 +17381,22 @@ class Session:
         # ``set_ask_handler(None)`` drops ``ask``.
         if any(tool.name == "no_reply" for tool in self._tools):
             self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
+
+    def declare_headless_host(self) -> None:
+        """Declare this session's host a HEADLESS print-mode host (turn-supplements R8).
+
+        Distinct from :meth:`declare_one_shot_exit` on purpose, and the split is the
+        point: that method's semantics are the departure latches ``_run_turn``'s
+        ``finally`` arms, so ``run_print_mode`` deliberately skips it for
+        ``--loop``/``--loop-goal`` runs (their turns are the run's work, not teardown
+        leftovers). The turn-supplements predicate must still refuse EVERY headless
+        host -- "exec/SDK unaffected", ``docs/design/turn-supplements.md`` §2.2 rule 6
+        -- and reading the one-shot latch alone left exactly those runs eligible
+        (measured on a real ``lop exec --loop`` subprocess: the job was scheduled and
+        ran its pre-filter walk). This flag carries the host fact WITHOUT the latch;
+        read only through ``RunProvenance.headless``, nothing else may depend on it.
+        """
+        self._headless_host = True
 
     def retire_job_deliveries_to_transcript(self) -> None:
         """From now on, a settled job's result is durable and opens NO turn.

@@ -564,6 +564,35 @@ async def test_a_one_shot_host_is_ineligible(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_print_mode_run_with_a_continuation_is_ineligible(tmp_path: Path) -> None:
+    """R8 ("exec/SDK unaffected"): a ``lop exec --loop`` run is still headless.
+
+    ``run_print_mode`` skips its one-shot declaration when ``continuation`` is set
+    (the departure latches must not arm between a loop's own turns — see
+    ``Session.declare_one_shot_exit``), so the predicate cannot read that latch
+    alone. This cell drives the REAL ``run_print_mode`` with a continuation and
+    requires the same refusal. Against the pre-fix source it failed with ``['']``:
+    the run was SCHEDULED — measured on a real ``lop exec --loop`` subprocess,
+    where the job then ran its pre-filter walk inside what the design calls a
+    host-blind, headless run.
+    """
+    from local_operator.headless_print import run_print_mode
+
+    stream = _stream()
+    session = _make_session(tmp_path, stream)
+    runner = _wire(session)
+
+    async def continuation() -> bool:
+        return True
+
+    try:
+        await run_print_mode(session, ["lop exec --loop"], continuation=continuation)
+        assert runner.reasons == ["one-shot-host"], runner.reasons
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_goal_loop_continuation_is_ineligible_even_typed_looking(tmp_path: Path) -> None:
     """Rule 1 excludes injections; rule 5 is the belt for a typed ``/loop`` seed turn."""
     from local_operator.harness.types import AgentEvent

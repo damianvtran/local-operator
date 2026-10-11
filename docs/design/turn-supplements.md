@@ -200,8 +200,11 @@ Both stamp `provider_payload[RENDERED_INJECTION_KEY]` (`session.py:8155`, `:8267
 5. **No goal loop is running.** `handle._goal_loop is None or not running`, and the run's
    opener was not a judge continuation. Rule 1 already excludes judge continuations; rule 5
    also covers `/loop` turns typed as the `/loop` seed.
-6. **Not a headless one-shot host.** `session._one_shot_exit` is False
-   (`session.py:15712-15731`; set by `run_print_mode`, `headless_print.py:601-604`).
+6. **Not a headless host.** `session._one_shot_exit` is False
+   (`session.py:15712-15731`; set by `run_print_mode`, `headless_print.py:601-604`) **and**
+   `RunProvenance.headless` is False (`Session.declare_headless_host`, also declared by
+   `run_print_mode`) — the second covers the `--loop`/`--loop-goal` runs whose one-shot
+   declaration is deliberately skipped (their turns are the run's work).
 
 **Coverage of the cases the brief names:**
 
@@ -217,7 +220,7 @@ Both stamp `provider_payload[RENDERED_INJECTION_KEY]` (`session.py:8155`, `:8267
 | Goal-loop / judge continuation, spooled owner chrome | not eligible | `RENDERED_INJECTION_KEY` |
 | Spooled *real* owner prompt (sent during an update window) | eligible | `harness_injected` False on a typed spool row |
 | Subagent run | not eligible | `_job_id` |
-| `lop exec` text / `--json`, `run_print_mode` | not eligible | `_one_shot_exit` (rule 6). The text arm's stdout is the last assistant `MessageEnd` (`headless_print.py:260-265`); the `--json` arm dumps **every** event (`headless_print.py:209-218`), so rule 6 is load-bearing there, not belt-and-braces — §5.1 pins a no-`supplement_progress` assertion on it (round-1 review R7). |
+| `lop exec` text / `--json`, `run_print_mode` | not eligible | `_one_shot_exit`/`headless` (rule 6). The text arm's stdout is the last assistant `MessageEnd` (`headless_print.py:260-265`); the `--json` arm dumps **every** event (`headless_print.py:209-218`), so rule 6 is load-bearing there, not belt-and-braces — §5.1 pins a no-`supplement_progress` assertion on it (round-1 review R7). |
 | SDK `open_session(mode="own")` | **not eligible by default** | the SDK constructs `create_session` with no `ServingSessionHandle` (`sdk.py:584-590`), so the runtime subscriber (§2.1) is never installed. That absence is the contract: SDK event streams stay unchanged. |
 | SDK `deliver()` to a runtime / `lop send` | eligible only if it carries a typed `PromptErrand` | it rides the runtime's ordinary prompt path |
 
