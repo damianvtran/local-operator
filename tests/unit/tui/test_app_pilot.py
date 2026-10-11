@@ -14465,7 +14465,10 @@ def _desktop_backend(config_dir: Path):
 
     server_app.state.config_manager = SimpleNamespace(config_dir=config_dir)
     server_app.state.desktop_sessions = DesktopSessions(config_dir)
-    with TestClient(server_app) as client:
+    # Every route validates the Host since P1.5 (RFC §3.6): the default
+    # ``Host: testserver`` is a DNS name and is refused; the app's real dial is
+    # the loopback literal, which is what this client must present too.
+    with TestClient(server_app, headers={"Host": "127.0.0.1:1111"}) as client:
         client.headers["Authorization"] = "Bearer pins-pilot-token"
         yield client
 

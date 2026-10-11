@@ -605,26 +605,45 @@ _WILDCARD_BINDS = frozenset({"0.0.0.0", "::", ""})
 
 
 def _host_name(host_header: str) -> str:
-    """The bare, lower-cased host of a ``Host`` header (port and IPv6 brackets stripped)."""
+    """The bare, lower-cased host of a ``Host`` header (port, brackets, trailing dot stripped)."""
     value = host_header.strip().lower()
     if value.startswith("["):  # [::1]:8080
-        return value[1:].split("]", 1)[0]
-    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+        name = value[1:].split("]", 1)[0]
+    else:
+        name = value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+    # One trailing dot is the FQDN spelling of the same authority (``localhost.``,
+    # ``mac.lan.`` -- browsers and some resolvers emit it). ONE, not all: a lone
+    # ``.`` is left alone and ``..`` collapses to it; neither is an IP literal
+    # or ``localhost``, so both refuse. Applied to both sides of the
+    # announced-name compare below, so ``mac.lan.`` matches an announced
+    # ``mac.lan`` exactly as the client dialed it.
+    return name[:-1] if name.endswith(".") and name != "." else name
 
 
 def host_is_acceptable(host_header: str | None, bound_host: str | None) -> bool:
-    """Whether a request's ``Host`` may reach a static route (DNS-rebinding guard).
+    """Whether a request's ``Host`` may reach the serve app (DNS-rebinding guard).
+
+    SCOPE. Since P1.5 (RFC §3.6 follow-up d) this predicate gates EVERY route of
+    the serve app, not only ``/v1/static/*``: ``server/app.py``'s
+    ``host_admission`` middleware calls it before the router. The audit for the
+    extension found no supported client that dials this app by DNS name (the
+    desktop app, its probes and the CLI dial ``127.0.0.1`` literals; the TUI is
+    in-process; the tunnel gateway forwards to the relay harness port, not this
+    app), so no route exemption exists.
 
     WHY. Dropping the CORS grant stops a foreign page READING a response, but a
     DNS-rebinding page is not foreign: it re-points ``rebind.attacker.test`` at
     ``127.0.0.1`` and is then same-origin with this daemon, so it needs no grant
     at all (review R8). The one thing it cannot change is the ``Host`` it sends,
-    which is the attacker's name. So the route accepts only:
+    which is the attacker's name. So the app accepts only:
 
     * an IP literal (a rebinding page cannot present one: no DNS is involved);
-    * ``localhost`` -- what the dev renderer and a hand-typed URL use;
+    * ``localhost`` -- what the dev renderer and a hand-typed URL use -- in its
+      port, case and trailing-dot spellings (``LOCALHOST:1111``,
+      ``localhost.``: all normalised to the same name by :func:`_host_name`);
     * the host the daemon was told to bind, when that is a specific name (an
-      operator who bound ``--host mac.lan`` and reaches it as such).
+      operator who bound ``--host mac.lan`` and reaches it as such), normalised
+      the same way on both sides.
 
     Refused before any of that is even parsed: a ``Host`` carrying userinfo
     (``localhost:80@attacker.test``, ``[::1]@attacker.test``) or present but empty

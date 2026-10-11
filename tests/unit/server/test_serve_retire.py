@@ -694,7 +694,7 @@ def test_the_create_route_refuses_with_a_503_and_no_receipt(
     monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.serve_retiring = True
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.post(
             "/v1/desktop/sessions",
             json={"request_id": "01234567-89ab-cdef-0123-456789abcdef", "cwd": str(tmp_path)},
@@ -739,7 +739,7 @@ def test_the_create_route_does_not_call_every_failure_a_retirement(
     monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = Boom(tmp_path)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.post(
             "/v1/desktop/sessions",
             json={"request_id": "01234567-89ab-cdef-0123-456789abcdef", "cwd": str(tmp_path)},

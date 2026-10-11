@@ -85,7 +85,7 @@ def test_the_command_catalogue_does_not_create_the_network_plane(tmp_path, monke
     """
     root = _isolate(tmp_path, monkeypatch)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         assert not (root / "network").exists(), "the app's own startup created the plane"
         response = client.get("/v1/desktop/commands", headers=HEADERS)
         assert response.status_code == 200
@@ -107,7 +107,7 @@ def test_the_mesh_reads_answer_empty_and_create_nothing_on_a_fresh_install(
     """
     root = _isolate(tmp_path, monkeypatch)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         peers = client.get("/v1/desktop/peers", headers=HEADERS)
         networks = client.get("/v1/desktop/networks", headers=HEADERS)
         assert (peers.status_code, networks.status_code) == (200, 200)
@@ -145,7 +145,7 @@ def test_the_other_read_routes_do_not_create_the_run_plane_either(tmp_path, monk
         "/v1/desktop/sessions/aaaaaaaaaaaa",
     )
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         # THE BOOT'S OWN WORK SETTLES BEFORE THE DELTAS. The lifespan schedules
         # the built-in assistant's first-run ensure as a background task — a
         # session build (and the wake-supervisor install behind it) must not
@@ -189,7 +189,7 @@ def test_the_probe_and_the_vocabulary_still_read_a_real_network(tmp_path, monkey
 
     assert has_any_network(root) is True
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         rows = client.get("/v1/desktop/commands", headers=HEADERS).json()["result"]["commands"]
     remote = next(row for row in rows if row["name"] == "new")
     # Both halves of the vocabulary: the name a person types, then the id as the
