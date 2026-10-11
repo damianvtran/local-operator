@@ -926,8 +926,15 @@ class SupplementRunner:
         if verb not in ("retry", "adjust"):
             return None
         candidates: list[tuple[float, str, str]] = []
-        for anchor in self._inputs:
-            inputs = self._inputs[anchor]
+        # SNAPSHOT BEFORE THE WALK, because every journal read below suspends on a
+        # worker thread and the ordinary path -- a turn ending and its render starting --
+        # remembers a NEW anchor (`_remember`) in exactly that window; iterating the
+        # LIVE dict across those awaits raises "dictionary changed size during
+        # iteration" and the whole command fails (post-merge review of #2189, F-1).
+        # A snapshot cannot change outcomes: the selected op re-validates its
+        # `(anchor, job)` under `_ops_lock` and answers neutrally (`already finished`)
+        # when the pick has gone stale.
+        for anchor, inputs in list(self._inputs.items()):
             row = await asyncio.to_thread(self._newest_row, anchor, job=inputs.job)
             if row is None:
                 continue
