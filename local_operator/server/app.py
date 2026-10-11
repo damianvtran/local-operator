@@ -1018,15 +1018,16 @@ async def static_response_policy(request: Request, call_next):
 
 
 def is_desktop_supplement_path(path: str) -> bool:
-    """Whether ``path`` is in the desktop supplement read family.
+    """Whether ``path`` is in the desktop supplement family.
 
-    The family today is the document route
-    (``/v1/desktop/sessions/{session_id}/supplements/{digest}/document``,
-    ``routes/desktop_sessions.py``) and the match is on the session's whole
-    ``/supplements/`` namespace, so a future read route added beside it is
-    covered without a second policy site. A named predicate rather than an
-    inline condition in the middleware below, so the family's scope is stated
-    once.
+    The family is the session's whole ``/supplements/`` namespace: the document
+    read route and the control-op write routes beside it
+    (``/v1/desktop/sessions/{session_id}/supplements/{digest}/document`` and
+    ``.../supplements/{job}/{cancel,steer,restart}``,
+    ``routes/desktop_sessions.py``). The match is on the namespace rather than
+    on the routes, so a route added beside them is covered without a second
+    policy site. A named predicate rather than an inline condition in the
+    middleware below, so the family's scope is stated once.
     """
     prefix = "/v1/desktop/sessions/"
     if not path.startswith(prefix):

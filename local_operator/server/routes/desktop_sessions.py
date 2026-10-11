@@ -61,6 +61,7 @@ from local_operator.server.models.desktop_sessions import (
     SessionList,
     SessionSearch,
     SessionSnapshot,
+    SupplementReceipt,
     WarmReceipt,
     WatchReceipt,
 )
@@ -127,6 +128,7 @@ from local_operator.slash_commands import (
     slash_command_for,
     whole_draft_command,
 )
+from local_operator.supplements.contract import STEER_TEXT_MAX_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -4963,6 +4965,245 @@ def _job_refusal(status: int, code: str, message: str, *, session_id: str = "") 
     if session_id:
         detail["session_id"] = session_id
     return HTTPException(status, detail)
+
+
+#: A supplement job id on a control route's path. Bounded, deliberately NOT
+#: patterned: a stale id must REACH the runtime's identity gate and be refused
+#: there (the neutral ``already finished`` receipt), not rejected as a shape
+#: error here -- and the gate, never a regex, is the one arbiter of whether an
+#: id names a job (the ``JobId`` rule above, one id space over).
+SupplementJobId = Annotated[str, Path(min_length=1, max_length=64)]
+
+
+class SupplementTarget(Input):
+    """Which of an answer's supplement rows a control op names.
+
+    ``anchor`` is the final assistant message id the row rides under -- the
+    row's own ``anchor`` key (memo §2.4), which the TUI calls
+    ``completion_anchor_id`` -- and every supplement op acts on the PAIR
+    ``(anchor, job)``. The anchor is REQUIRED rather than resolved from the job
+    id because the runtime's identity gate checks exactly this pair (C1b's
+    review R1): a route that re-derived one half from the other would be a
+    second lookup that can disagree with the one that decides. The bound
+    mirrors the shipped renderer's schema (``desktop-contract``'s
+    ``supplementAnchor``: 1..128), and journal entry ids are ``uuid4().hex``
+    (32 chars), so it admits every real anchor.
+    """
+
+    anchor: str = Field(min_length=1, max_length=128)
+
+
+class SupplementSteer(SupplementTarget):
+    """The steer's body: the target pair plus the operator's instruction.
+
+    ``text`` carries memo §2.7's bound at the wire
+    (:data:`~local_operator.supplements.contract.STEER_TEXT_MAX_CHARS`), so an
+    over-bound instruction is a 422 naming the field -- the same refusal the
+    runtime's own dispatch makes for the same text, one layer earlier, where
+    the caller's fix is a different body. A whitespace-only instruction is
+    refused here for the same reason: the dispatch would answer it with an
+    error frame ("supplement_steer needs a non-empty instruction"), which this
+    family's ladder can only render as an unreachable owner -- a false
+    statement about a body that was merely blank. The op itself still
+    normalises the text (``steer_job``'s ``" ".join(...)``): the wire forwards
+    the operator's words verbatim and the runtime is the one place they are
+    flattened.
+    """
+
+    text: str = Field(min_length=1, max_length=STEER_TEXT_MAX_CHARS)
+
+    @field_validator("text")
+    @classmethod
+    def _an_instruction_must_carry_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a steer instruction must not be blank")
+        return value
+
+
+async def _supplement_receipt(
+    remote: Any,
+    *,
+    session_id: str,
+    op: Literal["cancel", "steer", "restart"],
+    anchor: str,
+    job: str,
+    text: str = "",
+) -> dict[str, Any]:
+    """Drive one supplement control op on the session's runtime and receipt its answer.
+
+    THE ONE DISPATCH BEHIND THE THREE ROUTES BELOW, and the session DOOR stays in
+    those routes rather than moving in here: the desktop plane's refusal-matrix
+    walk (``tests/unit/server/test_serve_retire.py``) reads every module-level
+    function that obtains a bridge as a route that must be listed and gated, and
+    a helper holding the ``host(request).session(...)`` call would be a name no
+    matrix row and no router could publish. The ops themselves live on
+    the serving handle (``session/runtime/supplements.py``: ``cancel_job`` /
+    ``steer_job`` / ``restart_job``, reached over the control socket by
+    ``session/attached.py``'s facade methods), so this layer adds a way to
+    REACH them from HTTP -- one line per op mapping to
+    ``bridge.remote.supplement_*``, the interrupt route's own shape -- and not
+    a second implementation of the state machine. Both consequences are
+    deliberate: the runtime's identity gate and its journal-inside-the-write-
+    lock invariants decide every act, and the receipt vocabulary is the
+    runtime's own words (:class:`~local_operator.server.models.desktop_sessions.SupplementReceipt`).
+
+    NO RECEIPT JOURNAL (the jobs-cancel route's own reading): the shipped
+    client sends no request id for one to claim on -- these bodies carry
+    identity and nothing else -- and a retried op that finds nothing live
+    answers the neutral ``already finished`` receipt rather than a duplicate
+    side effect, so there is no duplicate a journal would prevent.
+
+    NO REACHABLE OWNER IS A REFUSAL, NOT A NO-OP: a supplement job exists only
+    in a running runtime's memory, so a session with no live runtime has
+    nothing this request could act on, and the sentence names the condition
+    rather than a remedy that cannot help. The term is REACHABILITY,
+    deliberately not ``is_cold`` (the interrupt route's lesson: a resyncing
+    viewer reads cold while its owner keeps serving), and a RECOVERING facade
+    is dialled like a live one -- a dropped socket says nothing about the job
+    -- with a dial that cannot be served answered by the shared ladder's 503
+    ``runtime_unreachable``.
+    """
+    if not remote.owner_reachable and not remote.recovering:
+        raise _job_refusal(
+            503,
+            "supplements_owner_unavailable",
+            "The conversation has no live runtime, so its highlights cannot be updated.",
+            session_id=session_id,
+        )
+    if op == "steer":
+        receipt = await remote.supplement_steer(anchor, job, text)
+    elif op == "restart":
+        receipt = await remote.supplement_restart(anchor, job)
+    else:
+        receipt = await remote.supplement_cancel(anchor, job)
+    return {"op": op, "anchor": anchor, "job": job, "receipt": str(receipt)}
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/supplements/{job}/cancel",
+    response_model=CRUDResponse[SupplementReceipt],
+)
+async def supplement_cancel(
+    session_id: str, job: SupplementJobId, body: SupplementTarget, request: Request
+):
+    """Cancel the running attempt of one supplement job (the Highlights block's Cancel).
+
+    WHY THIS ROUTE EXISTS, AND WHY HERE. The supplement control ops already
+    ride the runtime's attach channel (memo §2.7), but the desktop renderer is
+    HTTP-ONLY -- its IPC is main-process HTTP, with no attach channel to this
+    daemon's runtimes -- so the block's controls were reachable from the TUI
+    and the phone and not from the app, where a press answered 404. The fix
+    belongs in this family rather than in the client because the runtime's ops
+    are the one implementation of the semantics; the route is a door to them,
+    and there is one route per op because the shipped client names three
+    paths.
+
+    WHAT THE CALLER GETS BACK. The runtime's receipt, verbatim, in
+    ``SupplementReceipt``: ``cancelled`` when the running attempt was cut (the
+    row's own settle is the durable evidence, exactly as it is for a job
+    cancel), and the neutral ``already finished`` when there was nothing live
+    to cut -- a settled job, one this runtime forgot, or a pair the identity
+    gate refuses. THE NEUTRAL RECEIPT IS DELIBERATE (memo §2.7, reusing
+    image-gen's ``ALREADY_FINISHED_NOTE``, which "must never wear the error
+    ink or glyph"): a surface that lost a race with the job's own end must not
+    be told something happened, and a press that changed nothing must not be
+    rendered as a failure. A STALE JOB ID IS REFUSED BY THAT RECEIPT, NEVER
+    RESOLVED onto the anchor's newer job: the runtime cuts only the task
+    running under the exact ``(anchor, job)`` named (C1b's R1 identity gate),
+    and this route passes the pair through untouched -- there is no lookup here
+    that could re-point it.
+
+    AUTHORISATION and RESPONSE POLICY are the family's, not re-decided here:
+    the router's ``require_desktop`` dependency (bearer token, Origin
+    allowlist, 503 while the plane is closed) gates every route in this module;
+    a session this machine does not hold refuses through the pool's own lookup
+    (404, and a peer's row through its own typed arms); and
+    ``desktop_supplement_response_policy`` stamps ``nosniff`` +
+    ``Cache-Control: no-store`` on every status of the ``/supplements/``
+    namespace, errors included.
+
+    REFUSALS: 503 ``supplements_owner_unavailable`` for a session with no live
+    runtime (see the dispatcher above); the ladder's 404/409/503 for a session
+    it cannot resolve; 422 for a body that is not exactly ``{anchor}``; and an
+    owner that predates the op answers through the attach layer's error frame,
+    which the ladder renders as its own 503.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(
+            await _supplement_receipt(
+                bridge.remote, session_id=session_id, op="cancel", anchor=body.anchor, job=job
+            )
+        )
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/supplements/{job}/steer",
+    response_model=CRUDResponse[SupplementReceipt],
+)
+async def supplement_steer(
+    session_id: str, job: SupplementJobId, body: SupplementSteer, request: Request
+):
+    """Steer one supplement job: cut the in-flight attempt, start version + 1 with the text.
+
+    The Adjust control's op (memo §2.7). NOT a turn: it never touches the
+    session's turn lock, steering queue or model context -- it starts a new
+    GENERATOR version with the operator's instruction, and the runtime's own
+    ``steer_job`` owns every part of that distinction.
+
+    THE QUEUE RULE IS THE RUNTIME'S (memo §2.9): when the named job is not the
+    running one, the steer does not cut it -- it is queued behind the running
+    job (depth 1; a newer request replaces the queued one) and runs when that
+    job settles. The receipt is ``steering`` either way, BY DESIGN (the
+    runtime's own test pins the queued case to the same word): it reports that
+    the instruction was ACCEPTED, and this route neither claims nor implies
+    that the new version started immediately. A pair the runtime cannot act on
+    answers the neutral ``already finished`` (see ``supplement_cancel`` for the
+    full receipt vocabulary and the family's authorisation, response policy and
+    refusals).
+
+    ``text`` is bounded at the wire (``SupplementSteer``: 1..500 chars,
+    non-blank) and again by the runtime's dispatch, which is the owner of the
+    spend this op authorises.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(
+            await _supplement_receipt(
+                bridge.remote,
+                session_id=session_id,
+                op="steer",
+                anchor=body.anchor,
+                job=job,
+                text=body.text,
+            )
+        )
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/supplements/{job}/restart",
+    response_model=CRUDResponse[SupplementReceipt],
+)
+async def supplement_restart(
+    session_id: str, job: SupplementJobId, body: SupplementTarget, request: Request
+):
+    """Restart one supplement job: version + 1 with the previous instruction (the Retry).
+
+    The Retry affordance's op, offered from ``failed``/``cancelled``/``done``
+    (memo §2.7). It shares the steer's queue rule and receipt vocabulary --
+    ``restarting`` on acceptance, the neutral ``already finished`` for a pair
+    the runtime cannot act on -- and the steer's one distinction from a turn:
+    it spends a generator call, never the session's turn machinery. See
+    ``supplement_cancel`` for the family's authorisation, response policy and
+    refusals, and ``SupplementReceipt`` for the vocabulary.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(
+            await _supplement_receipt(
+                bridge.remote, session_id=session_id, op="restart", anchor=body.anchor, job=job
+            )
+        )
 
 
 @router.post(
