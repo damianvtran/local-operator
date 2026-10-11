@@ -64,6 +64,8 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import ACTIVITY_THINKING
+from local_operator.i18n.keys import tui_transcript
+from local_operator.i18n.text import tr
 from local_operator.mobile.peer_model import TERMINAL_SENDER
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.composer_focus import (
@@ -1349,13 +1351,18 @@ class ExpandableActionBlock(TranscriptBlock):
 #: the spool the message is out of reach, and the row saying otherwise for that
 #: brief window is why the press has to answer with the truth rather than
 #: silence.
-QUEUED_ROW_TEXT = "· queued for the next runtime \u2014 esc takes it back"
+#: Resolved through the i18n runtime (T3, RFC §3.1): the marker strings are the
+#: en catalogue's ``tui.transcript.queued.*`` values — the leading middle dot and
+#: every word — so a wave moves them like every other extracted area.
+_t = tr("tui.transcript")
+
+QUEUED_ROW_TEXT = _t(tui_transcript.queued_newest())
 #: The same state WITHOUT the offer, for every queued message but the newest.
 #: Only the newest is recallable (``app._withdraw_queued_prompt`` lifts one at a
 #: time, the sibling steer channel's rule), so a second marked row advertising
 #: the same key promises a recall that press will decline — measured: two rows
 #: offering, one honouring (UX round 2, U4).
-QUEUED_ROW_TEXT_OLDER = "· queued for the next runtime"
+QUEUED_ROW_TEXT_OLDER = _t(tui_transcript.queued_older())
 
 
 class UserBlock(TranscriptBlock):
@@ -1671,8 +1678,10 @@ class UserBlock(TranscriptBlock):
             # saying the bytes were actually attached and sent, which is the one
             # thing the marker cannot tell them and the whole reason a paste
             # that silently attached nothing went unnoticed for so long.
-            plural = "s" if self._attachments != 1 else ""
-            rows.append(f"↑ {self._attachments} image{plural} attached")
+            # ICU plural from the catalogue (T3): en renders '1 image' /
+            # '3 images' byte for byte; a wave changes the categories, not
+            # this call site.
+            rows.append(_t(tui_transcript.attach_receipt(count=self._attachments)))
             self._receipt_rows.add(len(rows) - 1)
         if self._queued:
             # MARKED, and not only stated below it: measured, this row was
@@ -2506,8 +2515,8 @@ class WakeBlock(ExpandableActionBlock):
                 if stripped.startswith("- "):
                     ids.append(stripped[2:].split(" ", 1)[0].split("(", 1)[0].strip())
             count = len(ids)
-            label = f"{count} missed wake{'s' if count != 1 else ''}"
-            headline = f"catch-up — {label}"
+            label = _t(tui_transcript.catchup_missed(count=count))
+            headline = _t(tui_transcript.catchup_headline(label=label))
             if ids:
                 # The same label treatment the single-delivery fold applies
                 # (UX review round 2, U5 / QA Q3): this branch composes its
@@ -2889,7 +2898,7 @@ class PeerMessageBlock(ExpandableActionBlock):
         model = _sanitize_sender_field(self._sender.get("model_label"))
         bits: list[str] = []
         if pid:
-            bits.append(f"pid {pid}")
+            bits.append(_t(tui_transcript.sender_pid(pid=pid)))
 
         def _compose(parts: list[str]) -> str:
             if name:
@@ -2898,10 +2907,12 @@ class PeerMessageBlock(ExpandableActionBlock):
             if parts:
                 return " · ".join(parts)
             # Nothing identifying at all. The one case that still needs prose,
-            # because a bare `·`-joined empty list says nothing — and it shares
-            # the wording `_summary` falls back to, and `harness/comms.py`
-            # before it, so the three do not drift.
-            return "another session"
+            # because a bare `·`-joined empty list says nothing — and it
+            # resolves the SAME catalogue key `_summary` falls back to (and
+            # `harness/comms.py`'s vocabulary before it), so the three do not
+            # drift: review round 1 (R1) found this sibling still a raw
+            # literal, invisible to a sink-only ratchet.
+            return _t(tui_transcript.sender_unknown())
 
         header = _compose(bits)
         if not model:
@@ -2946,7 +2957,11 @@ class PeerMessageBlock(ExpandableActionBlock):
             # the two spellings identical so a reader meeting one in a
             # transcript and one in a tool result does not think they are
             # different states.
-            identity = f"pid {pid}" if pid else "another session"
+            identity = (
+                _t(tui_transcript.sender_pid(pid=pid))
+                if pid
+                else _t(tui_transcript.sender_unknown())
+            )
         # The SNIPPET is stripped of control sequences and Cf; the body is not.
         #
         # `text()` and the expansion must stay byte-verbatim or `/copy` stops
@@ -3451,9 +3466,13 @@ class AskResponseBlock(WakeBlock):
                 # removes the ambiguity without putting the value anywhere near
                 # the frame.
                 keys = ", ".join(chosen) if chosen else ""
-                shown = f"{keys} (key name)" if keys else "not provided"
+                shown = (
+                    _t(tui_transcript.ask_key_name(keys=keys))
+                    if keys
+                    else _t(tui_transcript.ask_not_provided())
+                )
             else:
-                shown = ", ".join(chosen) if chosen else "not answered"
+                shown = ", ".join(chosen) if chosen else _t(tui_transcript.ask_not_answered())
             lines.append(("A: ", shown, fg))
         if not lines:
             # No structured Q&A (a timeout, or a row from a runtime that sent
