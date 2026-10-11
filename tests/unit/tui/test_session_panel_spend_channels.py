@@ -342,7 +342,7 @@ def test_pending_voice_spend_is_stated_beside_the_total() -> None:
         )
     )
     assert "Voice spend for this conversation is recorded but not yet included" in text, text
-    assert "2 requests." in text, text
+    assert "2\u00a0requests." in text, text  # NBSP: count + noun stay one unit (D2-2)
     # The total keeps its own knowledge-derived figure and mark untouched.
     assert "$1.01+" in text and "+ lower bound" in text
     # No wire vocabulary, and no fabricated zero for the excluded money.
@@ -361,6 +361,6 @@ def test_a_voice_only_session_draws_the_state_instead_of_nothing() -> None:
     text = rendered(replace(runtime(), spend_channels=voice_only_payload()))
     assert "Spend by channel" in text, text
     assert "Voice spend for this conversation is recorded but not yet included" in text, text
-    assert "2 requests." in text
+    assert "2\u00a0requests." in text
     assert UNKNOWN_COST_CELL in text, "an empty fold totals $—, never a fabricated zero"
     assert "$0.0000" not in text

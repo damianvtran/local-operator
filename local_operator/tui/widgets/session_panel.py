@@ -785,9 +785,9 @@ class _Body:
         self.lines.append(row)
 
     def note(self, text: str) -> None:
-        """A dim footnote, wrapped — it is prose, not a table row.
+        """A muted footnote, wrapped — it is prose, not a table row.
 
-        Wrapped HERE, one emitted line per visual line, rather than handed to
+        WRAPPED HERE, one emitted line per visual line, rather than handed to
         the container's ``fold``: folding applies the ``"  "`` indent to the
         first line only, so a continuation lands at column 0 and reads as a new
         record in the middle of a block (design D2). The codebase already names
@@ -795,13 +795,20 @@ class _Body:
         columns elsewhere specifically to avoid it, so a footnote must not
         reintroduce it. Indenting every line keeps a wrapped footnote visibly
         subordinate to the block it belongs to.
+
+        ``muted``, not ``dim``: a footnote is the block's DISCLOSURE prose, and
+        the pending-voice note measured 3.43:1 at the dim token — below AA,
+        landing on the one line whose whole job is to say charged money is not
+        in the total (design round 2, D2-1). Muted is this section's disclosure
+        token (6.51:1, beside the basis footer and the row notes), so every
+        footnote on this screen now reads at that ratio.
         """
         # Guard the arithmetic rather than the caller: a pre-mount width can be
         # small or absent, and textwrap raises on a non-positive width.
         body_width = max(1, self.width - 2)
         for line in textwrap.wrap(text, body_width) or [""]:
             row = Text(no_wrap=True, overflow="crop")
-            row.append(f"  {line}", style=semantic_style("dim"))
+            row.append(f"  {line}", style=semantic_style("muted"))
             self.lines.append(row)
 
     def header(self, title: str, meta: str = "", short: str = "") -> None:
@@ -1091,7 +1098,14 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
         # knowledge-derived mark untouched, so the figure and its state cannot
         # be confused with each other.
         noun = "request" if pending_calls == 1 else "requests"
-        body.note(f"{PENDING_OWNER_APPEND_REASON} — {pending_calls} {noun}.")
+        # The count and its noun are ONE unit (design round 2, D2-2): a plain
+        # space lets the wrap orphan "requests." alone on a line at the widths
+        # where the sentence just misses fitting, and an orphaned word under a
+        # money table reads as a stray. A NO-BREAK SPACE is what textwrap
+        # honours between them (measured: 90/92-col bodies split at the earlier
+        # space instead), so the count and what it counts always travel
+        # together.
+        body.note(f"{PENDING_OWNER_APPEND_REASON} — {pending_calls}\u00a0{noun}.")
     return True
 
 
