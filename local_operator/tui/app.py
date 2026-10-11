@@ -533,6 +533,7 @@ from local_operator.tui.widgets.usage_panel import (
 from local_operator.tui.widgets.wake_panel import WakePanel
 from local_operator.tui.widgets.welcome import (
     MODEL_PENDING,
+    MODEL_SETUP,
     WelcomeView,
     session_welcome_info,
 )
@@ -16077,10 +16078,12 @@ class OperatorApp(App[None]):
                 headline="No AI account connected",
             )
         if self._status is not None:
-            # "setup" rather than a model name: there is no model until the user
-            # picks a provider, and leaving MODEL_PENDING up would read as a
-            # session still booting rather than one waiting on the user.
-            self._status.update(model_label="setup", model_name="", streaming=False)
+            # MODEL_SETUP rather than a model name: there is no model until the
+            # user picks a provider, and leaving MODEL_PENDING up would read as a
+            # session still booting rather than one waiting on the user. The
+            # constant comes from the shared tui.status catalogue (T2), the same
+            # source the splash resolves, so band and splash agree by construction.
+            self._status.update(model_label=MODEL_SETUP, model_name="", streaming=False)
 
     async def _reload_session(
         self, *, keep_context: bool = False, preserve_outgoing: bool = False
