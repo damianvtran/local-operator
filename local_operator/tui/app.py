@@ -9664,25 +9664,17 @@ class OperatorApp(App[None]):
             # section, so the reveal's own frame already excludes its rows
             # (`_prearm_known_gate`; the ladder adopts the card when it runs).
             self._prearm_known_gate(source)
-            # SETTLE THE DOCK'S GEOMETRY IN THE REVEAL'S OWN TURN. Mounting the
-            # card is not the same as taking its rows out of the transcript: a
-            # widget authors its height during a layout pass, and the pass that
-            # resolved the transcript's `1fr` ran before this mount. Without a
-            # pass here the compositor can paint the transcript at its pre-card
-            # height with the card's rows below it — measured at 160x45: region
-            # `1/38`, host at `y=39` (15 rows on a 45-row screen, i.e. clipped),
-            # settling to `1/23` a display later with the scroll moving 93 -> 108
-            # by exactly the card's height. That frame is review round 1's F2,
-            # QA's Q2 and design's D1/D4.
-            #
-            # WHAT THIS DOES NOT BUY, measured (rounds 2-3): the pass runs while
-            # the card is still composing (`card_mounted=False` in 23 of 23
-            # instrumented runs), so it does not itself reserve the card's rows —
-            # the pin on painted frames is what decides whether the reader got
-            # them. Same spelling as the resume's pre-reveal settle, for the same
-            # reason: `_refresh_layout()` ends in `_compositor_refresh()`, i.e. it
-            # PAINTS, so the paint is suppressed and only the layout is taken.
-            self._settle_dock_rows_before_reveal()
+            # THE CARD'S ROWS ARE SETTLED WHERE THE CARD IS MOUNTED, not here.
+            # `_prearm_known_gate` takes the layout pass itself, immediately after
+            # its mount. This call site used to take it, guarded on
+            # `self._prearmed_approval` — a field a PREVIOUS conversation can leave
+            # set, so on a cold switch (nothing pre-armed for the incoming source)
+            # the pass still ran and authored an extra painted state: QA round 4
+            # measured the partial-reserve shape in 18 of 20 opens on the delta's
+            # head against 3 of 16 at the base, and 0 of 8 with this call removed.
+            # A call site in the reveal path cannot tell "nothing pre-armed for
+            # THIS source" from "the last source left the field set"; the pre-arm
+            # itself is the place that knows.
             # IMMEDIATELY AFTER the adopt, and never before it. `_adopt_session`
             # is the single place a source becomes current: it has just moved
             # `self._interaction` to the incoming source and lifted ITS mute, so
@@ -28012,7 +28004,8 @@ class OperatorApp(App[None]):
         this pass runs (23 of 23 instrumented runs: `card_mounted=False`, the host
         at its 3 rows of chrome), so this pass does not reserve the card's rows
         and must not be described as doing so. What it does is the thing its call
-        site needs: one layout pass inside the turn that reveals the transcript,
+        site needs: one layout pass inside the turn that mounted the card (and
+        hence, on the sidebar path, inside the turn that reveals the transcript),
         with the paint suppressed, so the compositor paints the arrangement that
         exists rather than a half-arranged one.
 
@@ -28022,14 +28015,15 @@ class OperatorApp(App[None]):
         card's own composition (Textual's async pipeline) that decides it: the
         pin's rate is the honest measure of that, not this method's intent.
         """
-        # GUARDED ON THE CARD, not only on the call site: this is a synchronous
-        # full reflow on a path whose whole target is first-paint time, and a
-        # switch with no pre-armed card (no gate, a cold lease, a follower with
-        # nothing owed) has no dock rows to reserve — the host's own height is
-        # the only thing that would move, and it moves on the next paint anyway
-        # (review round 2, M3).
-        if self._prearmed_approval is None:
-            return
+        # CALLED ONLY FROM `_prearm_known_gate`, immediately after it mounts the
+        # card: this pass exists for that mount and for nothing else. It used to
+        # carry a `self._prearmed_approval is None` guard instead of that scoping,
+        # which was not enough — the field outlives the conversation it was set
+        # for, so a cold switch (nothing pre-armed for the incoming source) still
+        # paid a synchronous reflow and painted an extra state: QA round 4
+        # measured the partial-reserve shape in 18 of 20 opens on head and 0 of 8
+        # with the call removed. Scope by CALL SITE, not by a field the previous
+        # conversation can leave behind.
         screen = self.screen
         paint = screen._compositor_refresh
         screen._compositor_refresh = _suppress_intermediate_paint
@@ -28109,6 +28103,20 @@ class OperatorApp(App[None]):
         self._prearmed_approval = prompt
         self._approval = prompt
         self._mount_prompt(prompt)
+        # THE PASS BELONGS HERE, in the same synchronous section as the mount, and
+        # this is now its only caller (QA round 4, Q2). Mounting the card is not
+        # the same as taking its rows out of the transcript: a widget authors its
+        # height during a layout pass, and the pass that resolved the transcript's
+        # `1fr` ran before this mount. Without a pass here the compositor can paint
+        # the transcript at its pre-card height with the card's rows below it —
+        # measured at 160x45: region `1/38`, host at `y=39` (15 rows on a 45-row
+        # screen, i.e. clipped), settling to `1/23` a display later with the scroll
+        # moving 93 -> 108 by exactly the card's height: review round 1's F2, QA's
+        # Q2, design's D1/D4. What it does NOT buy is measured too: the pass runs
+        # while the card is still composing (`card_mounted=False` in 23 of 23
+        # instrumented runs), so the pin on painted frames is what decides whether
+        # the reader got the rows.
+        self._settle_dock_rows_before_reveal()
 
     def _mount_prompt(self, card: Widget) -> None:
         """Put a prompt into the dock's prompt host, above the status band.
