@@ -652,12 +652,12 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     # Bare: the report, word for word with the terminal's.
     bare = await handle._slash_result("language", "", SlashResult)
     assert bare.style == "info"
-    assert bare.text == "language: en (English) — /language <auto|en|fr|es>; space lists"
+    assert bare.text == "language: en (English) — /language <auto|en|fr|es|ru|vi>; space lists"
 
     # Unknown: the option-list refusal, and nothing written.
     refused = await handle._slash_result("language", "xx", SlashResult)
     assert refused.style == "warning"
-    assert refused.text == "unknown language 'xx' — available: auto, en, fr, es"
+    assert refused.text == "unknown language 'xx' — available: auto, en, fr, es, ru, vi"
     assert stored() is None
 
     # The ALIAS routes to the same branch, and the switch writes the key.

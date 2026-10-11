@@ -87,7 +87,7 @@ async def test_bare_language_names_the_active_language(config_dir: Path) -> None
         # as the browse — the accepted command shape.
         assert any(
             text.startswith("language: en (English)")
-            and "<auto|en|fr|es>" in text
+            and "<auto|en|fr|es|ru|vi>" in text
             and "space lists" in text
             for text in texts
         ), texts
@@ -159,7 +159,7 @@ async def test_the_space_opens_the_choices_on_the_current_value(config_dir: Path
         picker = editor.picker
         assert picker.is_open(), "the space must open the choices list"
         rows = _choice_map(picker)
-        assert list(rows) == ["auto", "en", "fr", "es"], list(rows)
+        assert list(rows) == ["auto", "en", "fr", "es", "ru", "vi"], list(rows)
         assert picker.highlighted_name() == "auto", "the browse starts where the user is"
         assert rows["auto"].detail == "← current"
         # After a committed switch the marker moves with the value.
@@ -184,16 +184,17 @@ async def test_unknown_and_unshipped_values_are_refused_with_the_option_list(
         app._run_slash_command("/language klingon")
         await pilot.pause()
         assert any(
-            "unknown language 'klingon' — available: auto, en, fr, es" in text
+            "unknown language 'klingon' — available: auto, en, fr, es, ru, vi" in text
             for text in _notices(app)
         ), _notices(app)
-        # `ru` is SUPPORTED but not yet SHIPPED (waves: es+fr -> ru+vi -> ...):
+        # `hi` is SUPPORTED but not yet SHIPPED (waves: es+fr -> ru+vi -> hi+zh-CN):
         # an unaudited locale keys no catalogue, so it must be refused the same
         # way, and the option list is the honest one (auto + the shipped set).
-        app._run_slash_command("/language ru")
+        app._run_slash_command("/language hi")
         await pilot.pause()
         assert any(
-            "unknown language 'ru' — available: auto, en, fr, es" in text for text in _notices(app)
+            "unknown language 'hi' — available: auto, en, fr, es, ru, vi" in text
+            for text in _notices(app)
         ), _notices(app)
         assert _stored(config_dir) is None
         for text in _language_notices(app):
