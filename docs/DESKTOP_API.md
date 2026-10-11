@@ -2375,10 +2375,13 @@ to.
 ### The polling cadence
 
 One task per process, started with the first subscriber and stopped with the
-last. Each tick is FOUR `os.stat` calls — `attention.db` with its two journal
+last. Each tick is FIVE `os.stat` calls — `attention.db` with its two journal
 sidecars, plus `run/mobile`, the discovery-record directory, which is where the
 status channel's edges come from — the doorbell `config_watch` already uses for
-`config.yml` — with a SQLite read only when the store actually moved, and a
+`config.yml` — plus `config.yml` ITSELF, the settings doorbell: its movement
+publishes a `config` frame naming the changed keys and the freshly resolved
+`language` (the same value `GET /v1/capabilities` carries), so a language write
+reaches the app live whichever process performed it — with a SQLite read only when the store actually moved, and a
 record read only for a record whose own file moved. That is what takes background
 detection from the 1 s poll's floor to a p50 of roughly one tick. A quiet tick
 makes no SQL and no record read at all. The revision gate stays the
@@ -2429,7 +2432,7 @@ row**; a row's metadata file is READ only when that row's stat moved, so an idle
 probe reads nothing at all (measured on this fleet: a warm probe over 34 profiles
 is 36 `stat`/`scandir` calls and ZERO file reads, 0.31 ms; the same probe with
 its stat memory cold is 1.16 ms). It runs on the catalogue probe's 1 s clock, not
-on the 100 ms tick — a quiet tick still pays exactly the four stats the doorbell
+on the 100 ms tick — a quiet tick still pays exactly the five stats the doorbell
 is budgeted for — and it is off the event loop (`asyncio.to_thread`), like every
 other probe here. The projection is a line filter rather than a YAML parse for
 the same reason: `yaml.safe_load` + re-dump of those 34 rows measures 56.95 ms,

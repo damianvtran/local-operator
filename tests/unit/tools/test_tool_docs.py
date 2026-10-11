@@ -292,6 +292,12 @@ MEASURED_TOKENS: dict[str, int] = {
     "secret": 188,
     "send": 697,
     "sessions": 802,
+    # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
+    # vocabulary, the op split and the validation-by-registry contract. 191
+    # tokens is the deliberate cost of the reference detail staying off the
+    # wire (the description keeps one sentence); re-measured via this test's
+    # own print, and it is the ONLY count this change moved.
+    "setting": 191,
     "task": 484,
     "team": 489,
     "team_delete": 90,

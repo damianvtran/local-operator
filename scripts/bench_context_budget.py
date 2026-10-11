@@ -1428,7 +1428,25 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: round-1..3 wire-text edits) and it is IDENTICAL on the child arm
 #: (below) — the check that the delta is the pair and nothing else.
 #: Ceiling = merged head + the 55-token band.
-BUDGET_BILLED_TOKENS = 28_213
+#:
+#: RAISED 28,213 -> 28,746 for wave 4 slice A (the agent-writable `language`
+#: setting): the unconditionally published `setting` tool rides both arms
+#: (schema + description; its `tool://` doc adds no wire bytes). Measured
+#: with this script on the clean arm, base re-derived at the merge-base:
+#:
+#:   base (origin/main 9cf0321be4)  78,945 chars = ~28,397 billed
+#:   head (this branch)             79,761 chars = ~28,691 billed
+#:   delta                            +816 chars = ~+294
+#:
+#: TWO HONEST NOTES. (1) The delta is the one tool and nothing else: the
+#: child arm moves by the SAME +816 chars = ~+293 (the arms differ only in
+#: inventory), and no other entry of this change touches the prefix. (2)
+#: THE BASE WAS ALREADY 184 OVER THE OLD CEILING: the tree has grown past
+#: the video fold's measured head (28,158) since that fold merged, and this
+#: raise necessarily absorbs that pre-existing overage — named here rather
+#: than hidden, so its owner can net it back down without reading this as
+#: slice A's cost. Ceiling = head + the 55-token band.
+BUDGET_BILLED_TOKENS = 28_746
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1495,7 +1513,19 @@ BUDGET_BILLED_TOKENS = 28_213
 #:
 #: The same +2,337 the top arm moves by. Ceiling = merged head + the
 #: 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 25_257
+#:
+#: RAISED 25,257 -> 25,790 (with the top arm, same trees, same day): the
+#: child arm carries `setting` too and moves by the SAME +816 chars = ~+293
+#: (the check that the delta is that one tool and nothing else):
+#:
+#:   base (origin/main 9cf0321be4)  70,728 chars = ~25,442 billed
+#:   head (this branch)             71,544 chars = ~25,735 billed
+#:   delta                            +816 chars = ~+293
+#:
+#: As the top arm's entry states: the base was already 185 over the old
+#: ceiling, absorbed under the same disclosure. Ceiling = head + the
+#: 55-token band.
+BUDGET_CHILD_BILLED_TOKENS = 25_790
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

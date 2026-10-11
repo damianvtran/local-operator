@@ -243,9 +243,11 @@ def test_default_set_drops_sessions_without_a_launcher_and_appends_it_with_one()
             )
         )
     ]
-    # Appended at the END on purpose: appending never shifts the provider-visible
-    # array prefix the prompt cache keys on.
-    assert with_launcher[-1] == "sessions"
+    # Appended after everything that existed when it landed: appending never
+    # shifts the provider-visible array prefix the prompt cache keys on. Newer
+    # appends may follow (wave 4 slice A's `setting` is the current last, and
+    # the host-gated entries between them are absent in this environment).
+    assert with_launcher[-2:] == ["sessions", "setting"]
 
 
 # --- 2/3. spawn: argv + environment, asserted at the executor seam ----------
