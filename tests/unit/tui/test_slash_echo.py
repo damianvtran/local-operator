@@ -107,6 +107,9 @@ ECHO_POLICY = {
     # A setting, not words the model is told: the receipt names the theme now
     # in force, and the screen itself is wearing the change.
     "theme": False,
+    # A setting, `/theme`'s shape one noun over: the receipt names the language
+    # now in force, and the screen itself is wearing the change.
+    "language": False,
     "provider": False,
     # The PAGE is the receipt (same rule as `/usage` and `/analytics`): it
     # replaces the transcript region, so a user row printed behind it would
@@ -215,6 +218,10 @@ PROMPT_POLICY = {
     "effort": False,
     "fast": False,
     "theme": False,
+    # A VALUE (`auto` or a shipped locale), not a prompt: the handler reads it
+    # or refuses it with the option list, so an inline engage splices-and-runs
+    # rather than reassembling the draft into it.
+    "language": False,
     "provider": False,
     # The PAGE is the receipt (same rule as `/usage` and `/analytics`): it
     # replaces the transcript region, so a user row printed behind it would

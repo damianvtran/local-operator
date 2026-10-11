@@ -1460,6 +1460,32 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.ANY,
         desktop_destination="appearance",
     ),
+    # The command is the DISCOVERABLE half of the `language` setting (slice C):
+    # the /settings row (appearance) is the other, and both write the same
+    # config key through `settings_io.write_setting` — one truth. Beside
+    # `/theme` because it is the only other command whose whole business is the
+    # app's own presentation, and because a language, like a theme, is a
+    # standing preference: a switch persists AND applies live, with no restart
+    # and no second `/model default`-style step.
+    SlashCommand(
+        "language",
+        # Sized like `/theme`'s: the description column wraps past ~55 cells.
+        # "auto follows the system" is the half the picker cannot teach on its
+        # own — the row lists the value without saying what it means.
+        _tr(wire_slash.language()),
+        # `lang` is the one abbreviation users actually type; the alias column
+        # (`/language /lang`, 17 cells) fits the picker width with no widening.
+        aliases=("lang",),
+        # OPTIONAL: a bare `/language` reports the active language, and the
+        # space opens the choices list with the current value's row marked.
+        arguments=ArgumentMode.OPTIONAL,
+        # Trailing text is a language tag, a value this command owns — the
+        # desktop's `inline` list, which is the second half of the union the
+        # field docstring describes.
+        prefixes_text=True,
+        argument_shape=ArgumentShape.ANY,
+        desktop_destination="appearance",
+    ),
     # The listing is the receipt.
     SlashCommand(
         "provider",
