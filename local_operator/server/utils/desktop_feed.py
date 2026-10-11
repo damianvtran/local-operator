@@ -33,16 +33,20 @@ WHAT MAKES IT SAFE, and the property most likely to be broken by a later edit:
   guard and the store's no-flood bootstrap already apply.
 
 COST. One poller per process, started with the first subscriber and stopped with
-the last. Each tick is FOUR ``os.stat`` calls — the store, the two journal
-sidecars it commits through, and ``run/mobile``, where the discovery records are
-written (the status channel's doorbell) — the doorbell borrowed from
-``config_watch.py``'s treatment of ``config.yml`` — with SQL only when one of
+the last. Each tick is FIVE ``os.stat`` calls — the store, the two journal
+sidecars it commits through, ``run/mobile``, where the discovery records are
+written (the status channel's doorbell) — both doorbells borrowed from
+``config_watch.py``'s treatment of ``config.yml`` — and that same ``config.yml``
+itself, whose movement publishes the ``config`` frame: the settings doorbell,
+where every write origin (the TUI page, the desktop route, the agent's
+``setting`` tool, a hand edit) is the same file write, and the language a write
+changes is one key in it — with SQL only when one of
 them actually moved, plus one bounded authoritative read every
 ``AUTHORITATIVE_RECOVERY_INTERVAL_S`` and one ``STATUS_PROBE_INTERVAL_S`` status
 read. That is what makes detection p50 ~60 ms where the per-session poll's floor
 was 1 s.
 
-COST, CONTINUED — the THREE 1 s invalidation probes are NOT in that four-stat
+COST, CONTINUED — the THREE 1 s invalidation probes are NOT in that five-stat
 figure: the catalogue's, the authoring one (O(profiles)), and the code-request one
 (one ``readdir`` of the derived code-request index plus one ``os.stat`` per session
 WITH rows — usually zero, since most sessions never touch a pull request, and one
@@ -126,6 +130,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, cast
 
+import yaml
+
+from local_operator.config import CONFIG_FILE_NAME
+from local_operator.i18n.resolve import resolve_language
 from local_operator.monitors.store import read_index as read_monitor_index
 from local_operator.notifications import notification_payload
 from local_operator.notifications.compose import NotificationKind
@@ -375,6 +383,33 @@ def _fingerprint(path: Path) -> tuple[int, int, int] | None:
 _DB_SIDECAR_SUFFIXES = ("-wal", "-journal")
 
 
+def _read_config_values(path: Path) -> dict[str, Any]:
+    """The settings ``config.yml`` currently sets, flattened to ``{key: value}``.
+
+    RAW YAML, deliberately: a ``ConfigManager`` constructor can MOVE a malformed
+    file aside, and a change WATCHER must never be what renames a user's config
+    (``config_watch``'s rule; ``settings_io.config_value``'s docstring carries
+    the same reasoning). Sub-mapping entries flatten to dotted keys, top-level
+    dotted keys (the ``display.*`` family) join as themselves, and anything
+    unparseable reads as ``{}`` — a broken file is not a publishable change.
+    """
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    flat: dict[str, Any] = {}
+    values = data.get("values")
+    if isinstance(values, dict):
+        for key, value in values.items():
+            flat[str(key)] = value
+    for key, value in data.items():
+        if isinstance(key, str) and "." in key:
+            flat[key] = value
+    return flat
+
+
 def _db_fingerprint(path: Path) -> tuple[tuple[int, int, int] | None, ...]:
     """The database's fingerprint TOGETHER WITH its journal sidecars.
 
@@ -466,6 +501,10 @@ class DesktopFeed:
         #: store rather than spelled here, so the file the TUI writes and the file
         #: this probe stats cannot drift apart.
         self.pins_path = root / PINS_FILE
+        #: The settings doorbell (wave 4 slice A): the one config file every
+        #: write origin touches, watched so a language change reaches the
+        #: desktop app even when the write happened in another process.
+        self.config_path = root / CONFIG_FILE_NAME
         #: A fresh epoch per PROCESS start. Frames carry it so a client can tell
         #: "the backend restarted" from "the stream stuttered", exactly as the
         #: session stream's epoch does.
@@ -490,6 +529,15 @@ class DesktopFeed:
         #: database PLUS its journal sidecars, so it is a tuple of tuples rather
         #: than one ``(ino, size, mtime_ns)``.
         self._fingerprint: tuple[tuple[int, int, int] | None, ...] | None = None
+        #: The settings doorbell's cursor pair (wave 4 slice A): the config
+        #: file's fingerprint and the flattened values it carried, primed at
+        #: baseline so a language already set when the client connected is not
+        #: replayed, and compared every tick so any origin's write — including a
+        #: hand edit — publishes exactly one ``config`` frame per real change.
+        #: ``_config_values is None`` means "never primed" (``{}`` is a legit
+        #: state: a readable file that sets nothing).
+        self._config_fingerprint: tuple[int, int, int] | None = None
+        self._config_values: dict[str, Any] | None = None
         #: Set when a tick read its delta but could not finish processing it
         #: (R5). The cursors committed in ``_emit_delta`` are left untouched in
         #: that case, so the work is still owed — and this flag is what tells
@@ -989,6 +1037,12 @@ class DesktopFeed:
         # state. Replaying it would republish a correction nobody is stale for.
         healed = self.store.superseded_since(0)
         self._supersede_cursor = int(healed[-1]["sequence"]) if healed else 0
+        # THE SETTINGS BASELINE, same no-replay rule (wave 4 slice A): the
+        # language already configured when the client connected is what the
+        # client's own capabilities read shows, and announcing it would be a
+        # frame about last week. Only a change AFTER connect publishes.
+        self._config_fingerprint = _fingerprint(self.config_path)
+        self._config_values = _read_config_values(self.config_path)
         # THE STATUS BASELINE, on the same rule: a status that predates this
         # connection is history. Primed here WITHOUT publishing — the ``open``
         # snapshot's list read is what the client sees the current pair on, and
@@ -1147,7 +1201,7 @@ class DesktopFeed:
         # 1b. THE RECORD DOORBELL — the status channel's edge clock. ONE stat on
         # ``run/mobile``: a staged write + rename in that directory moves its
         # mtime, so every status edge (a gate armed, a turn started, a routine
-        # leaving) AND every 15 s heartbeat rings here. The tick is FOUR stats
+        # leaving) AND every 15 s heartbeat rings here. The tick is FIVE stats
         # now, still no SQL on a quiet tick, and the read below happens only for
         # a record whose OWN fingerprint moved — or, when NOTHING cached moved but
         # the directory did, once through the probe below (a session's first
@@ -1178,6 +1232,39 @@ class DesktopFeed:
                 raise
             self._record_pending = False
             self._registry_fingerprint = registry_fingerprint
+        # 1c. THE SETTINGS DOORBELL (wave 4 slice A). ONE stat on ``config.yml``
+        # — the file every settings-write origin touches (the TUI page, the
+        # desktop route, the agent's ``setting`` tool, a hand edit) — so a
+        # language change publishes ONE ``config`` frame regardless of which
+        # process wrote it. The values compare costs a raw YAML read only when
+        # the stat moved, and names the keys that actually changed, so a
+        # metadata-only touch publishes nothing.
+        config_fingerprint = await asyncio.to_thread(_fingerprint, self.config_path)
+        if self._config_values is None or config_fingerprint != self._config_fingerprint:
+            values = await asyncio.to_thread(_read_config_values, self.config_path)
+            if self._config_values is None:
+                # Defensive pre-baseline prime (tests drive ``_tick`` directly):
+                # nothing to compare against, so nothing is news.
+                self._config_fingerprint = config_fingerprint
+                self._config_values = values
+            else:
+                changed = sorted(
+                    key
+                    for key in set(values) | set(self._config_values)
+                    if values.get(key) != self._config_values.get(key)
+                )
+                self._config_fingerprint = config_fingerprint
+                self._config_values = values
+                if changed:
+                    # ``resolve_language()`` rather than a re-derivation from
+                    # the parsed dict: the frame must agree with
+                    # ``GET /v1/capabilities``'s ``language`` field, and the
+                    # resolver is that field's one truth (SYS1).
+                    language = await asyncio.to_thread(resolve_language)
+                    self._publish(
+                        "config",
+                        {"changed_keys": changed, "language": language},
+                    )
         # 3. THE CATALOGUE HAS ITS OWN SCHEDULE (R2). Deliberately outside the
         # doorbell branch above: it was reached only when the attention database
         # had moved, so on a quiet store — which is the common case — session
@@ -1206,12 +1293,12 @@ class DesktopFeed:
         # created from the app, moves nothing this tick already looks at. The rows
         # are FILES rather than a directory listing, so this probe is O(rows) in
         # stats: the number is stated in the module docstring and in the budget
-        # test rather than left to be read as a regression of the four-stat tick
+        # test rather than left to be read as a regression of the five-stat tick
         # above — it runs on the 1 s cadence, not on the tick.
         await self._maybe_emit_authoring()
         # 7. THE CODE-REQUEST INVALIDATION, per session. Outside the doorbell branch for
         # the authoring channel's reason and one of its own: the index lives under the
-        # CONFIG root, which this tick's four-stat doorbell never looks at, and it is
+        # CONFIG root, which this tick's five-stat doorbell never looks at, and it is
         # written by a scan that may be running in a different process entirely (the
         # desktop backend and a session runtime share the config root).
         await self._maybe_emit_code_requests()

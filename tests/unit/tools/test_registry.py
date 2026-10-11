@@ -273,11 +273,15 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     entries, not merely contain them (docs §8). Round-1 review V7: the video
     pair first sat BEFORE ``code_requests``/``no_reply`` while its comment
     claimed the end, which shifted those two; it now truly ends both
-    tables."""
-    assert DEFAULT_TOOL_NAMES[-2:] == ["generate_video", "video_status"]
-    assert list(TOOL_BUILDERS)[-2:] == ["generate_video", "video_status"]
-    assert DEFAULT_TOOL_NAMES[-3] == "no_reply"
-    assert list(TOOL_BUILDERS)[-3] == "no_reply"
+    tables — and wave 4 slice A's ``setting`` (the unconditionally published
+    settings write path) appended after the pair, so THE PIN MOVES WITH THE
+    NEWEST APPEND, which is this test's contract."""
+    assert DEFAULT_TOOL_NAMES[-2:] == ["video_status", "setting"]
+    assert list(TOOL_BUILDERS)[-2:] == ["video_status", "setting"]
+    assert DEFAULT_TOOL_NAMES[-3] == "generate_video"
+    assert list(TOOL_BUILDERS)[-3] == "generate_video"
+    assert DEFAULT_TOOL_NAMES[-4] == "no_reply"
+    assert list(TOOL_BUILDERS)[-4] == "no_reply"
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:
