@@ -2110,7 +2110,15 @@ class DefinitionsSyncer(threading.Thread):
     def __init__(self, server: "RelayServer") -> None:
         super().__init__(name="mesh-definitions", daemon=True)
         self._server = server
-        self._stop = threading.Event()
+        #: The stop/reap signal — renamed from ``_stop`` when the stop path was
+        #: adopted from S3a (the #2204 record asked for the rename BEFORE any
+        #: join existed). NOT ``_stop``: ``Thread`` owns that attribute
+        #: internally and on 3.12 ``_wait_for_tstate_lock`` CALLS it whenever a
+        #: join's wait completes, so the shadow made the new ``stop_syncer``
+        #: join raise "'Event' object is not callable" (measured 2026-10-11:
+        #: raises on 3.12.13 — the CI interpreter — while 3.14.7 dropped the
+        #: call, which is why the shadow stayed latent until this join).
+        self._stop_event = threading.Event()
         self._lock = threading.Lock()
         #: When this member's last attempt was ATTEMPTED, and whether it succeeded.
         #: Two dicts rather than one because the two outcomes get different floors:
@@ -2125,10 +2133,10 @@ class DefinitionsSyncer(threading.Thread):
         self._tick_s = _tick_seconds(server.root)
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
-    def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._stop.wait(self._tick_s):
+    def run(self) -> None:
+        while not self._stop_event.wait(self._tick_s):
             try:
                 self.tick()
             except Exception:  # noqa: BLE001 — a syncer must never kill the relay
@@ -2337,9 +2345,21 @@ def unholdable_capability(server: "RelayServer", device_id: str, op: str) -> str
     return required if shared else ""
 
 
-def ensure_syncer(server: "RelayServer") -> "DefinitionsSyncer":
-    """Start this relay's definitions syncer if it is not already running."""
+def ensure_syncer(server: "RelayServer") -> "DefinitionsSyncer | None":
+    """Start this relay's definitions syncer if it is not already running.
+
+    Returns ``None`` when the relay is already stopping or stopped — the guard
+    the S3a driver carries (round 6, R6-1), adopted here together with this
+    slice's stop hook: the start hooks are fire-and-forget daemon threads
+    (relay.py's ``_run_start_hooks``), so a hook can legally land AFTER
+    ``stop()`` ran the slice stop hooks — and a syncer started then is the one
+    thread no reaper will ever visit. The guard is the relay's own ``_stop``
+    event, read under the registry lock so the two seams cannot interleave.
+    """
     with _syncer_lock:
+        stop = getattr(server, "_stop", None)
+        if stop is not None and stop.is_set():
+            return None
         existing = _syncers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -2349,17 +2369,47 @@ def ensure_syncer(server: "RelayServer") -> "DefinitionsSyncer":
         return syncer
 
 
+#: Bounded join for ``stop_syncer`` (the S3a ``stop_driver`` shape). The driver's
+#: own constant explains it: a tick may be mid-dial (``push_to_peer`` has its own
+#: deadline), and ``RelayServer.stop()`` must not inherit a peer's latency; the
+#: thread is a daemon, so this is a promptness bound, not a leak nobody can reach.
+SYNCER_STOP_JOIN_S = 5.0
+
+
+def stop_syncer(server: "RelayServer", *, timeout: float = SYNCER_STOP_JOIN_S) -> None:
+    """Stop and reap this relay's syncer, if it has one (S3a's stop shape).
+
+    Wired into ``RelayServer.stop()`` via the slice's ``on_stop`` hook, so the
+    syncer cannot outlive the relay. The recorded follow-up was exactly this
+    gap: ``stop()`` had no production caller, so a started syncer never stopped
+    and kept pushing definitions to members the caller believed closed. The
+    join is BOUNDED for the driver's reason: a tick may be mid-dial, and a stop
+    that waited on a peer would make every caller's stop cost depend on another
+    machine. The thread is a daemon, so the bound is a promptness claim, not an
+    unreachable leak.
+    """
+    with _syncer_lock:
+        syncer = _syncers.pop(id(server), None)
+    if syncer is None:
+        return
+    syncer.stop()
+    syncer.join(timeout=timeout)
+
+
 def install(server: "RelayServer") -> None:
     """Register this slice's ops on ``server``.
 
     The cadence is registered as an ``on_start`` HOOK rather than started here:
     ``install`` runs at construction, and a thread per relay in a suite that
     builds hundreds of relays it never starts would be paid for by tests that
-    never asked about definitions (the rule ``register_ops`` states).
+    never asked about definitions (the rule ``register_ops`` states). Its
+    ``on_stop`` pair (S3a's driver shape, the #2204 follow-up) reaps the thread
+    inline before ``RelayServer.stop()`` returns.
     """
     server.register_ops(
         {"net_definitions": make_handler(server)},
         local_handlers={"definitions_sync": local_sync_handler(server)},
         slow={"net_definitions": DEFINITIONS_OP_DEADLINE_S},
         on_start={"mesh-definitions": lambda: ensure_syncer(server)},
+        on_stop={"mesh-definitions": lambda: stop_syncer(server)},
     )

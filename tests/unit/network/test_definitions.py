@@ -23,6 +23,7 @@ why ``resolve_create_identity`` returns a SENTENCE rather than a bool.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -1359,3 +1360,102 @@ def test_a_member_that_cannot_hold_the_op_is_not_asked_on_a_timer(
         store.save(live, root)
     assert syncer.tick(now=2016.0) == [(_SYNC_PEER, "in_sync")]
     assert asked == [_SYNC_PEER]
+
+
+# ---------------------------------------------------------------------------
+# The syncer's lifecycle: the S3a stop pattern, adopted (the #2204 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class _LifecycleServer:
+    """Just enough relay for the lifecycle cells: a root, a real stop flag and
+    a recording ``register_ops``.
+
+    The flag is a real ``Event`` because ``ensure_syncer``'s stand-down guard
+    reads it exactly as it reads a ``RelayServer``'s (the S3a/R6-1 shape).
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+        self._stop = threading.Event()
+        self.ops: Any = None
+        self.kw: Any = None
+
+    def register_ops(self, ops: Any, **kw: Any) -> None:
+        self.ops = ops
+        self.kw = kw
+
+
+def test_the_slice_registers_start_and_stop_hooks_alongside_its_ops() -> None:
+    """The S3a hook pair, adopted: a started syncer must be able to stop.
+
+    The #2204 record held what this fixes: ``install`` registered only
+    ``on_start`` and ``stop()`` had no production caller, so a started syncer
+    never stopped — the orphaned-stop shape S3a's driver carried.
+    """
+    server = _LifecycleServer(Path("/nonexistent-definitions-root"))
+    definitions.install(server)  # type: ignore[arg-type]
+    assert set(server.ops) == {"net_definitions"}, server.ops
+    assert list(server.kw.get("on_start", {})) == ["mesh-definitions"], server.kw
+    assert list(server.kw.get("on_stop", {})) == ["mesh-definitions"], server.kw
+    assert list(server.kw.get("slow", {})) == ["net_definitions"], server.kw
+
+
+def test_the_syncer_crosses_a_boundary_then_dies_at_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The S3a stop shape: ``stop_syncer`` reaps the cadence thread, join and all.
+
+    The join is the load-bearing half of the ``_stop_event`` rename, not a
+    formality: on 3.12 a join's completing wait calls ``Thread._stop``
+    internally, so the old shadow raised "'Event' object is not callable"
+    (re-measured on this fleet: 3.12.13 raises, 3.14.7 does not). This cell
+    fails on 3.12 without the rename.
+
+    The cadence source is patched (the driver cell's shape) so the stop lands
+    where production stops land — while the loop is inside its wait, after a
+    boundary was really crossed; the fresh-ensure half pins that the reap is
+    complete by starting a NEW thread that also stops.
+    """
+    root = _root(tmp_path / "root")
+    monkeypatch.setattr(definitions, "_tick_seconds", lambda _root: 0.05)
+    crossed = threading.Event()
+    real_tick = definitions.DefinitionsSyncer.tick
+
+    def _counting_tick(self: Any, *, now: float | None = None) -> Any:
+        result = real_tick(self, now=now)
+        crossed.set()
+        return result
+
+    monkeypatch.setattr(definitions.DefinitionsSyncer, "tick", _counting_tick)
+    server = _LifecycleServer(root)
+    syncer = definitions.ensure_syncer(server)  # type: ignore[arg-type]
+    assert syncer is not None
+    assert syncer.name == "mesh-definitions", syncer.name
+    reuse = definitions.ensure_syncer(server)  # type: ignore[arg-type]
+    assert reuse is syncer, "a second ensure must reuse the live thread"
+    assert crossed.wait(timeout=10.0), "the syncer never crossed a boundary"
+    definitions.stop_syncer(server)  # type: ignore[arg-type]
+    assert not syncer.is_alive(), "the syncer outlived stop_syncer"
+    assert id(server) not in definitions._syncers
+    again = definitions.ensure_syncer(server)  # type: ignore[arg-type]
+    assert again is not None and again is not syncer
+    definitions.stop_syncer(server)  # type: ignore[arg-type]
+    assert not again.is_alive(), "the second syncer outlived stop_syncer"
+
+
+def test_a_start_hook_landing_after_stop_starts_nothing(tmp_path: Path) -> None:
+    """R6-1's guard, adopted with the hook: a syncer born after the stop hooks
+    is the one thread no reaper will ever visit.
+
+    ``stop()`` sets the relay's ``_stop`` flag BEFORE it runs the stop hooks
+    and never clears it, so "set" is exactly the post-stop state this cell
+    builds — and the guard, read under the registry lock, must start nothing.
+    """
+    server = _LifecycleServer(_root(tmp_path / "root"))
+    server._stop.set()
+    try:
+        assert definitions.ensure_syncer(server) is None  # type: ignore[arg-type]
+        assert id(server) not in definitions._syncers
+    finally:
+        definitions.stop_syncer(server)  # type: ignore[arg-type]
