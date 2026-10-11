@@ -7,23 +7,31 @@ description: What the Highlights block under an answer is — the file callouts 
 
 After a turn that produced something real — a file, a block of numbers — Local Operator can add a short **Highlights** block under the final answer: callouts for the files the turn made, and a small generated graphic when the numbers justify one. The block draws no heading or label — no title, badge or separator announces it — and appears seamlessly directly under the answer's text: its position, not any caption, tells the reader it belongs to the turn. It is added only under a real user turn (never for wakes, monitors, peer messages or `lop exec`), always after the answer, and never in the model's context: the block sits in the transcript beside the answer, not in it.
 
-**Nothing paints it yet.** The decision and the row ship first: an eligible turn journals a `supplement_v1` row, readable by tooling and API consumers (the session log, a history read), but no surface renders a Highlights block at this head — the TUI, UI, relay and native renderers are their own lanes, so until one of them lands a correct turn still shows nothing anywhere, whatever the settings say.
+## Where it shows
 
-**Most turns have nothing to report.** With no file in the turn at all — and, once graphics are on, no numbers to draw from — the turn stops before anything leaves the machine. A source file the turn wrote is still offered to the decision: only the decision can tell "write me a script" from "this is the deliverable".
+Each surface paints the block from the row a turn journaled, and they do not sync with one another. Two ship it today:
+
+- **TUI** (`lop`), since v0.68.27 — the file callouts, the `N more files` disclosure and the state line. It does **not** paint components: a terminal cannot run one, so an HTML component is skipped **silently**, with no placeholder box and no "open this in the app" note (a stub that admits it cannot render the thing is worse than the thing simply not being there). A turn whose only highlight is a graphic therefore shows nothing in the TUI.
+- **Desktop UI** (local-operator-ui), since v0.34.14 — the same callouts and state line, plus every component mounted in a sandboxed frame (`allow-scripts`, opaque origin, no network, no file access, no popups). The component is body-only — no title line or caption restating the answer, only the data labelling it needs — and each mounted component carries exactly one `Source: …` caption naming where its numbers came from. A frame that dies or hangs is replaced by one quiet line where it stood (`Couldn't render this graphic`, with a `Retry` when the row can offer one), never by a rewritten block; a turn collapsed by the fold condenses the block with it, to one line of counts (`2 files · 1 graphic`) once the row has settled.
+
+Not yet: the **relay / phone web** renderer is in review (core PR #2222), so a phone shows nothing until that lands; the **phone app's own native renderer** is a separate lane and is not shipped. Where a surface cannot render something, it shows nothing rather than an apology.
+
+**Most turns have nothing to report.** With no file in the turn at all — and, once graphics are on, no numbers to draw from — the turn stops before anything leaves the machine, and a settled row with nothing in it paints no block at all. A source file the turn wrote is still offered to the decision: only the decision can tell "write me a script" from "this is the deliverable".
 
 ## What appears
 
-- **File callouts** — up to four files the turn wrote or named (`reports/latency.md`, `data/bench.csv`, …) with an "N more" line for the rest; paths are session-relative, never absolute. Spends no model tokens.
-- **Graphics** — a chart or table drawn from the turn's own numbers. Spends model tokens; on a stock install it is **off** until the surfaces that can render a graphic are out.
+- **File callouts** — up to four files the turn wrote or named (`reports/latency.md`, `data/bench.csv`, …), one row each with its name, session-relative path and size: openable in the desktop UI, and in the TUI clickable wherever the terminal renders links (plain, copyable text otherwise). Past the featured four, the rest fold into an `N more files` line that expands in place (bounded at the 20 stored). A finish with two files or fewer and no component is ONE line instead — `2 files: latency.md, bench.csv`. Paths are session-relative, never absolute. Spends no model tokens.
+- **Graphics** — a chart or table drawn from the turn's own numbers. Spends model tokens, and is **off by default**, so a stock install asks no graphics question and no surface draws one. Turn it on with `supplements.graphics` (below): the desktop UI then renders it, and the TUI still skips it.
+- **The state line** — one quiet line while a job runs, and on the arms that end without a block: `Preparing highlights…`, `Highlights cancelled`, `Couldn't prepare highlights`. The desktop UI draws those arms' controls too (`Adjust…`, `Cancel`, `Retry`); the TUI's actions are the `/highlights cancel | retry | adjust <text>` slash commands instead, because a terminal line advertising a click it cannot honour is a lie.
 
 ## Turning it on and off
 
-Edits are scoped to new sessions — start one after a change (the TUI's `/settings → Highlights` shows the same section):
+Edits are scoped to new sessions — start one after a change (the TUI's `/settings → Highlights` and the desktop UI's Settings render the same section, from the same registry):
 
 ```bash
 lop config edit supplements.enabled false     # the master switch
 lop config edit supplements.files false       # file callouts only
-lop config edit supplements.graphics true     # once a renderer ships
+lop config edit supplements.graphics true     # draw graphics (spends tokens)
 ```
 
 In the file every key is `values.supplements.<key>`; the CLI spells it `supplements.<key>`, which is what `lop config list` prints:
@@ -54,14 +62,13 @@ The decision is one small classification call per question — one for the files
 
 ## Troubleshooting
 
-1. **Nothing appeared.** Expected today: no surface paints the block yet, so no settings change brings it back (see the top of this guide). Once a renderer ships, most turns still legitimately show nothing; if it is then never anything, check `supplements.enabled` (and start a new session after an edit) and read the session log — it says why (`supplements: prefilter … skipped=…`, or the decision's `vendor=`).
-2. **Graphics skipped.** Off in this build; even when on, a graphic is drawn only when the turn's evidence contains numbers — a model "yes" without evidence is overruled.
+1. **Nothing appeared.** Most turns legitimately show nothing (above), and a settled row with no files and no components paints no block at all — that is the normal case, not a failure. Two surfaces show nothing by design rather than because something broke: the TUI never draws a component, and the phone draws nothing until the relay lane lands. If it is never anything on the TUI or in the desktop UI, check `supplements.enabled` (and start a new session after an edit) and read the session log — it says why (`supplements: prefilter … skipped=…`, or the decision's `vendor=`).
+2. **Graphics skipped.** Off by default; even when on, a graphic is drawn only when the turn's evidence contains numbers — a model "yes" without evidence is overruled — and the TUI skips components whether or not one was drawn.
 3. **A file is missing.** Only files the turn itself wrote or named can be called out; excluded folders (above), paths already linked in the answer, and files beyond the featured set ("N more") do not appear.
 
 ## Not in this release
 
-- **No surface renders the block yet** — the TUI, UI, relay and native renderers are separate lanes; what exists today is the journaled row, readable by tooling and API consumers.
 - No image components — generated output is HTML; raster charts are not in v1.
 - No mesh transfer — a file another device holds is named ("on <peer>") but not previewed.
-- The phone app's WebView frame is pending its own lane.
-- Static preview URLs are not yet token-authenticated (a recorded follow-up).
+- The relay lane and the phone app's own renderer — see "Where it shows".
+- Static preview URLs are not yet token-enforced: tokens are minted and accepted, but a request without one is not refused (a recorded follow-up).
