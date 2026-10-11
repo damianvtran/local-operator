@@ -70,13 +70,16 @@ does not appear for that image.
 
 COST, STATED
 ------------
-One base64-decode plus one sha256 per image per request build, on the loop —
-comparable to the per-render decode-and-sniff walk ``_rebound_history_images``
-already makes, and paid only for user-role messages that actually carry image
-blocks. The note itself is roughly 40-90 tokens per image and rides every
-later request while the image is in context; for a screenshot-heavy session
-that is a small fraction of what the image blocks themselves cost, and it is
-the price of the model never having to search.
+One base64-decode, one sha256 and one digest-verified store read per image per
+request build, on the loop — measured at ~3.0 ms/image for 700 KB frames
+(36.6 ms for twelve, best of five; the per-render repair walk already accepted
+beside it, ``_rebound_history_images``, pays 20.7 ms for the same list on the
+same host, so this pass is the same order as what already runs there) — and
+paid only for user-role messages that actually carry image blocks. The note
+itself is roughly 40-90 tokens per image and rides every later request while
+the image is in context; for a screenshot-heavy session that is a small
+fraction of what the image blocks themselves cost, and it is the price of the
+model never having to search.
 """
 
 from __future__ import annotations
