@@ -9272,6 +9272,22 @@ class ServingSessionHandle(SessionHandle):
         tool itself returns — the caller wanted it stopped and it is stopped.
         Optional capability, getattr-probed by the dispatch — no
         ``PROTOCOL_VERSION`` move.
+
+        THE DELIBERATE OMISSION (review round 1, R1-2). The ``jobs`` TOOL's
+        cancel path additionally attributes a deliberate stop for ``task``
+        rows — ``SubagentComms.begin_stop`` stamps ``ended_by``/
+        ``cancel_reason`` and stages the durable ``subagent-stop-<job>.v1.json``
+        receipt — and this op deliberately does NOT. The two paths agree on
+        the engine call and the receipt words; the attribution is left out
+        rather than mirrored because the actor for a phone- or peer-issued
+        cancel has no name in the wire's vocabulary yet (a new ``stopped by …``
+        string every surface would render), and the right home for the
+        alignment is a stop-issue helper shared with ``tools/builtin.py``, not
+        a second inline copy of the stamp sequence. THE CONDITION TO REVISIT:
+        when a task-job stop rides this op — a carrier cancelling ``task`` /
+        subagent rows through the rail — align it via that shared helper
+        first. Blast radius today is nil: v1 mounts no carrier, and the video
+        jobs this op was built for are not ``task`` rows.
         """
         self._check_loop_thread()
         job = self._session.jobs.get(job_id)
