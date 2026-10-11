@@ -9257,6 +9257,32 @@ class ServingSessionHandle(SessionHandle):
         }
 
     @_on_session_loop
+    async def job_cancel(self, job_id: str) -> str:
+        """``job_cancel``: cancel ONE background job by id — the rail's only mechanism.
+
+        Lands on :meth:`AsyncJobManager.cancel`, the engine call the ``jobs``
+        tool's ``op='cancel'`` already makes (contract §4.1): a phone or a
+        delegated surface requests the same stop the agent could, and the
+        runner's own cancellation semantics are what the settle then states —
+        for a media walk, ``best_effort_cancel`` and its receipt token. This
+        op never paints an outcome of its own.
+
+        An unknown id is a refusal in words (the dispatcher renders it as the
+        error frame); a job that already settled is the neutral reading the
+        tool itself returns — the caller wanted it stopped and it is stopped.
+        Optional capability, getattr-probed by the dispatch — no
+        ``PROTOCOL_VERSION`` move.
+        """
+        self._check_loop_thread()
+        job = self._session.jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"unknown job {job_id}")
+        cancelled = await self._session.jobs.cancel(job_id)
+        if not cancelled:
+            return f"job {job_id} was not cancelled (status: {job.status})"
+        return f"cancelled job {job_id} ({job.label})"
+
+    @_on_session_loop
     async def refresh(self) -> None:
         self._refresh_state()
         self._refresh_todos()

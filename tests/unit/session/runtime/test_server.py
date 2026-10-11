@@ -219,6 +219,9 @@ class FakeHandle:
             "known": job is not None,
         }
 
+    async def job_cancel(self, job_id):  # noqa: ANN001, ANN202
+        return await self._record("job_cancel", job_id)
+
     async def new_conversation(self):  # noqa: ANN202
         return await self._record("new_conversation")
 
@@ -871,6 +874,70 @@ async def test_peer_message_on_handle_without_capability_errors_cleanly() -> Non
         await writer.drain()
         err = await _until(reader, "error", 12)
         assert "cannot receive peer messages" in err["message"]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+class NoJobCancelHandle(FakeHandle):
+    """An owner runtime that predates the job rail's control op.
+
+    The dispatch probes the capability with getattr, so a handle that simply
+    lacks the method must surface the clear refusal rather than an
+    AttributeError — the same optional-capability contract ``NoPeerHandle``
+    documents.
+    """
+
+    job_cancel = None  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+async def test_job_cancel_dispatches_its_job_id_to_the_optional_capability() -> None:
+    """The post-turn job rail's control (video programme §2.2, contract §4.1).
+
+    The frame carries the job's own id and nothing else; the handle's receipt
+    travels as the ack's detail. That the cut lands on
+    ``AsyncJobManager.cancel`` — the SAME engine call ``jobs op='cancel'``
+    makes — is pinned at the serving seam (``test_serving``); here the wire
+    contract is.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps({"op": "job_cancel", "req": 31, "job_id": "job-abc123"}).encode() + b"\n"
+        )
+        await writer.drain()
+        ack = await _until(reader, "ack", 31)
+        assert ack["detail"] == "job_cancel ok"
+        assert handle.calls[-1] == ("job_cancel", ("job-abc123",), {})
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_job_cancel_on_a_handle_without_capability_errors_cleanly() -> None:
+    """Optional, getattr-probed, no ``PROTOCOL_VERSION`` bump."""
+    handle = NoJobCancelHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps({"op": "job_cancel", "req": 32, "job_id": "job-1"}).encode() + b"\n"
+        )
+        await writer.drain()
+        err = await _until(reader, "error", 32)
+        assert "cannot cancel background jobs" in err["message"]
     finally:
         if writer is not None:
             writer.close()

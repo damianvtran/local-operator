@@ -2149,6 +2149,54 @@ async def test_the_abort_receipt_does_not_claim_more_than_it_did() -> None:
 
 
 @pytest.mark.asyncio
+async def test_job_cancel_lands_on_the_job_managers_own_cancel() -> None:
+    """``job_cancel`` is the SAME engine call ``jobs op='cancel'`` makes.
+
+    The op exists so the phone's post-turn rail — and any delegated surface —
+    requests the stop the agent could request (contract §4.1), rather than a
+    second cancellation mechanism. Driven against a REAL ``AsyncJobManager``:
+    the id resolves through the manager's own ``cancel`` (spied), the job
+    settles, an unknown id is a refusal in words (the dispatcher's error
+    frame), and a job that already settled reads the tool's neutral
+    "was not cancelled" receipt instead of an error.
+    """
+    handle, session = make_handle()
+
+    async def never(job_id, signal, report_progress):  # noqa: ANN001, ANN202
+        await asyncio.sleep(30)
+
+    job_id = session.jobs.register("bash", "a long build", never)
+    await asyncio.sleep(0.05)
+    spied: list[str] = []
+    real_cancel = session.jobs.cancel
+
+    async def spying_cancel(target: str, **kwargs: Any) -> bool:
+        spied.append(target)
+        return await real_cancel(target, **kwargs)
+
+    session.jobs.cancel = spying_cancel  # type: ignore[assignment]
+    try:
+        receipt = await handle.job_cancel(job_id)
+    finally:
+        session.jobs.cancel = real_cancel  # type: ignore[assignment]
+    assert spied == [job_id]
+    assert receipt == f"cancelled job {job_id} (a long build)"
+    settled = session.jobs.get(job_id)
+    assert settled is not None and settled.status == "cancelled"
+
+    # Already settled: the tool's own neutral reading, never an error.
+    assert await handle.job_cancel(job_id) == (
+        f"job {job_id} was not cancelled (status: cancelled)"
+    )
+    # An unknown id is a refusal in words — the dispatcher renders it as the
+    # error frame, and no cancel is issued for it.
+    spied.clear()
+    with pytest.raises(ValueError, match="unknown job"):
+        await handle.job_cancel("no-such-job")
+    assert spied == []
+
+
+@pytest.mark.asyncio
 async def test_an_abort_clears_a_card_that_outlived_its_turn() -> None:
     """C2, and the case that FAILED before this change: the ORPHAN card.
 
