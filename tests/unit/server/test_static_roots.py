@@ -494,7 +494,7 @@ def test_the_macos_data_volume_firmlink_counts_as_an_ancestor_of_home():
 
 # ------------------------------------------------------------------- Host check
 # One predicate, one sentence, every route (P1.5, RFC §3.6): the matrix below is
-the app-wide rule; the live half exercises non-static routes on purpose.
+# the app-wide rule; the live half exercises non-static routes on purpose.
 
 
 @pytest.mark.parametrize(
