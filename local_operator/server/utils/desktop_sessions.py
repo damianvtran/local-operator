@@ -3354,21 +3354,47 @@ class DesktopSessionBridge:
         """
         validate_page_request(before_id, through_id, around_id, before, after, limit)
         if open_frame:
-            # THE REMOTE ARMS ARE BELOW THIS FLAG, DELIBERATELY. A peer's page is
-            # built by its OWNER (``net_session_history`` for a stored journal,
-            # the wire window for a live one), so stripping it here would be a
-            # second page builder for rows this device did not derive — and the
-            # rows a peer sends are messages, not journal entries, so the local
-            # strip's key list does not even describe them. The answer is today's
-            # shape with ``runs_state: "unsupported"``: a client must treat that
-            # and an absent ``runs`` alike, and the seam is the owner-side read
-            # (docs/DESKTOP_API.md, "The open frame").
-            # ``remote_row`` is the PEER marker and a missing facade is the
-            # stored-peer read (``_peer_stored_history``); ``self.remote`` is
-            # this device's own facade and must NOT be read as "a peer" — it is
+            # A PEER'S FRAME IS BUILT BY ITS OWNER, AND THE FLAG NOW TRAVELS WITH
+            # THE REQUEST (docs/DESKTOP_API.md §"The open frame"): the stored
+            # read (``_remote_history`` -> ``_peer_stored_history`` ->
+            # ``net_session_history``) is the owner's own build, so its
+            # ``runs``/``runs_state``/``head_cut`` are carried back here; an
+            # owner older than the facts half answers today's page and the
+            # fields default to the unsupported triple, which is exactly what a
+            # client must already tolerate (absent ``runs`` and ``unsupported``
+            # are one behaviour).
+            if self.remote_row is not None:
+                # ``remote_row`` IS THE PEER MARKER. The one arm that still
+                # answers ``unsupported`` in its own right is the live wire
+                # window inside ``_remote_history`` — see it for why that is a
+                # decision rather than an omission.
+                if around_id is not None:
+                    # V1 CANNOT ANCHOR A PEER'S WINDOW (design §D4) — the same
+                    # empty answer this method's plain arm gives for the same
+                    # request, with the frame's fields on it.
+                    return {
+                        "entries": [],
+                        "has_more": False,
+                        "cursor_missing": True,
+                        "has_newer": None,
+                        "runs": [],
+                        "runs_state": "unsupported",
+                        "head_cut": False,
+                    }
+                return await self._remote_history(
+                    before_id=before_id,
+                    through_id=through_id,
+                    limit=limit,
+                    entry_times=entry_times,
+                    open_frame=True,
+                )
+            # A LOCAL ID WITH NO FACADE YET (a draft, an id whose runtime never
+            # started): today's page, and the unsupported triple — unchanged
+            # from before the flag crossed the mesh. ``self.remote`` is this
+            # device's own facade and must NOT be read as "a peer" — it is
             # present for every local session the bridge has touched, which is
             # exactly the case this frame is built for.
-            if self.remote_row is not None or self.remote is None:
+            if self.remote is None:
                 page = await self.history(
                     before_id=before_id,
                     through_id=through_id,
@@ -3785,6 +3811,7 @@ class DesktopSessionBridge:
         through_id: str | None,
         limit: int,
         entry_times: bool = False,
+        open_frame: bool = False,
     ) -> dict[str, Any]:
         """One page of a PEER's transcript: the wire when it can answer, the
         owner's stored journal when it cannot.
@@ -3858,6 +3885,27 @@ class DesktopSessionBridge:
         projection (``_wire_row_payload``) because it does not have to be poorer:
         the reader merges the two sources by ``id``, and the ids match because the
         wire's message id IS the entry id (``transcript.encode_message_payload``).
+
+        ``open_frame`` RIDES THE **STORED** SOURCE ONLY, AND THAT IS THE DECISION
+        this method documents for the whole viewer path (docs/DESKTOP_API.md
+        §"The open frame"): the frame's page is the OWNER's build over the
+        owner's own journal (``net_session_history`` ->
+        ``RelayServer._open_frame_detail``), and the stored-read fallbacks below
+        are the only place this bridge speaks to it — the ask travels as the
+        key's presence (``projection.peer_stored_history_page``) and the reply's
+        ``runs``/``runs_state``/``head_cut`` are surfaced by
+        ``_peer_stored_history``. THE LIVE WIRE WINDOW KEEPS TODAY'S SHAPE and
+        answers ``runs_state: "unsupported"`` when the flag was asked for, and
+        that is a decision rather than an omission: the wire carries MESSAGES,
+        which the frame's strip does not even describe (its key list is
+        journal-entry shaped); the run facts join a transcript INDEX over a
+        journal this device does not hold, so no local derivation could stand in
+        for the owner's; and the wire answer is the page the paired state is
+        built from, so replacing it with an owner round trip would trade a
+        locally-answered read for a hop — to publish facts the stored path
+        states anyway. ``unsupported`` is honest for that source: the client
+        draws today's page and keeps its own condensation, which is also what an
+        owner older than the facts half produces, so no client behaviour is new.
         """
         remote = self.remote
         if remote is None:
@@ -3865,7 +3913,7 @@ class DesktopSessionBridge:
             # purposes: nothing on this device can read the wire, so the owner's
             # stored journal is the only source -- and it does not need a facade.
             return await self._peer_stored_history(
-                before_id=before_id, through_id=through_id, limit=limit
+                before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
             )
         if remote.is_cold:
             with contextlib.suppress(ConnectionError, OSError, TimeoutError):
@@ -3888,7 +3936,7 @@ class DesktopSessionBridge:
         rows = self._remote_rows(remote, before_id=before_id, through_id=through_id)
         if rows is None or (cold and not rows):
             return await self._peer_stored_history(
-                before_id=before_id, through_id=through_id, limit=limit
+                before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
             )
         page, has_more = _remote_page(rows, limit=limit)
         if not has_more and remote.history_before_token:
@@ -3945,7 +3993,7 @@ class DesktopSessionBridge:
                     "payload": _wire_row_payload(row),
                 }
             )
-        return {
+        answer: dict[str, Any] = {
             # THE SAME FILTER AS THE STORED SOURCE (agent review round 1, R1-4). A
             # hidden wake delivery, a patience ledger row and a diverted ask's result
             # are in the journal and therefore in the owner's own display window --
@@ -3957,6 +4005,16 @@ class DesktopSessionBridge:
             "cursor_missing": False,
             "has_newer": None,
         }
+        if open_frame:
+            # THE LIVE WINDOW IS NOT THE FRAME'S BUILDER (see this method's own
+            # ``open_frame`` paragraph): the facts are the owner's build over
+            # the owner's journal, and this source is messages off a wire.
+            # ``unsupported`` is the honest value — it is also what an owner
+            # older than the facts half yields, so a client treats both alike.
+            answer["runs"] = []
+            answer["runs_state"] = "unsupported"
+            answer["head_cut"] = False
+        return answer
 
     def _remote_rows(
         self, remote: AttachedSession, *, before_id: str | None, through_id: str | None
@@ -3994,7 +4052,7 @@ class DesktopSessionBridge:
         return rows
 
     async def _peer_stored_history(
-        self, *, before_id: str | None, through_id: str | None, limit: int
+        self, *, before_id: str | None, through_id: str | None, limit: int, open_frame: bool = False
     ) -> dict[str, Any]:
         """A page of the OWNER'S STORED JOURNAL, or an unservable answer.
 
@@ -4006,6 +4064,15 @@ class DesktopSessionBridge:
         relay's control socket lives) and the peer's device id from the row the
         pool resolved. It is also why the facade may be absent or cold and this
         still works.
+
+        ``open_frame`` THREADS TO THE OWNER'S BUILD, whose flag it asks for as
+        the KEY'S PRESENCE (``projection.peer_stored_history_page``): the reply's
+        optional ``runs``/``runs_state``/``head_cut`` are surfaced when the
+        owner produced them — an owner newer than this change — and default to
+        the contract's unsupported triple otherwise, because an owner older than
+        the facts half never names the keys (docs/DESKTOP_API.md §"The open
+        frame"). Per key, so a present-but-falsy value is carried rather than
+        dropped by a truthiness test.
 
         AN UNSERVABLE PAGE IS NOT AN EMPTY ONE. When the relay is down, the peer
         refuses, the hop expires, or the answer is not a page, the answer carries
@@ -4028,6 +4095,7 @@ class DesktopSessionBridge:
                 session_id=self.session_id,
                 before_id=before_id,
                 limit=limit,
+                open_frame=open_frame,
             )
             if page is not None:
                 cut = self._cut_stored_page(page, before_id=before_id, through_id=through_id)
@@ -4038,19 +4106,37 @@ class DesktopSessionBridge:
                 # entry was written, never the time it was served. Both answers
                 # this door returns carry it, so a reader that pages back does not
                 # see the same rows change vocabulary.
-                return {
+                answer = {
                     **cut,
                     "entries": [
                         {**row, "ts_source": "entry"} if isinstance(row, dict) else row
                         for row in cut.get("entries") or []
                     ],
                 }
-        return {
+                if open_frame:
+                    # THE OWNER'S FACTS, CARRIED UNCHANGED WHEN THEY EXIST — and
+                    # the contract's documented default when they do not (see
+                    # the method paragraph above). Per key, so a present-but-
+                    # falsy value (``head_cut: false``, an empty ``runs``) is
+                    # carried rather than dropped by a truthiness test.
+                    answer.setdefault("runs", [])
+                    answer.setdefault("runs_state", "unsupported")
+                    answer.setdefault("head_cut", False)
+                return answer
+        answer = {
             "entries": [],
             "has_more": False,
             "cursor_missing": True,
             "has_newer": None,
         }
+        if open_frame:
+            # AN UNSERVABLE PAGE IS STILL AN ANSWER WITH THE FRAME'S SHAPE: the
+            # caller asked for the frame, and ``unsupported`` is the value it
+            # must already tolerate (the same default as the served branch).
+            answer["runs"] = []
+            answer["runs_state"] = "unsupported"
+            answer["head_cut"] = False
+        return answer
 
     @staticmethod
     def _cut_stored_page(
