@@ -486,6 +486,15 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         sender = frame.get("sender", {})
         if not isinstance(sender, dict):
             raise ValueError("sender must be an object")
+    elif op == "job_cancel":
+        # The background-job rail's control (video programme §2.2): cancel ONE
+        # job by its own id — the one `jobs` prints. SHAPE only here: whether
+        # the id names anything, and whether the job has already settled, are
+        # the receiving runtime's questions (it holds the job table). Typed
+        # here so an empty or non-string id is refused at the wire rather
+        # than forwarded to a lookup for "".
+        if not isinstance(frame.get("job_id"), str) or not frame["job_id"]:
+            raise ValueError("job_id must be a non-empty string")
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +596,15 @@ ControlOp = Literal[
     # op`, which the viewer reports to the panel as `unsupported` — its own
     # sentence, distinct from "this chat has no code memory yet".
     "variables",  # {action: list|set|update|delete, key, value, type}
+    # The background-job rail's ONE mechanism: cancel ONE background job by
+    # id (the video programme's post-turn rail; design §2.2, contract §4.1).
+    # It lands on the SAME engine call `jobs op='cancel'` makes
+    # (``AsyncJobManager.cancel``) rather than a second cancel mechanism —
+    # the relay mounts no rendered control in v1, and the op exists so the
+    # first phone carrier and delegated surfaces can ride it. Additive like
+    # the ask ops: an OLD registrant answers `unknown op` gracefully — no
+    # ``PROTOCOL_VERSION`` bump.
+    "job_cancel",  # {job_id}
 ]
 
 # Events the registrant streams to the daemon.
