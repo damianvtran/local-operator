@@ -18,6 +18,7 @@ is S1's and is exercised against real relays in ``test_mesh_update.py``.
 
 from __future__ import annotations
 
+import json
 import time
 from argparse import Namespace
 from pathlib import Path
@@ -140,7 +141,20 @@ def test_the_summary_names_queued_and_skipped(tmp_path: Path) -> None:
     record = _open(root, devices=["d_a", "d_b"])
     _member(record, "d_b").update({"state": "skipped", "code": "no_grant"})
     line = rollouts.summary(record)
-    assert "1 queued" in line and "skipped (no_grant)" in line, line
+    # RU §7.3 NAMES the sets (round 1, M4): counts alone hid WHO was skipped.
+    assert "queued: d_a" in line and "skipped (no_grant): d_b" in line, line
+
+
+def test_a_concurrent_open_does_not_retire_a_newer_record(tmp_path: Path) -> None:
+    """M1 (round 1): an OLDER racer's scan must not supersede a newer record."""
+    root = tmp_path / "cfg"
+    newer = _open(root, devices=["d_a"], now=2000.0)
+    older = _open(root, devices=["d_a"], now=1000.0)  # a stale racer's open
+    assert (
+        rollouts.read_record(newer["id"], root)["state"] == "active"
+    ), "the newer record was retired by an older racer"
+    # Both stay active — the conservative outcome — and no pass sees zero actives.
+    assert rollouts.read_record(older["id"], root)["state"] == "active"
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +363,9 @@ def test_the_three_member_pass_defers_offline_and_busy_then_rolls_both(
     assert asked == ["d_busy", "d_offline", "d_idle"], asked  # serial, snapshot order
     mid = rollouts.read_record(record["id"], root)
     assert mid["state"] == "active", "two members are still owed a roll"
-    assert _member(mid, "d_busy")["state"] == "deferred" and _member(mid, "d_busy")["code"] == "busy"
+    assert (
+        _member(mid, "d_busy")["state"] == "deferred" and _member(mid, "d_busy")["code"] == "busy"
+    )
     assert _member(mid, "d_offline")["state"] == "unreachable"
     assert _member(mid, "d_idle")["state"] == "done"
 
@@ -358,7 +374,9 @@ def test_the_three_member_pass_defers_offline_and_busy_then_rolls_both(
     asked2 = _scripted(monkeypatch, [])
     rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S - 1.0)
     assert asked2 == [], "a member inside its floor must not be asked"
-    asked3 = _scripted(monkeypatch, [_answer("done", version="0.99.0"), _answer("already_on_target")])
+    asked3 = _scripted(
+        monkeypatch, [_answer("done", version="0.99.0"), _answer("already_on_target")]
+    )
     rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
     assert asked3 == ["d_busy", "d_offline"], asked3
     final = rollouts.read_record(record["id"], root)
@@ -405,6 +423,105 @@ def test_a_fully_terminal_pass_closes_with_ok_and_counts(
 # ---------------------------------------------------------------------------
 # Dormancy, registration, CLI — the S3a contract
 # ---------------------------------------------------------------------------
+
+
+def test_a_codeless_refusal_parks_the_member_as_no_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-1 (round 1): the authoriser's codeless `refused` IS the grant's absence.
+
+    The live shape: `update_peer` reports the error frame's code — `refused`
+    when the wire withheld which guard fired (`wire.refusal_frame`) — and the
+    record must PARK the member (`skipped (no_grant)`), not defer it onto the
+    failure ladder. Three scans audit one change and ask exactly once.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    asked = _scripted(
+        monkeypatch,
+        [{"ok": False, "code": "refused", "message": "not authorised", "state": "refused"}],
+    )
+    rollouts.step_record(server, record["id"], now=1000.0)
+    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    assert member["state"] == "skipped" and member["code"] == "no_grant", member
+    assert float(member["next_ask_at"]) == 0.0, "a parked member has no floor"
+    causes = [r.cause for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
+    assert causes == ["capability_denied"], causes
+    # Parked means parked: two cadence scans later the member is still asked once.
+    rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
+    rollouts.step_record(server, record["id"], now=1000.0 + 2 * rollouts.CADENCE_S + 2.0)
+    assert asked == ["d_a"], asked
+    assert rollouts.read_record(record["id"], root)["state"] == "done"
+
+
+def test_the_failure_ladder_is_consecutive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """N2 (round 1): a busy answer between two failures resets the rung."""
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    _scripted(monkeypatch, [_answer("failed", reason="x")])
+    rollouts.step_record(server, record["id"], now=1000.0)
+    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    assert member["fails"] == 1, member
+    at = float(member["next_ask_at"]) + 1.0
+    _scripted(monkeypatch, [_answer("busy", reason="2 sessions busy")])
+    rollouts.step_record(server, record["id"], now=at)
+    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    assert member["state"] == "deferred" and member["fails"] == 0, member
+    at2 = float(member["next_ask_at"]) + 1.0
+    _scripted(monkeypatch, [_answer("failed", reason="x")])
+    rollouts.step_record(server, record["id"], now=at2)
+    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    assert member["fails"] == 1, "the consecutive count restarted after the busy answer"
+    assert float(member["next_ask_at"]) == at2 + rollouts.FAIL_BACKOFF_S[0], member
+
+
+def test_cancel_without_a_server_still_lands_its_closing_row(tmp_path: Path) -> None:
+    """Q-2 (round 1): the server-less writer is CLOSED, so the row reaches disk."""
+    root = tmp_path / "cfg"
+    record = _open(root, devices=["d_a"])
+    cancelled = rollouts.cancel_record(record["id"], root)  # no server: the CLI path
+    assert cancelled is not None and cancelled["state"] == "abandoned"
+    audit = rollouts.rollouts_dir(root).parent / "audit.jsonl"
+    assert audit.exists(), f"no audit file at {audit}"
+    lines = [json.loads(line) for line in audit.read_text().splitlines() if line.strip()]
+    rows = [row for row in lines if row.get("event") == rollouts.ROLLOUT_DONE]
+    assert rows and rows[-1].get("outcome") == "partial", lines
+
+
+def test_terminal_records_are_refused_by_the_verbs(tmp_path: Path) -> None:
+    """M2 (round 1): a terminal record is refused, not rewritten."""
+    from local_operator.network.types import MeshRefusal
+
+    root = tmp_path / "cfg"
+    record = _open(root, devices=["d_a"])
+    rollouts.cancel_record(record["id"], root)  # active → abandoned
+    with pytest.raises(MeshRefusal) as cancelled:
+        rollouts.cancel_record(record["id"], root)
+    assert cancelled.value.code == "rollout_not_active", cancelled.value.code
+    with pytest.raises(MeshRefusal) as resumed:
+        rollouts.resume_record(record["id"], root)
+    assert resumed.value.code == "rollout_not_active", resumed.value.code
+    assert rollouts.read_record(record["id"], root)["state"] == "abandoned"
+
+
+def test_the_real_parser_builds_and_both_resume_spellings_parse() -> None:
+    """B1 (round 1): the REAL CLI parser, built and exercised.
+
+    The mirror-repro (an argparse fragment) proved the shape; only building the
+    actual parser catches a propagated `--resume` colliding with the verb's own
+    — which made every `lop` invocation die at parser build.
+    """
+    from local_operator.cli import build_cli_parser
+
+    parser = build_cli_parser()  # must not raise
+    verb = parser.parse_args(["network", "update", "--resume", "ro_x"])
+    assert getattr(verb, "resume", None) == "ro_x", vars(verb)
+    latest = parser.parse_args(["network", "update", "--cancel"])
+    assert getattr(latest, "cancel", "x") == "", vars(latest)  # const: newest active
+    sibling = parser.parse_args(["config", "list", "--resume", "abc"])
+    assert getattr(sibling, "resume", None) == "abc", "propagation still reaches other verbs"
 
 
 def test_the_slice_registers_one_start_hook_and_no_ops() -> None:

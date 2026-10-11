@@ -2191,6 +2191,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_global_flag(parser: argparse.ArgumentParser, *flags: str, **kwargs: Any) -> None:
+    """Add a propagated flag unless the subparser already declares it (round 1, B1).
+
+    ``lop network update`` owns its own ``--resume`` (the rollouts verb), and a
+    second declaration is an ``argparse.ArgumentError`` raised while
+    ``build_cli_parser`` runs — which is every `lop` invocation dead at build
+    time. A verb that owns a spelling keeps it; every other subparser still
+    receives the global one (and the recursion below still covers deeper
+    levels), so the propagation's own guarantee is unchanged.
+    """
+    if any(flag in parser._option_string_actions for flag in flags):
+        return
+    parser.add_argument(*flags, **kwargs)
+
+
 def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
     """Re-declare the position-independent global options on every subparser.
 
@@ -2217,7 +2232,8 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
             if id(subparser) in seen:
                 continue
             seen.add(id(subparser))
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--yolo",
                 action="store_true",
                 default=argparse.SUPPRESS,
@@ -2236,7 +2252,8 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                     " without prompting"
                 ),
             )
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--resume",
                 nargs="?",
                 const=RESUME_LATEST,
@@ -2254,21 +2271,24 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
             # answers and where it runs, so silently ignoring them would be
             # worse than the parse error: the run would proceed against the
             # wrong model, in the wrong directory.
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--hosting",
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="hosting",
                 help="Hosting platform for this run (e.g. anthropic, openai, openrouter)",
             )
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--model",
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="model",
                 help="Model to use for this run",
             )
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--run-in",
                 type=str,
                 default=argparse.SUPPRESS,

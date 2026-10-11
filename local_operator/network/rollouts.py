@@ -243,6 +243,12 @@ def open_record(
     see the module docstring). ``members`` is the snapshot, in network order,
     each ``{"device": …, "name": …}``; every member starts ``pending``.
 
+    ``unsupported_kind`` (the §3 exclusion of pool-kind members "before any
+    call") has NO PRODUCING PATH in S3a (round 1, M3): it is S3b's snapshot
+    call — an initial-state field in this mapping, or a documented
+    one-mutate-after-open — and is named here so nothing builds on an arm
+    that cannot fire.
+
     The supersede is part of the open (RU §6.3): a second update mid-pass
     re-snapshots, and the older record keeps its history, marked
     ``superseded``. Readers never see a half-open record: the new record is
@@ -288,6 +294,12 @@ def open_record(
             or str(other.get("network")) != str(network)
         ):
             continue
+        if float(other.get("created_at") or 0.0) >= float(record.get("created_at") or 0.0):
+            # NOT OURS TO RETIRE (round 1, M1): a CONCURRENT open whose record
+            # is newer (or same-second) stays active. Without this guard two
+            # racing opens could supersede each other — zero active records —
+            # and the older racer could retire the newer record's pass.
+            continue
         mutate_record(other_id, root, lambda rec: rec.update({"state": "superseded"}) or True)
     return record
 
@@ -321,22 +333,22 @@ def summary(record: Mapping[str, Any]) -> str:
     The text S3b prints at open; here it is also the read a `--json` consumer
     (and a test) gets without parsing the record.
     """
-    words: dict[str, int] = {}
+    groups: dict[str, list[str]] = {}
     for member in record.get("members", []):
         state = str(member.get("state") or "pending")
         code = str(member.get("code") or "")
-        # The design's own words: who is QUEUED and who is already SKIPPED
-        # (RU §7.3), with the skip's code in the same breath — the first
-        # rollout after this ships will skip most members, and a skip is
-        # never silent.
+        # RU §7.3's shape, taken literally (round 1, M4): the summary NAMES the
+        # queued set and the skips known without a call — the operator's first
+        # sight of a rollout must say "not cloud-node-2, it never granted this
+        # device `update`" without a second command.
         if state == "pending":
             label = "queued"
         elif state == "skipped" and code:
             label = f"skipped ({code})"
         else:
             label = state
-        words[label] = words.get(label, 0) + 1
-    parts = ", ".join(f"{count} {label}" for label, count in sorted(words.items()))
+        groups.setdefault(label, []).append(str(member.get("name") or member.get("device") or "?"))
+    parts = "; ".join(f"{label}: {', '.join(names)}" for label, names in sorted(groups.items()))
     count = len(record.get("members", []))
     line = f"rollout {record.get('id')} is {record.get('state')} to {count} peers ({parts})"
     if record.get("state") == "done" and any(
@@ -358,14 +370,16 @@ def _backoff_s(fails: int) -> float:
     return FAIL_BACKOFF_S[index]
 
 
-def classify_answer(
-    answer: Mapping[str, Any], *, prior_state: str, fails: int, now: float
-) -> dict[str, Any]:
+def classify_answer(answer: Mapping[str, Any], *, fails: int, now: float) -> dict[str, Any]:
     """One member answer → the record's next state (the §3 map's record column).
 
-    Deliberately a pure function of the answer + the member's prior state: the
-    pass's outcomes must be reviewable without a relay in the room, which is
-    also what lets the cells drive every row with a scripted answer.
+    Deliberately a pure function of the answer, the member's prior failure
+    count and the clock: the pass's outcomes must be reviewable without a
+    relay in the room, which is also what lets the cells drive every row with
+    a scripted answer. (A ``prior_state`` parameter lived here until round 1
+    (N1): the driver hard-wired it, so its non-matching branch was dead — the
+    one fact a silent ask needs, "an apply may have begun", is already in the
+    record's own ``applying`` marker.)
     """
     code = str(answer.get("code") or "")
     state = str(answer.get("state") or "")
@@ -390,7 +404,11 @@ def classify_answer(
             "detail": message[:DETAIL_CAP],
             "version": version,
             "method": method,
-            "fails": fails,
+            # CONSECUTIVE-failure count, so every non-failure answer resets it
+            # (round 1, N2): a busy streak between two failures used to advance
+            # the ladder anyway, and the ladder's own comment claims
+            # "consecutive". The failure arms override this with fails + 1.
+            "fails": 0,
         }
 
     if answer.get("ok") and state in DONE_STATES:
@@ -419,6 +437,17 @@ def classify_answer(
         # message the CLI already prints); the member's durable
         # `authorisation_refused` row is its own record.
         return moved("skipped", new_code="no_grant", cause="capability_denied", outcome="refused")
+    if code == "refused":
+        # THE #2179 RESOLUTION, MADE REAL (round 1, Q-1): the authoriser's
+        # refusal crosses the wire CODELESS by design (which guard fired is
+        # withheld — ``wire.refusal_frame``), and for THIS op the codeless
+        # refusal has exactly one reading in the design: the requester does
+        # not hold `update` on this member (``meshupdate``'s open question
+        # names the two ways to a coded frame; until one lands, this arm is
+        # the honest classification — the pre-round-1 fallback parked the
+        # member on the failure ladder instead). Parked `skipped (no_grant)`
+        # with the member's own sentence (and RU §2's remedy) in ``detail``.
+        return moved("skipped", new_code="no_grant", cause="capability_denied", outcome="refused")
     if code == "predates_rolling_updates":
         return moved("skipped", new_code="predates_rolling_updates", cause="capability_denied")
     if code in ("target_not_published", "editable_install"):
@@ -428,13 +457,14 @@ def classify_answer(
         # member is terminal for this rollout rather than retried on a timer.
         return moved("refused", new_code=code, cause="policy", outcome="refused")
     if code in ("unreachable", "no_answer"):
-        if prior_state == "applying" and code == "no_answer":
-            # REQUEST SENT, THEN SILENCE, and the last known state was applying:
-            # the member's relay may be mid-roll (its last act of a successful
-            # pass), so the re-ask is delayed by the bounded reconnect and then
-            # asks once more — the reply turns it into done/already_on_target
-            # (note §4, Q4). A DIAL failure (``unreachable``) proves nothing was
-            # sent, so it never claims an apply began.
+        if code == "no_answer":
+            # REQUEST SENT, THEN SILENCE: the member's relay may be mid-roll
+            # (its last act of a successful pass), so the re-ask is delayed by
+            # the bounded reconnect and then asks once more — the reply turns
+            # it into done/already_on_target (note §4, Q4). A DIAL failure
+            # (``unreachable``) proves nothing was sent, so it never claims an
+            # apply began; the record's ``applying`` marker (written before
+            # every ask) is what distinguishes the two readings.
             return moved(
                 "deferred", new_code="no_answer", floor=DROPPED_AFTER_APPLY_RETRY_S, cause="timeout"
             )
@@ -491,7 +521,13 @@ def _audit_member_state(
         if server is not None and getattr(server, "audit", None) is not None:
             server.audit.record(event)
         else:
-            AuditLog.from_config(root).record(event)
+            # THE WRITER IS CLOSED, not dropped (round 1, Q-2): the log batches
+            # a row and without a close the buffer dies with this object —
+            # measured on --cancel's closing row, which flipped the record
+            # `abandoned` while the row never landed.
+            log = AuditLog.from_config(root)
+            log.record(event)
+            log.close()  # ``close`` is ``flush``; the row is on disk or reported
     except Exception:  # noqa: BLE001 — a record is not a gate (the mcpdefs rule)
         pass
 
@@ -528,7 +564,13 @@ def _close_record(
         if server is not None and getattr(server, "audit", None) is not None:
             server.audit.record(event)
         else:
-            AuditLog.from_config(root).record(event)
+            # THE WRITER IS CLOSED, not dropped (round 1, Q-2): the log batches
+            # a row and without a close the buffer dies with this object —
+            # measured on --cancel's closing row, which flipped the record
+            # `abandoned` while the row never landed.
+            log = AuditLog.from_config(root)
+            log.record(event)
+            log.close()  # ``close`` is ``flush``; the row is on disk or reported
     except Exception:  # noqa: BLE001 — best-effort, same as the member rows
         pass
 
@@ -594,7 +636,7 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
             answer = meshupdate.update_peer(server, device, rollout=record_id)
         except Exception as exc:  # noqa: BLE001 — a driver must never die on one member
             answer = {"ok": False, "code": "no_answer", "message": str(exc), "state": ""}
-        update = classify_answer(answer, prior_state="applying", fails=fails, now=moment)
+        update = classify_answer(answer, fails=fails, now=moment)
 
         def _apply(
             rec: dict[str, Any], _update: Mapping[str, Any] = update, _device: str = device
@@ -704,7 +746,17 @@ def resume_record(
     It does not drive: the driver's scan is the wake (≤ :data:`SCAN_INTERVAL_S`),
     because the record is the only channel between the CLI's process and the
     relay's and a second signal channel would be a second source of truth.
+
+    Only an ``active`` record can be resumed (round 1, M2): a terminal id is
+    refused with a sentence instead of silently rewritten.
     """
+    current = read_record(record_id, root)
+    if current is None or str(current.get("state")) != "active":
+        state = str((current or {}).get("state") or "missing")
+        raise MeshRefusal(
+            "rollout_not_active",
+            f"rollout {record_id} is {state}; only an active rollout can be resumed",
+        )
 
     def _clear(rec: dict[str, Any]) -> bool:
         cleared = False
@@ -732,7 +784,17 @@ def cancel_record(
 
     An apply already in flight finishes — an install cannot be recalled — and
     is recorded by the driver's own step; this only ends the pass's future.
+    Only an ``active`` record can be cancelled (round 1, M2): a ``done`` id
+    would otherwise be rewritten to ``abandoned`` with a contradicting second
+    closing row.
     """
+    current = read_record(record_id, root)
+    if current is None or str(current.get("state")) != "active":
+        state = str((current or {}).get("state") or "missing")
+        raise MeshRefusal(
+            "rollout_not_active",
+            f"rollout {record_id} is {state}; only an active rollout can be cancelled",
+        )
     updated = mutate_record(record_id, root, lambda rec: rec.update({"state": "abandoned"}) or True)
     if updated is not None:
         _close_record(
