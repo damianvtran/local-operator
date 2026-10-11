@@ -93,11 +93,11 @@ def test_the_rate_legend_is_the_golden_sentence() -> None:
 def test_the_search_component_text_is_the_golden_rendering() -> None:
     # The unpriced split names the kind it actually counted.
     assert search_component_text(SearchSpendSnapshot(searches=5, unpriced_searches=5)) == _en(
-        "tui.analytics.search.incl_unpriced_search", count=5
+        "tui.analytics.search.incl_unpriced_search", count=5, shown="5"
     )
     # A read-only session says read, never search (the kinds stay apart).
     assert search_component_text(SearchSpendSnapshot(reads=2)) == _en(
-        "tui.analytics.search.incl_free_read", count=2
+        "tui.analytics.search.incl_free_read", count=2, shown="2"
     )
     # A zero-count snapshot has nothing to say.
     assert search_component_text(SearchSpendSnapshot()) == ""
@@ -147,7 +147,7 @@ def test_the_totals_block_is_the_golden_rendering() -> None:
     )
     assert totals_line.startswith(ap._SECTION_MARK + " " + _en("tui.analytics.totals.title"))
     # The meta carries the plural calls count and the measured suffix.
-    assert _en("tui.analytics.totals.calls_meta", count=100) in totals_line
+    assert _en("tui.analytics.totals.calls_meta", count="100") in totals_line
     assert _en("tui.analytics.totals.calls_measured") in totals_line
     # Failed-call count appears only because ok_calls != calls.
     assert _en("tui.analytics.totals.calls_failed", count="2") in totals_line
@@ -183,7 +183,7 @@ def test_the_empty_state_is_the_golden_rendering() -> None:
 def test_the_day_title_is_the_golden_plural() -> None:
     period = UsagePeriod(period="2026-10-10", model="m1", output_tokens=10, cost_micro=1)
     one = _text(_agg(), daily=[period])
-    assert _en("tui.analytics.totals.days_with_usage", count=1) in one
+    assert _en("tui.analytics.totals.days_with_usage", count=1, shown="1") in one
     assert _en("tui.analytics.chart.daily_empty") not in one
     # The rows-only meta states the metric clause from the catalogue.
     assert _en("tui.analytics.chart.metric_clause", active="cost", other="tokens") in one
@@ -202,5 +202,72 @@ def test_the_row_overhead_measures_the_catalogued_tails() -> None:
 
 
 def test_the_subagent_suffix_is_the_golden_plural() -> None:
-    assert _en("tui.analytics.table.subagent_suffix", count=1) == "+1 subagent"
-    assert _en("tui.analytics.table.subagent_suffix", count=12) == "+12 subagents"
+    assert _en("tui.analytics.table.subagent_suffix", count=1, shown="1") == "+1 subagent"
+    assert _en("tui.analytics.table.subagent_suffix", count=12, shown="12") == "+12 subagents"
+
+
+def test_counts_render_raw_digits_at_and_above_one_thousand() -> None:
+    """Round-1 MAJOR-1: counts are RAW digits, never ICU-grouped.
+
+    The pre-slice f-strings printed raw counts (``f"{n} calls"``); ICU ``#``
+    and numeric params format locale-grouped (``1,234``), which broke the
+    byte-identity invariant for counts >= 1000. Every count-bearing message now
+    interpolates a STRINGIFIED count through a plain ``{shown}`` substitution,
+    keeping the numeric ``count`` only for plural SELECTION.
+
+    This pins the class at the 999/1000/1234/12345 boundary for every affected
+    message — the boundary the first capture battery (all counts <= 100) could
+    not see, which is how the drift slipped round 1.
+    """
+
+    def msg(key: str, n: int, **extra: object) -> str:
+        params: dict[str, object] = {"count": n, "shown": str(n)}
+        params.update(extra)
+        return _en(key, **params)
+
+    for n in (1, 2, 999, 1000, 1234, 12345):
+        word_s = "search" if n == 1 else "searches"
+        word_r = "read" if n == 1 else "reads"
+        word_sa = "subagent" if n == 1 else "subagents"
+        word_d = "day" if n == 1 else "days"
+        assert msg("tui.analytics.search.counted_search", n) == f"{n} {word_s}"
+        assert msg("tui.analytics.search.counted_read", n) == f"{n} {word_r}"
+        assert msg("tui.analytics.search.incl_free_search", n) == f"incl. {n} free {word_s}"
+        assert msg("tui.analytics.search.incl_free_read", n) == f"incl. {n} free {word_r}"
+        assert msg("tui.analytics.search.incl_unpriced_search", n) == f"incl. {n} unpriced {word_s}"
+        assert msg("tui.analytics.search.incl_unpriced_read", n) == f"incl. {n} unpriced {word_r}"
+        assert (
+            msg("tui.analytics.search.note_search_full", n) == f"{n} {word_s} · no published price"
+        )
+        assert msg("tui.analytics.search.note_search_unpriced", n) == f"{n} {word_s} · unpriced"
+        assert (
+            msg("tui.analytics.search.note_search_partial", n, unpriced="3")
+            == f"{n} {word_s} · 3 unpriced"
+        )
+        assert msg("tui.analytics.search.note_read_full", n) == f"{n} {word_r} · no published price"
+        assert msg("tui.analytics.search.note_read_unpriced", n) == f"{n} {word_r} · unpriced"
+        assert (
+            msg("tui.analytics.search.note_read_partial", n, unpriced="3")
+            == f"{n} {word_r} · 3 unpriced"
+        )
+        assert msg("tui.analytics.table.subagent_suffix", n) == f"+{n} {word_sa}"
+        assert msg("tui.analytics.totals.days_with_usage", n) == f"{n} {word_d} with usage"
+        assert _en("tui.analytics.totals.calls_meta", count=str(n)) == f"{n} calls"
+
+    # Live-path wiring: the totals meta renders the raw count (1234, not
+    # 1,234), and the search component keeps its digits at 1234 searches.
+    text = _text(_agg(calls=1234, ok_calls=1200), 90)
+    assert _en("tui.analytics.totals.calls_meta", count="1234") in text
+    # The totals meta keeps RAW digits; the rate legend above it is the one
+    # count that legitimately groups (the pre-slice code grouped it too).
+    assert "1234 calls" in text
+    component = search_component_text(SearchSpendSnapshot(searches=1234))
+    assert component == "incl. 1234 free searches"
+    assert "1,234" not in component
+    # The unpriced branch carries its own count, raw, at the same magnitude.
+    unpriced_component = search_component_text(
+        SearchSpendSnapshot(searches=1234, unpriced_searches=1234)
+    )
+    assert unpriced_component == "incl. 1234 unpriced searches"
+    # And the counted tally (the notes ladder's first rung source) at 1234.
+    assert ap._counted_kinds(SearchSpendSnapshot(searches=1234)) == "1234 searches"
