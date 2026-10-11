@@ -9,6 +9,11 @@ The table below is the PRE-SLICE English, captured from the registry on
 ``origin/main`` @ ``22498f1a59`` (the M0 merge) before the rewrite — the
 English-pinned shape of RFC §7: an edit that changes wording must change the
 catalogue and this table together, under the pinned ``en`` locale.
+
+The C slice (live language access) later registered ONE new command,
+``/language``, through the same runtime path — an ADDITION rather than a
+rewrite, pinned here beside the migrated rows so a wording edit to it meets
+the same discipline.
 """
 
 from __future__ import annotations
@@ -44,6 +49,9 @@ PREVIOUS_ENGLISH: dict[str, str] = {
     "effort": "Show or set reasoning effort (shift+tab cycles)",
     "fast": "Toggle faster output at premium pricing",
     "theme": "Switch color theme; arrows preview live",
+    # Registered by the C slice, not migrated by S2: `/language`'s description
+    # is new English by design (the same runtime path, one new key).
+    "language": "Show or set the language; auto follows the system",
     "provider": "List providers and their login/usage state",
     "settings": "Change every setting on one page",
     "sidebar": "Show or hide conversations; 'focus' keys the list",
@@ -83,7 +91,9 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # The migrated SITES: the registry field the picker, /help, the desktop
     # catalogue and the phone sheet all read. A missing/extra command raises a
     # KeyError here rather than passing silently.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) == 50
+    # 50 at S2, +1 with C's `/language` (see the table note); a missing or
+    # extra command raises a KeyError either way rather than passing silently.
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) == 51
     for command in SLASH_COMMANDS:
         assert command.description == PREVIOUS_ENGLISH[command.name], command.name
 

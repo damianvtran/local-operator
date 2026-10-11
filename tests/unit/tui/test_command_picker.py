@@ -1023,7 +1023,18 @@ async def test_tab_still_completes_a_short_fuzzy_query() -> None:
         # promise, which is what this pins, is that Tab still COMPLETES a
         # fuzzy-only query; which of the tied rows it lands on is the engine's
         # documented ranking, not a second decision here.
-        assert app.editor.text in ("/highlights ", "/login ", "/logout "), app.editor.text
+        # `/language` (C) joins the tie the same way the note above records:
+        # `l…g` is a subsequence of it too, all four score 2, and the engine
+        # breaks the tie by registration order. The gate's promise, which is
+        # what this pins, is that Tab still COMPLETES a fuzzy-only query;
+        # which of the tied rows it lands on is the engine's documented
+        # ranking, not a second decision here.
+        assert app.editor.text in (
+            "/language ",
+            "/highlights ",
+            "/login ",
+            "/logout ",
+        ), app.editor.text
         assert app.submissions == [], "Tab must never send"
 
 

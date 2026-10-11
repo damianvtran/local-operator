@@ -45,7 +45,7 @@ from local_operator.harness.jobs import (
 )
 from local_operator.herdr.reporter import HerdrReporter, state_from_title
 from local_operator.i18n.keys import tui_status
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.session.frontend_state import (
     format_context_tokens as _format_context_tokens,
@@ -207,6 +207,23 @@ ICON_TUNNEL = ICON_APPROVALS
 _t = tr("tui.status")
 
 TUNNEL_PARKED_TEXT = _t(tui_status.tunnel_parked())
+
+
+def _reload_copy() -> None:
+    """Re-materialise the band's constants after a locale move (slice C).
+
+    Nearly everything the band paints resolves per render — the `_t(...)`
+    calls inside the formatting functions read the active locale at each call
+    — so this one import-time constant is the whole list that needs an entry
+    with :func:`local_operator.i18n.text.register_refresh`. The assignment
+    mirrors the definition above; the live-locale slice test pins it against
+    the fixture catalogue, so a stale mirror fails loudly.
+    """
+    global TUNNEL_PARKED_TEXT
+    TUNNEL_PARKED_TEXT = _t(tui_status.tunnel_parked())
+
+
+register_refresh(_reload_copy)
 
 #: Fork tag for the WINDOW/TAB title of a fork that has not named itself yet.
 #: The same word, brackets and case the /resume picker's row marker uses

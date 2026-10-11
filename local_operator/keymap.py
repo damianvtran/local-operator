@@ -71,7 +71,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from local_operator.i18n.keys import tui_welcome
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import register_refresh, tr
 
 # ---------------------------------------------------------------------------
 # The splash tips: English in the `tui.welcome` catalogue (RFC §2.2/§3.1)
@@ -214,6 +214,32 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
 
 #: ``id -> KeyAction`` for the lookups the page, the app and the tips all do.
 BY_ID: dict[str, KeyAction] = {action.id: action for action in KEY_ACTIONS}
+
+
+def _reload_copy() -> None:
+    """Re-resolve the catalogued ``tip`` templates after a locale move (C).
+
+    Only ``tip`` is catalogued copy here: ``help``/``label`` stay literals
+    until the bindings/settings slice owns them, and every other field is a
+    key, id or scope — machine values that never translate. ``welcome``'s
+    keyed pool reads these actions when ITS refresh runs, one registration
+    later (import order), so the splash picks the new templates up in the
+    same move. The assignments mirror the definitions above; the live-locale
+    slice test pins both tips against the fixture catalogue.
+    """
+    global KEY_ACTIONS, BY_ID
+    tips = {
+        "keymap.new_session": _t(tui_welcome.tip_key_new_session()),
+        "keymap.resume": _t(tui_welcome.tip_key_resume()),
+    }
+    KEY_ACTIONS = tuple(
+        dataclasses.replace(action, tip=tips[action.id]) if action.id in tips else action
+        for action in KEY_ACTIONS
+    )
+    BY_ID = {action.id: action for action in KEY_ACTIONS}
+
+
+register_refresh(_reload_copy)
 
 #: ``id -> scope``, the one-question lookup every writer and display path
 #: needs: "is this value a Textual key or a desktop shortcut?". Derived so a
