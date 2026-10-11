@@ -91,6 +91,37 @@ def test_an_unknown_key_names_how_to_find_keys(config_home: Path) -> None:
     assert "lop config list" in result.content[0].text
 
 
+def test_set_with_an_empty_value_unsets_a_row_that_supports_it(config_home: Path) -> None:
+    """The route/CLI clear gesture, mirrored: an empty string DELETES the key
+    (`empty_unsets` rows), so it reads as its default again — storing a literal
+    "" would report a deliberate choice the user never made."""
+    assert _run({"op": "set", "key": "hosting", "value": "example-host"}).is_error is False
+    result = _run({"op": "set", "key": "hosting", "value": ""})
+    assert result.is_error is False
+    assert _payload(result)["is_default"] is True
+    import yaml
+
+    written = yaml.safe_load((config_home / "config.yml").read_text(encoding="utf-8"))
+    assert "hosting" not in (written.get("values") or {})
+
+
+def test_a_cascade_key_is_refused_with_the_snapshot_contract_named(config_home: Path) -> None:
+    """Cascade keys carry a base-snapshot edit contract the tool has no field
+    for: refused EXPLICITLY (with the alternative named) rather than written
+    raw, which would accept shapes `_normalize_chains` drops on read — the
+    silent divergence the shared funnel exists to prevent. The refusal must not
+    touch the file."""
+    _run({"op": "set", "key": "language", "value": "en"})
+    before = (config_home / "config.yml").read_bytes()
+    result = _run(
+        {"op": "set", "key": "retry.fallbackChains", "value": {"default": ["zai/glm-5.3"]}}
+    )
+    assert result.is_error is True
+    text = result.content[0].text
+    assert "snapshot" in text and "base" in text
+    assert (config_home / "config.yml").read_bytes() == before
+
+
 def test_a_bad_op_is_an_invalid_arguments_error(config_home: Path) -> None:
     result = _run({"op": "reset", "key": "language"})
     assert result.is_error is True

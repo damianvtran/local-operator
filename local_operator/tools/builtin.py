@@ -18215,9 +18215,32 @@ async def execute_setting(
             ),
             details={"key": setting.key},
         )
+    if setting.kind is settings_io.Kind.CASCADE:
+        # Cascade keys are edited under a BASE-SNAPSHOT contract (the route's
+        # ``SettingEdit.base``): an unchanged chain from a stale screen must
+        # never overwrite a newer chain. This tool has no snapshot field, and
+        # writing raw through ``write_setting`` would accept shapes
+        # ``_normalize_chains`` drops on read — a silent divergence is the one
+        # outcome the shared funnel exists to prevent — so the key is REFUSED,
+        # explicitly, with the alternative named.
+        return _error(
+            tool_call_id,
+            "setting",
+            f"Setting '{setting.key}' is a cascade edited with an original-snapshot "
+            "contract. Use the /settings page, `lop config edit`, or PATCH "
+            "/v1/settings with `base` — this tool does not carry the snapshot.",
+        )
     try:
         settings_io._require_readable_config(manager)
-        settings_io.write_setting(manager, setting, params.value)
+        if setting.empty_unsets and params.value == "":
+            # The clear-to-unset gesture, mirrored from the route and the CLI
+            # (their arm is exactly this one: ``empty_unsets`` + the empty
+            # string): deleting the key is what makes it read as its default
+            # again — storing a literal "" would report a deliberate choice
+            # the user never made.
+            settings_io.reset_setting(manager, setting)
+        else:
+            settings_io.write_setting(manager, setting, params.value)
     except settings_io.ConfigUnreadableError:
         return _error(
             tool_call_id,
