@@ -2565,7 +2565,13 @@ def _owner_frame(
         frame["before_id"] = before_id
     if open_frame:
         frame["open_frame"] = 1
-    return server._op_session_history(object(), frame)
+    # THE LINK IS A PLACEHOLDER THIS OP NEVER READS — it takes the parameter for
+    # the dispatch signature only, so a real ``PeerLink`` is constructed BY TYPE
+    # (``__new__``, the shape ``test_membership._handler_link`` uses for its own
+    # direct handler calls; a duck would not type-check). Nothing is set on it on
+    # purpose: a handler that grows a read off the link must extend this helper
+    # rather than assume one.
+    return server._op_session_history(relay.PeerLink.__new__(relay.PeerLink), frame)
 
 
 def test_the_owner_open_frame_strips_and_counts_paintable_rows(peer_pair: Devices) -> None:
