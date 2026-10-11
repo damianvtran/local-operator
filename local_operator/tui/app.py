@@ -28128,7 +28128,7 @@ class OperatorApp(App[None]):
         # pre-card height with the card's rows below it — measured at 160x45:
         # region `1/38`, host at `y=39` (15 rows on a 45-row screen, i.e. clipped),
         # settling to `1/23` a display later with the scroll moving 93 -> 108 by
-        # exactly the card's height: review round 1's F2, QA's Q2, design's D1/D4.
+        # exactly the card's height: review round 1's F2, QA's Q2, design's D4.
         #
         # Dropped in `c12a62b9a1` and reinstated here, on measurement rather than
         # a change of mind: without it the cold path's transitional frame fell from
@@ -28141,7 +28141,7 @@ class OperatorApp(App[None]):
         self._settle_dock_rows_before_reveal()
 
     def _mounted_prompt_cards(self) -> tuple[Widget, ...]:
-        """The dock cards the READER has right now — mounted, shown, not leaving.
+        """The dock cards still live in the reader's dock — mounted, not leaving.
 
         Read from the DOM rather than from a field: the field is `None` while the
         host still lists a child, because a take-down clears it and leaves the
@@ -28155,20 +28155,27 @@ class OperatorApp(App[None]):
         Prune in between. A raw read therefore counts a card the reader has already
         lost, the pre-arm stands down on it, and the reveal frame loses the
         INCOMING gate's card: the frame-late card this path exists to remove.
-        `_pruning` is Textual's own on-its-way-out flag (`App._prune` sets it
-        synchronously, `Widget.render` honours it), and `display` is what the
-        reader gets; `_unmount_prompt` excludes the departing card by identity for
-        the same reason, from the call that holds the identity.
+        `_pruning` is the predicate, and only that: Textual sets it synchronously
+        in `App._prune`, so it means exactly "on its way out", and `DOMNode.display`
+        already returns False while it is set — `displayed_children` reads the flag
+        through that, which is why a `child.display` clause here was inert and is
+        gone.
+
+        `display` is not a safe filter in its own right either. An `ApprovalPrompt`
+        is an `AskPickerScreen` and hides itself when it has no drawable line
+        (`_repaint`: `self.display = drawable` — the regime its own 20x8 and 40x10
+        cases describe), so a card can be mounted, LIVE and owed an answer while
+        `display` is False; filtering on it would let the pre-arm mount a SECOND
+        card for the same gate in short terminals, which is the Q6 shape on a path
+        no bench cell covers (they run 160x45). `_unmount_prompt` excludes the
+        departing card by identity for the reason this reads `_pruning`, from the
+        call that holds the identity.
         """
         try:
             host = self.query_one("#prompt-host", Container)
         except Exception:  # pragma: no cover - only before the dock is composed
             return ()
-        return tuple(
-            child
-            for child in host.children
-            if child.display and not getattr(child, "_pruning", False)
-        )
+        return tuple(child for child in host.children if not getattr(child, "_pruning", False))
 
     def _mount_prompt(self, card: Widget) -> None:
         """Put a prompt into the dock's prompt host, above the status band.

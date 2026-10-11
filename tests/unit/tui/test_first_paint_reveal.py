@@ -822,8 +822,8 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
     # arrange-time settle: `OperatorApp._settle_dock_rows_before_reveal` runs its
     # pass while the card is still composing (instrumented: `card_mounted=False`
     # in every settle this lane and the reviewer took), so the pass is not the
-    # mechanism — see the comment under the equalities. It was dropped for two
-    # rounds and came back on the numbers: without it this pin is 3 of 8 green
+    # mechanism — see the comment under the equalities. It was dropped at
+    # `c12a62b9a1` and came back on the numbers: without it this pin is 3 of 8 green
     # against 8 of 8 with it (p = 2.3e-04, every failure `38.0 == 23.0`, the
     # 15-row shift on the pre-armed path), while the cold path's transitional
     # frame it authors is that path's RECORDED residual (19 of 20 opens with it,
