@@ -77,6 +77,15 @@ class RunProvenance:
     items: tuple[TurnItem, ...]
     job_id: str | None
     one_shot: bool
+    #: True for EVERY ``run_print_mode`` host -- the plain one-shot exec run AND its
+    #: ``--loop``/``--loop-goal`` runs, whose one-shot declaration is deliberately skipped
+    #: (their turns are the run's work; see ``Session.declare_headless_host``). Rule 6
+    #: refuses on this OR ``one_shot``, so no headless host is eligible whatever shape its
+    #: continuation takes. Deliberately has NO default: the field decides a refusal, so a
+    #: fail-open default would let a future freeze site omit it -- or a second producer
+    #: appear -- and silently re-open this hole. ``Session._emit`` is its only producer
+    #: today, and it must state the fact.
+    headless: bool
     #: ``Session.turns_settled`` at freeze time. The runner waits until the counter EXCEEDS
     #: this, i.e. until THIS turn's pipeline ``finally`` has finished -- a counter and not a
     #: bare ``Event`` so a next turn that clears the event first cannot strand the waiter.
@@ -181,9 +190,11 @@ def refusal(
     """
     if provenance is None:
         return "no-provenance"
-    # 6. A headless one-shot host (``run_print_mode``): its --json arm dumps EVERY event, so
-    # this rule is load-bearing there, not belt-and-braces.
-    if provenance.one_shot:
+    # 6. A headless print host (``run_print_mode``): its --json arm dumps EVERY event, so
+    # this rule is load-bearing there, not belt-and-braces. ``headless`` covers the runs
+    # ``one_shot`` cannot: ``--loop``/``--loop-goal``, whose one-shot declaration is
+    # skipped so the departure latches never arm between a run's own turns.
+    if provenance.one_shot or provenance.headless:
         return "one-shot-host"
     # 3. A subagent session.
     if provenance.job_id is not None:
