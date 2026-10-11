@@ -14,7 +14,7 @@
   "tui.welcome.tip.approvals": "/approvals <ask|auto> đặt xem công cụ có hỏi trước không",
   "tui.welcome.tip.classification_login": "lop login <radient|typesafe|openrouter> bật gợi ý",
   "tui.welcome.tip.classification_off": "lop config edit classification.auto false tắt gợi ý",
-  "tui.welcome.tip.cmux": "cmux: “Nơi nhánh mở” đặt không gian làm việc hoặc surface",
+  "tui.welcome.tip.cmux": "cmux: Nơi nhánh mở đặt không gian làm việc hoặc surface",
   "tui.welcome.tip.esc": "esc dừng tác nhân mà không kết thúc phiên",
   "tui.welcome.tip.fork": "/fork tách nhánh; /fork <message> đi theo hướng khác",
   "tui.welcome.tip.fork_placement": "/settings → Fork → “Nơi nhánh mở” đặt vị trí",

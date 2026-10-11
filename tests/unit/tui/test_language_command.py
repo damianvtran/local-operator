@@ -88,11 +88,25 @@ async def test_bare_language_names_the_active_language(config_dir: Path) -> None
         assert any(
             text.startswith("language: en (English)")
             and "<auto|en|fr|es|ru|vi>" in text
-            and "space lists" in text
+            and "; space" in text
             for text in texts
         ), texts
         for text in _language_notices(app):
             assert len(text) <= 70, text  # ASCII receipts: cells == chars
+        # Wave-2 QA: the receipt must fit the 70-cell budget at EVERY resolved
+        # value — the vi name is the longest and the value list grew; the
+        # pre-fix form measured 72 cells at vi.
+        for value in ("en", "fr", "es", "ru", "vi"):
+            app._run_slash_command(f"/language {value}")
+            await pilot.pause()
+            app._run_slash_command("/language")
+            await pilot.pause()
+            assert any(
+                text.startswith(f"language: {value} (") and "; space" in text
+                for text in _notices(app)
+            ), (value, _notices(app))
+        for text in _language_notices(app):
+            assert len(text) <= 70, text
 
 
 @pytest.mark.asyncio

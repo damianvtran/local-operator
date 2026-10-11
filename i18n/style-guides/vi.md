@@ -85,6 +85,13 @@ catalogues before landing here.
   female, male, chat_completions, responses, inherit, allowlist, snapcompact,
   context-full, session).
 - en ASCII "..." converts to "…".
+- Roll terminology (S3b, wave-2 delta): «cuốn chiếu» for the roll (noun «đợt
+  cuốn chiếu»); «thành viên» member; «cấp quyền» grant; «cục bộ» local (local
+  server sense — «địa phương» stays reserved for timezone-local).
+- `wire.slash.fork` is 81 cells by design (en 74): 46-col parity is unreachable
+  while keeping «tách nhánh» + «cuộc trò chuyện» (minimum prefix 38 > the
+  37-cell bound); `--window` renders whole from 53-col columns. Recorded
+  deviation (review m1, option b), endorsed by the post-fix recheck.
 - mesh: keep English «mesh» for the feature (settings «Mạng mesh»; the welcome
   tip now agrees). snapshot → «ảnh chụp» — keep it distinct from «ảnh chụp
   màn hình» (screenshots). The cmux qualifier: the welcome tip leads with the
