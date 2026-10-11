@@ -1,3 +1,5 @@
+import type { SupplementBeat } from "./lib/supplement";
+
 /**
  * Wire types for the mobile control plane.
  *
@@ -446,6 +448,17 @@ export interface SessionProjection {
 	context_is_estimate?: boolean | null;
 	/** Projection epoch; drop stale repaints. */
 	version: number;
+	/**
+	 * Turn supplements ("Highlights", memo §3.1 row 18): the newest beat per ANCHOR —
+	 * the final assistant message's id, which is the `TranscriptEntry.id` the block
+	 * hangs under. Absent when the daemon carries none: the daemon emits the key
+	 * only when it has beats (an empty map is absence, and the off-loop frame pin
+	 * holds a supplement-free frame to the parent's bytes), and an older daemon
+	 * omits it entirely — both read as "no beats", never as "unknown". The
+	 * projection's own `pid` carries the liveness the stale-row rule needs
+	 * (`lib/supplement.ts`, `beatLive`): 0 means a disk rebuild.
+	 */
+	supplements?: Record<string, SupplementBeat>;
 }
 
 /** The opener of an agent workstream, mirroring the desktop contract
@@ -690,7 +703,19 @@ export type CommandOp =
 	/* Dismiss is VIEW-ONLY: it removes the row from the queue's front end and
 	   injects nothing — no turn is bought. */
 	| { op: "ask_dismiss"; ask_id: string }
-	| { op: "snapshot" };
+	| { op: "snapshot" }
+	/* THE TURN-SUPPLEMENT FAMILY (memo §2.7). Additive ops the runtime's dispatch
+	   answers with its own receipt (`cancelled` / `steering` / `restarting` / the
+	   neutral `already finished`), carried over the SAME session command route
+	   every other mutation uses — the relay scopes them to the session in the
+	   URL and the anchor+job pair in the frame, and forwards them to the live
+	   runtime. `anchor` is the answer the block hangs under; `job` is the id the
+	   press names. Never authority-increasing: `cancel` cuts the session's own
+	   background work, `steer`/`restart` inject only the instruction the next
+	   attempt runs with. */
+	| { op: "supplement_cancel"; anchor: string; job: string }
+	| { op: "supplement_steer"; anchor: string; job: string; text: string }
+	| { op: "supplement_restart"; anchor: string; job: string };
 
 /* ---- projects (GET/POST/DELETE ``/api/projects…``) ------------------------ */
 

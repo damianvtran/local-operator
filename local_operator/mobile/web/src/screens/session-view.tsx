@@ -929,6 +929,8 @@ export function SessionScreen({
 					pending={pendingEchoes}
 					streaming={projection.streaming}
 					topInset={ladderInset}
+					supplements={projection.supplements}
+					projectionPid={projection.pid}
 				/>
 			)}
 
