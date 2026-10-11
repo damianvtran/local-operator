@@ -253,8 +253,7 @@ def _shipped_locales() -> list[str]:
         if not carried:
             continue
         if all(
-            (entry := record.get(namespace)) is not None
-            and entry.get("status") == "passed"
+            (entry := record.get(namespace)) is not None and entry.get("status") == "passed"
             # `en_sha is not None` is LOAD-BEARING, not belt-and-braces: the
             # entry is read with `.get`, so a `passed` entry that OMITS
             # `source_sha256` yields None too — and None == None would then read
@@ -262,8 +261,7 @@ def _shipped_locales() -> list[str]:
             # minor M1, reproduced: locale ships with an unverifiable
             # namespace). Requiring a real `en` hash first keeps the docstring's
             # promise structural instead of incidental.
-            and (en_sha := _en_sha(namespace)) is not None
-            and entry.get("source_sha256") == en_sha
+            and (en_sha := _en_sha(namespace)) is not None and entry.get("source_sha256") == en_sha
             for namespace in carried
         ):
             shipped.add(locale)
