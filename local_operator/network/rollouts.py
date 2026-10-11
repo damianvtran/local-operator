@@ -6,8 +6,10 @@ WHAT THIS FILE OWNS (RU §8.2 item 3, first half; the trigger note §4/§6):
   (origin, network), in RU §6.1's exact shape, written under the approvals
   store's discipline (atomic replace, a per-record flock, reader-never-
   creates) and superseding an older ``active`` record for the same network.
-- **The driver thread** — ``mesh-rollout``, registered as a start hook so a
-  suite that builds relays without starting them pays for no thread. It scans
+- **The driver thread** — ``mesh-rollout``, registered as a start hook (with
+  a matching stop hook that reaps it at ``RelayServer.stop()`` — round 5,
+  Q-R5-1) so a suite that builds relays without starting them pays for no
+  thread. It scans
   the rollouts directory every :data:`SCAN_INTERVAL_S`, and per member runs
   the pass the note freezes: one ask at a time, skip-then-retry, a ``busy``
   member parked on the catch-up cadence (never waited on, never forced), a
@@ -72,6 +74,12 @@ ROLLOUTS_DIRNAME = "rollouts"
 #: wake-up op, no new local op — and the bound on how stale every catch-up
 #: path can be: ``--resume`` clears floors and the next scan picks them up.
 SCAN_INTERVAL_S = 15.0
+
+#: Bounded join for ``stop_driver`` (round 5, Q-R5-1). The page loop's join in
+#: relay.py carries the same shape: a tick may be mid-dial when the stop lands,
+#: and ``stop()`` must not inherit a peer's latency — the thread is a daemon, so
+#: this bound is about promptness, not about leaking a thread nobody can reach.
+DRIVER_STOP_JOIN_S = 5.0
 
 #: The catch-up cadence (seconds): the re-ask floor for a member parked
 #: ``busy``/``unreachable``. One number, because "next contact" is one
@@ -754,10 +762,25 @@ class RolloutDriver(threading.Thread):
     def __init__(self, server: "RelayServer") -> None:
         super().__init__(name="mesh-rollout", daemon=True)
         self.server = server
+        #: The stop/reap signal (round 5, Q-R5-1). NOT ``_stop``: ``Thread``
+        #: owns that attribute internally (``_wait_for_tstate_lock`` CALLS it),
+        #: so shadowing it broke ``join`` with "'Event' object is not callable"
+        #: — found by this fix's own cells. The loop WAITS on this event rather
+        #: than calling ``time.sleep``, which fixes two things at once: a stop
+        #: lands within one boundary instead of never, and a process-global
+        #: ``time.sleep`` patch in a co-resident test (the WAL cell in
+        #: ``test_attention_lock_contention`` patches ``time.sleep``
+        #: module-wide) cannot capture this driver's cadence at all. The old
+        #: ``time.sleep(15.0)`` loop was captured that way and took
+        #: ``test (3.12, 0)`` red twice on the S3a head.
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        """Ask the loop to end; the next wake returns immediately."""
+        self._stop_event.set()
 
     def run(self) -> None:  # pragma: no cover — the loop is driven by tick() in cells
-        while True:
-            time.sleep(SCAN_INTERVAL_S)
+        while not self._stop_event.wait(SCAN_INTERVAL_S):
             tick(self.server)
 
 
@@ -771,6 +794,25 @@ def ensure_driver(server: "RelayServer") -> RolloutDriver:
         _DRIVERS[id(server)] = driver
         driver.start()
         return driver
+
+
+def stop_driver(server: "RelayServer", *, timeout: float = DRIVER_STOP_JOIN_S) -> None:
+    """Stop and reap this relay's driver, if it has one (round 5, Q-R5-1).
+
+    Wired into ``RelayServer.stop()`` via the slice's ``on_stop`` hook, so the
+    driver does not outlive the relay: ``stop()``'s post-condition is that the
+    device is quiet, and an immortal scan thread broke that — the same class of
+    leak the page-loop join closes there. The join is BOUNDED for the page
+    loop's reason: a tick may be mid-dial, and a stop that waited on a peer
+    would make every caller's stop cost depend on another machine. The thread is
+    a daemon, so the bound is a promptness claim, not an unreachable leak.
+    """
+    with _DRIVER_LOCK:
+        driver = _DRIVERS.pop(id(server), None)
+    if driver is None:
+        return
+    driver.stop()
+    driver.join(timeout=timeout)
 
 
 def resume_record(
@@ -858,12 +900,20 @@ def latest_active(  # noqa: SIM108 — the loop is clearer than a comprehension 
 
 
 def install(server: "RelayServer") -> None:
-    """Register the driver as a start hook. This slice serves no ops of its own.
+    """Register the driver's start and stop hooks. This slice serves no ops.
 
     ``register_ops`` with an empty op table is exactly the shape wanted: no
-    peer or local op, no slow slot, no capability table change — one hook,
-    run once when the relay starts, on its own daemon thread (relay.py's
-    ``_run_start_hooks``). The driver is what S3b's trigger will wake into
-    work; until then it scans empty directories.
+    peer or local op, no slow slot, no capability table change — one start
+    hook, run once when the relay starts, on its own daemon thread (relay.py's
+    ``_run_start_hooks``), and its matching stop hook, run inline by
+    ``RelayServer.stop()`` (round 5, Q-R5-1: a driver that outlived the relay
+    kept ticking a root the caller believed quiet, and its ``time.sleep``
+    boundaries were visible to any process-global patch of ``time.sleep``).
+    The driver is what S3b's trigger will wake into work; until then it scans
+    empty directories.
     """
-    server.register_ops({}, on_start={"mesh-rollout": lambda: ensure_driver(server)})
+    server.register_ops(
+        {},
+        on_start={"mesh-rollout": lambda: ensure_driver(server)},
+        on_stop={"mesh-rollout": lambda: stop_driver(server)},
+    )

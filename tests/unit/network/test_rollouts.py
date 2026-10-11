@@ -594,11 +594,12 @@ def test_main_defers_the_verbs_resume_to_the_verb(tmp_path: Path) -> None:
     assert proc.returncode != 0, proc.returncode
 
 
-def test_the_slice_registers_one_start_hook_and_no_ops() -> None:
+def test_the_slice_registers_start_and_stop_hooks_and_no_ops() -> None:
     server = _Server(Path("/nonexistent-rollouts-root"))
     rollouts.install(cast(Any, server))
     assert server.ops == {}, "S3a serves no ops"
     assert list(server.kw.get("on_start", {})) == ["mesh-rollout"], server.kw
+    assert list(server.kw.get("on_stop", {})) == ["mesh-rollout"], server.kw
     assert not server.kw.get("local_handlers") and not server.kw.get("slow"), server.kw
 
 
@@ -620,23 +621,71 @@ def test_the_driver_is_dormant_until_a_record_exists(
         meshupdate, "update_peer", lambda *a, **k: pytest.fail("the dormant driver asked a peer")
     )
     driver = rollouts.ensure_driver(cast(Any, server))
-    assert driver.name == "mesh-rollout", driver.name
-    time.sleep(0.3)
-    assert not rollouts.rollouts_dir(root).exists(), "a dormant driver created the rollouts dir"
-    assert server.audit.rows == [], server.audit.rows
+    try:
+        assert driver.name == "mesh-rollout", driver.name
+        time.sleep(0.3)
+        assert not rollouts.rollouts_dir(root).exists(), "a dormant driver created the rollouts dir"
+        assert server.audit.rows == [], server.audit.rows
 
-    asked: list[str] = []
-    monkeypatch.setattr(
-        meshupdate, "update_peer", lambda s, d, *, rollout="": asked.append(d) or _answer("busy")
-    )
-    record = _open(root, devices=["d_a"], now=time.time())
-    time.sleep(0.4)
-    assert asked and asked[0] == "d_a", asked
-    assert _live(record["id"], root)["members"][0]["state"] in (
-        "deferred",
-        "applying",
-        "pending",
-    )
+        asked: list[str] = []
+        monkeypatch.setattr(
+            meshupdate,
+            "update_peer",
+            lambda s, d, *, rollout="": asked.append(d) or _answer("busy"),
+        )
+        record = _open(root, devices=["d_a"], now=time.time())
+        time.sleep(0.4)
+        assert asked and asked[0] == "d_a", asked
+        assert _live(record["id"], root)["members"][0]["state"] in (
+            "deferred",
+            "applying",
+            "pending",
+        )
+    finally:
+        # A cell that starts the driver reaps it (round 5, Q-R5-1): a leaked
+        # loop kept ticking into sibling tests in the same worker.
+        rollouts.stop_driver(cast(Any, server))
+    assert not driver.is_alive(), "the driver outlived its test's reaping"
+
+
+def test_the_driver_dies_at_stop_and_rides_no_timer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-R5-1: the driver stops on demand, and its cadence never rides ``time.sleep``.
+
+    Both halves are the fix for the CI red this cell exists to keep red-proof:
+    ``test_attention_lock_contention``'s WAL cell patches ``time.sleep``
+    process-globally, and a driver that called ``time.sleep(15.0)`` while
+    co-resident was captured by it. The loop waits on its own stop event, so
+    (a) ``stop_driver`` lands within one boundary, and (b) a patched
+    ``time.sleep`` sees no driver boundary AT ALL — asserted against a
+    deliberately unique interval so no other thread's sleep can alias it.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    unique = 0.123456
+    monkeypatch.setattr(rollouts, "SCAN_INTERVAL_S", unique)
+    calls: list[float] = []
+    real_sleep = time.sleep
+
+    def _record(seconds: float) -> None:
+        calls.append(seconds)
+        real_sleep(seconds)
+
+    monkeypatch.setattr(time, "sleep", _record)
+    driver = rollouts.ensure_driver(cast(Any, server))
+    real_sleep(0.4)
+    assert driver.is_alive(), "the driver never came up"
+    rollouts.stop_driver(cast(Any, server))
+    assert not driver.is_alive(), "the driver outlived stop_driver"
+    assert id(server) not in rollouts._DRIVERS
+    assert unique not in calls, f"the driver's cadence rode time.sleep {calls.count(unique)} times"
+    # The reap is complete: a fresh ensure starts a NEW thread that also stops.
+    again = rollouts.ensure_driver(cast(Any, server))
+    assert again is not driver
+    real_sleep(0.2)
+    rollouts.stop_driver(cast(Any, server))
+    assert not again.is_alive(), "the second driver outlived stop_driver"
 
 
 def test_the_cli_verbs_mutate_the_record(monkeypatch: pytest.MonkeyPatch) -> None:

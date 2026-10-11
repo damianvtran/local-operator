@@ -4171,6 +4171,14 @@ class RelayServer:
         #: installed at CONSTRUCTION and a test builds hundreds of relays it never
         #: starts, so working here would spend their time on work no test asked for.
         self._slice_start_hooks: list[tuple[str, Callable[[], Any]]] = []
+        #: ``(name, hook)`` a slice registered to run when the relay STOPS (see
+        #: ``register_ops``, ``on_stop``). Run synchronously from ``stop()``: a
+        #: slice loop that outlives the relay keeps touching a root the caller
+        #: believes is quiet — the mesh-rollout driver did exactly that and its
+        #: boundary was visible to a co-resident test's ``time.sleep`` patch
+        #: (QA round 5, Q-R5-1) — and an asynchronous hop here would hand the
+        #: caller that same race back.
+        self._slice_stop_hooks: list[tuple[str, Callable[[], Any]]] = []
         self._slow_lock = threading.Lock()
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
@@ -4272,6 +4280,21 @@ class RelayServer:
             thread = threading.Thread(target=_run, name=f"mesh-start-{label}", daemon=True)
             thread.start()
 
+    def _run_slice_stop_hooks(self) -> None:
+        """Run each slice's stop hook, INLINE and in registration order.
+
+        WHY INLINE (QA round 5, Q-R5-1): ``stop()``'s return is when the caller
+        reads the device as quiet, and the driver this exists for is what made
+        that false — an off-thread hop would put the same race back in a
+        different shape. A hook that raises is REPORTED, and the remaining hooks
+        still run: one slice's teardown must never strand another's.
+        """
+        for label, hook in self._slice_stop_hooks:
+            try:
+                hook()
+            except Exception as exc:  # noqa: BLE001 — see the docstring
+                print(f"mesh relay: stop hook {label} failed ({exc})", file=sys.stderr)
+
     def _sweep_approvals_once(self) -> None:
         """One best-effort retention sweep for the device-local approvals store.
 
@@ -4351,6 +4374,12 @@ class RelayServer:
         narrow the race it is meant to close.
         """
         self._stop.set()
+        # SLICE LOOPS GO NEXT, before any of the link teardown below: a slice's
+        # stop hook is synchronous by contract (``register_ops``'s ``on_stop``),
+        # the driver it reaps must not tick through a teardown it would race,
+        # and "stop() returned" has to mean the device is quiet (round 5,
+        # Q-R5-1).
+        self._run_slice_stop_hooks()
         # THE MEMBERSHIP LOOP SLEEPS ON ITS OWN WAKE EVENT, so a stop must set that
         # too: without it a stop waits out up to MEMBERSHIP_PULL_PASS_S before the
         # loop notices — the same "nothing on the way in checks _stop" shape this
@@ -5830,6 +5859,7 @@ class RelayServer:
         slow: Mapping[str, float] | None = None,
         replace: bool = False,
         on_start: Mapping[str, Callable[[], Any]] | None = None,
+        on_stop: Mapping[str, Callable[[], Any]] | None = None,
     ) -> None:
         """Let a slice module serve its ops without editing this file.
 
@@ -5838,7 +5868,9 @@ class RelayServer:
         control-socket ops (:data:`SLICE_LOCAL_OPS`). ``slow`` maps a peer op to
         its owner-side deadline in seconds and moves its handler off the link's
         reader (see :data:`SLOW_OP_WORKERS`). ``on_start`` maps a LABEL to a
-        callable run once when the relay starts, on its own daemon thread.
+        callable run once when the relay starts, on its own daemon thread;
+        ``on_stop`` maps a LABEL to a callable run when the relay stops, INLINE
+        on the stopping thread.
 
         WHY ``on_start`` EXISTS. Some slice state can only be settled by a relay
         that is up: the move's crash recovery has to run when a relay starts on a
@@ -5849,6 +5881,16 @@ class RelayServer:
         M-3). Each hook runs on a DAEMON THREAD and its failure is logged and
         swallowed: a relay that refused to start because one slice's housekeeping
         raised would take every link on this device down with it.
+
+        WHY ``on_stop`` EXISTS. A slice loop started by ``on_start`` (the
+        mesh-rollout driver; the definitions syncer for its own reasons) must not
+        outlive the relay: a scan thread that keeps ticking a root the caller
+        believes quiet is a leak with a visible cost — the driver's
+        ``time.sleep`` boundary was captured by a co-resident test's
+        process-global patch and took ``test (3.12, 0)`` red twice (QA round 5,
+        Q-R5-1). ``on_stop`` hooks run INLINE on the stopping thread, in
+        registration order, so ``stop()``'s return is the moment the quiet is
+        real; a hook that raises is REPORTED and the remaining hooks still run.
 
         THE RULES, each a refusal rather than a warning:
 
@@ -5895,7 +5937,13 @@ class RelayServer:
                 raise TypeError(f"start hook {label!r} is not callable")
             if any(label == existing for existing, _hook in self._slice_start_hooks):
                 raise ValueError(f"a start hook named {label!r} is already registered")
+        for label, hook in (on_stop or {}).items():
+            if not callable(hook):
+                raise TypeError(f"stop hook {label!r} is not callable")
+            if any(label == existing for existing, _hook in self._slice_stop_hooks):
+                raise ValueError(f"a stop hook named {label!r} is already registered")
         self._slice_start_hooks.extend((label, hook) for label, hook in (on_start or {}).items())
+        self._slice_stop_hooks.extend((label, hook) for label, hook in (on_stop or {}).items())
         self._handlers.update(handlers)
         self._local_slice_handlers.update(local_handlers)
         for name in handlers:
