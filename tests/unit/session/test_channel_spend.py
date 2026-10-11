@@ -897,7 +897,7 @@ def test_a_new_channel_and_basis_flow_through_the_breakdown_without_schema_chang
     # Register the pair the way a later analytics PR would: label, canonical
     # order, basis meta. Nothing else in the tables moves.
     monkeypatch.setitem(channel_spend_module.CHANNEL_LABELS, "video", "Video generation")
-    order = list(channel_spend_module.CHANNEL_ORDER)
+    order: list[str] = list(channel_spend_module.CHANNEL_ORDER)
     order.insert(order.index("image") + 1, "video")
     monkeypatch.setattr(channel_spend_module, "CHANNEL_ORDER", tuple(order))
     monkeypatch.setitem(
@@ -946,11 +946,13 @@ def test_the_vocabulary_registries_cover_every_registered_value() -> None:
 
 
 def test_the_breakdown_entry_cap_groups_the_remainder() -> None:
-    """>cap channels: the kept prefix stands, the rest folds into ``other``.
+    """At most ``SPEND_BREAKDOWN_ENTRY_CAP`` entries; the rest fold into ``other``.
 
-    The same overflow discipline as the wire's row cap (design §4.6): money is
-    not lost, counts and the worst rung survive, and the partition still
-    reconciles — a pathological session cannot blow the section up.
+    The same overflow discipline as the wire's row cap (design §4.6; review
+    round 1, MINOR): the first ``cap - 1`` ranked entries keep their places
+    and everything past that edge aggregates into ONE ``other`` entry — money
+    summed, worst rung applied, counts preserved — so the partition never
+    exceeds the cap, loses no money and still reconciles.
     """
     records = [
         record(
@@ -963,20 +965,23 @@ def test_the_breakdown_entry_cap_groups_the_remainder() -> None:
     ]
     generated = payload(records)
     entries = generated["breakdown"]["by_source"]
-    assert len(entries) == SPEND_BREAKDOWN_ENTRY_CAP + 1
+    assert len(entries) == SPEND_BREAKDOWN_ENTRY_CAP
     assert [entry["id"] for entry in entries[:-1]] == [
-        f"chan{index:02d}" for index in range(SPEND_BREAKDOWN_ENTRY_CAP)
+        f"chan{index:02d}" for index in range(SPEND_BREAKDOWN_ENTRY_CAP - 1)
     ]
     folded = entries[-1]
     assert folded["id"] == "other"
     assert folded["label"] == "Other"
-    assert folded["amount_micro"] == 13000, "chan13 was never sized; only its count survives"
+    assert (
+        folded["amount_micro"] == 12000 + 13000
+    ), "chan13 was never sized; only its count survives"
     assert folded["unstated_records"] == 1
     assert folded["knowledge"] == "unknown", "an unsized folded entry may not read exact"
     assert sum(entry["amount_micro"] or 0 for entry in entries) == generated["total_micro"]
 
-    # A session that ALREADY has an ``other`` entry folds into it rather than
-    # emitting a second one — the partition stays a partition.
+    # A session that ALREADY has an ``other`` entry folds the remainder into
+    # it rather than emitting a second one — the count then sits below the
+    # cap and the partition stays a partition.
     with_other = payload(
         [
             *records,
@@ -984,9 +989,9 @@ def test_the_breakdown_entry_cap_groups_the_remainder() -> None:
         ]
     )
     other_entries = with_other["breakdown"]["by_source"]
-    assert len(other_entries) == SPEND_BREAKDOWN_ENTRY_CAP
+    assert len(other_entries) == SPEND_BREAKDOWN_ENTRY_CAP - 1
     assert other_entries[0]["id"] == "other"
-    assert other_entries[0]["amount_micro"] == 777 + 12000 + 13000
+    assert other_entries[0]["amount_micro"] == 777 + 11000 + 12000 + 13000
     assert sum(entry["amount_micro"] or 0 for entry in other_entries) == with_other["total_micro"]
 
 
@@ -1044,6 +1049,39 @@ def test_entry_knowledge_never_reads_exacter_than_its_parts() -> None:
         inference=InferenceSnapshot(micro=900000, calls=12, priced_calls=12, knowledge="floor"),
     )
     assert floor_only["breakdown"]["by_agent"][0]["knowledge"] == "floor"
+
+
+def test_the_inference_half_rung_follows_combines_activity_gate() -> None:
+    """MAJOR (review round 1): an entry mirrors the session over the inference half.
+
+    A never-accrued accumulator can carry money with NO calls (a remainder) or
+    unpriced calls only. ``combine`` counts the half's ``unknown`` only when
+    calls exist, and maps that case to ``partial`` — so the ``parent`` and
+    ``inference`` entries must derive their rungs from the same two facts, or
+    one reads vaguer than the session over the identical money (or exacter,
+    the other way).
+    """
+    remainder = payload(
+        [record(record_id="search:1")],
+        inference=InferenceSnapshot(micro=400000, calls=0),
+    )
+    assert remainder["knowledge"] == "exact"
+    agents = {entry["id"]: entry for entry in remainder["breakdown"]["by_agent"]}
+    sources = {entry["id"]: entry for entry in remainder["breakdown"]["by_source"]}
+    assert agents["parent"]["knowledge"] == "exact", "money without calls is not unpriced activity"
+    assert sources["inference"]["knowledge"] == "exact"
+
+    unpriced = payload(
+        [record(record_id="search:1")],
+        inference=InferenceSnapshot(micro=0, calls=2, priced_calls=0, knowledge="unknown"),
+    )
+    assert unpriced["knowledge"] == "partial"
+    agents = {entry["id"]: entry for entry in unpriced["breakdown"]["by_agent"]}
+    sources = {entry["id"]: entry for entry in unpriced["breakdown"]["by_source"]}
+    assert (
+        agents["parent"]["knowledge"] == "partial"
+    ), "unpriced calls degrade to partial, never vaguer"
+    assert sources["inference"]["knowledge"] == "partial"
 
 
 def test_custom_type_literal_is_pinned() -> None:

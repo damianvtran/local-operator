@@ -169,14 +169,14 @@ CHANNEL_LABELS: Mapping[str, str] = {
     "other": "Other",
 }
 
-#: Entries one ``breakdown`` partition may carry before the remainder is
-#: GROUPED into the ``other`` entry (design §4.6). ``by_agent`` is bounded at 2
-#: by construction; ``by_source`` grows with the session's channel ids, and the
-#: section must never scale with a pathological session — so the same overflow
-#: discipline the wire's row cap uses applies: the kept prefix keeps its order,
-#: the remainder's stated money is summed into ``other``, its worst knowledge
-#: applies and its counts are preserved, keeping the partition reconcilable to
-#: the total.
+#: The most entries one ``breakdown`` partition may carry IN TOTAL (design
+#: §4.6; review round 1, MINOR). ``by_agent`` is bounded at 2 by construction;
+#: ``by_source`` grows with the session's channel ids, and the section must
+#: never scale with a pathological session — so the same overflow discipline
+#: the wire's row cap uses applies, with the count itself bounded: the first
+#: ``cap - 1`` ranked entries keep their order, every entry past that edge is
+#: GROUPED into ``other`` (money summed, worst knowledge applied, counts
+#: preserved), keeping the partition reconcilable to the total.
 SPEND_BREAKDOWN_ENTRY_CAP = 12
 
 STATUS_OK = "ok"
@@ -841,6 +841,22 @@ def _record_rung(records: Sequence[ChannelSpendRecord]) -> str:
     return "exact"
 
 
+def _inference_half_rung(inference: InferenceSnapshot) -> str:
+    """The rung the inference half contributes to a breakdown entry.
+
+    Mirrors ``combine``'s OWN inference booleans (review round 1, MAJOR): an
+    ``unknown`` accumulator degrades only when calls EXIST — money without
+    calls is a stated remainder, not unpriced activity — and it degrades to
+    ``partial``, because some money is stated and some calls are not. A
+    ``partial``/``floor`` accumulator contributes as-is. Deriving an entry's
+    rung from these same facts is what keeps it from reading exacter OR
+    vaguer than the session over the identical money.
+    """
+    if str(inference.knowledge) == "unknown":
+        return "partial" if inference.calls > 0 else "exact"
+    return str(inference.knowledge)
+
+
 def _contributes(record: ChannelSpendRecord) -> bool:
     """Whether one record is ACTIVITY for a breakdown entry.
 
@@ -933,19 +949,21 @@ def _breakdown_entry(
 
 
 def _group_entries_past_cap(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Bound one partition: entries past the cap fold into ``other``.
+    """Bound one partition to :data:`SPEND_BREAKDOWN_ENTRY_CAP` entries.
 
-    The same overflow discipline the wire's row cap uses. The kept prefix
-    keeps its order; the remainder's stated money is SUMMED into the ``other``
-    entry (created here when the session has no ``other`` entry of its own),
-    its worst rung applies, its unstated counts are preserved and its bases are
-    unioned — so the partition still reconciles to the total and a reader can
-    see that more categories exist.
+    The same overflow discipline the wire's row cap uses, with one stronger
+    rule (review round 1, MINOR): the COUNT is bounded, not just the prefix —
+    the first ``cap - 1`` ranked entries keep their places, and every entry
+    past that edge folds into the ``other`` entry (reused in place when the
+    session already has one, else appended as the aggregate). The folded
+    money is SUMMED, its worst rung applies, its unstated counts are preserved
+    and its bases are unioned — so the partition still reconciles to the total
+    and a reader can see that more categories exist.
     """
     if len(entries) <= SPEND_BREAKDOWN_ENTRY_CAP:
         return entries
-    kept = entries[:SPEND_BREAKDOWN_ENTRY_CAP]
-    folded = entries[SPEND_BREAKDOWN_ENTRY_CAP:]
+    kept = entries[: SPEND_BREAKDOWN_ENTRY_CAP - 1]
+    folded = entries[SPEND_BREAKDOWN_ENTRY_CAP - 1 :]
     aggregate = next((entry for entry in kept if entry["id"] == "other"), None)
     if aggregate is None:
         aggregate = _breakdown_entry(
@@ -997,13 +1015,16 @@ def _breakdown_sections(
 
     Entry rungs come from the SAME booleans ``combine`` already derives (the
     worst of its contributors' rungs), so an entry can never read exacter than
-    its money. The subagents rung is the published ``children_knowledge``: the
-    block itself already degrades to ``partial`` when a relayed record cannot
-    be sized.
+    its money — nor VAGUER (review round 1, MAJOR): the inference half's rung
+    is itself derived through :func:`_inference_half_rung`, with combine's own
+    activity gate on the unpriced-calls case. The subagents rung is the
+    published ``children_knowledge``: the block itself already degrades to
+    ``partial`` when a relayed record cannot be sized.
     """
     ledger_rung = str(children.knowledge)
     ledger_stated = _statement(int(children.total_micro), ledger_rung)
-    inference_stated = _statement(int(inference.micro), str(inference.knowledge))
+    inference_rung = _inference_half_rung(inference)
+    inference_stated = _statement(int(inference.micro), inference_rung)
 
     # -- by_agent ------------------------------------------------------------
     by_agent: list[dict[str, Any]] = []
@@ -1022,7 +1043,7 @@ def _breakdown_sections(
                 amount_micro=_sum_stated(
                     [inference_stated, *(record.amount_micro for record in records)]
                 ),
-                rungs=(_record_rung(records), str(inference.knowledge)),
+                rungs=(_record_rung(records), inference_rung),
                 unstated_records=_unstated_count(records),
                 bases=parent_bases,
             )
@@ -1086,7 +1107,7 @@ def _breakdown_sections(
                     ]
                 ),
                 rungs=(
-                    str(inference.knowledge),
+                    inference_rung,
                     ledger_rung,
                     _record_rung(inference_named),
                 ),
