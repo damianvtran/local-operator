@@ -19,6 +19,8 @@ is S1's and is exercised against real relays in ``test_mesh_update.py``.
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
 from argparse import Namespace
 from pathlib import Path
@@ -425,34 +427,45 @@ def test_a_fully_terminal_pass_closes_with_ok_and_counts(
 # ---------------------------------------------------------------------------
 
 
-def test_a_codeless_refusal_parks_the_member_as_no_grant(
+def test_a_codeless_refusal_is_recorded_without_claiming_and_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Q-1 (round 1): the authoriser's codeless `refused` IS the grant's absence.
+    """R2-2 (round 2): the wire's codeless "not now" is never a claim of why.
 
-    The live shape: `update_peer` reports the error frame's code — `refused`
-    when the wire withheld which guard fired (`wire.refusal_frame`) — and the
-    record must PARK the member (`skipped (no_grant)`), not defer it onto the
-    failure ladder. Three scans audit one change and ask exactly once.
+    The live answer is the error frame's own shape — ``{"ok": false, "code":
+    "refused", "message": …}``, NO ``state`` key (the nit the previous cell
+    carried; the live error-frame path never sets one). It must record
+    ``refused``/``refused`` with NO cause, retry on the cadence, and keep ONE
+    row across ≥3 ticks (the rollout-scoped dedupe).
     """
     root = tmp_path / "cfg"
     server = _Server(root)
     record = _open(root, devices=["d_a"])
-    asked = _scripted(
-        monkeypatch,
-        [{"ok": False, "code": "refused", "message": "not authorised", "state": "refused"}],
-    )
+    live = {"ok": False, "code": "refused", "message": "not authorised"}
+    asked: list[str] = []
+
+    def _fake(server_: Any, device: str, *, rollout: str = "") -> dict[str, Any]:
+        asked.append(device)
+        return dict(live)
+
+    monkeypatch.setattr(meshupdate, "update_peer", _fake)
     rollouts.step_record(server, record["id"], now=1000.0)
     member = _member(rollouts.read_record(record["id"], root), "d_a")
-    assert member["state"] == "skipped" and member["code"] == "no_grant", member
-    assert float(member["next_ask_at"]) == 0.0, "a parked member has no floor"
-    causes = [r.cause for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
-    assert causes == ["capability_denied"], causes
-    # Parked means parked: two cadence scans later the member is still asked once.
+    assert member["state"] == "refused" and member["code"] == "refused", member
+    assert float(member["next_ask_at"]) == 1000.0 + rollouts.CADENCE_S, member
+    rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
+    assert len(rows) == 1 and rows[0].cause == "", rows  # non-claiming: no capability_denied
+
+    # Inside the floor: no ask. At the cadence: asked again; still ONE row.
+    rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S - 1.0)
     rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
     rollouts.step_record(server, record["id"], now=1000.0 + 2 * rollouts.CADENCE_S + 2.0)
-    assert asked == ["d_a"], asked
-    assert rollouts.read_record(record["id"], root)["state"] == "done"
+    assert asked == ["d_a", "d_a", "d_a"], asked
+    rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
+    assert len(rows) == 1, rows
+    assert (
+        rollouts.read_record(record["id"], root)["state"] == "active"
+    ), "a codeless refusal is not terminal — the window is the bound"
 
 
 def test_the_failure_ladder_is_consecutive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -517,11 +530,51 @@ def test_the_real_parser_builds_and_both_resume_spellings_parse() -> None:
 
     parser = build_cli_parser()  # must not raise
     verb = parser.parse_args(["network", "update", "--resume", "ro_x"])
-    assert getattr(verb, "resume", None) == "ro_x", vars(verb)
+    assert getattr(verb, "rollout_resume", None) == "ro_x", vars(verb)
     latest = parser.parse_args(["network", "update", "--cancel"])
     assert getattr(latest, "cancel", "x") == "", vars(latest)  # const: newest active
     sibling = parser.parse_args(["config", "list", "--resume", "abc"])
     assert getattr(sibling, "resume", None) == "abc", "propagation still reaches other verbs"
+
+
+def test_main_defers_the_verbs_resume_to_the_verb(tmp_path: Path) -> None:
+    """Q-R2-1 (round 2): the REAL `main()` must not eat the verb's `--resume`.
+
+    `main()` resolves a session `--resume` BEFORE dispatching, so a verb-level
+    `--resume` used to arrive as "no session 'ro_missing' to resume". The verb
+    owns its flag through its own dest; this drives the real entry point in a
+    subprocess on an isolated root and asserts the ROLLOUT sentence comes back
+    — reversing the dest rename turns this red on the "no session" assertion.
+    """
+    import subprocess
+
+    root = tmp_path / "home"
+    root.mkdir()
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in ("PATH", "TERM", "LANG", "LC_ALL", "TMPDIR")
+    }
+    env.update({"HOME": str(root), "LOCAL_OPERATOR_CONFIG_DIR": str(root / ".local-operator")})
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from local_operator.cli import main; sys.exit(main())",
+            "network",
+            "update",
+            "--resume",
+            "ro_missing",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=180,
+    )
+    text = proc.stdout + proc.stderr
+    assert "no rollout record 'ro_missing'" in text, text
+    assert "no session" not in text, text
+    assert proc.returncode != 0, proc.returncode
 
 
 def test_the_slice_registers_one_start_hook_and_no_ops() -> None:
@@ -578,11 +631,11 @@ def test_the_cli_verbs_mutate_the_record(monkeypatch: pytest.MonkeyPatch) -> Non
         net_cli, "_relay_answer", lambda *a, **k: pytest.fail("--resume/--cancel are local")
     )
 
-    ns = Namespace(resume="", cancel=None, peer="", json=False)
+    ns = Namespace(rollout_resume="", cancel=None, peer="", json=False)
     assert net_cli._cmd_update(ns) == 0
     assert rollouts.read_record(record["id"])["state"] == "active"
 
-    ns = Namespace(resume=None, cancel="", peer="", json=False)
+    ns = Namespace(rollout_resume=None, cancel="", peer="", json=False)
     assert net_cli._cmd_update(ns) == 0
     assert rollouts.read_record(record["id"])["state"] == "abandoned"
 

@@ -12,7 +12,9 @@ WHAT THIS FILE OWNS (RU §8.2 item 3, first half; the trigger note §4/§6):
   the pass the note freezes: one ask at a time, skip-then-retry, a ``busy``
   member parked on the catch-up cadence (never waited on, never forced), a
   failed member backed off, an unreachable member caught on its next contact,
-  a ``no_grant`` member parked for the rollout with the remedy recorded.
+  a codeless refusal retried on the cadence (the wire's "not now", never a
+  claim of why — round 2, R2-2), and a CODED ``no_grant`` member parked for
+  the rollout with the remedy recorded.
   Every state re-enters from the record; the record is the only state.
 - **The origin-side audit rows** — ``update_rollout_started`` (durable, written
   by S3b's hook through :func:`open_record`'s callers), ``update_member_state``
@@ -100,9 +102,15 @@ DETAIL_CAP = 200
 
 #: The member states that mean "nothing more will happen to this member
 #: without a new rollout" (the §3 vocabulary map's record column). ``failed``
-#: is NOT terminal: the window is its bound.
+#: is NOT terminal: the window is its bound. ``refused`` SPLITS (round 2,
+#: R2-2): a rule refusal is terminal, a codeless authoriser refusal is retried
+#: — :func:`member_terminal` is the one place that decides.
 DONE_STATES: frozenset[str] = frozenset({"done", "already_on_target", "ahead_of_target"})
 TERMINAL_STATES: frozenset[str] = DONE_STATES | {"refused", "skipped"}
+
+#: The codes that make a ``refused`` member TERMINAL: a member-side RULE said
+#: this target cannot be installed anywhere (RU §3's rule refusals).
+RULE_REFUSAL_CODES: tuple[str, ...] = ("target_not_published", "editable_install")
 
 #: The audit kinds this half emits (registered in ``audit.py`` with the rest).
 ROLLOUT_STARTED = "update_rollout_started"
@@ -311,6 +319,24 @@ def member_of(record: Mapping[str, Any], device_id: str) -> dict[str, Any] | Non
     return None
 
 
+def member_terminal(member: Mapping[str, Any]) -> bool:
+    """Is this member done being asked, or merely refused FOR NOW? (round 2, R2-2)
+
+    ``refused`` splits in two: a RULE refusal (:data:`RULE_REFUSAL_CODES`) is
+    terminal for the rollout, while a CODELESS authoriser refusal (``code
+    "refused"``) is the wire saying "not now" without saying why — a
+    previous-epoch or reconcile-phase refusal self-heals — so it is retried on
+    the cadence until the window closes (note §4's ``not_authorised`` row,
+    REALIGNED by this slice's errata). Everything else terminal is terminal.
+    """
+    state = str(member.get("state") or "")
+    if state not in TERMINAL_STATES:
+        return False
+    if state == "refused":
+        return str(member.get("code") or "") in RULE_REFUSAL_CODES
+    return True
+
+
 def _mark_applying(record: dict[str, Any], device: str) -> bool:
     """Set one member to the in-flight ``applying`` state before its ask.
 
@@ -437,24 +463,37 @@ def classify_answer(answer: Mapping[str, Any], *, fails: int, now: float) -> dic
         # message the CLI already prints); the member's durable
         # `authorisation_refused` row is its own record.
         return moved("skipped", new_code="no_grant", cause="capability_denied", outcome="refused")
-    if code == "refused":
-        # THE #2179 RESOLUTION, MADE REAL (round 1, Q-1): the authoriser's
-        # refusal crosses the wire CODELESS by design (which guard fired is
-        # withheld — ``wire.refusal_frame``), and for THIS op the codeless
-        # refusal has exactly one reading in the design: the requester does
-        # not hold `update` on this member (``meshupdate``'s open question
-        # names the two ways to a coded frame; until one lands, this arm is
-        # the honest classification — the pre-round-1 fallback parked the
-        # member on the failure ladder instead). Parked `skipped (no_grant)`
-        # with the member's own sentence (and RU §2's remedy) in ``detail``.
+    if code == "no_grant":
+        # THE CODED GATE (round 2, R2-2): only an answer that NAMES the grant's
+        # absence parks the member for the rollout. Today that code arrives
+        # through ``update_peer``'s coded ``not_authorised`` branch, whose own
+        # docstring calls it the FUTURE coded authoriser frame — the
+        # security-reviewed change this PR's follow-ups name as the S3b
+        # trigger. Parked, never re-asked on the cadence; RU §2's remedy is in
+        # the message the CLI already prints.
         return moved("skipped", new_code="no_grant", cause="capability_denied", outcome="refused")
+    if code == "refused":
+        # A CODELESS AUTHORISER REFUSAL — THE WIRE'S "NOT NOW", NEVER A CLAIM
+        # OF WHY (round 2, R2-2). Every authoriser refusal (missing grant, a
+        # previous epoch, a reconcile-phase reconciliation) crosses codeless by
+        # design (``wire.refusal_frame``) and some of them self-heal, so
+        # claiming `skipped (no_grant)` + `capability_denied` here was a false
+        # statement about the member — and S1's own docstring says it "never
+        # guesses no_grant". The honest record: state ``refused`` with code
+        # ``refused``, NO cause claimed, and a cadence floor — retried like any
+        # other not-now answer, with the rollout-scoped row dedupe (the audit
+        # comparison writes one row per change, so ≥3 ticks of re-asks stay
+        # one row). Only a future CODED ``not_authorised`` frame parks
+        # ``skipped (no_grant)`` (the S3b/follow-up item this PR names).
+        return moved("refused", new_code="refused", floor=CADENCE_S, outcome="refused")
     if code == "predates_rolling_updates":
         return moved("skipped", new_code="predates_rolling_updates", cause="capability_denied")
-    if code in ("target_not_published", "editable_install"):
+    if code in RULE_REFUSAL_CODES:
         # A member-side terminal refusal (the ack carries `state: refused`) or —
         # in the rare case the origin's own build cannot be offered — the same
         # class of fact: this target cannot be installed anywhere, so the
-        # member is terminal for this rollout rather than retried on a timer.
+        # member is terminal for this rollout (:func:`member_terminal`) rather
+        # than retried on a timer.
         return moved("refused", new_code=code, cause="policy", outcome="refused")
     if code in ("unreachable", "no_answer"):
         if code == "no_answer":
@@ -609,7 +648,7 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
         if current is None or current.get("state") != "active":
             return
         member = member_of(current, str(member.get("device"))) or member
-        if str(member.get("state")) in TERMINAL_STATES:
+        if member_terminal(member):
             continue
         if float(member.get("next_ask_at") or 0.0) > moment:
             continue
@@ -676,7 +715,7 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
     if (
         final is not None
         and final.get("state") == "active"
-        and all(str(m.get("state")) in TERMINAL_STATES for m in final.get("members", []))
+        and all(member_terminal(m) for m in final.get("members", []))
     ):
         done = sum(1 for m in final.get("members", []) if str(m.get("state")) in DONE_STATES)
         outcome = "ok" if done == len(final.get("members", [])) else "partial"
@@ -761,7 +800,7 @@ def resume_record(
     def _clear(rec: dict[str, Any]) -> bool:
         cleared = False
         for member in rec.get("members", []):
-            if str(member.get("state")) in TERMINAL_STATES:
+            if member_terminal(member):
                 continue
             if float(member.get("next_ask_at") or 0.0) > 0.0:
                 member["next_ask_at"] = 0.0

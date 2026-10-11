@@ -2191,9 +2191,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_global_flag(parser: argparse.ArgumentParser, *flags: str, **kwargs: Any) -> None:
-    """Add a propagated flag unless the subparser already declares it (round 1, B1).
+def _add_global_flag(parser: argparse.ArgumentParser, flag: str, **kwargs: Any) -> None:
+    """Add one propagated flag unless the subparser already declares it (round 1, B1).
 
+    ONE option string per call, deliberately (round 2, nit): the skip below is
+    all-or-nothing, so a variadic call with a partly-present list would have
+    silently dropped the missing spellings. A single flag cannot half-apply.
     ``lop network update`` owns its own ``--resume`` (the rollouts verb), and a
     second declaration is an ``argparse.ArgumentError`` raised while
     ``build_cli_parser`` runs — which is every `lop` invocation dead at build
@@ -2201,9 +2204,9 @@ def _add_global_flag(parser: argparse.ArgumentParser, *flags: str, **kwargs: Any
     receives the global one (and the recursion below still covers deeper
     levels), so the propagation's own guarantee is unchanged.
     """
-    if any(flag in parser._option_string_actions for flag in flags):
+    if flag in parser._option_string_actions:
         return
-    parser.add_argument(*flags, **kwargs)
+    parser.add_argument(flag, **kwargs)
 
 
 def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:

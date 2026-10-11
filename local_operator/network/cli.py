@@ -758,6 +758,13 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         const="",
         default=None,
         metavar="ID",
+        # DEST DIFFERS ON PURPOSE (round 2, Q-R2-1): ``cli.main`` resolves a
+        # TOP-LEVEL ``--resume`` (the session resume) BEFORE subcommand
+        # dispatch, so a verb that lands its flag in ``args.resume`` has it
+        # eaten ("no session '<id>' to resume"). The verb owns its flag
+        # through its own dest; the command-line SPELLING is the design's
+        # ``--resume``, unchanged.
+        dest="rollout_resume",
         help="clear a rollout's retry floors (default: the newest active one)",
     )
     update_peer_parser.add_argument(
@@ -7683,7 +7690,7 @@ def _cmd_update(args: argparse.Namespace) -> int:
 
     # ``--resume``/``--cancel`` FIRST: they are local record mutations, and a
     # plain ask (peer named or not) is the only path that needs the relay hop.
-    if getattr(args, "resume", None) is not None:
+    if getattr(args, "rollout_resume", None) is not None:
         return _cmd_rollout_resume(args)
     if getattr(args, "cancel", None) is not None:
         return _cmd_rollout_cancel(args)
@@ -7740,7 +7747,7 @@ def _cmd_rollout_resume(args: argparse.Namespace) -> int:
     """``lop network update --resume [<id>]``: clear floors; the scan is the wake."""
     from local_operator.network import rollouts
 
-    ident = str(getattr(args, "resume", "") or "")
+    ident = str(getattr(args, "rollout_resume", "") or "")
     record = _pick_rollout(args, ident)
     record = rollouts.resume_record(str(record["id"])) or record
     waiting = [
