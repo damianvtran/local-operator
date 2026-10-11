@@ -414,11 +414,11 @@ async def test_a_model_that_will_not_answer_in_text_is_a_named_409(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "aside_unanswered"
-    assert detail["message"] == str(AsideUnanswered())
+    assert detail["text"] == str(AsideUnanswered())
     # The sentence must not claim a tool call on BOTH attempts: the reachable
     # second arm is an empty answer, and only the user can see which one they got.
-    assert "both times" not in detail["message"]
-    assert "tool call" in detail["message"] and "ask again" in detail["message"]
+    assert "both times" not in detail["text"]
+    assert "tool call" in detail["text"] and "ask again" in detail["text"]
 
 
 @pytest.mark.asyncio
@@ -501,7 +501,13 @@ async def test_a_retry_naming_the_dropped_entry_id_is_refused(
 
     assert refused.status_code == 409, refused.text
     assert stale.status_code == 409, stale.text
-    assert stale.json()["detail"] == "This aside is no longer available"
+    # E2a: a bare-string refusal is the message envelope now; `text` is the
+    # identical sentence.
+    assert stale.json()["detail"] == {
+        "code": "wire.errors.desktop.aside_unavailable",
+        "params": {},
+        "text": "This aside is no longer available",
+    }
     assert [m.text for m in remote.turns[0]] == ["why?"]
     assert app.state.desktop_asides == {}, "the dropped entry must not come back"
 
@@ -589,8 +595,8 @@ async def test_a_settled_answer_with_no_text_is_a_named_409_and_stores_nothing(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "aside_empty_answer"
-    assert detail["message"] == str(AsideEmptyAnswer())
-    assert "Ask again" in detail["message"]
+    assert detail["text"] == str(AsideEmptyAnswer())
+    assert "Ask again" in detail["text"]
     # NOTHING STORED: no entry, so no empty turn to adopt and no "complete"
     # exchange for the next question to continue.
     assert app.state.desktop_asides == {}

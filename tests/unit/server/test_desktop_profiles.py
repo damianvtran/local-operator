@@ -190,7 +190,8 @@ async def test_known_admission_rejection_survives_attach_decoder_and_http_bounda
     assert caught.value.status_code == 409
     assert caught.value.detail == {
         "code": AttachmentUnavailable.code,
-        "message": str(AttachmentUnavailable()),
+        "params": {"error": str(AttachmentUnavailable())},
+        "text": str(AttachmentUnavailable()),
     }
 
 
