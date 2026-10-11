@@ -155,6 +155,13 @@ def test_shipped_set_requires_fresh_passed_entries(generated, i18n_generate) -> 
     demo = {"demo.x": "x"}
     (root / "en" / "demo.json").write_text(json.dumps(demo), encoding="utf-8")
     fresh = catalogues.catalogue_sha256("en", "demo")
+    # Each locale CARRYING the namespace (its own file on disk) is what makes
+    # the per-namespace gate judge it; see the 2026-10-11 amendment test below.
+    for locale in ("fr", "es", "ru"):
+        (root / locale).mkdir(parents=True, exist_ok=True)
+        (root / locale / "demo.json").write_text(json.dumps(demo), encoding="utf-8")
+    (root / "vi").mkdir(parents=True, exist_ok=True)
+    (root / "vi" / "other.json").write_text(json.dumps({"other.y": "t"}), encoding="utf-8")
     ledger = {
         "schema": 1,
         "entries": [
@@ -168,6 +175,121 @@ def test_shipped_set_requires_fresh_passed_entries(generated, i18n_generate) -> 
     assert i18n_generate._shipped_locales() == ["en", "fr"]
     # No ledger at all: en alone, not an empty set.
     Path(i18n_generate.LEDGER).unlink()
+    assert i18n_generate._shipped_locales() == ["en"]
+
+
+def test_a_new_en_namespace_does_not_un_ship_carried_locales(generated, i18n_generate) -> None:
+    """The E2a tree, exactly (2026-10-11 amendment): `wire.errors.desktop` is
+    born after wave 1.
+
+    Before the per-namespace gate this was the failure mode — one new en
+    namespace dropped the generated set es/fr → en only (measured on the E2a
+    worktree). A namespace the locale does not carry is not judged, so the
+    locale keeps shipping the ones it has; clients read the newborn namespace
+    from en until its own translation wave.
+    """
+    root, emitted = generated
+    (root / "en" / "demo.json").write_text(json.dumps({"demo.x": "x"}), encoding="utf-8")
+    (root / "en" / "newborn.json").write_text(json.dumps({"newborn.y": "y"}), encoding="utf-8")
+    (root / "fr").mkdir(parents=True, exist_ok=True)
+    (root / "fr" / "demo.json").write_text(json.dumps({"demo.x": "t"}), encoding="utf-8")
+    ledger = {
+        "schema": 1,
+        "entries": [
+            {
+                "locale": "fr",
+                "namespace": "demo",
+                "status": "passed",
+                "source_sha256": catalogues.catalogue_sha256("en", "demo"),
+            }
+        ],
+    }
+    Path(i18n_generate.LEDGER).write_text(json.dumps(ledger), encoding="utf-8")
+    assert i18n_generate._shipped_locales() == ["en", "fr"]
+
+
+def test_a_carried_namespace_without_a_ledger_entry_un_ships(generated, i18n_generate) -> None:
+    """The flip side of the amendment: completeness is still the gate's job.
+
+    A file the locale carries with no passing, fresh ledger entry — including
+    a MISSING entry — keeps that locale out; the per-namespace scope narrows
+    WHAT is judged, not whether judgement happens.
+    """
+    root, emitted = generated
+    (root / "en" / "demo.json").write_text(json.dumps({"demo.x": "x"}), encoding="utf-8")
+    (root / "fr").mkdir(parents=True, exist_ok=True)
+    (root / "fr" / "demo.json").write_text(json.dumps({"demo.x": "t"}), encoding="utf-8")
+    (root / "fr" / "extra.json").write_text(json.dumps({"extra.y": "y"}), encoding="utf-8")
+    (root / "en" / "extra.json").write_text(json.dumps({"extra.y": "y"}), encoding="utf-8")
+    ledger = {
+        "schema": 1,
+        "entries": [
+            {
+                "locale": "fr",
+                "namespace": "demo",
+                "status": "passed",
+                "source_sha256": catalogues.catalogue_sha256("en", "demo"),
+            }
+        ],
+    }
+    Path(i18n_generate.LEDGER).write_text(json.dumps(ledger), encoding="utf-8")
+    assert i18n_generate._shipped_locales() == ["en"]
+
+
+def test_a_missing_sha_on_an_en_less_namespace_is_not_fresh(generated, i18n_generate) -> None:
+    """``None == None`` must not read as fresh (round-1 minor M1).
+
+    A locale carrying a namespace ``en`` does not ship (a renamed child still
+    on disk) with a ``passed`` entry that OMITS ``source_sha256`` used to ship:
+    the entry is read with ``.get``, so both sides of the freshness comparison
+    were ``None``. The fix requires a REAL ``en`` hash before comparing; this
+    pins that exact shape.
+    """
+    root, emitted = generated
+    (root / "en" / "demo.json").write_text(json.dumps({"demo.x": "x"}), encoding="utf-8")
+    (root / "fr").mkdir(parents=True, exist_ok=True)
+    (root / "fr" / "demo.json").write_text(json.dumps({"demo.x": "t"}), encoding="utf-8")
+    # The carried child `en` does not have, with a passed entry naming NO hash.
+    (root / "fr" / "ghost.json").write_text(json.dumps({"ghost.y": "t"}), encoding="utf-8")
+    ledger = {
+        "schema": 1,
+        "entries": [
+            {
+                "locale": "fr",
+                "namespace": "demo",
+                "status": "passed",
+                "source_sha256": catalogues.catalogue_sha256("en", "demo"),
+            },
+            {"locale": "fr", "namespace": "ghost", "status": "passed"},
+        ],
+    }
+    Path(i18n_generate.LEDGER).write_text(json.dumps(ledger), encoding="utf-8")
+    assert i18n_generate._shipped_locales() == ["en"]
+
+
+def test_a_locale_directory_with_no_namespaces_is_not_shipped(generated, i18n_generate) -> None:
+    """Pin for the empty-carried reading (round-1 nit N1).
+
+    A locale DIRECTORY that exists but carries no namespace has nothing to
+    serve, so it is skipped rather than shipped as an empty locale; a wave
+    mid-checkout cannot put a blank entry in the picker. (Round 1 asked for
+    either a pin or a recorded reject; this is the pin.)
+    """
+    root, emitted = generated
+    (root / "en" / "demo.json").write_text(json.dumps({"demo.x": "x"}), encoding="utf-8")
+    (root / "fr").mkdir(parents=True, exist_ok=True)  # exists, carries nothing
+    ledger = {
+        "schema": 1,
+        "entries": [
+            {
+                "locale": "fr",
+                "namespace": "demo",
+                "status": "passed",
+                "source_sha256": catalogues.catalogue_sha256("en", "demo"),
+            }
+        ],
+    }
+    Path(i18n_generate.LEDGER).write_text(json.dumps(ledger), encoding="utf-8")
     assert i18n_generate._shipped_locales() == ["en"]
 
 
