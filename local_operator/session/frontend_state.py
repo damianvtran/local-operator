@@ -1249,6 +1249,91 @@ class FrontendSpendChildren(BaseModel):
         return payload
 
 
+class FrontendSpendBreakdownEntry(BaseModel):
+    """One category of a ``breakdown`` partition (design §4.2, wire v1).
+
+    ``amount_micro`` is the entry's STATED micro-USD sum; ``None`` (never 0)
+    when nothing in it was sized, with ``unstated_records`` counting the
+    records that could not be sized. ``bases`` lists the distinct basis
+    spellings inside the entry; the display words for them ride the object's
+    ``vocabulary`` section, so a surface prints core's words rather than
+    carrying its own copy.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    label: str = ""
+    amount_micro: int | None = None
+    knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+    unstated_records: int = 0
+    bases: list[str] = Field(default_factory=list)
+
+
+class FrontendSpendBreakdown(BaseModel):
+    """The two reconcilable partitions of the published total (design §4.1).
+
+    ``by_agent`` is parent vs subagents; ``by_source`` is per channel,
+    tree-wide. Each partition's stated amounts sum to ``total_micro`` on its
+    own — and a reader must never ADD the two together: they are two views of
+    one total, which is exactly what makes each independently reconcilable.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    by_agent: list[FrontendSpendBreakdownEntry] = Field(default_factory=list)
+    by_source: list[FrontendSpendBreakdownEntry] = Field(default_factory=list)
+
+
+class FrontendSpendChannelWord(BaseModel):
+    """The published display word for one channel id (design §5.2)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    label: str = ""
+
+
+class FrontendSpendBasisMeta(BaseModel):
+    """The published words and funding class for one billing basis spelling.
+
+    ``source_class`` is ``paygo`` | ``subscription`` | ``unknown`` — a property
+    of the basis VALUE, not of a provider; a subscription-class basis is the
+    only one that carries a ``note``. ``note`` is omitted entirely when there
+    is nothing to explain (the ``children.reason`` precedent above), so a
+    pay-as-you-go session's frames carry no subscription prose.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    label: str = ""
+    source_class: str = "unknown"
+    marker: str = ""
+    note: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_note(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload = handler(self)
+        if self.note is None:
+            payload.pop("note", None)
+        return payload
+
+
+class FrontendSpendVocabulary(BaseModel):
+    """The display vocabulary for the ids and bases this object carries.
+
+    Derived per object (only values present), so the section stays small and
+    its absence on an old producer is clean: a surface reads a word here first
+    and falls back to its legacy maps only when the whole section is absent.
+    A new channel or basis therefore renders from this section with zero UI
+    edits.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    channels: dict[str, FrontendSpendChannelWord] = Field(default_factory=dict)
+    bases: dict[str, FrontendSpendBasisMeta] = Field(default_factory=dict)
+
+
 class FrontendSpendChannels(BaseModel):
     """The session's published per-channel spend (``spend_channels``).
 
@@ -1285,6 +1370,13 @@ class FrontendSpendChannels(BaseModel):
     by_basis: dict[str, int] = Field(default_factory=dict)
     rows: list[FrontendSpendChannelRow] = Field(default_factory=list)
     children: FrontendSpendChildren = Field(default_factory=FrontendSpendChildren)
+    #: ADDITIVE sections (design §4/§5): the two reconcilable partitions of
+    #: ``total_micro`` and the display words for the ids and bases above. Both
+    #: are omitted from the wire when unset — absence is exactly what an old
+    #: producer looks like — so an unset section costs no bytes and needs no
+    #: sentinel (the ``children.reason`` precedent).
+    breakdown: FrontendSpendBreakdown | None = None
+    vocabulary: FrontendSpendVocabulary | None = None
     #: ADDITIVE on the v1 wire, and present ONLY when the session knows of
     #: voice records that exist (in analytics) but are not in the fold — the
     #: §4.2 return-path fallback: ``{"voice": "pending_owner_append",
@@ -1294,11 +1386,17 @@ class FrontendSpendChannels(BaseModel):
     #: reader keep the exact key set they always had.
     pending: dict[str, Any] | None = None
 
+    #: ONE wrap serializer for the three optional keys: pydantic allows one
+    #: ``model_serializer`` per model, and the merge-time rule these keys
+    #: share is the same — an unset key is POPPED, never emitted as null.
     @model_serializer(mode="wrap")
-    def _serialize_pending(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+    def _serialize_optional_sections(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
         payload = handler(self)
-        if self.pending is None:
-            payload.pop("pending", None)
+        for key in ("breakdown", "vocabulary", "pending"):
+            if payload.get(key) is None:
+                payload.pop(key, None)
         return payload
 
 
