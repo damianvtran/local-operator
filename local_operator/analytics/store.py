@@ -62,6 +62,8 @@ from local_operator.analytics.model import (
     EXCLUDED_FAULTS,
     ORIGIN_MODEL,
     CallSnapshot,
+    ChannelBreakdownRow,
+    ChannelPeriodRow,
     ModelRateRow,
     SessionReport,
     SessionRequest,
@@ -3739,11 +3741,21 @@ class AnalyticsStore:
         """
         return "parent_session_id" in self._present_optional
 
-    def session_report(self, session_id: str, *, recent_limit: int = 12) -> SessionReport:
+    def session_report(
+        self, session_id: str, *, recent_limit: int = 12, channels: bool = False
+    ) -> SessionReport:
         """Read one exact session ID without creating, migrating or pricing data.
 
         A single explicit read transaction pins all queries to the same WAL
         snapshot, even if the recorder commits between totals and recent rows.
+        ``channels=True`` opts into the channel ledger's rows for this session
+        (``channel_calls``, grouped like :meth:`channel_breakdown`) read on the
+        SAME connection inside the same transaction, so a caller that shows
+        both never renders a channel row beside inference totals from a
+        different committed state — the property the desktop report route's
+        docstring promises. The flag is OFF by default because the TUI's own
+        ``sessions.report`` caller does not render the section, and an unasked
+        read should not pay for it.
         Inspect columns on THIS connection rather than writer migration flags:
         diagnostics must also work against a read-only, older ledger. Missing
         optional fields remain unknown, not invented successes or zero timings.
@@ -3949,6 +3961,7 @@ class AnalyticsStore:
                 conn, session_id, columns, measures
             )
             tool_calls = self._tool_call_stats(conn, session_id)
+            channel_rows = self._session_channel_rows(conn, session_id) if channels else ()
             return SessionReport(
                 session_id=session_id,
                 aggregate=aggregate,
@@ -3964,6 +3977,7 @@ class AnalyticsStore:
                 first_ts_ms=first,
                 last_ts_ms=last,
                 tool_calls=tool_calls,
+                channels=channel_rows,
             )
         except Exception:  # noqa: BLE001 — diagnostics must not interrupt a turn
             logger.debug("analytics: session report unavailable", exc_info=True)
@@ -3971,6 +3985,56 @@ class AnalyticsStore:
         finally:
             if conn is not None:
                 conn.close()
+
+    @staticmethod
+    def _session_channel_rows(
+        conn: sqlite3.Connection, session_id: str
+    ) -> tuple[ChannelBreakdownRow, ...]:
+        """This session's channel rows, from the CALLER's connection.
+
+        Deliberately a staticmethod over an OPEN connection rather than a
+        method that opens its own: the whole reason the read exists beside
+        ``session_report``'s totals is the single-snapshot property its
+        docstring promises, and a read on a fresh connection would defeat it.
+
+        The channel tables are OPTIONAL on a ledger (see
+        ``_has_channel_tables``): this inspects ``sqlite_master`` on the same
+        connection, so a read-only pre-feature database answers an empty tuple
+        rather than failing the report. Never raises: any failure here degrades
+        to ``()`` — the channels section is additive and must not take the
+        inference report down with it.
+        """
+        try:
+            names = {
+                str(row[0])
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            if "channel_calls" not in names:
+                return ()
+            rows = conn.execute(
+                "SELECT channel, provider, billing_basis, cost_source, "
+                "SUM(units), COALESCE(SUM(amount_micro), 0), COUNT(*), "
+                "COUNT(amount_micro) FROM channel_calls WHERE session_id = ? "
+                "GROUP BY channel, provider, billing_basis, cost_source "
+                "ORDER BY channel ASC, provider ASC, billing_basis ASC, cost_source ASC",
+                (session_id,),
+            ).fetchall()
+        except Exception:  # noqa: BLE001 — the channels section is additive
+            logger.debug("analytics: session channel rows unavailable", exc_info=True)
+            return ()
+        return tuple(
+            ChannelBreakdownRow(
+                channel=str(row[0]),
+                provider=str(row[1]),
+                billing_basis=str(row[2]),
+                cost_source=str(row[3]),
+                units=float(row[4] or 0.0),
+                amount_micro=int(row[5] or 0),
+                calls=int(row[6] or 0),
+                known_calls=int(row[7] or 0),
+            )
+            for row in rows
+        )
 
     #: How deep a session tree is walked before the walk stops. The ledger's
     #: tree is one level today (33 parents, 467 children, zero sessions that are
@@ -4404,6 +4468,151 @@ class AnalyticsStore:
             )
             for row in rows
         ]
+
+    def channel_breakdown(
+        self,
+        *,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        session_id: str | None = None,
+    ) -> list[ChannelBreakdownRow]:
+        """Known and unknown spend by (channel, provider, basis, source).
+
+        THE RAW LEDGER, for the reasons ``model_rates`` documents at length:
+        it answers over the window the caller actually names (mid-day bounds
+        included), while the channel rollups are day-granular and would have to
+        be coarsened to a calendar day the caller did not ask for. The price is
+        the same one that read pays: the ``channel_calls`` table obeys the raw
+        retention (90 days), so a chart spanning longer uses the rollup series
+        (:meth:`channel_daily_series` / :meth:`channel_monthly_series`) — the
+        two sources are deliberately separate and the payload says which is
+        which.
+
+        ``amount_micro`` sums the KNOWN amounts only and ``known_calls`` counts
+        how many rows stated one (``COUNT(amount_micro)`` skips NULL), so a row
+        of zeros with ``known_calls=0`` reads as "could not be sized", never as
+        "free". Never raises: an absent channel-table set (a pre-feature or
+        read-only ledger) or an unopenable store returns ``[]``.
+        """
+        if not self._has_channel_tables:
+            return []
+        conn = self._read_connection()
+        if conn is None:
+            return []
+        where: list[str] = []
+        params: list[Any] = []
+        if since_ms is not None:
+            where.append("ts_ms >= ?")
+            params.append(int(since_ms))
+        if until_ms is not None:
+            where.append("ts_ms < ?")
+            params.append(int(until_ms))
+        if session_id is not None:
+            where.append("session_id = ?")
+            params.append(session_id)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        try:
+            rows = conn.execute(
+                "SELECT channel, provider, billing_basis, cost_source, "
+                "SUM(units), COALESCE(SUM(amount_micro), 0), COUNT(*), "
+                "COUNT(amount_micro) FROM channel_calls"
+                + clause
+                + " GROUP BY channel, provider, billing_basis, cost_source"
+                " ORDER BY channel ASC, provider ASC, billing_basis ASC, cost_source ASC",
+                params,
+            ).fetchall()
+        except Exception:  # noqa: BLE001 — a report read must never raise
+            logger.debug("analytics: channel breakdown query failed", exc_info=True)
+            return []
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return [
+            ChannelBreakdownRow(
+                channel=str(row[0]),
+                provider=str(row[1]),
+                billing_basis=str(row[2]),
+                cost_source=str(row[3]),
+                units=float(row[4] or 0.0),
+                amount_micro=int(row[5] or 0),
+                calls=int(row[6] or 0),
+                known_calls=int(row[7] or 0),
+            )
+            for row in rows
+        ]
+
+    def _channel_series(
+        self, table: str, key: str, buckets: int, *, by_provider: bool
+    ) -> list[ChannelPeriodRow]:
+        """The most recent ``buckets`` calendar buckets from a channel rollup.
+
+        The channel-half twin of :meth:`_series`, with the same two shapes: by
+        default one row per ``(bucket, channel, basis)`` summed across provider
+        and model in SQL (the chartable series); ``by_provider=True`` keeps
+        ``provider`` as its own grouping dimension so a client can colour by
+        serving identity. The window is "the newest N DISTINCT buckets that
+        exist", not a wall-clock cutoff, for the same idle-day reason. Never
+        raises: a degraded or absent channel-table set returns ``[]``.
+        """
+        if not self._has_channel_tables:
+            return []
+        conn = self._read_connection()
+        if conn is None:
+            return []
+        limit = max(1, int(buckets))
+        measures = "SUM(units), SUM(amount_micro), SUM(calls), SUM(known_calls)"
+        window = f"SELECT DISTINCT {key} AS b FROM {table} ORDER BY {key} DESC LIMIT {limit}"
+        try:
+            if by_provider:
+                sql = (
+                    f"SELECT {key}, channel, provider, billing_basis, {measures} "
+                    f"FROM {table} WHERE {key} IN ({window}) "
+                    f"GROUP BY {key}, channel, provider, billing_basis "
+                    f"ORDER BY {key} ASC, channel ASC, provider ASC, billing_basis ASC"
+                )
+            else:
+                sql = (
+                    f"SELECT {key}, channel, '', billing_basis, {measures} "
+                    f"FROM {table} WHERE {key} IN ({window}) "
+                    f"GROUP BY {key}, channel, billing_basis "
+                    f"ORDER BY {key} ASC, channel ASC, billing_basis ASC"
+                )
+            rows = conn.execute(sql).fetchall()
+        except Exception:  # noqa: BLE001 — a report read must never raise
+            logger.debug("analytics: %s channel series query failed", table, exc_info=True)
+            return []
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return [
+            ChannelPeriodRow(
+                period=str(row[0]),
+                channel=str(row[1]),
+                provider=str(row[2]),
+                billing_basis=str(row[3]),
+                units=float(row[4] or 0.0),
+                amount_micro=int(row[5] or 0),
+                calls=int(row[6] or 0),
+                known_calls=int(row[7] or 0),
+            )
+            for row in rows
+        ]
+
+    def channel_daily_series(
+        self, days: int = 30, *, by_provider: bool = False
+    ) -> list[ChannelPeriodRow]:
+        """The most recent ``days`` distinct days of channel spend, oldest-first."""
+        return self._channel_series("channel_daily", "day", days, by_provider=by_provider)
+
+    def channel_monthly_series(
+        self, months: int = 12, *, by_provider: bool = False
+    ) -> list[ChannelPeriodRow]:
+        """The most recent ``months`` distinct months of channel spend, oldest-first."""
+        return self._channel_series("channel_monthly", "month", months, by_provider=by_provider)
 
 
 def _period_from_row(period: str, model: str, measures: Iterable[Any]) -> UsagePeriod:

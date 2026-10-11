@@ -460,3 +460,146 @@ export function contextReading(state: ContextInput): ContextReading {
 export function contextEstimateMarker(reading: ContextReading): string {
 	return reading.status === "estimate" ? "estimate" : "";
 }
+
+/**
+ * The published per-channel spend (`spend_channels`) — the PREFERRED reading.
+ *
+ * Sources, by symbol, mirroring the desktop strip's own handoff:
+ *
+ *   - `tui/app.py::_band_cost_cell` — when the published object exists, the
+ *     band's money cell IS `total_micro` with marks from its `knowledge`; the
+ *     legacy `cumulative_cost` arithmetic is not consulted at all (re-summing
+ *     the parts is exactly how surfaces came to disagree, design §5.1).
+ *     `knowledge === "unknown"` means "nothing is stateable": the band renders
+ *     `$—` when there was billed activity and nothing at all when there was
+ *     none — the same two branches `sessionSpend` ports, reached from the
+ *     published reading instead of a null total.
+ *   - `tui/app.py::_spend_text` — a zero published total spends NO segment
+ *     (the zero policy above), and the mark is `≥` for `partial`/`floor`
+ *     knowledge. PENDING VOICE MONEY IS A FLOOR TOO (the band's conscious
+ *     stance, design round 1, D1): the published total excludes
+ *     recorded-but-unfolded voice charges, so the figure is a lower bound on
+ *     what the conversation cost — the number itself stays the published
+ *     total, the same figure every other surface shows.
+ *
+ * Returns `null` for an ABSENT object (an older daemon — the caller falls back
+ * to `sessionSpend`'s legacy arithmetic) and for a malformed one (a missing or
+ * non-finite `total_micro`): a wire that cannot answer falls back rather than
+ * inventing a figure.
+ */
+export type PublishedSpendInput = Pick<SessionProjection, "spend_channels">;
+
+export type PublishedSpend = {
+	/** `total_micro`, integer micro-USD. */
+	micro: number;
+	knowledge: CostKnowledge;
+	/** True when the figure is a lower bound (see the rules above). */
+	isFloor: boolean;
+	/** What the screen prints, `>=` mark included; `""` = no segment. */
+	text: string;
+};
+
+export function publishedSpend(
+	state: PublishedSpendInput,
+	usage?: SessionUsage,
+): PublishedSpend | null {
+	const published = state.spend_channels;
+	if (!published || typeof published !== "object") return null;
+	const micro = finite(published.total_micro);
+	if (micro === null) return null;
+	const knowledge = rung(published.knowledge);
+	const isFloor = isFloorKnowledge(knowledge) || published.pending != null;
+	if (knowledge === "unknown") {
+		const billed = Boolean(usage && (usage.input_tokens || usage.output_tokens));
+		return { micro, knowledge, isFloor, text: billed ? UNPRICEABLE_TEXT : "" };
+	}
+	if (!micro) return { micro, knowledge, isFloor, text: "" };
+	return { micro, knowledge, isFloor, text: `${isFloor ? FLOOR_MARK : ""}${formatUsd(micro)}` };
+}
+
+/** `subscription_api_equivalent` (`channel_spend.BASIS_SUBSCRIPTION`): quota
+    spent on a subscription plan, priced at the client rate table's API
+    equivalent — NOT billed dollars, and a surface must never spell it as if it
+    were. */
+export const SUB_EQUIVALENT_BASIS = "subscription_api_equivalent";
+
+/** How many channel chips the phone's second line names before summarising. */
+export const CHANNEL_CHIP_CAP = 4;
+
+export type ChannelChip = {
+	/** The channel name verbatim (`image`, `tts`, …), or the inference row's
+	    own model half of its `provider/model` label. */
+	label: string;
+	/** The row's money cell: the ladder, or `$—` for an unstated amount. */
+	text: string;
+	/** The row's basis is subscription quota with no billed claim beside it —
+	    the chip carries the `sub-equiv` marker so the money cannot be read as
+	    billed (design §5.1's collapse rule). */
+	subEquivalent: boolean;
+};
+
+export type ChannelBreakdown = {
+	tracked: boolean;
+	chips: ChannelChip[];
+	/** Rows past `CHANNEL_CHIP_CAP`, as a COUNT — never their money: the total
+	    is line 1's, and a second money sum here is the disagreement the
+	    published object exists to end. */
+	hiddenCount: number;
+};
+
+/**
+ * The breakdown line's data, from the published object only — never re-summed.
+ *
+ * `null` when no object is published (an older daemon: the legacy row renders
+ * alone). `tracked: false` is a STATEMENT about a pre-feature session and the
+ * caller renders `channels not tracked` in plain words, the same disclosure
+ * the TUI's `/session` section and the API carry (design D3: never an implied
+ * `$0` of channel spend).
+ *
+ * The chip cap is a PHONE-WIDTH bound, not a data bound: the backend already
+ * caps the row list (grouping the remainder into an `other` row whose money
+ * the total still holds), and the chip count is further reduced to four named
+ * rows with an honest `+N more` count — a count, deliberately not a sum, so a
+ * narrow screen can never become a second arithmetic site.
+ */
+export function channelBreakdown(state: PublishedSpendInput): ChannelBreakdown | null {
+	const published = state.spend_channels;
+	if (!published || typeof published !== "object") return null;
+	if (!published.tracked) return { tracked: false, chips: [], hiddenCount: 0 };
+	const rows = Array.isArray(published.rows) ? published.rows : [];
+	const chips: ChannelChip[] = rows.slice(0, CHANNEL_CHIP_CAP).map((row) => {
+		const amount = row.amount_micro;
+		return {
+			label: row.channel === "inference" ? inferenceShortLabel(row) : String(row.channel),
+			text:
+				typeof amount === "number" && Number.isFinite(amount)
+					? formatUsd(amount)
+					: UNPRICEABLE_TEXT,
+			subEquivalent: isSubEquivalentBasis(row.basis),
+		};
+	});
+	return { tracked: true, chips, hiddenCount: Math.max(0, rows.length - CHANNEL_CHIP_CAP) };
+}
+
+/** The model half of an inference row's `provider/model` label, or a fallback
+    that names the row's serving identity without inventing one. */
+function inferenceShortLabel(row: {
+	label?: string;
+	model?: string;
+	provider?: string;
+}): string {
+	const label = typeof row.label === "string" ? row.label : "";
+	const slash = label.lastIndexOf("/");
+	if (slash >= 0 && slash + 1 < label.length) return label.slice(slash + 1);
+	if (label) return label;
+	return row.model || row.provider || "inference";
+}
+
+/** True when the row's basis is subscription quota with no `billed` claim —
+    the one case the chip must qualify. A row mixing bases (a settled record
+    beside a plan record) keeps the plain money: part of it IS billed. */
+function isSubEquivalentBasis(basis: unknown): boolean {
+	if (!Array.isArray(basis) || basis.length === 0) return false;
+	if (basis.some((entry) => entry === "billed")) return false;
+	return basis.some((entry) => entry === SUB_EQUIVALENT_BASIS);
+}

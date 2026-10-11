@@ -1122,6 +1122,18 @@ class SessionProjection:
     context_tokens: int | None = None
     context_window: int | None = None
     context_is_estimate: bool | None = None
+    #: The PUBLISHED per-channel spend object (PR-2, design §5.1/§6), already
+    #: serialised by the runtime's store (``FrontendStateStore.spend_channels_copy``)
+    #: and bounded by the same row cap the desktop frame applies. Raw INTEGER
+    #: micro-USD throughout — the phone spells it with its own port of the
+    #: money ladder and never re-sums: ``total_micro`` already spans this
+    #: session's inference, its channels and its children, and its
+    #: ``knowledge``/``by_basis``/``rows`` are the backend's own readings.
+    #: ABSENT (``None``, popped by ``to_json``) means "this runtime publishes
+    #: no channel ledger" — the desktop frame's own absent-key rule — so an
+    #: older daemon or a pre-upgrade reader renders the legacy reading above
+    #: unchanged rather than an empty breakdown.
+    spend_channels: dict[str, Any] | None = None
     version: int = 0  # projection epoch; the phone drops stale repaints
     attention: dict[str, Any] = field(default_factory=dict)
     #: Turn supplements (memo §2.7/§3.1 row 18; probe P5's fallback): the newest
@@ -1148,6 +1160,13 @@ class SessionProjection:
             data.pop("asks", None)
         if self.asks_open is None:
             data.pop("asks_open", None)
+        # The per-channel spend object follows the same absence rule as
+        # ``asks`` above: a None field is POPPED rather than sent as null, so
+        # the key's presence is the capability proxy — an old runtime never
+        # emits it, and a null would read as "this runtime has a channel
+        # ledger and it is empty", which is a different fact.
+        if self.spend_channels is None:
+            data.pop("spend_channels", None)
         # An EMPTY supplement map is absence, not information: the map exists
         # only to carry beats, and the reader rebuilds a payload without the key
         # to the empty default (``_projection_from_json``; pinned by the
