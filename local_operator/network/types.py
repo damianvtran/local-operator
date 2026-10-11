@@ -762,6 +762,17 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # stop — "abort, cancel, stop (the kill switch), retire_if_pristine"
     "abort": "stop",
     "cancel": "stop",
+    # The post-turn job rail's ONE mechanism (video programme §2.2, contract
+    # §4.1): cancel ONE background job by id, landing on the same engine call
+    # ``jobs op='cancel'`` makes. ``stop`` — the same family as ``cancel``
+    # directly above: stopping a job this session started is a stop of its
+    # work, not a change to the install (``admin``) nor a driver's choice of
+    # what it runs (``prompt``); a member that may stop the session may stop
+    # one of its jobs. Load-bearing even though the v1 relay mounts no
+    # rendered control: the design's delegated-surface carrier rides the
+    # mesh, and without a row ``net_forward`` refused the op closed (review
+    # round 1, R1-1).
+    "job_cancel": "stop",
     "stop": "stop",
     "retire_if_pristine": "stop",
     "resume_session": "stop",
