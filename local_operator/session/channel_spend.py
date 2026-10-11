@@ -40,6 +40,7 @@ import math
 import os
 import time
 import uuid
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -160,11 +161,15 @@ WEB_SEARCH_PRICE_VERSION_LEGACY = "client-search-table-legacy"  # MIGRATE to cat
 #: fallback's "surfaces never disagree" claim true).
 PENDING_OWNER_APPEND = "pending_owner_append"
 
-#: The sentence a surface can show beside the state. Written for a reader of
-#: the wire, not for an operator's log: what happened, and what is missing.
+#: The sentence a surface shows beside the state — and the wire's ``reason``
+#: value. Written to be read by a PERSON (design round 1, D2): the TUI renders
+#: it verbatim beside a count, so internal vocabulary (a protocol operation's
+#: name) is banned, and the claim it makes must be true even when the analytics
+#: mirror dropped its copy — "recorded" means the daemon produced the record
+#: for this session, which the marker itself is the evidence of, and "not yet
+#: included" is independent of where the copy lives (review round 1, MINOR 5).
 PENDING_OWNER_APPEND_REASON = (
-    "recorded to analytics for this session; the journal append waits on "
-    "the owner-append operation"
+    "Voice spend for this conversation is recorded but not yet included in the total"
 )
 
 #: The per-session sidecar the route-level voice emitters append one JSON line
@@ -318,8 +323,11 @@ def write_pending_record(directory: str | os.PathLike[str], record: ChannelSpend
     only ever reads, and excludes entries its own fold already holds.
 
     Never raises; returns whether the marker was written. Best-effort by
-    design: a lost marker must not fail a paid request, and the record itself
-    is already durable in analytics.
+    design: a lost marker must not fail a paid request. The analytics mirror is
+    best-effort TOO — the recorder drops silently when its queue is full or it
+    is closing (review round 1, MINOR 5) — so this marker, not the mirror, is
+    the copy the owning session is guaranteed to see; the record's own claim
+    ("recorded but not yet included") holds in both outcomes.
     """
     if record.channel not in PENDING_VOICE_CHANNELS:
         return False
@@ -351,21 +359,25 @@ def read_pending_records(directory: str | os.PathLike[str]) -> list[dict[str, An
     """The sidecar's marker entries, oldest first; ``[]`` when absent.
 
     Tolerant per line — a corrupt line is skipped, never fatal — and bounded to
-    the trailing window (see ``_PENDING_SIDECAR_MAX_LINES``). The reader has no
-    fold to exclude against: the caller subtracts the ``record_id`` set it
-    holds, which is what retires a marker once the record is folded.
+    the trailing window (see ``_PENDING_SIDECAR_MAX_LINES``). The window is
+    STREAMED, not sliced after the fact: a paint path must not hold a whole
+    (potentially unbounded) file in memory to read its last 2000 lines, which
+    is the shape the docstring of the bound already promised (review round 1,
+    NIT 1). The reader has no fold to exclude against: the caller subtracts
+    the ``record_id`` set it holds, which is what retires a marker once the
+    record is folded.
     """
     try:
         path = os.path.join(os.fspath(directory), PENDING_SIDECAR_NAME)
         if not os.path.isfile(path):
             return []
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            lines = handle.readlines()
+            lines: list[str] = list(deque(handle, maxlen=_PENDING_SIDECAR_MAX_LINES))
     except Exception:  # noqa: BLE001 — an unreadable sidecar is "no markers"
         logger.debug("channel pending sidecar read failed", exc_info=True)
         return []
     out: list[dict[str, Any]] = []
-    for raw in lines[-_PENDING_SIDECAR_MAX_LINES:]:
+    for raw in lines:
         text = raw.strip()
         if not text:
             continue
@@ -1074,9 +1086,23 @@ def combine(
     # exist: the golden fixture (and every session without voice) keeps the
     # exact key set it always had, while a session that HAS them can state why
     # its total does not move. Never inside ``total_micro`` — see the docstring.
-    pending_voice = [
-        entry for entry in pending if str(entry.get("channel", "")) in PENDING_VOICE_CHANNELS
-    ]
+    #
+    # ``calls`` counts CHARGES, not marker lines: a retried emission writes a
+    # second identical marker, analytics still holds one row, and one fold
+    # retires both — so two markers must read "1 request", never a count the
+    # user cannot reconcile with what they did (QA round 1, Q6). Deduped by
+    # ``record_id`` (the marker's own idempotency key); a marker without one is
+    # already unreadable to the fold, so it cannot join the count.
+    seen: set[str] = set()
+    pending_voice: list[Mapping[str, Any]] = []
+    for entry in pending:
+        if str(entry.get("channel", "")) not in PENDING_VOICE_CHANNELS:
+            continue
+        record_id = str(entry.get("record_id", ""))
+        if not record_id or record_id in seen:
+            continue
+        seen.add(record_id)
+        pending_voice.append(entry)
     if pending_voice:
         payload["pending"] = {
             "voice": PENDING_OWNER_APPEND,

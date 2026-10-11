@@ -318,7 +318,8 @@ async def _run_radient_rung(
     store: AuthStore,
     language: str | None,
     prompt: str | None,
-) -> tuple[str, Any]:
+    correlation_session_id: str | None = None,
+) -> tuple[str, Any, str]:
     """Rung 1: the existing Radient route path, off the event loop.
 
     Wrapped in ``asyncio.to_thread`` because ``RadientClient`` is sync
@@ -327,13 +328,20 @@ async def _run_radient_rung(
     executor's own ``wait_for`` bounds this call (a thread cannot be
     cancelled, but the cascade stops waiting on it either way).
 
-    Returns ``(text, cost)``: the hub's transcription envelope carries the
-    versioned cost object inside ``result`` (PR-3), parsed by the ONE adapter
-    that knows its field names. ``None`` means the envelope carried none — an
-    older hub — and the caller records the call with an UNSTATED amount, never
-    a zero. The correlation id is minted per attempt, because one attempt is
-    exactly one hub call: a cascade that fell forward must leave each charge
-    joinable to the attempt that caused it.
+    Returns ``(text, cost, provider)``: the hub's transcription envelope carries
+    the versioned cost object inside ``result`` (PR-3), parsed by the ONE
+    adapter that knows its field names, and its own ``provider`` field beside
+    it — the emitting route reads the provider when the cost object does not
+    state one (an amount-less older envelope still names the vendor; QA round
+    1, Q3). ``None`` cost means the envelope carried none and the caller
+    records the call with an UNSTATED amount, never a zero. The correlation id
+    is minted per attempt, because one attempt is exactly one hub call: a
+    cascade that fell forward must leave each charge joinable to the attempt
+    that caused it. ``correlation_session_id`` is the CALLER's conversation id
+    (attribution only — never credential scope, which is why it is a separate
+    parameter from the walk's ``session_id``), sent as the client correlation
+    header when grammatical so the hub's usage row can be joined back to the
+    session (QA round 1, Q4).
     """
     from local_operator.clients.radient import new_correlation_id
     from local_operator.clients.radient_cost import cost_from_payload
@@ -349,6 +357,7 @@ async def _run_radient_rung(
         temperature=0.0,
         language=language,
         provider=None,
+        session_id=str(correlation_session_id or "") or None,
         client_request_id=new_correlation_id(),
     )
     cost = None
@@ -356,7 +365,8 @@ async def _run_radient_rung(
         cost = cost_from_payload(result.model_dump())
     except Exception:  # noqa: BLE001 — a cost parse must not fail a transcript
         cost = None
-    return result.text or "", cost
+    provider = str(getattr(result, "provider", "") or "")
+    return result.text or "", cost, provider
 
 
 async def _run_elevenlabs_rung(
@@ -368,7 +378,7 @@ async def _run_elevenlabs_rung(
     language: str | None,
     prompt: str | None,
     timeout_s: float,
-) -> str:
+) -> tuple[str, Any, str]:
     """Rung 2: the user's own ElevenLabs key."""
     key = await store.get_api_key("elevenlabs", session_id, read_only=True)
     if not key:
@@ -378,8 +388,9 @@ async def _run_elevenlabs_rung(
         audio, mime=mime, language=language, prompt=prompt, timeout_s=timeout_s
     )
     # No cost object on a BYO leg: the vendor is not the hub and reports no
-    # charge in this family, so the caller records amount unknown (PR-3).
-    return result.text, None
+    # charge in this family, and the envelope that would name it is the hub's
+    # only — the route knows this leg from the path itself (PR-3).
+    return result.text, None, ""
 
 
 async def _run_openai_rung(
@@ -391,7 +402,7 @@ async def _run_openai_rung(
     language: str | None,
     prompt: str | None,
     timeout_s: float,
-) -> str:
+) -> tuple[str, Any, str]:
     """Rung 3: the user's own OpenAI API key (``openai-key`` rows, never ChatGPT OAuth)."""
     key = await _openai_stt_key(store, session_id)
     if not key:
@@ -400,8 +411,9 @@ async def _run_openai_rung(
     result = await client.transcribe(
         audio, mime=mime, language=language, prompt=prompt, timeout_s=timeout_s
     )
-    # See the ElevenLabs rung: no cost object for a BYO leg.
-    return result.text, None
+    # See the ElevenLabs rung: no cost object for a BYO leg, and no provider
+    # for the route to read — the path names it.
+    return result.text, None, ""
 
 
 def _failed_attempt(path: AudioPath, exc: BaseException) -> SttAttempt:
@@ -448,8 +460,15 @@ async def transcribe_audio(
     model: object | None = None,
     language: str | None = None,
     prompt: str | None = None,
+    correlation_session_id: str | None = None,
 ) -> SttOutcome:
-    """Run the STT cascade over one audio file. See module docstring."""
+    """Run the STT cascade over one audio file. See module docstring.
+
+    ``correlation_session_id`` (PR-3) is the CALLER's conversation id for the
+    hub's client correlation header and the emitted spend record — deliberately
+    NOT the ``session_id`` above: that one scopes credential lookup, a
+    different question answered by the store (QA round 1, Q4).
+    """
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
     try:
@@ -496,6 +515,7 @@ async def transcribe_audio(
                         store=store,
                         language=language,
                         prompt=prompt,
+                        correlation_session_id=correlation_session_id,
                     )
                 else:
                     if audio is None:
@@ -535,7 +555,9 @@ async def transcribe_audio(
                 # timeouts: the deadline is the executor's promise, and a
                 # client that outlived its own timeout must not be able to
                 # extend the cascade.
-                text, rung_cost = await asyncio.wait_for(attempt, timeout=attempt_timeout)
+                text, rung_cost, rung_provider = await asyncio.wait_for(
+                    attempt, timeout=attempt_timeout
+                )
             except asyncio.TimeoutError:
                 # A timeout never reached an upstream status; it behaves like a
                 # transport failure (502, text passed through).
@@ -551,7 +573,13 @@ async def transcribe_audio(
                 failures.append((path, exc if isinstance(exc, APIError) else None))
                 continue
             attempts.append(SttAttempt(path=path, outcome="ok"))
-            return SttOutcome(text=text, path=path, attempts=tuple(attempts), cost=rung_cost)
+            return SttOutcome(
+                text=text,
+                path=path,
+                attempts=tuple(attempts),
+                cost=rung_cost,
+                provider=rung_provider,
+            )
 
         chosen = _choose_final_failure(failures)
         status_code: int | None = None
@@ -648,12 +676,12 @@ async def transcribe_backend(
                 reason = f"The speech-to-text cascade cannot run the {backend!r} path."
             raise SttUnavailable(reason, resolution=resolution)
         try:
-            # The token runners return ``(text, cost)`` like the walk's rungs
-            # (PR-3); the cost is dropped here because this executor's caller
-            # (the mobile bridge) records no spend channel yet — the phone's
-            # route is not an emitter in this slice, and pretending a cost it
-            # never records would be worse than not carrying it.
-            text, _cost = await asyncio.wait_for(
+            # The token runners return ``(text, cost, provider)`` like the walk's
+            # rungs (PR-3); cost and provider are dropped here because this
+            # executor's caller (the mobile bridge) records no spend channel yet
+            # — the phone's route is not an emitter in this slice, and pretending
+            # a cost it never records would be worse than not carrying it.
+            text, _cost, _provider = await asyncio.wait_for(
                 runner(
                     audio,
                     mime=mime,

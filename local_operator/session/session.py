@@ -11634,12 +11634,13 @@ class Session:
     def pending_channel_records(self) -> list[dict[str, Any]]:
         """The §4.2 fallback markers this fold does NOT already hold.
 
-        The route-level voice emitters record to analytics (they cannot append
-        to this process's journal — see ``channel_spend.write_pending_record``)
-        and drop a marker in the session directory's sidecar. Publishing reads
-        it so the wire can state WHY voice money is absent from the total
-        instead of hiding the gap; entries whose ``record_id`` the fold holds
-        are excluded, which is what retires a marker once a future owner-append
+        The route-level voice emitters mirror their records to analytics
+        (best-effort — the recorder may drop a copy) and cannot append to this
+        process's journal (see ``channel_spend.write_pending_record``), so they
+        drop a marker in the session directory's sidecar. Publishing reads it
+        so the wire can state WHY voice money is absent from the total instead
+        of hiding the gap; entries whose ``record_id`` the fold holds are
+        excluded, which is what retires a marker once a future owner-append
         folds the record.
 
         Best-effort and cheap: one stat/read of a small file, and ``[]`` for a

@@ -2693,3 +2693,39 @@ def test_the_closing_merge_leaves_a_cleared_goal_and_a_released_latch_alone():
     # The accumulating fields still take the larger value, which is the rule those
     # two branches were wrongly copied from.
     assert overrides["cumulative_parent_cost"] == 12.34
+
+
+def test_the_unstamped_wire_basis_uses_the_effective_model_like_the_ledger() -> None:
+    """Review round 1, MINOR 4: the two label readers must agree on ONE call.
+
+    The analytics side reads ``usage.provider or request.model.provider``; the
+    wire label used to read only ``usage.provider``. For an unstamped usage —
+    a test drain, a client that never went through failover — served by a
+    subscription flavour, that asymmetry recorded
+    ``subscription_api_equivalent`` in ``calls`` and ``['billed']`` on the wire,
+    which is exactly the divergence the shared-helper comment forbids. The
+    wire side now takes the same effective-model fallback.
+    """
+    from local_operator.session.frontend_state import _usage_billing_basis
+
+    unstamped = Usage(input_tokens=1, output_tokens=1, context_tokens=1)
+    flavour = ModelSpec(
+        provider="openai-device",
+        model_id="gpt-6",
+        display_name="GPT-6",
+        context_window=100_000,
+    )
+    assert _usage_billing_basis(unstamped, flavour) == "subscription_api_equivalent"
+    # The usage's OWN stamp still wins over the fallback.
+    stamped = Usage(
+        input_tokens=1,
+        output_tokens=1,
+        context_tokens=1,
+        provider="openrouter",
+        usd_cost=0.002,
+    )
+    assert _usage_billing_basis(stamped, flavour) == "billed"
+    # No provider anywhere falls to the rate-table reading (the same default
+    # the ledger's own helper gives an unknown provider) — never a crash and
+    # never a plan claim on a call whose credential kind nothing records.
+    assert _usage_billing_basis(unstamped, None) == "billed"

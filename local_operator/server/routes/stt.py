@@ -223,6 +223,10 @@ async def create_stt_transcription_endpoint(
             model=model_spec,
             language=language,
             prompt=prompt,
+            # The caller's conversation id for the hub correlation header and
+            # the emitted record — attribution only; the cascade's credential
+            # scope stays as it was (QA round 1, Q4).
+            correlation_session_id=str(session_id or "") or None,
         )
     except SttUnavailable as exc:
         if not exc.attempts:
@@ -269,7 +273,10 @@ async def create_stt_transcription_endpoint(
     emit_voice_spend(
         config_manager=config_manager,
         channel="stt",
-        provider=_rung_providers.get(outcome.path.value, ""),
+        # The envelope's own provider field outranks the path label (QA round
+        # 1, Q3): an amount-less older hub still names the vendor it used, and
+        # the cost object — when one was stated — wins inside the builder.
+        provider=outcome.provider or _rung_providers.get(outcome.path.value, ""),
         units=None,
         unit="seconds",
         cost=cost,

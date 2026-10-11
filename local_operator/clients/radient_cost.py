@@ -294,6 +294,8 @@ def channel_record_from_cost(
       carries the billed character count; transcription's envelope carries the
       metered seconds) — the client count is only the fallback for an absent
       or amount-less object, and the field stays the quantity the meter used.
+      A STATED ``0`` is a statement, not an absence (``is not None``): the
+      transcription meter documents a zero-unit outcome.
     - an absent amount is ``None`` and the record's ``__post_init__`` then
       normalises the basis to ``not_tracked``: absence is never 0, and a quote
       that never settled must not read as a charge.
@@ -315,7 +317,11 @@ def channel_record_from_cost(
         channel=channel,
         provider=(cost.provider if cost is not None and cost.provider else provider),
         model=(cost.model if cost is not None else ""),
-        units=float(stated_units if stated_units else (units or 0.0)),
+        # ``is not None``, not truthiness: a hub that STATES ``units: 0`` — the
+        # transcription contract's documented outcome when it cannot meter a
+        # duration — has stated a real fact, and the client's own count must
+        # not override it (review round 1, MINOR 3).
+        units=float(stated_units if stated_units is not None else (units or 0.0)),
         unit=(cost.unit if cost is not None and cost.unit else unit),
         amount_micro=cost.amount_micro if cost is not None else None,
         billing_basis=cost.basis if cost is not None else BASIS_NOT_TRACKED,

@@ -111,3 +111,9 @@ class SttOutcome:
     #: adapter that knows the shape. ``None`` must stay distinguishable from a
     #: stated zero — absence is not free.
     cost: object | None = None
+    #: The provider the served envelope named (PR-3), else ``""``: the
+    #: Radient transcription result carries its own ``provider`` field, and an
+    #: emitting route must use it when the cost object does not (an amount-less
+    #: older envelope still names the vendor — QA round 1, Q3). A BYO rung
+    #: leaves it empty; the route knows that leg from the path itself.
+    provider: str = ""

@@ -34,6 +34,7 @@ would attribute other sessions' spend to this one).
 from __future__ import annotations
 
 import textwrap
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Sequence, cast
@@ -60,6 +61,7 @@ from local_operator.session.channel_spend import (
     BASIS_NOT_TRACKED,
     BASIS_SUBSCRIPTION,
     NOT_TRACKED_MICRO,
+    PENDING_OWNER_APPEND_REASON,
 )
 from local_operator.session.protocol import SessionProtocol
 from local_operator.session.spend import SessionSpend
@@ -985,7 +987,10 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
     lower-bound mark (D3, via the combiner's ``partial``).
 
     Sheds entirely (returning False, so the caller draws the legacy block) when
-    the host publishes nothing, or when there is no money and no rows.
+    the host publishes nothing, or when there is no money, no rows AND no
+    pending voice records — a session whose only spend is a pending voice
+    charge still draws, because "nothing is in this total yet" and "nothing
+    was spent" are different statements (design round 1, D1).
     """
     published = runtime.spend_channels
     if published is None:
@@ -996,7 +1001,16 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
     total = _as_micro(getattr(published, "total_micro", None))
     knowledge = str(getattr(published, "knowledge", "unknown"))
     tracked = bool(getattr(published, "tracked", False))
-    if not rows and not total and not child_micro:
+    # The §4.2 fallback's state (design round 1, D1): voice records exist that
+    # are NOT in the total. Its count is unique CHARGES (the wire builder
+    # dedupes marker lines by record_id), so it is stated rather than summed.
+    pending = getattr(published, "pending", None)
+    pending_calls = 0
+    if isinstance(pending, Mapping):
+        raw_calls = pending.get("calls")
+        if isinstance(raw_calls, int) and not isinstance(raw_calls, bool):
+            pending_calls = max(0, raw_calls)
+    if not rows and not total and not child_micro and not pending_calls:
         return False
 
     body.header("Spend by channel", "this session · all sources")
@@ -1066,6 +1080,18 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
             notes=tuple(notes),
         )
     _draw_spend_basis(body, published)
+    if pending_calls:
+        # D1 (design round 1): a voice charge that is RECORDED but excluded
+        # from the total was invisible — the unmarked total read complete, and
+        # a voice-only session drew no section at all. The note states the
+        # exclusion in plain words (the wire's own reason string; internal
+        # protocol vocabulary is banned from frames) with the unique-charge
+        # count. Deliberately NOT the `$—` class: the money here is not
+        # unknown, it is excluded — and the Total row above keeps its own
+        # knowledge-derived mark untouched, so the figure and its state cannot
+        # be confused with each other.
+        noun = "request" if pending_calls == 1 else "requests"
+        body.note(f"{PENDING_OWNER_APPEND_REASON} — {pending_calls} {noun}.")
     return True
 
 

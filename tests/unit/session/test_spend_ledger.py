@@ -1558,3 +1558,39 @@ def test_old_details_without_bases_read_as_absent() -> None:
     spend = SessionSpend.from_details(legacy)
     assert spend is not None
     assert "bases" not in spend.by_identity["x/y"]
+
+
+def test_every_plan_sibling_labels_as_subscription() -> None:
+    """Review round 1, MINOR 1: both ids of a one-pool pair label identically.
+
+    ``openai`` beside ``openai-device`` is the pair that made the original set
+    inconsistent: the browser and device sign-ins are one ChatGPT pool writing
+    one credential row, so which id a spec happens to name must not decide
+    whether its call reads ``subscription_api_equivalent`` or ``billed``. Same
+    for the ``zai`` and ``alibaba-token-plan`` pairs. The pasted-key ids that
+    bill by the token stay metered; ``anthropic``/``kimi`` are the documented
+    one-id-two-credential-kinds limit and take the metered reading.
+    """
+    from local_operator.session.spend import inference_billing_labels
+
+    for provider in (
+        "openai",
+        "openai-device",
+        "xai-oauth",
+        "zai",
+        "zai-oauth",
+        "alibaba-token-plan",
+        "alibaba-token-plan-oauth",
+    ):
+        assert inference_billing_labels(provider, None) == (
+            "subscription_api_equivalent",
+            "catalogue",
+        ), provider
+        assert inference_billing_labels(provider, 0.5) == (
+            "subscription_api_equivalent",
+            "catalogue",
+        ), f"{provider}: a receipt does not turn plan quota into a bill"
+
+    for provider in ("openai-api-key", "anthropic-key", "radient-key", "openrouter", "anthropic"):
+        assert inference_billing_labels(provider, None) == ("billed", "catalogue"), provider
+        assert inference_billing_labels(provider, 0.5) == ("billed", "provider_reported"), provider
