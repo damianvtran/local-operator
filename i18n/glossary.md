@@ -63,6 +63,8 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 | team | translate | équipe · equipo · 团队 · команда · nhóm · ٹیم · टीम |
 | skill | translate | compétence · habilidad · 技能 · навык · kỹ năng · مہارت · कौशल |
 | device | translate | appareil · dispositivo · 设备 · устройство · thiết bị · ڈیوائس · डिवाइस |
+| credentials | translate | identifiants · credenciales · —⁶ · учётные данные · thông tin xác thực · —⁶ · —⁶ |
+| job | translate | tâche · trabajo · —⁶ · задание · tác vụ · —⁶ · —⁶ |
 
 1. `wake` in `ur`/`hi`: verb forms read best inside a sentence ("10 بجے
    جاگے گا", "10 बजे जागेगा"); for the noun label use the table's form. The
@@ -78,6 +80,16 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 5. `vi` telemetry: keep the English word — the native phrase ("đo lường từ
    xa") is long and absent from developer register. Recorded here as the
    per-locale decision.
+6. Wave-2 terms: fr/es renderings shipped in wave 1; ru/vi in wave 2 (see
+   their guides). The zh-CN/ur/hi cells stay `—` until their own waves record
+   renderings — do not invent them here.
+
+### Wave-2 kept-English set (all locales)
+
+Recorded by the ru/vi wave after their audits; fr/es audited the same way:
+`endpoint` (Latin, undeclined), `extra` (pip extras), `merge` / `pull` /
+`push` / `commit` (git/hub operations). Inflect around them; never translate
+inside them.
 
 A locale guide may *extend* this table (its own additions, its own
 kept-English list) but never contradict it; a genuine contradiction comes back
