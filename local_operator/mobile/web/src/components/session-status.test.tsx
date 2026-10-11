@@ -160,3 +160,114 @@ describe("SessionStatus", () => {
 		expect(zero.container.innerHTML).toBe("");
 	});
 });
+
+describe("SessionStatus — the published spend object (PR-2)", () => {
+	it("renders the published total rather than a local re-sum, mark included", () => {
+		// Legacy fields deliberately disagree with the published object: the
+		// published figure must win, because re-summing the parts is exactly
+		// how the surfaces came to disagree (design §5.1). `partial` keeps its
+		// `≥`, which is the backend's own knowledge rung.
+		const { container } = render(
+			<SessionStatus
+				projection={projection({
+					cumulative_parent_cost: 1.25,
+					spend_channels: {
+						version: 1,
+						tracked: true,
+						total_micro: 961_000,
+						knowledge: "partial",
+						rows: [],
+					},
+				})}
+			/>,
+		);
+		expect(container.querySelector('[data-testid="session-status-spend"]')?.textContent).toBe(
+			"\u2265$0.961",
+		);
+	});
+
+	it("marks a pending voice charge as the floor it is", () => {
+		const { container } = render(
+			<SessionStatus
+				projection={projection({
+					spend_channels: {
+						version: 1,
+						tracked: true,
+						total_micro: 100_000,
+						knowledge: "exact",
+						rows: [],
+						pending: { voice: "pending_owner_append", calls: 2 },
+					},
+				})}
+			/>,
+		);
+		expect(container.querySelector('[data-testid="session-status-spend"]')?.textContent).toBe(
+			"\u2265$0.100",
+		);
+	});
+
+	it("lists channel rows with their own amounts and the sub-equiv marker", () => {
+		const { container } = render(
+			<SessionStatus
+				projection={projection({
+					spend_channels: {
+						version: 1,
+						tracked: true,
+						total_micro: 1_005_000,
+						knowledge: "partial",
+						rows: [
+							{
+								channel: "inference",
+								label: "anthropic/claude-sonnet-5-5",
+								amount_micro: 900_000,
+								basis: ["billed"],
+							},
+							{ channel: "image", amount_micro: 100_000, basis: ["estimated"] },
+							{ channel: "tts", amount_micro: null, basis: [] },
+							{
+								channel: "inference",
+								label: "openai/gpt-5.4",
+								amount_micro: 5_000,
+								basis: ["subscription_api_equivalent"],
+							},
+						],
+					},
+				})}
+			/>,
+		);
+		const chips = Array.from(
+			container.querySelectorAll('[data-testid="session-status-channel"]'),
+		).map((el) => el.textContent);
+		expect(chips).toEqual([
+			"claude-sonnet-5-5 $0.900",
+			"image $0.100",
+			"tts $\u2014",
+			"gpt-5.4 $0.0050 sub-equiv",
+		]);
+		// The sub-equiv qualifier is its own dim span — the money must never be
+		// read as billed dollars.
+		const marker = container.querySelector('[data-testid="session-status-channels"] .text-ink-dim');
+		expect(marker?.textContent).toBe(" sub-equiv");
+	});
+
+	it("states an untracked session in plain words, never an implied $0", () => {
+		const { container } = render(
+			<SessionStatus
+				projection={projection({
+					spend_channels: { version: 1, tracked: false, total_micro: 0, rows: [] },
+				})}
+			/>,
+		);
+		expect(
+			container.querySelector('[data-testid="session-status-channels-untracked"]')?.textContent,
+		).toBe("channels not tracked");
+	});
+
+	it("shows no breakdown line at all without a published object", () => {
+		const { container } = render(<SessionStatus projection={projection()} />);
+		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
+		expect(container.querySelector('[data-testid="session-status-spend"]')?.textContent).toBe(
+			"$1.25",
+		);
+	});
+});

@@ -362,6 +362,48 @@ export interface PendingAsk {
 	draft_question_ids?: string[];
 }
 
+/** One aggregated row of the published `spend_channels` object
+    (`session/frontend_state.py::FrontendSpendChannelRow`). Money is raw INTEGER
+    micro-USD, like every money field on this wire; `amount_micro` null means
+    the money could not be stated — never a zero. `label` is the inference
+    by-identity bucket key (`provider/model`) and is empty on channel rows. */
+export interface SpendChannelRow {
+	channel: string;
+	provider?: string;
+	model?: string;
+	label?: string;
+	units?: number | null;
+	unit?: string;
+	amount_micro?: number | null;
+	knowledge?: string;
+	basis?: string[];
+	price_versions?: string[];
+}
+
+/** The session's published per-channel spend (`FrontendSpendChannels`), already
+    serialised and row-capped by the runtime
+    (`FrontendStateStore.spend_channels_copy`): the ONE object every surface
+    renders, so no client re-sums. Integer micro-USD throughout;
+    `knowledge` is `CostKnowledge` (`spend-context.ts`). ABSENT means "this
+    runtime publishes no channel ledger" — a null would instead claim an empty
+    one — so an absence renders the legacy reading, never an empty breakdown. */
+export interface SpendChannels {
+	version: number;
+	/** False for a session whose journal predates the channel ledger: the
+	    totals are inference-only and a surface must say "channels not
+	    tracked" rather than implying $0 of channel spend. */
+	tracked: boolean;
+	total_micro: number;
+	knowledge?: string;
+	/** Money per billing basis; the buckets reconcile to `total_micro`. */
+	by_basis?: Record<string, number>;
+	rows?: SpendChannelRow[];
+	children?: Record<string, unknown>;
+	/** Present only when voice records exist in analytics but not in the fold
+	    (§4.2's return-path fallback): the total then excludes them. */
+	pending?: Record<string, unknown> | null;
+}
+
 export interface SessionProjection {
 	attention?: CompletionAttention;
 	session_id: string;
@@ -444,6 +486,11 @@ export interface SessionProjection {
 	context_tokens?: number | null;
 	context_window?: number | null;
 	context_is_estimate?: boolean | null;
+	/** The published per-channel spend object (PR-2). Raw micro-USD and the
+	    backend's own knowledge rung; `lib/spend-context.ts` spells it. Absent
+	    on an older daemon — the legacy `cumulative_parent_cost` block above
+	    then renders exactly as it did before this field existed. */
+	spend_channels?: SpendChannels | null;
 	/** Projection epoch; drop stale repaints. */
 	version: number;
 }
