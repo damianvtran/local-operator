@@ -7750,9 +7750,11 @@ def _cmd_rollout_resume(args: argparse.Namespace) -> int:
     ident = str(getattr(args, "rollout_resume", "") or "")
     record = _pick_rollout(args, ident)
     record = rollouts.resume_record(str(record["id"])) or record
-    waiting = [
-        m for m in record.get("members", []) if str(m.get("state")) not in rollouts.TERMINAL_STATES
-    ]
+    # ``member_terminal``, NOT bare set membership (round 3, R3-3): a codeless-
+    # refused member is non-terminal and WILL be re-asked, so counting it as
+    # "not re-asked" undercounted the receipt (the reviewer's probe: "0
+    # member(s) will be re-asked" while the cleared member was asked).
+    waiting = [m for m in record.get("members", []) if not rollouts.member_terminal(m)]
     lines = [
         f"resumed {record['id']}: {len(waiting)} member(s) will be re-asked on the driver's "
         f"next scan (≤{int(rollouts.SCAN_INTERVAL_S)} s); it does not drive"
@@ -7767,9 +7769,9 @@ def _cmd_rollout_cancel(args: argparse.Namespace) -> int:
     ident = str(getattr(args, "cancel", "") or "")
     record = _pick_rollout(args, ident)
     record = rollouts.cancel_record(str(record["id"])) or record
-    left = [
-        m for m in record.get("members", []) if str(m.get("state")) not in rollouts.TERMINAL_STATES
-    ]
+    # Same decider as the resume receipt (round 3, R3-3): a codeless refusal
+    # is not terminal, so it counts as "remained".
+    left = [m for m in record.get("members", []) if not rollouts.member_terminal(m)]
     lines = [
         f"abandoned {record['id']}: {len(left)} member(s) remained; an apply already in "
         "flight finishes and is recorded by the driver"

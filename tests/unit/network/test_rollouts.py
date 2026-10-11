@@ -24,12 +24,25 @@ import sys
 import time
 from argparse import Namespace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from local_operator.network import cli as net_cli
 from local_operator.network import meshupdate, rollouts
+
+
+def _live(record_id: str, root: Path | None = None) -> dict[str, Any]:
+    """The record, asserted present — the cells always just wrote it.
+
+    ``read_record`` returns Optional (a reader over a directory that may
+    not exist); in a cell the record is the setup, so the None case is a
+    test bug the assert catches (round 3, R3-1: CI's pyright runs the
+    test files too).
+    """
+    record = rollouts.read_record(record_id, root)
+    assert record is not None
+    return record
 
 
 class _Audit:
@@ -56,7 +69,7 @@ class _Server:
 
 def _open(
     root: Path | None, *, devices: list[str], network: str = "n1", now: float = 1000.0
-) -> dict:
+) -> dict[str, Any]:
     return rollouts.open_record(
         network=network,
         origin="d_origin",
@@ -118,21 +131,21 @@ def test_opening_supersedes_the_older_active_record_for_the_network(tmp_path: Pa
     root = tmp_path / "cfg"
     first = _open(root, devices=["d_a"], now=1000.0)
     second = _open(root, devices=["d_a", "d_b"], now=2000.0)
-    assert rollouts.read_record(first["id"], root)["state"] == "superseded"
-    assert rollouts.read_record(second["id"], root)["state"] == "active"
+    assert _live(first["id"], root)["state"] == "superseded"
+    assert _live(second["id"], root)["state"] == "active"
 
     # A DIFFERENT network's active record is NOT superseded: the record is per
     # (origin, network) (note §3, RU §6.3).
     other = _open(root, devices=["d_c"], network="n2", now=2500.0)
-    assert rollouts.read_record(other["id"], root)["state"] == "active"
+    assert _live(other["id"], root)["state"] == "active"
 
 
 def test_the_window_lapse_closes_the_record_with_a_sentence(tmp_path: Path) -> None:
     root = tmp_path / "cfg"
     server = _Server(root)
     record = _open(root, devices=["d_a"], now=1000.0)
-    rollouts.step_record(server, record["id"], now=1000.0 + rollouts.WINDOW_S + 1.0)
-    lapsed = rollouts.read_record(record["id"], root)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.WINDOW_S + 1.0)
+    lapsed = _live(record["id"], root)
     assert lapsed["state"] == "done"
     rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
     assert rows and "no longer active" in rows[-1].detail["counts"], rows
@@ -153,10 +166,10 @@ def test_a_concurrent_open_does_not_retire_a_newer_record(tmp_path: Path) -> Non
     newer = _open(root, devices=["d_a"], now=2000.0)
     older = _open(root, devices=["d_a"], now=1000.0)  # a stale racer's open
     assert (
-        rollouts.read_record(newer["id"], root)["state"] == "active"
+        _live(newer["id"], root)["state"] == "active"
     ), "the newer record was retired by an older racer"
     # Both stay active — the conservative outcome — and no pass sees zero actives.
-    assert rollouts.read_record(older["id"], root)["state"] == "active"
+    assert _live(older["id"], root)["state"] == "active"
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +187,9 @@ def test_the_pass_is_serial_and_a_done_member_is_not_re_applied(
         monkeypatch, [_answer("done", version="0.99.0"), _answer("already_on_target")]
     )
 
-    rollouts.step_record(server, record["id"], now=1000.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
     assert asked == ["d_a", "d_b"], asked  # in snapshot order, one at a time
-    after = rollouts.read_record(record["id"], root)
+    after = _live(record["id"], root)
     assert _member(after, "d_a")["state"] == "done"
     assert _member(after, "d_b")["state"] == "already_on_target"
     assert after["state"] == "done", "all members terminal must close the record"
@@ -186,7 +199,7 @@ def test_the_pass_is_serial_and_a_done_member_is_not_re_applied(
     monkeypatch.setattr(
         meshupdate, "update_peer", lambda *a, **k: called.append("x") or _answer("busy")
     )
-    rollouts.step_record(server, record["id"], now=2000.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=2000.0)
     assert called == []
 
 
@@ -200,8 +213,8 @@ def test_a_busy_member_is_parked_on_the_cadence_and_writes_one_row(
     rollouts.mutate_record(record["id"], root, lambda rec: _sync(rec, record) or True)
     asked = _scripted(monkeypatch, [_answer("busy", reason="1 session is busy")])
 
-    rollouts.step_record(server, record["id"], now=1000.0)
-    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    member = _member(_live(record["id"], root), "d_a")
     assert member["state"] == "deferred" and member["code"] == "busy", member
     assert member["next_ask_at"] == 1000.0 + rollouts.CADENCE_S, member
 
@@ -211,11 +224,11 @@ def test_a_busy_member_is_parked_on_the_cadence_and_writes_one_row(
     rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
     assert len(rows) == 1 and rows[0].cause == "busy", rows
 
-    rollouts.step_record(server, record["id"], now=1100.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1100.0)
     assert asked == ["d_a"], "a member inside its floor must not be asked"
 
     _scripted(monkeypatch, [_answer("busy", reason="1 session is busy")])
-    rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
     rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
     assert len(rows) == 1, "a re-ask with the same outcome must not add a row"
 
@@ -236,14 +249,16 @@ def test_a_failed_member_backs_off_and_the_count_is_in_the_record(
     server = _Server(root)
     record = _open(root, devices=["d_a"])
     _scripted(monkeypatch, [_answer("failed", reason="installer exited 1")])
-    rollouts.step_record(server, record["id"], now=1000.0)
-    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    member = _member(_live(record["id"], root), "d_a")
     assert member["state"] == "failed" and member["fails"] == 1, member
     assert member["next_ask_at"] == 1000.0 + rollouts.FAIL_BACKOFF_S[0], member
 
     _scripted(monkeypatch, [_answer("failed", reason="installer exited 1")])
-    rollouts.step_record(server, record["id"], now=1000.0 + rollouts.FAIL_BACKOFF_S[0] + 1.0)
-    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    rollouts.step_record(
+        cast(Any, server), record["id"], now=1000.0 + rollouts.FAIL_BACKOFF_S[0] + 1.0
+    )
+    member = _member(_live(record["id"], root), "d_a")
     assert member["fails"] == 2, member
     assert member["next_ask_at"] == 1000.0 + rollouts.FAIL_BACKOFF_S[0] + 1.0 + (
         rollouts.FAIL_BACKOFF_S[1]
@@ -261,9 +276,9 @@ def test_a_no_grant_member_is_parked_for_the_whole_rollout(
     asked = _scripted(monkeypatch, [{"ok": False, "code": "no_grant", "message": "remedy"}] * 3)
 
     for moment in (1000.0, 1300.0, 1600.0):  # ≥ 3 ticks past the cadence
-        rollouts.step_record(server, record["id"], now=moment)
+        rollouts.step_record(cast(Any, server), record["id"], now=moment)
     assert asked == ["d_a"], "an ungranted member is parked: ONE refusal per rollout"
-    final = rollouts.read_record(record["id"], root)
+    final = _live(record["id"], root)
     assert _member(final, "d_a")["state"] == "skipped"
     assert _member(final, "d_a")["code"] == "no_grant"
     rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
@@ -278,14 +293,14 @@ def test_an_unreachable_member_is_caught_on_its_next_contact(
     server = _Server(root)
     record = _open(root, devices=["d_a"])
     _scripted(monkeypatch, [{"ok": False, "code": "unreachable", "message": "off"}])
-    rollouts.step_record(server, record["id"], now=1000.0)
-    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    member = _member(_live(record["id"], root), "d_a")
     assert member["state"] == "unreachable" and member["code"] == "unreachable", member
     assert member["next_ask_at"] == 1000.0 + rollouts.CADENCE_S, member
 
     _scripted(monkeypatch, [_answer("done", version="0.99.0")])
-    rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
-    final = rollouts.read_record(record["id"], root)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
+    final = _live(record["id"], root)
     assert _member(final, "d_a")["state"] == "done" and final["state"] == "done"
 
 
@@ -298,23 +313,23 @@ def test_a_drop_after_applying_re_probes_on_the_bounded_floor(
     seen_states: list[str] = []
 
     def _fake(server_: Any, device: str, *, rollout: str = "") -> dict[str, Any]:
-        live = rollouts.read_record(record["id"], root)
+        live = _live(record["id"], root)
         seen_states.append(str(_member(live, device)["state"]))
         return answers.pop(0)
 
     answers = [{"ok": False, "code": "no_answer", "message": ""}]
     monkeypatch.setattr(meshupdate, "update_peer", _fake)
-    rollouts.step_record(server, record["id"], now=1000.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
     assert seen_states == ["applying"], seen_states  # the in-flight marker is written first
-    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    member = _member(_live(record["id"], root), "d_a")
     assert member["state"] == "deferred" and member["code"] == "no_answer", member
     assert member["next_ask_at"] == 1000.0 + rollouts.DROPPED_AFTER_APPLY_RETRY_S, member
 
     answers.append(_answer("already_on_target"))
     rollouts.step_record(
-        server, record["id"], now=1000.0 + rollouts.DROPPED_AFTER_APPLY_RETRY_S + 1.0
+        cast(Any, server), record["id"], now=1000.0 + rollouts.DROPPED_AFTER_APPLY_RETRY_S + 1.0
     )
-    assert _member(rollouts.read_record(record["id"], root), "d_a")["state"] == "already_on_target"
+    assert _member(_live(record["id"], root), "d_a")["state"] == "already_on_target"
 
 
 def test_resume_clears_the_floors_and_restarts_the_ladder(
@@ -324,8 +339,8 @@ def test_resume_clears_the_floors_and_restarts_the_ladder(
     server = _Server(root)
     record = _open(root, devices=["d_a", "d_b"])
     _scripted(monkeypatch, [_answer("busy"), {"ok": False, "code": "unreachable", "message": ""}])
-    rollouts.step_record(server, record["id"], now=1000.0)
-    parked = rollouts.read_record(record["id"], root)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    parked = _live(record["id"], root)
     assert _member(parked, "d_a")["next_ask_at"] > 0 and _member(parked, "d_b")["next_ask_at"] > 0
 
     resumed = rollouts.resume_record(record["id"], root)
@@ -335,7 +350,9 @@ def test_resume_clears_the_floors_and_restarts_the_ladder(
     asked = _scripted(
         monkeypatch, [_answer("done", version="0.99.0"), _answer("done", version="0.99.0")]
     )
-    rollouts.step_record(server, record["id"], now=1000.0)  # SAME moment: floors are gone
+    rollouts.step_record(
+        cast(Any, server), record["id"], now=1000.0
+    )  # SAME moment: floors are gone
     assert asked == ["d_a", "d_b"], asked
 
 
@@ -361,9 +378,9 @@ def test_the_three_member_pass_defers_offline_and_busy_then_rolls_both(
             _answer("done", version="0.99.0"),
         ],
     )
-    rollouts.step_record(server, record["id"], now=1000.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
     assert asked == ["d_busy", "d_offline", "d_idle"], asked  # serial, snapshot order
-    mid = rollouts.read_record(record["id"], root)
+    mid = _live(record["id"], root)
     assert mid["state"] == "active", "two members are still owed a roll"
     assert (
         _member(mid, "d_busy")["state"] == "deferred" and _member(mid, "d_busy")["code"] == "busy"
@@ -374,14 +391,14 @@ def test_the_three_member_pass_defers_offline_and_busy_then_rolls_both(
     # Nothing is due before the cadence; at it, both deferred members are asked
     # once more and both land — "caught on next contact".
     asked2 = _scripted(monkeypatch, [])
-    rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S - 1.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.CADENCE_S - 1.0)
     assert asked2 == [], "a member inside its floor must not be asked"
     asked3 = _scripted(
         monkeypatch, [_answer("done", version="0.99.0"), _answer("already_on_target")]
     )
-    rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
     assert asked3 == ["d_busy", "d_offline"], asked3
-    final = rollouts.read_record(record["id"], root)
+    final = _live(record["id"], root)
     assert final["state"] == "done", final
     assert _member(final, "d_busy")["state"] == "done"
     assert _member(final, "d_offline")["state"] == "already_on_target"
@@ -395,9 +412,9 @@ def test_cancel_abandons_the_record_and_stops_the_pass(
     root = tmp_path / "cfg"
     server = _Server(root)
     record = _open(root, devices=["d_a"])
-    cancelled = rollouts.cancel_record(record["id"], root, server=server)
+    cancelled = rollouts.cancel_record(record["id"], root, server=cast(Any, server))
     assert cancelled is not None
-    final = rollouts.read_record(record["id"], root)
+    final = _live(record["id"], root)
     assert final["state"] == "abandoned"
     rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
     assert rows and rows[-1].outcome == "partial", rows
@@ -406,7 +423,7 @@ def test_cancel_abandons_the_record_and_stops_the_pass(
     monkeypatch.setattr(
         meshupdate, "update_peer", lambda *a, **k: called.append("x") or _answer("busy")
     )
-    rollouts.step_record(server, record["id"], now=2000.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=2000.0)
     assert called == [], "an abandoned record must not be driven"
 
 
@@ -417,7 +434,7 @@ def test_a_fully_terminal_pass_closes_with_ok_and_counts(
     server = _Server(root)
     record = _open(root, devices=["d_a"])
     _scripted(monkeypatch, [_answer("already_on_target")])
-    rollouts.step_record(server, record["id"], now=1000.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
     rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
     assert rows and rows[-1].outcome == "ok" and rows[-1].detail["counts"] == "1 of 1 moved", rows
 
@@ -449,22 +466,22 @@ def test_a_codeless_refusal_is_recorded_without_claiming_and_retried(
         return dict(live)
 
     monkeypatch.setattr(meshupdate, "update_peer", _fake)
-    rollouts.step_record(server, record["id"], now=1000.0)
-    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    member = _member(_live(record["id"], root), "d_a")
     assert member["state"] == "refused" and member["code"] == "refused", member
     assert float(member["next_ask_at"]) == 1000.0 + rollouts.CADENCE_S, member
     rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
     assert len(rows) == 1 and rows[0].cause == "", rows  # non-claiming: no capability_denied
 
     # Inside the floor: no ask. At the cadence: asked again; still ONE row.
-    rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S - 1.0)
-    rollouts.step_record(server, record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
-    rollouts.step_record(server, record["id"], now=1000.0 + 2 * rollouts.CADENCE_S + 2.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.CADENCE_S - 1.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.CADENCE_S + 1.0)
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + 2 * rollouts.CADENCE_S + 2.0)
     assert asked == ["d_a", "d_a", "d_a"], asked
     rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
     assert len(rows) == 1, rows
     assert (
-        rollouts.read_record(record["id"], root)["state"] == "active"
+        _live(record["id"], root)["state"] == "active"
     ), "a codeless refusal is not terminal — the window is the bound"
 
 
@@ -474,18 +491,18 @@ def test_the_failure_ladder_is_consecutive(tmp_path: Path, monkeypatch: pytest.M
     server = _Server(root)
     record = _open(root, devices=["d_a"])
     _scripted(monkeypatch, [_answer("failed", reason="x")])
-    rollouts.step_record(server, record["id"], now=1000.0)
-    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    member = _member(_live(record["id"], root), "d_a")
     assert member["fails"] == 1, member
     at = float(member["next_ask_at"]) + 1.0
     _scripted(monkeypatch, [_answer("busy", reason="2 sessions busy")])
-    rollouts.step_record(server, record["id"], now=at)
-    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    rollouts.step_record(cast(Any, server), record["id"], now=at)
+    member = _member(_live(record["id"], root), "d_a")
     assert member["state"] == "deferred" and member["fails"] == 0, member
     at2 = float(member["next_ask_at"]) + 1.0
     _scripted(monkeypatch, [_answer("failed", reason="x")])
-    rollouts.step_record(server, record["id"], now=at2)
-    member = _member(rollouts.read_record(record["id"], root), "d_a")
+    rollouts.step_record(cast(Any, server), record["id"], now=at2)
+    member = _member(_live(record["id"], root), "d_a")
     assert member["fails"] == 1, "the consecutive count restarted after the busy answer"
     assert float(member["next_ask_at"]) == at2 + rollouts.FAIL_BACKOFF_S[0], member
 
@@ -516,7 +533,7 @@ def test_terminal_records_are_refused_by_the_verbs(tmp_path: Path) -> None:
     with pytest.raises(MeshRefusal) as resumed:
         rollouts.resume_record(record["id"], root)
     assert resumed.value.code == "rollout_not_active", resumed.value.code
-    assert rollouts.read_record(record["id"], root)["state"] == "abandoned"
+    assert _live(record["id"], root)["state"] == "abandoned"
 
 
 def test_the_real_parser_builds_and_both_resume_spellings_parse() -> None:
@@ -579,7 +596,7 @@ def test_main_defers_the_verbs_resume_to_the_verb(tmp_path: Path) -> None:
 
 def test_the_slice_registers_one_start_hook_and_no_ops() -> None:
     server = _Server(Path("/nonexistent-rollouts-root"))
-    rollouts.install(server)
+    rollouts.install(cast(Any, server))
     assert server.ops == {}, "S3a serves no ops"
     assert list(server.kw.get("on_start", {})) == ["mesh-rollout"], server.kw
     assert not server.kw.get("local_handlers") and not server.kw.get("slow"), server.kw
@@ -602,7 +619,7 @@ def test_the_driver_is_dormant_until_a_record_exists(
     monkeypatch.setattr(
         meshupdate, "update_peer", lambda *a, **k: pytest.fail("the dormant driver asked a peer")
     )
-    driver = rollouts.ensure_driver(server)
+    driver = rollouts.ensure_driver(cast(Any, server))
     assert driver.name == "mesh-rollout", driver.name
     time.sleep(0.3)
     assert not rollouts.rollouts_dir(root).exists(), "a dormant driver created the rollouts dir"
@@ -615,7 +632,7 @@ def test_the_driver_is_dormant_until_a_record_exists(
     record = _open(root, devices=["d_a"], now=time.time())
     time.sleep(0.4)
     assert asked and asked[0] == "d_a", asked
-    assert rollouts.read_record(record["id"], root)["members"][0]["state"] in (
+    assert _live(record["id"], root)["members"][0]["state"] in (
         "deferred",
         "applying",
         "pending",
@@ -626,18 +643,49 @@ def test_the_cli_verbs_mutate_the_record(monkeypatch: pytest.MonkeyPatch) -> Non
     # The verbs act on THIS device's config root (root=None), so the record is
     # opened there — the harness isolates it — and no relay is ever touched.
     record = _open(None, devices=["d_a"])
-    monkeypatch.setattr(rollouts, "latest_active", lambda: rollouts.read_record(record["id"]))
+    monkeypatch.setattr(rollouts, "latest_active", lambda: _live(record["id"]))
     monkeypatch.setattr(
         net_cli, "_relay_answer", lambda *a, **k: pytest.fail("--resume/--cancel are local")
     )
 
     ns = Namespace(rollout_resume="", cancel=None, peer="", json=False)
     assert net_cli._cmd_update(ns) == 0
-    assert rollouts.read_record(record["id"])["state"] == "active"
+    assert _live(record["id"])["state"] == "active"
 
     ns = Namespace(rollout_resume=None, cancel="", peer="", json=False)
     assert net_cli._cmd_update(ns) == 0
-    assert rollouts.read_record(record["id"])["state"] == "abandoned"
+    assert _live(record["id"])["state"] == "abandoned"
+
+
+def test_the_receipts_count_codeless_refused_members(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R3-3 (round 3): receipts use ``member_terminal``, not bare state membership.
+
+    A codeless-refused member is non-terminal and WILL be re-asked, so a
+    receipt that counted it as parked undercounted what the verb just did
+    (the reviewer's probe: "0 member(s) will be re-asked").
+    """
+    record = _open(None, devices=["d_a"])
+    rollouts.mutate_record(
+        record["id"],
+        None,
+        lambda rec: _member(rec, "d_a").update({"state": "refused", "code": "refused"}) or True,
+    )
+    monkeypatch.setattr(rollouts, "latest_active", lambda: _live(record["id"]))
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda *a, **k: pytest.fail("local verbs only"))
+
+    ns = Namespace(rollout_resume="", cancel=None, peer="", json=False)
+    assert net_cli._cmd_update(ns) == 0
+    out = capsys.readouterr().out
+    assert "1 member(s) will be re-asked" in out, out
+
+    # The cancel receipt counts it as REMAINED for the same reason.
+    monkeypatch.setattr(rollouts, "latest_active", lambda: _live(record["id"]))
+    ns = Namespace(rollout_resume=None, cancel="", peer="", json=False)
+    assert net_cli._cmd_update(ns) == 0
+    out = capsys.readouterr().out
+    assert "1 member(s) remained" in out, out
 
 
 def test_a_member_frame_carries_the_rollout_id_into_the_members_rows(
@@ -649,7 +697,7 @@ def test_a_member_frame_carries_the_rollout_id_into_the_members_rows(
 
     def _fake_exec(
         server_: Any, link: Any, target: Any, *, rollout: str = "", runner: Any = None
-    ) -> dict:
+    ) -> dict[str, Any]:
         seen["rollout"] = rollout
         return {
             "state": "busy",
@@ -663,7 +711,7 @@ def test_a_member_frame_carries_the_rollout_id_into_the_members_rows(
 
     monkeypatch.setattr(meshupdate, "_execute_validated", _fake_exec)
     reply = meshupdate.member_execute(
-        server,
+        cast(Any, server),
         None,
         {"target": {"version": "0.9.0", "source_ref": ""}, "rollout": "ro_abc123"},
     )

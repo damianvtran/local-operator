@@ -326,7 +326,7 @@ def member_terminal(member: Mapping[str, Any]) -> bool:
     terminal for the rollout, while a CODELESS authoriser refusal (``code
     "refused"``) is the wire saying "not now" without saying why — a
     previous-epoch or reconcile-phase refusal self-heals — so it is retried on
-    the cadence until the window closes (note §4's ``not_authorised`` row,
+    the cadence until the window closes (note §3's ``not_authorised`` row,
     REALIGNED by this slice's errata). Everything else terminal is terminal.
     """
     state = str(member.get("state") or "")
@@ -458,19 +458,15 @@ def classify_answer(answer: Mapping[str, Any], *, fails: int, now: float) -> dic
             outcome="failed",
         ) | {"fails": next_fails}
     if code == "no_grant":
-        # The member's own refusal to grant THIS peer `update`: parked for the
-        # rollout, never re-asked on the cadence (RU §2's remedy is in the
-        # message the CLI already prints); the member's durable
-        # `authorisation_refused` row is its own record.
-        return moved("skipped", new_code="no_grant", cause="capability_denied", outcome="refused")
-    if code == "no_grant":
-        # THE CODED GATE (round 2, R2-2): only an answer that NAMES the grant's
+        # THE CODED GATE (round 2/3): only an answer that NAMES the grant's
         # absence parks the member for the rollout. Today that code arrives
         # through ``update_peer``'s coded ``not_authorised`` branch, whose own
         # docstring calls it the FUTURE coded authoriser frame — the
         # security-reviewed change this PR's follow-ups name as the S3b
         # trigger. Parked, never re-asked on the cadence; RU §2's remedy is in
-        # the message the CLI already prints.
+        # the message the CLI already prints, and the member's durable
+        # `authorisation_refused` row is its own record. (ONE arm: a second
+        # identical ``if`` here was dead code — round 3, R3-2.)
         return moved("skipped", new_code="no_grant", cause="capability_denied", outcome="refused")
     if code == "refused":
         # A CODELESS AUTHORISER REFUSAL — THE WIRE'S "NOT NOW", NEVER A CLAIM
