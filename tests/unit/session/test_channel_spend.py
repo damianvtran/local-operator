@@ -1084,6 +1084,69 @@ def test_the_inference_half_rung_follows_combines_activity_gate() -> None:
     assert sources["inference"]["knowledge"] == "partial"
 
 
+def test_all_unsized_entries_read_null_never_zero() -> None:
+    """MAJOR (review round 2): an entry whose contributors are all unstated is null.
+
+    Nothing is stated anywhere, so every entry reads ``null`` + its unsized
+    count — never a fabricated 0 — and the siblings AGREE with each other on
+    the same payload (parent, the channel entry, and the subagents entry).
+    """
+    generated = payload(
+        [
+            record(
+                record_id="image:1",
+                channel="image",
+                amount_micro=None,
+                status="cancelled",
+            )
+        ],
+        child_records=[
+            record(
+                record_id="image:kid",
+                channel="image",
+                amount_micro=None,
+                status="cancelled",
+            )
+        ],
+    )
+    agents = {entry["id"]: entry for entry in generated["breakdown"]["by_agent"]}
+    sources = {entry["id"]: entry for entry in generated["breakdown"]["by_source"]}
+    assert agents["parent"]["amount_micro"] is None
+    assert agents["parent"]["unstated_records"] == 1
+    assert sources["image"]["amount_micro"] is None
+    assert sources["image"]["unstated_records"] == 2, "the own and the relayed record"
+    assert agents["subagents"]["amount_micro"] is None
+    assert agents["subagents"]["unstated_records"] == 1
+
+
+def test_a_degraded_children_bundle_degrades_the_inference_entry() -> None:
+    """MAJOR (review round 2): an entry never reads ``unknown`` over stated money.
+
+    A children ledger of 400,000 µ$ with a relayed child record that has NO
+    stated amount: the ledger money is stated (the inference entry carries
+    400,000) and the bundle itself degrades to ``partial`` for the unsized
+    relay — the entry takes that worst rung rather than out-reading the
+    bundle.
+    """
+    generated = payload(
+        [],
+        children=ChildrenSnapshot(total_micro=400000, knowledge="exact"),
+        child_records=[
+            record(
+                record_id="image:kid",
+                channel="image",
+                amount_micro=None,
+                status="cancelled",
+            )
+        ],
+    )
+    assert generated["children"]["knowledge"] == "partial", "the bundle's own degradation"
+    entries = {entry["id"]: entry for entry in generated["breakdown"]["by_source"]}
+    assert entries["inference"]["amount_micro"] == 400000
+    assert entries["inference"]["knowledge"] == "partial"
+    assert entries["inference"]["unstated_records"] == 0
+
+
 def test_custom_type_literal_is_pinned() -> None:
     """The transcript type is a compatibility surface; a rename is a migration."""
     assert CHANNEL_SPEND_CUSTOM_TYPE == "session_channel_spend.v1"

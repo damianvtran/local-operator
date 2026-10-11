@@ -897,15 +897,32 @@ def _sum_stated(amounts: Sequence[int | None]) -> int | None:
     return sum(stated) if stated else None
 
 
-def _statement(amount: int, rung: str) -> int | None:
-    """A non-record contribution (the inference half / the children ledger).
+def _inference_half_statement(inference: InferenceSnapshot) -> int | None:
+    """The inference half's STATED amount, or ``None`` when nothing was sized.
 
-    These pieces state a figure even when it is 0 (a free call; a session with
-    no children). But a piece whose own block presents it as degraded
-    (``partial``/``floor``/``unknown``) and carries no money is NOT a
-    measurement: it contributes ``None``, so the entry reads null, never $0.
+    "Stated" is a property of the ACCUMULATOR, not of its rung (review round
+    2, MAJOR): money (``micro``) or a priced call is a figure — a free call
+    keeps its stated 0 — while a never-accrued accumulator is not a
+    measurement. So an entry whose only contributors are unstated reads
+    ``null``, never 0, and agrees with its sibling entries on the same
+    payload.
     """
-    return amount if amount != 0 or rung == "exact" else None
+    if int(inference.micro) != 0 or inference.priced_calls > 0:
+        return int(inference.micro)
+    return None
+
+
+def _ledger_statement(total_micro: int) -> int | None:
+    """The children ledger's STATED amount, or ``None`` when it carries none.
+
+    The same accumulator rule as the inference half (review round 2, MAJOR):
+    the ledger states a figure when it carries money; an exact zero with
+    nothing recorded in it is "no ledger", not a measurement — it must not
+    fabricate a 0 into an entry whose records are all unsized. A relayed FREE
+    record still states its own 0 AS A RECORD, which is where a real zero in
+    the children money comes from.
+    """
+    return int(total_micro) if int(total_micro) != 0 else None
 
 
 def _channel_label(channel: str) -> str:
@@ -1022,9 +1039,9 @@ def _breakdown_sections(
     ``partial`` when a relayed record cannot be sized.
     """
     ledger_rung = str(children.knowledge)
-    ledger_stated = _statement(int(children.total_micro), ledger_rung)
+    ledger_stated = _ledger_statement(int(children.total_micro))
     inference_rung = _inference_half_rung(inference)
-    inference_stated = _statement(int(inference.micro), inference_rung)
+    inference_stated = _inference_half_statement(inference)
 
     # -- by_agent ------------------------------------------------------------
     by_agent: list[dict[str, Any]] = []
@@ -1109,6 +1126,11 @@ def _breakdown_sections(
                 rungs=(
                     inference_rung,
                     ledger_rung,
+                    # The BUNDLE's own degradation (review round 2, MAJOR): a
+                    # relayed record with no stated amount degrades it to
+                    # ``partial``, and the entry carrying the ledger lump must
+                    # take that worst rung — never out-read the bundle.
+                    str(children_knowledge),
                     _record_rung(inference_named),
                 ),
                 unstated_records=_unstated_count(inference_named),
