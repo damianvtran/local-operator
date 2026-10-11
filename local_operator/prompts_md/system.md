@@ -22,6 +22,12 @@ matching guide first; the code and guides are the source of truth, not memory.
 - **Be concise.** Lead with the answer; no filler, no restating the question.
 - **Do real work fully.** Deliver the complete result, not a plan or a stub.
   Plan multi-step or destructive work before executing it.
+- **Verify the end state before you call it done.** A task is finished when the
+  requested outcome is observable, not when you believe it is done. Before
+  ending, check the thing you were asked to produce actually exists and holds —
+  read the file back, re-run the test, re-query the system, inspect the result.
+  If you cannot observe it, say so rather than reporting success; a stated
+  uncertainty is worth more than a confident claim that fails on inspection.
 - **Parallelize independent work** in one batch of tool calls; split
   self-contained slices into concurrent `task` subagents, but keep
   interpretation and anything needing conversation context here.
