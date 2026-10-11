@@ -4676,8 +4676,9 @@ async def test_todo_view_renders_all_four_statuses(tools, context) -> None:
 
 @pytest.mark.asyncio
 async def test_open_todos_is_pending_only_and_copies(tools, context) -> None:
-    """The guardrail's single definition of "open", and it hands out copies:
-    the ops mutate item dicts in place."""
+    """The guardrail's single definition of "pending" — the work that may not be
+    silently left running — and it hands out copies: the ops mutate item dicts
+    in place."""
     await _call(tools, "todo", {"op": "init", "items": ["a", "b"]}, context)
     await _call(tools, "todo", {"op": "done", "items": ["a"]}, context)
 
@@ -4686,6 +4687,31 @@ async def test_open_todos_is_pending_only_and_copies(tools, context) -> None:
 
     assert builtin.open_todos("unit-test") == [{"text": "b", "status": "pending"}]
     assert builtin.open_todos("no-such-session") == []
+
+
+@pytest.mark.asyncio
+async def test_blocked_todos_is_blocked_only_and_copies(tools, context) -> None:
+    """``blocked_todos`` is ``open_todos``'s mirror: the blocked subset, copies
+    (the ops mutate item dicts in place), and ``[]`` for an unknown session. It
+    feeds the guardrail's reconciliation pass, so selecting pending here would
+    nudge the model back to work it has honestly parked."""
+    await _call(tools, "todo", {"op": "init", "items": ["a", "b", "c"]}, context)
+    await _call(tools, "todo", {"op": "done", "items": ["a"]}, context)
+    await _call(
+        tools,
+        "todo",
+        {"op": "block", "items": ["b"], "reason": "waiting on legal"},
+        context,
+    )
+
+    snapshot = builtin.blocked_todos("unit-test")
+    assert snapshot == [{"text": "b", "status": "blocked", "reason": "waiting on legal"}]
+    snapshot[0]["text"] = "mutated"
+
+    assert [item["text"] for item in builtin.blocked_todos("unit-test")] == ["b"]
+    assert builtin.blocked_todos("no-such-session") == []
+    # The two projections are disjoint and cut the same store by status.
+    assert [item["text"] for item in builtin.open_todos("unit-test")] == ["c"]
 
 
 @pytest.mark.asyncio
@@ -4842,8 +4868,10 @@ async def test_todo_block_and_drop_by_phase(tools, context) -> None:
 
     assert bare_block.is_error is True and "reason" in bare_block.text
     assert blocked.is_error is False
-    # Blocked is not open; the guardrail sees an honest stop.
+    # Blocked is not PENDING work: the guardrail reconciles it through
+    # ``blocked_todos`` instead, so it never shows up here as work to resume.
     assert builtin.open_todos("unit-test") == []
+    assert [item["text"] for item in builtin.blocked_todos("unit-test")] == ["a", "b"]
     assert all(item["status"] == "blocked" for item in builtin.TODO_STORE["unit-test"][0]["items"])
 
 

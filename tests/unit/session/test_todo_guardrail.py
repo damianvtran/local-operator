@@ -24,7 +24,11 @@ from local_operator.harness.types import (
     StreamEvent,
     StreamTextDelta,
 )
-from local_operator.session.session import Session, _default_convert_to_llm
+from local_operator.session.session import (
+    Session,
+    _default_convert_to_llm,
+    _todo_reminder_text,
+)
 from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
 
@@ -218,21 +222,63 @@ async def test_a_fresh_user_turn_rearms_the_latch(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_blocked_only_list_does_not_fire(tmp_path) -> None:
-    """``blocked`` is the honest stop: the guardrail must let the turn end so
-    the user can answer, instead of pushing the model to invent progress."""
+async def test_blocked_only_list_fires_a_reconciliation_nudge(tmp_path) -> None:
+    """Blocked is no longer a list the guardrail ignores. The honest stop still
+    ends the turn, but the model must account for what it parked first — this is
+    the ~14-hours-on-six-blocked-items case. Exactly ONE pass: the byte-identical
+    re-yield after the accounting is released, so the block is reconciled, never
+    forbidden."""
     builtin.TODO_STORE[SESSION_ID] = [
         {"text": "pick a domain", "status": "blocked", "reason": "needs the user's call"},
         {"text": "old plan", "status": "dropped"},
         {"text": "schema", "status": "done"},
     ]
-    stream = ScriptedStream(prose_turns(1))
+    stream = ScriptedStream(prose_turns(4))
     session = make_session(tmp_path, stream)
 
     await session.prompt("go")
 
-    assert len(stream.requests) == 1
-    assert reminders(session._context.messages) == []
+    assert len(stream.requests) == 2  # one accounting pass, then released
+    assert len(reminders(session._context.messages)) == 1
+    # It reached the model on the continuation request, naming the parked item,
+    # the condition it is parked on, and the reconciliation it owes.
+    sent = stream.requests[1].messages[-1].text
+    assert "pick a domain" in sent
+    assert "needs the user's call" in sent  # the reason IS the condition to re-check
+    assert "account for each blocked item" in sent
+    # Settled work is still not re-asserted, and the pending paragraph stays out
+    # of a list with nothing pending: it is an instruction about work that is not
+    # there, and the model would have to reconcile it against its own list.
+    assert "old plan" not in sent and "schema" not in sent
+    assert "Do not end the turn while pending items remain" not in sent
+    # The latch still compares the FULL list, settled items included.
+    assert session._todo_reminder_fingerprint == (
+        ("Todos", "pick a domain", "blocked"),
+        ("Todos", "old plan", "dropped"),
+        ("Todos", "schema", "done"),
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_user_turn_rearms_the_latch_on_a_parked_list(tmp_path) -> None:
+    """The re-arm applies to blocked work too: the user's next message may be the
+    answer the block was waiting on, so the latch must not carry across turns —
+    otherwise a parked list is accounted for exactly once, ever."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {"text": "pick a domain", "status": "blocked", "reason": "needs the user's call"}
+    ]
+    stream = ScriptedStream(prose_turns(6))
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("go")
+    assert session._todo_reminder_fingerprint is not None
+    await session.prompt("use example.com")
+
+    # Two requests per turn: the prose answer plus one reconciliation each, and
+    # the second turn is released after its own single accounting pass.
+    assert len(stream.requests) == 4
+    assert len(reminders(session._context.messages)) == 2
     await session.dispose()
 
 
@@ -355,8 +401,10 @@ async def test_unstamped_reminder_expires(tmp_path) -> None:
 
 
 def test_phased_open_todos_flattens_pending_and_excludes_blocked() -> None:
-    """The guardrail's \"open\" is pending across ALL phases; blocked stays out so
-    a phased list can still stop honestly."""
+    """``open_todos`` is the PENDING projection across all phases — blocked stays
+    out of it (the guardrail draws it separately through ``blocked_todos``, which
+    is what keeps the two obligations apart). Both flatten the same phased store
+    in phase-then-item order."""
     builtin.TODO_STORE[SESSION_ID] = [
         {
             "name": "A",
@@ -375,6 +423,41 @@ def test_phased_open_todos_flattens_pending_and_excludes_blocked() -> None:
     ]
 
     assert [item["text"] for item in builtin.open_todos(SESSION_ID)] == ["one", "two"]
+    assert [item["text"] for item in builtin.blocked_todos(SESSION_ID)] == ["held"]
+
+
+# --- the reminder text ------------------------------------------------------
+
+
+def test_reminder_text_states_each_group_only_when_present() -> None:
+    """One text, two groups. Pending rows carry their paragraph; blocked rows
+    carry their reason and the reconciliation paragraph. A group with no items
+    contributes no paragraph, because an instruction about work that is not on
+    the list is noise the model has to reconcile away."""
+    pending = [{"text": "add the columns", "status": "pending"}]
+    blocked = [{"text": "pick a domain", "status": "blocked", "reason": "needs the user's call"}]
+
+    mixed = _todo_reminder_text(pending, blocked)
+    assert mixed.startswith("<system-reminder>") and mixed.endswith("</system-reminder>")
+    assert "- add the columns" in mixed
+    assert "- pick a domain — blocked: needs the user's call" in mixed
+    assert "Do not end the turn while pending items remain" in mixed
+    assert "Before you finish, account for each blocked item" in mixed
+
+    pending_only = _todo_reminder_text(pending, [])
+    assert "Before you finish, account for each blocked item" not in pending_only
+    # The exits the tool actually offers, and the ask clause, stay named.
+    assert "`todo block`" in pending_only and "`ask` tool" in pending_only
+
+    blocked_only = _todo_reminder_text([], blocked)
+    assert "Do not end the turn while pending items remain" not in blocked_only
+    assert "- pick a domain — blocked: needs the user's call" in blocked_only
+
+    # A blocked row with no reason (a hand-edited or pre-``reason`` store) keeps
+    # the state and drops the empty tail — the panel's own ``— blocked`` form.
+    bare = _todo_reminder_text([], [{"text": "x", "status": "blocked"}])
+    assert bare.count("— blocked") == 1
+    assert "— blocked:" not in bare
 
 
 def test_stamped_fingerprint_round_trips_a_three_tuple() -> None:
