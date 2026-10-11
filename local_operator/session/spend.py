@@ -154,9 +154,11 @@ def inference_billing_labels(provider: str, usd_cost: float | None) -> tuple[str
 
     The three rules, in order:
 
-    - a SUBSCRIPTION login flavour (``openai-device``, ``xai-oauth``,
-      ``zai-oauth``, ``alibaba-token-plan-oauth``) spends quota, not dollars,
-      so the figure is the client rate table's API-EQUIVALENT: basis
+    - a SUBSCRIPTION-flavoured provider id (``openai``, ``openai-device``,
+      ``xai-oauth``, ``zai``, ``zai-oauth``, ``alibaba-token-plan``,
+      ``alibaba-token-plan-oauth`` — ``providers.registry``
+      ``SUBSCRIPTION_LOGIN_FLAVOURS`` is the ONE list) spends quota, not
+      dollars, so the figure is the client rate table's API-EQUIVALENT: basis
       ``subscription_api_equivalent``, source ``catalogue``;
     - a provider-reported receipt (``usd_cost``) IS the provider's own
       statement: basis ``billed``, source ``provider_reported``;

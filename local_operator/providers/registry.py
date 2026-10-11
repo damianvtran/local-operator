@@ -1172,16 +1172,32 @@ def credential_provider_id(provider_id: str) -> str:
     return (definition.store_credentials_as or definition.id) if definition else provider_id
 
 
-#: The login-flavour provider ids whose sign-in is a SUBSCRIPTION (a plan or
-#: quota), so a call they serve spends no metered dollars and the client-side
-#: figure beside it is an API-EQUIVALENT, never a bill (PR-3, design §3.4).
+#: The provider ids whose calls spend a PLAN or QUOTA rather than metered
+#: dollars, so the client-side figure beside them is an API-EQUIVALENT, never a
+#: bill (PR-3, design §3.4). Membership is about the BILLING the id implies,
+#: whether the id names a login flavour that stores under another provider
+#: (``openai-device`` → ``openai``) or a provider whose own sign-in is the
+#: plan (``zai``'s pasted key is the GLM Coding Plan key; the base URL is the
+#: plan host — its own registry row says so).
 #:
 #: WHY AN EXPLICIT SET rather than "every id whose ``store_credentials_as``
 #: differs": that test also covers ``openai-api-key``, ``anthropic-key`` and
 #: ``radient-key`` — pasted-key logins that alias onto a provider but bill by
 #: the token, and labelling their calls subscription-flavoured would be a
-#: wrong number wearing a plan's authority. Each id here is one whose ONLY
-#: login is the subscription sign-in, so the id alone settles the question.
+#: wrong number wearing a plan's authority. Every id here is one whose only
+#: NORMAL way to serve a call is a plan: a subscription sign-in, or a plan key.
+#: The one reading nobody can see is an env API key (`OPENAI_API_KEY` &
+#: friends) configured under one of these ids: the call records the ID, not
+#: the credential kind, and the design accepts that limit wherever a label is
+#: read (``session.spend.inference_billing_labels`` says the same for
+#: ``anthropic``/``kimi``).
+#:
+#: BOTH ids of a one-pool pair belong here together, and that is why ``openai``
+#: sits beside ``openai-device`` (review round 1, MINOR 1): the browser and
+#: device sign-ins are one ChatGPT pool writing one credential row, so a call
+#: must not read ``subscription_api_equivalent`` or ``billed`` depending only
+#: on which of the two ids its spec names. Same for ``zai``/``zai-oauth`` and
+#: ``alibaba-token-plan``/``alibaba-token-plan-oauth``.
 #:
 #: NOT here, and deliberately: ``anthropic`` and ``kimi``, which serve a
 #: subscription sign-in AND a plain API key under one id — a call records no
@@ -1189,9 +1205,12 @@ def credential_provider_id(provider_id: str) -> str:
 #: ``session.spend.inference_billing_labels`` documents).
 SUBSCRIPTION_LOGIN_FLAVOURS: frozenset[str] = frozenset(
     {
+        "openai",
         "openai-device",
         "xai-oauth",
+        "zai",
         "zai-oauth",
+        "alibaba-token-plan",
         "alibaba-token-plan-oauth",
     }
 )

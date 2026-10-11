@@ -244,3 +244,32 @@ def test_channel_record_without_a_cost_is_unknown_never_zero() -> None:
     assert record.units == 420.0, "the client-side count still rides — it is a real fact"
     assert record.provider == "elevenlabs"
     assert record.request_id == "rpc-2", "no usage id: the caller's correlation rides instead"
+
+
+def test_a_stated_zero_unit_count_wins_over_the_client_fallback() -> None:
+    """Review round 1, MINOR 3: ``units: 0`` is a STATEMENT, not an absence.
+
+    The transcription contract documents a zero-unit outcome ("If the service
+    cannot report a usable duration … metered at 0 units"), so a hub that
+    states ``units: 0`` must not be overridden by the route's ``ceil(duration)``
+    fallback — the same "server-counted units win" rule the docstring one screen
+    up states, applied to the one value that used to slip through it.
+    """
+    cost = cost_from_headers(
+        {
+            "x-radient-cost-version": "1",
+            "x-radient-cost-amount-usd": "0.001",
+            "x-radient-cost-basis": "billed",
+            "x-radient-cost-unit": "second",
+            "x-radient-cost-units": "0",
+        }
+    )
+    record = channel_record_from_cost(
+        cost,
+        channel="stt",
+        record_id="stt:zero",
+        units=3.0,  # the client's ceil(duration) — must NOT override the stated 0
+        unit="seconds",
+    )
+    assert record.units == 0.0
+    assert record.amount_micro == 1000, "the amount is independent of the unit count"

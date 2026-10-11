@@ -7,13 +7,18 @@ record over live would need a new attach-protocol operation (the design note's
 is an in-process lock with no cross-process counterpart), so until that
 operation lands these routes emit the way the design's fallback says:
 
-1. the record goes to the ANALYTICS mirror immediately — queryable by session,
-   provider, model and time, and durable for the analytics retention window;
+1. the record goes to the ANALYTICS mirror — best-effort, not a guarantee:
+   the recorder drops silently when its queue is full or it is closing
+   (design review round 1 / review MINOR 5). It is queryable by session,
+   provider, model and time for the analytics retention window;
 2. when the session id names a LOCAL session directory, a marker line is
    appended to that directory's ``channel_pending.jsonl`` sidecar, which the
    session's own fold reads when it publishes ``spend_channels`` and reports
    as ``pending: {voice: pending_owner_append, ...}`` — the session's total on
-   every surface excludes the record, and the published object says why.
+   every surface excludes the record, and the published object says why. The
+   marker is the copy the owning session is guaranteed to see; it stands even
+   when the mirror dropped its copy, because the charge is real and its
+   exclusion from the total is the fact the note tells.
 
 One module rather than a copy per route, because a second entry point that
 diverged on the marker rule would make voice money visible on one route and

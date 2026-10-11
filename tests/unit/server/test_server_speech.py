@@ -960,10 +960,17 @@ LEGACY_COST_HEADERS = {
 }
 
 
-def _local_session_config(tmp_path: Path, session_id: str) -> SimpleNamespace:
-    """A config root whose ``sessions/<id>`` directory exists (the marker's gate)."""
-    (tmp_path / "config" / "sessions" / session_id).mkdir(parents=True)
-    return SimpleNamespace(config_dir=tmp_path / "config")
+def _session_config(tmp_path: Path, session_id: str) -> ConfigManager:
+    """A REAL config manager whose ``sessions/<id>`` directory exists.
+
+    A real manager (not a stand-in): the marker write re-reads config_dir and
+    stats the session directory, and the type checker is right that a
+    ``SimpleNamespace`` would not answer ``config_dir`` the way the caller
+    assumes — the session directory it names must exist for a marker.
+    """
+    config = ConfigManager(config_dir=tmp_path / "config")
+    (tmp_path / "config" / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
+    return config
 
 
 @pytest.mark.asyncio
@@ -988,7 +995,7 @@ async def test_the_direct_route_records_the_hub_charge(tmp_path):
             _speech_request(session_id="sess-1"),
             radient_client,
             MagicMock(),
-            _local_session_config(tmp_path, "sess-1"),
+            _session_config(tmp_path, "sess-1"),
             _env_config(),
         )
 
@@ -1032,7 +1039,7 @@ async def test_an_old_hub_without_the_header_set_states_unknown_never_zero(tmp_p
             _speech_request(session_id="sess-2"),
             radient_client,
             MagicMock(),
-            _local_session_config(tmp_path, "sess-2"),
+            _session_config(tmp_path, "sess-2"),
             _env_config(),
         )
 
@@ -1056,8 +1063,7 @@ async def test_the_descriptor_path_records_the_charge_and_sends_correlation(tmp_
     radient_client = _credentialed_client()
     radient_client.create_speech_response.return_value = (b"audio_data", dict(LEGACY_COST_HEADERS))
     captured: list[Any] = []
-    config = _voiced_config(tmp_path)
-    (Path(str(config.config_dir)) / "sessions" / "sess-3").mkdir(parents=True, exist_ok=True)
+    config = _session_config(tmp_path, "sess-3")
 
     with (
         patch("local_operator.server.routes.speech.configure_model", return_value=MagicMock()),
@@ -1072,7 +1078,11 @@ async def test_the_descriptor_path_records_the_charge_and_sends_correlation(tmp_
         ),
     ):
         response = await create_speech(
-            SpeechRequest(input="Hello", session_id="sess-3"),
+            # The descriptor-driven shape: model and voice absent as a PAIR,
+            # provider never named — built through the typed-dict helper the
+            # file's other descriptor tests use (pyright treats a pydantic
+            # model's defaulted fields as required keyword arguments).
+            _speech_request(input="Hello", model=None, voice=None, session_id="sess-3"),
             radient_client,
             _speech_store(tmp_path),
             config,

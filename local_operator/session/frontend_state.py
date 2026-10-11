@@ -7181,9 +7181,10 @@ class FrontendStateStore:
         self._seed_legacy_spend(session, None)
         micro = int(round(paint_cost * 1_000_000)) if paint_cost is not None else None
         # The call's billing basis (PR-3): the SAME decision the analytics
-        # record takes, from the SAME raw usage stamps, so the wire's basis
-        # array and the ledger's basis column cannot disagree about one call.
-        basis = _usage_billing_basis(usage)
+        # record takes, from the SAME raw usage stamps AND the same unstamped
+        # fallback (the effective model), so the wire's basis array and the
+        # ledger's basis column cannot disagree about one call.
+        basis = _usage_billing_basis(usage, getattr(session, "effective_model", None))
         # ``cast`` rather than a bare call: these are duck-typed members on a
         # session facade (a reduced host may not have them at all), so pyright
         # sees ``object`` where the runtime contract is the call signature
@@ -8547,23 +8548,30 @@ def _usd_to_micro(value: Any) -> int:
         return 0
 
 
-def _usage_billing_basis(usage: Any) -> str | None:
+def _usage_billing_basis(usage: Any, effective_model: Any = None) -> str | None:
     """The billing basis label for ONE usage, or ``None`` when unscorable.
 
     The same :func:`~local_operator.session.spend.inference_billing_labels`
     the analytics record uses, read from the SAME raw stamps — the usage's
-    pre-collapse serving provider and its receipt — so the wire's basis array
-    and the ledger's basis column can never disagree about one call. Never
-    raises: a label is not worth a broken frame, and a missing one reads as
-    ``not_tracked`` — the state the wire has always shown for money with no
+    pre-collapse serving provider (falling back to the effective model for an
+    UNSTAMPED usage, the :func:`serving_identity` rule both sides share) and
+    its receipt — so the wire's basis array and the ledger's basis column
+    cannot disagree about one call. The fallback is load-bearing: the
+    analytics label reads ``usage.provider or request.model.provider``, and
+    without the same elbow here a truly-unstamped call served by a
+    subscription flavour would read ``billed`` on the wire and
+    ``subscription_api_equivalent`` in ``calls`` (review round 1, MINOR 4).
+    Never raises: a label is not worth a broken frame, and a missing one reads
+    as ``not_tracked`` — the state the wire has always shown for money with no
     recorded basis.
     """
     try:
         from local_operator.session.spend import inference_billing_labels
 
-        return inference_billing_labels(
-            str(getattr(usage, "provider", "") or ""), getattr(usage, "usd_cost", None)
-        )[0]
+        provider = str(getattr(usage, "provider", "") or "")
+        if not provider:
+            provider = str(getattr(effective_model, "provider", "") or "")
+        return inference_billing_labels(provider, getattr(usage, "usd_cost", None))[0]
     except Exception:  # noqa: BLE001 — an unlabelable call is not a broken frame
         return None
 
@@ -8573,7 +8581,10 @@ def _pending_channels(session: Any) -> list[dict[str, Any]]:
 
     A host without the reader (a reduced facade, a test double) has no pending
     state to publish, and a reader that faults degrades to the same answer: a
-    marker is never worth a broken refresh.
+    marker is never worth a broken refresh. A reader returning a non-sequence
+    is the same class of answer — the ``isinstance`` is the runtime contract,
+    not a typing formality (the callable narrowing above it is what pyright
+    sees; a reduced facade's answer is not guaranteed to be a list).
     """
     reader = getattr(session, "pending_channel_records", None)
     if not callable(reader):
@@ -8581,6 +8592,8 @@ def _pending_channels(session: Any) -> list[dict[str, Any]]:
     try:
         entries = reader()
     except Exception:  # noqa: BLE001 — a marker read is not worth a broken refresh
+        return []
+    if not isinstance(entries, Iterable):
         return []
     return [dict(entry) for entry in entries if isinstance(entry, Mapping)]
 

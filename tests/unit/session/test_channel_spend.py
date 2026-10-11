@@ -761,3 +761,24 @@ def test_pending_sidecar_roundtrip_is_tolerant_and_never_raises(tmp_path: Path) 
     assert write_pending_record(tmp_path, image) is False
     assert read_pending_records(tmp_path / "missing") == []
     assert write_pending_record(tmp_path / "never-made", record) is False
+
+
+def test_pending_calls_counts_unique_charges_not_marker_lines() -> None:
+    """Q6 (QA round 1): a retried emission writes a second identical marker.
+
+    Analytics holds ONE row, one fold retires both markers, and the money is
+    counted once — so the wire's count must read one request, not the number
+    of lines a crash-and-retry happens to have left in the sidecar.
+    """
+    with_pending = payload(
+        [],
+        pending=[
+            {"record_id": "tts:one", "channel": "tts", "ts_ms": 1},
+            {"record_id": "tts:one", "channel": "tts", "ts_ms": 2},
+        ],
+    )
+    assert with_pending["pending"]["calls"] == 1
+    # A marker without a record_id cannot be retired by the fold, so it cannot
+    # join the count either (it would never go away).
+    orphan = payload([], pending=[{"channel": "tts", "ts_ms": 3}])
+    assert "pending" not in orphan

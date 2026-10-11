@@ -124,10 +124,14 @@ async def create_transcription_endpoint(
         # object inside ``result``. The unit count is the metered seconds —
         # the server's own when stated, else the audio duration CEILED, which
         # is the meter the hub prices by ("rounded up to the whole second");
-        # an absent amount stays unknown, never zero.
+        # an absent amount stays unknown, never zero. ``isfinite`` is load-
+        # bearing: pydantic accepts ``duration=inf`` and ``math.ceil`` RAISES
+        # on it, which would 500 the route and discard a successful paid call
+        # (review round 1, MINOR 2) — a non-finite duration is simply "no
+        # count stated", the same reading the adapter gives non-finite money.
         duration = getattr(transcription_result, "duration", None)
         units = None
-        if isinstance(duration, (int, float)) and duration > 0:
+        if isinstance(duration, (int, float)) and math.isfinite(duration) and duration > 0:
             units = float(math.ceil(duration))
         emit_voice_spend(
             config_manager=config_manager,
