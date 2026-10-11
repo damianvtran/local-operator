@@ -5012,6 +5012,12 @@ class AttachedSession:
             on_event=once_adopted(self._on_wire_event),
             frontend_state=True,
             display_window=self._display_window_requested,
+            # The viewer's half of the ``supplements-v1`` attach gate (memo
+            # §2.7): this facade paints supplement rows (the TUI lane), and
+            # ``AttachClient.connect`` ANDs the intent with the owner record's
+            # advertised capability — an owner that does not advertise is
+            # never sent the declaration's consequences.
+            supplements=True,
             surface=self._surface,
             # THE full-TUI viewer is the client that renders action-carrying
             # receipts: ``_render_authoritative_slash`` submits their
@@ -9878,6 +9884,53 @@ class AttachedSession:
         except BaseException:
             self._deliberate_stop = False
             raise
+
+    # -- turn supplements (memo §2.7) ---------------------------------------
+
+    async def supplements_for(self, anchors: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """``{anchor: newest supplement row}`` for the anchors asked about.
+
+        The lazy read a surface makes when an answer row mounts (memo §2.11).
+        A detached or recovering facade answers ``{}`` — a read that cannot
+        run paints nothing, and raising here would turn "no rows yet" into an
+        error path on every resume. An owner that predates the op answers an
+        error frame, which is swallowed the same way: older owner, no rows.
+        """
+        client = self._client
+        if client is None or self._recovering or not client.connected:
+            return {}
+        try:
+            return await client.supplements_for(anchors)
+        except Exception:  # noqa: BLE001 — a read that fails paints nothing
+            logger.debug("supplements_for could not be read", exc_info=True)
+            return {}
+
+    async def supplement_cancel(self, anchor: str, job: str) -> str:
+        """Cancel a running supplement job; a settled one answers neutrally.
+
+        RAISES when there is no attached client (the caller shows a notice),
+        and an owner from before the feature raises the dispatch's own sentence
+        — both are states the ``/highlights`` command reports rather than
+        pretends away.
+        """
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError("not attached")
+        return await client.supplement_cancel(anchor, job)
+
+    async def supplement_steer(self, anchor: str, job: str, text: str) -> str:
+        """Cut the in-flight attempt and start version + 1 with ``text``."""
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError("not attached")
+        return await client.supplement_steer(anchor, job, text)
+
+    async def supplement_restart(self, anchor: str, job: str) -> str:
+        """Start version + 1 with the previous instruction (the Retry)."""
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError("not attached")
+        return await client.supplement_restart(anchor, job)
 
     async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
         """Run one ``/credential`` verb on the owner's store.

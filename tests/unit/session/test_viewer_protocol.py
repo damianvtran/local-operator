@@ -1325,9 +1325,20 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # of it and has no dial, so the state does not exist for it. Declared in
     # ``ViewerSessionProtocol`` in the same commit, which is what the
     # undeclared-member check above requires.
-    assert len(viewer_only) == 73, (
+    # 73 → 74 is the turn-supplement lazy read (``supplements_for``, memo
+    # §2.7(c)/§2.11): ``tui/app.py`` reads it off the session when an answer
+    # row mounts, and the member is viewer-only by construction — a
+    # session-hosted owner runs no supplement jobs at all (the runner lives on
+    # ``ServingSessionHandle``; memo §2.2, "host scope follows from the
+    # seam"), so there is nothing for it to read or act on. Declared in
+    # ``ViewerSessionProtocol`` in the same commit, which is what the
+    # undeclared-member check above requires. (The three ``/highlights``
+    # control methods joined that protocol's declaration surface in the same
+    # rung; they are not in THIS population because the app reaches them
+    # through a computed ``getattr`` the derivation is blind to.)
+    assert len(viewer_only) == 74, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 73, and the aggregate floor is set at 40 against that number. A "
+        "says 74, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
