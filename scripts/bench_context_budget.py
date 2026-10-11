@@ -1428,7 +1428,26 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: round-1..3 wire-text edits) and it is IDENTICAL on the child arm
 #: (below) — the check that the delta is the pair and nothing else.
 #: Ceiling = merged head + the 55-token band.
-BUDGET_BILLED_TOKENS = 28_213
+#:
+#: RAISED 28,213 -> 28,506 for wave 4 slice A (the agent-writable `language`
+#: setting): the unconditionally published `setting` tool rides both arms
+#: (schema + description; its `tool://` doc adds no wire bytes). CLEAN ARM,
+#: NAMED: fresh `HOME` + `LOCAL_OPERATOR_CONFIG_DIR` per tree — a developer's
+#: own config can move the config-sensitive docs (the 2026-10-10 review round
+#: found exactly that: an ambient-config base measured 666 chars high and read
+#: as "pre-existing overage"). Measured with this script, both trees back to
+#: back:
+#:
+#:   base (origin/main ef4b4b19eb)  78,279 chars = ~28,158 billed
+#:   head (this branch)             79,095 chars = ~28,451 billed
+#:   delta                              +816 chars = ~+293
+#:
+#: The delta is the one tool and nothing else: the child arm moves by the SAME
+#: +816 chars (reported as +294 there — the arms' totals round the same 816
+#: differently), and the base figure equals the video fold's merged head
+#: (28,158) byte for byte, so nothing else has moved the prefix since.
+#: Ceiling = head + the 55-token band.
+BUDGET_BILLED_TOKENS = 28_506
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1495,7 +1514,19 @@ BUDGET_BILLED_TOKENS = 28_213
 #:
 #: The same +2,337 the top arm moves by. Ceiling = merged head + the
 #: 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 25_257
+#:
+#: RAISED 25,257 -> 25,551 (with the top arm, same trees, same clean-arm
+#: environment): the child arm carries `setting` too and moves by the SAME
+#: +816 chars — reported as +294 here because this arm's total rounds the
+#: shared 816 chars differently (the check that the delta is that one tool
+#: and nothing else):
+#:
+#:   base (origin/main ef4b4b19eb)  70,062 chars = ~25,202 billed
+#:   head (this branch)             70,878 chars = ~25,496 billed
+#:   delta                              +816 chars = ~+294
+#:
+#: Ceiling = head + the 55-token band.
+BUDGET_CHILD_BILLED_TOKENS = 25_551
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

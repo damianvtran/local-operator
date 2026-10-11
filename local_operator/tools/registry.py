@@ -141,11 +141,24 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # Radient login or a FAL key, plus the session's job manager), sync and
     # socket-free like the image gate. The pair rides together: the start
     # tool and the one callable that answers a pending job after a restart.
-    # TRULY at the end of both tables (round-1 review V7): the pair landed
-    # before `code_requests`/`no_reply` first, which made this comment false
-    # and shifted those two entries.
+    # TRULY at the end of both tables when they landed (round-1 review V7:
+    # the pair first sat before `code_requests`/`no_reply`, which made the
+    # comment false and shifted those two entries) — and wave 4 slice A's
+    # `setting` appended after them, which is fine: only the NEWEST appends
+    # may follow, and the pin test moves with each newest append.
     "generate_video": lambda context: build_generate_video_tool(context),
     "video_status": lambda context: build_video_status_tool(context),
+    # The sanctioned AGENT write path for the settings registry (wave 4,
+    # slice A): reads and writes one /settings row through
+    # `settings_io.write_setting` — the same funnel every other surface uses —
+    # so the user's language (and every other setting) has ONE truth. Published
+    # rather than deferred: the tool exists for the moment the user asks for a
+    # change, which is exactly when a model that must read a tool:// page first
+    # is most likely not to reach for it (the `ask_withdraw` adoption lesson;
+    # see tools/deferral.py). Appended at the END of both tables on purpose:
+    # appending never shifts a provider-visible array prefix, which is what
+    # the prompt cache keys on.
+    "setting": lambda _context: builtin.build_setting_tool(),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -192,6 +205,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "no_reply",
     "generate_video",
     "video_status",
+    "setting",
 ]
 
 

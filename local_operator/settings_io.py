@@ -5434,7 +5434,9 @@ def _number(value: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-def write_setting(manager: "ConfigManager", setting: Setting, value: Any) -> None:
+def write_setting(
+    manager: "ConfigManager", setting: Setting, value: Any, *, notify: bool = True
+) -> None:
     """Store ``value``, merging into any existing sub-mapping.
 
     THE merge rule (see the module docstring): the sub-mapping is copied,
@@ -5451,6 +5453,17 @@ def write_setting(manager: "ConfigManager", setting: Setting, value: Any) -> Non
 
     Raises ``ValueError`` when :func:`validate` rejects the value, so no caller
     can write past the schema.
+
+    ``notify=False`` suppresses ONLY the in-process watcher fan-out — the call
+    that gives a write its ``source="local"`` attribution, which
+    ``harness.approval.loosening_is_authorised`` reads to decide whether a
+    LOOSENING write may lower a live gate. The agent-facing seam
+    (``local_operator.settings_control``) passes it, because the party a gate
+    constrains must not be able to mint the operator's attribution; every other
+    side effect of the write (cache invalidation, the trigger snapshot, the
+    aida hold marker) is file- or state-level and stays unconditional. Operator
+    surfaces — the TUI page, ``PATCH /v1/settings``, ``lop config edit`` — keep
+    the default.
     """
     if setting.kind is Kind.HOTKEY and isinstance(value, str):
         # Normalized HERE as well as in `coerce`, because the writers do not
@@ -5474,16 +5487,17 @@ def write_setting(manager: "ConfigManager", setting: Setting, value: Any) -> Non
     if problem is not None:
         raise ValueError(problem)
     if value is None and setting.default is None:
-        reset_setting(manager, setting)
+        reset_setting(manager, setting, notify=notify)
         return
     _store(manager, setting.path, value)
     _invalidate_caches()
-    _notify_watcher(manager)
+    if notify:
+        _notify_watcher(manager)
     _publish_trigger_settings(manager, setting)
     _sync_aida_hold_marker(manager, setting)
 
 
-def reset_setting(manager: "ConfigManager", setting: Setting) -> None:
+def reset_setting(manager: "ConfigManager", setting: Setting, *, notify: bool = True) -> None:
     """Delete the stored value so ``setting`` reads as its default again.
 
     Deletion rather than "write the default", because for the flat-dotted
@@ -5492,12 +5506,17 @@ def reset_setting(manager: "ConfigManager", setting: Setting) -> None:
     stays readable by hand. Top-level keys that ship in ``DEFAULT_CONFIG`` are
     back-filled on the next load, which lands on the same value from the other
     direction.
+
+    ``notify`` carries :func:`write_setting`'s exact meaning (see there): the
+    agent-facing seam resets UNATTRIBUTED for the same reason it writes that
+    way.
     """
     if setting.kind is Kind.READONLY:
         raise ValueError("this setting is retired and cannot be changed")
     _delete(manager, setting.path)
     _invalidate_caches()
-    _notify_watcher(manager)
+    if notify:
+        _notify_watcher(manager)
     _publish_trigger_settings(manager, setting)
     _sync_aida_hold_marker(manager, setting)
 
