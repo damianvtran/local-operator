@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from . import (
     tui_status,
+    tui_transcript,
     tui_welcome,
     wire_errors,
     wire_errors_settings,
@@ -21,6 +22,7 @@ from . import (
 
 __all__ = [
     "tui_status",
+    "tui_transcript",
     "tui_welcome",
     "wire_errors",
     "wire_errors_settings",
