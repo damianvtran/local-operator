@@ -31,7 +31,8 @@ def test_shipped_wire_namespaces_exist() -> None:
     # until their own slices land. The TUI wave writes `tui.*` files instead —
     # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
     # in its own slice test, so this list does not churn per TUI slice.
-    assert catalogues.locales() == ("en",)
+    # Wave 1: the es and fr catalogue trees ship with the wave.
+    assert catalogues.locales() == ("en", "es", "fr")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.errors.settings",
