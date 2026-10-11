@@ -59,6 +59,8 @@ from local_operator.harness.approval import (
     operator_nonce,
     request_proof,
 )
+from local_operator.i18n.frames import config_frame_payload
+from local_operator.i18n.resolve import resolve_language
 from local_operator.mobile import mesh as mobile_mesh
 from local_operator.mobile import projects as mobile_projects
 from local_operator.mobile import push_devices as mobile_push_devices
@@ -2768,6 +2770,19 @@ class MobileDaemon:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        #: Subscribers to ``/api/config/events`` (wave-5 slice D, the relay's
+        #: half of the settings doorbell): one queue per open SSE response.
+        #: Doorbell-style — a watcher listener hands the change over, the
+        #: generator re-resolves and stamps when it drains. Mirrors
+        #: ``table.list_subscribers``.
+        self.config_subscribers: set[asyncio.Queue[Any]] = set()
+        #: The fan-out listener's unsubscribe for that channel, held so the
+        #: LAST subscriber can let go of the fan-out. The watcher itself is
+        #: the process-wide singleton (``config_watch.process_watcher``) and is
+        #: deliberately never stopped here: ``service.amain`` starts it for
+        #: display-following anyway, and its idle cost is the one stat per 2 s
+        #: the module already budgets for across 50 processes.
+        self._config_unsubscribe: Callable[[], None] | None = None
         # Push/ack-sync S5: the emit loop's host, and ``None`` on every machine
         # that has not armed one. The worker is INJECTED rather than built here
         # because its transport is the cloud's (S7), and the transport is the
@@ -2921,6 +2936,49 @@ class MobileDaemon:
             )
         except Exception:  # noqa: BLE001 — a missing invalidator costs a restart, not the boot
             logger.warning("display settings follower could not be attached", exc_info=True)
+
+    # -- the relay's config channel (wave-5 slice D) -----------------------
+
+    def attach_config_subscriber(self, queue: "asyncio.Queue[Any]") -> None:
+        """Register one ``/api/config/events`` queue; first-in starts the fan-out.
+
+        The watcher is the process-wide ``config_watch`` singleton, started at
+        boot for display-following — the same stat-poll every sibling process
+        uses on this machine — so the relay's language is resolved from the
+        SAME file through the SAME resolver as every other surface: no second
+        truth and no replay.
+        """
+        self.config_subscribers.add(queue)
+        if self._config_unsubscribe is None:
+            try:
+                from local_operator.config_watch import process_watcher
+                from local_operator.paths import config_dir
+
+                watcher = process_watcher(config_dir())
+                watcher.start()  # idempotent; boot already did it in the normal path
+                self._config_unsubscribe = watcher.subscribe(self._fan_out_config_change)
+            except Exception:  # noqa: BLE001 — a dead fan-out costs live updates, not the stream
+                logger.warning("config subscriber could not be attached", exc_info=True)
+
+    def detach_config_subscriber(self, queue: "asyncio.Queue[Any]") -> None:
+        """Last-out releases the fan-out (the watcher itself stays; see ``__init__``)."""
+        self.config_subscribers.discard(queue)
+        if not self.config_subscribers and self._config_unsubscribe is not None:
+            self._config_unsubscribe()
+            self._config_unsubscribe = None
+
+    def _fan_out_config_change(self, change: Any) -> None:
+        """One change to every open stream; a full queue drops the EXTRA change.
+
+        Called on the loop thread, synchronously (``config_watch``'s listener
+        contract). Dropping is safe: the next frame carries the then-current
+        resolved language either way, and ``changed_keys`` is advisory.
+        """
+        for queue in list(self.config_subscribers):
+            try:
+                queue.put_nowait(change)
+            except asyncio.QueueFull:
+                continue
 
     def _projection_route_owned(self, session_id: str) -> bool:
         """Whether an epoch can still be observed by a process or browser."""
@@ -4672,6 +4730,68 @@ def build_app(daemon: MobileDaemon):
                 # that turns buffering off at nginx-family proxies.
                 "X-Accel-Buffering": "no",
             },
+        )
+
+    async def api_config_events(request: Request) -> Response:
+        """SSE for the RESOLVED language: a settings change reaches the phone live.
+
+        Wave-5 slice D. The relay web (and, through it, the mobile app)
+        subscribe to the same ``config`` frame semantics the desktop feed
+        publishes — one shape, shared builder
+        (``i18n/frames.config_frame_payload``) — so a language write from any
+        origin (agent tool, TUI page, UI, a hand edit) lands here the same way:
+        the process watcher only fires when the file's VALUES moved.
+
+        THE FIRST FRAME IS THE BASELINE, matching the desktop feed's no-replay
+        discipline: on connect the stream sends the CURRENT resolved language
+        with ``changed_keys: []`` — nothing historical is ever announced — and
+        only real changes after that publish. An older daemon without this
+        route answers 404; clients treat that as the stream being absent, not
+        as a failure.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=4)
+
+        async def stream():
+            # ATTACH ON FIRST PULL, not at route time (CI round 1, MINOR-1): a
+            # response nobody consumes — a client that vanishes between the
+            # call and the first read — must not leave its queue and fan-out
+            # behind, which a route-time attach did (one leaked subscriber,
+            # visible in ``config_subscribers``, per never-started stream).
+            # The sibling per-session stream carries the same lesson, and
+            # ``SessionEventResponse`` below closes this generator on the
+            # send-raise path too, so the finally's detach cannot be skipped.
+            daemon.attach_config_subscriber(queue)
+            try:
+                # ``to_thread``: the resolver falls back to constructing a
+                # ConfigManager (a YAML parse) when no watcher snapshot exists,
+                # and this daemon serves a 2 s SSE repaint loop (the module's
+                # own rule for anything heavier than a dict read).
+                yield _sse(
+                    "config",
+                    config_frame_payload((), await asyncio.to_thread(resolve_language)),
+                )
+                while True:
+                    try:
+                        change = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
+                        yield _sse(
+                            "config",
+                            config_frame_payload(
+                                getattr(change, "changed_keys", ()) or (),
+                                await asyncio.to_thread(resolve_language),
+                            ),
+                        )
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+            finally:
+                daemon.detach_config_subscriber(queue)
+
+        return SessionEventResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
     async def api_list_events(request: Request) -> Response:
@@ -7127,6 +7247,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/schedules", api_schedules),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
+        Route("/api/config/events", api_config_events),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),
