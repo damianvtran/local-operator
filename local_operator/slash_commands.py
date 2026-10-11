@@ -1473,8 +1473,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # "auto follows the system" is the half the picker cannot teach on its
         # own — the row lists the value without saying what it means.
         _tr(wire_slash.language()),
+        # `lang` is the one abbreviation users actually type; the alias column
+        # (`/language /lang`, 17 cells) fits the picker width with no widening.
+        aliases=("lang",),
         # OPTIONAL: a bare `/language` reports the active language, and the
-        # space offers the picker's own value set (auto + shipped locales).
+        # space opens the choices list with the current value's row marked.
         arguments=ArgumentMode.OPTIONAL,
         # Trailing text is a language tag, a value this command owns — the
         # desktop's `inline` list, which is the second half of the union the

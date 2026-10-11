@@ -171,8 +171,10 @@ async def test_a_running_switch_swaps_the_band_and_the_splash(
         assert status_line_mod.format_tunnel(True) == "FR:parked"
         assert status_line_mod.format_agents(2) == "2 FR-agents"
         # The band rendered through its own entry point paints the new copy.
-        app._status.update(tunnel_parked=True)
-        assert "FR:parked" in app._status.render_text(200).plain
+        status = app._status
+        assert status is not None
+        status.update(tunnel_parked=True)
+        assert "FR:parked" in status.render_text(200).plain
         # The receipt names the resolved language.
         assert any("language: fr saved — active fr (French)" in n for n in _notices(app))
 

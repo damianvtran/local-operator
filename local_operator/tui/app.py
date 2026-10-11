@@ -41739,7 +41739,6 @@ class OperatorApp(App[None]):
         from local_operator import settings_io
         from local_operator.i18n.resolve import (
             DEFAULT_LANGUAGE,
-            config_value,
             language_name,
             language_options,
             normalise_locale,
@@ -41750,10 +41749,11 @@ class OperatorApp(App[None]):
         resolved = resolve_language()
         options = dict(language_options())
         if not wanted:
+            # Within the picker's receipt budget; the space is the browse
+            # (`_language_choices`), and the /settings row has the same list.
             self._system_notice(
                 f"language: {resolved} ({language_name(resolved)}) — "
-                f"/language <{'|'.join(options)}> switches, live; "
-                "the /settings row has the same list"
+                f"/language <{'|'.join(options)}> switches; space lists"
             )
             return
         key = (
@@ -41766,9 +41766,7 @@ class OperatorApp(App[None]):
                 f"unknown language {wanted!r} — available: {', '.join(options)}", "warning"
             )
             return
-        stored = config_value()
-        current_key = (normalise_locale(stored) or stored) if stored else DEFAULT_LANGUAGE
-        if key == current_key:
+        if key == self._language_current():
             self._system_notice(
                 f"language: already {key} — resolves to {resolved} " f"({language_name(resolved)})"
             )
@@ -41916,6 +41914,51 @@ class OperatorApp(App[None]):
             self.query_one(WelcomeView).refresh()
         except Exception:
             pass
+
+    def _language_current(self) -> str:
+        """The stored language value, normalised; ``auto`` when absent.
+
+        The same read and normalisation the resolver chain applies, so the
+        command's \"already\" comparison, the choices list's marker row and
+        the boot resolution cannot disagree about which value is in force.
+        """
+        from local_operator.i18n.resolve import (
+            DEFAULT_LANGUAGE,
+            config_value,
+            normalise_locale,
+        )
+
+        stored = config_value()
+        return (normalise_locale(stored) or stored) if stored else DEFAULT_LANGUAGE
+
+    def _language_choices(self) -> list[ArgumentChoice]:
+        """One row per selectable language: ``auto`` plus the SHIPPED locales.
+
+        Sourced from ``language_options`` — the same tuple the /settings row's
+        picker and the command's validation read — so the three surfaces cannot
+        drift and a wave that ships a locale widens all of them at once.
+        ``detail`` carries the current marker only; the value a selection
+        writes is the row's ``name``.
+        """
+        from local_operator.i18n.resolve import (
+            DEFAULT_LANGUAGE,
+            language_name,
+            language_options,
+        )
+
+        current = self._language_current()
+        return [
+            ArgumentChoice(
+                value,
+                (
+                    "follow the environment, then the system"
+                    if value == DEFAULT_LANGUAGE
+                    else language_name(value)
+                ),
+                detail="← current" if value == current else "",
+            )
+            for value, _label in language_options()
+        ]
 
     def _theme_choices(self) -> list[ArgumentChoice]:
         """One row per registered theme, the active one marked.
@@ -46798,6 +46841,12 @@ class OperatorApp(App[None]):
             # where the user already is, the same landing `/model` gives its
             # empty query.
             picker.set_choices(self._theme_choices(), highlight=theme_mod.current_theme())
+            picker.set_notice("")
+            return
+        if message.command in ("language", "lang"):
+            # Opens on the row the setting is ON (`auto` when absent), the same
+            # landing `/theme` gives a browse.
+            picker.set_choices(self._language_choices(), highlight=self._language_current())
             picker.set_notice("")
             return
         if message.command in ("credential", "cred"):
