@@ -22,10 +22,15 @@ Then bump `PRELUDE_VERSION` in `supplements/document.py` and update the pinned d
 | C0, with the per-frame nonce echo (memo §4.1 S-R4) | 2,044 | 8,259 | 10,303 | 4,577 |
 | C0 round 1: pre-nonce `error` held and flushed (QA Q-2), nonce > 64 refused not truncated (R4) | 2,044 | 8,202 | 10,246 | 4,607 |
 | C1b: `div.ttl` table title + its CSS rule stripped (memo §8 F9, §2.8 no chrome) | 2,008 | 8,047 | 10,055 | 4,562 |
+| theme-flip ground: the ROOT element paints `--lo-canvas`, dark fallback `#121212` | 2,056 | 8,047 | 10,103 | 4,573 |
 
-Caps (memo §2.6): ≤ 11 KB raw (11,264 B) / ≤ 4.5 KB gzip (4,608 B). The C1b pair leaves
-1,209 B raw / **46 B gzip**. F9's strip paid for itself: the removed rule, helper and element
-cost 36 B CSS + 155 B JS raw (36 + 45 B gzip) against the C0 pair.
+Caps (memo §2.6): ≤ 11 KB raw (11,264 B) / ≤ 4.5 KB gzip (4,608 B). The current pair leaves
+1,161 B raw / **35 B gzip**. The theme-flip ground cost 48 B CSS / 11 B gzip; the JS half is
+untouched, because the defect was in the cascade arms of the document, not in its script. The
+gate itself (why the ground is painted on the ROOT and why it waits for `[data-ready]`) is
+commented in `prelude.src.css`; `PRELUDE_VERSION` 3 is what a served document re-derives under.
+F9's strip paid for itself: the removed rule, helper and element cost 36 B CSS + 155 B JS raw
+(36 + 45 B gzip) against the C0 pair.
 
 Historical trims, kept because each was a measured choice: the C0 round-1 additions were paid
 for by trims with no behaviour change (one error-post helper for three call sites,
@@ -33,7 +38,7 @@ destructuring the message event, one `"use strict"` instead of two, and a space 
 fallback media query). Stripping the nonce from `LO.theme` measured 4,611 B and was NOT taken
 (it would also hide nothing: any component script can add its own `message` listener).
 
-**The cap still binds.** 46 B gzip is the whole headroom: any further addition must trim, and
+**The cap still binds.** 35 B gzip is the whole headroom: any further addition must trim, and
 it cannot pay for itself with a feature the memo only allows a surface to add (see the native
 paragraph below).
 
