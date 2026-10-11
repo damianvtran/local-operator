@@ -7532,6 +7532,61 @@ class AttachedSession:
             self._streaming = False
             self._suspect_generation = None
 
+    def _drop_liveness_claim(self) -> None:
+        """Stop claiming a live turn the owner can no longer sustain.
+
+        ``_end_turn_locally``'s no-verdict sibling, for the one owner loss that
+        must not end the turn it may not have: a REFRESH retirement
+        (``RETIRING_REASON``). The contract says the runtime retires only when
+        idle, and the first cut of that path merely logged when the facade
+        still read ``_streaming`` — "the honest repair is the successor's
+        snapshot". The 2026-10-10 incident falsified that as the ONLY repair:
+        the snapshot exists only when a successor is ENGAGED, and a whole-daemon
+        update declines to engage one (``DesktopSessionBridge._on_runtime_retired``
+        asks ``assert_admitting``), so the claim outlived its owner for minutes —
+        session 62480a153ced served ``frontend.streaming: true`` while idle, two
+        operator presses were routed into the steer branch of a turn that had
+        ended, and the same flag painted the stuck "thinking" indicator.
+
+        NOT ``_end_turn_locally``, deliberately. Every shape it can deliver is
+        a verdict: ``aborted=True`` is a stop the user did not make, ``error=``
+        is a cut-off this seat cannot establish, and even ``aborted=False``
+        claims a completion a successor turn may still be owed. What is known
+        here is that NOTHING is known — the ``agent_end`` that would explain
+        the claim is exactly what the retirement raced — so this drops the
+        claim and nothing else: ``_streaming`` goes False (``is_streaming``
+        stops lying to every host, the desktop's steer-vs-prompt predicate
+        included), and the canonical mirror's ``streaming`` bit is cleared so
+        viewers stop painting "thinking"/steering and the next message routes
+        as a prompt — which engages a successor — instead of into a dead
+        turn's steer branch. A successor that IS coming re-marks the state from
+        its own snapshot (``_apply_frontend_facades``), so a genuinely live
+        turn loses nothing an owner still vouches for.
+
+        THE MIRROR INSTALL IS SILENT AND PRESERVES THE SEQUENCE, for the rule
+        ``_publish_working_directory`` states: a viewer-local ``mutate`` would
+        consume the owner's next sequence number and break synchronization, and
+        a same-sequence notify is a delta the desktop renderer discards as
+        stale (review R4). Hosts that serve a projection publish their own
+        replacement — the desktop bridge does exactly that in its refresh
+        callback — and every host that reads this facade directly has the
+        corrected store by its next read.
+        """
+        store = self._frontend_store
+        claimed = bool(self._streaming) or (
+            store is not None and bool(getattr(store.state, "streaming", False))
+        )
+        if not claimed:
+            return
+        self._streaming = False
+        if store is not None and bool(getattr(store.state, "streaming", False)):
+            store.replace(store.state.model_copy(update={"streaming": False}))
+        logger.warning(
+            "runtime retired for a refresh while a turn looked live; dropped the "
+            "liveness claim for %s without synthesising a turn end",
+            self._session_id,
+        )
+
     def _journal_witnessed_cut_off(self, *, cause: str) -> None:
         """Journal the cut-off this viewer just witnessed, off the loop.
 
@@ -7767,11 +7822,15 @@ class AttachedSession:
         # which would leave the prompt path waiting on an event nothing else
         # will set (review round 1, MINOR-1).
         if refresh:
-            if self._streaming:
-                # Should be unreachable (the runtime retires only when idle);
-                # logged rather than asserted because the honest repair is
-                # the successor's snapshot, not a false abort here.
-                logger.warning("runtime retired for a refresh while a turn looked live")
+            # THE CLAIM MUST NOT OUTLIVE ITS OWNER, and this is the one owner
+            # loss where nothing else repairs it: a refresh synthesises no
+            # turn end, and when the daemon itself is being replaced no
+            # successor either (``_on_runtime_retired`` declines), so a
+            # liveness bit the retirement raced had no repair at all —
+            # session 62480a153ced served ``frontend.streaming: true`` for 6+
+            # minutes off exactly this window (2026-10-10 incident; see
+            # ``_drop_liveness_claim``).
+            self._drop_liveness_claim()
             # A viewer that ATTACHED (``connect``) rather than started cold
             # keeps the legacy "recover by taking over" contract for owner
             # DEATH — but a refresh is not a death, and taking the lease into
@@ -7783,10 +7842,14 @@ class AttachedSession:
             # is exactly this case (design-runtime-autorefresh §1.1).
             self._can_go_cold = True
             # ``_suspect_generation`` is deliberately LEFT SET here. A refresh
-            # is not a death, so an in-flight turn (which should not exist —
-            # the warning above) must not be aborted: the successor's snapshot
-            # is the honest repair, and ``_settle_suspect_turn`` decides on
-            # rebind exactly as it does after a transient drop.
+            # is not a death, so no abort is synthesised: what a stale claim
+            # gets is the drop above, and a successor's snapshot, when one
+            # comes, re-seeds whatever is actually running
+            # (``_apply_frontend_facades`` writes both flags from it). NOTE
+            # that nothing on this path settles a suspect —
+            # ``_settle_suspect_turn`` belongs to the recovery loop and a
+            # refresh's rebind never passes through it — so the drop must
+            # stand on its own.
         else:
             # OWNER DEATH, and the end must say so. Synthesising the bare
             # abort (``aborted=True, error=None``) is the exact shape a user's

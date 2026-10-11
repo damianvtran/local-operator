@@ -749,6 +749,35 @@ async def test_a_strength_taking_provider_records_no_ignored_marker(
 
 
 @pytest.mark.asyncio
+async def test_a_radient_edit_records_no_ignored_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The policy half of the N1 pin (agent review round 1): Radient is IN
+    ``STRENGTH_ROUTES``, so a strength-carrying Radient edit must not surface
+    an ignored claim — dropping RADIENT from the set flips this test's
+    assertion (the route-level arm would then say "was ignored")."""
+    source = tmp_path / "in.png"
+    source.write_bytes(PNG_1X1)
+
+    async def fake_cascade(**kwargs):
+        return _outcome(route=ImageRoute.RADIENT)
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1",
+        {"prompt": "x", "source_image_path": str(source), "strength": 0.6},
+        None,
+        None,
+        ToolContext(cwd=str(tmp_path)),
+    )
+
+    details = result.details or {}
+    assert details["strength"] == 0.6
+    assert "strength_ignored" not in details
+    assert "was ignored" not in result.content[0].text  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
 async def test_a_usage_record_id_reaches_details_when_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -771,12 +800,34 @@ def test_the_approval_label_skips_edit_incapable_rungs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The same filter the cascade applies: an edit prompt must never name a
-    # provider that cannot run it (Radient is available here, and skipped).
+    # provider that cannot run it — and post-hub-slice Radient CAN, so an
+    # available Radient now names itself for BOTH shapes.
     monkeypatch.setattr(image_tool.image_availability, "radient_available", lambda *a: True)
     monkeypatch.setattr(image_tool.image_availability, "fal_key", lambda *a: "fk")
 
     assert image_tool._preferred_route_label() == "Radient"
-    assert image_tool._preferred_route_label(editing=True) == "FAL"
+    assert image_tool._preferred_route_label(editing=True) == "Radient"
+
+
+def test_the_approval_label_still_skips_an_edit_incapable_rung(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The filter keeps its negative case: the ChatGPT-plan rung is
+    # edit-incapable (its edit path is deliberately not wired in v1), so an
+    # edit prompt must skip it and name the next capable provider — while a
+    # generation still names it first.
+    monkeypatch.setattr(image_tool.image_availability, "radient_available", lambda *a: False)
+    monkeypatch.setattr(image_tool.image_availability, "fal_key", lambda *a: None)
+    monkeypatch.setattr(image_tool.image_availability, "openai_images_key", lambda *a: None)
+    monkeypatch.setattr(
+        image_tool.image_availability, "openai_subscription_grant", lambda *a: object()
+    )
+    monkeypatch.setattr(image_tool.image_availability, "google_key", lambda *a: "gk")
+    monkeypatch.setattr(image_tool.image_availability, "xai_available", lambda *a: False)
+    monkeypatch.setattr(image_tool.image_availability, "openrouter_key", lambda *a: None)
+
+    assert image_tool._preferred_route_label() == "ChatGPT plan"
+    assert image_tool._preferred_route_label(editing=True) == "Google"
 
 
 @pytest.mark.asyncio

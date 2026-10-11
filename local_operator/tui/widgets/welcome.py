@@ -88,6 +88,9 @@ from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
 from local_operator import terminals
+from local_operator.i18n.keys import tui_welcome
+from local_operator.i18n.messages import Msg
+from local_operator.i18n.text import tr
 from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
@@ -95,6 +98,32 @@ from local_operator.tui.link_targets import _URL_START_RE, _body_end, _trim
 from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
 from local_operator.tui.widgets.status_line import format_model_label
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
+
+# ---------------------------------------------------------------------------
+# Catalogued copy: resolved through the i18n runtime (RFC §2.2/§3.1)
+# ---------------------------------------------------------------------------
+#
+# Every user-facing string this module composes lives in the `tui.welcome`
+# catalogue (T1), and `_t` materialises one message from it. The resolver
+# loads the namespace's en catalogue ONCE (local_operator.i18n.text), so the
+# import-time constants below and the per-frame status/step lines pay no file
+# read per message. Resolution is pinned to `en` — the only shipped locale
+# while the program ships dark (RFC §9 P1); the translation waves re-point
+# here (and the clients, which render the served catalogue by key, §2.6). A
+# broken wheel degrades each string to its message code rather than failing
+# the import, the same contract `messages.render` documents.
+#
+# MACHINE FIELDS STAY LITERALS, deliberately (RFC §2.7): the hint table's
+# command keys ("/", "/help", "ctrl/cmd+d"), the glyphs, and the model row's
+# state words — the last ones because they are half of a two-surface pair
+# (`app.py`'s band shows the same word, D1) and the pair moves together with
+# the status-line slice.
+#
+# The tips are also the pool's WIDTH BUDGET: TIP_MIN_WIDTH below is DERIVED
+# from the resolved strings, so every cell-length claim in this file is
+# measured on exactly the text a user reads; the en-only context sidecar
+# (`tui.welcome.context.json`) carries the per-entry maxCells contract.
+_t = tr("tui.welcome")
 
 #: The real local-operator mark, downsampled from the shipped raster asset
 #: (``static/local-operator-icon-2-light-clear.png``, also the app icon in
@@ -261,9 +290,9 @@ MODEL_SETUP = "setup"
 #: kitty-protocol spelling; terminal apps may still intercept it before the TUI.
 #: The composer placeholder carried this hint for one release and no longer does.
 HINTS: tuple[tuple[str, str], ...] = (
-    ("/", "command picker"),
-    ("/help", "all commands"),
-    ("ctrl/cmd+d", "quit"),
+    ("/", _t(tui_welcome.hint_command_picker())),
+    ("/help", _t(tui_welcome.hint_all_commands())),
+    ("ctrl/cmd+d", _t(tui_welcome.hint_quit())),
 )
 
 #: The affordance table in the first-run SETUP state. `/login` leads because it
@@ -284,21 +313,23 @@ HINTS: tuple[tuple[str, str], ...] = (
 #: binding the user already has. Its row is what pays for the step line, so the
 #: first screen's height budget is unchanged.
 HINTS_SETUP: tuple[tuple[str, str], ...] = (
-    (f"/login {RECOMMENDED_LOGIN}", "sign in — recommended, no key to paste"),
-    ("/login", "another provider, including API keys"),
-    ("/help", "all commands"),
+    (f"/login {RECOMMENDED_LOGIN}", _t(tui_welcome.hint_sign_in())),
+    ("/login", _t(tui_welcome.hint_other_provider())),
+    ("/help", _t(tui_welcome.hint_all_commands())),
 )
 
 
-#: The checklist above the setup table, longest form first. Each entry is tried
-#: in order and the first that fits the width wins, so the step reading degrades
-#: to the two steps that matter rather than being truncated mid-word (the same
-#: rule the table's own width tiers follow). The numeral and the step are joined
-#: by a middle dot separator the whole line shares.
-SETUP_STEPS: tuple[str, ...] = (
-    "1 connect an account  ·  2 sign in or paste a key  ·  3 {aida} says hello",
-    "1 connect  ·  2 sign in or paste a key  ·  3 {aida} says hello",
-    "1 connect  ·  2 sign in  ·  3 {aida} says hello",
+#: The checklist above the setup table, longest form first: the generated
+#: messages `tui.welcome.step.full/medium/short`, tried IN THIS ORDER — the
+#: first that fits the width wins, so the step reading degrades to the two
+#: steps that matter rather than being truncated mid-word (the same rule the
+#: table's own width tiers follow). The numeral and the step are joined by a
+#: middle dot separator the whole line shares; `{aida}` is the render-time
+#: parameter (her live name, or the line is withdrawn by the caller).
+_SETUP_STEP_MESSAGES: tuple[Callable[..., Msg], ...] = (
+    tui_welcome.step_full,
+    tui_welcome.step_medium,
+    tui_welcome.step_short,
 )
 
 
@@ -315,8 +346,8 @@ def setup_step_line(width: int, aida_name: str | None) -> Text | None:
     """
     if not aida_name:
         return None
-    for template in SETUP_STEPS:
-        body = template.replace("{aida}", aida_name)
+    for build in _SETUP_STEP_MESSAGES:
+        body = _t(build(aida=aida_name))
         if cell_len(body) <= width:
             return Text(body, style=Style(color=theme_mod.semantic_color("fg")), no_wrap=True)
     return None
@@ -471,12 +502,12 @@ KEYED_TIPS: tuple[tuple[str, str | None], ...] = tuple(
     (action.tip, action.id)
     for action in keymap_mod.KEY_ACTIONS
     if action.tip
-) + (("/settings → Hotkeys remaps these keys", None),)
+) + ((_t(tui_welcome.tip_hotkeys()), None),)
 
 #: The ``ctrl+v`` paste sentence. Defined before :data:`TIPS` so the pool can
 #: reuse it rather than carrying a second copy that would drift. See the pin
 #: comment on :data:`TIP_SETUP` for why a Terminal.app launch opens on this.
-TIP_PASTE = "ctrl+v attaches an image from the system clipboard"
+TIP_PASTE = _t(tui_welcome.tip_paste())
 
 #: The mesh's own sentence — the FIRST step of the pairing path.
 #:
@@ -485,20 +516,20 @@ TIP_PASTE = "ctrl+v attaches an image from the system clipboard"
 #: cannot drift from the row the rotation reaches later, and pinning it cannot
 #: change the tip row's width budget (:data:`TIP_MIN_WIDTH` measures the pool, and
 #: this entry is the pool's).
-TIP_MESH = "/network new <name> makes a mesh other devices can join"
+TIP_MESH = _t(tui_welcome.tip_mesh())
 
 TIPS: tuple[str, ...] = (
-    "/resume picks up a recent session where you left off",
-    "/team <name> <message> sends work to the manager",
-    "/model <provider>/<id> switches this session only",
+    _t(tui_welcome.tip_resume()),
+    _t(tui_welcome.tip_team()),
+    _t(tui_welcome.tip_model()),
     TIP_PASTE,
-    "/approvals <ask|auto> sets whether tools ask first",
-    "esc stops the agent without ending the session",
-    "Ask for parallel work and the agent fans out subagents",
-    "! on an empty composer runs a shell command",
-    "/fork branches; /fork <message> starts divergent work",
-    "/settings → Fork → Where a fork opens sets placement",
-    "Under cmux, Where it opens sets workspace or surface",
+    _t(tui_welcome.tip_approvals()),
+    _t(tui_welcome.tip_esc()),
+    _t(tui_welcome.tip_subagents()),
+    _t(tui_welcome.tip_shell()),
+    _t(tui_welcome.tip_fork()),
+    _t(tui_welcome.tip_fork_placement()),
+    _t(tui_welcome.tip_cmux()),
     # The classification layer's two facts: how to stop it and how to give one
     # of its legs a credential. Appended at the END of the literal group rather
     # than interleaved, so the pinned opening tip stays `TIPS[0]` and the
@@ -532,8 +563,8 @@ TIPS: tuple[str, ...] = (
     # 60, and at 60 no tip row is drawn at all), and `len(TIPS)` sits exactly at
     # the ceiling `test_welcome.py` asserts. An entry that needs either budget
     # takes a slot from the pool rather than adding one.
-    "lop config edit classification.auto false turns hints off",
-    "lop login <radient|typesafe|openrouter> enables hints",
+    _t(tui_welcome.tip_classification_off()),
+    _t(tui_welcome.tip_classification_login()),
     # THE MESH'S OWN ENTRY, and it TOOK A SLOT rather than adding one: both
     # budgets were spent before it (see the note above). Which slot, and why.
     #
@@ -621,7 +652,7 @@ TIPS: tuple[str, ...] = (
 #: prior sessions to resume, so the most-read row would advertise a command that
 #: does nothing for them (D4). Once a session exists the rotation resumes into
 #: the normal ring, so this only replaces the opening frame.
-TIP_SETUP = f"New here? {RECOMMENDED_LOGIN.title()} is one browser sign-in; no key to paste"
+TIP_SETUP = _t(tui_welcome.tip_setup(login=RECOMMENDED_LOGIN.title()))
 
 #: The tip a Terminal.app launch opens on, in place of the pinned ``TIPS[0]``.
 #:
@@ -690,7 +721,7 @@ TIP_MIN_WIDTH = max(
 #: Warning body without its remedy, for widths that cannot hold the full
 #: `— /login <provider>` tail. A half-printed command is worse than none: the
 #: FACT is what must survive, the remedy is what may be dropped.
-WARNING_SHORT = "not logged in"
+WARNING_SHORT = _t(tui_welcome.status_login_required_short())
 
 #: Drop priorities for the status rows. Rows are shed lowest-first when the
 #: terminal is too short for all of them, so the credential warning — the
@@ -1087,9 +1118,9 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
         # WHOLE when it does not fit — a half-printed ``/upd…`` is an
         # instruction nobody can follow, same rule as the login warning.
         glyph = NOTICE_GLYPHS["warning"]
-        body = f"{glyph} latest is v{info.update_available} — /update"
+        body = f"{glyph} {_t(tui_welcome.status_update(version=info.update_available))}"
         if cell_len(body) > width:
-            body = f"{glyph} latest is v{info.update_available}"
+            body = f"{glyph} {_t(tui_welcome.status_update_short(version=info.update_available))}"
         rows.append((_PRIORITY_UPDATE, Text(body, style=warn, no_wrap=True)))
     if info.notice:
         # KIND-AWARE GLYPH AND INK (design round 2, M2). This row used to paint
@@ -1139,7 +1170,7 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
         # remedy does not fit, the fact is kept and the command dropped whole —
         # a half-printed `/logi…` is an instruction the user cannot follow.
         glyph = NOTICE_GLYPHS["warning"]
-        body = f"{glyph} {WARNING_SHORT} — /login {info.missing_credential}"
+        body = f"{glyph} {_t(tui_welcome.status_login_required(provider=info.missing_credential))}"
         if cell_len(body) > width:
             body = f"{glyph} {WARNING_SHORT}"
         rows.append((_PRIORITY_WARNING, Text(body, style=warn, no_wrap=True)))
