@@ -886,6 +886,7 @@ def _audit_member(
     target: UpdateTarget,
     outcome: str = "ok",
     cause: str = "",
+    rollout: str = "",
     detail: Mapping[str, Any] | None = None,
 ) -> None:
     """One member-side row. Best-effort: a record is not a gate (the mcpdefs rule)."""
@@ -893,7 +894,7 @@ def _audit_member(
         from local_operator.network.audit import AuditEvent
 
         fields: dict[str, Any] = {
-            "rollout": "",
+            "rollout": rollout,
             "target": target.version,
         }
         if detail:
@@ -928,16 +929,27 @@ def member_execute(
     state has exactly one producer and a ``busy`` answer costs milliseconds.
     """
     target = target_from_frame(frame)
-    _audit_member(server, link, "update_requested", target=target, detail={"capability": "update"})
+    # THE ROLLOUT ID RIDES THE FRAME (S3a): the member never acts on it, its
+    # rows just name the rollout they belong to (see ``update_peer``'s note).
+    rollout = str(frame.get("rollout") or "")[:80]
+    _audit_member(
+        server,
+        link,
+        "update_requested",
+        target=target,
+        rollout=rollout,
+        detail={"capability": "update"},
+    )
 
     try:
-        return _execute_validated(server, link, target, runner=runner)
+        return _execute_validated(server, link, target, rollout=rollout, runner=runner)
     except MeshRefusal as refusal:
         _audit_member(
             server,
             link,
             "update_refused",
             target=target,
+            rollout=rollout,
             outcome="refused",
             cause="policy",
             detail={"code": refusal.code},
@@ -960,6 +972,7 @@ def _execute_validated(
     link: "PeerLink | None",
     target: UpdateTarget,
     *,
+    rollout: str = "",
     runner: Callable[[list[str], dict[str, str]], int] | None,
 ) -> dict[str, Any]:
     """Validation, the never-force gate, the install, the tail, and the receipt.
@@ -1086,7 +1099,7 @@ def _execute_validated(
                 "sessions": {"moved": 0, "kept": max(count, 0)},
                 "updated_at": time.time(),
             }
-        _audit_member(server, link, "update_started", target=target)
+        _audit_member(server, link, "update_started", target=target, rollout=rollout)
         try:
             method = install_build(target_version, runner=runner)
         except Exception as exc:  # noqa: BLE001 — the installer's own tail is the receipt
@@ -1098,6 +1111,7 @@ def _execute_validated(
                 link,
                 "update_failed",
                 target=target,
+                rollout=rollout,
                 outcome="failed",
                 cause="internal",
                 detail={"method": install_shape()},
@@ -1119,6 +1133,7 @@ def _execute_validated(
                 link,
                 "update_failed",
                 target=target,
+                rollout=rollout,
                 outcome="failed",
                 cause="internal",
                 detail={"method": method},
@@ -1140,6 +1155,7 @@ def _execute_validated(
             link,
             "update_completed",
             target=target,
+            rollout=rollout,
             detail={"method": method, "from": current, "version": target_version},
         )
         # THE TAIL RUNS UNDER THE SAME LOCK (agent review round 1, m5): the
@@ -1241,8 +1257,14 @@ def classify_member_answer(reply: Mapping[str, Any] | None) -> tuple[str, str]:
     return "failed", ""
 
 
-def update_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
+def update_peer(server: "RelayServer", device_id: str, *, rollout: str = "") -> dict[str, Any]:
     """Ask ONE member to move to this device's build. The ``peer_update`` body.
+
+    ``rollout`` is the record id this ask belongs to (S3a): it rides the frame
+    so the MEMBER's audit rows can name the rollout their update was part of
+    (note §6: "every later row of that rollout repeats ``rollout``", so one
+    ``lop network log`` filter reconstructs the whole story). It is prose-free
+    provenance, never an instruction: the member audits it, nothing acts on it.
 
     The origin half of the single-peer verb: dial, check the feature string
     BEFORE the first request (RU §5 — an old member never has to compose a
@@ -1329,6 +1351,7 @@ def update_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
                 "req": server._next_relay_req(),  # noqa: SLF001 — the one req counter
                 "locality": "remote",
                 "target": target,
+                "rollout": rollout,
             },
             timeout=server.slow_request_timeout("net_update"),
         )
