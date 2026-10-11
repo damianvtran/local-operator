@@ -258,8 +258,82 @@ def cost_from_headers(headers: Any) -> RadientCost | None:
         "units": found.get("units", ""),
         "unit": found.get("unit", ""),
         "usage_record_id": found.get("usage-record-id", ""),
+        # The live speech header set carries these too (docs.radienthq.com,
+        # speech-api "What you were charged": Provider, Model and
+        # Price-Version, "omitted when they do not apply"). Read like every
+        # other field — absent means not stated, never a guess.
+        "provider": found.get("provider", ""),
+        "model": found.get("model", ""),
+        "price_version": found.get("price-version", ""),
     }
     return _cost_from_mapping(raw)
+
+
+def channel_record_from_cost(
+    cost: RadientCost | None,
+    *,
+    channel: str,
+    record_id: str,
+    session_id: str = "",
+    units: float | None = None,
+    unit: str = "",
+    provider: str = "",
+    request_id: str = "",
+    ts_ms: int = 0,
+    status: str = "ok",
+) -> ChannelSpendRecord:
+    """ONE route-side channel record, from a parsed cost or from its ABSENCE.
+
+    The PR-3 emission seam for the voice routes (and any future route-level
+    caller): the caller supplies what it knows client-side — the channel, a
+    record id, the billable quantity it counted and the leg that served — and
+    the cost object (or ``None``) upgrades every field the server stated. The
+    rules, all inherited from the record's own contract:
+
+    - SERVER-COUNTED UNITS WIN over the client's count (speech's header set
+      carries the billed character count; transcription's envelope carries the
+      metered seconds) — the client count is only the fallback for an absent
+      or amount-less object, and the field stays the quantity the meter used.
+      A STATED ``0`` is a statement, not an absence (``is not None``): the
+      transcription meter documents a zero-unit outcome.
+    - an absent amount is ``None`` and the record's ``__post_init__`` then
+      normalises the basis to ``not_tracked``: absence is never 0, and a quote
+      that never settled must not read as a charge.
+    - ``cost_source`` is ``server_reported`` exactly when a figure was stated
+      (it is the SERVER's own statement), ``none`` otherwise.
+    - ``request_id`` is the usage-record join key when the server gave one,
+      else the caller's own correlation id; either way a reconcile has a key
+      that points at the right usage row once the server echoes it.
+
+    ``record_id`` is the caller's (``new_record_id(channel, correlation)``), so
+    idempotency across a retry stays the caller's decision rather than a
+    second rule in here.
+    """
+    stated_units = cost.units if cost is not None else None
+    return ChannelSpendRecord(
+        record_id=record_id,
+        ts_ms=ts_ms,
+        session_id=session_id,
+        channel=channel,
+        provider=(cost.provider if cost is not None and cost.provider else provider),
+        model=(cost.model if cost is not None else ""),
+        # ``is not None``, not truthiness: a hub that STATES ``units: 0`` — the
+        # transcription contract's documented outcome when it cannot meter a
+        # duration — has stated a real fact, and the client's own count must
+        # not override it (review round 1, MINOR 3).
+        units=float(stated_units if stated_units is not None else (units or 0.0)),
+        unit=(cost.unit if cost is not None and cost.unit else unit),
+        amount_micro=cost.amount_micro if cost is not None else None,
+        billing_basis=cost.basis if cost is not None else BASIS_NOT_TRACKED,
+        cost_source=(
+            "server_reported" if cost is not None and cost.amount_micro is not None else "none"
+        ),
+        price_version=(cost.price_version if cost is not None else ""),
+        status=status,
+        request_id=(
+            cost.usage_record_id if cost is not None and cost.usage_record_id else request_id
+        ),
+    )
 
 
 def _cost_from_mapping(raw: Mapping[str, Any]) -> RadientCost:

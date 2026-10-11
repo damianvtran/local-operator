@@ -341,3 +341,87 @@ def test_audio_path_vocabulary_is_closed() -> None:
         "model_audio_sidecar",
         "none",
     ]
+
+
+# -- PR-3: the cascade route's spend emission (QA round 1, Q3/Q4/Q5) ----------
+
+
+@pytest.mark.asyncio
+async def test_the_cascade_route_records_the_envelope_provider_and_correlates(
+    test_app_client, store_override, monkeypatch
+) -> None:
+    """Q3/Q4/Q5: envelope provider outranks the path label; the session id rides.
+
+    Q3: the legacy route records ``elevenlabs`` for the same envelope while
+    this route recorded ``''`` — the envelope's own ``provider`` field is the
+    vendor witness, and the cost object (when one is stated) still wins inside
+    the record builder. Q4: the caller's ``session_id`` goes OUT on the hub
+    call as the client correlation header (proved at the client layer; this
+    test proves the route passes it down at all). Q5: the emission itself —
+    amount, units, basis, session — had no route-level test before this.
+    """
+    from pydantic import SecretStr
+
+    from local_operator.clients.radient import RadientTranscriptionResponseData
+    from local_operator.stt import cascade
+
+    async def keyed(_config_dir, _base_url, *, store=None):
+        return SecretStr("stub-key")
+
+    async def available(_config_dir, _base_url, *, store):
+        return True
+
+    monkeypatch.setattr(cascade, "resolve_radient_credential", keyed)
+    monkeypatch.setattr(cascade, "has_persisted_radient_credential", available)
+
+    sent: list[dict[str, Any]] = []
+
+    class FakeRadient:
+        def __init__(self, api_key=None, base_url=None):
+            """Same constructor surface the rung uses; nothing to store."""
+
+        def create_transcription(self, **kwargs):
+            sent.append(kwargs)
+            return RadientTranscriptionResponseData.model_validate(
+                {
+                    "text": "hello from the stub hub",
+                    "provider": "elevenlabs",
+                    "status": "completed",
+                    "duration": 2.832875,
+                    "cost": {
+                        "v": 1,
+                        "amount_usd": "0.001",
+                        "basis": "billed",
+                        "units": 3,
+                        "unit": "second",
+                        "usage_record_id": "qa-cascade-0001",
+                        "price_version": "transcription-rates@2026-10-01",
+                    },
+                }
+            )
+
+    monkeypatch.setattr(cascade, "RadientClient", FakeRadient)
+    store_override(FakeStore({"radient": "stub"}))
+    captured: list[Any] = []
+    monkeypatch.setattr(
+        "local_operator.server.utils.voice_spend.enqueue_channel_record",
+        captured.append,
+    )
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("clip.wav", _WAV_BYTES, "audio/wav")},
+        data={"session_id": "sess-qa-cascade"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["path"] == "provider_stt_radient"
+    assert captured, "the route must record the hub's charge"
+    record = captured[0]
+    assert record.provider == "elevenlabs", "Q3: the envelope's own provider field"
+    assert record.units == 3.0 and record.unit == "seconds"
+    assert record.amount_micro == 1000 and record.billing_basis == "billed"
+    assert record.session_id == "sess-qa-cascade"
+    assert sent, "the Radient rung must have run"
+    assert sent[0]["session_id"] == "sess-qa-cascade", "Q4: the correlation id rides"
+    assert len(sent[0]["client_request_id"]) == 32
