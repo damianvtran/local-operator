@@ -12092,11 +12092,25 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
     """Copies of the ``pending`` items for ``session_id`` (``[]`` when there
     are none, or the id is unknown).
 
-    THE single definition of "open" that the session's continuation guardrail
-    (``Session._todo_continuation``) fires on, so the tool and the guardrail
-    cannot disagree about whether a turn may end. ``blocked`` is excluded on
-    purpose: it is the escape hatch that lets a model stop honestly instead of
-    marking work done it did not do, and nudging it would defeat that.
+    The pending SUBSET of the work the session's continuation guardrail
+    (``Session._todo_continuation``) reconciles at the yield boundary: work that
+    must not be silently left running, because a model that stops with it in
+    hand has neither done it nor said why not. THE single definition of
+    "pending", so the tool and the guardrail cannot disagree about what still
+    demands work.
+
+    ``blocked`` is deliberately NOT here, and that is not an exemption from the
+    guardrail any more: blocked work is unfinished and is reconciled at the same
+    boundary through :func:`blocked_todos`, which the guardrail ALSO draws on.
+    The split is about what the two groups demand. A pending item may not be left
+    running, so the guardrail nudges the model back to work. A blocked item may
+    legitimately end a turn — it is the escape hatch that lets a model stop
+    honestly instead of marking work done it did not do — but stopping on it is
+    now ACCOUNTED for rather than merely permitted: the model must say whether
+    the condition still holds and that something is watching it. Keeping the two
+    groups in separate functions is what lets the reminder state the two
+    obligations separately; folding blocked into this function would restore the
+    old behaviour of pushing a blocked model to invent progress.
 
     Mirrors only the SESSION-ID branch of :func:`_todo_store_and_key`. A host
     that attaches its own store to ``ToolContext.todos`` (harness/types.py:449;
@@ -12107,8 +12121,9 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
 
     Pending items are flattened across ALL phases (phase-then-item order): the
     guardrail asks "is there open work?", and a phase boundary does not change
-    the answer. The returned dicts are plain item dicts (no phase key), so
-    ``_todo_reminder_text`` needs no change.
+    the answer. The returned dicts are plain item dicts (no phase key), which is
+    the shape ``_todo_reminder_text`` renders (it takes the blocked list
+    alongside this one and formats each group itself).
     """
     raw = TODO_STORE.get(session_id)
     if not raw:
@@ -12118,6 +12133,42 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
         for phase in _as_phases(raw)
         for item in phase["items"]
         if item.get("status") == "pending"
+    ]
+
+
+def blocked_todos(session_id: str) -> list[dict[str, str]]:
+    """Copies of the ``blocked`` items for ``session_id`` (``[]`` when there
+    are none, or the id is unknown).
+
+    :func:`open_todos`'s mirror — same store branch, same copy semantics, same
+    phase flattening (read its docstring for the host-attached
+    ``ToolContext.todos`` caveat and the plain-item-dict shape) — over the
+    ``blocked`` status instead of ``pending``.
+
+    The second half of the guardrail's work set: ``Session._todo_continuation``
+    reconciles pending AND blocked at the yield boundary. Blocked items are
+    unfinished work parked on a user decision or an external service, and a
+    model that ends a turn on one may still stop honestly — but it must ACCOUNT
+    for it. A blocked item nothing is watching is how a session ended turns for
+    ~14 hours over six parked items while the pending-only guardrail saw an
+    empty list and let every yield stand.
+
+    A separate function rather than a status parameter on :func:`open_todos`
+    because the two feed DIFFERENT obligations in the reminder: pending items
+    are work to resume or resolve, blocked items are conditions to re-check and
+    to arm something for. Keeping them apart is what lets the reminder state the
+    two obligations separately; folding blocked into ``open_todos`` would push a
+    blocked model to invent progress, which is the behaviour that function
+    exists to prevent.
+    """
+    raw = TODO_STORE.get(session_id)
+    if not raw:
+        return []
+    return [
+        dict(item)
+        for phase in _as_phases(raw)
+        for item in phase["items"]
+        if item.get("status") == "blocked"
     ]
 
 

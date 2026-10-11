@@ -222,6 +222,11 @@ _WALK_DEPTH_CAP = 2
 #: in ``tool_docs.py``; the wire description SHRANK in the same wave (186 ->
 #: 160 chars), which is one reason both ``bench_context_budget.py`` arms
 #: still PASS. Every other entry is byte-identical.
+#: RE-MEASURED 2026-10-10 (blocked-todo reconciliation, ``fix/todo-guard-blocked``):
+#: ``todo`` 524 -> 540 is the ONLY entry that moved — one clause added to the
+#: tool:// notes (blocked items are accounted for at the turn boundary). Off the
+#: wire, so ``scripts/bench_context_budget.py`` is untouched and the two ledgers
+#: do NOT move together this time.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 786,
     "ask": 1005,
@@ -295,7 +300,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "task": 484,
     "team": 489,
     "team_delete": 90,
-    "todo": 524,
+    "todo": 540,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
     # read side: states, the at-most-once registration and the watcher handoff.
     "video_status": 206,
