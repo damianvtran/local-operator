@@ -57,6 +57,14 @@ def test_each_row_classifies_into_the_derivations_vocabulary() -> None:
     assert assistant_record.kind == "assistant"
     assert group_splitter_of(assistant_record), "visible prose splits"
     assert quiet_family_of(quiet_group_record_of(_peer())) == "peer"
+    # BELT (S5 remediation): an assistant row whose visible text has not
+    # landed is a BOUNDARY, never a foldable interior row — it may still
+    # become the answer a group would then hide.
+    empty = AssistantBlock()
+    assert group_splitter_of(quiet_group_record_of(empty))
+    pending = AssistantBlock()
+    pending.update_text("   ")  # whitespace paints nothing and is not prose
+    assert group_splitter_of(quiet_group_record_of(pending))
 
 
 def test_an_ask_receipt_splits_like_the_relay_port() -> None:
@@ -206,3 +214,15 @@ def test_a_span_touching_an_existing_bar_is_refused() -> None:
     assert fold_quiet_group_list(run, prev_block=bar) == run
     assert fold_quiet_group_list(run, next_block=bar) == run
     assert all(member.display for member in run)
+
+
+def test_a_not_yet_visible_assistant_row_refuses_a_fold() -> None:
+    """The belt at the plan layer: an assistant row with no visible text yet
+    is a boundary, so [peer, pending-assistant, peer] never folds — and the
+    same run with its prose landed splits the same way it always did."""
+    pending = [_peer("one"), AssistantBlock(), _peer("two")]
+    assert quiet_group_plan(pending) == []
+    visible = AssistantBlock()
+    visible.update_text("on it")
+    visible.finalize_text()
+    assert quiet_group_plan([_peer("one"), visible, _peer("two")]) == []

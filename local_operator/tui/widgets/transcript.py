@@ -3629,11 +3629,57 @@ def quiet_group_record_of(
             kind="tool", id=record_id, tool_name=block.tool_name, tool_state=tool_state
         )
     if isinstance(block, AssistantBlock):
-        return QuietGroupRecord(kind="assistant", id=record_id, text=block.text())
+        text = block.text()
+        if not text.strip():
+            # BELT (S5 remediation): an assistant row whose visible text has
+            # not landed is a BOUNDARY, never a foldable interior row — the
+            # live path may still deliver prose into it, and a group may never
+            # hide a row that can become an answer. The derivation tolerates
+            # an empty ``assistant`` row as interior because such a row paints
+            # nothing a reader would miss; that reading is only safe once the
+            # row has settled, which a mounted block cannot promise, so this
+            # surface classifies the unresolved row as unknown instead — the
+            # derivation's default makes that a splitter. Visible prose keeps
+            # its own kind and splits by the definition's own text rule.
+            return QuietGroupRecord(kind="other", id=record_id)
+        return QuietGroupRecord(kind="assistant", id=record_id, text=text)
     if isinstance(block, ImageBlock):
         kind = "inside" if prev_kind == "tool" else "image"
         return QuietGroupRecord(kind=kind, id=record_id)
     return QuietGroupRecord(kind="other", id=record_id)
+
+
+def _records_of_blocks(blocks: Sequence[TranscriptBlock]) -> list[QuietGroupRecord]:
+    """Derive the fold records from the blocks ON HAND, in order.
+
+    The tracker reads a record once per append and freezes it
+    (``note_append``); this re-derives a span whose rows may have changed
+    since — a live assistant row whose text landed after its mount, a tool
+    row that has since settled or failed — so a formation or a restate reads
+    the CURRENT truth instead of the append-time snapshot.
+
+    ``prev_kind`` chains from the span's first block. That is faithful
+    because a span never begins with the one context-sensitive row: an image
+    classified ``inside`` implies the tool row it belongs to is in the span
+    too (a tool row never splits), so the chain cannot disagree with the
+    stream's own reading of the first block.
+    """
+    records: list[QuietGroupRecord] = []
+    prev_kind: str | None = None
+    for block in blocks:
+        record = quiet_group_record_of(block, prev_kind=prev_kind)
+        prev_kind = record.kind
+        records.append(record)
+    return records
+
+
+def _last_splitter_index(records: Sequence[QuietGroupRecord]) -> int:
+    """The last index whose record is a splitter, or -1 when there is none."""
+    last = -1
+    for index, record in enumerate(records):
+        if group_splitter_of(record):
+            last = index
+    return last
 
 
 class PlannedQuietGroup(NamedTuple):
@@ -3692,15 +3738,13 @@ def quiet_group_plan(
     included), so a caller slicing members by a span gets the members.
     """
     origin: list[int] = []
-    records: list[QuietGroupRecord] = []
-    prev_kind: str | None = None
+    kept: list[TranscriptBlock] = []
     for index, block in enumerate(blocks):
         if getattr(block, "SPACING_TRANSIENT", False):
             continue
         origin.append(index)
-        record = quiet_group_record_of(block, prev_kind=prev_kind)
-        prev_kind = record.kind
-        records.append(record)
+        kept.append(block)
+    records = _records_of_blocks(kept)
     plan: list[PlannedQuietGroup] = []
     for span_from, span_to in quiet_group_stretches(records):
         span_head_loaded = True
@@ -3767,10 +3811,15 @@ def fold_quiet_group_list(
 @dataclass
 class _QuietTrailingSpan:
     """The trailing stretch of the transcript since the last splitter: the
-    rows a future receipt would join (a group in the making)."""
+    rows a future receipt would join (a group in the making).
+
+    Only the BLOCKS are held. The records a formation or a restate judges by
+    are re-derived from them (:func:`_records_of_blocks`) — the append-time
+    snapshot goes stale the moment a member row changes (S5 remediation), so
+    keeping a second copy would invite reading the wrong one.
+    """
 
     blocks: list[TranscriptBlock]
-    records: list[QuietGroupRecord]
 
 
 class QuietGroupTracker:
@@ -3790,6 +3839,16 @@ class QuietGroupTracker:
     else (a user row, a notice, visible prose) clears them, which is the
     boundary vocabulary ``tui/quiet_groups.py`` owns.
 
+    THE LIVE RE-READ (S5 remediation): facts are derived from the blocks ON
+    HAND at formation and at every restate, never from the append-time
+    records — the stream snapshots once per append, and a row can change
+    after its mount (an assistant row whose text lands, a tool row that
+    settles or fails). A member that re-reads as a splitter would mean the
+    bar hides a row the reader must see; the restate then DISSOLVES the bar
+    (unfolds its members, removes it) rather than keep hiding — the safe
+    direction every refusal in this module takes. A member that only settles
+    or fails AFTER the bar closed does not move its facts; the latch holds.
+
     A resync exists for the join between the incremental stream and a
     clear: ``reset`` calls it, re-deriving the state from the transcript's
     own tail. Replay and page appends need no call — replay streams through
@@ -3806,7 +3865,6 @@ class QuietGroupTracker:
     def __init__(self, view: TranscriptView) -> None:
         self._view = view
         self._open: QuietGroupBlock | None = None
-        self._open_records: list[QuietGroupRecord] = []
         self._trailing: _QuietTrailingSpan | None = None
         self._last_record: QuietGroupRecord | None = None
         #: The transcript's head-cut verdict (the caller's; see `resync`).
@@ -3827,16 +3885,15 @@ class QuietGroupTracker:
         record = quiet_group_record_of(block, prev_kind=prev_kind)
         self._last_record = record
         if quiet_family_of(record) is not None:
-            self._receipt(block, record)
+            self._receipt(block)
         elif not group_splitter_of(record):
-            self._inside(block, record)
+            self._inside(block)
         else:
             self._close()
 
-    def _receipt(self, block: TranscriptBlock, record: QuietGroupRecord) -> None:
+    def _receipt(self, block: TranscriptBlock) -> None:
         bar = self._live_bar()
         if bar is not None:
-            self._open_records.append(record)
             bar.admit_member(block)
             self._restate(bar)
             return
@@ -3854,52 +3911,72 @@ class QuietGroupTracker:
                 # which is the safe direction. Keep accumulating so a later
                 # attempt is judged on the same span.
                 trailing.blocks.append(block)
-                trailing.records.append(record)
                 return
             partial = self._span_head_partial(index)
-            records = [*trailing.records, record]
+            blocks = [*trailing.blocks, block]
+            # LIVE RE-READ (S5 remediation): judge the span by the blocks on
+            # hand, not the append-time records — a row that changed after
+            # its mount (a writer that settled, an assistant row whose text
+            # landed) must count as it is now.
+            records = _records_of_blocks(blocks)
+            last_splitter = _last_splitter_index(records)
+            if last_splitter >= 0:
+                # A member re-read as a splitter: the span is not a run a bar
+                # can state (belt breach — the mount order and the empty-
+                # assistant boundary are supposed to make this unreachable).
+                # Keep accumulating from the stretch after the splitter;
+                # never fold across a row the reader must see.
+                self._reseed_trailing(blocks, last_splitter)
+                return
             group = quiet_group_of_segment(
                 records, (0, len(records) - 1), span_head_loaded=not partial, open=True
             )
             if group is not None:
-                self._form(records, [*trailing.blocks, block], group, partial)
+                self._form(blocks, group, partial)
                 return
             # Fewer than two triggers so far: this is not a group yet — keep
             # the span growing (the second receipt is what makes it one).
             trailing.blocks.append(block)
-            trailing.records.append(record)
             return
-        self._trailing = _QuietTrailingSpan(blocks=[block], records=[record])
+        self._trailing = _QuietTrailingSpan(blocks=[block])
 
-    def _inside(self, block: TranscriptBlock, record: QuietGroupRecord) -> None:
+    def _inside(self, block: TranscriptBlock) -> None:
         bar = self._live_bar()
         if bar is not None:
-            self._open_records.append(record)
             bar.admit_member(block)
             self._restate(bar)
             return
         trailing = self._live_trailing()
         if trailing is not None:
             trailing.blocks.append(block)
-            trailing.records.append(record)
             return
         # A tool row between receipts sits INSIDE the span still to come
         # (design §5), so it OPENS the trailing stretch rather than being
         # forgotten: with no state yet, the next receipt must see this row as
         # the span's possible first row.
-        self._trailing = _QuietTrailingSpan(blocks=[block], records=[record])
+        self._trailing = _QuietTrailingSpan(blocks=[block])
 
     def _close(self) -> None:
-        """A splitter landed: the latch. Facts from here on are frozen."""
+        """A splitter landed: the latch. Facts from here on are frozen.
+
+        The open bar is restated CLOSED first — it was formed with
+        ``open=True`` and would otherwise keep claiming the tail after the run
+        ended — and the state is cleared AFTER that restate: the closing
+        splitter is the newest row, so nothing may join a stretch from before
+        it, and a dissolve's re-seated trailing span goes with the clear. A
+        member that only settles or fails from here on does not move the
+        bar's facts — no append reaches a closed group again.
+        """
+        bar = self._live_bar()
+        if bar is not None:
+            self._restate(bar, open=False)
         self._open = None
-        self._open_records = []
         self._trailing = None
 
     # -- formation -----------------------------------------------------------
 
     def _form(
         self,
-        records: list[QuietGroupRecord],
         blocks: list[TranscriptBlock],
         group: QuietGroup,
         partial: bool,
@@ -3918,18 +3995,61 @@ class QuietGroupTracker:
         self._view.insert_blocks(index, [bar])
         bar.adopt_members(blocks)
         self._open = bar
-        self._open_records = records
         self._trailing = None
 
-    def _restate(self, bar: QuietGroupBlock) -> None:
+    def _restate(self, bar: QuietGroupBlock, *, open: bool = True) -> None:
+        """Re-state a bar's facts from its live member blocks.
+
+        LIVE RE-READ (S5 remediation): the records are re-derived from the
+        blocks on hand rather than read back from the append-time snapshots,
+        so a member whose row changed after its mount — a tool row that has
+        since settled or failed, an assistant row whose text landed — states
+        what is true NOW. Only the open span restates during its life; the
+        close restate (``open=False``) is the final one before the latch
+        freezes the facts.
+        """
+        records = _records_of_blocks(list(bar._members))
+        last_splitter = _last_splitter_index(records)
+        if last_splitter >= 0:
+            # A member re-reads as a splitter: the bar would hide a row a
+            # reader must see. Dissolve — the safe direction every refusal in
+            # this module takes.
+            self._dissolve(bar, last_splitter)
+            return
         group = quiet_group_of_segment(
-            self._open_records,
-            (0, len(self._open_records) - 1),
-            span_head_loaded=not bar.partial,
-            open=True,
+            records, (0, len(records) - 1), span_head_loaded=not bar.partial, open=open
         )
         if group is not None:
             bar.restate_group(group)
+
+    def _dissolve(self, bar: QuietGroupBlock, last_splitter: int) -> None:
+        """Unfold a bar whose span no longer holds, and re-seat the state.
+
+        The belt-for-belt path: a member re-read as a splitter means the bar
+        is hiding a row the definition says must stay visible, so the fold
+        gives way to the rows — every member is shown again, the bar is
+        removed, and the stretch after the splitter keeps accumulating
+        (:meth:`_reseed_trailing`). Unreachable while the mount order and the
+        empty-assistant boundary hold; kept as the honest fallback for what
+        the fold must never do.
+        """
+        members = list(bar._members)
+        for member in members:
+            member.display = True
+        self._view.remove_block(bar)
+        self._open = None
+        self._reseed_trailing(members, last_splitter)
+
+    def _reseed_trailing(self, blocks: list[TranscriptBlock], last_splitter: int) -> None:
+        """Re-seat the trailing span at the stretch after the last splitter.
+
+        The "keep accumulating so a later attempt is judged on the same span"
+        rule the fragment refusal uses, applied when a re-read finds a
+        splitter inside a span: the rows before it can never fold with the
+        rows after, so the suffix becomes the span a future receipt joins.
+        """
+        suffix = blocks[last_splitter + 1 :]
+        self._trailing = _QuietTrailingSpan(blocks=suffix) if suffix else None
 
     # -- liveness ------------------------------------------------------------
 
@@ -3939,7 +4059,6 @@ class QuietGroupTracker:
             return None
         if bar not in self._view.blocks():
             self._open = None  # the view was cleared or rebuilt under us
-            self._open_records = []
             return None
         return bar
 
@@ -3986,39 +4105,27 @@ class QuietGroupTracker:
         windowed head passes the caller's ``head_cut`` verdict.
         """
         self._open = None
-        self._open_records = []
         self._trailing = None
         self._last_record = None
         self._head_cut = bool(head_cut)
         blocks = [
             block for block in self._view.blocks() if not getattr(block, "SPACING_TRANSIENT", False)
         ]
+        records = _records_of_blocks(blocks)
         # The trailing stretch: everything after the last splitter.
-        last_splitter = -1
-        prev_kind: str | None = None
-        for index, block in enumerate(blocks):
-            record = quiet_group_record_of(block, prev_kind=prev_kind)
-            prev_kind = record.kind
-            if group_splitter_of(record):
-                last_splitter = index
+        last_splitter = _last_splitter_index(records)
         stretch = blocks[last_splitter + 1 :]
-        records: list[QuietGroupRecord] = []
-        prev_kind = None
-        for block in stretch:
-            record = quiet_group_record_of(block, prev_kind=prev_kind)
-            prev_kind = record.kind
-            records.append(record)
-        if records:
-            self._last_record = records[-1]
+        stretch_records = records[last_splitter + 1 :]
+        if stretch_records:
+            self._last_record = stretch_records[-1]
         if stretch and isinstance(stretch[0], QuietGroupBlock):
             # The tail already carries a bar: adopt it as the open group, its
             # facts as they stand (the bar authored them; growth re-states).
             self._open = stretch[0]
-            self._open_records = records[1:]
             return
-        triggers = [record for record in records if quiet_family_of(record) is not None]
+        triggers = [record for record in stretch_records if quiet_family_of(record) is not None]
         if len(triggers) == 1:
-            self._trailing = _QuietTrailingSpan(blocks=stretch, records=records)
+            self._trailing = _QuietTrailingSpan(blocks=stretch)
 
     def reset(self) -> None:
         """After a clear: nothing on hand, nothing to fold."""
