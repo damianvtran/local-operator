@@ -392,12 +392,14 @@ def _last_card(app: OperatorApp) -> ToolCard:
     return cards[-1]
 
 
-#: The three widgets `.comfortable-rows` names in ONE selector, each built the
-#: way the app builds it. They are pinned together for the reason
-#: `test_minimalism.py` already pins their height contract together ("so the
-#: three cannot drift"): a wake receipt and an inbound peer receipt are ledger
-#: rows, they ride this rule through the same combined selector, and a fix
-#: verified on `ToolCard` alone is a fix verified on one third of the rule.
+#: Three of the action rows `.comfortable-rows` names in one selector, each built
+#: the way the app builds it (the quiet-group bar is the fourth; a fold has no
+#: summary row of its own to pad beyond the bar). They are pinned together for
+#: the reason `test_minimalism.py` already pins their height contract together
+#: ("so the rows cannot drift"): a wake receipt and an inbound peer receipt are
+#: ledger rows, they ride this rule through the same combined selector, and a
+#: fix verified on `ToolCard` alone is a fix verified on one row's share of the
+#: rule.
 ACTION_ROWS: dict[str, Any] = {
     "tool": lambda: _card("grep"),
     "wake": lambda: WakeBlock("(alarm) Scheduled wake w1 (1).\n\ncheck the build"),
