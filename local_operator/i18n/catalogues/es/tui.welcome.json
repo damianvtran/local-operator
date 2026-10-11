@@ -13,7 +13,7 @@
   "tui.welcome.step.short": "1 conecta  ·  2 inicia sesión  ·  3 {aida} te saluda",
   "tui.welcome.tip.approvals": "/approvals <ask|auto> fija si las herramientas preguntan",
   "tui.welcome.tip.classification_login": "lop login <radient|typesafe|openrouter> te da sugerencias",
-  "tui.welcome.tip.classification_off": "lop config edit classification.auto false sin sugerencias",
+  "tui.welcome.tip.classification_off": "lop config edit classification.auto false ya no sugiere",
   "tui.welcome.tip.cmux": "En cmux, “Dónde se abre”: espacio de trabajo o superficie",
   "tui.welcome.tip.esc": "esc detiene al agente sin terminar la sesión",
   "tui.welcome.tip.fork": "/fork bifurca; /fork <message> inicia trabajo aparte",
