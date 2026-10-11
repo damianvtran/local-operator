@@ -1326,6 +1326,11 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     a = _make(devices, "a", mode=HUB)
     b = _make(devices, "b", mode=HUB)
     record = _init_network(a.server)
+    # THE BASELINE FOR THE SECOND WAIT BELOW, taken BEFORE the join: a's admit-time
+    # ``contact_peers`` pass starts on a handshake thread of its own once the joiner's
+    # result frame is sent, and may still be in flight when this test is already past
+    # the dial.
+    admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
     link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
     assert link is not None, reason
@@ -1347,6 +1352,20 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     assert net_fixtures.wait_for(
         lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
     ), "a's establishment pull never stamped the link"
+
+    # AND LET THE ADMIT-TIME PASS COMPLETE TOO, or one writer the test does not
+    # control can still restamp the link behind the arm below (agent review round 1,
+    # MINOR — the residual behind QA round 1's one green miss): the same listener
+    # runs a ``contact_peers`` pass after sending the result frame, and starved
+    # across the dial it reads the REPLACEMENT link while that link is due
+    # (``member_pulled_at == 0.0``), pulling it: "a second stamp on the same link",
+    # landing after the arm and reinstating the not-due skip. The pass bumps
+    # ``_membership_seq`` exactly once, at completion, after every pull it made has
+    # stamped, so waiting for the bump leaves no unprompted pass in flight when the
+    # due window is armed.
+    assert net_fixtures.wait_for(
+        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0
+    ), "a's admit-time contact_peers pass never completed"
 
     # A completed pass first: the fallback must BE this one, so make it answer with
     # b's table (a real pull — the link is up, and the zero makes it due).
