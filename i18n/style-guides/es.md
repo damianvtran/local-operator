@@ -23,7 +23,8 @@ translators and the auditor. Wave 1 locale.
   `--flags`, config keys, paths, identifiers.
 - Kept-English technical list: commit, push, pull, merge, rebase, token,
   cache, endpoint, script, prompt, deploy · API, CLI, TUI, JSON, YAML, HTTP,
-  URL, GPU. Reason: settled dev usage across Spain and LatAm.
+  URL, GPU. Wave-1 recorded additions: runtime, harness, hook(s), handshake,
+  backoff. Reason: settled dev usage across Spain and LatAm.
 - Prefer Spanish where settled: servidor, archivo, carpeta, red, dispositivo,
   ajustes (settings), equipo (team), habilidad (skill).
 
@@ -34,8 +35,10 @@ translators and the auditor. Wave 1 locale.
 - tool trace → traza · transcript → transcripción
 - approvals → aprobaciones
 - schedule → programación; one scheduled item reads "prompt programado".
-- usage → uso · cost → coste (LatAm "costo" is acceptable; the wave records
-  which it standardises on and notes it here).
+- usage → uso · cost → coste (LatAm "costo" is accepted; wave 1 standardised
+  on **coste** throughout — recorded 2026-10-11).
+- job → trabajo (a backgrounded shell job; "control de trabajos" register —
+  recorded 2026-10-11).
 
 ## Plurals
 
