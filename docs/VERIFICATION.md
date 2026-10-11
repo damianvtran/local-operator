@@ -2278,7 +2278,7 @@ offers no cheap exact transient-allocation counter (`tracemalloc` and
 dropped nets to zero). "No lock, no I/O, no `await` in the delta branch" is
 confirmed structurally — the branch is four scalar locals and two comparisons.
 
-----
+---
 
 ## Field-validating a merged tree without installing it (2026-10-10)
 
@@ -2292,10 +2292,15 @@ PYTHONPATH=/path/to/clean-checkout ~/.local/share/lop/current/bin/lop sessions c
 
 Python puts `PYTHONPATH` ahead of site-packages, so the checkout's
 `local_operator/` shadows the installed one while dependencies come from the
-generation. Dry runs write nothing, so this is read-only against the store.
+generation. A ``--dry-run`` writes nothing to the session store; note that the CLI still runs
+its startup migrations and appends its own log line in the config dir, so "read-only" means
+the store, not the whole config root (a no-op on an already-migrated config).
 Two bounds: it validates the checkout's CODE, not a built artifact, and a
 dependency added by the checkout (not yet in the installed generation) fails
 loudly at import — the safe failure. Demonstrated on the scratchpad-reclaim
-content phase: the dry run found 36 pads / ~192 MiB reclaimable with the guard
-matrix exercised on real data; after the release installed, the live sweeps
-reclaimed 58 pads / ~491.6 MB (state file `content_freed_bytes_estimate`).
+content phase (2026-10-10, this machine): a read-only dry run found 36 pads /
+191.8 MiB reclaimable with the guard matrix exercised on real data — an
+ephemeral figure, since a dry run leaves no artifact; once the
+feature-carrying release was installed, the live sweeps reclaimed 58 pads /
+491.6 MB, re-derivable from the sessions state file (`content_reclaimed_total`,
+`content_freed_bytes_estimate`) and the cleanup log.
