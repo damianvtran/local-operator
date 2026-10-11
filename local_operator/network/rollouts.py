@@ -779,14 +779,25 @@ class RolloutDriver(threading.Thread):
         """Ask the loop to end; the next wake returns immediately."""
         self._stop_event.set()
 
-    def run(self) -> None:  # pragma: no cover — the loop is driven by tick() in cells
+    def run(self) -> None:
         while not self._stop_event.wait(SCAN_INTERVAL_S):
             tick(self.server)
 
 
-def ensure_driver(server: "RelayServer") -> RolloutDriver:
-    """Start this relay's rollout driver if it is not already running."""
+def ensure_driver(server: "RelayServer") -> RolloutDriver | None:
+    """Start this relay's rollout driver if it is not already running.
+
+    Returns ``None`` when the relay is already stopping or stopped (round 6,
+    R6-1): the start hooks are fire-and-forget daemon threads (relay.py's
+    ``_run_start_hooks``), so a hook can legally land AFTER ``stop()`` ran the
+    slice stop hooks — and a driver started then is the one thread no reaper
+    will ever visit. The guard is the relay's own ``_stop`` event, read under
+    the registry lock so the two seams cannot interleave.
+    """
     with _DRIVER_LOCK:
+        stop = getattr(server, "_stop", None)
+        if stop is not None and stop.is_set():
+            return None
         existing = _DRIVERS.get(id(server))
         if existing is not None and existing.is_alive():
             return existing

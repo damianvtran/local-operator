@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from argparse import Namespace
 from pathlib import Path
@@ -61,6 +62,9 @@ class _Server:
         self.audit = _Audit()
         self.ops: Any = None
         self.kw: Any = None
+        #: The relay's own stop flag, present so the driver's stand-down guard
+        #: (R6-1) reads a real Event here, exactly as it does on a RelayServer.
+        self._stop = threading.Event()
 
     def register_ops(self, ops: Any, **kw: Any) -> None:
         self.ops = ops
@@ -621,6 +625,7 @@ def test_the_driver_is_dormant_until_a_record_exists(
         meshupdate, "update_peer", lambda *a, **k: pytest.fail("the dormant driver asked a peer")
     )
     driver = rollouts.ensure_driver(cast(Any, server))
+    assert driver is not None
     try:
         assert driver.name == "mesh-rollout", driver.name
         time.sleep(0.3)
@@ -674,6 +679,7 @@ def test_the_driver_dies_at_stop_and_rides_no_timer(
 
     monkeypatch.setattr(time, "sleep", _record)
     driver = rollouts.ensure_driver(cast(Any, server))
+    assert driver is not None
     real_sleep(0.4)
     assert driver.is_alive(), "the driver never came up"
     rollouts.stop_driver(cast(Any, server))
@@ -682,10 +688,35 @@ def test_the_driver_dies_at_stop_and_rides_no_timer(
     assert unique not in calls, f"the driver's cadence rode time.sleep {calls.count(unique)} times"
     # The reap is complete: a fresh ensure starts a NEW thread that also stops.
     again = rollouts.ensure_driver(cast(Any, server))
+    assert again is not None
     assert again is not driver
     real_sleep(0.2)
     rollouts.stop_driver(cast(Any, server))
     assert not again.is_alive(), "the second driver outlived stop_driver"
+
+
+def test_a_start_hook_landing_after_stop_starts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6-1: start()'s hook thread can land after stop() ran the stop hooks.
+
+    The relay's start hooks are fire-and-forget daemon threads, so the
+    interleaving is legal: ``stop()`` runs ``stop_driver`` (nothing to reap
+    yet) and the hook then calls ``ensure_driver``. Without the stand-down
+    guard that starts a driver no reaper will ever visit — the relay is
+    stopped and the stop hooks have already run. This cell pins the seam: a
+    server whose ``_stop`` is already set must start nothing.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    server._stop.set()
+    monkeypatch.setattr(rollouts, "SCAN_INTERVAL_S", 0.05)
+    try:
+        driver = rollouts.ensure_driver(cast(Any, server))
+        assert driver is None, "a start hook landing after stop started a driver"
+        assert id(server) not in rollouts._DRIVERS
+    finally:
+        rollouts.stop_driver(cast(Any, server))
 
 
 def test_the_cli_verbs_mutate_the_record(monkeypatch: pytest.MonkeyPatch) -> None:
