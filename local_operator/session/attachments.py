@@ -143,6 +143,18 @@ class AttachmentStore:
     def _meta_path(self, digest: str) -> Path:
         return self.root / f"{digest}.json"
 
+    def path_for(self, digest: str) -> Path:
+        """The content file ``digest`` names — ``<root>/<digest>.bin``.
+
+        The naming rule, exposed rather than re-spelled: callers that must
+        NAME the file a digest addresses (the request-side attachment hints,
+        ``session/attachment_hints.py``) should read it from here, so a second
+        copy of the ``.bin`` convention cannot drift from this one. Does not
+        check existence — a caller that needs the bytes actually there reads
+        through :meth:`get` and degrades on ``None``.
+        """
+        return self._content_path(digest)
+
     # -- write -------------------------------------------------------------
 
     def put(self, data_b64: str, mime_type: str) -> AttachmentRef | None:
@@ -195,6 +207,35 @@ class AttachmentStore:
             except OSError as exc:
                 logger.debug("attachment store: cannot write %s: %s", digest, exc)
                 return None
+        return AttachmentRef(digest=digest, mime_type=mime_type, bytes=len(raw))
+
+    def locate(self, data_b64: str, mime_type: str) -> AttachmentRef | None:
+        """The reference for bytes the store is EXPECTED to already hold.
+
+        The read-only sibling of :meth:`put`, for callers that report where a
+        stored image lives (:mod:`local_operator.session.attachment_hints`)
+        without being allowed to populate the store as a side effect — a
+        request render runs per provider step and beside every token count, so
+        a write here would churn the operator's store on paths that are meant
+        to be pure functions of the conversation.
+
+        ``None`` means the file (or its sidecar) is not there, which is the
+        same normal, degraded outcome :meth:`put` returns ``None`` for: the
+        caller omits the reference rather than naming a path that dangles.
+        The file's own integrity check is :meth:`get_bytes`'s — a bit-rotted
+        or hand-rewritten file fails its digest there and reads as missing
+        here too, so a path this returns always addresses the bytes it is
+        standing for.
+        """
+        try:
+            raw = base64.b64decode(data_b64, validate=False)
+        except (ValueError, TypeError):
+            return None
+        if not raw:
+            return None
+        digest = hashlib.sha256(raw).hexdigest()[:_DIGEST_CHARS]
+        if self.get_bytes(digest) is None:
+            return None
         return AttachmentRef(digest=digest, mime_type=mime_type, bytes=len(raw))
 
     # -- read --------------------------------------------------------------
