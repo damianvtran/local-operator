@@ -800,6 +800,7 @@ def _reload_copy() -> None:
     """
     global MODEL_PENDING, MODEL_SETUP, HINTS, HINTS_SETUP, HINT_KEY_WIDTH_TIGHT
     global KEYED_TIPS, TIP_PASTE, TIP_MESH, TIPS, TIP_SETUP, TIP_MIN_WIDTH, WARNING_SHORT
+    global _KEYED_BY_TEMPLATE
     MODEL_PENDING = _s(tui_status.model_connecting())
     MODEL_SETUP = _s(tui_status.model_setup())
     TIP_PASTE = _t(tui_welcome.tip_paste())
@@ -808,6 +809,7 @@ def _reload_copy() -> None:
     HINTS_SETUP = _hints_setup()
     HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
     KEYED_TIPS = _keyed_tips()
+    _KEYED_BY_TEMPLATE = _keyed_by_template()
     TIPS = _tips()
     TIP_SETUP = _t(tui_welcome.tip_setup(login=RECOMMENDED_LOGIN.title()))
     TIP_MIN_WIDTH = _tip_min_width()
@@ -1336,11 +1338,20 @@ def _hint_lines(width: int, *, setup: bool = False, aida_name: str | None = None
     return lines
 
 
-#: ``template -> binding id`` for the keyed pool entries, so the renderer can
-#: recognise one without re-scanning :data:`KEYED_TIPS` per frame.
-_KEYED_BY_TEMPLATE: dict[str, str] = {
-    template: binding_id for template, binding_id in KEYED_TIPS if binding_id is not None
-}
+def _keyed_by_template() -> dict[str, str]:
+    """``template -> binding id`` for the keyed pool entries, so the renderer
+    can recognise one without re-scanning :data:`KEYED_TIPS` per frame.
+
+    A builder like every other composite in this module: :func:`_reload_copy`
+    re-runs it when the active locale moves. Without that re-run the map kept
+    the previous locale's templates and :func:`_resolve_tip` fell through to
+    the raw body — the splash painted a literal ``{key}`` after a live
+    ``/language`` switch until restart (wave-1 regression).
+    """
+    return {template: binding_id for template, binding_id in KEYED_TIPS if binding_id is not None}
+
+
+_KEYED_BY_TEMPLATE: dict[str, str] = _keyed_by_template()
 
 
 def _resolve_tip(body: str) -> str:
