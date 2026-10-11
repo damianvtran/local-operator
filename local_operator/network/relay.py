@@ -7392,6 +7392,12 @@ class RelayServer:
                     break
                 # A journal that does not exist yet: the empty page, and no
                 # promise of facts over nothing (the desktop twin's own arm).
+                # ``has_newer`` STAYS HERE, unlike the twin (review round 1,
+                # R1-2): the twin's own empty answer omits the key, while this
+                # op's plain arm always carries it (``page.has_newer``) and the
+                # frame arm's contract is today's key set PLUS the three frame
+                # keys — so a client reads the envelope it always has, either
+                # way (``reply.get``).
                 return {
                     "entries": [],
                     "has_more": False,
@@ -7508,12 +7514,20 @@ class RelayServer:
         desktop buys with a wait the next request buys by asking again.
 
         THE REFRESH IS SCHEDULED ON THE PAGE LOOP because ``start_refresh`` is
-        loop-resident by construction (it creates a task on the running loop —
-        single-flight with the desktop's own refresh and the prewarm's), and
-        this handler runs on the LINK'S READER thread. The submit is taken under
-        ``_page_loop_lock`` for the same reason ``_stored_page_read``'s is: a
-        ``stop`` landing between choosing the loop and submitting must hand
-        this read either the live loop or a fresh one, never a closed one.
+        loop-resident by construction (it creates a task on the RUNNING loop),
+        and this handler runs on the LINK'S READER thread. SINGLE-FLIGHT MEANS
+        PER LOOP HERE: ``transcript_index`` joins an in-flight task only when it
+        was recorded for the same loop — a request from another loop starts a
+        FRESH task and replaces the map's entry. Every stored-page read in this
+        process shares the one page loop, so concurrent frame reads join one
+        scan; a refresh already running on ANOTHER loop (the desktop bridge's,
+        another process) is duplicated, not joined — safe (the same journal, an
+        idempotent cache write), and exactly why this side schedules its own
+        rather than assuming anyone else's scan is in flight. The submit is
+        taken under ``_page_loop_lock`` for the same reason
+        ``_stored_page_read``'s is: a ``stop`` landing between choosing the loop
+        and submitting must hand this read either the live loop or a fresh one,
+        never a closed one.
         """
         from local_operator.session import transcript_index as index_module
 
@@ -7537,11 +7551,16 @@ class RelayServer:
         return None
 
     async def _schedule_frame_index_refresh(self, session_id: str) -> None:
-        """Create the single-flight index refresh task, on the page loop.
+        """Create the index refresh task, on the page loop.
 
-        A coroutine rather than a direct call because ``start_refresh`` reads
-        ``asyncio.get_running_loop()`` — it must run where a loop is running,
-        which is the page loop and only the page loop on this side.
+        THE LOOP IS THE JOIN CONDITION, not just the executor: ``start_refresh``
+        joins a task only for the loop it was recorded under, and every
+        stored-page read here shares this one — so concurrent frame reads join
+        ONE scan. (A refresh already running on another loop is not joined; see
+        :meth:`_stored_frame_index` for the scope and why the duplicate is
+        safe.) A coroutine rather than a direct call because ``start_refresh``
+        reads ``asyncio.get_running_loop()`` — it must run where a loop is
+        running, which is the page loop and only the page loop on this side.
         """
         from local_operator.session import transcript_index as index_module
 
