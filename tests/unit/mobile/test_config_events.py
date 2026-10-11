@@ -94,6 +94,22 @@ async def test_the_first_frame_is_the_baseline(config_home: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_never_pulled_response_attaches_nothing(config_home: Path) -> None:
+    """Attach happens on FIRST PULL (CI round 1, MINOR-1): a response that
+    never starts — a client that vanished between the call and the first
+    read — must leave neither a queue nor the fan-out behind. A route-time
+    attach used to leak one subscriber per never-started stream."""
+    (config_home / "config.yml").write_text("values:\n  language: en\n", encoding="utf-8")
+    daemon = MobileDaemon(password="pw")
+    app = build_app(daemon)
+    response = await _endpoint(app)(_request())
+    assert daemon.config_subscribers == set()
+    assert daemon._config_unsubscribe is None
+    await response.body_iterator.aclose()
+    assert daemon.config_subscribers == set()
+
+
+@pytest.mark.asyncio
 async def test_a_real_change_publishes_through_the_shared_builder(config_home: Path) -> None:
     """A change detected against the FILE (a hand edit + the watcher's poll)
     produces one frame via the shared payload builder, naming the changed key
