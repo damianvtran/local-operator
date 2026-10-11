@@ -151,7 +151,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Round-1 audit FAILED (4 MAJOR/1 MINOR/1 NIT - term divergences); fix round applied 6/6; round-2 recheck PASSED (labels settings-exact; widths <=57/59; keyed ex-sub 28/30; valns OK). Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+      "note": "Round-1 audit FAILED (4 MAJOR/1 MINOR/1 NIT - term divergences); fix round applied 6/6; round-2 recheck PASSED (labels settings-exact; widths <=57/59; keyed ex-sub 28/30; valns OK). Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet). Post-review recheck passed (design D2 remediation): classification_off 'ya no sugiere' (55/57, 2 cells headroom); changed set = exactly that 1 key vs 97a85c44; 29/30 values byte-identical; valns OK."
     },
     {
       "locale": "es",
@@ -379,7 +379,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Round-2 recheck passed: 7/7 fixes verified (labels settings-byte-exact); changed set = exactly the 7 keys; widths 54/56 37/39 53/55 57/59 55/57 53/55 48/50; pool max 59 unchanged; valns+check.py OK 30 keys. Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+      "note": "Round-2 recheck passed: 7/7 fixes verified (labels settings-byte-exact); changed set = exactly the 7 keys; widths 54/56 37/39 53/55 57/59 55/57 53/55 48/50; pool max 59 unchanged; valns+check.py OK 30 keys. Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet). Post-review recheck passed (design D1/D3 remediation): tip.cmux lowercased (55/57), tip.hotkeys 'réassigne' (52/54); changed set = exactly those 2 keys vs 995f22d7; the spaced-quote option was re-derived to 59/61 (two interior NNBSPs) — over both caps; 28/30 values byte-identical; valns OK."
     }
   ]
 }

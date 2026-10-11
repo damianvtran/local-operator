@@ -791,9 +791,11 @@ def _reload_copy() -> None:
 
     The composites go through their builders — each value's single
     expression, so this function and the import-time bindings cannot drift:
-    the pools via ``_tips``/``_keyed_tips``/``_hints``/``_hints_setup`` and
-    the width budget via :func:`_tip_min_width` (round-1 F2: the budget was
-    the one mirror without one). The scalar assignments below mirror the
+    the pools via ``_tips``/``_keyed_tips``/``_hints``/``_hints_setup``, the
+    keyed-tip lookup via :func:`_keyed_by_template`, and the width budget via
+    :func:`_tip_min_width` (round-1 F2: the budget used to be the only mirror
+    without one; the keyed-tip map was this wave's addition — the live-switch
+    literal ``{key}`` it fixes). The scalar assignments below mirror the
     one-line definitions above; the live-locale tests pin each one against
     the fixture catalogue, so a mirror that went stale fails loudly rather
     than half-translating the splash.
