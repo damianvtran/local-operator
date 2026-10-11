@@ -275,3 +275,117 @@ def test_calls_basis_columns_migrate_and_the_view_reads_them(tmp_path: Path) -> 
         "SELECT billing_basis, cost_source FROM spend_all WHERE channel = 'inference'"
     ).fetchone() == ("not_tracked", "none"), "an old row is not relabelled by the view"
     reopened.close()
+
+
+# -- PR-2: the channel READS (breakdown + calendar series) -------------------
+
+
+def test_channel_breakdown_groups_and_honours_window_and_session(tmp_path: Path) -> None:
+    """The windowed breakdown: grouped per (channel, provider, basis, source).
+
+    The stated/unstated pair is the load-bearing half: an amount-unknown call
+    must leave ``amount_micro`` as the KNOWN sum and be visible through
+    ``known_calls`` — a group of zeros with ``known_calls=0`` reads as "could
+    not be sized", never as "free".
+    """
+    store = AnalyticsStore(db_path=tmp_path / "analytics.db")
+    assert (
+        store.record_channel_batch(
+            [
+                channel_row("image:r1", ts_ms=DAY_MS, amount_micro=53_000, session_id="s1"),
+                channel_row("image:r2", ts_ms=DAY_MS + 1, amount_micro=None, session_id="s1"),
+                channel_row(
+                    "tts:r1",
+                    ts_ms=DAY_MS + 2,
+                    channel="tts",
+                    provider="elevenlabs",
+                    basis="billed",
+                    amount_micro=1_200,
+                    session_id="s2",
+                ),
+            ]
+        )
+        == 3
+    )
+
+    rows = store.channel_breakdown(session_id="s1")
+    assert [(row.channel, row.calls, row.known_calls, row.amount_micro) for row in rows] == [
+        ("image", 2, 1, 53_000)
+    ], "the unknown amount is not a zero and does not vanish"
+
+    every = store.channel_breakdown()
+    assert {row.channel for row in every} == {"image", "tts"}
+    tts = next(row for row in every if row.channel == "tts")
+    assert (tts.provider, tts.billing_basis, tts.cost_source) == (
+        "elevenlabs",
+        "billed",
+        "server_reported",
+    )
+
+    # The window is half-open on ``ts_ms``, the same bounds ``aggregate`` uses.
+    windowed = store.channel_breakdown(since_ms=DAY_MS + 2)
+    assert {row.channel for row in windowed} == {"tts"}
+    store.close()
+
+
+def test_channel_series_sum_providers_and_split_them_on_request(tmp_path: Path) -> None:
+    """The rollup series: one (period, channel, basis) row, or per provider.
+
+    Two providers under one channel SUM into the default series and SPLIT when
+    ``by_provider=True`` — the two shapes the payload offers a client that
+    charts spend over time.
+    """
+    store = AnalyticsStore(db_path=tmp_path / "analytics.db")
+    assert (
+        store.record_channel_batch(
+            [
+                channel_row(
+                    "search:r1",
+                    ts_ms=DAY_MS,
+                    channel="search",
+                    provider="brave",
+                    amount_micro=250,
+                ),
+                channel_row(
+                    "search:r2",
+                    ts_ms=DAY_MS + 1,
+                    channel="search",
+                    provider="exa",
+                    amount_micro=150,
+                ),
+            ]
+        )
+        == 2
+    )
+
+    daily = store.channel_daily_series(7)
+    assert len(daily) == 1
+    row = daily[0]
+    assert (row.channel, row.provider, row.billing_basis) == ("search", "", "estimated")
+    assert (row.amount_micro, row.calls, row.known_calls) == (400, 2, 2)
+
+    split = store.channel_daily_series(7, by_provider=True)
+    assert {(row.provider, row.amount_micro) for row in split} == {
+        ("brave", 250),
+        ("exa", 150),
+    }
+
+    monthly = store.channel_monthly_series(12)
+    assert len(monthly) == 1 and monthly[0].amount_micro == 400
+    store.close()
+
+
+def test_channel_reads_answer_empty_without_the_channel_tables(tmp_path: Path) -> None:
+    """A ledger without the channel tables reads as empty, never as an error.
+
+    ``_has_channel_tables`` is False on a pre-feature or read-only database;
+    the reads are additive to payloads that already have an answer, so all
+    three return ``[]`` rather than raising into a report.
+    """
+    store = AnalyticsStore(db_path=tmp_path / "analytics.db")
+    assert store.record_channel_batch([channel_row()]) == 1
+    store._has_channel_tables = False  # the state the flag holds on an old db
+    assert store.channel_breakdown() == []
+    assert store.channel_daily_series() == []
+    assert store.channel_monthly_series() == []
+    store.close()

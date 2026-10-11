@@ -9824,6 +9824,7 @@ class ServingSessionHandle(SessionHandle):
                 context_window=store.read_field("context_window"),
                 context_is_estimate=store.read_field("context_is_estimate"),
                 usage=usage,
+                spend_channels=store.spend_channels_copy(),
             )
         # Publish the child roster beside the session state, the way the TUI
         # host does (``mobile/tui_handle.py::_refresh_state``). The folded

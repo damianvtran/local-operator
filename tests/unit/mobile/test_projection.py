@@ -4283,6 +4283,7 @@ def test_set_spend_context_assigns_every_field_and_never_skips_a_none() -> None:
         context_window=200_000,
         context_is_estimate=True,
         usage={"input_tokens": 9_000, "output_tokens": 100},
+        spend_channels={"version": 1, "tracked": True, "total_micro": 961_000, "rows": []},
     )
     p = fold.projection
     assert p.cumulative_parent_cost == 1.25
@@ -4294,6 +4295,12 @@ def test_set_spend_context_assigns_every_field_and_never_skips_a_none() -> None:
     assert p.context_window == 200_000
     assert p.context_is_estimate is True
     assert p.usage == {"input_tokens": 9_000, "output_tokens": 100}
+    assert p.spend_channels == {
+        "version": 1,
+        "tracked": True,
+        "total_micro": 961_000,
+        "rows": [],
+    }
 
     version = p.version
     fold.set_spend_context(
@@ -4306,6 +4313,7 @@ def test_set_spend_context_assigns_every_field_and_never_skips_a_none() -> None:
         context_window=None,
         context_is_estimate=None,
         usage={},
+        spend_channels=None,
     )
     assert p.cumulative_parent_cost is None, "a None reading must overwrite, not skip"
     assert p.child_costs == {}
@@ -4314,6 +4322,10 @@ def test_set_spend_context_assigns_every_field_and_never_skips_a_none() -> None:
     assert p.context_tokens is None and p.context_window is None
     assert p.context_is_estimate is None
     assert p.usage == {}
+    assert p.spend_channels is None, (
+        "a withdrawn channel object must overwrite too — a skip would keep a "
+        "stale breakdown alive after the store stopped publishing one"
+    )
     assert p.version > version
 
 

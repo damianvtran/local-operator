@@ -33,8 +33,10 @@
  */
 import { cn } from "../lib/cn";
 import {
+	channelBreakdown,
 	contextEstimateMarker,
 	contextReading,
+	publishedSpend,
 	sessionSpend,
 	type ContextRung,
 } from "../lib/spend-context";
@@ -62,41 +64,97 @@ const RUNG_CLASS: Record<ContextRung, string> = {
 };
 
 export function SessionStatus({ projection }: { projection: SessionProjection }) {
-	const spend = sessionSpend(projection, projection.usage);
+	// THE PUBLISHED OBJECT WINS when the runtime has one: its `total_micro`
+	// already spans this session's inference, its channels AND its children,
+	// computed in one backend place — so the row renders that figure rather
+	// than summing locally, exactly as the TUI band does (`_band_cost_cell`).
+	// A runtime that publishes nothing keeps the legacy reading verbatim.
+	const published = publishedSpend(projection, projection.usage);
+	const spend = published
+		? { text: published.text }
+		: { text: sessionSpend(projection, projection.usage).text };
 	const context = contextReading(projection);
 	const estimateMarker = contextEstimateMarker(context);
-	if (!spend.text && !context.spelling) return null;
+	// The breakdown line (PR-2): shown only when the published object exists
+	// and has something to say — named rows, an honest remainder count, or the
+	// untracked disclosure. An old daemon sends no object and this line is
+	// absent entirely, so the legacy row is untouched.
+	const breakdown = channelBreakdown(projection);
+	const hasBreakdown =
+		breakdown !== null &&
+		(breakdown.chips.length > 0 || breakdown.hiddenCount > 0 || breakdown.untrackedNotice);
+	const hasRow = Boolean(spend.text || context.spelling);
+	if (!hasRow && !hasBreakdown) return null;
 	return (
-		<div
-			data-testid="session-status"
-			className="flex items-center gap-2 border-b border-hairline px-3 py-1 font-mono text-mono-sm tabular-nums"
-		>
-			{/* Reading order is the one both references use — the TUI band's right
-			    group and the desktop strip both read context before spend — and
-			    `ml-auto` sits on the SECOND cell rather than on `justify-between`,
-			    so a lone reading keeps a fixed edge and the row does not reflow as
-			    the other appears or vanishes. */}
-			{context.spelling ? (
-				<span
-					data-testid="session-status-context"
-					className={cn("shrink-0", RUNG_CLASS[context.rung])}
+		<>
+			{hasRow ? (
+				<div
+					data-testid="session-status"
+					className="flex items-center gap-2 border-b border-hairline px-3 py-1 font-mono text-mono-sm tabular-nums"
 				>
-					{context.spelling}
-					{/* The estimate marker: the desktop's dim WORD, not a glyph —
-					    D2's ruling; `contextEstimateMarker` names both precedents. */}
-					{estimateMarker ? (
-						<span className="ml-1 text-ink-dim">{estimateMarker}</span>
+					{/* Reading order is the one both references use — the TUI band's right
+					    group and the desktop strip both read context before spend — and
+					    `ml-auto` sits on the SECOND cell rather than on `justify-between`,
+					    so a lone reading keeps a fixed edge and the row does not reflow as
+					    the other appears or vanishes. */}
+					{context.spelling ? (
+						<span
+							data-testid="session-status-context"
+							className={cn("shrink-0", RUNG_CLASS[context.rung])}
+						>
+							{context.spelling}
+							{/* The estimate marker: the desktop's dim WORD, not a glyph —
+							    D2's ruling; `contextEstimateMarker` names both precedents. */}
+							{estimateMarker ? (
+								<span className="ml-1 text-ink-dim">{estimateMarker}</span>
+							) : null}
+						</span>
 					) : null}
-				</span>
+					{spend.text ? (
+						<span
+							data-testid="session-status-spend"
+							className="ml-auto min-w-0 truncate text-ink-muted"
+						>
+							{spend.text}
+						</span>
+					) : null}
+				</div>
 			) : null}
-			{spend.text ? (
-				<span
-					data-testid="session-status-spend"
-					className="ml-auto min-w-0 truncate text-ink-muted"
+			{hasBreakdown && breakdown ? (
+				/* The second line is FACTS, not an alarm: muted like the spend cell
+				   above it, wrapping on a 390-px screen rather than shedding chips
+				   silently. Every amount here is the backend's own row amount —
+				   never a re-sum of the total — and `sub-equiv` marks subscription
+				   quota so it cannot be read as billed dollars (design §5.1). ROWS
+				   DRAW ALWAYS (the desktop M-4 gate): a marker-less session that
+				   carries recovered rows shows them, and the untracked disclosure
+				   appears BESIDE them only when the object itself shows something
+				   is missing. */
+				<div
+					data-testid="session-status-channels"
+					className="flex flex-wrap items-baseline gap-x-2 border-b border-hairline px-3 pb-1 font-mono text-mono-sm tabular-nums text-ink-muted"
 				>
-					{spend.text}
-				</span>
+					{breakdown.chips.map((chip, index) => (
+						<span key={`${chip.label}-${index}`} data-testid="session-status-channel">
+							{chip.label} {chip.text}
+							{chip.subEquivalent ? (
+								<span className="text-ink-dim"> sub-equiv</span>
+							) : null}
+						</span>
+					))}
+					{breakdown.untrackedNotice ? (
+						<span data-testid="session-status-channels-untracked">
+							channels not tracked
+						</span>
+					) : null}
+					{breakdown.hiddenCount > 0 ? (
+						/* The TUI's own separator (design round 1, D1): `· +N more`
+						   reads as one more segment of the same line, where a bare
+						   `+N more` scanned as a stray token. */
+						<span className="text-ink-dim">· +{breakdown.hiddenCount} more</span>
+					) : null}
+				</div>
 			) : null}
-		</div>
+		</>
 	);
 }

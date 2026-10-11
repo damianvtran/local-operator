@@ -3386,6 +3386,7 @@ class ProjectionFold:
         context_window: int | None,
         context_is_estimate: bool | None,
         usage: dict[str, int],
+        spend_channels: dict[str, Any] | None,
     ) -> None:
         """Adopt the store's spend/context block EXACTLY, then bump.
 
@@ -3414,6 +3415,14 @@ class ProjectionFold:
         p.context_window = context_window
         p.context_is_estimate = context_is_estimate
         p.usage = usage
+        # The published per-channel object (PR-2): assigned UNCONDITIONALLY on
+        # the same rule as every field above — ``None`` is a READING ("this
+        # runtime publishes no channel ledger"), never "skip this update", and
+        # a skip here would keep a stale breakdown alive after a republish that
+        # withdrew it. The caller hands the copy it owns
+        # (``spend_channels_copy``), so the fold keeps that object and a
+        # repaint never re-copies it.
+        p.spend_channels = spend_channels
         self._bump()
 
     # -- internals ----------------------------------------------------------
