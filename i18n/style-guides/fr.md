@@ -28,6 +28,7 @@ for `fr`; when this file and a habit disagree, this file wins.
   commit, push, pull, merge, rebase, fetch, tag · token, cache, endpoint,
   script, prompt · API, CLI, TUI, JSON, YAML, HTTP, URL, GPU · bug. Reason:
   translating them ("validation", "bogue") reads foreign to fr developers.
+- Wave-1 recorded addition: runtime (kept English; mirrors the es guide).
 - Prefer French where settled: serveur, fichier, dossier, réseau, stockage,
   paramètres (settings), appareil (device), équipe, compétence (skill).
 
@@ -40,6 +41,7 @@ for `fr`; when this file and a habit disagree, this file wins.
 - schedule → planification (Windows fr precedent: "Planificateur de tâches");
   one scheduled item reads "prompt planifié".
 - usage → utilisation · cost → coût
+- job → tâche (a backgrounded shell job — recorded 2026-10-11).
 
 ## Plurals
 

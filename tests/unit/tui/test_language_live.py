@@ -177,6 +177,13 @@ async def test_a_running_switch_swaps_the_band_and_the_splash(
         # (ICU quoting is consumed by the runtime: the fixture's `'{key}'`
         # resolves to the literal `{key}` the pool then substitutes at render.)
         assert ("FR {key} starts", "keymap.new_session") in welcome_mod.KEYED_TIPS
+        # ...the keyed-tip LOOKUP follows the pool: _resolve_tip must recognise
+        # the FRESH template (regression: the template->binding map was
+        # import-time only, so a live switch painted a literal `{key}` on the
+        # splash until restart).
+        resolved_fr = welcome_mod._resolve_tip("FR {key} starts")
+        assert "{key}" not in resolved_fr, resolved_fr
+        assert resolved_fr.startswith("FR ") and resolved_fr.endswith(" starts")
         # ...the band's, and keymap's tip templates (welcome's pool reads them).
         assert status_line_mod.TUNNEL_PARKED_TEXT == "FR:parked"
         assert keymap_mod.BY_ID["keymap.resume"].tip == "FR {key} resumes"
@@ -201,6 +208,9 @@ async def test_a_running_switch_swaps_the_band_and_the_splash(
         assert welcome_mod.MODEL_PENDING == "connecting…"
         assert status_line_mod.TUNNEL_PARKED_TEXT == "remote access off"
         assert status_line_mod.format_agents(2) == "2 agents"
+        # The keyed-tip lookup re-materialised in reverse too.
+        resolved_en = welcome_mod._resolve_tip("{key} starts a new conversation")
+        assert "{key}" not in resolved_en, resolved_en
 
 
 @pytest.mark.asyncio
