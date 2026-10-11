@@ -779,15 +779,6 @@ export function Transcript({
 					<span className="h-px w-10 bg-hairline" />
 				</div>
 			) : null}
-			{hiddenCount > 0 ? (
-				<button
-					type="button"
-					onClick={() => setWindowSize((n) => n + PAGE)}
-					className="mx-auto text-meta text-ink-dim underline-offset-2 active:underline"
-				>
-					show {hiddenCount} more loaded
-				</button>
-			) : null}
 			{visible.flatMap((entry) => {
 				const group = groupsByFirstId.get(entry.id);
 				if (group !== undefined) {
