@@ -588,6 +588,13 @@ async def test_a_print_mode_run_with_a_continuation_is_ineligible(tmp_path: Path
     try:
         await run_print_mode(session, ["lop exec --loop"], continuation=continuation)
         assert runner.reasons == ["one-shot-host"], runner.reasons
+        # The split's NEGATIVE half (review round 1, R-1): a continuation run must not
+        # re-arm the one-shot latch it deliberately skipped. Without this line the cell
+        # stays green if ``run_print_mode`` declares that latch for continuation runs
+        # too (``if continuation is None:`` -> ``if True:`` at ``headless_print.py:601``)
+        # -- the exact collapse the one-shot/headless split exists to prevent, since the
+        # departure latches must not arm between a loop's own turns.
+        assert session._one_shot_exit is False
     finally:
         await session.dispose()
 

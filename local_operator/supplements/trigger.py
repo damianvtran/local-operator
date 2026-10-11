@@ -81,8 +81,11 @@ class RunProvenance:
     #: ``--loop``/``--loop-goal`` runs, whose one-shot declaration is deliberately skipped
     #: (their turns are the run's work; see ``Session.declare_headless_host``). Rule 6
     #: refuses on this OR ``one_shot``, so no headless host is eligible whatever shape its
-    #: continuation takes.
-    headless: bool = False
+    #: continuation takes. Deliberately has NO default: the field decides a refusal, so a
+    #: fail-open default would let a future freeze site omit it -- or a second producer
+    #: appear -- and silently re-open this hole. ``Session._emit`` is its only producer
+    #: today, and it must state the fact.
+    headless: bool
     #: ``Session.turns_settled`` at freeze time. The runner waits until the counter EXCEEDS
     #: this, i.e. until THIS turn's pipeline ``finally`` has finished -- a counter and not a
     #: bare ``Event`` so a next turn that clears the event first cannot strand the waiter.
