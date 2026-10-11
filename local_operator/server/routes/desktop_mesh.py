@@ -39,6 +39,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.network.types import MeshRefusal
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_mesh import (
@@ -289,7 +290,9 @@ async def transfer_session(session_id: str, body: TransferSession, request: Requ
         code = str(result.get("code") or "move_refused")
         raise HTTPException(
             503 if code in _MOVE_UNCONFIRMED_CODES else 409,
-            {"code": code, "message": str(result.get("message") or "the move was refused")},
+            _wd.desktop_refusal(
+                error=str(result.get("message") or "the move was refused")
+            ).envelope(code=code),
         )
 
 

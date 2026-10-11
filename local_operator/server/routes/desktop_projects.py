@@ -67,6 +67,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.projects import (
     MilestoneEdit,
     Project,
@@ -164,10 +165,7 @@ def _not_found(registry: ProjectRegistry, key: str) -> HTTPException:
     names = f" — closest: {', '.join(near)}" if near else ""
     return HTTPException(
         404,
-        {
-            "code": "project_not_found",
-            "message": f"no project with id or name {key!r}{names}",
-        },
+        _wd.project_not_found(key=repr(key), names=names).envelope(code="project_not_found"),
     )
 
 
@@ -178,15 +176,21 @@ def _refusal(exc: Exception, key: str) -> HTTPException:
         # malformed value — the client's move is to pick another name or open
         # the existing project, which 409 (with a machine code) says and 422
         # does not.
-        return HTTPException(409, {"code": "project_name_exists", "message": str(exc)})
+        return HTTPException(
+            409, _wd.desktop_refusal(error=str(exc)).envelope(code="project_name_exists")
+        )
     if isinstance(exc, ProjectSchemaGuardError):
         # The row EXISTS and is readable; this build is too old to rewrite it.
         # 409, not 404 (the operator can see it) and not 422 (nothing about the
         # request is malformed): the state of the target is what refuses.
-        return HTTPException(409, {"code": "project_schema_newer", "message": str(exc)})
+        return HTTPException(
+            409, _wd.desktop_refusal(error=str(exc)).envelope(code="project_schema_newer")
+        )
     if isinstance(exc, ProjectRegistryLockTimeout):
         # Contention is transient; the client retries.
-        return HTTPException(503, {"code": "project_store_busy", "message": str(exc)})
+        return HTTPException(
+            503, _wd.desktop_refusal(error=str(exc)).envelope(code="project_store_busy")
+        )
     if isinstance(exc, ProjectDoneGateError):
         # Still 422 (the request is well-formed; it asks for a state the plan's
         # milestones contradict), but with its OWN machine code: the remedy is
@@ -198,13 +202,12 @@ def _refusal(exc: Exception, key: str) -> HTTPException:
         # same code if create ever carried milestones (it cannot today).
         return HTTPException(
             422,
-            {
-                "code": "project_done_incomplete",
-                "message": readable_error(exc),
-                "incomplete": list(exc.incomplete),
-            },
+            _wd.desktop_refusal(error=readable_error(exc)).envelope(code="project_done_incomplete")
+            | {"incomplete": list(exc.incomplete)},
         )
-    return HTTPException(422, {"code": "project_invalid", "message": readable_error(exc)})
+    return HTTPException(
+        422, _wd.desktop_refusal(error=readable_error(exc)).envelope(code="project_invalid")
+    )
 
 
 def _live_counts(registry: ProjectRegistry, projects: list[Project]) -> dict[str, int]:
@@ -436,13 +439,9 @@ async def remove(key: str, body: ProjectDelete, request: Request) -> CRUDRespons
             if body.confirm.strip().casefold() != found.name.casefold():
                 raise HTTPException(
                     422,
-                    {
-                        "code": "project_confirm_mismatch",
-                        "message": (
-                            f"confirm must repeat the project name {found.name!r} "
-                            "exactly (the name, not the id)"
-                        ),
-                    },
+                    _wd.project_confirm_mismatch(name=repr(found.name)).envelope(
+                        code="project_confirm_mismatch"
+                    ),
                 )
             try:
                 registry.delete_project(found.id)

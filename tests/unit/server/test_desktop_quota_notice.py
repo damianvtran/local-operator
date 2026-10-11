@@ -867,7 +867,13 @@ async def test_unknown_provider_is_422(quota: Harness) -> None:
         "/v1/desktop/quota-notice", params={"provider": "not-a-provider"}
     )
     assert response.status_code == 422
-    assert response.json()["detail"] == "Unknown provider"
+    # E2a: the exact envelope, pinned (E1's shape) — code, empty params, and
+    # the byte-identical sentence in `text`.
+    assert response.json()["detail"] == {
+        "code": "wire.errors.desktop.unknown_provider",
+        "params": {},
+        "text": "Unknown provider",
+    }
 
 
 async def test_defaults_come_from_config(quota: Harness) -> None:
