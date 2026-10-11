@@ -89,6 +89,17 @@ def test_the_rate_legend_is_the_golden_sentence() -> None:
     # footnote rides on (one line for the whole report, or none at all).
     assert rate_legend(UsageAggregate(calls=98, decode_calls=98)) == ""
 
+    # Round-2 MAJOR: the word never pluralizes — base said "calls" for every
+    # total — and the digits group exactly as base's f"{n:,}" did. At 1 the
+    # one/other form said "1 call" and broke byte-identity; the 28-case battery
+    # missed it because nothing sampled a total of 1.
+    for total in (1, 2, 999, 1000, 1234, 12345):
+        shown = 0 if total == 1 else 1
+        assert (
+            _en("tui.analytics.rate.legend", shown=shown, total=total)
+            == f"decode rate over {shown} of {total:,} calls"
+        )
+
 
 def test_the_search_component_text_is_the_golden_rendering() -> None:
     # The unpriced split names the kind it actually counted.
