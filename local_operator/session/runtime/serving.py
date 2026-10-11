@@ -8960,7 +8960,7 @@ class ServingSessionHandle(SessionHandle):
                 kind="notice",
                 text=(
                     f"language: {resolved} ({language_name(resolved)}) — "
-                    f"/language <{'|'.join(options)}> switches; space lists"
+                    f"/language <{'|'.join(options)}>; space lists"
                 ),
                 style="info",
             )

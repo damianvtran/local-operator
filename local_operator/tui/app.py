@@ -42023,7 +42023,7 @@ class OperatorApp(App[None]):
             # (`_language_choices`), and the /settings row has the same list.
             self._system_notice(
                 f"language: {resolved} ({language_name(resolved)}) — "
-                f"/language <{'|'.join(options)}> switches; space lists"
+                f"/language <{'|'.join(options)}>; space lists"
             )
             return
         key = (
