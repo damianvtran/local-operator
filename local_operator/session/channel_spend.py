@@ -34,8 +34,10 @@ reason.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -145,6 +147,44 @@ SEARCH_PRICE_VERSION = "client-search-table-2026-09"  # MIGRATE to catalogue
 #: live estimate from a recovered one.
 WEB_SEARCH_PRICE_VERSION = "client-search-table-2026-09"  # MIGRATE to catalogue
 WEB_SEARCH_PRICE_VERSION_LEGACY = "client-search-table-legacy"  # MIGRATE to catalogue
+
+#: The §4.2 FALLBACK's wire state: a voice record exists in analytics for this
+#: session, but the owning session's journal does not hold it — the process
+#: that served ``/v1/tools/speech`` or ``/v1/transcriptions`` runs in the
+#: daemon, not in the runtime that owns the journal, and handing the record
+#: over live needs a new attach-protocol op (the design note's spike; the
+#: sidecar below is the interim). The wire presents the CHANNEL as
+#: ``voice`` because the state is about the two voice channels jointly, and a
+#: surface must render it instead of a figure — never as $0, and never inside
+#: ``total_micro`` (the same total shows everywhere; that is what keeps the
+#: fallback's "surfaces never disagree" claim true).
+PENDING_OWNER_APPEND = "pending_owner_append"
+
+#: The sentence a surface can show beside the state. Written for a reader of
+#: the wire, not for an operator's log: what happened, and what is missing.
+PENDING_OWNER_APPEND_REASON = (
+    "recorded to analytics for this session; the journal append waits on "
+    "the owner-append operation"
+)
+
+#: The per-session sidecar the route-level voice emitters append one JSON line
+#: to (``{"record_id", "channel", "ts_ms", "reason"}``). It lives INSIDE the
+#: session directory so a fork/copy carries it with the conversation, and it is
+#: append-only: the fold reads it and excludes anything its own ``record_id``
+#: set already holds, so a later owner-append of the same record retires the
+#: marker by construction rather than by a second write.
+PENDING_SIDECAR_NAME = "channel_pending.jsonl"
+
+#: The channels the pending sidecar speaks for. Voice only, today: it is the
+#: one route-level family whose caller runs outside the owning process. A
+#: second family joins by naming its channels here AND passing them through
+#: the same reader — the wire key stays ``voice`` until that happens.
+PENDING_VOICE_CHANNELS = frozenset({"tts", "stt"})
+
+#: A parse bound for the sidecar reader: one line per call is tiny, but a file
+#: that somehow grew unbounded must not be walked whole by a paint path. Only
+#: the trailing window can matter — every entry says the same thing.
+_PENDING_SIDECAR_MAX_LINES = 2000
 
 
 def usd_to_micro(value: Any) -> int | None:
@@ -260,6 +300,82 @@ def new_record_id(channel: str, correlation: str = "") -> str:
     """
     key = (correlation or "").strip() or uuid.uuid4().hex
     return f"{channel}:{key}"
+
+
+def write_pending_record(directory: str | os.PathLike[str], record: ChannelSpendRecord) -> bool:
+    """Append ONE record's pending marker to a session directory's sidecar.
+
+    THE §4.2 FALLBACK'S WRITE HALF. A route-level voice caller (the daemon's
+    speech/transcription routes) cannot append to the owning runtime's journal:
+    the journal's writer is an in-process lock, there is no cross-process file
+    lock, and an append from beside it would race the owner's own compaction
+    rewrite. So the record is mirrored to analytics (with its ``session_id``)
+    and this sidecar carries the fact the OWNING session's fold needs to state
+    in its published object: a voice record exists that it has not folded.
+
+    ONE ``O_APPEND`` line per call: a write that small is atomic for readers on
+    the local filesystem, which is the whole cross-process contract — the fold
+    only ever reads, and excludes entries its own fold already holds.
+
+    Never raises; returns whether the marker was written. Best-effort by
+    design: a lost marker must not fail a paid request, and the record itself
+    is already durable in analytics.
+    """
+    if record.channel not in PENDING_VOICE_CHANNELS:
+        return False
+    try:
+        root = os.fspath(directory)
+        if not root or not os.path.isdir(root):
+            # A REMOTE or never-materialised session: writing a spurious local
+            # directory for another device's id would be worse than the lost
+            # marker, so the write is skipped and the analytics row stands
+            # alone. The wire then simply carries no pending state, exactly as
+            # for a call that never named a session.
+            return False
+        payload = {
+            "record_id": record.record_id,
+            "channel": record.channel,
+            "ts_ms": int(record.ts_ms),
+            "reason": PENDING_OWNER_APPEND,
+        }
+        line = json.dumps(payload, separators=(",", ":")) + "\n"
+        with open(os.path.join(root, PENDING_SIDECAR_NAME), "a", encoding="utf-8") as handle:
+            handle.write(line)
+        return True
+    except Exception:  # noqa: BLE001 — a lost marker is not a failed request
+        logger.debug("channel pending marker write failed", exc_info=True)
+        return False
+
+
+def read_pending_records(directory: str | os.PathLike[str]) -> list[dict[str, Any]]:
+    """The sidecar's marker entries, oldest first; ``[]`` when absent.
+
+    Tolerant per line — a corrupt line is skipped, never fatal — and bounded to
+    the trailing window (see ``_PENDING_SIDECAR_MAX_LINES``). The reader has no
+    fold to exclude against: the caller subtracts the ``record_id`` set it
+    holds, which is what retires a marker once the record is folded.
+    """
+    try:
+        path = os.path.join(os.fspath(directory), PENDING_SIDECAR_NAME)
+        if not os.path.isfile(path):
+            return []
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except Exception:  # noqa: BLE001 — an unreadable sidecar is "no markers"
+        logger.debug("channel pending sidecar read failed", exc_info=True)
+        return []
+    out: list[dict[str, Any]] = []
+    for raw in lines[-_PENDING_SIDECAR_MAX_LINES:]:
+        text = raw.strip()
+        if not text:
+            continue
+        try:
+            entry = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("record_id"):
+            out.append(entry)
+    return out
 
 
 @dataclass(frozen=True)
@@ -549,6 +665,23 @@ class ChildrenSnapshot:
     reason: str = ""
 
 
+def _identity_bases(entry: Mapping[str, Any]) -> list[str]:
+    """The billing bases ONE identity's priced calls recorded (PR-3).
+
+    ``SessionSpend`` writes ``bases: {basis: micro}`` on each by-identity
+    entry; a record from before that key — or a host that never set it — has
+    none, and the row then says ``not_tracked``, which is the honest legacy
+    state and never a guess. Only bases that CARRY money are stated: an entry
+    with unpriced calls reads ``$—`` through ``knowledge``, and a basis about
+    money that does not exist would contradict it.
+    """
+    bases = entry.get("bases")
+    if not isinstance(bases, Mapping):
+        return [BASIS_NOT_TRACKED]
+    stated = sorted(str(name) for name, micro in bases.items() if int(micro or 0) > 0)
+    return stated or [BASIS_NOT_TRACKED]
+
+
 def _inference_rows(inference: InferenceSnapshot) -> list[dict[str, Any]]:
     """One wire row per serving identity, plus an UNATTRIBUTED row if needed.
 
@@ -595,7 +728,7 @@ def _inference_rows(inference: InferenceSnapshot) -> list[dict[str, Any]]:
                 "unit": "calls",
                 "amount_micro": micro,
                 "knowledge": row_knowledge,
-                "basis": [BASIS_NOT_TRACKED],
+                "basis": _identity_bases(entry),
                 "price_versions": [],
             }
         )
@@ -755,6 +888,7 @@ def combine(
     child_records: Sequence[ChannelSpendRecord] = (),
     tracked: bool = False,
     lost: bool = False,
+    pending: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """The ONE derivation of the ``spend_channels`` wire object (design §5.1).
 
@@ -788,6 +922,15 @@ def combine(
     - ``floor``: rows were POSITIVELY reported lost (``lost_money_rows``) or a
       component's own knowledge is a floor.
     - ``exact``: everything that spent money has a stated figure.
+
+    ``pending`` carries the §4.2 fallback's per-record markers (the session
+    directory sidecar): voice records that exist in analytics but are NOT in
+    the fold, because the process that served them could not hand them to the
+    owner. They are EXCLUDED from ``total_micro`` — the same total shows on
+    every surface, at the price of leaving voice out until the owner-append op
+    lands — and the object states them under ``pending`` so a surface can say
+    why the number is not the whole story. The CALLER excludes records the
+    fold already holds; ``combine`` has no fold of its own to subtract.
     """
     records = list(records)
     child_records = list(child_records)
@@ -880,12 +1023,38 @@ def combine(
             record_not_tracked_micro += int(record.amount_micro)
             continue
         by_basis[record.billing_basis] += int(record.amount_micro)
+    # Inference money with a RECORDED basis attributes to its buckets (PR-3):
+    # ``SessionSpend`` accrues a basis per call and folds it into each
+    # by-identity entry's ``bases: {basis: micro}``. Everything else — an entry
+    # from before that key, the unattributed remainder, the children bundle —
+    # stays in ``not_tracked_micro``, because the buckets must keep summing to
+    # the total and no historic row may be forced into a basis it never
+    # recorded.
+    inference_attributed = 0
+    for entry in (inference.by_identity or {}).values():
+        bases = entry.get("bases") if isinstance(entry, Mapping) else None
+        if not isinstance(bases, Mapping):
+            continue
+        for name, micro in bases.items():
+            value = int(micro or 0)
+            if value <= 0:
+                continue
+            if name in (BASIS_BILLED, BASIS_SUBSCRIPTION, BASIS_ESTIMATED):
+                by_basis[name] += value
+            else:
+                # The foreign-basis rule the channel arm keeps (R3-5): a
+                # stated amount whose basis is off-vocabulary lands in
+                # ``not_tracked_micro``, never a fifth bucket key.
+                record_not_tracked_micro += value
+            inference_attributed += value
     by_basis[NOT_TRACKED_MICRO] = (
-        max(0, int(inference.micro)) + max(0, children_total_micro) + record_not_tracked_micro
+        max(0, int(inference.micro) - inference_attributed)
+        + max(0, children_total_micro)
+        + record_not_tracked_micro
     )
 
     rows = _inference_rows(inference) + _channel_rows(records)
-    return {
+    payload = {
         "version": CHANNEL_SPEND_WIRE_VERSION,
         "tracked": bool(tracked),
         "total_micro": int(total_micro),
@@ -901,6 +1070,20 @@ def combine(
             **({"reason": children.reason} if children.reason else {}),
         },
     }
+    # ADDITIVE on the v1 wire, and present ONLY when unfoled voice records
+    # exist: the golden fixture (and every session without voice) keeps the
+    # exact key set it always had, while a session that HAS them can state why
+    # its total does not move. Never inside ``total_micro`` — see the docstring.
+    pending_voice = [
+        entry for entry in pending if str(entry.get("channel", "")) in PENDING_VOICE_CHANNELS
+    ]
+    if pending_voice:
+        payload["pending"] = {
+            "voice": PENDING_OWNER_APPEND,
+            "calls": len(pending_voice),
+            "reason": PENDING_OWNER_APPEND_REASON,
+        }
+    return payload
 
 
 def web_search_record(*, channel: str, provider: str, usd: float | None) -> ChannelSpendRecord:

@@ -1489,3 +1489,72 @@ def test_the_session_screen_shows_both_money_rows_from_a_real_session(tmp_path: 
     # R2-4: the sign alone left "vs the record" reading either way, so the word
     # that names the minuend is part of the contract now.
     assert "record +0.500750" in text, text
+
+
+# -- PR-3: the billing basis rides the accrual ---------------------------------
+
+
+def test_accrue_records_the_basis_split_and_round_trips_it() -> None:
+    """``bases: {basis: micro}`` is additive on the entry and survives details."""
+    spend = SessionSpend()
+    spend.accrue(600, {"provider": "x", "model_id": "y"}, basis="billed")
+    spend.accrue(400, {"provider": "x", "model_id": "y"}, basis="subscription_api_equivalent")
+    entry = spend.by_identity["x/y"]
+    assert entry["bases"] == {"billed": 600, "subscription_api_equivalent": 400}
+
+    recalled = SessionSpend.from_details(spend.to_details())
+    assert recalled is not None
+    assert recalled.by_identity["x/y"]["bases"] == {
+        "billed": 600,
+        "subscription_api_equivalent": 400,
+    }
+
+
+def test_a_call_with_no_basis_leaves_the_entry_without_one() -> None:
+    """No basis stated → no ``bases`` key at all, and no empty dict either.
+
+    The wire reads that as ``not_tracked`` — the honest legacy state — and an
+    empty dict would look like a split that had been consulted and found empty.
+    """
+    spend = SessionSpend()
+    spend.accrue(500, {"provider": "x", "model_id": "y"})
+    assert "bases" not in spend.by_identity["x/y"]
+    # An unpriced call states no money, so it states no basis either.
+    spend.accrue(None, {"provider": "x", "model_id": "y"}, basis="billed")
+    assert "bases" not in spend.by_identity["x/y"]
+    details = spend.to_details()
+    assert "bases" not in details["by_identity"]["x/y"]
+
+
+def test_a_basis_correction_moves_the_split_by_the_same_delta() -> None:
+    """``correct`` moves ``micro`` and the basis bucket TOGETHER (one delta)."""
+    spend = SessionSpend()
+    index = spend.accrue(600, {"provider": "x", "model_id": "y"}, basis="billed")
+    spend.correct(index, 450)
+    entry = spend.by_identity["x/y"]
+    assert entry["micro"] == 450
+    assert entry["bases"] == {"billed": 450}
+    # An unpriced→priced correction books the value into the recorded basis.
+    index2 = spend.accrue(None, {"provider": "x", "model_id": "y"}, basis="catalogue_guess")
+    spend.correct(index2, 50)
+    assert spend.by_identity["x/y"]["bases"] == {"billed": 450, "catalogue_guess": 50}
+
+
+def test_old_details_without_bases_read_as_absent() -> None:
+    """Rows written before the key existed keep their exact shape — no backfill."""
+    legacy = {
+        "version": 1,
+        "micro": 1000,
+        "calls": 2,
+        "priced_calls": 2,
+        "unpriced_calls": 0,
+        "floor": False,
+        "rebuilt": False,
+        "writer": "w",
+        "by_identity": {
+            "x/y": {"provider": "x", "model_id": "y", "micro": 1000, "calls": 2, "unpriced": 0}
+        },
+    }
+    spend = SessionSpend.from_details(legacy)
+    assert spend is not None
+    assert "bases" not in spend.by_identity["x/y"]

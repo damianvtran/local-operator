@@ -12,6 +12,7 @@ from local_operator.clients.radient_cost import (
     RadientCost,
     basis_from_wire,
     channel_from_tool_type,
+    channel_record_from_cost,
     cost_from_headers,
     cost_from_payload,
     micro_from_amount,
@@ -152,3 +153,94 @@ def test_non_finite_amounts_read_as_absent() -> None:
         basis="not_tracked",
         version=1,
     )
+
+
+# -- PR-3: the live speech header set and the route-side record builder -------
+
+#: The exact header set docs.radienthq.com documents for a speech charge
+#: (speech-api "What you were charged": Version, Amount-Usd, Basis, Unit, Units,
+#: Usage-Record-Id, Provider, Model, Price-Version — the last three omitted
+#: when they do not apply).
+LIVE_SPEECH_HEADERS = {
+    "x-radient-cost-version": "1",
+    "x-radient-cost-amount-usd": "0.001",
+    "x-radient-cost-basis": "billed",
+    "x-radient-cost-unit": "char",
+    "x-radient-cost-units": "25",
+    "x-radient-cost-usage-record-id": "6acabfcf80f7de3d24c98268",
+    "x-radient-cost-provider": "elevenlabs",
+    "x-radient-cost-model": "eleven_flash_v2_5",
+    "x-radient-cost-price-version": "speech-rates@2026-09-30",
+}
+
+
+def test_live_speech_headers_carry_provider_model_and_price_version() -> None:
+    """PR-1's parser dropped the three provenance headers; the live set has them.
+
+    Provider/Model are what the spend row's identity needs when the caller has
+    no better source, and Price-Version is what makes a figure auditable; an
+    absent header must stay absent (``""``), never a fabricated name.
+    """
+    cost = cost_from_headers(LIVE_SPEECH_HEADERS)
+    assert cost is not None
+    assert cost.amount_micro == 1000
+    assert cost.basis == "billed"
+    assert cost.units == 25.0 and cost.unit == "chars"
+    assert cost.provider == "elevenlabs"
+    assert cost.model == "eleven_flash_v2_5"
+    assert cost.price_version == "speech-rates@2026-09-30"
+    assert cost.usage_record_id == "6acabfcf80f7de3d24c98268"
+    # And the bare six-header form (no provenance) still parses.
+    bare = {
+        key: value
+        for key, value in LIVE_SPEECH_HEADERS.items()
+        if "provider" not in key and "model" not in key and "price-version" not in key
+    }
+    stripped = cost_from_headers(bare)
+    assert stripped is not None
+    assert stripped.provider == "" and stripped.model == "" and stripped.price_version == ""
+
+
+def test_channel_record_from_cost_prefers_the_server_count() -> None:
+    """Server units win; the client's count is the fallback, never an override."""
+    cost = cost_from_headers(LIVE_SPEECH_HEADERS)
+    record = channel_record_from_cost(
+        cost,
+        channel="tts",
+        record_id="tts:req-1",
+        session_id="s1",
+        units=999.0,  # the client's own count — the hub's 25 is the billed figure
+        unit="chars",
+        provider="fallback-provider",
+        request_id="rpc-1",
+    )
+    assert record.units == 25.0
+    assert record.unit == "chars"
+    assert record.provider == "elevenlabs", "the cost object's own identity wins"
+    assert record.amount_micro == 1000
+    assert record.cost_source == "server_reported"
+    assert record.request_id == "6acabfcf80f7de3d24c98268"
+
+
+def test_channel_record_without_a_cost_is_unknown_never_zero() -> None:
+    """FALSIFICATION pin: absence must survive as None through the builder.
+
+    If this ever reads 0 — or a basis other than ``not_tracked`` — a user's
+    screen would show a charge that was never measured.
+    """
+    record = channel_record_from_cost(
+        None,
+        channel="tts",
+        record_id="tts:req-2",
+        session_id="s1",
+        units=420.0,
+        unit="chars",
+        provider="elevenlabs",
+        request_id="rpc-2",
+    )
+    assert record.amount_micro is None
+    assert record.billing_basis == "not_tracked"
+    assert record.cost_source == "none"
+    assert record.units == 420.0, "the client-side count still rides — it is a real fact"
+    assert record.provider == "elevenlabs"
+    assert record.request_id == "rpc-2", "no usage id: the caller's correlation rides instead"

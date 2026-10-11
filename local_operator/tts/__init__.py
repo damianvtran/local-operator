@@ -114,3 +114,10 @@ class TtsOutcome:
     #: mapper, so it emits the same header family from its own mapping. Always
     #: carries ``X-Radient-Speech-Path``.
     speech_headers: tuple[tuple[str, str], ...] = ()
+    #: The hub's ``X-Radient-Cost-*`` charge headers, in order, for THIS call
+    #: (PR-3). Empty on a BYO leg (the vendor is not Radient and reports no
+    #: charge here) and on an older hub (the family is additive). NEVER relayed
+    #: onto the daemon's own response — the route parses it with
+    #: ``clients/radient_cost.py`` to emit the spend record, and an empty tuple
+    #: must read as "the amount is not stated", never as a zero charge.
+    cost_headers: tuple[tuple[str, str], ...] = ()

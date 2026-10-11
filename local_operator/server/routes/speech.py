@@ -8,7 +8,8 @@ from pydantic import SecretStr
 from local_operator.agents import AgentRegistry
 from local_operator.clients._http import APIError, error_payload
 from local_operator.clients.openrouter import OpenRouterClient
-from local_operator.clients.radient import RadientClient
+from local_operator.clients.radient import RadientClient, new_correlation_id
+from local_operator.clients.radient_cost import cost_from_headers
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig, get_env_config
 from local_operator.model.configure import configure_model
@@ -22,6 +23,7 @@ from local_operator.server.dependencies import (
 from local_operator.server.models.schemas import AgentSpeechRequest, SpeechRequest
 from local_operator.server.utils.operator import ServerExecutor
 from local_operator.server.utils.speech_utils import determine_voice
+from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt.errors import PROVIDER_CREDIT_MARKERS
 from local_operator.tts import VoicePath, VoicePathResolution
 from local_operator.tts.adapters import Legacy
@@ -308,6 +310,8 @@ async def _synthesize_with_descriptor(
     label: str,
     resolved_gender: Optional[str] = None,
     resolution: Optional[VoicePathResolution] = None,
+    session_id: str = "",
+    request_id: str = "",
 ) -> Response:
     """Build the descriptor, resolve the rung, synthesize, and report the leg.
 
@@ -327,11 +331,19 @@ async def _synthesize_with_descriptor(
     ``label`` is the caller's own name for its subject (the agent id, or the
     route's name); it rides the log lines only, never the response copy.
 
+    ``session_id``/``request_id`` are the PR-3 emission pair: the session the
+    call belongs to (empty for the agent route, which names none) and a
+    correlation id minted per request here when the caller has none. They go
+    out as the hub's client correlation headers and are what the recorded spend
+    row carries — never the credential scope; this path's credentials resolve
+    exactly as before.
+
     Raises ``HTTPException`` for every refusal, so both routes' existing
     handlers stay in charge of the response shape: 401 when no rung can run,
     the classified refusal sentences for an upstream failure, and 500 with the
     real message (and a stack) for a defect in the serving leg.
     """
+    request_id = request_id or new_correlation_id()
     if resolution is None:
         resolution = await resolve_voice_path(
             config_dir=config_manager.config_dir,
@@ -354,6 +366,8 @@ async def _synthesize_with_descriptor(
             response_format=response_format,
             resolution=resolution,
             radient_client=radient_client,
+            correlation_session_id=session_id,
+            client_request_id=request_id,
         )
     except TtsUnavailable as unavailable:
         error = unavailable.error
@@ -372,6 +386,21 @@ async def _synthesize_with_descriptor(
     # ACTUALLY served — the hub's own headers on a hub-served call, this
     # daemon's mapping headers on a BYO one — so a surface can tell what was
     # honoured without listening to the audio.
+    #
+    # The charge (PR-3) goes to the ledger HERE, before the response: the
+    # billable count is the client's own (the input text's characters — the
+    # meter the hub prices by), and the hub's cost headers upgrade it with the
+    # server-counted units, the amount and the basis when they are present.
+    emit_voice_spend(
+        config_manager=config_manager,
+        channel="tts",
+        provider=outcome.provider,
+        units=float(len(text)),
+        unit="chars",
+        cost=cost_from_headers(outcome.cost_headers),
+        session_id=session_id,
+        request_id=request_id,
+    )
     return Response(
         content=outcome.audio,
         media_type=f"audio/{response_format}",
@@ -433,6 +462,12 @@ async def create_speech(
     validation anyway, so refusing them here would be this route re-deciding a
     question that is not its own.
     """
+    # The PR-3 emission pair, decided ONCE for this request: the hub correlation
+    # id rides every attempt of the call (see ``new_correlation_id``), and the
+    # body's session id is whatever the caller stated — empty when it named
+    # none, which records the call without guessing a conversation onto it.
+    request_id = new_correlation_id()
+    session_id = str(speech_request.session_id or "")
     try:
         if (
             speech_request.model is None
@@ -460,10 +495,12 @@ async def create_speech(
                 provider_auth_store=provider_auth_store,
                 radient_client=radient_client,
                 label="direct route",
+                session_id=session_id,
+                request_id=request_id,
             )
 
         _require_radient_credential(radient_client)
-        audio_data = radient_client.create_speech(
+        audio_data, speech_headers = radient_client.create_speech_response(
             input_text=speech_request.input,
             instructions=speech_request.instructions,
             model=speech_request.model,
@@ -472,6 +509,26 @@ async def create_speech(
             speed=speech_request.speed,
             provider=speech_request.provider,
             language_code=speech_request.language_code,
+            session_id=session_id or None,
+            client_request_id=request_id,
+        )
+
+        # The legacy path's charge (PR-3): emitted before the response, from
+        # the same header block the client already returned. The unit count is
+        # the client's own (input characters, the hub's meter); the hub's cost
+        # headers upgrade it with the server-counted units and the amount when
+        # they are present. The header lookup is case-insensitive because the
+        # hub's own casing is not ours to assume.
+        lower_headers = {str(name).lower(): str(value) for name, value in speech_headers.items()}
+        emit_voice_spend(
+            config_manager=config_manager,
+            channel="tts",
+            provider=lower_headers.get("x-radient-speech-provider", ""),
+            units=float(len(speech_request.input)),
+            unit="chars",
+            cost=cost_from_headers(speech_headers),
+            session_id=session_id,
+            request_id=request_id,
         )
 
         media_type = f"audio/{speech_request.response_format}"
