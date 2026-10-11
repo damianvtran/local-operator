@@ -1,6 +1,8 @@
 import json
+import re
 import time
 import unicodedata
+import uuid
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -528,6 +530,60 @@ def _is_an_error_envelope(response: requests.Response) -> bool:
     except (UnicodeDecodeError, ValueError):
         return False
     return isinstance(payload, (dict, list))
+
+
+#: The Radient CLIENT CORRELATION headers (docs.radienthq.com, "Client
+#: correlation headers"): optional telemetry that makes our records and the
+#: server's usage row point at each other — ``client_session_id`` lands on the
+#: usage record and is readable back through the tenant-scoped usage surface.
+#: The values are opaque to the server (never money, never routing), and the
+#: grammar is ``[A-Za-z0-9._:-]{1,64}``.
+CORRELATION_HEADER_SESSION_ID = "X-Radient-Client-Session-Id"
+CORRELATION_HEADER_REQUEST_ID = "X-Radient-Client-Request-Id"
+
+#: The server IGNORES an ungrammatical value rather than refusing the request
+#: ("an optional telemetry header must not fail a paid request"), so we drop one
+#: client-side: sending bytes the other end is documented to discard is noise,
+#: and a local session id is arbitrary text (a path-ish string can be longer
+#: than 64 characters or carry a slash).
+_CORRELATION_VALUE_RE = re.compile(r"[A-Za-z0-9._:-]{1,64}\Z")
+
+
+def _correlation_headers(
+    session_id: Optional[str], client_request_id: Optional[str]
+) -> Dict[str, str]:
+    """The correlation headers for one call, omitting ungrammatical values.
+
+    Both are optional and independent: a call that knows its session but has no
+    request id sends only the session header, and a caller that knows neither
+    sends none — the request is then byte-identical to the pre-correlation one,
+    which is what makes this safe against older servers (they ignore the
+    headers, and absence is the legacy shape).
+    """
+    headers: Dict[str, str] = {}
+    for name, value in (
+        (CORRELATION_HEADER_SESSION_ID, session_id),
+        (CORRELATION_HEADER_REQUEST_ID, client_request_id),
+    ):
+        text = str(value or "").strip()
+        if text and _CORRELATION_VALUE_RE.match(text):
+            headers[name] = text
+    return headers
+
+
+def new_correlation_id() -> str:
+    """A fresh value for ``X-Radient-Client-Request-Id`` (PR-3).
+
+    Minted once per logical client call and passed to every attempt of it: the
+    hub writes one usage row per admitted request, so a retry that minted a
+    new id would leave the earlier row unjoinable from our side, which is the
+    only side that knows the two attempts were one call.
+
+    Hex rather than dashed UUID text: the header grammar is
+    ``[A-Za-z0-9._:-]{1,64}``, and the domain-free 32-character form keeps
+    every value inside it by construction.
+    """
+    return uuid.uuid4().hex
 
 
 class RadientClient:
@@ -1951,6 +2007,8 @@ class RadientClient:
         temperature: Optional[float] = 0.0,
         language: Optional[str] = None,
         provider: Optional[str] = None,
+        session_id: Optional[str] = None,
+        client_request_id: Optional[str] = None,
     ) -> RadientTranscriptionResponseData:
         """Create an audio transcription using the Radient API.
 
@@ -1971,6 +2029,12 @@ class RadientClient:
                                       they actually serve, but nothing here enforces
                                       the pairing: whatever the caller passes is
                                       forwarded, and no model is invented for it.
+            session_id (Optional[str]): Optional client correlation id (PR-3); sent
+                as ``X-Radient-Client-Session-Id`` so the server's usage row can be
+                read back against this session. Omitted, and the request stays
+                byte-identical, when None or ungrammatical.
+            client_request_id (Optional[str]): Optional correlation id for THIS
+                call (``X-Radient-Client-Request-Id``); see ``session_id``.
 
         Returns:
             RadientTranscriptionResponseData: The transcription result.
@@ -1993,6 +2057,7 @@ class RadientClient:
         # Headers for multipart/form-data will be set by requests library,
         # but we still need Authorization.
         headers = self._get_headers(content_type=None, require_api_key=True)
+        headers.update(_correlation_headers(session_id, client_request_id))
 
         form_data: Dict[str, Any] = {}
         if model:
@@ -2083,6 +2148,8 @@ class RadientClient:
         provider: Optional[str] = "openai",
         language_code: Optional[str] = None,
         voice_descriptor: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+        client_request_id: Optional[str] = None,
     ) -> bytes:
         """Generate speech from text using the Radient API.
 
@@ -2106,6 +2173,10 @@ class RadientClient:
                 one. An explicit legacy field alongside it WINS for its own
                 field (the hub's per-field pin rule), which is why the
                 speak-aloud route sends neither voice nor speed.
+            session_id (Optional[str]): Optional client correlation id (PR-3),
+                forwarded to :meth:`create_speech_response`.
+            client_request_id (Optional[str]): Optional per-call correlation id
+                (PR-3), forwarded the same way.
 
         Returns:
             bytes: The binary audio data of the generated speech.
@@ -2125,6 +2196,8 @@ class RadientClient:
             provider=provider,
             language_code=language_code,
             voice_descriptor=voice_descriptor,
+            session_id=session_id,
+            client_request_id=client_request_id,
         )
         return audio
 
@@ -2139,6 +2212,8 @@ class RadientClient:
         provider: Optional[str] = "openai",
         language_code: Optional[str] = None,
         voice_descriptor: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+        client_request_id: Optional[str] = None,
     ) -> Tuple[bytes, Dict[str, str]]:
         """As :meth:`create_speech`, also returning the hub's response headers.
 
@@ -2149,12 +2224,23 @@ class RadientClient:
         leg that ACTUALLY served (the echoed-actual-path rule) instead of
         claiming one. The hub's words are the only place that fact exists —
         the request names no leg when it carries a descriptor.
+
+        ``session_id`` and ``client_request_id`` are the client correlation
+        ids (PR-3): sent as ``X-Radient-Client-Session-Id`` /
+        ``X-Radient-Client-Request-Id`` when grammatical, and omitted entirely
+        otherwise — an absent pair leaves the request byte-identical to the
+        pre-correlation one, which is what tolerates an older hub.
         """
         if not self.api_key:
             raise RuntimeError("RADIENT_API_KEY is not configured. Cannot create speech.")
 
         url = f"{self.base_url}/tools/speech"
         headers = self._get_headers(require_api_key=True)
+        # The client correlation headers (PR-3): the hub stores a valid pair on
+        # its usage row, which is how a charge reconciles back to the session
+        # that asked for it. Omitted when absent/ungrammatical, so an older
+        # hub sees a request indistinguishable from the pre-correlation one.
+        headers.update(_correlation_headers(session_id, client_request_id))
 
         # Create the payload, excluding None values for optional fields. Model
         # and voice are omitted rather than defaulted here: the hub owns the

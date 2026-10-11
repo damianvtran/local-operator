@@ -54303,10 +54303,19 @@ class OperatorApp(App[None]):
             # The marks are the BACKEND's knowledge, not a re-derivation: a
             # partial or floor total is a lower bound on every surface, and
             # ``exact`` is the only state that may print an unmarked figure.
+            #
+            # PENDING VOICE MONEY IS A FLOOR TOO, and this is the band's
+            # conscious stance on it (design round 1, D1): the published total
+            # excludes recorded-but-unfolded voice charges, so the figure is a
+            # lower bound on what the conversation actually cost. The band has
+            # no room for the /session section's prose, but `≥` is exactly its
+            # existing word for "at least this much" — the number itself stays
+            # the published total (same figure on every surface), and a session
+            # with nothing pending keeps the mark it always had.
             is_floor = str(getattr(published, "knowledge", "unknown")) in {
                 "floor",
                 "partial",
-            }
+            } or bool(getattr(published, "pending", None))
         else:
             is_floor = (
                 self._spend_is_floor or self._search_spend_is_floor() if floor is None else floor

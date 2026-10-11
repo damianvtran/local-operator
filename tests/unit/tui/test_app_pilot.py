@@ -15238,3 +15238,56 @@ async def test_a_rehome_queued_before_the_session_binds_runs_on_the_bind_edge(
     assert session.model_label == "deepseek/deepseek-flash"
     assert app._rehome_await_bind is None
     assert "Switched to deepseek/deepseek-flash — not signed in to radient." in text
+
+
+@pytest.mark.asyncio
+async def test_the_band_marks_a_total_that_excludes_pending_voice_spend() -> None:
+    """D1 band stance (design round 1): a total with pending voice money is A FLOOR.
+
+    The band cannot carry the /session section's prose, and the figure itself
+    stays the published total (same number on every surface) — but `≥` is
+    exactly the band's existing word for "at least this much", and a session
+    whose total excludes a recorded voice charge has spent at least the figure.
+    A session with nothing pending renders the mark it always did.
+    """
+    from local_operator.session.channel_spend import InferenceSnapshot, combine
+    from local_operator.session.frontend_state import FrontendSpendChannels
+    from local_operator.tui.costs import LOWER_BOUND_MARK
+
+    def published_with(*, pending: list[dict[str, Any]]) -> FrontendSpendChannels:
+        return FrontendSpendChannels.model_validate(
+            combine(
+                [],
+                inference=InferenceSnapshot(
+                    micro=900_000,
+                    calls=10,
+                    priced_calls=10,
+                    knowledge="exact",
+                    by_identity={
+                        "anthropic/x": {
+                            "provider": "anthropic",
+                            "model_id": "x",
+                            "micro": 900_000,
+                            "calls": 10,
+                            "unpriced": 0,
+                        }
+                    },
+                ),
+                tracked=True,
+                pending=pending,
+            )
+        )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 24)) as pilot:
+        await pilot.pause()
+        app._spend_channels_state = published_with(pending=[])
+        unmarked = app._spend_text()
+        assert "$0.900" in unmarked and not unmarked.startswith(LOWER_BOUND_MARK), unmarked
+
+        app._spend_channels_state = published_with(
+            pending=[{"record_id": "tts:one", "channel": "tts", "ts_ms": 1}]
+        )
+        marked = app._spend_text()
+        assert marked.startswith(LOWER_BOUND_MARK), marked
+        assert "$0.900" in marked, "the FIGURE stays the published total"

@@ -206,3 +206,72 @@ def test_prune_drops_old_channel_rows_and_keeps_the_rollups(tmp_path: Path) -> N
     assert (
         conn.execute("SELECT COUNT(*) FROM channel_daily").fetchone()[0] >= 1
     ), "the rollup survives the raw ledger's window"
+
+
+def test_calls_basis_columns_migrate_and_the_view_reads_them(tmp_path: Path) -> None:
+    """PR-3: the two columns arrive by ALTER, and ``spend_all`` reads them.
+
+    Old rows read the schema DEFAULTs — ``not_tracked``/``none`` — which is the
+    truth about them: no basis was ever recorded, and a historic row is never
+    retro-labelled. New rows carry the labels decided at record time, so a
+    surface filtering by basis sees inference and channel money in one
+    vocabulary.
+    """
+    path = tmp_path / "analytics.db"
+    store = AnalyticsStore(db_path=path)
+    snapshot = CallSnapshot(
+        ts_ms=DAY_MS,
+        session_id="s1",
+        provider="openrouter",
+        model_id="m",
+        input_tokens=10,
+        output_tokens=5,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        reasoning_tokens=0,
+        context_tokens=10,
+        priced=True,
+        cost_micro=2000,
+        cost_known=True,
+        billing_basis="billed",
+        cost_source="provider_reported",
+    )
+    assert store.record_batch([snapshot]) == 1
+    assert store.record_channel_batch([channel_row()]) == 1
+    store.close()
+
+    conn = sqlite3.connect(path)
+    rows = {
+        row[0]: (row[1], row[2])
+        for row in conn.execute("SELECT channel, billing_basis, cost_source FROM spend_all")
+    }
+    assert rows["inference"] == ("billed", "provider_reported")
+    assert rows["image"] == ("estimated", "server_reported")
+
+    # Simulate a PRE-PR-3 database: the view must go first, because SQLite
+    # refuses to drop a column a view references (the same rule the cost_micro
+    # migration test documents).
+    conn.execute("DROP VIEW spend_all")
+    conn.execute("ALTER TABLE calls DROP COLUMN billing_basis")
+    conn.execute("ALTER TABLE calls DROP COLUMN cost_source")
+    conn.commit()
+    conn.close()
+
+    reopened = AnalyticsStore(db_path=path)
+    # ``_connect`` is what opens the file and runs the ALTER pass: the store
+    # opens lazily, so asserting straight after construction would test
+    # nothing (the pattern the first_reasoning_ms migration test set).
+    conn = reopened._connect()
+    assert conn is not None
+    # The ALTER path put them back; the old row reads the defaults.
+    assert conn.execute("SELECT billing_basis, cost_source FROM calls").fetchall() == [
+        ("not_tracked", "none")
+    ]
+    assert (
+        conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'spend_all'").fetchone()[0]
+        == 1
+    ), "the view is recreated after the migration"
+    assert conn.execute(
+        "SELECT billing_basis, cost_source FROM spend_all WHERE channel = 'inference'"
+    ).fetchone() == ("not_tracked", "none"), "an old row is not relabelled by the view"
+    reopened.close()
