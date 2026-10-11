@@ -1721,7 +1721,7 @@ def _is_persistable_message(message: AgentMessage) -> bool:
     return not message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
 
 
-def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, str], ...]:
+def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, str, str], ...]:
     """The todo fingerprint a reminder was built from, normalized for compare.
 
     Read back through an explicit tuple/str coercion rather than trusted as
@@ -1731,20 +1731,24 @@ def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, st
     malformed one) compares equal to nothing and expires, which is the safe
     direction: a nudge that may be lying is worth less than one turn without it.
 
-    ARITY MUST MATCH ``builtin.todo_fingerprint`` (design §5.3): it now emits
-    3-tuples ``(phase_name, text, status)``, so this filter keeps ``len == 3``.
-    If this stayed at 2 while the source grew to 3, EVERY stamped item would be
-    dropped, the stamped side would compare empty against a non-empty current
-    fingerprint, and every reminder would expire on every render — the latch
-    errs safe (keeps nudging) so 'does it nudge' still passes while the
+    ARITY MUST MATCH ``builtin.todo_fingerprint`` (design §5.3): it emits
+    4-tuples ``(phase_name, text, status, reason)``, so this filter keeps
+    ``len == 4``. The reason is part of it because the reminder renders the
+    reason and a re-``block`` rewrites it in place without touching the status:
+    a 3-tuple stamp would keep asserting the old condition after the model
+    corrected it, and this expiry check is the only thing that retires the stale
+    row. If this filter kept fewer elements than the source, EVERY stamped item
+    would be dropped, the stamped side would compare empty against a non-empty
+    current fingerprint, and every reminder would expire on every render — the
+    latch errs safe (keeps nudging) so 'does it nudge' still passes while the
     no-second-nudge suppression silently breaks. The phased no-second-nudge
     guardrail test is what catches a regression here.
     """
     stamped = details.get("fingerprint") or ()
     return tuple(
-        (str(item[0]), str(item[1]), str(item[2]))
+        (str(item[0]), str(item[1]), str(item[2]), str(item[3]))
         for item in stamped
-        if isinstance(item, (list, tuple)) and len(item) == 3
+        if isinstance(item, (list, tuple)) and len(item) == 4
     )
 
 
@@ -3910,17 +3914,18 @@ class Session:
         # last guardrail nudge in THIS user turn, so a model that yields twice
         # with a byte-identical list is not nudged a second time. Reset per user
         # turn in _run_turn_pipeline; see :meth:`_todo_continuation`.
-        # Both fingerprints are the phase-aware 3-tuple form
-        # ``(phase_name, text, status)`` that ``builtin.todo_fingerprint`` now
-        # emits (phased-todos change): the reminder latch and the persistence
+        # Both fingerprints are the phase-aware 4-tuple form
+        # ``(phase_name, text, status, reason)`` that ``builtin.todo_fingerprint``
+        # now emits (phased-todos change; the reason joined in the blocked-reason
+        # remediation): the reminder latch and the persistence
         # latch both compare against that source, so their annotations must match
         # its arity or a comparison silently degrades.
-        self._todo_reminder_fingerprint: tuple[tuple[str, str, str], ...] | None = None
+        self._todo_reminder_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
         # The todo fingerprint that was last WRITTEN to the transcript, so the
         # post-turn snapshot only appends when the list actually moved. Seeded
         # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
         # turn after a restore does not re-persist an unchanged restored list.
-        self._persisted_todo_fingerprint: tuple[tuple[str, str, str], ...] | None = None
+        self._persisted_todo_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
         # Project-continuation latch: the stale-set fingerprint captured at the
         # last project nudge in THIS user turn — the sorted
         # ``(project_id, status, int(progress_updated_at or 0))`` tuples of the

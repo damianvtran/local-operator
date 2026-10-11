@@ -132,7 +132,7 @@ async def test_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
 
     assert len(stream.requests) == 2  # one nudge, then the turn ends
     assert len(reminders(session._context.messages)) == 1
-    assert session._todo_reminder_fingerprint == (("Todos", "decide the domain", "pending"),)
+    assert session._todo_reminder_fingerprint == (("Todos", "decide the domain", "pending", ""),)
     await session.dispose()
 
 
@@ -140,7 +140,7 @@ async def test_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
 async def test_phased_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
     """THE §5.3 coupling guard. A PHASED no-progress list must be nudged exactly
     once, the same as a flat one. If ``session.py:_stamped_todo_fingerprint`` is
-    NOT widened to 3-tuples in lockstep with ``builtin.todo_fingerprint``, the
+    NOT widened to 4-tuples in lockstep with ``builtin.todo_fingerprint``, the
     stamped side compares empty, every reminder expires on every render, and the
     latch nudges again on the second identical yield. That failure is SILENT in
     the flat suite (whose stamps happen to survive) and in any 'does it nudge?'
@@ -157,14 +157,14 @@ async def test_phased_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
     assert len(stream.requests) == 2, "one nudge, then the turn ends — not re-nudged every yield"
     assert len(reminders(session._context.messages)) == 1
     assert session._todo_reminder_fingerprint == (
-        ("Foundation", "decide the domain", "pending"),
-        ("Verification", "run the gate", "pending"),
+        ("Foundation", "decide the domain", "pending", ""),
+        ("Verification", "run the gate", "pending", ""),
     )
     # The reminder must actually REACH the model on the continuation request:
     # that render passes through ``_expire_stale_todo_reminders`` →
     # ``_stamped_todo_fingerprint``. If that normaliser is NOT widened to
-    # 3-tuples in lockstep (§5.3), the stamped side compares empty against the
-    # live 3-tuple, the reminder is judged stale on an UNCHANGED list, and it is
+    # 4-tuples in lockstep (§5.3), the stamped side compares empty against the
+    # live 4-tuple, the reminder is judged stale on an UNCHANGED list, and it is
     # stripped from this request — so the model never sees the nudge. Asserting
     # the text is present on request 2 is what catches the silent coupling break.
     sent = stream.requests[1].messages[-1].text
@@ -251,11 +251,12 @@ async def test_blocked_only_list_fires_a_reconciliation_nudge(tmp_path) -> None:
     # there, and the model would have to reconcile it against its own list.
     assert "old plan" not in sent and "schema" not in sent
     assert "Do not end the turn while pending items remain" not in sent
-    # The latch still compares the FULL list, settled items included.
+    # The latch still compares the FULL list, settled items included, and a
+    # blocked item's reason is part of it (the round-1 remediation).
     assert session._todo_reminder_fingerprint == (
-        ("Todos", "pick a domain", "blocked"),
-        ("Todos", "old plan", "dropped"),
-        ("Todos", "schema", "done"),
+        ("Todos", "pick a domain", "blocked", "needs the user's call"),
+        ("Todos", "old plan", "dropped", ""),
+        ("Todos", "schema", "done", ""),
     )
     await session.dispose()
 
@@ -383,6 +384,39 @@ async def test_reminder_expires_when_the_list_moves(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reminder_expires_and_re_arms_when_a_blocked_reason_is_rewritten(
+    tmp_path,
+) -> None:
+    """The reason is rendered AND fingerprinted, which is the round-1 finding: a
+    re-``block`` that corrects the condition leaves status and text alone, so a
+    reason-blind latch called the list unmoved, kept the live reminder asserting
+    the OLD wait, and never let the expiry check retire it."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {"text": "deploy", "status": "blocked", "reason": "waiting on legal"}
+    ]
+    stream = ScriptedStream(prose_turns(2))
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")
+    assert len(reminders(session._context.messages)) == 1
+    # The latch holds while nothing moves — the one-accounting-pass bound.
+    assert await session._todo_continuation() == []
+
+    # Status and text unchanged: only the condition the reminder renders moved.
+    builtin.TODO_STORE[SESSION_ID][0]["reason"] = "legal cleared it; waiting on finance"
+
+    rendered = session._render_history(session._context.messages)
+    expired = not any("<system-reminder>" in message.text for message in rendered)
+    assert expired, "the stale reminder asserts the old condition and must expire"
+    # And the latch sees it as movement, so the replacement text carries the
+    # corrected condition rather than repeating the stale one.
+    nudges = await session._todo_continuation()
+    assert len(nudges) == 1
+    assert "waiting on finance" in nudges[0].details["text"]
+    assert "waiting on legal" not in nudges[0].details["text"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_unstamped_reminder_expires(tmp_path) -> None:
     """No stamp means the claim cannot be checked, and an unverifiable nudge is
     worth less than one turn without it."""
@@ -391,7 +425,7 @@ async def test_unstamped_reminder_expires(tmp_path) -> None:
     session = make_session(tmp_path, stream)
 
     kept = session._live_todo_reminders(
-        [Message.user("go"), _reminder("stamped", (("Todos", "ship it", "pending"),))]
+        [Message.user("go"), _reminder("stamped", (("Todos", "ship it", "pending", ""),))]
     )
     dropped = session._live_todo_reminders([Message.user("go"), _reminder("no stamp")])
 
@@ -460,13 +494,15 @@ def test_reminder_text_states_each_group_only_when_present() -> None:
     assert "— blocked:" not in bare
 
 
-def test_stamped_fingerprint_round_trips_a_three_tuple() -> None:
+def test_stamped_fingerprint_round_trips_a_four_tuple() -> None:
     """A reminder's stamped fingerprint survives the JSON list round trip and
-    compares equal to the live 3-tuple, so an unchanged phased list keeps its
+    compares equal to the live 4-tuple, so an unchanged phased list keeps its
     reminder instead of expiring it (the §5.3 failure mode)."""
     from local_operator.session.session import _stamped_todo_fingerprint
 
     # JSON turns the nested tuples into lists; the normaliser must still yield a
-    # 3-tuple that equals what todo_fingerprint emits.
-    details = {"fingerprint": [["Foundation", "decide", "pending"]]}
-    assert _stamped_todo_fingerprint(details) == (("Foundation", "decide", "pending"),)
+    # 4-tuple that equals what todo_fingerprint emits.
+    details = {"fingerprint": [["Foundation", "decide", "blocked", "needs the user"]]}
+    assert _stamped_todo_fingerprint(details) == (
+        ("Foundation", "decide", "blocked", "needs the user"),
+    )
