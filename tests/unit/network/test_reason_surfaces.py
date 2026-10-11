@@ -447,14 +447,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ),
     # The todo store's own blocked-item reason, read by ``todo_fingerprint`` to
     # build the guardrail's latch fingerprint: authored on this device by the
-    # ``todo`` tool's ``block`` op, never a peer's value, and COMPARED in that
-    # tuple rather than rendered — the one surface that shows it is the
-    # turn-boundary reminder, which addresses the MODEL as the condition to
-    # re-check, not a person.
+    # ``todo`` tool's ``block`` op — this device's own list, never a mesh or peer
+    # token. THIS read compares it and renders nothing; the surfaces that do
+    # display it (``_todo_rows``' view/receipt rows, the TUI panel's item row,
+    # and the turn-boundary reminder to the model) all show the operator's own
+    # blocked reason as the condition to re-check.
     ("local_operator/tools/builtin.py", "todo_fingerprint", "reason"): (
         1,
         "the todo store's own blocked reason (authored by the todo tool's block "
-        "op), compared in the latch fingerprint — never rendered for a person",
+        "op), compared in the latch fingerprint — this read renders nothing; the "
+        "surfaces that display it show this device's own list, not a mesh token",
     ),
     # ``mobile/daemon.py`` joined this scan with the mesh half's own import
     # (``MeshRefusal``) — the base file named ``local_operator.network`` nowhere.
