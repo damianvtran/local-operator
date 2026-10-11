@@ -236,9 +236,7 @@ def test_a_carried_namespace_without_a_ledger_entry_un_ships(generated, i18n_gen
     assert i18n_generate._shipped_locales() == ["en"]
 
 
-def test_a_missing_sha_on_an_en_less_namespace_is_not_fresh(
-    generated, i18n_generate
-) -> None:
+def test_a_missing_sha_on_an_en_less_namespace_is_not_fresh(generated, i18n_generate) -> None:
     """``None == None`` must not read as fresh (round-1 minor M1).
 
     A locale carrying a namespace ``en`` does not ship (a renamed child still
@@ -269,9 +267,7 @@ def test_a_missing_sha_on_an_en_less_namespace_is_not_fresh(
     assert i18n_generate._shipped_locales() == ["en"]
 
 
-def test_a_locale_directory_with_no_namespaces_is_not_shipped(
-    generated, i18n_generate
-) -> None:
+def test_a_locale_directory_with_no_namespaces_is_not_shipped(generated, i18n_generate) -> None:
     """Pin for the empty-carried reading (round-1 nit N1).
 
     A locale DIRECTORY that exists but carries no namespace has nothing to
