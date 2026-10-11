@@ -1583,7 +1583,7 @@ async def test_every_route_that_reaches_the_door_refuses_once_latched(
         ), f"{route.endpoint}: {response.status_code} {response.text[:200]}"
         detail = response.json()["detail"]
         assert detail["code"] == "daemon-retiring", route.endpoint
-        assert detail["message"] == retire.RETIRING_MESSAGE, route.endpoint
+        assert detail["text"] == retire.RETIRING_MESSAGE, route.endpoint
         assert started == [], f"{route.endpoint} reached the spawn seam"
         bridge = pool.bridges.get(session_id)
         assert bridge is None or bridge.warm_task is None, f"{route.endpoint} started a warm"
@@ -1723,7 +1723,7 @@ async def test_a_duplicate_aside_request_answers_409_and_claims_nothing(
             )
 
         assert response.status_code == 409, response.text
-        assert "already used" in response.json()["detail"]
+        assert "already used" in response.json()["detail"]["text"]
         assert started == [], "the duplicate reached the spawn seam"
         assert _claimed_receipts(tmp_path) == set()
         assert list(app.state.desktop_asides) == [REQUEST_ID], "the claim was rewritten"
