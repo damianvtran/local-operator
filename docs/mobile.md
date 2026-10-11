@@ -365,19 +365,19 @@ exactly this line). A viewer that does not declare receives no event and no proj
 row and paints no unknown kind; the row is journaled either way.
 
 The phone renders none of this yet, and that is the revision's honest state: the
-projection's `supplement` arm, `mobile/web`'s frame and the relay's document/file routes
-belong to the relay lane, which also needs the routes lane. Both relay routes are
-registered today as auth-first 404 stubs
-(`GET /api/sessions/{id}/supplements/{digest}/document` and
-`GET /api/sessions/{id}/supplements/{job}/file?i=<n>`), frozen so the route table and
-the auth ordering cannot drift before their implementation; until then a phone must
-expect the 404 and show nothing.
+projection's `supplement` arm and `mobile/web`'s frame belong to the relay lane. Both
+relay routes are live today (`GET /api/sessions/{id}/supplements/{digest}/document` and
+`GET /api/sessions/{id}/supplements/{job}/file?i=<n>`): `gate()` authenticates the
+caller first, the document's digest is reference-checked against the session's journal,
+and a 404 means only a missing supplement or file -- what a phone still lacks is the
+renderer, so it paints nothing until `mobile/web`'s supplement frame lands (PR #2222).
 
 Row and event shapes (newest version per anchor; the stale-row rule; the live-only
 `running`/`cancelling` states): `docs/DESKTOP_API.md`, §"Turn supplements". Not in this
 release: no image components (documents carry HTML only in v1), no mesh transfer (a
 peer-held file is named but not previewed), the phone app's own WebView frame is
-pending its own lane, and static preview URLs are not yet token-authenticated.
+pending its own lane, and static preview URLs are not yet token-enforced (tokens are
+minted and accepted, but a request without one is not refused).
 
 ### The peers' rows — other devices' sessions (`GET /api/sessions?include_peers`)
 
