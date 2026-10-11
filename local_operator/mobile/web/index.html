@@ -2,6 +2,25 @@
 <html lang="en" data-theme="localOperatorDark">
 	<head>
 		<meta charset="UTF-8" />
+		<!--
+			THE FRAME NAVIGATION CONTROL (turn-supplements memo §4.1's relay row).
+			The supplement frames are child documents this page mounts; on this host
+			there is no interception point for a subframe navigation (no Electron
+			guard, no native callback), so this parent-document `frame-src` policy
+			is the load-bearing control: the embedder's frame-src governs every
+			navigation of an already-loaded child frame — script-, `meta refresh`-
+			and embedder-initiated alike — and blocks it BEFORE the request is
+			issued (measured on Chrome 155; w3c/webappsec-csp#509). The second-`load`
+			teardown in `supplement-frame.tsx` is the belt.
+
+			It MUST be a `<meta>` and not a response header: the tunnel gateway
+			forwards a fixed response-header set and overwrites CSP with
+			`frame-ancestors 'none'`, so a header would lose this policy in transit
+			(§2.7). And `frame-src data:` — not `src` — deliberately: the only
+			frames this page ever mounts are the base64 `data:` component documents,
+			so a later URL-served frame would need its own decision here.
+		-->
+		<meta http-equiv="Content-Security-Policy" content="frame-src data:" />
 		<meta
 			name="viewport"
 			content="width=device-width, initial-scale=1, viewport-fit=cover"

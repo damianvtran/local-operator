@@ -13,12 +13,14 @@ import { Markdown } from "./markdown"
 import { AskRow } from "./ask-row";
 import { AttachmentImage } from "./attachment-image";
 import { ImageGenCard } from "./image-gen-card";
+import { SupplementBlock } from "./supplement-block";
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
 import { followScrollTop } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory } from "../api";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
+import { beatLive, type SupplementBeat } from "../lib/supplement";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
 
@@ -311,6 +313,8 @@ export function Transcript({
 	pending = [],
 	streaming = false,
 	topInset = 0,
+	supplements,
+	projectionPid = 0,
 	tailContent,
 	emptyContent,
 }: {
@@ -318,6 +322,17 @@ export function Transcript({
 	entries: TranscriptEntry[];
 	jobId?: string;
 	scrollKey?: string;
+	/** Turn supplements ("Highlights", memo §3.1 row 18): the projection's
+	 *  sibling `{anchor: beat}` map. The block renders under the answer row
+	 *  whose `id` is the beat's anchor — outside the completion anchor div (the
+	 *  block is the answer's supplement, not part of the message the completion
+	 *  receipt samples), inside the same row boundary so one malformed beat
+	 *  cannot blank the screen. Absent map = no blocks, which is what every
+	 *  session without beats and every older daemon mean. */
+	supplements?: Record<string, SupplementBeat>;
+	/** The projection's own process identity, for the reader rule's `job_live`
+	 *  (`lib/supplement.ts`, `beatLive`): 0 is a disk rebuild. */
+	projectionPid?: number;
 	/** Commands this device sent that the session has not written a row for yet.
 	 *  Rendered as the LAST rows of the conversation, which is where the real rows
 	 *  will land, and boxed like the row each op settles into (`PendingEchoRow`)
@@ -676,6 +691,22 @@ export function Transcript({
 					<div data-completion-anchor={e.id} data-completion-complete={e.final && e.text_complete === true}>
 						<Entry entry={e} pid={pid} />
 					</div>
+					{(() => {
+						/* The supplement block's seat: under the FINAL answer, outside
+						   the completion-anchor div, inside the row boundary. The anchor
+						   is the display entry id, so only the answer the beat names
+						   renders it; the beat's own `beatLive` decides the stale rule. */
+						const beat =
+							e.kind === "assistant" ? supplements?.[e.id] : undefined;
+						if (!beat) return null;
+						return (
+							<SupplementBlock
+								beat={beat}
+								sessionId={pid}
+								jobLive={beatLive(beat, projectionPid)}
+							/>
+						);
+					})()}
 				</RowBoundary>
 			))}
 			{visible.length === 0 && pending.length === 0 ? emptyContent : null}
