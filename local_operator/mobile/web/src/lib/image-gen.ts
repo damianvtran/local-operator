@@ -1,12 +1,13 @@
 /**
- * Image generation on the phone — the detection set and the ONE
+ * Media generation on the phone — the detection set and the ONE
  * entry→view-model adapter for the progress card.
  *
- * The programme wires agent-driven image generation end to end
- * (provider → harness tool `generate_image` → every surface). This module is
- * the phone's whole share of the contract, and it exists as a module rather
- * than inline in the card because the LIVE DETAIL FIELDS ARE FROZEN HERE:
- * every `generate_image` update carries the canonical bag — `stage`,
+ * The programme wires agent-driven media generation end to end
+ * (provider → harness tool `generate_image`/`generate_video` → every surface).
+ * This module is the phone's whole share of the contract, and it exists as a
+ * module rather than inline in the card because the LIVE DETAIL FIELDS ARE
+ * FROZEN HERE:
+ * every media-generation update carries the canonical bag — `stage`,
  * `queue_position`, `progress_fraction`, `log_lines`, `error`, `error_type` —
  * every key present, `None` when no provider supplied a value (the harness
  * lane's freeze, 2026-10-09). Everything that reads one of those names lives
@@ -34,16 +35,30 @@ import type { TranscriptEntry, TranscriptImageRef } from "../types";
 /**
  * The detection set — the ONE exported detection point per surface.
  *
- * ONE tool since the harness lane froze it: `generate_image`, whose
+ * TWO tools since the surfaces programme (ruling R1): `generate_image`, whose
  * image-to-image case is a `source_image_path` argument on the SAME call —
- * there is no separate `generate_altered_image`. If the harness ever adds a
- * second image-generation call, its name is added HERE and nowhere else:
- * the transcript branch and this module's tests both read this constant.
- * Keys are lowercase; lookups normalise, mirroring `tool-row.tsx`'s own
- * `DIFF_FIRST_TOOLS` lookup beside it.
+ * there is no separate `generate_altered_image` — and `generate_video`, whose
+ * live lifecycle and wire fields are the same frozen six, so sharing the set
+ * means the card's live body, settle absorption and failure body follow with
+ * zero edits. If the harness ever adds a third call, its name is added HERE
+ * and nowhere else: the transcript branch and this module's tests both read
+ * this constant. Keys are lowercase; lookups normalise, mirroring
+ * `tool-row.tsx`'s own `DIFF_FIRST_TOOLS` lookup beside it.
  */
 export const IMAGE_GEN_TOOLS: ReadonlySet<string> = new Set([
 	"generate_image",
+	"generate_video",
+]);
+
+/**
+ * The video member of the detection set, kept as its own constant so the ONE
+ * EXCLUSION gate (the card's cancel control) has a named reader and a future
+ * rename edits one line. A SUBSET of `IMAGE_GEN_TOOLS` — pinned by a test,
+ * because a rename that edited one and not the other would silently re-arm
+ * the control for video.
+ */
+export const VIDEO_GEN_TOOLS: ReadonlySet<string> = new Set([
+	"generate_video",
 ]);
 
 /**
@@ -65,6 +80,15 @@ export type ImageGenCardState =
 	| "failed"
 	| "cancelled"
 	| "finished";
+
+/**
+ * Which media noun the card's words wear, and whether the turn-interrupt
+ * control applies at all. Video joined the same card family (surfaces
+ * programme, R1) but is cancelled post-turn via `jobs op='cancel'` — never by
+ * a turn interrupt — so its card withholds the cancel control (contract
+ * §4.2; the frozen §5.4 relay row).
+ */
+export type ImageGenMaterial = "image" | "video";
 
 /** Everything the card's body renders, and nothing else. */
 export interface ImageGenView {
@@ -102,6 +126,14 @@ export interface ImageGenView {
 	errorType: string;
 	/** Finished artifact refs, in the entry's image index space. */
 	images: TranscriptImageRef[];
+	/**
+	 * The ONE material fact, read from the entry's own tool name: which noun
+	 * the done line wears (`video ready` vs `image ready`) and whether the
+	 * cancel control is withheld. `image` is the default for anything not in
+	 * `VIDEO_GEN_TOOLS` — the pre-video reading, and the honest one for any
+	 * member the exclusion was never written for.
+	 */
+	material: ImageGenMaterial;
 }
 
 /**
@@ -315,6 +347,17 @@ export function imageGenView(
 	   absent (absence renders the reduced state). */
 	const error = typeof entry.error === "string" ? entry.error : "";
 
+	/* The material fact: whether the entry's tool is the video member of the
+	   detection set. Read from the entry's own tool name — the same field the
+	   transcript branch gates on — with the same normalisation as that lookup
+	   (lowercase; surrounding space is tolerated nowhere on this path, so a
+	   padded name never reaches the card at all). */
+	const toolName =
+		typeof entry.tool_name === "string" ? entry.tool_name.toLowerCase() : "";
+	const material: ImageGenMaterial = VIDEO_GEN_TOOLS.has(toolName)
+		? "video"
+		: "image";
+
 	/* Artifact refs. The frozen attachment contract indexes them like a user
 	   turn's images and serves their bytes from the same phone image route,
 	   so this reads the SAME `images` field the transcript's user case
@@ -339,5 +382,6 @@ export function imageGenView(
 		error,
 		errorType,
 		images,
+		material,
 	};
 }
