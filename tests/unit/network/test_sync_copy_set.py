@@ -496,6 +496,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``PEERS_RUN_DIRNAME`` (``run/peers``): the mesh's run directory under the store root",
     ),
+    "local_operator/network/rollouts.py": (
+        1,
+        "``ROLLOUTS_DIRNAME`` (``rollouts``): the rollout RECORDS directory under "
+        "``<config>/network/rollouts`` — a device-local orchestration store beside "
+        "the approval store above, never an entry of a session directory and never "
+        "carried in one",
+    ),
     "local_operator/network/sync.py": (
         6,
         "``network``, ``replicas`` and ``staging`` under the config root, plus "
