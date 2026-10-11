@@ -145,6 +145,17 @@ _SCHEDULES_READERS: dict[str, dict[str, str]] = {
     "local_operator/tui/widgets/wake_panel.py": {
         "sync": "a HUMAN surface — subtracts via ``scheduled_rows``",
     },
+    "local_operator/video/jobs.py": {
+        "ensure": (
+            "a MUTATION path: arms/ensures the one video check-wake row for a "
+            "pending record (full-list writer — filtering would drop rows this "
+            "writer does not own)"
+        ),
+        "cancel": (
+            "a MUTATION path: cancels the video check-wake row (full-list "
+            "writer; same raw-list need as ``ensure``)"
+        ),
+    },
     "local_operator/wakes/patience.py": {
         "arm_patience": "the patience engine",
         "cancel_patience": "the patience engine",

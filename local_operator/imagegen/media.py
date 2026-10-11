@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 #: Per-asset byte ceiling (design §9). A larger payload refuses rather than
 #: truncates: a truncated image is not a smaller image, it is a corrupt one.
+#: Callers may override it per call (``max_bytes``) — the video lane passes
+#: its own, larger cap because a video is legitimately bigger than any image;
+#: the parameterisation keeps ONE cap-owning code path instead of a second
+#: downloader with a second refusal contract.
 ARTIFACT_MAX_BYTES = 32 * 1024 * 1024
 
 #: Connect 10 s / read 60 s (design §9): the connect half keeps an unreachable
@@ -42,6 +46,8 @@ async def download_asset(
     width: int | None = None,
     height: int | None = None,
     duration_s: float | None = None,
+    max_bytes: int | None = None,
+    timeout: httpx.Timeout | None = None,
 ) -> MediaAsset:
     """Stream one asset into memory under the cap; raise ``APIError`` on failure.
 
@@ -50,11 +56,14 @@ async def download_asset(
     refused rather than followed (see the module docstring); a missing/odd
     content type falls back to ``fallback_content_type`` when the payload
     carried one, else ``application/octet-stream`` — the attachment contract's
-    own default.
+    own default. ``max_bytes`` defaults to :data:`ARTIFACT_MAX_BYTES` (the
+    image lane's value, unchanged for every existing call site) and
+    ``timeout`` to :data:`DOWNLOAD_TIMEOUT`.
     """
+    cap = ARTIFACT_MAX_BYTES if max_bytes is None else max_bytes
     try:
         async with client.stream(
-            "GET", url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=False
+            "GET", url, timeout=timeout or DOWNLOAD_TIMEOUT, follow_redirects=False
         ) as response:
             if 300 <= response.status_code < 400:
                 raise APIError(
@@ -71,9 +80,9 @@ async def download_asset(
             total = 0
             async for chunk in response.aiter_bytes():
                 total += len(chunk)
-                if total > ARTIFACT_MAX_BYTES:
+                if total > cap:
                     raise APIError(
-                        f"asset exceeds the {ARTIFACT_MAX_BYTES // (1024 * 1024)} MiB cap.",
+                        f"asset exceeds the {cap // (1024 * 1024)} MiB cap.",
                         status_code=None,
                         code="invalid_response",
                     )
