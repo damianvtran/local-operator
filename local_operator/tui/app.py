@@ -42067,7 +42067,8 @@ class OperatorApp(App[None]):
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.
 
-        View-only: it never touches the store, so the guardrail's ``open_todos``
+        View-only: it never touches the store, so the guardrail's two
+        projections (``open_todos`` for pending, ``blocked_todos`` for blocked)
         and ``todo_fingerprint`` are untouched (design §5.4). ``toggle_expanded``
         flips the panel flag and drops its equality-guard so the change repaints;
         ``_refresh_band`` settles the band inset and row budget in the same tick

@@ -4724,14 +4724,47 @@ async def test_todo_fingerprint_tracks_the_whole_list(tools, context) -> None:
 
     await _call(tools, "todo", {"op": "drop", "items": ["a"]}, context)
 
-    # The fingerprint is now a 3-tuple carrying phase identity (design §5.2); a
-    # flat init reports the implicit "Todos" phase name for every item.
-    assert before == (("Todos", "a", "done"), ("Todos", "b", "pending"))
+    # The fingerprint is now a 4-tuple carrying phase identity and the blocked
+    # reason (design §5.2 + the round-1 remediation); a flat init reports the
+    # implicit "Todos" phase name for every item, and an item with no reason
+    # contributes "".
+    assert before == (("Todos", "a", "done", ""), ("Todos", "b", "pending", ""))
     assert builtin.todo_fingerprint("unit-test") == (
-        ("Todos", "a", "dropped"),
-        ("Todos", "b", "pending"),
+        ("Todos", "a", "dropped", ""),
+        ("Todos", "b", "pending", ""),
     )
     assert builtin.todo_fingerprint("no-such-session") == ()
+
+
+@pytest.mark.asyncio
+async def test_todo_fingerprint_moves_when_a_blocked_reason_is_rewritten(tools, context) -> None:
+    """``block`` on an ALREADY-blocked item rewrites ``reason`` in place and
+    leaves the status alone, so the status-bearing tuple of the phased change
+    called that list unmoved — the reminder kept rendering the old condition and
+    the expiry check could never retire it. The reason is part of the
+    fingerprint so a corrected condition IS movement."""
+    await _call(tools, "todo", {"op": "init", "items": ["b"]}, context)
+    await _call(
+        tools,
+        "todo",
+        {"op": "block", "items": ["b"], "reason": "waiting on legal"},
+        context,
+    )
+    before = builtin.todo_fingerprint("unit-test")
+
+    await _call(
+        tools,
+        "todo",
+        {"op": "block", "items": ["b"], "reason": "legal cleared it; waiting on finance"},
+        context,
+    )
+
+    assert before == (("Todos", "b", "blocked", "waiting on legal"),)
+    assert builtin.todo_fingerprint("unit-test") == (
+        ("Todos", "b", "blocked", "legal cleared it; waiting on finance"),
+    )
+    # The status never moved — the reason alone is what the latch has to see.
+    assert builtin.TODO_STORE["unit-test"][0]["items"][0]["status"] == "blocked"
 
 
 # --- phased todos -----------------------------------------------------------
@@ -4962,7 +4995,7 @@ def test_todo_as_phases_coerces_legacy_flat_list() -> None:
 
 
 def test_todo_fingerprint_moves_on_phase_rename_and_item_move() -> None:
-    """A 3-tuple fingerprint sees phase-level movement a 2-tuple was blind to."""
+    """A four-element fingerprint sees phase-level movement a 2-tuple was blind to."""
     builtin.TODO_STORE["unit-test"] = [
         {"name": "A", "items": [{"text": "x", "status": "pending"}]},
     ]
@@ -4972,8 +5005,8 @@ def test_todo_fingerprint_moves_on_phase_rename_and_item_move() -> None:
     builtin.TODO_STORE["unit-test"][0]["name"] = "B"
     renamed = builtin.todo_fingerprint("unit-test")
 
-    assert before == (("A", "x", "pending"),)
-    assert renamed == (("B", "x", "pending"),)
+    assert before == (("A", "x", "pending", ""),)
+    assert renamed == (("B", "x", "pending", ""),)
     assert before != renamed
 
 

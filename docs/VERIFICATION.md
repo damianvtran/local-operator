@@ -1866,11 +1866,23 @@ byte-identical yield after the model accounts releases the turn — reconciled,
 never forbidden, and never a loop. Still invisible to the user: the panel and
 the transcript carry nothing new.
 
-Evidence: `tests/unit/session/test_todo_guardrail.py` (16 tests — the
+The round-1 fix follows from the same shape. A blocked row RENDERS its reason,
+so the reason is part of what a reminder asserts — but it was not part of the
+fingerprint, and `block` on an already-blocked item rewrites `reason` in place
+and leaves the status alone. A model that re-blocked an item with a corrected
+condition therefore produced no movement the latch could see: the live reminder
+kept rendering the old wait and the expiry check could never retire it, i.e. a
+stale claim the model had no way to correct. `todo_fingerprint` is now
+`(phase_name, text, status, reason)` with `reason = str(item.get("reason") or
+"")`, and `session.py:_stamped_todo_fingerprint` filters `len == 4` in lockstep
+(design §5.3) — the same coupled edit, one element wider.
+
+Evidence: `tests/unit/session/test_todo_guardrail.py` (17 tests — the
 blocked-only list firing a single reconciliation and releasing, the mixed
 pending+blocked text with each group's paragraph appearing only with its items,
-a fresh user turn re-arming a parked list, and the unchanged latch, renderer,
-expiry and phased-`open_todos` cases) and
+a fresh user turn re-arming a parked list, a re-blocked reason expiring the live
+reminder AND re-arming the latch, and the unchanged latch, renderer, expiry and
+phased-`open_todos` cases) and
 `tests/unit/session/test_todo_steering_e2e.py::test_blocking_an_item_earns_one_reconciliation_nudge`
 (5 requests through the real `Session`, `AgentLoop` and `todo` tool: the block,
 then the accounting turn that carries the reminder, then release).

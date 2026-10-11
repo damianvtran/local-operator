@@ -12233,8 +12233,9 @@ def restore_todos(session_id: str, phases: list[dict[str, Any]]) -> None:
     ]
 
 
-def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str], ...]:
-    """``(phase_name, text, status)`` for EVERY item, phase-then-item order.
+def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str, str], ...]:
+    """``(phase_name, text, status, reason)`` for EVERY item, phase-then-item
+    order.
 
     What the guardrail's no-progress latch compares between two yields. The
     FULL list, not the pending subsequence: an item moving from ``done`` to
@@ -12243,6 +12244,17 @@ def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str], ...]:
     tuple because with phases a rename or an item moving between phases is also
     movement the model made — a 2-tuple would be blind to it and read a list
     that changed as stuck.
+
+    The REASON rides in for the same reason, one status over: ``block`` on an
+    item that is already blocked rewrites ``reason`` in place and leaves the
+    status alone (``builtin.py``, the ``block`` arm), and the reminder RENDERS
+    that reason as the condition the model is asked to re-check. A latch blind
+    to it would call a re-blocked item unmoved, so ``_todo_reminder_text`` would
+    keep asserting the old condition and ``_live_todo_reminders`` would never
+    expire it — a stale claim the model has no way to correct. ``or ""`` because
+    a missing key and an empty string are the same fact (no reason recorded), and
+    two spellings of one fact must not read as movement; every item that is not
+    blocked therefore contributes ``""``.
 
     CROSS-FILE COUPLING (design §5.3): the arity of this tuple is mirrored by
     ``session.py:_stamped_todo_fingerprint``, which filters the stamped copy to
@@ -12258,7 +12270,12 @@ def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str], ...]:
     if not raw:
         return ()
     return tuple(
-        (str(phase["name"]), str(item.get("text", "")), str(item.get("status", "pending")))
+        (
+            str(phase["name"]),
+            str(item.get("text", "")),
+            str(item.get("status", "pending")),
+            str(item.get("reason") or ""),
+        )
         for phase in _as_phases(raw)
         for item in phase["items"]
     )
