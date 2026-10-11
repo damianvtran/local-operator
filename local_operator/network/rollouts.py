@@ -388,12 +388,23 @@ def _rollable_remainder(record: Mapping[str, Any]) -> bool:
     a ``skipped (unsupported_kind)`` pool member, or a build that predates the
     frames — or the sentence promises an action that cannot work. The skip
     itself stays NAMED in the summary's sets; only the nudge is withheld.
+
+    A ``refused`` member SPLITS the same way ``member_terminal`` splits it
+    (round 2, R2-1): a RULE refusal (:data:`RULE_REFUSAL_CODES` —
+    ``target_not_published`` / ``editable_install``, origin-side facts
+    evaluated at ask time) is terminal for the rollout and a re-run from the
+    same origin cannot move it, so it is exempt here too; a CODELESS refusal
+    (code ``refused``) is the wire's "not now", self-heals, and stays
+    rollable — the split R2-2 drew for termination is the same split the nudge
+    needs.
     """
     for member in record.get("members", []):
         state = str(member.get("state") or "")
         if state in DONE_STATES:
             continue
         if state == "skipped" and str(member.get("code") or "") in UNROLLABLE_SKIP_CODES:
+            continue
+        if state == "refused" and str(member.get("code") or "") in RULE_REFUSAL_CODES:
             continue
         return True
     return False

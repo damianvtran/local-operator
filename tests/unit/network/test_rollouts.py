@@ -632,6 +632,15 @@ def test_the_driver_is_dormant_until_a_record_exists(
     itself), so this cell observes the inert half directly: a live driver on an
     empty root stays silent, and acts the moment — and only when — a record
     exists.
+
+    BOTH WAITS ARE ON EVENTS, NEVER ON CLOCKS (QA O-R6-1, then F1 — the old
+    fixed ``sleep(0.3)``/``sleep(0.4)`` windows failed once in each round of
+    #2204's QA; they were a bet on machine load, and the measured write->ask
+    tail at load ~100 was p50 75 ms / p95 389 ms / max 557 ms, 1 in 30 over
+    the 0.4 s window). The silence assertions must follow scans that actually
+    RAN — counted through the real ``tick``, so a starved thread cannot pass
+    them vacuously — and the ask is waited on the fake's own publication. The
+    deadlines are hang backstops, not the assertions.
     """
     root = tmp_path / "cfg"
     server = _Server(root)
@@ -639,23 +648,38 @@ def test_the_driver_is_dormant_until_a_record_exists(
     monkeypatch.setattr(
         meshupdate, "update_peer", lambda *a, **k: pytest.fail("the dormant driver asked a peer")
     )
+    scans = threading.Event()
+    seen = 0
+    real_tick = rollouts.tick
+
+    def _counting_tick(srv: Any) -> None:
+        nonlocal seen
+        real_tick(srv)
+        seen += 1
+        if seen >= 2:
+            scans.set()
+
+    monkeypatch.setattr(rollouts, "tick", _counting_tick)
     driver = rollouts.ensure_driver(cast(Any, server))
     assert driver is not None
     try:
         assert driver.name == "mesh-rollout", driver.name
-        time.sleep(0.3)
+        assert scans.wait(timeout=10.0), "the driver never completed two scans"
         assert not rollouts.rollouts_dir(root).exists(), "a dormant driver created the rollouts dir"
         assert server.audit.rows == [], server.audit.rows
 
+        replied = threading.Event()
         asked: list[str] = []
-        monkeypatch.setattr(
-            meshupdate,
-            "update_peer",
-            lambda s, d, *, rollout="": asked.append(d) or _answer("busy"),
-        )
+
+        def _ask(_srv: Any, device: str, *, rollout: str = "") -> dict[str, Any]:
+            asked.append(device)
+            replied.set()
+            return _answer("busy")
+
+        monkeypatch.setattr(meshupdate, "update_peer", _ask)
         record = _open(root, devices=["d_a"], now=time.time())
-        time.sleep(0.4)
-        assert asked and asked[0] == "d_a", asked
+        assert replied.wait(timeout=10.0), "the driver never asked the new record's member"
+        assert asked[0] == "d_a", asked
         assert _live(record["id"], root)["members"][0]["state"] in (
             "deferred",
             "applying",
@@ -1127,6 +1151,59 @@ def test_the_closing_nudge_is_withheld_for_an_unrollable_remainder(
     _member(other, "d_e").update({"state": "deferred", "code": "busy"})
     other["state"] = "done"
     assert "no longer active" in rollouts.summary(other), rollouts.summary(other)
+
+
+def test_the_closing_nudge_tracks_which_refusals_a_re_run_can_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1 (round 2): a rule-refused remainder is as unrollable as an R1-2 skip.
+
+    ``refused/target_not_published`` and ``refused/editable_install`` are
+    origin-side rule facts evaluated at ask time, terminal for the rollout via
+    ``member_terminal`` — so a re-run from the same origin cannot move the
+    member, and the nudge would be the same promise-that-cannot-work R1-2
+    fixed for the skip codes. The member stays NAMED in the sets; only the
+    nudge is withheld.
+
+    The retained direction is pinned because the SPLIT is the point: a
+    CODELESS ``refused`` (code ``refused``) is the wire's "not now", self-heals,
+    and a re-run really can move it — its nudge stays.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    _seed_mesh(root, members=[("d_a", "device"), ("d_b", "device")])
+    rollouts.open_after_update("0.27.0", "0.28.0", via="update", root=root, now=1000.0)
+    record = rollouts.latest_active(root=root)
+    assert record is not None
+    _scripted(
+        monkeypatch,
+        [
+            _answer("done", version="0.28.0"),
+            _answer(
+                "refused", code="editable_install", reason="editable installs cannot be rolled"
+            ),
+        ],
+    )
+    rollouts.step_record(cast(Any, server), record["id"], now=2000.0)
+    closed = _live(record["id"], root)
+    assert closed["state"] == "done", closed
+    assert "refused: d_b" in rollouts.summary(closed), rollouts.summary(closed)
+    rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
+    assert rows and "1 of 2 moved" in rows[-1].detail["counts"], rows
+    assert "no longer active" not in rows[-1].detail["counts"], rows[-1].detail
+
+    # The other rule code is exempt the same way...
+    other = _open(root, devices=["d_c"], network="n2")
+    _member(other, "d_c").update({"state": "refused", "code": "target_not_published"})
+    other["state"] = "done"
+    assert "no longer active" not in rollouts.summary(other), rollouts.summary(other)
+
+    # ...while the codeless refusal KEEPS the nudge: it self-heals, so a re-run
+    # really can move it.
+    codeless = _open(root, devices=["d_d"], network="n3")
+    _member(codeless, "d_d").update({"state": "refused", "code": "refused"})
+    codeless["state"] = "done"
+    assert "no longer active" in rollouts.summary(codeless), rollouts.summary(codeless)
 
 
 def test_the_switch_halts_a_policy_driven_roll_at_the_next_boundary(
