@@ -133,6 +133,7 @@ from typing import Any, AsyncIterator, Callable, cast
 import yaml
 
 from local_operator.config import CONFIG_FILE_NAME
+from local_operator.i18n.frames import config_frame_payload
 from local_operator.i18n.resolve import resolve_language
 from local_operator.monitors.store import read_index as read_monitor_index
 from local_operator.notifications import notification_payload
@@ -1286,9 +1287,12 @@ class DesktopFeed:
                         language = await asyncio.to_thread(
                             resolve_language, raw if isinstance(raw, str) else "auto"
                         )
+                        # The payload comes from the SHARED builder so this
+                        # surface and the relay daemon's /api/config/events
+                        # cannot drift (see i18n/frames.py).
                         self._publish(
                             "config",
-                            {"changed_keys": changed, "language": language},
+                            config_frame_payload(changed, language),
                         )
         # 3. THE CATALOGUE HAS ITS OWN SCHEDULE (R2). Deliberately outside the
         # doorbell branch above: it was reached only when the attention database
