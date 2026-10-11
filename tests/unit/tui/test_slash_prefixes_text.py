@@ -79,6 +79,11 @@ PREFIXES_TEXT_POLICY = {
     "approvals": True,
     # The colour theme name.
     "theme": True,
+    # The language tag (`auto` or a shipped locale), `/theme`'s class exactly:
+    # a value from an inline list the handler reads and applies. Anything else
+    # is refused with the option list — nothing after `/language` is ever
+    # forwarded to a model.
+    "language": True,
     # --- a command whose trailing text is its OWN instruction ----------------
     # `cancel | retry | adjust <text>`: the words are the supplement job's
     # control vocabulary, read by the handler and sent to the generator — never
@@ -305,6 +310,9 @@ ARGUMENT_SHAPE_POLICY = {
     "effort": ArgumentShape.ANY,
     "approvals": ArgumentShape.ANY,
     "theme": ArgumentShape.ANY,
+    # The language tag, `/theme`'s row again: a boolean carries it, the handler
+    # reads the word, and an unknown one is refused with the option list.
+    "language": ArgumentShape.ANY,
     # ...and ONE row neither boolean carries, because the text it owns is REFUSED
     # rather than consumed. The command route answers typed text with "Enter
     # credentials in the masked credential form, not command text", so the text
@@ -378,6 +386,9 @@ def test_the_vocabulary_is_exactly_the_desktop_argument_set() -> None:
         "effort",
         "approvals",
         "theme",
+        # A language tag, `/theme`'s row class exactly: a value the inline
+        # list offers and the handler consumes or refuses, never a prompt.
+        "language",
         # the command's own control vocabulary (not a prompt, not a list value)
         "highlights",
     }
