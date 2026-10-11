@@ -11636,6 +11636,14 @@ class OperatorApp(App[None]):
     # -- lifecycle ----------------------------------------------------------
     async def on_mount(self) -> None:
         install_markdown_theme()
+        # The process's language is resolved ONCE at boot through the same chain
+        # every surface reads (RFC §2.5: config `language` → LOP_LANG → OS →
+        # `en`, filtered to the shipped set). Today that is `en` — the only
+        # shipped locale — so this is a no-op until a translation wave ships;
+        # `/language` and the config watcher move it later without a restart.
+        from local_operator.i18n.resolve import resolve_language
+
+        self._apply_language(resolve_language())
         self._sidebar_timer = self.set_interval(2.0, self._refresh_sidebar, pause=True)
         # THE FOREGROUND OWNER PROBE. `verified_at` is written only on a wire
         # answer and every one of those surfaces is EVENT-DRIVEN, so without this
@@ -37343,10 +37351,12 @@ class OperatorApp(App[None]):
         if local:
             # Apply, do not announce. The only groups whose apply this process
             # owns and has not already performed are the approval gate, the
-            # keymap and `display.composer.*`: the theme and display caches are
-            # written by the same handlers that repainted, while
-            # `tool_approval_mode` reaches the gate through nothing but this
-            # listener.
+            # keymap, `display.composer.*` and `language` (the /settings page
+            # write's only apply path; the theme and display caches are written
+            # by the same handlers that repainted, `tool_approval_mode` reaches
+            # the gate through nothing but this listener, and the `/language`
+            # command applies directly — `set_active_locale` is idempotent, so
+            # its echo here moves nothing).
             if "tool_approval_mode" in changed:
                 self._follow_configured_approvals(change, announce=False)
             if any(key.startswith(_keymap.KEYMAP_PREFIX) for key in changed):
@@ -37368,6 +37378,14 @@ class OperatorApp(App[None]):
                 # `display` flags and the repaint are owed — the segments
                 # re-read themselves on it.
                 self._apply_composer_settings()
+            if "language" in changed:
+                # The /settings row's live half. Silent, like the other local
+                # applies: the page (or the /language command, whose echo this
+                # is) already showed its own receipt.
+                from local_operator.i18n.resolve import resolve_language
+
+                value = getattr(change, "values", {}).get("language")
+                self._apply_language(resolve_language(value))
             return
         from local_operator import settings_io
 
@@ -37546,6 +37564,15 @@ class OperatorApp(App[None]):
                     self._apply_theme(wanted)
                 except KeyError:
                     self._system_notice(f"theme: unknown theme {wanted!r} in config.yml", "warning")
+        if "language" in changed:
+            # The same apply the /language command runs; `applied: language`
+            # above has told the user the key moved, and the swap (catalogue +
+            # repaint) is the half a line of text cannot do. Disk source only —
+            # the local branch returns before this point.
+            from local_operator.i18n.resolve import resolve_language
+
+            value = getattr(change, "values", {}).get("language")
+            self._apply_language(resolve_language(value))
 
     async def _reconcile_aida_title(self) -> None:
         """Point her STORED title at ``aida.name`` (the R1-M3 seam).
@@ -38959,6 +38986,8 @@ class OperatorApp(App[None]):
             self._cmd_fast(arg, notice)
         elif command == "/theme":
             self._cmd_theme(arg, notice)
+        elif command == "/language":
+            self._cmd_language(arg, notice)
         elif command == "/provider":
             self._cmd_providers(notice)
         elif command == "/sidebar":
@@ -41687,6 +41716,106 @@ class OperatorApp(App[None]):
             return None
         except Exception as error:  # noqa: BLE001 — reported to the user verbatim
             return str(error)
+
+    def _cmd_language(self, arg: str, notice: NoticeFn) -> None:
+        """``/language`` — show the UI language; ``/language <tag>`` — switch it.
+
+        The command is the DISCOVERABLE half of the ``language`` setting; the
+        ``/settings`` row (appearance) is the other, and both write the same
+        config key through ``settings_io.write_setting`` — one truth, so the
+        picker, this command and the resolver chain cannot disagree. The value
+        space is the picker's own (``language_options``): ``auto`` plus the
+        SHIPPED locales only, because an unaudited locale keys no catalogue
+        and would render message codes.
+
+        A switch PERSISTS (the ``language`` key in config.yml) and applies to
+        the running app at once — ``_apply_language`` swaps the catalogue and
+        repaints; nothing waits for a restart, because a language is a
+        standing preference by nature. The receipt names the RESOLVED
+        language, which is what a user will actually see: with ``auto`` the
+        answer comes from the chain (env, then the OS), and while only ``en``
+        ships the shipped filter pins every answer to ``en``.
+        """
+        from local_operator import settings_io
+        from local_operator.i18n.resolve import (
+            DEFAULT_LANGUAGE,
+            config_value,
+            language_name,
+            language_options,
+            normalise_locale,
+            resolve_language,
+        )
+
+        wanted = arg.strip()
+        resolved = resolve_language()
+        options = dict(language_options())
+        if not wanted:
+            self._system_notice(
+                f"language: {resolved} ({language_name(resolved)}) — "
+                f"/language <{'|'.join(options)}> switches, live; "
+                "the /settings row has the same list"
+            )
+            return
+        key = (
+            DEFAULT_LANGUAGE
+            if wanted.casefold() == DEFAULT_LANGUAGE
+            else normalise_locale(wanted) or wanted
+        )
+        if key not in options:
+            self._system_notice(
+                f"unknown language {wanted!r} — available: {', '.join(options)}", "warning"
+            )
+            return
+        stored = config_value()
+        current_key = (normalise_locale(stored) or stored) if stored else DEFAULT_LANGUAGE
+        if key == current_key:
+            self._system_notice(
+                f"language: already {key} — resolves to {resolved} " f"({language_name(resolved)})"
+            )
+            return
+        setting = settings_io.resolve_key("language")
+        if setting is None:  # the registry owns the key; guard a broken build
+            self._system_notice("language: the setting is not registered in this build", "warning")
+            return
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            settings_io.write_setting(ConfigManager(config_dir()), setting, key)
+        except Exception as error:  # noqa: BLE001 — reported to the user verbatim
+            self._system_notice(f"language: could not save {key} — {error}", "warning")
+            return
+        active = resolve_language()
+        self._apply_language(active)
+        notice(f"language: {key} saved — active {active} ({language_name(active)})")
+
+    def _apply_language(self, locale: str) -> None:
+        """Point every rendering surface at ``locale``, live (slice C).
+
+        The catalogue swap lives in ``i18n.text``: ``set_active_locale`` moves
+        the process's active locale and re-runs the registered
+        re-materialisers — the splash's and the band's constants, keymap's tip
+        templates — while everything resolved per render follows on its next
+        call. The repaint below is owed because those two widgets hold PAINTED
+        text between updates; without it a swap would look like nothing
+        happened until the next unrelated redraw.
+
+        Idempotent and cheap: a same-locale call is a no-op inside
+        ``set_active_locale`` (no re-materialiser runs) plus two dirty marks,
+        which is what lets the config watcher's echo of this process's own
+        write call it unconditionally.
+
+        Not covered here, by design: the slash registry's descriptions, which
+        resolve through ``messages.render`` at import (the S2 seam note says
+        where that rework starts) — they move with their own slice.
+        """
+        from local_operator.i18n import text as i18n_text
+
+        i18n_text.set_active_locale(locale)
+        if self._welcome is not None:
+            self._welcome.refresh()
+        if self._status is not None:
+            self._status.refresh()
 
     def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.

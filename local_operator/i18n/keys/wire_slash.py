@@ -102,6 +102,10 @@ def keys() -> Msg:
     return Msg("wire.slash.keys", {})
 
 
+def language() -> Msg:
+    return Msg("wire.slash.language", {})
+
+
 def links() -> Msg:
     return Msg("wire.slash.links", {})
 
