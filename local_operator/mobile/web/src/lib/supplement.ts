@@ -376,6 +376,12 @@ export const COPY_ADJUST = "Adjust…";
 export const COPY_CANCEL = "Cancel";
 /** The retry affordance the cancelled/failed/frame lines carry. */
 export const COPY_RETRY = "Retry";
+/**
+ * The disclosure's open-state words: `Show fewer` — the other half of the
+ * toggle the desktop ships (`N more files` / `Show all N graphics` ⇄
+ * `Show fewer`, UI #971's `supplement-row.tsx`; UX round 1, U2).
+ */
+export const COPY_SHOW_FEWER = "Show fewer";
 
 /**
  * The terminal control sequences, ported verbatim from the desktop's
@@ -386,14 +392,6 @@ export const COPY_RETRY = "Retry";
  */
 const CONTROL_SEQUENCES =
 	/(?:\u001b[\]PX^_]|[\u009d\u0090\u0098\u009e\u009f])(?:(?!\u0007|\u001b\\|\u009c)[\s\S])*(?:\u0007|\u001b\\|\u009c|$)|(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]|(?:\u001b\[|\u009b)[0-?]*[ -/]*$|\u001b[ -/]+[0-~]|\u001b[@-Z\\-_]|\u001b$|[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
-
-/**
- * Every Unicode `Cf` (format) character: `U+202E` (RTL override) reorders the
- * glyphs around it and a zero-width joiner hides the seam in a spliced word,
- * so the category is stripped beside the sequences above — the same pair the
- * desktop strips, so a name that is safe in a peer row is safe here.
- */
-const FORMAT_CHARACTERS = /\p{Cf}/gu;
 
 /** Every run of whitespace, the display boundary's collapse. */
 const WHITESPACE_RUN = /\s+/;
@@ -407,12 +405,21 @@ const TRAILING_ZERO_DECIMAL = /\.0$/;
  * included, which survive sequence stripping by design — collapsed to a single
  * space. Non-strings read as `""` so a malformed row paints nothing rather
  * than raising on a render path.
+ *
+ * WHAT IS NOT STRIPPED is the point of the port: format characters — ZWJ emoji
+ * sequences, RTL text, soft hyphens — are PRINTABLE text to the TUI's
+ * `display_text` (`ansi.py::strip_control_sequences` says so explicitly) and
+ * to the desktop's own port (`supplement-model.ts::displayText`), so a file
+ * name carrying one renders here exactly as it renders on the sibling
+ * surfaces. An earlier revision of this function stripped `\p{Cf}` as well;
+ * that was a third behaviour beside the two ports, and the divergence is
+ * withdrawn (agent review round 1, R1). The `receipt-row-model.ts::senderField`
+ * advisory-label pair is a different function and does not govern these paints.
  */
 export function displayText(value: unknown): string {
 	if (typeof value !== "string") return "";
 	return value
 		.replace(CONTROL_SEQUENCES, "")
-		.replace(FORMAT_CHARACTERS, "")
 		.split(WHITESPACE_RUN)
 		.filter(Boolean)
 		.join(" ");

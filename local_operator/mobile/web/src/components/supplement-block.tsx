@@ -56,6 +56,7 @@ import {
 	COPY_FAILED,
 	COPY_PREPARING,
 	COPY_RETRY,
+	COPY_SHOW_FEWER,
 	MORE_MAX,
 	STEER_TEXT_MAX_CHARS,
 	displayText,
@@ -260,9 +261,12 @@ export const SupplementBlock = memo(function SupplementBlock({
 					<span aria-hidden="true" className="text-ink-dim">
 						·
 					</span>
+					{/* `px-2`, not the sibling `px-1`: the word alone measured 38 px
+					    at this size, under the surface's own 44 px touch rule
+					    (D1/U1) — the extra step is the target, not decoration. */}
 					<button
 						type="button"
-						className="min-h-11 px-1 text-ink-dim disabled:opacity-50"
+						className="min-h-11 px-2 text-ink-dim disabled:opacity-50"
 						data-supplement-retry=""
 						disabled={busy}
 						onClick={() => void sendOp("restart")}
@@ -346,20 +350,19 @@ export const SupplementBlock = memo(function SupplementBlock({
 						/>
 					))}
 					{moreCount > 0 && (
-						/* The disclosure's words are the model's (`N more files`); the
-						   phone's Disclosure shows its own chevron and its header does
-						   not swap labels — the chevron is the state, the same idiom
-						   every panel on this surface uses. The tail's rows carry NO
-						   preview affordance: the file route addresses `files[i]` by
-						   index and the stored tail has none, so the honest row is
-						   name-only. */
+						/* The disclosure TOGGLES its words with the state, the desktop's
+						   grammar exactly (`N more files` ⇄ `Show fewer`, UI #971;
+						   UX round 1, U2): the chevron says the state, the label says
+						   the action. The tail's rows carry NO preview affordance: the
+						   file route addresses `files[i]` by index and the stored tail
+						   has none, so the honest row is name-only. */
 						<Disclosure
 							className="text-meta"
-							header={
+							header={(open) => (
 								<span className="text-ink-dim" data-supplement-more="">
-									{moreText(moreCount)}
+									{open ? COPY_SHOW_FEWER : moreText(moreCount)}
 								</span>
-							}
+							)}
 						>
 							<div className="flex flex-col gap-1 pb-1">
 								{beat.more.slice(0, MORE_MAX).map((item) => (
@@ -393,13 +396,15 @@ export const SupplementBlock = memo(function SupplementBlock({
 					/>
 				))}
 				{tail.length > 0 && (
+					/* The same toggle grammar as the files disclosure above
+					   (`Show all N graphics` ⇄ `Show fewer`). */
 					<Disclosure
 						className="text-meta"
-						header={
+						header={(open) => (
 							<span className="text-ink-dim" data-supplement-show-all="">
-								{showAllText(tail.length)}
+								{open ? COPY_SHOW_FEWER : showAllText(tail.length)}
 							</span>
-						}
+						)}
 					>
 						<div className="flex flex-col gap-2 pb-1">
 							{tail.map((component) => (
@@ -497,9 +502,18 @@ function CalloutRow({
 		<div className="flex flex-col gap-1" data-supplement-file="">
 			<div className="flex min-h-11 items-center gap-2">
 				{previewable ? (
+					/* THE ROW'S OWN 44 px IS THE TARGET (D1/U1): with `min-h-11` the
+					   button answers a tap anywhere in the row's visible strip, not
+					   just its 17 px text line — measured before the fix: the four
+					   buttons were 326-332×17 inside a 44 px row and the padding
+					   did not respond. At REST a previewable row deliberately looks
+					   like a refused or inert one (D4): the desktop's file lines
+					   carry no resting cue either (hover steps there, `active:`
+					   steps here), and a chevron would promise a disclosure the
+					   tail rows cannot honour. */
 					<button
 						type="button"
-						className="min-w-0 flex-1 truncate text-left text-meta text-ink active:text-ink-dim"
+						className="min-h-11 min-w-0 flex-1 truncate text-left text-meta text-ink active:text-ink-dim"
 						aria-expanded={open}
 						onClick={() => void toggle()}
 					>
@@ -562,12 +576,46 @@ function FrameSlot({
 	onRetry?: () => void;
 	onHeight: (digest: string, height: number) => void;
 }) {
+	const anchorRef = useRef<HTMLDivElement | null>(null);
+	/*
+	 * THE §2.11 MOUNT GATE: the document is fetched only once the slot is at
+	 * (or near) the viewport — the memo's "a component frame mounts only when
+	 * its answer row is in the viewport", implemented exactly as the desktop
+	 * slot does (`supplement-row.tsx::SupplementFrameSlot`, same 200 px
+	 * margin). Without it, opening a long session fetched every supplemented
+	 * turn's document at render, including turns the reader never approached
+	 * (UX round 1, U3). `near` only ever turns ON — an approached slot stays
+	 * mounted, matching the budget's own stickiness.
+	 */
+	const [near, setNear] = useState(false);
+	useEffect(() => {
+		const element = anchorRef.current;
+		if (element === null) return;
+		if (typeof IntersectionObserver === "undefined") {
+			/* No observer (older harness, a test environment without one): the
+			   gate has nothing to hold on, so the slot mounts as before. */
+			setNear(true);
+			return;
+		}
+		const observer = new IntersectionObserver(
+			(entries) => {
+				for (const entry of entries) {
+					if (entry.isIntersecting) setNear(true);
+				}
+			},
+			{ rootMargin: "200px 0px" },
+		);
+		observer.observe(element);
+		return () => observer.disconnect();
+	}, []);
+
 	const [html, setHtml] = useState<string | null>(null);
 	const [failed, setFailed] = useState(false);
 	const onHeightRef = useRef(onHeight);
 	onHeightRef.current = onHeight;
 
 	useEffect(() => {
+		if (!near) return;
 		let cancelled = false;
 		setHtml(null);
 		setFailed(false);
@@ -584,15 +632,17 @@ function FrameSlot({
 		return () => {
 			cancelled = true;
 		};
-	}, [sessionId, component.attachment]);
+	}, [near, sessionId, component.attachment]);
 
 	return (
-		<SupplementFrame
-			component={component}
-			documentHtml={html}
-			documentFailed={failed}
-			onRetry={onRetry}
-			onHeightChange={(height) => onHeightRef.current(component.attachment, height)}
-		/>
+		<div ref={anchorRef} data-supplement-slot="">
+			<SupplementFrame
+				component={component}
+				documentHtml={html}
+				documentFailed={failed}
+				onRetry={onRetry}
+				onHeightChange={(height) => onHeightRef.current(component.attachment, height)}
+			/>
+		</div>
 	);
 }

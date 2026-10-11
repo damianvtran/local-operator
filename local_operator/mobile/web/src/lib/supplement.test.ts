@@ -9,6 +9,7 @@
 // pin the RULES the wire is judged by).
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	COPY_SHOW_FEWER,
 	HEIGHT_HINT_MAX,
 	HEIGHT_HINT_MIN,
 	MORE_MAX,
@@ -172,6 +173,8 @@ describe("the display copy and the paint boundary", () => {
 		expect(moreText(3)).toBe("3 more files");
 		expect(showAllText(1)).toBe("Show all 1 graphic");
 		expect(showAllText(2)).toBe("Show all 2 graphics");
+		// The open-state half of the disclosure toggle (desktop parity, U2).
+		expect(COPY_SHOW_FEWER).toBe("Show fewer");
 		expect(countClause(2, "file")).toBe("2 files");
 	});
 
@@ -184,12 +187,16 @@ describe("the display copy and the paint boundary", () => {
 		expect(fileSizeText("big")).toBe("");
 	});
 
-	it("strips control sequences, format characters and collapses whitespace", () => {
+	it("strips control sequences and collapses whitespace, keeping printable text", () => {
 		// The strip REMOVES the escape rather than replacing it with a space (the
 		// TUI's `display_text`, `ansi.py`'s grammar): `a\x1b[31mred\x1b[0m\nb`
 		// reads `ared b` once the newline collapses.
 		expect(displayText("a\u001b[31mred\u001b[0m\nb")).toBe("ared b");
-		expect(displayText("a\u202eb\u200bc")).toBe("abc");
+		// Format characters are PRINTABLE to this port (agent review round 1,
+		// R1): the TUI's `display_text` and the desktop's `displayText` both
+		// preserve ZWJ sequences and RTL overrides, and a name must render
+		// here exactly as it renders on the sibling surfaces.
+		expect(displayText("a\u202eb\u200bc")).toBe("a\u202eb\u200bc");
 		expect(displayText(41)).toBe("");
 	});
 
