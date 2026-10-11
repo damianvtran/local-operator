@@ -30,7 +30,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from anyio import CancelScope
 from fastapi import HTTPException
@@ -45,7 +45,7 @@ from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 # every existing caller and test stays put; there is ONE definition, in the
 # host-free module (see its docstring).
 from local_operator.harness.rows import visible_transcript_rows  # noqa: F401
-from local_operator.harness.types import ModelSpec
+from local_operator.harness.types import ModelSpec, SupplementProgressEvent
 from local_operator.resume import (
     ORIGIN_AGENT_CONFIG,
     ORIGIN_SUBAGENT,
@@ -1185,6 +1185,27 @@ class LegacySubscriberDuringMove(Exception):
     """
 
 
+#: The live family the supplements lane gates PER VIEWER (memo §2.7): a viewer that did
+#: not send ``?supplements=1`` must never receive a ``supplement_progress`` frame, because
+#: an older renderer would paint the unknown family visibly. Taken from the event CLASS
+#: rather than re-spelled, so the gate and the event cannot drift.
+SUPPLEMENT_EVENT_TYPE: Final = SupplementProgressEvent.model_fields["type"].default
+
+
+def supplement_event_frame(frame: Mapping[str, Any]) -> bool:
+    """Whether one bridge frame is the supplement family's live beat.
+
+    The frame shape is ``{"type": "event", "payload": <event dump>}``; the family is
+    named on the PAYLOAD. One predicate for both places the bridge hands frames to a
+    viewer (live ``publish`` and the ``events`` replay), so the gate cannot hold on one
+    path and leak on the other.
+    """
+    if frame.get("type") != "event":
+        return False
+    payload = frame.get("payload")
+    return isinstance(payload, Mapping) and payload.get("type") == SUPPLEMENT_EVENT_TYPE
+
+
 @dataclass(eq=False)
 class DesktopSubscription:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -1198,6 +1219,14 @@ class DesktopSubscription:
     #: False for every existing caller, which is what makes the move path
     #: refuse rather than silently leave a mounted viewer stale.
     frontend_replace: bool = False
+    #: Whether this subscriber negotiated ``supplements-v1`` (the events route's
+    #: ``?supplements=1``, memo §2.7): only then does the bridge hand it
+    #: ``supplement_progress`` frames -- live or from replay. False for every
+    #: caller that does not know the flag, which is what keeps an older renderer
+    #: from meeting an event family it would paint as unknown (the same two-half
+    #: negotiation the runtime's attach gate runs, with the query parameter as
+    #: this transport's half).
+    supplements: bool = False
     expires: float = 0.0
     overflow: bool = False
     #: False until ``events`` has finished the OPEN handshake -- i.e. until the
@@ -2311,6 +2340,14 @@ class DesktopSessionBridge:
         for sub in self.subscribers.values():
             if sub.overflow or sub.dwelling:
                 continue
+            # PER-VIEWER NEGOTIATION, and it gates LIVE and REPLAY alike because
+            # every frame either path can hand out passes through here first (the
+            # replay list is filtered again in ``events`` for frames published
+            # before this subscription existed). A viewer that never declared
+            # ``supplements`` must not meet the family at all: an older renderer
+            # would paint the unknown event visibly (memo §2.7).
+            if not sub.supplements and supplement_event_frame(frame):
+                continue
             if sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES:
                 if sub.opened:
                     # A READER that is behind: first try to FOLD the queued
@@ -3354,21 +3391,47 @@ class DesktopSessionBridge:
         """
         validate_page_request(before_id, through_id, around_id, before, after, limit)
         if open_frame:
-            # THE REMOTE ARMS ARE BELOW THIS FLAG, DELIBERATELY. A peer's page is
-            # built by its OWNER (``net_session_history`` for a stored journal,
-            # the wire window for a live one), so stripping it here would be a
-            # second page builder for rows this device did not derive — and the
-            # rows a peer sends are messages, not journal entries, so the local
-            # strip's key list does not even describe them. The answer is today's
-            # shape with ``runs_state: "unsupported"``: a client must treat that
-            # and an absent ``runs`` alike, and the seam is the owner-side read
-            # (docs/DESKTOP_API.md, "The open frame").
-            # ``remote_row`` is the PEER marker and a missing facade is the
-            # stored-peer read (``_peer_stored_history``); ``self.remote`` is
-            # this device's own facade and must NOT be read as "a peer" — it is
+            # A PEER'S FRAME IS BUILT BY ITS OWNER, AND THE FLAG NOW TRAVELS WITH
+            # THE REQUEST (docs/DESKTOP_API.md §"The open frame"): the stored
+            # read (``_remote_history`` -> ``_peer_stored_history`` ->
+            # ``net_session_history``) is the owner's own build, so its
+            # ``runs``/``runs_state``/``head_cut`` are carried back here; an
+            # owner older than the facts half answers today's page and the
+            # fields default to the unsupported triple, which is exactly what a
+            # client must already tolerate (absent ``runs`` and ``unsupported``
+            # are one behaviour).
+            if self.remote_row is not None:
+                # ``remote_row`` IS THE PEER MARKER. The one arm that still
+                # answers ``unsupported`` in its own right is the live wire
+                # window inside ``_remote_history`` — see it for why that is a
+                # decision rather than an omission.
+                if around_id is not None:
+                    # V1 CANNOT ANCHOR A PEER'S WINDOW (design §D4) — the same
+                    # empty answer this method's plain arm gives for the same
+                    # request, with the frame's fields on it.
+                    return {
+                        "entries": [],
+                        "has_more": False,
+                        "cursor_missing": True,
+                        "has_newer": None,
+                        "runs": [],
+                        "runs_state": "unsupported",
+                        "head_cut": False,
+                    }
+                return await self._remote_history(
+                    before_id=before_id,
+                    through_id=through_id,
+                    limit=limit,
+                    entry_times=entry_times,
+                    open_frame=True,
+                )
+            # A LOCAL ID WITH NO FACADE YET (a draft, an id whose runtime never
+            # started): today's page, and the unsupported triple — unchanged
+            # from before the flag crossed the mesh. ``self.remote`` is this
+            # device's own facade and must NOT be read as "a peer" — it is
             # present for every local session the bridge has touched, which is
             # exactly the case this frame is built for.
-            if self.remote_row is not None or self.remote is None:
+            if self.remote is None:
                 page = await self.history(
                     before_id=before_id,
                     through_id=through_id,
@@ -3785,6 +3848,7 @@ class DesktopSessionBridge:
         through_id: str | None,
         limit: int,
         entry_times: bool = False,
+        open_frame: bool = False,
     ) -> dict[str, Any]:
         """One page of a PEER's transcript: the wire when it can answer, the
         owner's stored journal when it cannot.
@@ -3858,6 +3922,27 @@ class DesktopSessionBridge:
         projection (``_wire_row_payload``) because it does not have to be poorer:
         the reader merges the two sources by ``id``, and the ids match because the
         wire's message id IS the entry id (``transcript.encode_message_payload``).
+
+        ``open_frame`` RIDES THE **STORED** SOURCE ONLY, AND THAT IS THE DECISION
+        this method documents for the whole viewer path (docs/DESKTOP_API.md
+        §"The open frame"): the frame's page is the OWNER's build over the
+        owner's own journal (``net_session_history`` ->
+        ``RelayServer._open_frame_detail``), and the stored-read fallbacks below
+        are the only place this bridge speaks to it — the ask travels as the
+        key's presence (``projection.peer_stored_history_page``) and the reply's
+        ``runs``/``runs_state``/``head_cut`` are surfaced by
+        ``_peer_stored_history``. THE LIVE WIRE WINDOW KEEPS TODAY'S SHAPE and
+        answers ``runs_state: "unsupported"`` when the flag was asked for, and
+        that is a decision rather than an omission: the wire carries MESSAGES,
+        which the frame's strip does not even describe (its key list is
+        journal-entry shaped); the run facts join a transcript INDEX over a
+        journal this device does not hold, so no local derivation could stand in
+        for the owner's; and the wire answer is the page the paired state is
+        built from, so replacing it with an owner round trip would trade a
+        locally-answered read for a hop — to publish facts the stored path
+        states anyway. ``unsupported`` is honest for that source: the client
+        draws today's page and keeps its own condensation, which is also what an
+        owner older than the facts half produces, so no client behaviour is new.
         """
         remote = self.remote
         if remote is None:
@@ -3865,7 +3950,7 @@ class DesktopSessionBridge:
             # purposes: nothing on this device can read the wire, so the owner's
             # stored journal is the only source -- and it does not need a facade.
             return await self._peer_stored_history(
-                before_id=before_id, through_id=through_id, limit=limit
+                before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
             )
         if remote.is_cold:
             with contextlib.suppress(ConnectionError, OSError, TimeoutError):
@@ -3888,7 +3973,7 @@ class DesktopSessionBridge:
         rows = self._remote_rows(remote, before_id=before_id, through_id=through_id)
         if rows is None or (cold and not rows):
             return await self._peer_stored_history(
-                before_id=before_id, through_id=through_id, limit=limit
+                before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
             )
         page, has_more = _remote_page(rows, limit=limit)
         if not has_more and remote.history_before_token:
@@ -3945,7 +4030,7 @@ class DesktopSessionBridge:
                     "payload": _wire_row_payload(row),
                 }
             )
-        return {
+        answer: dict[str, Any] = {
             # THE SAME FILTER AS THE STORED SOURCE (agent review round 1, R1-4). A
             # hidden wake delivery, a patience ledger row and a diverted ask's result
             # are in the journal and therefore in the owner's own display window --
@@ -3957,6 +4042,16 @@ class DesktopSessionBridge:
             "cursor_missing": False,
             "has_newer": None,
         }
+        if open_frame:
+            # THE LIVE WINDOW IS NOT THE FRAME'S BUILDER (see this method's own
+            # ``open_frame`` paragraph): the facts are the owner's build over
+            # the owner's journal, and this source is messages off a wire.
+            # ``unsupported`` is the honest value — it is also what an owner
+            # older than the facts half yields, so a client treats both alike.
+            answer["runs"] = []
+            answer["runs_state"] = "unsupported"
+            answer["head_cut"] = False
+        return answer
 
     def _remote_rows(
         self, remote: AttachedSession, *, before_id: str | None, through_id: str | None
@@ -3994,7 +4089,7 @@ class DesktopSessionBridge:
         return rows
 
     async def _peer_stored_history(
-        self, *, before_id: str | None, through_id: str | None, limit: int
+        self, *, before_id: str | None, through_id: str | None, limit: int, open_frame: bool = False
     ) -> dict[str, Any]:
         """A page of the OWNER'S STORED JOURNAL, or an unservable answer.
 
@@ -4006,6 +4101,15 @@ class DesktopSessionBridge:
         relay's control socket lives) and the peer's device id from the row the
         pool resolved. It is also why the facade may be absent or cold and this
         still works.
+
+        ``open_frame`` THREADS TO THE OWNER'S BUILD, whose flag it asks for as
+        the KEY'S PRESENCE (``projection.peer_stored_history_page``): the reply's
+        optional ``runs``/``runs_state``/``head_cut`` are surfaced when the
+        owner produced them — an owner newer than this change — and default to
+        the contract's unsupported triple otherwise, because an owner older than
+        the facts half never names the keys (docs/DESKTOP_API.md §"The open
+        frame"). Per key, so a present-but-falsy value is carried rather than
+        dropped by a truthiness test.
 
         AN UNSERVABLE PAGE IS NOT AN EMPTY ONE. When the relay is down, the peer
         refuses, the hop expires, or the answer is not a page, the answer carries
@@ -4028,6 +4132,7 @@ class DesktopSessionBridge:
                 session_id=self.session_id,
                 before_id=before_id,
                 limit=limit,
+                open_frame=open_frame,
             )
             if page is not None:
                 cut = self._cut_stored_page(page, before_id=before_id, through_id=through_id)
@@ -4038,19 +4143,37 @@ class DesktopSessionBridge:
                 # entry was written, never the time it was served. Both answers
                 # this door returns carry it, so a reader that pages back does not
                 # see the same rows change vocabulary.
-                return {
+                answer = {
                     **cut,
                     "entries": [
                         {**row, "ts_source": "entry"} if isinstance(row, dict) else row
                         for row in cut.get("entries") or []
                     ],
                 }
-        return {
+                if open_frame:
+                    # THE OWNER'S FACTS, CARRIED UNCHANGED WHEN THEY EXIST — and
+                    # the contract's documented default when they do not (see
+                    # the method paragraph above). Per key, so a present-but-
+                    # falsy value (``head_cut: false``, an empty ``runs``) is
+                    # carried rather than dropped by a truthiness test.
+                    answer.setdefault("runs", [])
+                    answer.setdefault("runs_state", "unsupported")
+                    answer.setdefault("head_cut", False)
+                return answer
+        answer = {
             "entries": [],
             "has_more": False,
             "cursor_missing": True,
             "has_newer": None,
         }
+        if open_frame:
+            # AN UNSERVABLE PAGE IS STILL AN ANSWER WITH THE FRAME'S SHAPE: the
+            # caller asked for the frame, and ``unsupported`` is the value it
+            # must already tolerate (the same default as the served branch).
+            answer["runs"] = []
+            answer["runs_state"] = "unsupported"
+            answer["head_cut"] = False
+        return answer
 
     @staticmethod
     def _cut_stored_page(
@@ -4929,13 +5052,19 @@ class DesktopSessionBridge:
             return
         await remote.withdraw_desktop_watch()
 
-    def subscribe(self, *, frontend_replace: bool = False) -> DesktopSubscription:
+    def subscribe(
+        self, *, frontend_replace: bool = False, supplements: bool = False
+    ) -> DesktopSubscription:
         """Register one event subscriber.
 
         ``frontend_replace`` records whether this subscriber's renderer
         understands the desktop-only ``frontend.replace`` frame. It defaults to
         False, so a caller that does not know the flag negotiates nothing and
         the move path treats it as a viewer that must not be left stale.
+
+        ``supplements`` is the same shape for the supplements family (memo §2.7):
+        the events route reads ``?supplements=1`` and passes it here, and only a
+        subscriber that declared it is handed ``supplement_progress`` frames.
         """
         if len(self.subscribers) >= SUBSCRIBER_COUNT:
             raise ValueError("Too many event subscribers")
@@ -4950,7 +5079,7 @@ class DesktopSessionBridge:
                 "A working-directory move is in progress; this viewer cannot follow it. "
                 "Update the desktop app, then reconnect."
             )
-        sub = DesktopSubscription(frontend_replace=frontend_replace)
+        sub = DesktopSubscription(frontend_replace=frontend_replace, supplements=supplements)
         self.subscribers[sub.id] = sub
         return sub
 
@@ -4968,7 +5097,14 @@ class DesktopSessionBridge:
             first = self.replay[0][0]["seq"] if self.replay else cutoff + 1
             gap = epoch != self.epoch or after_seq < first - 1 or after_seq > cutoff
             replay = (
-                [f for f, _ in self.replay if after_seq < f["seq"] <= cutoff] if not gap else []
+                [
+                    f
+                    for f, _ in self.replay
+                    if after_seq < f["seq"] <= cutoff
+                    and (sub.supplements or not supplement_event_frame(f))
+                ]
+                if not gap
+                else []
             )
             snapshot = await self.snapshot(entry_times=entry_times, open_frame=open_frame)
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
@@ -6654,6 +6790,66 @@ class DesktopSessions:
                 raise KeyError("Unknown attachment")
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
+
+        return await asyncio.to_thread(read)
+
+    async def supplement_document(self, session_id: str, digest: str) -> str:
+        """The assembled HTML document of one stored supplement component.
+
+        THE SAME STORE, A DIFFERENT FAMILY (file-serving RFC §2 D5). A supplement
+        component is an agent-written DOCUMENT THAT EXECUTES in an opaque-origin
+        frame, so it must never ride the general media family or the path-addressed
+        ``/v1/static/html`` family; it is served by digest only, from this
+        device's content-addressed store, through the one assembler
+        (``supplements.document.assemble_stored_component``). The reply is
+        ``{html}`` JSON -- never ``text/html`` -- because no host may navigate a
+        frame to a URL (memo §4.1); the frame mounts the returned bytes at an
+        opaque origin under the document's own meta CSP.
+
+        Digest resolution is :meth:`attachment`'s, deliberately: the read is the
+        store's own (``get`` verifies the digest against the bytes, so a bit-rotted
+        file resolves as missing), the session id is an EXISTENCE check rather
+        than a binding (the store is shared across conversations by design), and a
+        PEER's conversation whose bytes are not in this device's store raises
+        :class:`PeerAttachmentUnavailable` -- which the route family maps to the
+        409 ``attachment_on_peer`` the memo names, so the desktop paints
+        "on <peer>" rather than a 404 that would read as deleted. A local copy of
+        a moved conversation still serves its bytes here.
+
+        A missing blob and a blob that cannot assemble are the same answer --
+        ``KeyError``, an ordinary 404 -- because the reader's remedy is identical
+        (the frame-level "Couldn't render this graphic" line, memo §2.8), and the
+        store's contract already says an unresolvable reference is ordinary. The
+        caller decides nothing about the document; it may not add, strip or edit
+        bytes (one assembler, memo §2.6).
+        """
+
+        def read() -> str:
+            from local_operator.session.remote_open import remote_row_for
+            from local_operator.supplements.document import assemble_stored_component
+
+            store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                row = remote_row_for(session_id, self.root)
+                if row is None or store.get(digest) is None:
+                    if row is not None:
+                        # The conversation exists, the bytes are not HERE: name the
+                        # device (409 attachment_on_peer), never 404 a live row.
+                        raise PeerAttachmentUnavailable(session_id, row)
+                    raise KeyError("Unknown session")
+            resolved = store.get(digest)
+            if resolved is None:
+                raise KeyError("Unknown supplement component")
+            data_b64, _mime_type = resolved
+            try:
+                return assemble_stored_component(base64.b64decode(data_b64).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                # Stored bytes that do not assemble are not renderable -- the same
+                # reader remedy as a missing blob, so the same ordinary 404.
+                raise KeyError("Unknown supplement component") from None
 
         return await asyncio.to_thread(read)
 

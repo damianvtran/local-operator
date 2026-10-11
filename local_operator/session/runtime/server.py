@@ -7550,6 +7550,23 @@ class RuntimeServer:
             # The host's own line when it gives one (a TUI owner names the
             # session and the reopen command), else the bare progress word.
             return str(result) if isinstance(result, str) and result else "stopping"
+        if op == "job_cancel":
+            # The post-turn job rail's ONE mechanism (video programme §2.2,
+            # contract §4.1): cancel ONE background job by id, landing on the
+            # same engine call ``jobs op='cancel'`` makes
+            # (``AsyncJobManager.cancel``). Optional capability, getattr-probed
+            # like ``job_trajectory``: a reduced handle or an older bridge
+            # answers the unknown-op error rather than a silent no-op, so the
+            # caller can say the session cannot cancel the job. No
+            # ``PROTOCOL_VERSION`` move — additive on the wire.
+            cancel_job = getattr(h, "job_cancel", None)
+            if not callable(cancel_job):
+                raise ValueError("this session cannot cancel background jobs; update the owner")
+            job_id = str(frame.get("job_id") or "")
+            if not job_id:
+                raise ValueError("job_id must be a non-empty string")
+            typed_cancel = cast(Callable[[str], Awaitable[str]], cancel_job)
+            return await typed_cancel(job_id)
         raise ValueError(f"unknown op: {op!r}")
 
     async def _dispatch_payload(

@@ -65,9 +65,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Final, Literal, Mapping, Sequence, cast
 
-from local_operator.supplements import generator, policy
+from local_operator.supplements import generator, policy, sweep
 from local_operator.supplements.candidates import prefilter
 from local_operator.supplements.contract import (
+    SUPERSEDED_ERROR,
     SUPPLEMENT_CUSTOM_TYPE,
     SupplementDetails,
 )
@@ -213,6 +214,12 @@ class SupplementRunner:
         #: reads ``values.monitor`` the same way, on the same kind of build path).
         self._settings = self._read_settings()
         self._task: asyncio.Task[None] | None = None
+        #: The detached maintenance pass (sweep.py): its own slot, deliberately NOT
+        #: ``_task`` -- every control op gates its cut on ``_task``/``_running`` being
+        #: the JOB, and the sweep must never be nameable by an op, never make
+        #: ``running`` true, and never be cancelled by a job flow. Disposal cancels
+        #: it like the job task.
+        self._sweep_task: asyncio.Task[None] | None = None
         self._open_row: Mapping[str, Any] | None = None
         #: Jobs this runtime is running right now: the runtime's half of the reader rule
         #: (``contract.reader_disposition(job_live=...)``).
@@ -305,8 +312,122 @@ class SupplementRunner:
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
+    def schedule_sweep(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Schedule the detached maintenance pass (sweep.py). Never awaited.
+
+        Called once by the handle's constructor, on the session's own loop. The
+        pass is interval-gated (``sweep.sweep_due``) and bounded per pass, so a
+        busy fleet's session starts schedule at most one real pass per interval;
+        a caller that schedules twice is a no-op. Fail-open: a feature that is
+        switched off schedules nothing, and a scheduling failure is a missing
+        cleanup, never a failed session.
+        """
+        if self._sweep_task is not None and not self._sweep_task.done():
+            return
+        if not (policy.enabled() and self._settings.enabled):
+            return
+        if self._config_dir is None:
+            # The root must be EXPLICIT. A handle built without one (a test double,
+            # a reduced host) would otherwise sweep through the global fallback --
+            # the operator's real store -- and the first thing it writes is the
+            # interval stamp. Every production caller passes ``config_dir``, so
+            # the guard costs nothing and keeps the blast radius declared.
+            return
+        try:
+            self._sweep_task = loop.create_task(self._sweep())
+        except Exception:  # noqa: BLE001 -- a missing sweep is not a failed session
+            self._sweep_task = None
+            logger.debug("supplement sweep could not be scheduled", exc_info=True)
+
+    async def _sweep(self) -> None:
+        """One maintenance pass: reclaim orphaned blobs, settle stale rows.
+
+        THE TURN PATH NEVER SEES THIS. It runs on its own task, does every
+        filesystem scan on a worker thread, and is interval-gated, so nothing
+        here can delay a turn or a job. The store half (``sweep.store_sweep``)
+        deletes only ``text/html`` blobs unreferenced by every journal and older
+        than the in-flight grace window; the row half settles this session's
+        non-terminal rows -- leftovers from a runtime that died -- through the
+        runner's own write path, under the ops lock, deciding from the journal.
+        """
+        try:
+            if not (policy.enabled() and self._settings.enabled):
+                return
+            from local_operator.paths import config_dir
+
+            root = Path(self._config_dir) if self._config_dir is not None else config_dir()
+            if not await asyncio.to_thread(sweep.sweep_due, root):
+                return
+            report = await asyncio.to_thread(sweep.store_sweep, root)
+            settled = await self._settle_stale_rows()
+            logger.debug(
+                "supplements: sweep candidates=%d scanned_sessions=%d scanned_bytes=%d "
+                "deleted=%d bytes_freed=%d kept=%d stale_settled=%d skipped=%s elapsed_ms=%.1f",
+                report.candidates,
+                report.scanned_sessions,
+                report.scanned_bytes,
+                report.deleted,
+                report.bytes_freed,
+                len(report.kept),
+                settled,
+                report.skipped,
+                report.elapsed_ms,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- the sweep fails open: worst case, bytes stay
+            logger.debug("supplement sweep failed", exc_info=True)
+
+    async def _settle_stale_rows(self) -> int:
+        """Settle this session's non-terminal supplement rows, bounded and fail-open.
+
+        See :func:`sweep.stale_rows` for why a non-terminal row at runner-build
+        time can only belong to a runtime that died. Each write goes through
+        ``_commit_row`` -- the one write path -- so it reads the journal inside
+        the write lock, and it is additionally gated on the job being neither
+        live-this-run nor the running job, so an op flow that somehow moved the
+        anchor forward can never be written over.
+
+        The row's ``error`` is ``disposed`` (memo §7's spelling for a job cut
+        because its runtime went away): the reader paints it as
+        ``cancelled - Retry``, identical to what the stale-row rule already
+        rendered for it -- the write moves the story from the reader's head
+        into the journal, it never changes what a surface shows.
+        """
+
+        def build_disposed(base: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+            if base is None or _is_terminal(base):
+                return None
+            return next_version(base, state="cancelled", error=sweep.DISPOSED_ERROR)
+
+        settled = 0
+        try:
+            rows = sweep.stale_rows(self._session.transcript.entries())
+        except Exception:  # noqa: BLE001 -- an unreadable journal settles nothing
+            logger.debug("supplement stale rows could not be read", exc_info=True)
+            return 0
+        for row in rows[: sweep.MAX_STALE_ROWS]:
+            anchor = str(row.get("anchor", ""))
+            if not anchor:
+                continue
+            if self.is_live(str(row.get("job", ""))) or self._running_under(anchor):
+                continue
+            try:
+                final = await self._commit_row(anchor=anchor, build=build_disposed)
+            except Exception:  # noqa: BLE001 -- a failed settle is a row left where it was
+                logger.debug("supplement stale row could not be settled", exc_info=True)
+                continue
+            if final is not None:
+                settled += 1
+        return settled
+
     async def cancel(self) -> None:
         """Cancel and reap the task (dispose). Never raises."""
+        sweep_task = self._sweep_task
+        self._sweep_task = None
+        if sweep_task is not None and not sweep_task.done():
+            sweep_task.cancel()
+            await asyncio.gather(sweep_task, return_exceptions=True)
         task = self._task
         self._task = None
         self._running = None
@@ -479,7 +600,17 @@ class SupplementRunner:
                     )
                 )
 
-            await self._commit_row(anchor=anchor, build=build_done)
+            final = await self._commit_row(anchor=anchor, build=build_done)
+            if final is not None:
+                # THE FILES-ONLY BEAT. The graphics path beats `decided` before it runs;
+                # the files half is the DEFAULT half (graphics ship off), and a surface's
+                # live path learns every row from this family — so without this beat a
+                # files-only callout was visible only after a reload, on every surface.
+                # `decided`/`done` are the only states that carry `files` (§2.7), so the
+                # terminal state is the correct beat here: the row is terminal on arrival.
+                # (Added by the TUI lane; the design's §2.4 rule is "file callouts appear
+                # without waiting for the generator".)
+                await self._progress(final, "done")
         finally:
             self._live_jobs.discard(job)
 
@@ -884,6 +1015,63 @@ class SupplementRunner:
         if inputs is None or inputs.job != job:
             return None
         return inputs
+
+    async def newest_actionable(self, verb: str) -> tuple[str, str] | None:
+        """The newest remembered job a routed ``/highlights <verb>`` can act on, or ``None``.
+
+        The runtime's counterpart of the TUI's ``_supplement_target``: the command arrives
+        with a VERB only (``cancel``/``retry``/``adjust``), so picking the target is the
+        runner's job, over the jobs it still holds for a later steer/restart (``_inputs``,
+        §2.7). The rules are the TUI's, re-expressed where the runtime knows the same facts:
+
+        - ``cancel`` addresses the job RUNNING NOW, and nothing else -- the only cut
+          ``cancel_job`` can deliver; the TUI's "seen live, still non-terminal" rule made
+          exact (a runtime always knows).
+        - ``retry`` the newest remembered job whose newest row is ``failed``/``cancelled``.
+        - ``adjust`` the newest remembered job whose newest row is visible (not
+          superseded/dismissed/skipped), from any state -- the documented re-run path.
+
+        "Newest" is the newest ROW (its ``at``), not dict order: a steer/restart re-remembers
+        an existing anchor in place, so ``_inputs``' order alone would not answer it. State
+        comes from the JOURNAL, never ``inputs.details``: the pointer can lag a terminal
+        append that is already durable (the R3-1 class), and a selection reading it could
+        pick against a state the user has already seen change. A verb other than the three
+        is refused by the caller before this is asked; here it answers ``None``.
+        """
+        if verb == "cancel":
+            task = self._task
+            if self._running is None or task is None or task.done():
+                return None
+            return self._running
+        if verb not in ("retry", "adjust"):
+            return None
+        candidates: list[tuple[float, str, str]] = []
+        # SNAPSHOT BEFORE THE WALK, because every journal read below suspends on a
+        # worker thread and the ordinary path -- a turn ending and its render starting --
+        # remembers a NEW anchor (`_remember`) in exactly that window; iterating the
+        # LIVE dict across those awaits raises "dictionary changed size during
+        # iteration" and the whole command fails (post-merge review of #2189, F-1).
+        # A snapshot cannot change outcomes: the selected op re-validates its
+        # `(anchor, job)` under `_ops_lock` and answers neutrally (`already finished`)
+        # when the pick has gone stale.
+        for anchor, inputs in list(self._inputs.items()):
+            row = await asyncio.to_thread(self._newest_row, anchor, job=inputs.job)
+            if row is None:
+                continue
+            if (
+                row.get("error") == SUPERSEDED_ERROR
+                or row.get("dismissed")
+                or row.get("state") == "skipped"
+            ):
+                continue
+            state = str(row.get("state", ""))
+            if verb == "retry" and state not in ("failed", "cancelled"):
+                continue
+            candidates.append((float(row.get("at", 0.0) or 0.0), anchor, inputs.job))
+        if not candidates:
+            return None
+        _at, anchor, job = max(candidates)
+        return anchor, job
 
     # -- the one write path (round-3 review R3-1) -------------------------------------------
 

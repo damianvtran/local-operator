@@ -59,6 +59,8 @@ from local_operator.harness.approval import (
     operator_nonce,
     request_proof,
 )
+from local_operator.i18n.frames import config_frame_payload
+from local_operator.i18n.resolve import resolve_language
 from local_operator.mobile import mesh as mobile_mesh
 from local_operator.mobile import projects as mobile_projects
 from local_operator.mobile import push_devices as mobile_push_devices
@@ -1686,6 +1688,11 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
     # fold_history reads messages without mutating them, so the cached list
     # can be shared; the fold builds its own TranscriptEntry rows.
     fold.fold_history(state.history)
+    #: Turn supplements (memo §3.1 row 18): the durable rows are CUSTOM entries,
+    #: which fold_history (messages only) never sees, so the sibling map is
+    #: copied from the durable fold's own per-anchor collection. Old app builds
+    #: ignore the key; new ones render the settled blocks on a cold open.
+    projection.supplements = {anchor: dict(row) for anchor, row in state.supplements.items()}
 
     # The persisted roster is the restart-safe ownership record for child
     # routes. Rebuilding from it keeps old session projections useful without
@@ -2763,6 +2770,19 @@ class MobileDaemon:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        #: Subscribers to ``/api/config/events`` (wave-5 slice D, the relay's
+        #: half of the settings doorbell): one queue per open SSE response.
+        #: Doorbell-style — a watcher listener hands the change over, the
+        #: generator re-resolves and stamps when it drains. Mirrors
+        #: ``table.list_subscribers``.
+        self.config_subscribers: set[asyncio.Queue[Any]] = set()
+        #: The fan-out listener's unsubscribe for that channel, held so the
+        #: LAST subscriber can let go of the fan-out. The watcher itself is
+        #: the process-wide singleton (``config_watch.process_watcher``) and is
+        #: deliberately never stopped here: ``service.amain`` starts it for
+        #: display-following anyway, and its idle cost is the one stat per 2 s
+        #: the module already budgets for across 50 processes.
+        self._config_unsubscribe: Callable[[], None] | None = None
         # Push/ack-sync S5: the emit loop's host, and ``None`` on every machine
         # that has not armed one. The worker is INJECTED rather than built here
         # because its transport is the cloud's (S7), and the transport is the
@@ -2916,6 +2936,49 @@ class MobileDaemon:
             )
         except Exception:  # noqa: BLE001 — a missing invalidator costs a restart, not the boot
             logger.warning("display settings follower could not be attached", exc_info=True)
+
+    # -- the relay's config channel (wave-5 slice D) -----------------------
+
+    def attach_config_subscriber(self, queue: "asyncio.Queue[Any]") -> None:
+        """Register one ``/api/config/events`` queue; first-in starts the fan-out.
+
+        The watcher is the process-wide ``config_watch`` singleton, started at
+        boot for display-following — the same stat-poll every sibling process
+        uses on this machine — so the relay's language is resolved from the
+        SAME file through the SAME resolver as every other surface: no second
+        truth and no replay.
+        """
+        self.config_subscribers.add(queue)
+        if self._config_unsubscribe is None:
+            try:
+                from local_operator.config_watch import process_watcher
+                from local_operator.paths import config_dir
+
+                watcher = process_watcher(config_dir())
+                watcher.start()  # idempotent; boot already did it in the normal path
+                self._config_unsubscribe = watcher.subscribe(self._fan_out_config_change)
+            except Exception:  # noqa: BLE001 — a dead fan-out costs live updates, not the stream
+                logger.warning("config subscriber could not be attached", exc_info=True)
+
+    def detach_config_subscriber(self, queue: "asyncio.Queue[Any]") -> None:
+        """Last-out releases the fan-out (the watcher itself stays; see ``__init__``)."""
+        self.config_subscribers.discard(queue)
+        if not self.config_subscribers and self._config_unsubscribe is not None:
+            self._config_unsubscribe()
+            self._config_unsubscribe = None
+
+    def _fan_out_config_change(self, change: Any) -> None:
+        """One change to every open stream; a full queue drops the EXTRA change.
+
+        Called on the loop thread, synchronously (``config_watch``'s listener
+        contract). Dropping is safe: the next frame carries the then-current
+        resolved language either way, and ``changed_keys`` is advisory.
+        """
+        for queue in list(self.config_subscribers):
+            try:
+                queue.put_nowait(change)
+            except asyncio.QueueFull:
+                continue
 
     def _projection_route_owned(self, session_id: str) -> bool:
         """Whether an epoch can still be observed by a process or browser."""
@@ -4243,6 +4306,54 @@ async def _wait_for_owner_to_unpublish(session_id: str, retired_pid: int, timeou
         await asyncio.sleep(0.05)
 
 
+# ---------------------------------------------------------------------------
+# Turn supplements (memo §2.7) -- the relay's read routes
+# ---------------------------------------------------------------------------
+
+#: A supplement JOB id: ``persistence.new_job_id`` mints 12 lowercase hex, and the
+#: file route keys on it. Shape-checked before any lookup so a crafted job segment
+#: can never be anything but a miss (it is a lookup key, never a path).
+_SUPPLEMENT_JOB = re.compile(r"^[a-f0-9]{12}$")
+
+#: The file route's per-request byte cap (memo §2.7: "a 10 MB cap"), re-applied here
+#: rather than trusted from the decision, because the bytes on disk are what is read.
+SUPPLEMENT_FILE_MAX_BYTES = 10 * 1024 * 1024
+
+#: The SUFFIX -> Content-Type allowlist for the file route. Never ``text/html``,
+#: ``image/svg+xml``, ``application/xhtml+xml``, or any ``+xml`` (memo §2.7, S15):
+#: the served type is decided by this table alone, never by the bytes, so a ``.txt``
+#: whose body opens with ``<script>`` is still served as ``text/plain`` under
+#: ``nosniff`` and cannot execute. ``svg`` and ``xml`` are deliberately absent.
+_SUPPLEMENT_FILE_TYPES: dict[str, str] = {
+    ".txt": "text/plain",
+    ".log": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".csv": "text/csv",
+    ".tsv": "text/tab-separated-values",
+    ".json": "application/json",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    ".avif": "image/avif",
+}
+
+#: The read family's response policy (file-serving RFC D5; memo §2.7): the pair rides
+#: EVERY response of both routes, errors included -- #2134 R4's lesson is that a policy
+#: attached only to the success path is silently absent where it matters. Stamped by
+#: ``_supplement_response`` at each return site below (the gate's refusals included).
+_SUPPLEMENT_POLICY: dict[str, str] = {
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store",
+}
+
+
 def build_app(daemon: MobileDaemon):
     """The Starlette app. Imported inside the function so ``lop`` without the
     server extra never pays for starlette at startup."""
@@ -4619,6 +4730,68 @@ def build_app(daemon: MobileDaemon):
                 # that turns buffering off at nginx-family proxies.
                 "X-Accel-Buffering": "no",
             },
+        )
+
+    async def api_config_events(request: Request) -> Response:
+        """SSE for the RESOLVED language: a settings change reaches the phone live.
+
+        Wave-5 slice D. The relay web (and, through it, the mobile app)
+        subscribe to the same ``config`` frame semantics the desktop feed
+        publishes — one shape, shared builder
+        (``i18n/frames.config_frame_payload``) — so a language write from any
+        origin (agent tool, TUI page, UI, a hand edit) lands here the same way:
+        the process watcher only fires when the file's VALUES moved.
+
+        THE FIRST FRAME IS THE BASELINE, matching the desktop feed's no-replay
+        discipline: on connect the stream sends the CURRENT resolved language
+        with ``changed_keys: []`` — nothing historical is ever announced — and
+        only real changes after that publish. An older daemon without this
+        route answers 404; clients treat that as the stream being absent, not
+        as a failure.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=4)
+
+        async def stream():
+            # ATTACH ON FIRST PULL, not at route time (CI round 1, MINOR-1): a
+            # response nobody consumes — a client that vanishes between the
+            # call and the first read — must not leave its queue and fan-out
+            # behind, which a route-time attach did (one leaked subscriber,
+            # visible in ``config_subscribers``, per never-started stream).
+            # The sibling per-session stream carries the same lesson, and
+            # ``SessionEventResponse`` below closes this generator on the
+            # send-raise path too, so the finally's detach cannot be skipped.
+            daemon.attach_config_subscriber(queue)
+            try:
+                # ``to_thread``: the resolver falls back to constructing a
+                # ConfigManager (a YAML parse) when no watcher snapshot exists,
+                # and this daemon serves a 2 s SSE repaint loop (the module's
+                # own rule for anything heavier than a dict read).
+                yield _sse(
+                    "config",
+                    config_frame_payload((), await asyncio.to_thread(resolve_language)),
+                )
+                while True:
+                    try:
+                        change = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
+                        yield _sse(
+                            "config",
+                            config_frame_payload(
+                                getattr(change, "changed_keys", ()) or (),
+                                await asyncio.to_thread(resolve_language),
+                            ),
+                        )
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+            finally:
+                daemon.detach_config_subscriber(queue)
+
+        return SessionEventResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
     async def api_list_events(request: Request) -> Response:
@@ -5333,21 +5506,262 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
-    async def api_supplement_stub(request: Request) -> Response:
-        """The two turn-supplement read routes, as C0 STUBS: auth, then 404.
+    # -- the supplement read family (memo §2.7; RFC D5) ----------------------------------
+    #
+    # The response policy and the journal-reference check are shared by the two routes
+    # below, so they live beside them rather than inside each handler.
 
-        ``GET /api/sessions/{id}/supplements/{digest}/document`` (the assembled component
-        as ``{html}``) and ``GET /api/sessions/{id}/supplements/{job}/file?i=<n>`` (a file
-        callout's bytes, allowlisted ``Content-Type``) are frozen here so the route table
-        and the auth ordering are settled before lane C2 implements them
-        (``docs/design/turn-supplements.md`` §2.7). ``gate()`` runs FIRST on purpose: an
-        unauthenticated caller must get the 401 and learn nothing about whether the route
-        is real, which is the ordering the real routes have to keep.
+    def _supplement_response(response: Response) -> Response:
+        """Stamp the family policy (``_SUPPLEMENT_POLICY``) on ``response``.
+
+        EVERY return of the two routes below goes through this, errors included
+        (#2134 R4: a policy attached only to the success path is silently absent
+        where it matters). Plain assignment, not ``setdefault``: the 200s set the
+        same pair, and one spelling keeps the family uniform.
+        """
+        for name, value in _SUPPLEMENT_POLICY.items():
+            response.headers[name] = value
+        return response
+
+    def _journal_references_digest(payload: bytes, digest: str) -> bool:
+        """Whether a ``supplement_v1`` row of this journal references ``digest``.
+
+        §2.7's letter for the document route: the reference is read per
+        ``supplement_v1`` row. Deliberately narrower than a raw session-wide scan
+        with sync's byte grammar -- the grammar also matches ``"attachment"``
+        references on other row types (message media carries the same key today),
+        and a future text-mime producer must not become servable through this door
+        without the authorisation being reconsidered (round-1 review R4). The cheap
+        pre-filter keeps JSON parsing to the lines that can be supplement rows.
+        """
+        from local_operator.network.sync import _ATTACHMENT_REF
+        from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+        marker = SUPPLEMENT_CUSTOM_TYPE.encode("ascii")
+        needle = digest.encode("ascii")
+        for line in payload.splitlines():
+            if marker not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            row_payload = row.get("payload")
+            if not isinstance(row_payload, dict):
+                continue
+            if row_payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
+                continue
+            if any(match == needle for match in _ATTACHMENT_REF.findall(line)):
+                return True
+        return False
+
+    async def api_session_supplement_document(request: Request) -> Response:
+        """One stored supplement component, assembled to a document, as ``{html}``.
+
+        THE EXECUTING-DOCUMENT FAMILY (file-serving RFC §2 D5). Component blobs are
+        agent-written documents that run script in an opaque-origin frame, so they are
+        served ONLY from this digest-addressed family -- never by path, never through
+        ``/v1/static/*`` -- and the reply is JSON (``{html}``), never ``text/html``:
+        nothing here may become a URL a browsing context is navigated to (memo §4.1).
+        The digest is the whole address; there is no caller-supplied path anywhere in
+        the request. Headers carry ``X-Content-Type-Options: nosniff`` and
+        ``Cache-Control: no-store``; the document's own CSP rides inside it as a
+        <meta>, because the tunnel forwards a fixed response-header set (memo §2.7).
+
+        AUTHORISATION IS THREE FACTS, the memo's §2.7 (a)-(c): the cookie (``gate``),
+        the session existing on disk as a local USER conversation, and the digest
+        The digest is the whole address; there is no caller-supplied path anywhere in
+        the request. Headers carry ``X-Content-Type-Options: nosniff`` and
+        ``Cache-Control: no-store`` -- on EVERY response of the route, refusals
+        included (``_supplement_response``) -- and the document's own CSP rides
+        inside it as a <meta>, because the tunnel forwards a fixed response-header
+        set (memo §2.7).
+
+        AUTHORISATION IS THREE FACTS, the memo's §2.7 (a)-(c): the cookie (``gate``),
+        the session existing on disk as a local USER conversation, and the digest
+        being REFERENCED by a ``supplement_v1`` row of that session's journal
+        (``_journal_references_digest``). The third is what makes the route safe to
+        key on a digest alone: a blob no row references is not servable here even
+        when the caller holds a digest from somewhere else. It is deliberately
+        scoped to supplement rows rather than sync's whole-journal byte grammar --
+        the grammar also matches media references on other row types, and those
+        must not become servable through this door without the authorisation being
+        reconsidered (round-1 review R4). It deliberately does NOT use
+        ``_entry_for_session`` -- that serves only live generations, and an ended
+        conversation's history must still show its components.
         """
         denied = gate(request)
         if denied is not None:
-            return denied
-        return JSONResponse({"error": "supplement not available"}, status_code=404)
+            return _supplement_response(denied)
+        session_id = str(request.path_params["session_id"])
+        digest = str(request.path_params["digest"])
+
+        def load() -> str | None:
+            import base64
+
+            from local_operator.session.attachments import AttachmentStore
+            from local_operator.supplements.contract import is_digest
+            from local_operator.supplements.document import assemble_stored_component
+
+            if not is_digest(digest):
+                return None
+            directory = _durable_user_session_dir(session_id)
+            if directory is None:
+                return None
+            try:
+                payload = (directory / "transcript.jsonl").read_bytes()
+            except OSError:
+                return None
+            if not _journal_references_digest(payload, digest):
+                return None
+            resolved = AttachmentStore().get(digest)
+            if resolved is None:
+                return None
+            data_b64, _mime_type = resolved
+            try:
+                return assemble_stored_component(base64.b64decode(data_b64).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                return None
+
+        html = await asyncio.to_thread(load)
+        if html is None:
+            return _supplement_response(
+                JSONResponse({"error": "no such supplement"}, status_code=404)
+            )
+        return JSONResponse({"html": html}, headers=dict(_SUPPLEMENT_POLICY))
+
+    async def api_session_supplement_file(request: Request) -> Response:
+        """One file callout's bytes, addressed by the row's own index (memo §2.7).
+
+        THERE IS NO PATH PARAMETER AND THERE NEVER MAY BE. The only addressable file
+        is ``row["files"][i]`` -- the path the row itself recorded, which the
+        pre-filter admitted -- so a caller cannot ask for an arbitrary file however
+        the query is shaped, and out-of-range indices (``-1``, past the end, a
+        non-integer) resolve to nothing.
+
+        Four refusals beyond that, each re-applied here rather than trusted from the
+        decision (memo §4.3/S15): the resolved path must stay under the session's cwd
+        or ``~`` (a tampered row does not become a read primitive); the §4.3
+        sensitive-path denylist is re-applied; the file must be a regular file of at
+        most 10 MB; and the ``Content-Type`` comes from a SUFFIX ALLOWLIST --
+        text/markdown/CSV/TSV/JSON/image/PDF -- never ``text/html``, ``image/svg+xml``,
+        ``application/xhtml+xml`` or any ``+xml``. A ``.txt`` whose body begins
+        ``<script>`` therefore renders as text under ``nosniff``: content-type and
+        disposition are decided by the allowlist alone, never by the bytes.
+        ``Content-Disposition: attachment`` rides every non-image class, and nothing
+        navigates a browsing context to this route (S-R6; bytes are rendered in-app).
+
+        An ended session's cwd is NOT recorded durably (the daemon's own resume notes
+        this), so a cwd-relative path without a live record is refused rather than
+        resolved against a guess; ``~``-relative paths serve in either case. A
+        peer-hosted conversation has no local directory and is refused the same way.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return _supplement_response(denied)
+        session_id = str(request.path_params["session_id"])
+        job = str(request.path_params["job"])
+        raw_index = request.query_params.get("i", "")
+        try:
+            index = int(raw_index)
+        except ValueError:
+            return _supplement_response(JSONResponse({"error": "bad file index"}, status_code=400))
+
+        def load() -> tuple[bytes, str] | str:
+            """``(bytes, mime)``, or a refusal token the route maps to a status."""
+            import os
+
+            from local_operator.session.transcript import Transcript
+            from local_operator.supplements import denylist
+
+            directory = _durable_user_session_dir(session_id)
+            if directory is None or not _SUPPLEMENT_JOB.fullmatch(job):
+                return "missing"
+            try:
+                entries = Transcript(directory).entries()
+            except Exception:  # noqa: BLE001 -- an odd transcript serves no file
+                return "missing"
+            newest: dict[str, Any] | None = None
+            for entry in entries:
+                if entry.type != "custom":
+                    continue
+                payload = entry.payload if isinstance(entry.payload, dict) else {}
+                details = payload.get("details")
+                if not isinstance(details, dict) or details.get("job") != job:
+                    continue
+                version = details.get("version")
+                if not isinstance(version, int) or isinstance(version, bool):
+                    continue
+                if newest is None or version >= int(newest.get("version", -1)):
+                    newest = details
+            if newest is None:
+                return "missing"
+            files = newest.get("files")
+            if not isinstance(files, list) or not 0 <= index < len(files):
+                return "missing"
+            recorded = files[index] if isinstance(files[index], dict) else {}
+            raw = recorded.get("path")
+            if not isinstance(raw, str) or not raw:
+                return "missing"
+
+            home = str(Path.home())
+            entry = _entry_for_session(daemon, session_id)
+            cwd = entry.record.cwd if entry is not None else ""
+            expanded = os.path.expanduser(raw)
+            if not os.path.isabs(expanded):
+                if not cwd:
+                    # No live record: a cwd-relative path has no root we can
+                    # vouch for, and resolving it against a guess is the class
+                    # of silent wrong-directory this codebase refuses.
+                    return "no-cwd"
+                expanded = os.path.join(cwd, expanded)
+            resolved_path = Path(os.path.realpath(expanded))
+            allowed_roots = [Path(os.path.realpath(root)) for root in (cwd, home) if root]
+            if not any(
+                resolved_path == root or resolved_path.is_relative_to(root)
+                for root in allowed_roots
+            ):
+                return "missing"
+            if denylist.is_sensitive(str(resolved_path), cwd=cwd or home):
+                logger.info("supplement file refused by the denylist for %s", session_id)
+                return "missing"
+            try:
+                if not resolved_path.is_file():
+                    return "missing"
+                size = resolved_path.stat().st_size
+                if size > SUPPLEMENT_FILE_MAX_BYTES:
+                    return "too-large"
+                data = resolved_path.read_bytes()
+            except OSError:
+                return "missing"
+            if len(data) > SUPPLEMENT_FILE_MAX_BYTES:
+                return "too-large"
+            mime = _SUPPLEMENT_FILE_TYPES.get(resolved_path.suffix.lower())
+            if mime is None:
+                return "missing"
+            return data, mime
+
+        outcome = await asyncio.to_thread(load)
+        if outcome == "missing":
+            return _supplement_response(JSONResponse({"error": "no such file"}, status_code=404))
+        if outcome == "no-cwd":
+            return _supplement_response(
+                JSONResponse(
+                    {"error": "file previews for an ended session need the session running"},
+                    status_code=409,
+                )
+            )
+        if outcome == "too-large":
+            return _supplement_response(
+                JSONResponse({"error": "file is larger than the preview limit"}, status_code=413)
+            )
+        data, mime = outcome
+        headers = dict(_SUPPLEMENT_POLICY)
+        if not mime.startswith("image/"):
+            headers["Content-Disposition"] = "attachment"
+        return Response(content=data, media_type=mime, headers=headers)
 
     async def api_command(request: Request) -> Response:
         """The one mutation endpoint: {op, ...} → control frame. Keeping
@@ -6810,11 +7224,11 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route(
             "/api/sessions/{session_id:str}/supplements/{digest:str}/document",
-            api_supplement_stub,
+            api_session_supplement_document,
         ),
         Route(
             "/api/sessions/{session_id:str}/supplements/{job:str}/file",
-            api_supplement_stub,
+            api_session_supplement_file,
         ),
         Route("/api/sessions/{session_id:str}/command", api_command, methods=["POST"]),
         Route(
@@ -6833,6 +7247,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/schedules", api_schedules),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
+        Route("/api/config/events", api_config_events),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),

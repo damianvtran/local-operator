@@ -212,7 +212,11 @@ error and never to a zero.
   reading `partial` exactly as the session and `subagents` read the same
   bundle); `unstated_records` is a COUNT of records
   with no stated amount and no failure (the failed-unbilled presumption
-  counts nothing); `bases` are the distinct basis spellings inside the entry.
+  counts nothing); `bases` are the distinct basis spellings inside the entry
+  — for the inference half, taken from the per-route `by_identity` columns
+  (their `bases: {basis: micro}` money), so a plan-funded call reads
+  `subscription_api_equivalent` and `not_tracked` covers only money those
+  columns do not attribute.
   An entry exists only on activity — no fabricated zeros — and a partition
   never carries more than `SPEND_BREAKDOWN_ENTRY_CAP` (12) entries: the first
   eleven keep their rank and the remainder is aggregated into the `other`

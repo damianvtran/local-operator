@@ -1,6 +1,6 @@
 ---
 name: image-generation
-description: Generate or edit images via the configured provider — setup, credits, model choice, cost, cancel and restart, and what to do when no provider is configured.
+description: Generate or edit images via the configured provider — setup, edit-model advice, cost, cancel and restart, and what to do when no provider is configured.
 ---
 
 # Generating and editing images
@@ -138,18 +138,32 @@ Pass a source and the call becomes an edit. Two ways to name it:
   pass that digest back to edit the image the harness just made.
 
 One source per call in v1; multi-source is a documented extension point (the
-rung specs' typed `max_sources` field).
+rung specs' typed `max_sources` field). A source rides as a data URI or an
+https URL; the Radient hub refuses a request body over 16 MiB, so a very
+large local source can fail there first.
 
 `strength` (0..1) tunes how far the edit may move from the source, where the
 provider supports it (FAL's flux-class image-to-image apps; its
-multi-reference editors document no strength field). Wherever it cannot be
-honoured, the result says it was ignored rather than dropping it silently.
-`strength` without a source is rejected.
+multi-reference editors document no strength field). Where the harness can
+detect the drop — FAL's schema-guided path — the result says the value was
+ignored rather than dropping it silently; on Radient it rides the hub's
+verbatim passthrough, and a pin that does not document it gives no drop
+signal, so the result does not claim one. `strength` without a source is
+rejected.
 
-Edits run on FAL, OpenAI, Google, xAI and OpenRouter. The ChatGPT-plan rung —
-and Radient, until its media route learns source handling — records an
-explicit skip, so an edit never silently degrades to a fresh image: if no
-capable provider is available the call fails and names what to set up.
+Edits run on Radient, FAL, OpenAI, Google, xAI and OpenRouter. The
+ChatGPT-plan rung records an explicit skip, so an edit never silently
+degrades to a fresh image: if no capable provider is available the call fails
+and names what to set up.
+
+**Which edit model.** On Radient the harness resolves the pin the hub marks
+as its edit default — GPT Image 2.5 sunburst edit, the best single-edit
+quality on the listing. It **drifts across successive edits** (each round is
+free to move the whole image): for multi-round revision workflows prefer an
+NB2.1-class or flux-class model via FAL or OpenRouter. Radient value pins:
+Nano Banana 2 edit ≈$0.08 and Nano Banana Pro edit ≈$0.15 per image;
+premium: FLUX.2 max edit. On every provider, pin `model` to choose
+specifically.
 
 Digests come from results. An image pasted straight into the chat has no
 digest you can cite yet — reference a local file with `source_image_path`

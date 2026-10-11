@@ -186,6 +186,15 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # It is a fact about the SESSION, not a liveness claim about a source process, so
     # it is not on the ``.session.pid`` side of the argument.
     "eval-kernel.json",
+    # THE PENDING-VOICE MARKERS (``session.channel_spend.PENDING_SIDECAR_NAME``):
+    # one JSON line per voice call a route recorded against a conversation whose
+    # own process has not folded the record yet. It travels for the same reason
+    # ``asks.jsonl`` and ``goal.json`` do — a session forked or MOVED while a
+    # charge is still unfoled must arrive WITH the fact stated, or the
+    # destination reads as a conversation whose voice spend never existed while
+    # the record sits unjoined in analytics (design §4.2's fallback exists so
+    # the case is visible, and a move must not be the thing that hides it).
+    "channel_pending.jsonl",
 )
 
 #: Directories a session directory may hold whose FILES are the user's own

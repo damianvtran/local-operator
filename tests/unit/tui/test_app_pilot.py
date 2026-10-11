@@ -96,6 +96,9 @@ class _FakeJobs:
     ``running_bash_jobs`` does the same for backgrounded shell work, which the
     stop ladder deliberately SPARES and now names when confirming a stop — so a
     test needs to be able to say "a build is also running" as plainly.
+    ``running_video_jobs`` is the same fact for the media lane's detached jobs
+    (remediation round 1: they are spared too, and both the stop confirmation
+    and the band's jobs rung count them).
     """
 
     def __init__(self, session: "FakeSession") -> None:
@@ -109,6 +112,10 @@ class _FakeJobs:
         rows += [
             SimpleNamespace(id=f"bash{i}", status="running", type="bash", queued=False)
             for i in range(self._session.running_bash_jobs)
+        ]
+        rows += [
+            SimpleNamespace(id=f"video{i}", status="running", type="video", queued=False)
+            for i in range(self._session.running_video_jobs)
         ]
         return rows
 
@@ -359,6 +366,11 @@ class FakeSession:
         #: exists so a build outlives the turn). Staged separately from
         #: `running_children` because the ladder treats them as opposites.
         self.running_bash_jobs = 0
+        #: The media lane's detached video jobs, which outlive a stop for the
+        #: same class of reason (contract §4.3) — staged for the stop
+        #: confirmation's spared count and the band's rung, both of which count
+        #: them beside `bash` (remediation round 1).
+        self.running_video_jobs = 0
         #: The job ledger the app counts children in. A real manager's rows are
         #: what `_job_count` reads, so the fake presents the same shape rather
         #: than having the app special-case a test double.
@@ -15226,3 +15238,56 @@ async def test_a_rehome_queued_before_the_session_binds_runs_on_the_bind_edge(
     assert session.model_label == "deepseek/deepseek-flash"
     assert app._rehome_await_bind is None
     assert "Switched to deepseek/deepseek-flash — not signed in to radient." in text
+
+
+@pytest.mark.asyncio
+async def test_the_band_marks_a_total_that_excludes_pending_voice_spend() -> None:
+    """D1 band stance (design round 1): a total with pending voice money is A FLOOR.
+
+    The band cannot carry the /session section's prose, and the figure itself
+    stays the published total (same number on every surface) — but `≥` is
+    exactly the band's existing word for "at least this much", and a session
+    whose total excludes a recorded voice charge has spent at least the figure.
+    A session with nothing pending renders the mark it always did.
+    """
+    from local_operator.session.channel_spend import InferenceSnapshot, combine
+    from local_operator.session.frontend_state import FrontendSpendChannels
+    from local_operator.tui.costs import LOWER_BOUND_MARK
+
+    def published_with(*, pending: list[dict[str, Any]]) -> FrontendSpendChannels:
+        return FrontendSpendChannels.model_validate(
+            combine(
+                [],
+                inference=InferenceSnapshot(
+                    micro=900_000,
+                    calls=10,
+                    priced_calls=10,
+                    knowledge="exact",
+                    by_identity={
+                        "anthropic/x": {
+                            "provider": "anthropic",
+                            "model_id": "x",
+                            "micro": 900_000,
+                            "calls": 10,
+                            "unpriced": 0,
+                        }
+                    },
+                ),
+                tracked=True,
+                pending=pending,
+            )
+        )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 24)) as pilot:
+        await pilot.pause()
+        app._spend_channels_state = published_with(pending=[])
+        unmarked = app._spend_text()
+        assert "$0.900" in unmarked and not unmarked.startswith(LOWER_BOUND_MARK), unmarked
+
+        app._spend_channels_state = published_with(
+            pending=[{"record_id": "tts:one", "channel": "tts", "ts_ms": 1}]
+        )
+        marked = app._spend_text()
+        assert marked.startswith(LOWER_BOUND_MARK), marked
+        assert "$0.900" in marked, "the FIGURE stays the published total"

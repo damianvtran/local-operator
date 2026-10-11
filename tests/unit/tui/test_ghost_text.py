@@ -115,7 +115,9 @@ GHOST_CASES = [
     # because that is the route on which the app fills the server rows.
     ("/mcp login ", "n", "otion"),
     ("/mcp login ", "l", "inear"),
-    # FUZZY: `/lg` + Tab produces `/login `, which is not `/lg` plus anything.
+    # FUZZY: `/lg` + Tab rewrites the span to a completion (`/login `, or
+    # `/highlights ` — the tied top row registration order picks), which is not
+    # `/lg` plus anything.
     # A span rewrite cannot be described by characters appended at the caret,
     # so the only honest ghost is none.
     ("", "/lg", ""),

@@ -100,7 +100,7 @@ fetched 2026-10-10 (no live call — same operator decision as above).
 | Google | image content blocks in `input` | `{"type":"image","data":<b64>,"mime_type":…}` | up to 14; no API mask (prompt-driven "semantic masking") |
 | xAI | `POST /v1/images/edits` | `"image": {"url": <data URI>, "type": "image_url"}` | single-image shape wired; multi-image (≤5 refs) page read, its field shape waits for the multi-source wire; edits bill input + output |
 | OpenRouter | `input_references` | `[{"type":"image_url","image_url":{"url": …}}]` | sent only after `GET /api/v1/images/models` confirms `architecture.input_modalities` includes `"image"`; deterministic negative → recorded skip, models read that cannot answer → rung failure (its real class) |
-| Radient | — (skips) | — | the media route forwards body keys verbatim to FAL and maps `source_url` only on the LEGACY adapter, so an edit today is a silent billed text-to-image or a rejection; the message says so. The enabling PR (hub capability + server-side mapping) flips `sources` and wires `image_url`/`image_urls` |
+| Radient | `POST /v1/tools/media/generate` — canonical `image_url` (string; data URI or https URL); `image_urls` list also live | single-source wired (`image_url`); the hub accepts `image_urls` lists too — the harness multi-source wire is a named residual | hub media slice LIVE 2026-10-10 (radient PR #111, deploy `c24615b9`): listing carries per-pin `sources`/`max_sources`/`mask`/`edit_default` (26/26 rows); `source_url` and every alias REFUSED (400 before any vendor call, no charge); blank model + source auto-resolves to the edit default (`openai/gpt-image-2.5/sunburst/edit`, named in the response; REQUIRES an explicit `image_size` — absent/`auto` refused at quote); a `prompt` must ride an edit (prompt-less submits queue then fail vendor-side, unbilled); 16 MiB media body cap. The harness resolves the listing's `edit_default` row itself for an un-pinned edit so the unit-price/affordability read keeps its row |
 | openai-sub | — (skips) | — | unchanged; the planned Codex probe settles acceptance |
 
 ### Edit cost posture
@@ -171,9 +171,14 @@ an operator-approved probe). The acceptance probe for each is ONE call:
 
 Radient/FAL are the unchanged baseline rungs; their live evidence stands from
 wave-1 (PRs #2089/#2091), and no new live call was made this wave. The edit
-paths added 2026-10-10 carry the same posture: hermetic-test-backed against
-the fetched docs, no live call; the per-rung probes above (plus one FAL edit
-and one OpenAI edit probe) settle them when the operator opens spend.
+paths added 2026-10-10 carry the same posture for the other four rungs:
+hermetic-test-backed against the fetched docs, no live call; the per-rung
+probes above (plus one FAL edit and one OpenAI edit probe) settle them when
+the operator opens spend. Radient's edit path is the exception and it was
+validated live on the day the hub slice went out: prod check on the hub
+(blank-model + data-URI source + prompt → COMPLETED, settled $0.05268) and
+the harness rung flip's own end-to-end run (see the harness PR's testing
+evidence).
 
 ## Document-only this wave (survey verdicts)
 

@@ -4315,3 +4315,88 @@ def test_set_spend_context_assigns_every_field_and_never_skips_a_none() -> None:
     assert p.context_is_estimate is None
     assert p.usage == {}
     assert p.version > version
+
+
+def test_a_supplement_beat_folds_keep_newest_per_anchor() -> None:
+    """Turn supplements (memo §3.1 row 18; P5's sibling map): beats are
+    self-replacing per anchor, so the fold keeps the NEWEST version and a replay
+    cannot roll a reader back."""
+    from local_operator.harness.types import SupplementProgressEvent
+
+    fold = make_fold()
+    fold.fold_event(SupplementProgressEvent(anchor="a1", job="j1", version=1, state="queued"))
+    fold.fold_event(
+        SupplementProgressEvent(
+            anchor="a1",
+            job="j1",
+            version=2,
+            state="running",
+            stage="generating",
+            elapsed_s=1.5,
+        )
+    )
+    fold.fold_event(SupplementProgressEvent(anchor="a2", job="j2", version=1, state="decided"))
+    # A replayed/late v1 beat after the v2 one: dropped, never a roll-back.
+    fold.fold_event(SupplementProgressEvent(anchor="a1", job="j1", version=1, state="queued"))
+
+    held = fold.projection.supplements
+    assert set(held) == {"a1", "a2"}
+    assert held["a1"]["version"] == 2
+    assert held["a1"]["state"] == "running" and held["a1"]["stage"] == "generating"
+    assert held["a2"]["state"] == "decided"
+
+
+def test_the_projection_wire_carries_the_supplement_map_loosely() -> None:
+    """The map rides the projection as a sibling key: a payload WITHOUT it (an
+    older runtime) rebuilds to the empty default, and one with it survives
+    ``to_json``/``_projection_from_json`` byte-for-byte as data -- an old app
+    build ignores the unknown key instead of tripping on an unknown row kind."""
+    from local_operator.harness.types import SupplementProgressEvent
+
+    fold = make_fold()
+    fold.fold_event(
+        SupplementProgressEvent(
+            anchor="a1",
+            job="j1",
+            version=3,
+            state="done",
+            files=[
+                {
+                    "path": "reports/q3.md",
+                    "name": "q3.md",
+                    "kind": "markdown",
+                    "size_bytes": 1,
+                    "mtime": 1.0,
+                    "why": "w",
+                }
+            ],
+            components=[
+                {
+                    "attachment": "d" * 32,
+                    "title": "t",
+                    "source": "s",
+                    "mime": "text/html",
+                    "height_hint": 320,
+                }
+            ],
+        )
+    )
+    wire = fold.projection.to_json()
+    assert wire["supplements"]["a1"]["version"] == 3
+    assert wire["supplements"]["a1"]["components"][0]["attachment"] == "d" * 32
+
+    record = SessionRecord(
+        pid=1,
+        kind="tui",
+        session_id="s1",
+        conversation_name="",
+        cwd="",
+        model_label="",
+        control_port=0,
+        control_key="",
+    )
+    rebuilt = _projection_from_json(wire, record)
+    assert rebuilt.supplements["a1"]["version"] == 3
+
+    older = _projection_from_json({k: v for k, v in wire.items() if k != "supplements"}, record)
+    assert older.supplements == {}

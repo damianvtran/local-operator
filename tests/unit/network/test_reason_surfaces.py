@@ -445,6 +445,19 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "``AbortSignal.reason``: the abort's own reason, authored in this process by "
         "the canceller for the abort line of the tool result, never a peer's prose",
     ),
+    # The todo store's own blocked-item reason, read by ``todo_fingerprint`` to
+    # build the guardrail's latch fingerprint: authored on this device by the
+    # ``todo`` tool's ``block`` op — this device's own list, never a mesh or peer
+    # token. THIS read compares it and renders nothing; the surfaces that do
+    # display it (``_todo_rows``' view/receipt rows, the TUI panel's item row,
+    # and the turn-boundary reminder to the model) all show the operator's own
+    # blocked reason as the condition to re-check.
+    ("local_operator/tools/builtin.py", "todo_fingerprint", "reason"): (
+        1,
+        "the todo store's own blocked reason (authored by the todo tool's block "
+        "op), compared in the latch fingerprint — this read renders nothing; the "
+        "surfaces that display it show this device's own list, not a mesh token",
+    ),
     # ``mobile/daemon.py`` joined this scan with the mesh half's own import
     # (``MeshRefusal``) — the base file named ``local_operator.network`` nowhere.
     # The read below predates that and is not a mesh value: it is the session's
@@ -460,6 +473,22 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "the session's own attention record's reason, fed to the shared "
         "completion_notice row builder — never a peer's wire value; the module "
         "joined the scan with the mesh half's MeshRefusal import",
+    ),
+    # S3a's own reads of the MEMBER's receipt sentence: ``detail`` is where the
+    # classified answer's prose (RU §6.1's "2 sessions busy since 10:02" class)
+    # lands in the record's per-member entry, and these two sites PASS it there
+    # — ``step_record`` writes it into the receipt and the member's state line,
+    # ``_audit_member_state`` into the origin's member row's ``reason``. Same
+    # contract as ``update_peer`` above (the member's own words, never
+    # re-worded; the gloss's vocabulary does not cover a member's receipt).
+    ("local_operator/network/rollouts.py", "step_record", "detail"): (
+        2,
+        "the member's own receipt prose, passed onto the record's receipts "
+        "verbatim (RU §6.1's detail field is FOR a reader)",
+    ),
+    ("local_operator/network/rollouts.py", "_audit_member_state", "detail"): (
+        1,
+        "the member's own receipt prose, passed into the origin's member row",
     ),
 }
 

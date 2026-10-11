@@ -23,6 +23,7 @@ error`` status and can be retried with ``/reload`` (TUI-012).
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import logging
 import os
@@ -208,7 +209,9 @@ from local_operator.slash_commands import (
     slash_command_for,
     unknown_flag_refusal,
 )
+from local_operator.supplements.contract import SUPERSEDED_ERROR, reader_disposition
 from local_operator.tui import images as images_mod
+from local_operator.tui import supplements as supplement_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.ask_open_policy import (
     AskOpenPolicy,
@@ -252,6 +255,7 @@ from local_operator.tui.events import (
     SubagentEnded,
     SubagentProgress,
     SubagentStarted,
+    SupplementProgress,
     ToolComposing,
     ToolEnded,
     ToolStarted,
@@ -265,7 +269,12 @@ from local_operator.tui.events import (
     WakeDelivered,
 )
 from local_operator.tui.glyphs import display_name
-from local_operator.tui.link_targets import LinkTarget, build_link_targets, is_openable
+from local_operator.tui.link_targets import (
+    LinkTarget,
+    build_link_targets,
+    file_affordance,
+    is_openable,
+)
 from local_operator.tui.liveness import (
     LIVENESS_PROBE_EVERY_S,
     LivenessProbe,
@@ -340,6 +349,7 @@ from local_operator.tui.terminal_title import (
     cwd_label,
     terminal_title_enabled,
 )
+from local_operator.tui.widgets import welcome as welcome_mod
 from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
 from local_operator.tui.widgets.aside_panel import (
     ASIDE_PROMPT,
@@ -486,6 +496,7 @@ from local_operator.tui.widgets.subagent_panel import (
     paused_child_ids,
 )
 from local_operator.tui.widgets.subagent_view import SubagentView, SubagentViewDismissed
+from local_operator.tui.widgets.supplement_block import SupplementBlock
 from local_operator.tui.widgets.toast import (
     _NETWORK_MARKER,
     TOAST_DEFAULT_MS,
@@ -521,11 +532,13 @@ from local_operator.tui.widgets.usage_panel import (
     UsageRefreshRequested,
 )
 from local_operator.tui.widgets.wake_panel import WakePanel
-from local_operator.tui.widgets.welcome import (
-    MODEL_PENDING,
-    WelcomeView,
-    session_welcome_info,
-)
+
+# The band's two catalogued words are read THROUGH THE MODULE at every use
+# site, never copied into this module's namespace: a locale move re-materialises
+# `welcome`'s attributes (slice C's refresh registry), so a from-import would
+# freeze this module's copy at boot — the band would keep painting `connecting…`
+# while the splash showed the moved word (round-1 F1, reproduced).
+from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
@@ -4960,6 +4973,24 @@ class OperatorApp(App[None]):
         #: reason before each of its calls, and each phase is its own block.
         self._reasoning_block: ReasoningBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
+        # Turn supplements ("Highlights", memo §2.7/§2.8). One registry per
+        # attached conversation, reset with the transcript's own bookkeeping
+        # (`/clear`, source swap, canonical reset) exactly like `_tool_cards`:
+        # `_supplement_blocks` is the block mounted per answer ANCHOR (message
+        # id, not position — a late beat lands on the right answer),
+        # `_supplement_rows` is the newest row seen per anchor in recency
+        # order (the `/highlights` commands' target), `_supplement_images` is
+        # the image blocks mounted beside each (so a re-apply never doubles
+        # one), `_supplement_read` names anchors a settled read answered for
+        # (the lazy read fires only for anchors it has not answered), and
+        # `_supplement_live` names anchors a LIVE beat has spoken for — a read
+        # result must never overwrite a newer live state.
+        self._supplement_blocks: dict[str, SupplementBlock] = {}
+        self._supplement_rows: dict[str, dict[str, Any]] = {}
+        self._supplement_images: dict[str, dict[str, ImageBlock]] = {}
+        self._supplement_read: set[str] = set()
+        self._supplement_read_inflight: set[str] = set()
+        self._supplement_live: set[str] = set()
         # Rows for calls the model is still dictating. Separate from
         # `_tool_cards`, which holds calls that are RUNNING: a composing row has
         # no execution behind it yet, and treating the two as one dictionary let
@@ -6258,7 +6289,7 @@ class OperatorApp(App[None]):
     def _turn_notified(self) -> bool:
         return self._interaction.turn.notified
         self._status = StatusLine(self.query_one("#status-band", Static))
-        self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
+        self._status.update(model_label=welcome_mod.MODEL_PENDING, cwd=os.getcwd())
         # Attached AFTER the first `update`, so the first STABLE title already
         # carries the working directory it falls back to while the conversation
         # is unnamed. Attaching first would leave a bare `lo ›` on screen for
@@ -11607,6 +11638,14 @@ class OperatorApp(App[None]):
     # -- lifecycle ----------------------------------------------------------
     async def on_mount(self) -> None:
         install_markdown_theme()
+        # The process's language is resolved ONCE at boot through the same chain
+        # every surface reads (RFC §2.5: config `language` → LOP_LANG → OS →
+        # `en`, filtered to the shipped set). Today that is `en` — the only
+        # shipped locale — so this is a no-op until a translation wave ships;
+        # `/language` and the config watcher move it later without a restart.
+        from local_operator.i18n.resolve import resolve_language
+
+        self._apply_language(resolve_language())
         self._sidebar_timer = self.set_interval(2.0, self._refresh_sidebar, pause=True)
         # THE FOREGROUND OWNER PROBE. `verified_at` is written only on a wire
         # answer and every one of those surfaces is EVENT-DRIVEN, so without this
@@ -11663,7 +11702,7 @@ class OperatorApp(App[None]):
         self._set_welcome_visible(True)
 
         self._status = StatusLine(self.query_one("#status-band", Static))
-        self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
+        self._status.update(model_label=welcome_mod.MODEL_PENDING, cwd=os.getcwd())
         # And the composer's visibility flags (``display.composer.*``) on the
         # boot frame: a band or segment the user hid must never be painted and
         # then removed. Straight after the band exists, before the first
@@ -11816,6 +11855,10 @@ class OperatorApp(App[None]):
         :meth:`_measure_preloaded_context` already puts its measurement in one.
         """
         self._invalidate_pending_frontend_state()
+        # A new conversation's supplement registries start empty: the previous
+        # session's blocks went with the cleared ledger, and its read/seen sets
+        # describe anchors THIS session may never carry.
+        self._reset_supplement_state()
         source = self._interactions.get(id(session))
         if source is None or source.retired:
             source = SessionInteraction(session)
@@ -12421,6 +12464,7 @@ class OperatorApp(App[None]):
         mcp_servers = list(getattr(state, "mcp_servers", []) or [])
         task_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "task"]
         bash_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "bash"]
+        video_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "video"]
         # Search spend rides the band cell here too. This path renders the
         # STORE's cumulative model cost rather than `_spend_total()` (which
         # already folds search spend in), so without this the canonical
@@ -12469,7 +12513,13 @@ class OperatorApp(App[None]):
             # is the hidden dock's only liveness cue, so a follower's band must
             # not go silent where the owner's would not (round 1, U2).
             subagents=sum(1 for j in task_jobs if j.status == "running"),
-            jobs=sum(1 for j in bash_jobs if j.status == "running" and not j.queued),
+            # Video rides the same rung here as the owner's band's
+            # `_job_count("bash") + _job_count("video")`, so the two cannot
+            # disagree about one session (the parity rule this block already
+            # states for `subagents`).
+            jobs=sum(
+                1 for j in (*bash_jobs, *video_jobs) if j.status == "running" and not j.queued
+            ),
             mcp=McpStatus(
                 configured=len(mcp_servers),
                 connected=sum(1 for server in mcp_servers if server.status == "connected"),
@@ -14703,6 +14753,11 @@ class OperatorApp(App[None]):
                 # end that already arrived while the card was being painted.
                 self._controller.register_restored_tools(set(painted))
             self._refresh_working_activity()
+            # Turn supplements: an answer row that just mounted may already have
+            # a journaled row the history fold cannot carry (they are custom
+            # entries) — the §2.11 lazy read is the replay mechanism, so it is
+            # asked once per projection for the anchors that have no answer yet.
+            self._request_supplement_reads()
             return projected
         finally:
             self._projection_message_id = ""
@@ -16033,10 +16088,12 @@ class OperatorApp(App[None]):
                 headline="No AI account connected",
             )
         if self._status is not None:
-            # "setup" rather than a model name: there is no model until the user
-            # picks a provider, and leaving MODEL_PENDING up would read as a
-            # session still booting rather than one waiting on the user.
-            self._status.update(model_label="setup", model_name="", streaming=False)
+            # MODEL_SETUP rather than a model name: there is no model until the
+            # user picks a provider, and leaving MODEL_PENDING up would read as a
+            # session still booting rather than one waiting on the user. The
+            # constant comes from the shared tui.status catalogue (T2), the same
+            # source the splash resolves, so band and splash agree by construction.
+            self._status.update(model_label=welcome_mod.MODEL_SETUP, model_name="", streaming=False)
 
     async def _reload_session(
         self, *, keep_context: bool = False, preserve_outgoing: bool = False
@@ -16609,7 +16666,7 @@ class OperatorApp(App[None]):
         # session's first turn happened to end.
         self._status.update(
             connection="",
-            model_label=MODEL_PENDING,
+            model_label=welcome_mod.MODEL_PENDING,
             # Cleared with the label it describes: a name left standing beside
             # `MODEL_PENDING` would be the dead session's model.
             model_name="",
@@ -25853,13 +25910,18 @@ class OperatorApp(App[None]):
         if stopped:
             text = f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
             # Sparing backgrounded `bash` is deliberate (`background=true`
-            # exists so a build outlives the turn) and genuinely surprising
-            # to a user who just escalated a stop, which reads as "stop all
-            # of it". Naming the survivors here, and only when there ARE
-            # any, prevents the "I stopped everything, why is the build
-            # still running" question at the one moment the answer is
-            # wanted (D3, design round 1). Unconditional, it would be noise.
-            spared = self._job_count("bash")
+            # exists so a build outlives the turn), and the media lane's video
+            # jobs outlive a stop for the same class of reason (the job is
+            # detached; contract §4.3) — both are genuinely surprising to a
+            # user who just escalated a stop, which reads as "stop all of
+            # it". Naming the survivors here, and only when there ARE any,
+            # prevents the "I stopped everything, why is the build still
+            # running" question at the one moment the answer is wanted (D3,
+            # design round 1). Unconditional, it would be noise. Video joins
+            # the count (remediation round 1, folded from the reviewer's
+            # observation): the sentence's own remedy — "jobs cancel to stop"
+            # — is exactly a video job's cancel rail (`jobs op='cancel'`).
+            spared = self._job_count("bash") + self._job_count("video")
             if spared:
                 text += (
                     f"; {spared} background job{'s' if spared != 1 else ''} "
@@ -28841,6 +28903,10 @@ class OperatorApp(App[None]):
         self._reasoning_block = None
         self._tool_cards = {}
         self._composing_cards = {}
+        # The supplement blocks went with the transcript like the cards above;
+        # their per-anchor registries (and the read/seen sets) reset with them,
+        # or a later beat would try to update a widget the view no longer holds.
+        self._reset_supplement_state()
         # The ask gate's settle-mount stash is turn state like the registries
         # beside it: the rows it described went with the transcript.
         self._ask_gate_settled_calls = {}
@@ -33994,7 +34060,12 @@ class OperatorApp(App[None]):
     def _poll_subagents(self) -> None:
         """Repaint the counter segments only when a running count changes."""
         agents = self._job_count("task")
-        jobs = self._job_count("bash")
+        # The jobs rung carries the video family too (§5.4's post-turn row): a
+        # video generation is a detached job whose card settles with the
+        # submit receipt (R5), so between submit and completion THIS counter is
+        # its only live presence — one number on the existing rung, never a
+        # second band row. Same predicate shape as `bash` (running, not queued).
+        jobs = self._job_count("bash") + self._job_count("video")
         # Delegated spend BEFORE the equality gate, because it moves on ticks
         # where the counts do not: a single child working for two minutes holds
         # `agents` at 1 the whole time while its bill climbs, so gating the
@@ -36962,12 +37033,17 @@ class OperatorApp(App[None]):
             self.screen.set_focus(None)
 
     def _job_count(self, kind: str) -> int:
-        """Jobs of one ``kind`` the band counts — ``task`` (subagents) or ``bash``.
+        """Jobs of one ``kind`` the band counts — ``task`` (subagents),
+        ``bash`` (backgrounded shell) or ``video`` (the media lane's detached
+        jobs).
 
-        The two are counted separately because they are different things an
+        The kinds are counted separately because they are different things an
         operator tracks: a subagent is delegated reasoning with no other
         representation on screen, while a backgrounded shell command already has
-        a tool card. Summing them would hide which kind is running.
+        a tool card. Summing them would hide which kind is running. ``video``
+        rides the same rungs as ``bash`` at the callers (the band's §5.4
+        post-turn row and the stop notice's spared count); it is named here so a
+        later reader cannot "simplify" the two-term callers back to one.
 
         ``task`` INCLUDES children still queued behind the capacity gate;
         ``bash`` does not. The asymmetry is the point. This counter is the
@@ -37277,10 +37353,12 @@ class OperatorApp(App[None]):
         if local:
             # Apply, do not announce. The only groups whose apply this process
             # owns and has not already performed are the approval gate, the
-            # keymap and `display.composer.*`: the theme and display caches are
-            # written by the same handlers that repainted, while
-            # `tool_approval_mode` reaches the gate through nothing but this
-            # listener.
+            # keymap, `display.composer.*` and `language` (the /settings page
+            # write's only apply path; the theme and display caches are written
+            # by the same handlers that repainted, `tool_approval_mode` reaches
+            # the gate through nothing but this listener, and the `/language`
+            # command applies directly — `set_active_locale` is idempotent, so
+            # its echo here moves nothing).
             if "tool_approval_mode" in changed:
                 self._follow_configured_approvals(change, announce=False)
             if any(key.startswith(_keymap.KEYMAP_PREFIX) for key in changed):
@@ -37302,6 +37380,14 @@ class OperatorApp(App[None]):
                 # `display` flags and the repaint are owed — the segments
                 # re-read themselves on it.
                 self._apply_composer_settings()
+            if "language" in changed:
+                # The /settings row's live half. Silent, like the other local
+                # applies: the page (or the /language command, whose echo this
+                # is) already showed its own receipt.
+                from local_operator.i18n.resolve import resolve_language
+
+                value = getattr(change, "values", {}).get("language")
+                self._apply_language(resolve_language(value))
             return
         from local_operator import settings_io
 
@@ -37480,6 +37566,15 @@ class OperatorApp(App[None]):
                     self._apply_theme(wanted)
                 except KeyError:
                     self._system_notice(f"theme: unknown theme {wanted!r} in config.yml", "warning")
+        if "language" in changed:
+            # The same apply the /language command runs; `applied: language`
+            # above has told the user the key moved, and the swap (catalogue +
+            # repaint) is the half a line of text cannot do. Disk source only —
+            # the local branch returns before this point.
+            from local_operator.i18n.resolve import resolve_language
+
+            value = getattr(change, "values", {}).get("language")
+            self._apply_language(resolve_language(value))
 
     async def _reconcile_aida_title(self) -> None:
         """Point her STORED title at ``aida.name`` (the R1-M3 seam).
@@ -38893,6 +38988,8 @@ class OperatorApp(App[None]):
             self._cmd_fast(arg, notice)
         elif command == "/theme":
             self._cmd_theme(arg, notice)
+        elif command == "/language":
+            self._cmd_language(arg, notice)
         elif command == "/provider":
             self._cmd_providers(notice)
         elif command == "/sidebar":
@@ -38942,6 +39039,11 @@ class OperatorApp(App[None]):
             self._cmd_compact()
         elif command == "/stop":
             self._cmd_stop(arg, notice)
+        elif command == "/highlights":
+            # Beside `/stop` because both act on background work the turn left
+            # behind: a supplement job is not the turn (§2.9), so cancelling it
+            # is not `/stop` — this is the command that touches it.
+            self._cmd_highlights(arg, notice)
         elif command == "/copy":
             self._cmd_copy(notice)
         elif command == "/links":
@@ -41617,6 +41719,104 @@ class OperatorApp(App[None]):
         except Exception as error:  # noqa: BLE001 — reported to the user verbatim
             return str(error)
 
+    def _cmd_language(self, arg: str, notice: NoticeFn) -> None:
+        """``/language`` — show the UI language; ``/language <tag>`` — switch it.
+
+        The command is the DISCOVERABLE half of the ``language`` setting; the
+        ``/settings`` row (appearance) is the other, and both write the same
+        config key through ``settings_io.write_setting`` — one truth, so the
+        picker, this command and the resolver chain cannot disagree. The value
+        space is the picker's own (``language_options``): ``auto`` plus the
+        SHIPPED locales only, because an unaudited locale keys no catalogue
+        and would render message codes.
+
+        A switch PERSISTS (the ``language`` key in config.yml) and applies to
+        the running app at once — ``_apply_language`` swaps the catalogue and
+        repaints; nothing waits for a restart, because a language is a
+        standing preference by nature. The receipt names the RESOLVED
+        language, which is what a user will actually see: with ``auto`` the
+        answer comes from the chain (env, then the OS), and while only ``en``
+        ships the shipped filter pins every answer to ``en``.
+        """
+        from local_operator import settings_io
+        from local_operator.i18n.resolve import (
+            DEFAULT_LANGUAGE,
+            language_name,
+            language_options,
+            normalise_locale,
+            resolve_language,
+        )
+
+        wanted = arg.strip()
+        resolved = resolve_language()
+        options = dict(language_options())
+        if not wanted:
+            # Within the picker's receipt budget; the space is the browse
+            # (`_language_choices`), and the /settings row has the same list.
+            self._system_notice(
+                f"language: {resolved} ({language_name(resolved)}) — "
+                f"/language <{'|'.join(options)}> switches; space lists"
+            )
+            return
+        key = (
+            DEFAULT_LANGUAGE
+            if wanted.casefold() == DEFAULT_LANGUAGE
+            else normalise_locale(wanted) or wanted
+        )
+        if key not in options:
+            self._system_notice(
+                f"unknown language {wanted!r} — available: {', '.join(options)}", "warning"
+            )
+            return
+        if key == self._language_current():
+            self._system_notice(
+                f"language: already {key} — resolves to {resolved} " f"({language_name(resolved)})"
+            )
+            return
+        setting = settings_io.resolve_key("language")
+        if setting is None:  # the registry owns the key; guard a broken build
+            self._system_notice("language: the setting is not registered in this build", "warning")
+            return
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            settings_io.write_setting(ConfigManager(config_dir()), setting, key)
+        except Exception as error:  # noqa: BLE001 — reported to the user verbatim
+            self._system_notice(f"language: could not save {key} — {error}", "warning")
+            return
+        active = resolve_language()
+        self._apply_language(active)
+        notice(f"language: {key} saved — active {active} ({language_name(active)})")
+
+    def _apply_language(self, locale: str) -> None:
+        """Point every rendering surface at ``locale``, live (slice C).
+
+        The catalogue swap lives in ``i18n.text``: ``set_active_locale`` moves
+        the process's active locale and re-runs the registered
+        re-materialisers — the splash's and the band's constants, keymap's tip
+        templates — while everything resolved per render follows on its next
+        call. The repaint below is owed because those two widgets hold PAINTED
+        text between updates; without it a swap would look like nothing
+        happened until the next unrelated redraw.
+
+        Idempotent and cheap: a same-locale call is a no-op inside
+        ``set_active_locale`` (no re-materialiser runs) plus two dirty marks,
+        which is what lets the config watcher's echo of this process's own
+        write call it unconditionally.
+
+        Not covered here, by design: the slash registry's descriptions, which
+        resolve through ``messages.render`` at import (the S2 seam note says
+        where that rework starts) — they move with their own slice.
+        """
+        from local_operator.i18n import text as i18n_text
+
+        i18n_text.set_active_locale(locale)
+        if self._welcome is not None:
+            self._welcome.refresh()
+        if self._status is not None:
+            self._status.refresh()
+
     def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.
 
@@ -41716,6 +41916,51 @@ class OperatorApp(App[None]):
             self.query_one(WelcomeView).refresh()
         except Exception:
             pass
+
+    def _language_current(self) -> str:
+        """The stored language value, normalised; ``auto`` when absent.
+
+        The same read and normalisation the resolver chain applies, so the
+        command's \"already\" comparison, the choices list's marker row and
+        the boot resolution cannot disagree about which value is in force.
+        """
+        from local_operator.i18n.resolve import (
+            DEFAULT_LANGUAGE,
+            config_value,
+            normalise_locale,
+        )
+
+        stored = config_value()
+        return (normalise_locale(stored) or stored) if stored else DEFAULT_LANGUAGE
+
+    def _language_choices(self) -> list[ArgumentChoice]:
+        """One row per selectable language: ``auto`` plus the SHIPPED locales.
+
+        Sourced from ``language_options`` — the same tuple the /settings row's
+        picker and the command's validation read — so the three surfaces cannot
+        drift and a wave that ships a locale widens all of them at once.
+        ``detail`` carries the current marker only; the value a selection
+        writes is the row's ``name``.
+        """
+        from local_operator.i18n.resolve import (
+            DEFAULT_LANGUAGE,
+            language_name,
+            language_options,
+        )
+
+        current = self._language_current()
+        return [
+            ArgumentChoice(
+                value,
+                (
+                    "follow the environment, then the system"
+                    if value == DEFAULT_LANGUAGE
+                    else language_name(value)
+                ),
+                detail="← current" if value == current else "",
+            )
+            for value, _label in language_options()
+        ]
 
     def _theme_choices(self) -> list[ArgumentChoice]:
         """One row per registered theme, the active one marked.
@@ -41996,7 +42241,8 @@ class OperatorApp(App[None]):
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.
 
-        View-only: it never touches the store, so the guardrail's ``open_todos``
+        View-only: it never touches the store, so the guardrail's two
+        projections (``open_todos`` for pending, ``blocked_todos`` for blocked)
         and ``todo_fingerprint`` are untouched (design §5.4). ``toggle_expanded``
         flips the panel flag and drops its equality-guard so the change repaints;
         ``_refresh_band`` settles the band inset and row budget in the same tick
@@ -46600,6 +46846,12 @@ class OperatorApp(App[None]):
             picker.set_choices(self._theme_choices(), highlight=theme_mod.current_theme())
             picker.set_notice("")
             return
+        if message.command in ("language", "lang"):
+            # Opens on the row the setting is ON (`auto` when absent), the same
+            # landing `/theme` gives a browse.
+            picker.set_choices(self._language_choices(), highlight=self._language_current())
+            picker.set_notice("")
+            return
         if message.command in ("credential", "cred"):
             # Both suppression reasons are read here, and the notice follows
             # whichever applies. ARMED wins the notice when both are true (a
@@ -50879,6 +51131,17 @@ class OperatorApp(App[None]):
             return self._archive_slash_result(False, SlashResult)
         if command == "delete":
             return await self._delete_slash_result(args, SlashResult)
+        # ``/highlights`` is deliberately NOT among the producers above, and
+        # that is host scope rather than an omission: turn supplements are a
+        # ``ServingSessionHandle`` surface — the runner, the lazy read and the
+        # three control ops all live on that handle (memo §2.2, "host scope
+        # follows from the seam") — and a session THIS app hosts has no runner
+        # for a branch to act on, so the refusal below is the honest answer.
+        # The runtime host implements the command
+        # (``ServingSessionHandle._highlights_slash``), which is the only host
+        # where the actions can exist; a no-op branch here would fabricate the
+        # "nothing is being prepared" stub — indistinguishable from a session
+        # that really is idle — for one that cannot run supplements at all.
         # Every authoritative capability must land on a producer ABOVE: a
         # success-shaped receipt for an operation that never ran is the round-2
         # MAJOR-1 defect, so an unhandled command answers with an honest
@@ -54040,10 +54303,19 @@ class OperatorApp(App[None]):
             # The marks are the BACKEND's knowledge, not a re-derivation: a
             # partial or floor total is a lower bound on every surface, and
             # ``exact`` is the only state that may print an unmarked figure.
+            #
+            # PENDING VOICE MONEY IS A FLOOR TOO, and this is the band's
+            # conscious stance on it (design round 1, D1): the published total
+            # excludes recorded-but-unfolded voice charges, so the figure is a
+            # lower bound on what the conversation actually cost. The band has
+            # no room for the /session section's prose, but `≥` is exactly its
+            # existing word for "at least this much" — the number itself stays
+            # the published total (same figure on every surface), and a session
+            # with nothing pending keeps the mark it always had.
             is_floor = str(getattr(published, "knowledge", "unknown")) in {
                 "floor",
                 "partial",
-            }
+            } or bool(getattr(published, "pending", None))
         else:
             is_floor = (
                 self._spend_is_floor or self._search_spend_is_floor() if floor is None else floor
@@ -54634,6 +54906,7 @@ class OperatorApp(App[None]):
             self._resume_mounted_ids.clear()
             self._tool_cards = {}
             self._composing_cards = {}
+            self._reset_supplement_state()
             self._ask_gate_settled_calls = {}
             self._streaming_block = None
             self._working_block = None
@@ -56243,6 +56516,508 @@ class OperatorApp(App[None]):
         # really is running. Cleared wherever the flag it serves is cleared.
         self._settled_child_ids.clear()
 
+    # -- turn supplements ("Highlights", memo §2.7/§2.8) ---------------------
+
+    def on_supplement_progress(self, message: SupplementProgress) -> None:
+        """A live supplement beat: place or refresh the block under its answer.
+
+        No generation guard and no deferral: the job is not the turn, the beat
+        IS the state, and the handler only mutates the transcript — so it can
+        never block input or delay the next turn (§2.9). A repeat or an
+        out-of-order beat repaints identically, because the block renders as a
+        pure function of the merged row.
+        """
+        anchor = str(message.anchor or "")
+        if not anchor:
+            return
+        self._supplement_live.add(anchor)
+        terminal = message.state in ("done", "failed", "cancelled", "skipped")
+        self._apply_supplement(anchor, message.details(), job_live=not terminal)
+
+    def _apply_supplement(self, anchor: str, details: Mapping[str, Any], *, job_live: bool) -> None:
+        """Fold one row (live beat or read result) into the block and registry.
+
+        MERGES over the newest known row for the anchor: a ``running`` beat
+        carries empty file lists by design (§2.7 — only decided/done carry
+        them), so replacing blindly would drop the callouts the ``decided``
+        beat had already put on screen. A version CHANGE replaces the lists
+        instead: version + 1 is a new attempt whose empty list means empty.
+        """
+        merged = self._merge_supplement(anchor, details)
+        state = str(merged.get("state", ""))
+        if merged.get("error") == SUPERSEDED_ERROR or merged.get("dismissed") or state == "skipped":
+            # Superseded / dismissed / skipped: nothing renders (§2.8), and the
+            # row leaves the registry so no command can target it again.
+            self._remove_supplement(anchor)
+            return
+        disposition = reader_disposition(merged, job_live=job_live)
+        if disposition == "nothing":
+            self._remove_supplement(anchor)
+            return
+        # Recency: keys keep insertion order, and a touched anchor moves to the
+        # end, which is what "/highlights ..." reads as "the newest row".
+        self._supplement_rows.pop(anchor, None)
+        self._supplement_rows[anchor] = merged
+
+        view = self._supplement_view()
+        if view is None:
+            return
+        block = self._supplement_blocks.get(anchor)
+        # MEMBERSHIP, not ``is_mounted``: a block mounted earlier in THIS call
+        # stack (the decided → done swap is one message apart) is in ``_blocks``
+        # but not yet reported as mounted by Textual, and the mount-time
+        # question here is only "does the container still hold it".
+        mounted_blocks = view.blocks()
+        if block is not None and block not in mounted_blocks:
+            self._supplement_blocks.pop(anchor, None)
+            block = None
+        if block is None:
+            # STRUCTURAL dedupe, independent of this method's own registry: a
+            # block already in the container for this anchor is adopted rather
+            # than doubled. The registry can be empty while the container holds
+            # one (a read result landing in the same stack as its beat), and two
+            # blocks under one answer is the visible failure that class causes.
+            block = next(
+                (
+                    candidate
+                    for candidate in mounted_blocks
+                    if isinstance(candidate, SupplementBlock) and candidate.anchor_id == anchor
+                ),
+                None,
+            )
+            if block is not None:
+                self._supplement_blocks[anchor] = block
+        shows_block = disposition != "block" or bool(merged.get("files"))
+        if not shows_block:
+            # A done row with images only: the block itself would be invisible
+            # (HTML is skipped by contract), so only the images mount — under
+            # the answer.
+            if block is not None:
+                self._remove_supplement(anchor, drop_row=False)
+        elif block is None:
+            answer = self._supplement_answer_block(anchor)
+            if answer is None:
+                # The answer row is not on screen (not in the rendered bound):
+                # the held row mounts when the answer's page does — the
+                # projection read re-arms for a live anchor whose block is not
+                # mounted (see `_request_supplement_reads`).
+                return
+            width = 0
+            try:
+                width = view.scrollable_content_region.width or view.size.width
+            except Exception:  # noqa: BLE001 — no layout yet: the fold hint stays 0
+                width = 0
+            block = SupplementBlock(
+                merged,
+                job_live=job_live,
+                fold_width=width if width and width > 0 else 0,
+                cwd=self._supplement_cwd(),
+            )
+            index = view.blocks().index(answer) + 1
+            view.insert_blocks(index, [block])
+            self._supplement_blocks[anchor] = block
+        else:
+            block.set_details(merged, job_live=job_live)
+        if state == "done":
+            self._mount_supplement_images(anchor, merged)
+        if (
+            state in ("done", "failed", "cancelled")
+            and anchor not in self._supplement_read
+            and anchor not in self._supplement_read_inflight
+            and callable(getattr(self._session, "supplements_for", None))
+        ):
+            # THE TERMINAL BEAT'S ROW UPGRADE. The event carries the FEATURED
+            # files only (memo §2.7: ``files``, "the same shape as the row") —
+            # ``files_more``/``more`` ride the ROW, and the read op is what
+            # serves it. One read per job makes the live block identical to
+            # the replayed one (the "N more files" disclosure included)
+            # instead of the disclosure appearing only after a reload; the
+            # cost is the read the design already documents (§2.11), and the
+            # guard keeps a read that already served this anchor from being
+            # asked twice.
+            self._supplement_read_inflight.add(anchor)
+            self.run_worker(self._read_supplements([anchor]), group="supplement-read")
+
+    def _merge_supplement(self, anchor: str, details: Mapping[str, Any]) -> dict[str, Any]:
+        """The row to paint: ``details`` with the same-version lists carried over."""
+        merged = dict(details)
+        prev = self._supplement_rows.get(anchor)
+        if not isinstance(prev, Mapping):
+            return merged
+        try:
+            same_version = int(merged.get("version", 0) or 0) == int(prev.get("version", 0) or 0)
+        except (TypeError, ValueError):
+            same_version = False
+        if same_version:
+            for key in ("files", "files_more", "more", "components", "images"):
+                if not merged.get(key) and prev.get(key):
+                    merged[key] = prev[key]
+        return merged
+
+    def _supplement_cwd(self) -> str | None:
+        """The session working directory callout paths resolve against."""
+        try:
+            cwd = str(getattr(self._session, "cwd", "") or "")
+        except Exception:  # noqa: BLE001 — no session: no relative resolution
+            return None
+        return cwd or None
+
+    def _supplement_view(self) -> Any:
+        """The transcript view, or ``None`` once it is gone (teardown)."""
+        try:
+            return self._transcript_view()
+        except Exception:  # noqa: BLE001 — NoMatches once the screen is gone
+            return None
+
+    def _supplement_answer_block(self, anchor: str) -> AssistantBlock | None:
+        """The mounted answer block whose message id is ``anchor``, if any."""
+        view = self._supplement_view()
+        if view is None:
+            return None
+        for block in view.blocks():
+            if (
+                isinstance(block, AssistantBlock)
+                and str(getattr(block, "completion_anchor_id", "") or "") == anchor
+            ):
+                return block
+        return None
+
+    def _mount_supplement_images(self, anchor: str, details: Mapping[str, Any]) -> None:
+        """Mount image entries as ImageBlocks beside the block (once per digest).
+
+        The SAME ImageBlock the transcript's ``append_image_blocks`` mounts —
+        one renderer — built directly because these must land at a POSITION
+        (right under the row they belong to), not at the tail the existing
+        helper appends to. A digest already mounted for this anchor is never
+        doubled, so a repeated ``done`` beat repaints idempotently.
+        """
+        entries = details.get("images")
+        if not isinstance(entries, list) or not entries:
+            return
+        view = self._supplement_view()
+        if view is None:
+            return
+        blocks = view.blocks()
+        after = self._supplement_blocks.get(anchor)
+        if after is None or after not in blocks:
+            after = self._supplement_answer_block(anchor)
+        if after is None:
+            return
+        from local_operator.session.attachments import AttachmentStore
+
+        store = AttachmentStore()
+        mounted = self._supplement_images.setdefault(anchor, {})
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            digest = str(entry.get("attachment", "") or "")
+            if not digest or digest in mounted:
+                continue
+            mime = str(entry.get("mime", "") or "")
+            if mime and not mime.startswith("image/"):
+                # Only images render on this surface; anything else is skipped
+                # silently, with no placeholder (the operator's requirement).
+                continue
+            resolved = store.get_bytes(digest)
+            if resolved is None:
+                continue
+            raw, stored_mime = resolved
+            resolved_mime = mime or str(stored_mime or "image/png")
+            try:
+                image_block = ImageBlock(
+                    base64.b64encode(raw).decode("ascii"),
+                    resolved_mime,
+                    label=supplement_mod.display_text(entry.get("title")),
+                    fold_width=max(0, view.size.width),
+                )
+            except Exception:  # noqa: BLE001 — one bad blob must not take the row down
+                logger.debug("supplement image block construction failed", exc_info=True)
+                continue
+            index = view.blocks().index(after) + 1
+            view.insert_blocks(index, [image_block])
+            mounted[digest] = image_block
+            after = image_block
+
+    def _remove_supplement(self, anchor: str, *, drop_row: bool = True) -> None:
+        """Lift the block and its images; by default forget the row too.
+
+        ``remove_block`` is membership-guarded on its own side, so neither
+        caller here re-asks: a block mounted in the same stack that removes it
+        is in ``_blocks`` before Textual reports it as mounted.
+        """
+        view = self._supplement_view()
+        block = self._supplement_blocks.pop(anchor, None)
+        if block is not None and view is not None:
+            view.remove_block(block)
+        for image_block in self._supplement_images.pop(anchor, {}).values():
+            if view is not None:
+                view.remove_block(image_block)
+        if drop_row:
+            self._supplement_rows.pop(anchor, None)
+
+    def _request_supplement_reads(self) -> None:
+        """Issue the lazy read for mounted answers this app has not heard about.
+
+        The memo's §2.11 rule: a surface reads ``{anchor: newest row}`` when an
+        answer row mounts, because supplement rows are custom entries the
+        history fold does not carry — this read IS the replay mechanism. Titled
+        anchors are skipped once a read ANSWERED for them, and an empty answer
+        leaves the anchor unread on purpose: the first read can race a cold
+        attach, and a later projection then retries instead of losing the row.
+        """
+        session = self._session
+        if not callable(getattr(session, "supplements_for", None)):
+            return
+        view = self._supplement_view()
+        if view is None:
+            return
+        anchors: list[str] = []
+        for block in view.blocks():
+            if not isinstance(block, AssistantBlock):
+                continue
+            anchor = str(getattr(block, "completion_anchor_id", "") or "")
+            if not anchor or anchor in self._supplement_read:
+                continue
+            if anchor in self._supplement_read_inflight:
+                continue
+            # A live anchor is skipped only while its own block is mounted:
+            # that is the case its beat path owns end to end (the terminal
+            # beat asks this same read, below its mount branch). A live anchor
+            # with NO block fell out of that path — the beat landed while its
+            # answer was outside the rendered bound, so `_apply_supplement`
+            # returned before the read was asked — and this pass is the one
+            # that re-arms it when the answer's page mounts.
+            if anchor in self._supplement_live and anchor in self._supplement_blocks:
+                continue
+            anchors.append(anchor)
+        if not anchors:
+            return
+        self._supplement_read_inflight.update(anchors)
+        self.run_worker(self._read_supplements(anchors), group="supplement-read")
+
+    async def _read_supplements(self, anchors: list[str]) -> None:
+        """Fetch and apply the lazy read's rows; never let it raise into the app."""
+        session = self._session
+        reader = getattr(session, "supplements_for", None)
+        if not callable(reader):
+            return
+        read = cast(Callable[[list[str]], Awaitable[Any]], reader)
+        try:
+            rows = await read(anchors)
+        except Exception:  # noqa: BLE001 — a read that fails paints nothing
+            logger.debug("supplements_for failed", exc_info=True)
+            return
+        finally:
+            for anchor in anchors:
+                self._supplement_read_inflight.discard(anchor)
+        if self._session is not session:
+            return  # the conversation moved while the read was in flight
+        if not isinstance(rows, Mapping):
+            return
+        for anchor, details in rows.items():
+            key = str(anchor)
+            if not isinstance(details, Mapping):
+                continue
+            held = self._supplement_rows.get(key)
+            if isinstance(held, Mapping):
+                # ``(version, rank)``-GUARDED, not live-guarded: a read must
+                # never paint OLDER than what the surface already holds, but
+                # the same version at the same rank is the same journaled row
+                # and re-applying it is how the terminal beat's upgrade read
+                # lands the disclosure keys the event does not carry
+                # (``files_more``/``more``). Both halves are needed: live beats
+                # are never journaled, so a read of the SAME version can still
+                # carry the EARLIER journaled state (``running`` held,
+                # ``decided`` read) — applying that would repaint a running job
+                # as cancelled. A blanket "a live beat wins" skip also blocked
+                # the upgrade, because every beat's anchor IS marked live.
+                try:
+                    older = (
+                        int(details.get("version", 0) or 0),
+                        supplement_mod.state_rank(details.get("state")),
+                    ) < (
+                        int(held.get("version", 0) or 0),
+                        supplement_mod.state_rank(held.get("state")),
+                    )
+                except (TypeError, ValueError):
+                    older = False
+                if older:
+                    continue
+            if self._supplement_answer_block(key) is None:
+                continue  # nothing to hang it under yet; a later pass retries
+            self._supplement_read.add(key)
+            self._apply_supplement(key, details, job_live=False)
+
+    def _reset_supplement_state(self) -> None:
+        """Drop the per-conversation supplement bookkeeping (clear / swap)."""
+        self._supplement_blocks.clear()
+        self._supplement_rows.clear()
+        self._supplement_images.clear()
+        self._supplement_read.clear()
+        self._supplement_read_inflight.clear()
+        self._supplement_live.clear()
+
+    def open_transcript_file(self, url: str, *, source_path: str = "") -> None:
+        """Reveal a file callout in Finder — the open half of the affordance.
+
+        ``open -R``, never ``webbrowser``: the callout hands the user the FILE,
+        and revealing it is the least authority that answers "where is it".
+        The check is the SAME predicate as paint time and on the SAME input
+        (the row's own path + the session cwd), RE-RUN here: between the paint
+        and the click the path is attacker-changeable state, and this is the
+        moment it actually reaches a process.
+        """
+        source = self._interaction
+
+        def notice(body: str, kind: NoticeKind = "info") -> None:
+            self._notice_for(source, body, kind)
+
+        if not url.startswith("file:"):
+            notice("only file callouts can be revealed here", "warning")
+            return
+        checked = file_affordance(source_path, cwd=self._supplement_cwd())
+        if checked is None:
+            notice("that file can no longer be revealed", "warning")
+            return
+        if checked != url:
+            # The same input now resolves elsewhere (a replacement symlink, a
+            # moved root): refuse rather than reveal what was never vouched for.
+            notice("that file changed since it was listed", "warning")
+            return
+        from urllib.parse import unquote, urlparse
+
+        path = unquote(urlparse(checked).path)
+        self.run_worker(self._reveal_file(path, notice), group="reveal-file")
+
+    async def _reveal_file(self, path: str, notice: NoticeFn) -> None:
+        """Run ``open -R`` quietly and receipt the outcome."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "open",
+                "-R",
+                path,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            code = await process.wait()
+        except Exception as exc:  # noqa: BLE001 — no opener is a notice, not a crash
+            logger.debug("reveal-in-finder failed to start", exc_info=True)
+            notice(f"could not reveal that file: {exc}", "warning")
+            return
+        if code == 0:
+            notice("revealed in Finder")
+        else:
+            notice("could not reveal that file", "warning")
+
+    def _cmd_highlights(self, arg: str, notice: NoticeFn) -> None:
+        """``/highlights cancel | retry | adjust <text>`` — the supplement actions.
+
+        The block paints no pointer-only action pair (memo §3.2 T5: ``ctrl+c``
+        is the turn interrupt and stays unbound), so these commands are the
+        TUI's whole interaction with a supplement job. Each targets the NEWEST
+        row the app knows; the receipt names what happened.
+        """
+        words = arg.split(maxsplit=1)
+        verb = words[0].strip().lower() if words and words[0].strip() else ""
+        text = words[1].strip() if len(words) > 1 else ""
+        if verb not in ("cancel", "retry", "adjust"):
+            notice("Usage: /highlights cancel | retry | adjust <text>", "warning")
+            return
+        if verb == "adjust" and not text:
+            notice("Usage: /highlights adjust <text>", "warning")
+            return
+        target = self._supplement_target(verb)
+        if target is None:
+            missing = {
+                "cancel": "nothing is being prepared right now",
+                "retry": "nothing to retry — no highlights were cancelled or failed",
+                "adjust": "no highlights to adjust yet",
+            }
+            notice(missing[verb], "warning")
+            return
+        anchor, details = target
+        job = str(details.get("job", "") or "")
+        if not job:
+            notice("that highlight has no job to act on", "warning")
+            return
+        self.run_worker(
+            self._run_highlights_op(verb, anchor, job, text, notice), group="highlights"
+        )
+
+    def _supplement_target(self, verb: str) -> tuple[str, dict[str, Any]] | None:
+        """The newest actionable row for ``verb``, or ``None``.
+
+        ``cancel`` needs a job this app has seen LIVE (a cold row must not
+        promise a cancel it cannot deliver — the stale-row rule already paints
+        it as cancelled); ``retry`` takes the newest cancelled/failed row;
+        ``adjust`` the newest row of any state, since steering a finished row
+        is the documented re-run path.
+        """
+        for anchor, details in reversed(list(self._supplement_rows.items())):
+            state = str(details.get("state", ""))
+            if details.get("error") == SUPERSEDED_ERROR or details.get("dismissed"):
+                continue
+            if verb == "cancel":
+                if anchor in self._supplement_live and state in (
+                    "decided",
+                    "queued",
+                    "running",
+                    "cancelling",
+                ):
+                    return anchor, details
+                continue
+            if verb == "retry":
+                if state in ("failed", "cancelled"):
+                    return anchor, details
+                continue
+            if state in (
+                "decided",
+                "queued",
+                "running",
+                "cancelling",
+                "done",
+                "failed",
+                "cancelled",
+            ):
+                return anchor, details
+        return None
+
+    async def _run_highlights_op(
+        self, verb: str, anchor: str, job: str, text: str, notice: NoticeFn
+    ) -> None:
+        """Send one supplement op to the owner and receipt its answer."""
+        session = self._session
+        method_name = {
+            "cancel": "supplement_cancel",
+            "retry": "supplement_restart",
+            "adjust": "supplement_steer",
+        }[verb]
+        method = getattr(session, method_name, None)
+        if not callable(method):
+            notice("this session cannot manage highlights; update the owner", "warning")
+            return
+        # ``getattr`` resolves it as ``object``; the cast is what makes the
+        # await legal for the type checker while the ``callable`` check above
+        # is what makes it safe at runtime (the two halves are separate because
+        # the surface is duck-typed across several owners).
+        op = cast(Callable[..., Awaitable[str]], method)
+        try:
+            if verb == "adjust":
+                receipt = await op(anchor, job, text)
+            else:
+                receipt = await op(anchor, job)
+        except Exception as exc:  # noqa: BLE001 — refusals are the receipt
+            notice(str(exc) or "could not update highlights", "warning")
+            return
+        words = {
+            "cancelled": "Highlights cancelled",
+            "steering": "Updating highlights…",
+            "restarting": "Preparing highlights again…",
+            "already finished": "those highlights already finished",
+        }
+        notice(words.get(str(receipt), str(receipt)))
+
 
 def slot_rows(slot: Any) -> int:
     """Rows a docked band slot occupies, measured if possible and predicted if not.
@@ -56298,7 +57073,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 142
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 146
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

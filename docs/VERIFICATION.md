@@ -1845,6 +1845,48 @@ replaces the list), `block` with a mandatory reason, `drop`, and a fix to
 model closing three items watched two stay open and would then be nagged about
 items it believed it had closed.
 
+## Blocked items are reconciled at the yield boundary (2026-10-10)
+
+The same guardrail, one gap further out. Its work set was **pending-only**, and
+`block` is exactly what a model uses to stop honestly — so a session parked six
+items on an external condition and ended turns for ~14 hours while the guardrail
+saw an empty list at every yield and let each one stand. The honest stop was
+never the bug; the missing ACCOUNT was.
+
+`builtin.blocked_todos` is `open_todos`'s mirror (blocked subset, copies, phased
+flattening), the work set is pending + blocked, and `_todo_reminder_text` states
+the two obligations in separate paragraphs because they are not the same demand:
+pending items may not be left running (resume, or resolve honestly), while a
+blocked item may legitimately end the turn once the model has said whether its
+condition still holds and what is watching it. Each paragraph is emitted only
+when its group is non-empty, so no instruction refers to work that is not on the
+list. The latch is unchanged and is what bounds the new pass: blocking is
+MOVEMENT, so a block earns exactly ONE reconciliation nudge, and the
+byte-identical yield after the model accounts releases the turn — reconciled,
+never forbidden, and never a loop. Still invisible to the user: the panel and
+the transcript carry nothing new.
+
+The round-1 fix follows from the same shape. A blocked row RENDERS its reason,
+so the reason is part of what a reminder asserts — but it was not part of the
+fingerprint, and `block` on an already-blocked item rewrites `reason` in place
+and leaves the status alone. A model that re-blocked an item with a corrected
+condition therefore produced no movement the latch could see: the live reminder
+kept rendering the old wait and the expiry check could never retire it, i.e. a
+stale claim the model had no way to correct. `todo_fingerprint` is now
+`(phase_name, text, status, reason)` with `reason = str(item.get("reason") or
+"")`, and `session.py:_stamped_todo_fingerprint` filters `len == 4` in lockstep
+(design §5.3) — the same coupled edit, one element wider.
+
+Evidence: `tests/unit/session/test_todo_guardrail.py` (17 tests — the
+blocked-only list firing a single reconciliation and releasing, the mixed
+pending+blocked text with each group's paragraph appearing only with its items,
+a fresh user turn re-arming a parked list, a re-blocked reason expiring the live
+reminder AND re-arming the latch, and the unchanged latch, renderer, expiry and
+phased-`open_todos` cases) and
+`tests/unit/session/test_todo_steering_e2e.py::test_blocking_an_item_earns_one_reconciliation_nudge`
+(5 requests through the real `Session`, `AgentLoop` and `todo` tool: the block,
+then the accounting turn that carries the reminder, then release).
+
 ## Two review rounds' findings, and what they cost to miss (2026-08-17)
 
 Both round-1 reviews requested changes on defects the 4177-test suite was green
@@ -2277,3 +2319,30 @@ offers no cheap exact transient-allocation counter (`tracemalloc` and
 `getallocatedblocks` measure net or peak, and a per-delta container that is
 dropped nets to zero). "No lock, no I/O, no `await` in the delta branch" is
 confirmed structurally — the branch is four scalar locals and two comparisons.
+
+---
+
+## Field-validating a merged tree without installing it (2026-10-10)
+
+When a change must be validated against the REAL session store but the fleet is
+busy and an install would tear running runtimes, run the checkout's package
+over the installed generation's interpreter:
+
+```sh
+PYTHONPATH=/path/to/clean-checkout ~/.local/share/lop/current/bin/lop sessions cleanup --dry-run
+```
+
+Python puts `PYTHONPATH` ahead of site-packages, so the checkout's
+`local_operator/` shadows the installed one while dependencies come from the
+generation. A ``--dry-run`` writes nothing to the session store; note that the CLI still runs
+its startup migrations and appends its own log line in the config dir, so "read-only" means
+the store, not the whole config root (a no-op on an already-migrated config).
+Two bounds: it validates the checkout's CODE, not a built artifact, and a
+dependency added by the checkout (not yet in the installed generation) fails
+loudly at import — the safe failure. Demonstrated on the scratchpad-reclaim
+content phase (2026-10-10, this machine): a read-only dry run found 36 pads /
+191.8 MiB reclaimable with the guard matrix exercised on real data — an
+ephemeral figure, since a dry run leaves no artifact; once the
+feature-carrying release was installed, the live sweeps reclaimed 58 pads /
+491.6 MB, re-derivable from the sessions state file (`content_reclaimed_total`,
+`content_freed_bytes_estimate`) and the cleanup log.

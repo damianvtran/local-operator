@@ -1193,6 +1193,42 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
         "/v1/desktop/sessions/{session_id}/interrupt",
         {"request_id": "01234567-89ab-cdef-0123-456789abcdef"},
     ),
+    # The job rail's cancel (the video phase's route): it takes a bridge like
+    # every other row, so on a latched daemon it must answer the typed refusal
+    # and claim no receipt — the row is what proves the new route is INSIDE the
+    # door rather than beside it. It sits after ``/interrupt`` here for the same
+    # reason it does in the route table: both are stop-work controls, and BOTH
+    # must refuse once the daemon has latched.
+    _DoorRoute(
+        "cancel_job",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/jobs/abcdef012345/cancel",
+    ),
+    # The highlight block's three control routes (the supplements write half).
+    # They take a bridge like every other row -- the op is dispatched to the
+    # owner's runtime -- so on a latched daemon each must answer the typed
+    # refusal and claim no receipt. Literal ``(anchor, job)`` values, because
+    # the row's job is the DOOR: the request must validate to reach it, and the
+    # identity gate's own refusals are pinned elsewhere (the route's own
+    # contract file).
+    _DoorRoute(
+        "supplement_cancel",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/supplements/3f9c1a7e5b20/cancel",
+        {"anchor": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"},
+    ),
+    _DoorRoute(
+        "supplement_steer",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/supplements/3f9c1a7e5b20/steer",
+        {"anchor": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "text": "make it a table"},
+    ),
+    _DoorRoute(
+        "supplement_restart",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/supplements/3f9c1a7e5b20/restart",
+        {"anchor": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"},
+    ),
     # The child reader's LIVE half (design § 1). A row for the same reason
     # ``/interrupt`` and ``/mcp/credentials`` carry one: the open takes a bridge
     # from the door, so on a latched daemon it must answer the typed refusal and

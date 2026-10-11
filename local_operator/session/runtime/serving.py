@@ -1062,6 +1062,12 @@ class ServingSessionHandle(SessionHandle):
             config_dir=config_dir,
             seam=getattr(session, "supplement_seam", None),
         )
+        # The detached maintenance pass (sweep.py; memo-style housekeeping of orphaned
+        # component blobs and stale rows). SCHEDULED here, never awaited -- the pass is
+        # interval-gated, bounded and runs off the loop's critical path by construction,
+        # and disposal reaps it (``SupplementRunner.cancel``). Scheduling is a no-op when
+        # the feature is disabled.
+        self._supplements.schedule_sweep(loop)
         # Same shape as ``on_turn_settled``: the session flips the record's
         # ``started`` bit the first time a real turn runs (see
         # ``_run_turn_pipeline``), and the registrant owns the publish.
@@ -7131,6 +7137,11 @@ class ServingSessionHandle(SessionHandle):
             # ``reportUnreachable`` and flake8 has no unreachable check, so CI stays
             # green either way. The dead line is gone; this argument is not.
             return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
+        if command == "language":
+            # The terminal's funnel, served: one `settings_io.write_setting`
+            # against the `language` key; receipts word for word (see
+            # `_language_slash`).
+            return self._language_slash(args, SlashResult)
         # THE DELETE-SCOPED VERBS ARE GATED HERE, where the verb is chosen.
         # ``slash_result`` is authorised on ``slash``, which a ``drive`` member
         # holds while holding no ``delete`` — and these three produce exactly the
@@ -7157,6 +7168,13 @@ class ServingSessionHandle(SessionHandle):
             return await self._wake_slash(session, args, SlashResult)
         if command == "monitor":
             return await self._monitor_slash(session, args, SlashResult)
+        if command == "jobs":
+            return await self._jobs_slash(session, args, SlashResult)
+        if command == "highlights":
+            # Supplement actions (memo §3.2 T5) as a routed verb: the follower's
+            # typed command and the phone composer land here with the VERB only,
+            # so the target is chosen runtime-side (``newest_actionable``).
+            return await self._highlights_slash(args, SlashResult)
         if command == "loop":
             from local_operator.slash_commands import unknown_flag_refusal
 
@@ -7565,6 +7583,152 @@ class ServingSessionHandle(SessionHandle):
         """One shape for every refusal this command produces, so the route can
         map a code to a status without reading prose."""
         return SlashResult(kind="error", text=text, data={"code": code})
+
+    async def _jobs_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Run one job mutation INSIDE the session that owns the manager.
+
+        Reached from the desktop by
+        ``POST /v1/desktop/sessions/{id}/jobs/{job_id}/cancel`` when a live
+        runtime holds the session (see ``routes/desktop_sessions``), never by
+        a user typing ``/jobs``: the name is a routed-command word in the
+        ladder above, not a registry entry, so no palette row exists for it
+        and no terminal offers it (``wake``/``monitor``/``desktop_mcp`` are
+        the same shape of internal word).
+
+        WHY THIS PATH EXISTS. ``AsyncJobManager`` state lives only in the
+        process that owns the session — there is no file or index an external
+        writer could reach (the wake/monitor surfaces' cold paths exist
+        because THEIR state persists; a job's does not) — so a cancel has to
+        reach the owner's own manager. The call below is the SAME one
+        ``jobs op='cancel'`` makes (``AsyncJobManager.cancel``: abort the
+        signal, cancel the task, await it), deliberately not a second
+        mechanism, so the runner's own cancellation semantics — a video
+        runner's bounded ``best_effort_cancel`` — apply identically whoever
+        asked. Only the refusal classes are this side's own, and they are
+        typed as codes so the route maps a status without reading prose.
+        """
+        import json
+
+        try:
+            payload = json.loads(arg) if arg and arg.strip() else {}
+            if not isinstance(payload, dict):
+                raise ValueError("job payload must be an object")
+        except (TypeError, ValueError):
+            # The caller is our own route, so this is a protocol bug rather
+            # than user input; refusing in the same typed shape keeps the
+            # route's error mapping in one place instead of adding a case.
+            return self._jobs_failure(
+                SlashResult, "The job request could not be read.", "jobs_invalid"
+            )
+
+        op = str(payload.get("op") or "")
+        job_id = str(payload.get("job_id") or "")
+        if op != "cancel":
+            return self._jobs_failure(SlashResult, f"Unknown job operation {op!r}.", "jobs_invalid")
+
+        manager = getattr(session, "jobs", None)
+        if manager is None:
+            # The jobs tool's own sentence for the same state (``execute_jobs``
+            # in ``tools/builtin``), so a cancel and a ``jobs op='cancel'`` on
+            # one session cannot describe it two ways.
+            return self._jobs_failure(
+                SlashResult,
+                "job tracking is not available in this session (no job manager attached).",
+                "jobs_unavailable",
+            )
+
+        job = manager.get(job_id)
+        if job is None:
+            # The frozen phrase from the engine's own wording map
+            # (``tools/image_tool``'s ``_CANCEL_PHRASES``, quoted rather than
+            # respelled): the class the rail renders for a refused/unknown-job
+            # cancel — "the frozen ``not_found``-class phrase, never a generic
+            # error" (design spec §2.2).
+            from local_operator.tools.image_tool import _CANCEL_PHRASES
+
+            return self._jobs_failure(SlashResult, _CANCEL_PHRASES["not_found"], "jobs_not_found")
+
+        cancelled = await manager.cancel(job.id)
+        if not cancelled:
+            # The row passed the lookup but the manager still refused: it
+            # settled in the window between. The tool's own honest sentence
+            # for this outcome, kept so the two callers report one thing —
+            # the press asked for a stop that cannot happen, and must not be
+            # painted as one.
+            return self._jobs_failure(
+                SlashResult,
+                f"job {job.id} was not cancelled (status: {job.status})",
+                "jobs_not_cancelled",
+            )
+        # ``notice`` rather than ``block``: the caller is a route that reads
+        # ``data``, and a notice is what the frontier renderer prints for a
+        # receipt it has nothing special to do with.
+        return SlashResult(
+            kind="notice",
+            text=f"cancelled job {job.id} ({job.label})",
+            data={"job_id": job.id, "cancelled": True},
+        )
+
+    @staticmethod
+    def _jobs_failure(SlashResult: Any, text: str, code: str) -> Any:
+        """One shape for every refusal this command produces, so the route can
+        map a code to a status without reading prose."""
+        return SlashResult(kind="error", text=text, data={"code": code})
+
+    async def _highlights_slash(self, arg: str, SlashResult: Any) -> Any:
+        """``/highlights cancel | retry | adjust <text>`` — the routed supplement actions.
+
+        The runtime half of the TUI's ``_cmd_highlights`` (memo §3.2 T5). The command is
+        advertised ``authoritative_session``, so a follower's typed command and the phone
+        composer both land here carrying the VERB only; the target is the newest actionable
+        job the runner still holds (``SupplementRunner.newest_actionable``). The receipts
+        are the TUI's words for the same ops, kept word for word (``_run_highlights_op``'s
+        map), so one gesture reads one sentence whether the session is local or detached.
+        """
+        words = arg.split(maxsplit=1)
+        verb = words[0].strip().lower() if words and words[0].strip() else ""
+        text = words[1].strip() if len(words) > 1 else ""
+        if verb not in ("cancel", "retry", "adjust"):
+            return SlashResult(
+                kind="notice",
+                text="Usage: /highlights cancel | retry | adjust <text>",
+                style="warning",
+            )
+        if verb == "adjust" and not text:
+            return SlashResult(
+                kind="notice", text="Usage: /highlights adjust <text>", style="warning"
+            )
+        target = await self._supplements.newest_actionable(verb)
+        if target is None:
+            missing = {
+                "cancel": "nothing is being prepared right now",
+                "retry": "nothing to retry — no highlights were cancelled or failed",
+                "adjust": "no highlights to adjust yet",
+            }
+            return SlashResult(kind="notice", text=missing[verb], style="warning")
+        anchor, job = target
+        try:
+            if verb == "adjust":
+                receipt = await self._supplements.steer_job(anchor, job, text)
+            elif verb == "retry":
+                receipt = await self._supplements.restart_job(anchor, job)
+            else:
+                receipt = await self._supplements.cancel_job(anchor, job)
+        except Exception as exc:  # noqa: BLE001 — a refused op is a notice, not a turn error
+            return SlashResult(
+                kind="notice",
+                text=str(exc) or "could not update highlights",
+                style="warning",
+            )
+        receipts = {
+            "cancelled": "Highlights cancelled",
+            "steering": "Updating highlights…",
+            "restarting": "Preparing highlights again…",
+            "already finished": "those highlights already finished",
+        }
+        return SlashResult(
+            kind="notice", text=receipts.get(str(receipt), str(receipt)), style="info"
+        )
 
     def _archive_slash(self, session: Any, archived: bool, SlashResult: Any) -> Any:
         """``/archive`` and ``/unarchive`` on a DETACHED runtime.
@@ -8765,6 +8929,86 @@ class ServingSessionHandle(SessionHandle):
         )
         return SlashResult(kind="notice", text=text, style="info")
 
+    def _language_slash(self, arg: str, SlashResult: Any) -> Any:
+        """Report the language, and CHANGE it — the terminal's own funnel.
+
+        One ``settings_io.write_setting`` against the ``language`` registry
+        key, the same call ``OperatorApp._cmd_language`` makes, so a phone
+        switch and a terminal switch write one value space the same way.
+        Applying the swap is the FRONTEND's half: a running TUI re-renders
+        from its config watcher (slice C's external-change path announces
+        it), which is why this branch writes and receipts but never repaints.
+
+        The receipts mirror the terminal's word for word — the ``/effort``
+        precedent — the option list and the "already" no-op included.
+        """
+        from local_operator import settings_io
+        from local_operator.i18n.resolve import (
+            DEFAULT_LANGUAGE,
+            config_value,
+            language_name,
+            language_options,
+            normalise_locale,
+            resolve_language,
+        )
+
+        wanted = arg.strip()
+        resolved = resolve_language()
+        options = dict(language_options())
+        if not wanted:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"language: {resolved} ({language_name(resolved)}) — "
+                    f"/language <{'|'.join(options)}> switches; space lists"
+                ),
+                style="info",
+            )
+        key = (
+            DEFAULT_LANGUAGE
+            if wanted.casefold() == DEFAULT_LANGUAGE
+            else normalise_locale(wanted) or wanted
+        )
+        if key not in options:
+            # SHIPPED locales only, exactly as the terminal refuses: an
+            # unaudited locale keys no catalogue and would render codes.
+            return SlashResult(
+                kind="notice",
+                text=f"unknown language {wanted!r} — available: {', '.join(options)}",
+                style="warning",
+            )
+        stored = config_value()
+        current = (normalise_locale(stored) or stored) if stored else DEFAULT_LANGUAGE
+        if key == current:
+            return SlashResult(
+                kind="notice",
+                text=f"language: already {key} — resolves to {resolved} "
+                f"({language_name(resolved)})",
+                style="info",
+            )
+        setting = settings_io.resolve_key("language")
+        if setting is None:  # the registry owns the key; guard a broken build
+            return SlashResult(
+                kind="notice",
+                text="language: the setting is not registered in this build",
+                style="warning",
+            )
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            settings_io.write_setting(ConfigManager(config_dir()), setting, key)
+        except Exception as error:  # noqa: BLE001 — reported to the caller verbatim
+            return SlashResult(
+                kind="notice", text=f"language: could not save {key} — {error}", style="warning"
+            )
+        active = resolve_language()
+        return SlashResult(
+            kind="notice",
+            text=f"language: {key} saved — active {active} ({language_name(active)})",
+            style="info",
+        )
+
     @staticmethod
     def _adopt_remedy(saved: str, *, may_loosen: bool | None = None) -> str:
         """The command that matches ``config.yml``, and where it has to be typed.
@@ -9195,6 +9439,48 @@ class ServingSessionHandle(SessionHandle):
             "known": job is not None or node is not None,
             **details,
         }
+
+    @_on_session_loop
+    async def job_cancel(self, job_id: str) -> str:
+        """``job_cancel``: cancel ONE background job by id — the rail's only mechanism.
+
+        Lands on :meth:`AsyncJobManager.cancel`, the engine call the ``jobs``
+        tool's ``op='cancel'`` already makes (contract §4.1): a phone or a
+        delegated surface requests the same stop the agent could, and the
+        runner's own cancellation semantics are what the settle then states —
+        for a media walk, ``best_effort_cancel`` and its receipt token. This
+        op never paints an outcome of its own.
+
+        An unknown id is a refusal in words (the dispatcher renders it as the
+        error frame); a job that already settled is the neutral reading the
+        tool itself returns — the caller wanted it stopped and it is stopped.
+        Optional capability, getattr-probed by the dispatch — no
+        ``PROTOCOL_VERSION`` move.
+
+        THE DELIBERATE OMISSION (review round 1, R1-2). The ``jobs`` TOOL's
+        cancel path additionally attributes a deliberate stop for ``task``
+        rows — ``SubagentComms.begin_stop`` stamps ``ended_by``/
+        ``cancel_reason`` and stages the durable ``subagent-stop-<job>.v1.json``
+        receipt — and this op deliberately does NOT. The two paths agree on
+        the engine call and the receipt words; the attribution is left out
+        rather than mirrored because the actor for a phone- or peer-issued
+        cancel has no name in the wire's vocabulary yet (a new ``stopped by …``
+        string every surface would render), and the right home for the
+        alignment is a stop-issue helper shared with ``tools/builtin.py``, not
+        a second inline copy of the stamp sequence. THE CONDITION TO REVISIT:
+        when a task-job stop rides this op — a carrier cancelling ``task`` /
+        subagent rows through the rail — align it via that shared helper
+        first. Blast radius today is nil: v1 mounts no carrier, and the video
+        jobs this op was built for are not ``task`` rows.
+        """
+        self._check_loop_thread()
+        job = self._session.jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"unknown job {job_id}")
+        cancelled = await self._session.jobs.cancel(job_id)
+        if not cancelled:
+            return f"job {job_id} was not cancelled (status: {job.status})"
+        return f"cancelled job {job_id} ({job.label})"
 
     @_on_session_loop
     async def refresh(self) -> None:

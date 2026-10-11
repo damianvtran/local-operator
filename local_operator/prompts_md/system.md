@@ -87,7 +87,9 @@ rest.
 
 Keep the todo list honest: `add` new requirements, mark items `done` as you
 finish them, and never end a turn with pending items — resolve, `block` with a
-reason, or `drop` each one.
+reason, or `drop` each one. Before you finish, account for anything you left
+`block`ed — its condition re-checked, with a wake or monitor armed if it waits
+on something external.
 
 Subagents: `task` delegates (`agent` names a vetted role), `wait` blocks with
 one budget sized to the whole job, `hub` peeks at, messages, steers or resumes

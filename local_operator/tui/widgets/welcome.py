@@ -88,6 +88,9 @@ from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
 from local_operator import terminals
+from local_operator.i18n.keys import tui_status, tui_welcome
+from local_operator.i18n.messages import Msg
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
@@ -95,6 +98,36 @@ from local_operator.tui.link_targets import _URL_START_RE, _body_end, _trim
 from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
 from local_operator.tui.widgets.status_line import format_model_label
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
+
+# ---------------------------------------------------------------------------
+# Catalogued copy: resolved through the i18n runtime (RFC §2.2/§3.1)
+# ---------------------------------------------------------------------------
+#
+# Every user-facing string this module composes lives in the `tui.welcome`
+# catalogue (T1), and `_t` materialises one message from it. The resolver
+# loads the namespace's en catalogue ONCE (local_operator.i18n.text), so the
+# import-time constants below and the per-frame status/step lines pay no file
+# read per message. Resolution is pinned to `en` — the only shipped locale
+# while the program ships dark (RFC §9 P1); the translation waves re-point
+# here (and the clients, which render the served catalogue by key, §2.6). A
+# broken wheel degrades each string to its message code rather than failing
+# the import, the same contract `messages.render` documents.
+#
+# MACHINE FIELDS STAY LITERALS, deliberately (RFC §2.7): the hint table's
+# command keys ("/", "/help", "ctrl/cmd+d"), the glyphs, and the model row's
+# state words — the last ones because they are half of a two-surface pair
+# (`app.py`'s band shows the same word, D1) and the pair moves together with
+# the status-line slice.
+#
+# The tips are also the pool's WIDTH BUDGET: TIP_MIN_WIDTH below is DERIVED
+# from the resolved strings, so every cell-length claim in this file is
+# measured on exactly the text a user reads; the en-only context sidecar
+# (`tui.welcome.context.json`) carries the per-entry maxCells contract.
+_t = tr("tui.welcome")
+#: The status namespace (T2): the model row's state words are catalogued with the
+#: band's, because the two surfaces MUST agree on them (D1) — a single key
+#: resolved here and by ``status_line`` is how they cannot drift.
+_s = tr("tui.status")
 
 #: The real local-operator mark, downsampled from the shipped raster asset
 #: (``static/local-operator-icon-2-light-clear.png``, also the app icon in
@@ -234,8 +267,9 @@ def mark_pulse_color(phase: float) -> str:
 
 
 #: Placeholder while the session factory is still being awaited. The band uses
-#: the same word for the same state, so the two never disagree on screen.
-MODEL_PENDING = "connecting…"
+#: the same word for the same state, so the two never disagree on screen — both
+#: resolve ``tui.status.model.connecting`` through the i18n runtime (T2).
+MODEL_PENDING = _s(tui_status.model_connecting())
 
 #: The model row's word in the first-run SETUP state — no session, no model,
 #: the app parked waiting on the user's `/login`. This is the same word the
@@ -244,8 +278,10 @@ MODEL_PENDING = "connecting…"
 #: `MODEL_PENDING` sentinel up here made the splash read `connecting…` while
 #: the band read `setup`, so the first screen a new user sees told them "it's
 #: busy, wait" (the opposite of "you need to act") and looked hung (D1). The
-#: two MUST answer "what state is this" with the same word.
-MODEL_SETUP = "setup"
+#: two MUST answer "what state is this" with the same word. Resolved from
+#: ``tui.status.model.setup`` (T2) — the same key the status band resolves.
+MODEL_SETUP = _s(tui_status.model_setup())
+
 
 #: The few affordances a first-time user actually needs. ``/`` and ``/help``
 #: are kept separate on purpose: one is the inline picker, the other prints the
@@ -260,11 +296,20 @@ MODEL_SETUP = "setup"
 #: terminals that do not (Terminal.app). ``Cmd+D`` uses Textual's ``super+d``
 #: kitty-protocol spelling; terminal apps may still intercept it before the TUI.
 #: The composer placeholder carried this hint for one release and no longer does.
-HINTS: tuple[tuple[str, str], ...] = (
-    ("/", "command picker"),
-    ("/help", "all commands"),
-    ("ctrl/cmd+d", "quit"),
-)
+def _hints() -> tuple[tuple[str, str], ...]:
+    """The single expression behind the import-time binding: the locale
+    refresh (:func:`_reload_copy`, via ``text.register_refresh``) re-runs it
+    rather than carrying a second copy that could drift.
+    """
+    return (
+        ("/", _t(tui_welcome.hint_command_picker())),
+        ("/help", _t(tui_welcome.hint_all_commands())),
+        ("ctrl/cmd+d", _t(tui_welcome.hint_quit())),
+    )
+
+
+HINTS: tuple[tuple[str, str], ...] = _hints()
+
 
 #: The affordance table in the first-run SETUP state. `/login` leads because it
 #: is the one command this state exists to teach, and the fixed key/description
@@ -283,22 +328,32 @@ HINTS: tuple[tuple[str, str], ...] = (
 #: tier of the table still names every affordance that does, and quitting is a
 #: binding the user already has. Its row is what pays for the step line, so the
 #: first screen's height budget is unchanged.
-HINTS_SETUP: tuple[tuple[str, str], ...] = (
-    (f"/login {RECOMMENDED_LOGIN}", "sign in — recommended, no key to paste"),
-    ("/login", "another provider, including API keys"),
-    ("/help", "all commands"),
-)
+def _hints_setup() -> tuple[tuple[str, str], ...]:
+    """The single expression behind the import-time binding: the locale
+    refresh (:func:`_reload_copy`, via ``text.register_refresh``) re-runs it
+    rather than carrying a second copy that could drift.
+    """
+    return (
+        (f"/login {RECOMMENDED_LOGIN}", _t(tui_welcome.hint_sign_in())),
+        ("/login", _t(tui_welcome.hint_other_provider())),
+        ("/help", _t(tui_welcome.hint_all_commands())),
+    )
 
 
-#: The checklist above the setup table, longest form first. Each entry is tried
-#: in order and the first that fits the width wins, so the step reading degrades
-#: to the two steps that matter rather than being truncated mid-word (the same
-#: rule the table's own width tiers follow). The numeral and the step are joined
-#: by a middle dot separator the whole line shares.
-SETUP_STEPS: tuple[str, ...] = (
-    "1 connect an account  ·  2 sign in or paste a key  ·  3 {aida} says hello",
-    "1 connect  ·  2 sign in or paste a key  ·  3 {aida} says hello",
-    "1 connect  ·  2 sign in  ·  3 {aida} says hello",
+HINTS_SETUP: tuple[tuple[str, str], ...] = _hints_setup()
+
+
+#: The checklist above the setup table, longest form first: the generated
+#: messages `tui.welcome.step.full/medium/short`, tried IN THIS ORDER — the
+#: first that fits the width wins, so the step reading degrades to the two
+#: steps that matter rather than being truncated mid-word (the same rule the
+#: table's own width tiers follow). The numeral and the step are joined by a
+#: middle dot separator the whole line shares; `{aida}` is the render-time
+#: parameter (her live name, or the line is withdrawn by the caller).
+_SETUP_STEP_MESSAGES: tuple[Callable[..., Msg], ...] = (
+    tui_welcome.step_full,
+    tui_welcome.step_medium,
+    tui_welcome.step_short,
 )
 
 
@@ -315,8 +370,8 @@ def setup_step_line(width: int, aida_name: str | None) -> Text | None:
     """
     if not aida_name:
         return None
-    for template in SETUP_STEPS:
-        body = template.replace("{aida}", aida_name)
+    for build in _SETUP_STEP_MESSAGES:
+        body = _t(build(aida=aida_name))
         if cell_len(body) <= width:
             return Text(body, style=Style(color=theme_mod.semantic_color("fg")), no_wrap=True)
     return None
@@ -447,6 +502,7 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: configuration can move it.
 KEY_BUDGET_CELLS = 25
 
+
 #: Tips that name a REMAPPABLE key, as ``(template, binding id)``.
 #:
 #: Templated rather than literal because the key is the user's to change: a
@@ -461,22 +517,30 @@ KEY_BUDGET_CELLS = 25
 #: Keep each template at or under 32 cells excluding ``{key}``: the threshold
 #: below budgets a worst-case key against them, and a longer sentence would
 #: raise it and drop the tip row on narrow terminals.
-KEYED_TIPS: tuple[tuple[str, str | None], ...] = tuple(
-    # `tip == ""` means "no splash tip" and is SKIPPED rather than rendered:
-    # the first such row is a desktop-scope action ("Quick send"), whose key
-    # is not a terminal key at all — promoting it on the splash would advertise
-    # a chord this screen cannot press. It must not ride the rotation either:
-    # an empty template would still be budgeted here and could move the tip
-    # row's count on narrow terminals, which `_tip_lines` forbids.
-    (action.tip, action.id)
-    for action in keymap_mod.KEY_ACTIONS
-    if action.tip
-) + (("/settings → Hotkeys remaps these keys", None),)
+def _keyed_tips() -> tuple[tuple[str, str | None], ...]:
+    """The single expression behind the import-time binding: the locale
+    refresh (:func:`_reload_copy`, via ``text.register_refresh``) re-runs it
+    rather than carrying a second copy that could drift.
+    """
+    return tuple(
+        # `tip == ""` means "no splash tip" and is SKIPPED rather than rendered:
+        # the first such row is a desktop-scope action ("Quick send"), whose key
+        # is not a terminal key at all — promoting it on the splash would advertise
+        # a chord this screen cannot press. It must not ride the rotation either:
+        # an empty template would still be budgeted here and could move the tip
+        # row's count on narrow terminals, which `_tip_lines` forbids.
+        (action.tip, action.id)
+        for action in keymap_mod.KEY_ACTIONS
+        if action.tip
+    ) + ((_t(tui_welcome.tip_hotkeys()), None),)
+
+
+KEYED_TIPS: tuple[tuple[str, str | None], ...] = _keyed_tips()
 
 #: The ``ctrl+v`` paste sentence. Defined before :data:`TIPS` so the pool can
 #: reuse it rather than carrying a second copy that would drift. See the pin
 #: comment on :data:`TIP_SETUP` for why a Terminal.app launch opens on this.
-TIP_PASTE = "ctrl+v attaches an image from the system clipboard"
+TIP_PASTE = _t(tui_welcome.tip_paste())
 
 #: The mesh's own sentence — the FIRST step of the pairing path.
 #:
@@ -485,134 +549,143 @@ TIP_PASTE = "ctrl+v attaches an image from the system clipboard"
 #: cannot drift from the row the rotation reaches later, and pinning it cannot
 #: change the tip row's width budget (:data:`TIP_MIN_WIDTH` measures the pool, and
 #: this entry is the pool's).
-TIP_MESH = "/network new <name> makes a mesh other devices can join"
+TIP_MESH = _t(tui_welcome.tip_mesh())
 
-TIPS: tuple[str, ...] = (
-    "/resume picks up a recent session where you left off",
-    "/team <name> <message> sends work to the manager",
-    "/model <provider>/<id> switches this session only",
-    TIP_PASTE,
-    "/approvals <ask|auto> sets whether tools ask first",
-    "esc stops the agent without ending the session",
-    "Ask for parallel work and the agent fans out subagents",
-    "! on an empty composer runs a shell command",
-    "/fork branches; /fork <message> starts divergent work",
-    "/settings → Fork → Where a fork opens sets placement",
-    "Under cmux, Where it opens sets workspace or surface",
-    # The classification layer's two facts: how to stop it and how to give one
-    # of its legs a credential. Appended at the END of the literal group rather
-    # than interleaved, so the pinned opening tip stays `TIPS[0]` and the
-    # placement cluster above keeps its ring positions.
-    #
-    # WHY THESE EARN A SLOT, by the test this pool is bounded for ("a further
-    # slash-command tip takes a slot rather than adding one"): the layer ships
-    # ON (`values.classification.auto`, true since 2026-09-18), it spends money
-    # and reads the roster on every NEW user message (an identical repeat is a
-    # cache hit and costs nothing), and it stays SILENT in every
-    # state where it has nothing to say — no credential, nothing picked, a
-    # skipped call are all the ordinary quiet cases. So using the app never
-    # teaches a user either fact: the one-line way to stop it, and the login a
-    # leg needs before it can serve at all. The splash is the one surface every
-    # launch crosses.
-    #
-    # Both are COMMANDS rather than descriptions, because the row is one line
-    # and the cascade does not fit on it: the reasoning (three legs, which
-    # login each needs, what it costs) lives in `guide://classification`.
-    #
-    # WIDTH IS THE CONSTRAINT HERE, not taste. The tip row's presence is a
-    # function of the pool's LONGEST entry (`TIP_MIN_WIDTH`, pinned at 59 cells
-    # in tests/unit/tui/test_keymap_pilot.py), and that threshold must not rise:
-    # a longer entry would take the row away from the terminals that have it
-    # today. These two are 57 and 53 cells of content — 59 and 55 painted, so
-    # the threshold moves not at all (measured, and pinned by that test).
-    #
-    # BOTH BUDGETS ARE NOW SPENT, and the next contributor should know it before
-    # adding another entry. The 59-cell floor means the row is painted from a
-    # 63-COLUMN terminal (the view is the grid minus 4 columns: 59 at 63, 56 at
-    # 60, and at 60 no tip row is drawn at all), and `len(TIPS)` sits exactly at
-    # the ceiling `test_welcome.py` asserts. An entry that needs either budget
-    # takes a slot from the pool rather than adding one.
-    "lop config edit classification.auto false turns hints off",
-    "lop login <radient|typesafe|openrouter> enables hints",
-    # THE MESH'S OWN ENTRY, and it TOOK A SLOT rather than adding one: both
-    # budgets were spent before it (see the note above). Which slot, and why.
-    #
-    # The retired entry is `lop detects terminal or multiplexer, then picks
-    # placement` — the placement cluster's third member, and the only entry in
-    # the pool whose subject is the MECHANISM rather than something a person
-    # does, names or changes. What that costs is recorded here rather than
-    # glossed: the clause also carried the cluster's capability-shaped
-    # reassurance ("not cmux-only"), which is why
-    # `test_fork_tips_cover_commands_and_settings` used to assert it — that test
-    # now asserts the two survivors, its docstring says where the third clause
-    # went, and the loss itself was judged ACCEPTABLE at review round 1 rather
-    # than defended here. Everything the cluster ACTS on survives: the setting's
-    # route (`TIPS[9]`) and the multiplexer case that needs the other spelling
-    # (`TIPS[10]`) are the two facts a reader can use, and the clause that went
-    # was the one the rotation could do nothing with.
-    #
-    # The classification entry could NOT have been the one retired, and the
-    # reason is worth stating precisely because the first draft of this note got
-    # it wrong (review round 1, MINOR 1): the pinned 59-cell floor is TIED, not
-    # owned. `lop config edit classification.auto false turns hints off` measures
-    # 57 cells of content, but so does `TIP_SETUP`, and both paint 59 — so
-    # retiring either leaves the other holding the floor at 59 and the number
-    # would not have moved. The floor cannot justify this retirement at all; the
-    # CONTENT argument below carries it on its own, which is what the pool's own
-    # test ("no second discovery route") is for.
-    #
-    # The remaining alternatives were each worse for a reason already written
-    # down in this file: the keyed entries earn their slots because a remappable
-    # key has no picker, unlike every slash command in the pool; and retiring
-    # another SLASH tip would take away a headline command's only passive
-    # advertisement, which is the class this entry is joining rather than
-    # leaving — the mesh is the one slash family whose existence nothing else in
-    # the app states.
-    #
-    # The cluster keeps its ring positions: `TIPS[9]` and `TIPS[10]` are
-    # untouched, and this entry is appended at the END of the literal group,
-    # which is the placement rule the classification pair above already records
-    # — nothing before it moves.
-    #
-    # WHY THE MESH EARNS ONE, by the pool's own test: it is a capability with no
-    # second discovery route. Nothing else in the app says it exists until you
-    # are already in a network — the sidebar paints its first `↗` row only once a
-    # peer does, and `/network` is a word you must know in order to type — so a
-    # device that has never paired has no surface that mentions pairing, while
-    # this row is the one thing every launch crosses.
-    #
-    # IT IS A COMMAND, like the rest of the slash group, and it names the FIRST
-    # step rather than describing the feature: the panel `/network new <name>`
-    # opens carries the rest of the path (create → invite → join, and which
-    # device runs which) in its own empty state, so this row's whole job is to
-    # get a person there. The command is real: `_cmd_network`'s `new` arm takes
-    # the whole tail as the network's name.
-    #
-    # WIDTH: 55 cells of content, 57 painted — under the 57-cell content budget
-    # the two 59-painted entries set, so the threshold does not move (measured,
-    # not estimated).
-    #
-    # AND IT IS THE PINNED OPENING TIP ON A DEVICE THAT HAS NEVER PAIRED (UX
-    # round 1, U1). As the pool's entry alone it was not discoverable: the ring
-    # opens on `TIPS[0]`, this sentence sits at index 13 of 17, and the first tick
-    # jumps to a DRAWN resume point — measured on the real splash, the mesh's only
-    # passive advertisement arrived at 72.1 s of a focused idle frame, worst case
-    # 204 s, and a user who submits their first prompt sees exactly one tip and
-    # never reaches it at all. The remedy is the mechanism that already exists
-    # twice: :data:`TIP_SETUP` for first-run and :data:`TIP_PASTE` for the
-    # Terminal.app population (`ctrl+v` there, which is the same "reaches ~100% of
-    # a stranded population on their first frame, 0% of everyone else" rule).
-    # A device in NO mesh is the third stranded population, and the only one whose
-    # feature nothing else in the app states.
-    TIP_MESH,
-    # The KEYED entries. Held as templates in the pool and substituted at
-    # render (`_resolve_tip`), which is what keeps them true after a remap —
-    # a literal chord here would become a lie the moment the user changed it,
-    # on the one screen a first-run user reads word for word. The `{key}`
-    # spelling is deliberate: an entry with no field is an ordinary tip and
-    # passes through untouched, so the pool stays one list rather than two.
-    *(template for template, _ in KEYED_TIPS),
-)
+
+def _tips() -> tuple[str, ...]:
+    """The single expression behind the import-time binding: the locale
+    refresh (:func:`_reload_copy`, via ``text.register_refresh``) re-runs it
+    rather than carrying a second copy that could drift.
+    """
+    return (
+        _t(tui_welcome.tip_resume()),
+        _t(tui_welcome.tip_team()),
+        _t(tui_welcome.tip_model()),
+        TIP_PASTE,
+        _t(tui_welcome.tip_approvals()),
+        _t(tui_welcome.tip_esc()),
+        _t(tui_welcome.tip_subagents()),
+        _t(tui_welcome.tip_shell()),
+        _t(tui_welcome.tip_fork()),
+        _t(tui_welcome.tip_fork_placement()),
+        _t(tui_welcome.tip_cmux()),
+        # The classification layer's two facts: how to stop it and how to give one
+        # of its legs a credential. Appended at the END of the literal group rather
+        # than interleaved, so the pinned opening tip stays `TIPS[0]` and the
+        # placement cluster above keeps its ring positions.
+        #
+        # WHY THESE EARN A SLOT, by the test this pool is bounded for ("a further
+        # slash-command tip takes a slot rather than adding one"): the layer ships
+        # ON (`values.classification.auto`, true since 2026-09-18), it spends money
+        # and reads the roster on every NEW user message (an identical repeat is a
+        # cache hit and costs nothing), and it stays SILENT in every
+        # state where it has nothing to say — no credential, nothing picked, a
+        # skipped call are all the ordinary quiet cases. So using the app never
+        # teaches a user either fact: the one-line way to stop it, and the login a
+        # leg needs before it can serve at all. The splash is the one surface every
+        # launch crosses.
+        #
+        # Both are COMMANDS rather than descriptions, because the row is one line
+        # and the cascade does not fit on it: the reasoning (three legs, which
+        # login each needs, what it costs) lives in `guide://classification`.
+        #
+        # WIDTH IS THE CONSTRAINT HERE, not taste. The tip row's presence is a
+        # function of the pool's LONGEST entry (`TIP_MIN_WIDTH`, pinned at 59 cells
+        # in tests/unit/tui/test_keymap_pilot.py), and that threshold must not rise:
+        # a longer entry would take the row away from the terminals that have it
+        # today. These two are 57 and 53 cells of content — 59 and 55 painted, so
+        # the threshold moves not at all (measured, and pinned by that test).
+        #
+        # BOTH BUDGETS ARE NOW SPENT, and the next contributor should know it before
+        # adding another entry. The 59-cell floor means the row is painted from a
+        # 63-COLUMN terminal (the view is the grid minus 4 columns: 59 at 63, 56 at
+        # 60, and at 60 no tip row is drawn at all), and `len(TIPS)` sits exactly at
+        # the ceiling `test_welcome.py` asserts. An entry that needs either budget
+        # takes a slot from the pool rather than adding one.
+        _t(tui_welcome.tip_classification_off()),
+        _t(tui_welcome.tip_classification_login()),
+        # THE MESH'S OWN ENTRY, and it TOOK A SLOT rather than adding one: both
+        # budgets were spent before it (see the note above). Which slot, and why.
+        #
+        # The retired entry is `lop detects terminal or multiplexer, then picks
+        # placement` — the placement cluster's third member, and the only entry in
+        # the pool whose subject is the MECHANISM rather than something a person
+        # does, names or changes. What that costs is recorded here rather than
+        # glossed: the clause also carried the cluster's capability-shaped
+        # reassurance ("not cmux-only"), which is why
+        # `test_fork_tips_cover_commands_and_settings` used to assert it — that test
+        # now asserts the two survivors, its docstring says where the third clause
+        # went, and the loss itself was judged ACCEPTABLE at review round 1 rather
+        # than defended here. Everything the cluster ACTS on survives: the setting's
+        # route (`TIPS[9]`) and the multiplexer case that needs the other spelling
+        # (`TIPS[10]`) are the two facts a reader can use, and the clause that went
+        # was the one the rotation could do nothing with.
+        #
+        # The classification entry could NOT have been the one retired, and the
+        # reason is worth stating precisely because the first draft of this note got
+        # it wrong (review round 1, MINOR 1): the pinned 59-cell floor is TIED, not
+        # owned. `lop config edit classification.auto false turns hints off` measures
+        # 57 cells of content, but so does `TIP_SETUP`, and both paint 59 — so
+        # retiring either leaves the other holding the floor at 59 and the number
+        # would not have moved. The floor cannot justify this retirement at all; the
+        # CONTENT argument below carries it on its own, which is what the pool's own
+        # test ("no second discovery route") is for.
+        #
+        # The remaining alternatives were each worse for a reason already written
+        # down in this file: the keyed entries earn their slots because a remappable
+        # key has no picker, unlike every slash command in the pool; and retiring
+        # another SLASH tip would take away a headline command's only passive
+        # advertisement, which is the class this entry is joining rather than
+        # leaving — the mesh is the one slash family whose existence nothing else in
+        # the app states.
+        #
+        # The cluster keeps its ring positions: `TIPS[9]` and `TIPS[10]` are
+        # untouched, and this entry is appended at the END of the literal group,
+        # which is the placement rule the classification pair above already records
+        # — nothing before it moves.
+        #
+        # WHY THE MESH EARNS ONE, by the pool's own test: it is a capability with no
+        # second discovery route. Nothing else in the app says it exists until you
+        # are already in a network — the sidebar paints its first `↗` row only once a
+        # peer does, and `/network` is a word you must know in order to type — so a
+        # device that has never paired has no surface that mentions pairing, while
+        # this row is the one thing every launch crosses.
+        #
+        # IT IS A COMMAND, like the rest of the slash group, and it names the FIRST
+        # step rather than describing the feature: the panel `/network new <name>`
+        # opens carries the rest of the path (create → invite → join, and which
+        # device runs which) in its own empty state, so this row's whole job is to
+        # get a person there. The command is real: `_cmd_network`'s `new` arm takes
+        # the whole tail as the network's name.
+        #
+        # WIDTH: 55 cells of content, 57 painted — under the 57-cell content budget
+        # the two 59-painted entries set, so the threshold does not move (measured,
+        # not estimated).
+        #
+        # AND IT IS THE PINNED OPENING TIP ON A DEVICE THAT HAS NEVER PAIRED (UX
+        # round 1, U1). As the pool's entry alone it was not discoverable: the ring
+        # opens on `TIPS[0]`, this sentence sits at index 13 of 17, and the first tick
+        # jumps to a DRAWN resume point — measured on the real splash, the mesh's only
+        # passive advertisement arrived at 72.1 s of a focused idle frame, worst case
+        # 204 s, and a user who submits their first prompt sees exactly one tip and
+        # never reaches it at all. The remedy is the mechanism that already exists
+        # twice: :data:`TIP_SETUP` for first-run and :data:`TIP_PASTE` for the
+        # Terminal.app population (`ctrl+v` there, which is the same "reaches ~100% of
+        # a stranded population on their first frame, 0% of everyone else" rule).
+        # A device in NO mesh is the third stranded population, and the only one whose
+        # feature nothing else in the app states.
+        TIP_MESH,
+        # The KEYED entries. Held as templates in the pool and substituted at
+        # render (`_resolve_tip`), which is what keeps them true after a remap —
+        # a literal chord here would become a lie the moment the user changed it,
+        # on the one screen a first-run user reads word for word. The `{key}`
+        # spelling is deliberate: an entry with no field is an ordinary tip and
+        # passes through untouched, so the pool stays one list rather than two.
+        *(template for template, _ in KEYED_TIPS),
+    )
+
+
+TIPS: tuple[str, ...] = _tips()
 
 #: The tip the SETUP state opens on, in place of the pinned ``TIPS[0]``. The
 #: rotation normally pins its first entry to ``/resume`` on the argument that
@@ -621,7 +694,7 @@ TIPS: tuple[str, ...] = (
 #: prior sessions to resume, so the most-read row would advertise a command that
 #: does nothing for them (D4). Once a session exists the rotation resumes into
 #: the normal ring, so this only replaces the opening frame.
-TIP_SETUP = f"New here? {RECOMMENDED_LOGIN.title()} is one browser sign-in; no key to paste"
+TIP_SETUP = _t(tui_welcome.tip_setup(login=RECOMMENDED_LOGIN.title()))
 
 #: The tip a Terminal.app launch opens on, in place of the pinned ``TIPS[0]``.
 #:
@@ -661,6 +734,7 @@ TIP_GLYPH = NOTICE_GLYPHS["info"]
 #: step and start reading as one animation.
 TIP_ROTATE_INTERVAL_S = 12.0
 
+
 #: Narrowest width that gets a tip at all.
 #:
 #: Below this the row holds a command and a word or two of its reason, which is
@@ -679,18 +753,68 @@ TIP_ROTATE_INTERVAL_S = 12.0
 #: Narrowest width that gets a tip at all — see the block comment above the
 #: original definition; the keyed entries are measured at their WORST-CASE key
 #: so the answer stays a function of terminal width alone.
-TIP_MIN_WIDTH = max(
-    *(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE)),
-    *(
-        cell_len(f"{TIP_GLYPH} {template.format(key='x' * KEY_BUDGET_CELLS)}")
-        for template, _ in KEYED_TIPS
-    ),
-)
+def _tip_min_width() -> int:
+    """The pool's width budget — the single expression behind the binding.
+
+    Narrowest width that gets a tip at all; the keyed entries are measured at
+    their WORST-CASE key so the answer stays a function of terminal width
+    alone. The locale refresh (:func:`_reload_copy`) re-runs THIS builder
+    (round-1 F2: it was the one value mirrored rather than built).
+    """
+    return max(
+        *(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE)),
+        *(
+            cell_len(f"{TIP_GLYPH} {template.format(key='x' * KEY_BUDGET_CELLS)}")
+            for template, _ in KEYED_TIPS
+        ),
+    )
+
+
+TIP_MIN_WIDTH = _tip_min_width()
 
 #: Warning body without its remedy, for widths that cannot hold the full
 #: `— /login <provider>` tail. A half-printed command is worse than none: the
 #: FACT is what must survive, the remedy is what may be dropped.
-WARNING_SHORT = "not logged in"
+WARNING_SHORT = _t(tui_welcome.status_login_required_short())
+
+
+def _reload_copy() -> None:
+    """Re-materialise every catalogued module constant after a locale move.
+
+    ``local_operator.i18n.text`` runs registered re-materialisers when the
+    process's ACTIVE locale changes — the ``/language`` command, the config
+    watcher, and boot all move it through ``set_active_locale``. Only
+    CONSTANTS need an entry here: everything the splash and the band resolve
+    per frame (``_status_rows``, :func:`setup_step_line`, the band's
+    per-render strings) reads the active locale at each call and follows on
+    its own.
+
+    The composites go through their builders — each value's single
+    expression, so this function and the import-time bindings cannot drift:
+    the pools via ``_tips``/``_keyed_tips``/``_hints``/``_hints_setup`` and
+    the width budget via :func:`_tip_min_width` (round-1 F2: the budget was
+    the one mirror without one). The scalar assignments below mirror the
+    one-line definitions above; the live-locale tests pin each one against
+    the fixture catalogue, so a mirror that went stale fails loudly rather
+    than half-translating the splash.
+    """
+    global MODEL_PENDING, MODEL_SETUP, HINTS, HINTS_SETUP, HINT_KEY_WIDTH_TIGHT
+    global KEYED_TIPS, TIP_PASTE, TIP_MESH, TIPS, TIP_SETUP, TIP_MIN_WIDTH, WARNING_SHORT
+    MODEL_PENDING = _s(tui_status.model_connecting())
+    MODEL_SETUP = _s(tui_status.model_setup())
+    TIP_PASTE = _t(tui_welcome.tip_paste())
+    TIP_MESH = _t(tui_welcome.tip_mesh())
+    HINTS = _hints()
+    HINTS_SETUP = _hints_setup()
+    HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
+    KEYED_TIPS = _keyed_tips()
+    TIPS = _tips()
+    TIP_SETUP = _t(tui_welcome.tip_setup(login=RECOMMENDED_LOGIN.title()))
+    TIP_MIN_WIDTH = _tip_min_width()
+    WARNING_SHORT = _t(tui_welcome.status_login_required_short())
+
+
+register_refresh(_reload_copy)
 
 #: Drop priorities for the status rows. Rows are shed lowest-first when the
 #: terminal is too short for all of them, so the credential warning — the
@@ -1087,9 +1211,9 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
         # WHOLE when it does not fit — a half-printed ``/upd…`` is an
         # instruction nobody can follow, same rule as the login warning.
         glyph = NOTICE_GLYPHS["warning"]
-        body = f"{glyph} latest is v{info.update_available} — /update"
+        body = f"{glyph} {_t(tui_welcome.status_update(version=info.update_available))}"
         if cell_len(body) > width:
-            body = f"{glyph} latest is v{info.update_available}"
+            body = f"{glyph} {_t(tui_welcome.status_update_short(version=info.update_available))}"
         rows.append((_PRIORITY_UPDATE, Text(body, style=warn, no_wrap=True)))
     if info.notice:
         # KIND-AWARE GLYPH AND INK (design round 2, M2). This row used to paint
@@ -1139,7 +1263,7 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
         # remedy does not fit, the fact is kept and the command dropped whole —
         # a half-printed `/logi…` is an instruction the user cannot follow.
         glyph = NOTICE_GLYPHS["warning"]
-        body = f"{glyph} {WARNING_SHORT} — /login {info.missing_credential}"
+        body = f"{glyph} {_t(tui_welcome.status_login_required(provider=info.missing_credential))}"
         if cell_len(body) > width:
             body = f"{glyph} {WARNING_SHORT}"
         rows.append((_PRIORITY_WARNING, Text(body, style=warn, no_wrap=True)))

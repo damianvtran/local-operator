@@ -253,6 +253,16 @@ class CallSnapshot:
     decode_us: int = 0
     decode_tokens: int = 0
     decode_calls: int = 0
+    #: The basis the call's figure is read under, and where the figure came
+    #: from (PR-3, design §3.4). Decided at RECORD time
+    #: (:func:`local_operator.session.spend.inference_billing_labels`) from the
+    #: RAW serving provider — before ``credential_provider_id`` collapses a
+    #: login flavour — and the receipt, because neither survives to the
+    #: background writer. The defaults are the schema's own DEFAULTs, which is
+    #: what a legacy row reads: a snapshot from an older caller stays honest
+    #: rather than being relabelled here.
+    billing_basis: str = "not_tracked"
+    cost_source: str = "none"
 
 
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:

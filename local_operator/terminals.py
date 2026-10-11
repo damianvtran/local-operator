@@ -221,3 +221,76 @@ def is_ssh(env: EnvMap | None = None) -> bool:
     """True when this process is inside an ssh session."""
     source = _source(env)
     return bool(source.get(SSH_CONNECTION_ENV) or source.get(SSH_TTY_ENV))
+
+
+#: The user-facing escape hatch for OSC 8 hyperlinks (turn-supplements T3):
+#: ``0/false/no/off`` paints file callouts as plain text even where the
+#: terminal would render a link, and ``1/true/yes/on`` paints them where the
+#: markers do not name the terminal. Anything else detects, the same
+#: read-once-at-paint rule ``LOCAL_OPERATOR_IMAGES`` follows. It chooses
+#: between the two RENDERINGS and nothing else: whether a link is drawn is all
+#: it decides -- the target a drawn link carries is still resolved, and
+#: re-vetted at click time, by ``link_targets.file_affordance`` (the same
+#: predicate both moments share), so the hatch can never change what a path
+#: resolves to, nor make a path the predicate refuses openable.
+HYPERLINKS_ENV = "LOCAL_OPERATOR_HYPERLINKS"
+
+#: VTE-based terminals (GNOME Terminal, Tilix, gnome-console) render OSC 8
+#: from VTE 0.50 onward; the version is exported as an integer like 5000.
+VTE_VERSION_ENV = "VTE_VERSION"
+VTE_HYPERLINK_MIN = 5000
+
+#: Konsole exports its own version integer; OSC 8 arrived in 18.08 (180800).
+KONSOLE_VERSION_ENV = "KONSOLE_VERSION"
+KONSOLE_HYPERLINK_MIN = 180800
+
+#: foot's terminfo entries (``foot``, ``foot-extra``).
+FOOT_TERM_PREFIX = "foot"
+
+
+def is_hyperlinked(env: EnvMap | None = None) -> bool:
+    """True when this terminal is known to render OSC 8 hyperlinks.
+
+    DETECTED RATHER THAN ASSUMED, because a link that a terminal does not
+    understand is silently discarded — and the fallback text has to stay the
+    useful half of the callout, so the difference must be a deliberate paint
+    decision, not an accident of who swallowed a control sequence. The set is
+    the emulators whose OSC 8 support is documented and stable: kitty, ghostty
+    (cmux embeds it, so :func:`is_ghostty` covers both), WezTerm, iTerm2, the
+    VTE family, Konsole and foot.
+
+    Anything under a MULTIPLEXER is NOT detected: tmux and screen do not
+    forward OSC 8 to the outer terminal without passthrough bookkeeping this
+    deliberately does not attempt, the same conservative gate
+    :mod:`local_operator.tui.images` applies to kitty placeholders. An
+    unrecognised terminal takes the plain-text path rather than a guess:
+    over-detection here would silence the fallback that exists for exactly
+    this case.
+
+    ``HYPERLINKS_ENV`` overrides both directions (see its note), which is also
+    how a capture script or a test pins the branch it wants.
+    """
+    source = _source(env)
+    forced = (source.get(HYPERLINKS_ENV) or "").strip().lower()
+    if forced in ("0", "false", "no", "off"):
+        return False
+    if forced in ("1", "true", "yes", "on"):
+        return True
+    if source.get("TMUX") or source.get("TERM", "").startswith(("screen", "tmux")):
+        return False
+    if is_kitty(env) or is_ghostty(env) or is_wezterm(env) or is_iterm(env):
+        return True
+    if is_local_operator_console(env):
+        # The app bundles ghostty as its emulator, so its console surfaces
+        # render links for the same reason a ghostty window does.
+        return True
+    term = source.get("TERM", "")
+    if term.startswith(FOOT_TERM_PREFIX):
+        return True
+    raw_vte = source.get(VTE_VERSION_ENV, "")
+    if raw_vte.isdigit() and int(raw_vte) >= VTE_HYPERLINK_MIN:
+        return True
+    raw_konsole = source.get(KONSOLE_VERSION_ENV, "")
+    if raw_konsole.isdigit() and int(raw_konsole) >= KONSOLE_HYPERLINK_MIN:
+        return True
+    return False

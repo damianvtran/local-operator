@@ -222,6 +222,11 @@ _WALK_DEPTH_CAP = 2
 #: in ``tool_docs.py``; the wire description SHRANK in the same wave (186 ->
 #: 160 chars), which is one reason both ``bench_context_budget.py`` arms
 #: still PASS. Every other entry is byte-identical.
+#: RE-MEASURED 2026-10-10 (blocked-todo reconciliation, ``fix/todo-guard-blocked``):
+#: ``todo`` 524 -> 540 is the ONLY entry that moved — one clause added to the
+#: tool:// notes (blocked items are accounted for at the turn boundary). Off the
+#: wire, so ``scripts/bench_context_budget.py`` is untouched and the two ledgers
+#: do NOT move together this time.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 786,
     "ask": 1005,
@@ -241,7 +246,24 @@ MEASURED_TOKENS: dict[str, int] = {
     #: +63 tokens over the 730 the slimming wave measured — re-measured
     #: deliberately with this change, then again after the context-budget
     #: round trimmed the schema description (795 -> 793).
-    "generate_image": 793,
+    #: RE-MEASURED 2026-10-10 (hub media slice harness co-flip,
+    #: ``feat/radient-edit-sources``): 793 -> 838 is the ONLY entry that moved
+    #: — Radient re-joins the edit sentence as a capable rung, the ChatGPT-plan
+    #: skip is stated alone, and the un-pinned edit's hub default (sunburst
+    #: edit + its drift caveat) is documented. Doc-only: the wire description
+    #: and schema are untouched, so ``bench_context_budget.py``'s arms are
+    #: unmoved by this change.
+    "generate_image": 838,
+    # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
+    # lifecycle (receipt, completion, restart, cancel), the two rungs, the
+    # mode/source rules and the family quirks. The wire description carries
+    # one sentence; this holds the rest. Re-measured deliberately via this
+    # test's own print; the ONLY other count that moved is ``jobs`` below.
+    # 796 -> 794 (round-1 design D3): the wire description's first sentence is
+    # now the contract §2.3 string verbatim (the shipped wording stated the
+    # same fact twice); re-measured deliberately, and it is the ONLY entry
+    # this remediation moved.
+    "generate_video": 794,
     "glob": 91,
     "grep": 337,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
@@ -254,7 +276,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
     # paused child is halted-and-resumable, not stopped. Re-measured.
     "hub": 650,
-    "jobs": 350,
+    # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
+    # "(task/bash/video)" — the video job type is a model-visible part of what
+    # ``op='list'`` shows. One token, re-measured.
+    "jobs": 351,
     "list_variables": 58,
     "lsp": 276,
     "monitor": 357,
@@ -272,10 +297,19 @@ MEASURED_TOKENS: dict[str, int] = {
     "secret": 188,
     "send": 697,
     "sessions": 802,
+    # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
+    # vocabulary, the op split and the validation-by-registry contract. 191
+    # tokens is the deliberate cost of the reference detail staying off the
+    # wire (the description keeps one sentence); re-measured via this test's
+    # own print, and it is the ONLY count this change moved.
+    "setting": 191,
     "task": 484,
     "team": 489,
     "team_delete": 90,
-    "todo": 524,
+    "todo": 540,
+    # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
+    # read side: states, the at-most-once registration and the watcher handoff.
+    "video_status": 206,
     "wait": 272,
     "wake": 312,
     "web_fetch": 352,

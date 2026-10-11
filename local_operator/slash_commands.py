@@ -1460,6 +1460,32 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.ANY,
         desktop_destination="appearance",
     ),
+    # The command is the DISCOVERABLE half of the `language` setting (slice C):
+    # the /settings row (appearance) is the other, and both write the same
+    # config key through `settings_io.write_setting` — one truth. Beside
+    # `/theme` because it is the only other command whose whole business is the
+    # app's own presentation, and because a language, like a theme, is a
+    # standing preference: a switch persists AND applies live, with no restart
+    # and no second `/model default`-style step.
+    SlashCommand(
+        "language",
+        # Sized like `/theme`'s: the description column wraps past ~55 cells.
+        # "auto follows the system" is the half the picker cannot teach on its
+        # own — the row lists the value without saying what it means.
+        _tr(wire_slash.language()),
+        # `lang` is the one abbreviation users actually type; the alias column
+        # (`/language /lang`, 17 cells) fits the picker width with no widening.
+        aliases=("lang",),
+        # OPTIONAL: a bare `/language` reports the active language, and the
+        # space opens the choices list with the current value's row marked.
+        arguments=ArgumentMode.OPTIONAL,
+        # Trailing text is a language tag, a value this command owns — the
+        # desktop's `inline` list, which is the second half of the union the
+        # field docstring describes.
+        prefixes_text=True,
+        argument_shape=ArgumentShape.ANY,
+        desktop_destination="appearance",
+    ),
     # The listing is the receipt.
     SlashCommand(
         "provider",
@@ -1739,6 +1765,22 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # composer runs while a sentence after the word is prose.
         argument_shape=ArgumentShape.WORD,
         desktop_destination="sessions.stop",
+    ),
+    # Turn supplements ("Highlights", memo §3.2 T5). The TUI's whole interaction
+    # with a supplement job — the block paints no pointer-only action pair, and
+    # `ctrl+c` stays the turn interrupt — so cancel / retry / adjust live here.
+    # No `desktop_destination`: the UI renders the block's own controls, so there
+    # is no desktop command path to route to (the `/keys` rule;
+    # `test_desktop_controls.py` pins the withheld set). ANY, the invariant a
+    # boolean-carried row declares (`test_slash_prefixes_text.py`): the trailing
+    # text is this command's argument (`adjust <text>`), so engaging it inline
+    # keeps the rest of the line with it. No echo: the receipt names what
+    # happened to which job, which is more than the typed word.
+    SlashCommand(
+        "highlights",
+        _tr(wire_slash.highlights()),
+        prefixes_text=True,
+        argument_shape=ArgumentShape.ANY,
     ),
     # The receipt states the resulting mode, which is the durable fact; the
     # typed argument is only how it was reached.

@@ -253,10 +253,16 @@ async def test_a_model_that_cannot_proceed_is_nudged_once_and_then_released(tmp_
 
 
 @pytest.mark.asyncio
-async def test_blocking_an_item_ends_the_turn_without_a_second_nudge(tmp_path) -> None:
-    """The honest escape hatch. ``block`` is how a model stops with work
-    outstanding without lying that it finished it — so a blocked list must not
-    keep the turn alive."""
+async def test_blocking_an_item_earns_one_reconciliation_nudge(tmp_path) -> None:
+    """The honest escape hatch, now ACCOUNTED for instead of merely permitted.
+
+    ``block`` is how a model stops with work outstanding without lying that it
+    finished it — and it is MOVEMENT, so it earns exactly one nudge asking the
+    model to say what it did with the parked item. That is the contract change:
+    a blocked list used to earn no nudge at all, which is how a session parked
+    six items and ended turns for ~14 hours. The turn still ends — after ONE
+    accounting pass, not a loop — so the honest stop survives.
+    """
     stream = SteeringStream(
         [
             {"events": todo_call("c1", {"op": "init", "items": ["get prod credentials"]})},
@@ -272,15 +278,36 @@ async def test_blocking_an_item_ends_the_turn_without_a_second_nudge(tmp_path) -
                 )
             },
             {"events": [StreamTextDelta(delta="Blocked on credentials — over to you.")]},
+            # The accounting turn the reconciliation nudge buys: the model states
+            # what the block waits on. Its yield is byte-identical to the last,
+            # so the turn ends here rather than nudging again.
+            {
+                "events": [
+                    StreamTextDelta(
+                        delta=(
+                            "Still blocked on the prod credential; nothing is watching it "
+                            "until you provide it."
+                        )
+                    )
+                ]
+            },
         ]
     )
     session = make_session(tmp_path, stream)
 
     await session.prompt("deploy")
 
-    assert len(stream.requests) == 4, "nudged once, then released after the block"
-    assert reminders_in(stream, 3) == [], "a blocked list must not re-arm the guardrail"
-    assert builtin.open_todos("e2e") == [], "blocked is not open work"
+    assert len(stream.requests) == 5, "one reconciliation nudge, then released"
+    assert reminders_in(stream, 3) == [], "the block itself is not yet accounted for"
+    accounted = reminders_in(stream, 4)
+    assert len(accounted) == 1, "the reconciliation nudge must reach the model"
+    assert "get prod credentials" in accounted[0]
+    assert "needs a credential only the user can provide" in accounted[0]
+    assert "account for each blocked item" in accounted[0]
+    # Pending is empty and the item is parked, not closed: blocked is reconciled
+    # as blocked, never quietly treated as open work or as done.
+    assert builtin.open_todos("e2e") == []
+    assert [item["text"] for item in builtin.blocked_todos("e2e")] == ["get prod credentials"]
     assert builtin.TODO_STORE["e2e"][0]["items"][0]["status"] == "blocked"
 
     await session.dispose()
