@@ -2692,6 +2692,109 @@ def test_a_job_cancel_command_forwards_the_job_id_and_carries_the_receipt(
     assert len(written) == frames_before
 
 
+def test_a_supplement_command_forwards_the_pair_and_carries_the_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    """The phone's route to a highlight job's controls (memo §2.7, lane R).
+
+    The relay is a COURIER here, deliberately: the web's press rides the SAME
+    session command route every other mutation uses — scoped by the session in
+    the URL and the (anchor, job) pair in the frame — and the runtime's receipt
+    is the ack's ``detail``. This pins that path at the relay's own seam: the
+    frame leaves with the pair, the receipt (including the NEUTRAL ``already
+    finished`` for a settled job) comes back as a 200, a runtime-side refusal
+    travels as a 422 in its own words, and a session with no live runtime is
+    refused BEFORE any frame leaves (the same 409 every op on this route
+    gives). The runtime's own dispatch is pinned at its seam
+    (``tests/unit/supplements``); this file owns the carrier.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = SessionRecord(
+        pid=4346,
+        kind="tui",
+        session_id="hl-controls",
+        conversation_name="x",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    written: list[dict[str, Any]] = []
+    replies: list[dict[str, Any]] = []
+
+    class Writer:
+        def write(self, payload: bytes) -> None:
+            frame = json.loads(payload.decode())
+            written.append(frame)
+            daemon._pending_reqs[(record.pid, frame["req"])].set_result(
+                replies.pop(0) | {"req": frame["req"]}
+            )
+
+        async def drain(self) -> None:
+            return None
+
+    entry.writer = Writer()  # type: ignore[assignment]
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    url = "/api/sessions/hl-controls/command"
+    anchor = "a" * 32
+    job = "3f9c1a7e5b20"
+
+    # A cut that landed: the runtime's receipt is the answer, verbatim, and the
+    # frame carried the pair the runtime's identity gate checks.
+    replies.append({"op": "ack", "detail": "cancelled"})
+    reply = client.post(url, json={"op": "supplement_cancel", "anchor": anchor, "job": job})
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": "cancelled"}
+    assert written[-1]["op"] == "supplement_cancel"
+    assert written[-1]["anchor"] == anchor and written[-1]["job"] == job
+
+    # The NEUTRAL receipt for a settled job travels as a 200, not an error.
+    replies.append({"op": "ack", "detail": "already finished"})
+    reply = client.post(url, json={"op": "supplement_cancel", "anchor": anchor, "job": job})
+    assert reply.status_code == 200
+    assert reply.json()["detail"] == "already finished"
+
+    # A steer carries the operator's words verbatim and answers its receipt.
+    replies.append({"op": "ack", "detail": "steering"})
+    reply = client.post(
+        url,
+        json={
+            "op": "supplement_steer",
+            "anchor": anchor,
+            "job": job,
+            "text": "label the axes",
+        },
+    )
+    assert reply.status_code == 200
+    assert reply.json()["detail"] == "steering"
+    assert written[-1]["text"] == "label the axes"
+
+    # An owner that predates the ops refuses in its own words, carried as 422.
+    replies.append(
+        {
+            "op": "error",
+            "message": "this session cannot run turn supplements; update the owner",
+        }
+    )
+    reply = client.post(url, json={"op": "supplement_restart", "anchor": anchor, "job": job})
+    assert reply.status_code == 422
+    assert "update the owner" in reply.json()["error"]
+
+    # A session with NO live runtime: refused before any frame leaves.
+    frames_before = len(written)
+    reply = client.post(
+        "/api/sessions/hl-cold/command",
+        json={"op": "supplement_cancel", "anchor": anchor, "job": job},
+    )
+    assert reply.status_code == 409
+    assert reply.json()["error"] == "session not connected"
+    assert len(written) == frames_before
+
+
 def test_the_phone_catalogue_drops_terminal_only_vocabulary() -> None:
     """The sheet's copy is read on a TOUCH device (UX round 1, U5).
 

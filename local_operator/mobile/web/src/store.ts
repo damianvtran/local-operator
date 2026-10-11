@@ -9,6 +9,7 @@
  * reopen ourselves.
  */
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { supplementsFromWire } from "./lib/supplement";
 import type {
 	Capabilities,
 	SessionProjection,
@@ -43,12 +44,22 @@ function normalizeSubagent(row: SubagentRow): SubagentRow {
 }
 
 export function normalizeProjection(incoming: SessionProjection): SessionProjection {
-	return {
+	const projection: SessionProjection = {
 		...incoming,
 		transcript: list(incoming.transcript),
 		todos: list(incoming.todos).map(normalizeTodoPhase),
 		subagents: list(incoming.subagents).map(normalizeSubagent),
 	};
+	/* Turn supplements: the sibling map is re-read through its ONE reader at
+	   this last trust boundary, like every nested shape beside it — a beat
+	   whose anchor/state does not parse is dropped rather than rendered from
+	   a guess. ABSENT stays absent: the daemon emits the key only when it
+	   carries beats, and every renderer reads a missing key and an empty map
+	   the same way (the distinction is deliberately not laundered here). */
+	if (incoming.supplements !== undefined) {
+		projection.supplements = supplementsFromWire(incoming.supplements);
+	}
+	return projection;
 }
 
 export interface ProjectionSlot {
