@@ -20,6 +20,7 @@ from local_operator import procname
 from local_operator import update as update_mod
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.mobile import install as install_mod
+from local_operator.network import types as mesh_types
 from local_operator.update import (
     TTL_S,
     InstallKind,
@@ -776,6 +777,7 @@ def test_main_dispatches_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
             from_snapshot=None,
             services=True,
             allow_downgrade=False,
+            roll=True,
         )
 
 
@@ -793,6 +795,7 @@ def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
             from_snapshot=None,
             services=True,
             allow_downgrade=False,
+            roll=True,
         )
 
 
@@ -817,6 +820,7 @@ def test_main_dispatches_the_service_only_repair(monkeypatch: pytest.MonkeyPatch
             from_snapshot=None,
             services=True,
             allow_downgrade=False,
+            roll=True,
         )
 
 
@@ -842,6 +846,7 @@ def test_main_dispatches_the_mobile_repair(monkeypatch: pytest.MonkeyPatch) -> N
             from_snapshot=None,
             services=True,
             allow_downgrade=False,
+            roll=True,
         )
 
 
@@ -860,6 +865,7 @@ def test_main_dispatches_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
             from_snapshot="main",
             services=True,
             allow_downgrade=False,
+            roll=True,
         )
 
     monkeypatch.setattr("sys.argv", ["lop", "update", "--check", "--from-snapshot", "main"])
@@ -892,6 +898,7 @@ def test_main_dispatches_allow_downgrade(monkeypatch: pytest.MonkeyPatch) -> Non
             from_snapshot="v0.9.8",
             services=True,
             allow_downgrade=True,
+            roll=True,
         )
 
 
@@ -915,6 +922,7 @@ def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
             from_snapshot=None,
             services=False,
             allow_downgrade=False,
+            roll=True,
         )
 
 
@@ -3914,6 +3922,10 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         ),
         patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
         patch.object(install_mod, "snapshot_bundle") as bundle,
+        # The hook's ``before`` is captured from the pointer; pinned here so the
+        # tail assertion below is deterministic rather than a fact about the
+        # machine the suite runs on (S3b).
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="1.2.2")),
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
     ):
@@ -3927,7 +3939,15 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
     assert "installing the published macOS wheel" in out
     assert "carries the macOS key agent" in out
     assert "warning:" not in out, "the wheel route is progress, not a warning"
-    tail.assert_called_once_with(0, services=True, install_version="1.2.3", target="1.2.3")
+    tail.assert_called_once_with(
+        0,
+        services=True,
+        install_version="1.2.3",
+        target="1.2.3",
+        roll=True,
+        before_version="1.2.2",
+        via="snapshot",
+    )
 
 
 def test_from_snapshot_unreleased_ref_falls_back_loudly_and_records_the_reason(
@@ -4133,7 +4153,15 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
     assert calls == [
         (None, {"version": "0.9.8", "note": "downgrade-allowed"})
     ], "the override installs the older wheel and the marker note records it"
-    tail.assert_called_once_with(0, services=True, install_version="0.9.8", target="0.9.8")
+    tail.assert_called_once_with(
+        0,
+        services=True,
+        install_version="0.9.8",
+        target="0.9.8",
+        roll=True,
+        before_version="0.9.9",
+        via="snapshot",
+    )
     captured = capsys.readouterr()
     assert (
         "warning: downgrading on purpose — current install 0.9.9, snapshot 0.9.8; "
@@ -4336,3 +4364,192 @@ def test_update_command_refuses_allow_downgrade_without_from_snapshot(
         assert update_mod.update_command(allow_downgrade=True) == 1
     latest.assert_not_called()
     assert "--allow-downgrade applies to --from-snapshot" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# S3b: the update exits drive the mesh-roll hook
+# ---------------------------------------------------------------------------
+
+
+def _seed_mesh(root: Path, members: list[tuple[str, mesh_types.MemberKind]] | None = None) -> None:
+    """One network record on disk, the shape the trigger's walk reads."""
+    from local_operator.network import store
+
+    record = mesh_types.NetworkRecord(
+        network_id="n_updtest00000000000000000000001",
+        name="home-net",
+        self_device_id="d_origin",
+        members=[
+            mesh_types.MemberRecord(device_id="d_origin", name="origin"),
+            *[
+                mesh_types.MemberRecord(device_id=device, name=device, kind=kind)
+                for device, kind in (members or [("d_a", "device")])
+            ],
+        ],
+    )
+    store.save(record, root)
+
+
+def _audit_rows(root: Path, event: str) -> list[dict[str, Any]]:
+    audit = root / "network" / "audit.jsonl"
+    if not audit.exists():
+        return []
+    lines = [json.loads(line) for line in audit.read_text().splitlines() if line.strip()]
+    return [row for row in lines if row.get("event") == event]
+
+
+def _upgrade_patches() -> Any:
+    """The seams every cell here drives the PyPI exit through.
+
+    ``_services_stage`` returns ``None``, which ``_run_services_tail``
+    documents as a tolerated stand-in — the daemon half is not what these cells
+    are about, and it keeps the run bounded.
+    """
+    return (
+        patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.28.0", True)),
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "is_git_snapshot", return_value=False),
+        patch.object(update_mod, "perform_upgrade", return_value="0.28.0"),
+        patch.object(update_mod, "_services_stage", return_value=None),
+    )
+
+
+def test_a_successful_update_queues_the_mesh_roll_before_the_report_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _seed_mesh(root, [("d_a", "device"), ("d_b", "device")])
+    with ExitStack() as stack:
+        for patcher in _upgrade_patches():
+            stack.enter_context(patcher)
+        assert update_command(check=False) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    # The summary precedes the frozen report line (note §3), and names the set.
+    assert "queued: d_a, d_b" in out[-2], out
+    report = json.loads(out[-1])["update_report"]
+    assert report["install_version"] == "0.28.0"
+
+    from local_operator.network import rollouts
+
+    record = rollouts.latest_active(root=root)
+    assert record is not None, "the exit opened no record"
+    assert record["target"]["version"] == "0.28.0"
+    assert record["authority"]["via"] == "update"
+    rows = _audit_rows(root, "update_rollout_started")
+    assert len(rows) == 1 and rows[0]["network_id"] == record["network"], rows
+
+
+def test_no_roll_queues_nothing_and_records_the_suppression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _seed_mesh(root)
+    with ExitStack() as stack:
+        for patcher in _upgrade_patches():
+            stack.enter_context(patcher)
+        assert update_command(check=False, roll=False) == 0
+
+    from local_operator.network import rollouts
+
+    assert rollouts.latest_active(root=root) is None
+    rows = _audit_rows(root, "update_rollout_suppressed")
+    assert len(rows) == 1, rows
+    assert rows[0]["detail"] == {"via": "update", "policy": "auto", "flag": "--no-roll"}, rows[0]
+
+
+def test_a_failing_roll_hook_is_one_sentence_and_the_exit_code_stands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _seed_mesh(root)
+
+    from local_operator.network import rollouts
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rollouts, "open_record", _boom)
+    with ExitStack() as stack:
+        for patcher in _upgrade_patches():
+            stack.enter_context(patcher)
+        assert update_command(check=False) == 0
+    captured = capsys.readouterr()
+    assert "updated; the mesh roll could not be queued: boom" in captured.err, captured.err
+    # The machine report line is still the last stdout line: a failed queue
+    # never un-says the install.
+    assert json.loads(captured.out.strip().splitlines()[-1])["update_report"]
+
+
+def test_the_nothing_to_install_exit_queues_no_roll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _seed_mesh(root)
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.27.0", False))
+        )
+        stack.enter_context(patch.object(update_mod, "_services_stage", return_value=None))
+        mocked = stack.enter_context(patch("local_operator.network.rollouts.open_after_update"))
+        assert update_command(check=False) == 0
+    mocked.assert_not_called()
+    from local_operator.network import rollouts
+
+    assert rollouts.latest_active(root=root) is None
+
+
+def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[Any] = []
+    monkeypatch.setattr(update_mod, "_print_current_generation", lambda: None)
+    monkeypatch.setattr(update_mod, "prune_generations", lambda **kwargs: None)
+    monkeypatch.setattr(update_mod, "prune_notice_lines", lambda plan: ())
+    monkeypatch.setattr(update_mod, "referenced_install_roots", lambda: [])
+    monkeypatch.setattr(
+        update_mod,
+        "_run_services_tail",
+        lambda services: order.append("services") or update_mod.StageReport(),
+    )
+    monkeypatch.setattr(
+        update_mod, "_roll_after_update", lambda **kwargs: order.append(("roll", kwargs))
+    )
+    monkeypatch.setattr(update_mod, "_emit_update_report", lambda **kwargs: order.append("report"))
+    assert (
+        update_mod._generation_upgrade(
+            0,
+            install_version="0.28.0",
+            target="0.28.0",
+            roll=False,
+            before_version="0.27.0",
+            via="snapshot",
+        )
+        == 0
+    )
+    assert [item if isinstance(item, str) else item[0] for item in order] == [
+        "services",
+        "roll",
+        "report",
+    ], order
+    assert order[1][1] == {
+        "before": "0.27.0",
+        "after": "0.28.0",
+        "via": "snapshot",
+        "roll": False,
+    }, order
+
+
+def test_main_dispatches_the_no_roll_flag_and_the_default_rolls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.cli import main
+
+    for argv, expected in ((["lop", "update"], True), (["lop", "update", "--no-roll"], False)):
+        monkeypatch.setattr("sys.argv", argv)
+        with patch("local_operator.update.update_command", return_value=0) as cmd:
+            assert main() == 0
+            assert cmd.call_args.kwargs["roll"] is expected, (argv, cmd.call_args)

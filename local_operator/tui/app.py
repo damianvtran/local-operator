@@ -17058,6 +17058,18 @@ class OperatorApp(App[None]):
         # Failure is a notice, never a rollback: the wheel is already in.
         mobile = refresh_mobile_after_upgrade()
 
+        # The standing instruction (S3b): this update rolls the mesh — the same
+        # record the CLI hook opens, on this front end's ``via`` token. The
+        # helper never raises and never touches the install's success (a
+        # failure is one sentence), and the summary is shown as a notice the
+        # way the services lines above are; the write happens here, in the
+        # worker, not in the closure that renders on the app thread.
+        from local_operator.network import rollouts
+
+        trigger = rollouts.open_after_update(
+            before=str(result.installed or ""), after=str(installed or ""), via="tui"
+        )
+
         # ``restarting…`` only once exit 75 is actually happening — a
         # typed-ahead loop used to make ``_request_relaunch`` refuse after
         # this line had already painted. Wrapped so ``call_from_thread``
@@ -17089,6 +17101,12 @@ class OperatorApp(App[None]):
                     "the foreground lop mobile serve process to pick up the new UI",
                     "warning",
                 )
+            # The mesh roll's summary, and the one sentence a hook failure
+            # prints (never a rollback — the install is already in).
+            for line in trigger.lines:
+                self._system_notice(line)
+            if trigger.failure:
+                self._system_notice(trigger.failure, "warning")
             if self._relaunch_refusal():
                 self._system_notice(f"updated to v{installed}; relaunch when local work is idle")
             else:
