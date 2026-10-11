@@ -45,9 +45,9 @@ paragraph below).
 **The cap is not final for native (lane N).** The memo's §4.1 Native row needs the prelude to
 post through `window.ReactNativeWebView.postMessage` when present, listen on `document` as
 well as `window`, and accept the iOS host push whose `event.source` is `null` (the
-`e.source!==parent` check drops it today). None of that fits in 46 B. Lane N either injects a
-native-only shim at assembly time without touching this shared pair, or revisits the cap in its
-own PR with measured numbers.
+`e.source!==parent` check drops it today). None of that fits in the 35 B gzip headroom this pair
+has left. Lane N either injects a native-only shim at assembly time without touching this shared
+pair, or revisits the cap in its own PR with measured numbers.
 
 The App. B accent guard (+412 B gzip) is deliberately NOT in the build; it lands with the
 surface that needs it, under the size test.

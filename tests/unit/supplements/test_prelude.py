@@ -140,7 +140,7 @@ def _declarations(rule: re.Pattern[str], css: str) -> dict[str, str]:
 
 
 def test_the_root_element_paints_the_canvas_token_as_the_frames_ground() -> None:
-    """The frame's ground is `--lo-canvas`, in BOTH directions (the live theme-flip defect).
+    """The frame's ground is `--lo-canvas` from the ROOT element (the live theme-flip defect).
 
     WHY THIS IS A STYLE PIN AND WHAT IT DOES NOT PROVE. The behaviour tests below run the
     prelude's JS against a stub DOM, which has no CSS engine, so nothing in this suite can
@@ -153,6 +153,12 @@ def test_the_root_element_paints_the_canvas_token_as_the_frames_ground() -> None
     direction the theme moved. The rendered proof -- the real assembled document, mounted in
     a sandboxed `data:` frame, flipped both ways, ground read from the painted pixels and
     from the frame's own computed style -- is in the PR that added this test.
+
+    WHAT THIS PIN COVERS, PRECISELY: the two directions are NOT asserted symmetrically here.
+    The assertions below read the ROOT's declaration and the DARK block's own `--lo-canvas`;
+    the light ground is the `:root` default `--lo-canvas:#fff`, left implicit because a light
+    push overrides it inline. So the LIGHT arm rests on the rendered evidence named above, and
+    this docstring should not be read as "the pin proves both directions".
     """
     css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
     root = _declarations(_ROOT_RULE, css)
