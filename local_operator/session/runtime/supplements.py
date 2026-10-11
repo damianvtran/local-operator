@@ -68,6 +68,7 @@ from typing import Any, Awaitable, Callable, Final, Literal, Mapping, Sequence, 
 from local_operator.supplements import generator, policy
 from local_operator.supplements.candidates import prefilter
 from local_operator.supplements.contract import (
+    SUPERSEDED_ERROR,
     SUPPLEMENT_CUSTOM_TYPE,
     SupplementDetails,
 )
@@ -479,7 +480,17 @@ class SupplementRunner:
                     )
                 )
 
-            await self._commit_row(anchor=anchor, build=build_done)
+            final = await self._commit_row(anchor=anchor, build=build_done)
+            if final is not None:
+                # THE FILES-ONLY BEAT. The graphics path beats `decided` before it runs;
+                # the files half is the DEFAULT half (graphics ship off), and a surface's
+                # live path learns every row from this family — so without this beat a
+                # files-only callout was visible only after a reload, on every surface.
+                # `decided`/`done` are the only states that carry `files` (§2.7), so the
+                # terminal state is the correct beat here: the row is terminal on arrival.
+                # (Added by the TUI lane; the design's §2.4 rule is "file callouts appear
+                # without waiting for the generator".)
+                await self._progress(final, "done")
         finally:
             self._live_jobs.discard(job)
 
@@ -884,6 +895,56 @@ class SupplementRunner:
         if inputs is None or inputs.job != job:
             return None
         return inputs
+
+    async def newest_actionable(self, verb: str) -> tuple[str, str] | None:
+        """The newest remembered job a routed ``/highlights <verb>`` can act on, or ``None``.
+
+        The runtime's counterpart of the TUI's ``_supplement_target``: the command arrives
+        with a VERB only (``cancel``/``retry``/``adjust``), so picking the target is the
+        runner's job, over the jobs it still holds for a later steer/restart (``_inputs``,
+        §2.7). The rules are the TUI's, re-expressed where the runtime knows the same facts:
+
+        - ``cancel`` addresses the job RUNNING NOW, and nothing else -- the only cut
+          ``cancel_job`` can deliver; the TUI's "seen live, still non-terminal" rule made
+          exact (a runtime always knows).
+        - ``retry`` the newest remembered job whose newest row is ``failed``/``cancelled``.
+        - ``adjust`` the newest remembered job whose newest row is visible (not
+          superseded/dismissed/skipped), from any state -- the documented re-run path.
+
+        "Newest" is the newest ROW (its ``at``), not dict order: a steer/restart re-remembers
+        an existing anchor in place, so ``_inputs``' order alone would not answer it. State
+        comes from the JOURNAL, never ``inputs.details``: the pointer can lag a terminal
+        append that is already durable (the R3-1 class), and a selection reading it could
+        pick against a state the user has already seen change. A verb other than the three
+        is refused by the caller before this is asked; here it answers ``None``.
+        """
+        if verb == "cancel":
+            task = self._task
+            if self._running is None or task is None or task.done():
+                return None
+            return self._running
+        if verb not in ("retry", "adjust"):
+            return None
+        candidates: list[tuple[float, str, str]] = []
+        for anchor in self._inputs:
+            inputs = self._inputs[anchor]
+            row = await asyncio.to_thread(self._newest_row, anchor, job=inputs.job)
+            if row is None:
+                continue
+            if (
+                row.get("error") == SUPERSEDED_ERROR
+                or row.get("dismissed")
+                or row.get("state") == "skipped"
+            ):
+                continue
+            state = str(row.get("state", ""))
+            if verb == "retry" and state not in ("failed", "cancelled"):
+                continue
+            candidates.append((float(row.get("at", 0.0) or 0.0), anchor, inputs.job))
+        if not candidates:
+            return None
+        _at, anchor, job = max(candidates)
+        return anchor, job
 
     # -- the one write path (round-3 review R3-1) -------------------------------------------
 

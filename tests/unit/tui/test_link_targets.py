@@ -479,3 +479,102 @@ def test_a_block_that_cannot_answer_is_skipped_rather_than_raising() -> None:
     assert build_link_targets([Hostile(), _answer("https://ok.test/x")]) == [
         LinkTarget(url="https://ok.test/x", sender="agent", rank=1)
     ]
+
+
+# ---------------------------------------------------------------------------
+# The FILE affordance (turn-supplements T3) — a separate predicate, never a
+# scheme widening: `is_openable` still refuses everything but http(s).
+# ---------------------------------------------------------------------------
+
+
+def test_file_affordance_admits_a_regular_file_under_the_session_cwd(tmp_path) -> None:
+    from local_operator.tui.link_targets import file_affordance
+
+    (tmp_path / "reports").mkdir()
+    report = tmp_path / "reports" / "q3.md"
+    report.write_text("the report")
+    uri = file_affordance("reports/q3.md", cwd=str(tmp_path))
+    assert uri is not None and uri.startswith("file://")
+    # `~`-relative is the contract's other spelling, resolved against home.
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "notes.txt").write_text("n")
+    tilde = file_affordance("~/notes.txt", cwd=str(tmp_path), home=str(home))
+    assert tilde is not None and tilde.endswith("/notes.txt")
+    # A name that IS its path (the session root) is fine; percent-encoding is
+    # the stdlib's job.
+    spaced = tmp_path / "my reports.csv"
+    spaced.write_text("a,b")
+    encoded = file_affordance("my reports.csv", cwd=str(tmp_path))
+    assert encoded is not None and "%20" in encoded
+
+
+def test_file_affordance_refuses_the_execution_and_escape_classes(tmp_path) -> None:
+    import os
+
+    from local_operator.tui.link_targets import file_affordance
+
+    def write(name: str, *, mode: int = 0o644):
+        path = tmp_path / name
+        path.write_text("x")
+        os.chmod(path, mode)
+        return path
+
+    write("run.command")
+    write("installer.pkg")
+    write("payload.sh", mode=0o755)
+    write("tool.txt", mode=0o755)
+    write("data.bin")
+    assert file_affordance("run.command", cwd=str(tmp_path)) is None
+    assert file_affordance("installer.pkg", cwd=str(tmp_path)) is None
+    assert file_affordance("payload.sh", cwd=str(tmp_path)) is None
+    # The suffix allowlist refuses what it does not name, and an executable bit
+    # refuses even an admitted one.
+    assert file_affordance("data.bin", cwd=str(tmp_path)) is None
+    assert file_affordance("tool.txt", cwd=str(tmp_path)) is None
+    # A bare absolute path is not the contract's shape.
+    assert file_affordance("/etc/hosts") is None
+    # A directory is refused even with an admitted-looking name.
+    (tmp_path / "folder.md").mkdir()
+    assert file_affordance("folder.md", cwd=str(tmp_path)) is None
+    # A missing file is plain text, not a dead link.
+    assert file_affordance("gone.md", cwd=str(tmp_path)) is None
+    # A symlink is admitted only when it RESOLVES inside the allowed roots: a
+    # readme symlinked at a private key is the escape this closes.
+    secret = tmp_path / "outside-key.rsa"
+    secret.write_text("PRIVATE")
+    link = tmp_path / "readme.md"
+    link.symlink_to(secret)
+    assert file_affordance("readme.md", cwd=str(tmp_path), home=str(tmp_path)) == (
+        secret.resolve().as_uri()
+    )
+    outside = tmp_path.parent / "elsewhere-secret.md"
+    outside.write_text("PRIVATE")
+    escape = tmp_path / "escape.md"
+    escape.symlink_to(outside)
+    assert file_affordance("escape.md", cwd=str(tmp_path), home=str(tmp_path)) is None
+
+
+def test_hyperlink_support_is_detected_per_terminal() -> None:
+    """Paint-time detection: an OSC 8 link is only written where it renders."""
+    from local_operator.terminals import is_hyperlinked
+
+    assert is_hyperlinked({"GHOSTTY_RESOURCES_DIR": "/x"}) is True
+    assert is_hyperlinked({"KITTY_WINDOW_ID": "1"}) is True
+    assert is_hyperlinked({"TERM_PROGRAM": "iTerm.app"}) is True
+    assert is_hyperlinked({"VTE_VERSION": "7003"}) is True
+    assert is_hyperlinked({"VTE_VERSION": "3000"}) is False
+    assert is_hyperlinked({"KONSOLE_VERSION": "220390"}) is True
+    assert is_hyperlinked({"TERM": "foot"}) is True
+    # Never claimed under a multiplexer: tmux/screen do not forward OSC 8
+    # without passthrough bookkeeping this deliberately does not attempt.
+    assert is_hyperlinked({"TERM_PROGRAM": "ghostty", "TMUX": "/tmp/t,1,0"}) is False
+    # An unrecognised terminal takes the plain-text path rather than a guess —
+    # including the dumb case, the terminal that genuinely cannot render a link.
+    assert is_hyperlinked({"TERM": "xterm-256color"}) is False
+    assert is_hyperlinked({"TERM": "dumb"}) is False
+    assert is_hyperlinked({"TERM_PROGRAM": "Apple_Terminal"}) is False
+    # The override cuts both ways (the kill switch and the capture-script pin).
+    forced_off = {"LOCAL_OPERATOR_HYPERLINKS": "0", "GHOSTTY_RESOURCES_DIR": "/x"}
+    assert is_hyperlinked(forced_off) is False
+    assert is_hyperlinked({"LOCAL_OPERATOR_HYPERLINKS": "1", "TERM": "dumb"}) is True

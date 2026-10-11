@@ -388,3 +388,50 @@ async def test_dispose_cancels_a_running_job(tmp_path: Path) -> None:
     finally:
         release.set()
         await session.dispose()
+
+
+async def test_a_files_only_finish_beats_done_with_its_files(tmp_path: Path) -> None:
+    """The terminal beat must fire on the files-only path too (TUI lane fix).
+
+    Every surface's LIVE half learns rows from the ``supplement_progress`` family, and
+    ``files`` rides only ``decided``/``done`` (memo §2.7) — while the graphics path beats
+    ``decided`` before it runs, the files path used to journal its ``done`` row and emit
+    NOTHING, so with graphics shipped OFF (the default) a live viewer saw a files-only
+    callout only after a reload. Asserted on the EVENT, not the journal: the row was
+    always correct, the beat is what was missing, and it must carry the files it is about
+    (an empty-files ``done`` repaints an empty block on a viewer that merged it).
+    """
+    from local_operator.harness.types import SupplementProgressEvent
+
+    stream = _report_stream("reports/beats.md")
+    session = _make_session(
+        tmp_path / "sessions" / "beats",
+        stream,
+        [_write_tool(tmp_path, [])],
+        tmp_path,
+    )
+    handle = ServingSessionHandle(
+        session, asyncio.get_running_loop(), install_gates=False, cwd=str(tmp_path)
+    )
+    handle.subscribe(lambda: None)
+    beats: list[SupplementProgressEvent] = []
+
+    def handler(event: Any) -> None:
+        if isinstance(event, SupplementProgressEvent):
+            beats.append(event)
+
+    session.subscribe(handler)
+    try:
+        await session.prompt("write the report")
+        row = await _await_row(session.transcript)
+        # The beat is emitted after the row is durable, so by the time the row is
+        # readable the beat is owed; give the emitter its turn.
+        await wait_for(lambda: bool(beats), timeout=10)
+        assert row["state"] == "done"
+        assert [(beat.state, [f["path"] for f in beat.files]) for beat in beats] == [
+            ("done", ["reports/beats.md"])
+        ], beats
+        assert beats[-1].anchor == row["anchor"] and beats[-1].job == row["job"]
+    finally:
+        await handle.dispose()
+        await session.dispose()

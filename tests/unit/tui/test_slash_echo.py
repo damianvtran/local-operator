@@ -133,6 +133,9 @@ ECHO_POLICY = {
     "compact": False,
     # The stop receipt names what was stopped; nothing reaches the model.
     "stop": False,
+    # The `/highlights` receipt names the effect and the job it landed on —
+    # nothing here reaches the model (`/stop`'s rule one noun over).
+    "highlights": False,
     "context": False,
     "approvals": False,
     "skills": False,
@@ -236,6 +239,9 @@ PROMPT_POLICY = {
     "btw": True,
     "compact": False,
     "stop": False,
+    # The `/highlights` argument is the job's control vocabulary, not a prompt
+    # THIS conversation is given (it reaches the supplement generator).
+    "highlights": False,
     "context": False,
     "approvals": False,
     "skills": False,
