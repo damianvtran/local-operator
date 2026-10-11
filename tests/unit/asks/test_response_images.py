@@ -11,8 +11,9 @@ neither see nor repair:
   open (secret question, unknown question, too many, a store that will not write);
 * the fold keeps the FIRST answer's refs across a revision, and a revision that
   tries to carry images is refused in words;
-* the model's turn is ``[Text, Image...]`` exactly as a composer send is, and the
-  durable row stays tiny because the bytes ride the transcript's own
+* the model's turn is ``[Text, Image..., note]`` — a composer send's shape
+  plus the request's stored-location note (``session/attachment_hints.py``) —
+  and the durable row stays tiny because the bytes ride the transcript's own
   externalisation (``content`` blocks), not ``details``.
 
 The session is the real one (``make_session``) and so is the queue; the stream
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import struct
@@ -420,9 +422,15 @@ async def test_the_model_receives_the_image_in_the_answer_turn(
     assert stream.requests, "the answer never produced a model turn"
     user = [m for m in stream.requests[-1].messages if m.role == "user"][-1]
     kinds = [type(block).__name__ for block in user.content]
-    assert kinds == ["TextContent", "ImageContent"], kinds
+    # The trailing TextContent is the stored-location note every request
+    # carries for a stored image (``session/attachment_hints.py``): the image
+    # keeps its own block, and the note names where its bytes live.
+    assert kinds == ["TextContent", "ImageContent", "TextContent"], kinds
     assert user.content[1].data == image.data
     assert "see screenshot (+1 image, shown below)" in user.content[0].text
+    digest = hashlib.sha256(base64.b64decode(image.data)).hexdigest()[:32]
+    assert "no filesystem search is needed" in user.content[2].text
+    assert f"digest {digest}" in user.content[2].text
 
 
 @pytest.mark.asyncio

@@ -4536,15 +4536,19 @@ class Session:
     def _render_for_request(self, messages: list[AgentMessage]) -> list[Message]:
         """The request render: ``_render_history`` plus stored-attachment hints.
 
-        The one convert seam every wire path shares — the turn loop's
-        ``convert_to_llm`` callable and ``_read_only_prompt`` (asides,
-        clearance, the compaction advisor) — so the aside's promise to read
-        the turn's provider cache holds with the hints in place, byte for
-        byte. Deliberately NOT folded into ``_render_history`` itself: that
-        function also feeds the compaction renders and the context counters,
-        and a note that entered the kept window a compaction commit seats
-        would be persisted into the transcript and paint as the user's own
-        words (``session/attachment_hints.py`` carries the whole argument).
+        The composition every wire path shares — the turn loop goes through
+        THIS method (``convert_to_llm``), and ``_read_only_prompt`` (asides,
+        clearance, the compaction advisor) spells the same two calls inline,
+        through the same module symbols, because the pinned harness stub at
+        that seam mirrors those symbols only and routing it through this
+        method broke the aside-equals-turn equality test. The wiring suite
+        pins the two spellings byte-equal in production, which is what lets
+        the aside read the turn's provider cache. Deliberately NOT folded
+        into ``_render_history`` itself: that function also feeds the
+        compaction renders and the context counters, and a note that entered
+        the kept window a compaction commit seats would be persisted into the
+        transcript and paint as the user's own words
+        (``session/attachment_hints.py`` carries the whole argument).
         """
         return with_attachment_hints(self._render_history(messages))
 

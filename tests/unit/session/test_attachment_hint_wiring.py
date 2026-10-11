@@ -26,6 +26,7 @@ import hashlib
 
 import pytest
 
+from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.types import (
     ImageContent,
     Message,
@@ -129,6 +130,26 @@ async def test_the_read_only_render_carries_the_same_note_as_the_turn(tmp_path):
     _blocks, aside_messages = await session._read_only_prompt([Message.user("aside question")])
 
     assert _notes(aside_messages) == turn_notes
+
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_read_only_render_is_the_same_composition_as_the_turn(tmp_path):
+    """The aside seam spells the composition inline; pin it EQUAL to the
+    turn's method. Their byte equality is the property that lets an aside read
+    the turn's provider cache, and the two spellings must not drift."""
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    await session.prompt("edit this", [ImageContent(data=PNG_B64, mime_type="image/png")])
+
+    turns = [Message.user("and now?")]
+    _blocks, aside = await session._read_only_prompt(turns)
+    expected = bound_replay_payloads(
+        session._render_for_request([*session._wire_legal_snapshot(), *turns])
+    )
+
+    assert [m.model_dump() for m in aside] == [m.model_dump() for m in expected]
 
     await session.dispose()
 
