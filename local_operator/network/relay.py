@@ -417,6 +417,11 @@ SLICE_MODULES: tuple[str, ...] = (
     # S1 of the mesh rolling updates: the ``update`` capability's op halves. It
     # starts no thread of its own (the S3 rollout driver is a different slice).
     "local_operator.network.meshupdate",
+    # S3a of the rolling updates: the rollout record and the serial pass. It
+    # serves NO ops of its own — one start hook, the ``mesh-rollout`` driver
+    # thread — and it opens no record by itself: the trigger that does is
+    # S3b's, so this slice ships inert in production by construction.
+    "local_operator.network.rollouts",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.

@@ -747,6 +747,27 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "peer", nargs="?", default="", help="the device to update (a name or a device id)"
     )
     update_peer_parser.add_argument("--json", action="store_true")
+    # S3a: the two rollouts verbs that live on this command because they act on
+    # the same machine-side orchestration the ask feeds. Both are LOCAL file
+    # mutations on the rollout record (no relay hop): `--resume` clears the
+    # retry floors, `--cancel` abandons the running rollout (an apply already
+    # in flight finishes — an install cannot be recalled — and is recorded).
+    update_peer_parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help="clear a rollout's retry floors (default: the newest active one)",
+    )
+    update_peer_parser.add_argument(
+        "--cancel",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help="abandon a rollout (default: the newest active one)",
+    )
 
     identity = actions.add_parser("identity", help="This device's key")
     identity_actions = identity.add_subparsers(dest="identity_command")
@@ -7660,6 +7681,12 @@ def _cmd_update(args: argparse.Namespace) -> int:
     from local_operator.network import meshupdate
     from local_operator.network.types import MeshRefusal
 
+    # ``--resume``/``--cancel`` FIRST: they are local record mutations, and a
+    # plain ask (peer named or not) is the only path that needs the relay hop.
+    if getattr(args, "resume", None) is not None:
+        return _cmd_rollout_resume(args)
+    if getattr(args, "cancel", None) is not None:
+        return _cmd_rollout_cancel(args)
     peer = str(getattr(args, "peer", "") or "")
     if not peer:
         raise MeshRefusal(
@@ -7688,6 +7715,59 @@ def _cmd_update(args: argparse.Namespace) -> int:
     else:
         lines.append(f"{label}: {message or payload.get('code') or 'no answer'}")
     return _emit(args, payload, lines)
+
+
+def _pick_rollout(args: argparse.Namespace, ident: str) -> Any:
+    """The record ``--resume``/``--cancel`` names: an id, or the newest active."""
+    from local_operator.network import rollouts
+    from local_operator.network.types import MeshRefusal
+
+    record = rollouts.read_record(ident) if ident else rollouts.latest_active()
+    if record is None:
+        raise MeshRefusal(
+            "rollout_not_found",
+            (
+                f"no rollout record {ident!r} on this device"
+                if ident
+                else "no active rollout on this device — `lop update` opens one after an "
+                "update settles, or ask one peer directly with `lop network update <peer>`"
+            ),
+        )
+    return record
+
+
+def _cmd_rollout_resume(args: argparse.Namespace) -> int:
+    """``lop network update --resume [<id>]``: clear floors; the scan is the wake."""
+    from local_operator.network import rollouts
+
+    ident = str(getattr(args, "resume", "") or "")
+    record = _pick_rollout(args, ident)
+    record = rollouts.resume_record(str(record["id"])) or record
+    waiting = [
+        m for m in record.get("members", []) if str(m.get("state")) not in rollouts.TERMINAL_STATES
+    ]
+    lines = [
+        f"resumed {record['id']}: {len(waiting)} member(s) will be re-asked on the driver's "
+        f"next scan (≤{int(rollouts.SCAN_INTERVAL_S)} s); it does not drive"
+    ]
+    return _emit(args, record, lines)
+
+
+def _cmd_rollout_cancel(args: argparse.Namespace) -> int:
+    """``lop network update --cancel [<id>]``: abandon the rollout, closing row included."""
+    from local_operator.network import rollouts
+
+    ident = str(getattr(args, "cancel", "") or "")
+    record = _pick_rollout(args, ident)
+    record = rollouts.cancel_record(str(record["id"])) or record
+    left = [
+        m for m in record.get("members", []) if str(m.get("state")) not in rollouts.TERMINAL_STATES
+    ]
+    lines = [
+        f"abandoned {record['id']}: {len(left)} member(s) remained; an apply already in "
+        "flight finishes and is recorded by the driver"
+    ]
+    return _emit(args, record, lines)
 
 
 def _cmd_identity_show(args: argparse.Namespace) -> int:
