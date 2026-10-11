@@ -2115,6 +2115,42 @@ def test_a_touch_without_a_value_change_publishes_nothing(tmp_path, monkeypatch)
     asyncio.run(feed.close())
 
 
+def test_a_broken_config_announces_nothing_and_is_never_renamed(tmp_path, monkeypatch):
+    """Review round 1, MINOR-3(a): an unreadable config publishes NO frame —
+    there is nothing truthful to name — and the FEED never renames the file:
+    the raw read keeps the last good snapshot, so the repair is what publishes.
+    (A `ConfigManager` construction would move the malformed file aside; this
+    path must never be the thing that does.)"""
+    root = tmp_path
+    (root / "config.yml").write_text("values:\n  language: en\n", encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+
+    broken = "values: [not, a, mapping\n"
+    (root / "config.yml").write_text(broken, encoding="utf-8")
+    _tick(feed)
+
+    assert _config_frames(_queued(subscription)) == []
+    assert list(root.glob("config.yml.bad.*")) == []
+    assert (root / "config.yml").read_text(encoding="utf-8") == broken
+
+    # THE REPAIR is the change that publishes, diffed against the last good
+    # snapshot so it names exactly what moved across the broken window.
+    (root / "config.yml").write_text(
+        "values:\n  language: en\n  auto_save_conversation: false\n", encoding="utf-8"
+    )
+    _tick(feed)
+    frames = _config_frames(_queued(subscription))
+    assert len(frames) == 1, frames
+    assert frames[0]["payload"]["changed_keys"] == ["auto_save_conversation"]
+    asyncio.run(feed.close())
+
+
 def test_a_second_probe_primes_no_markers(tmp_path, monkeypatch):
     """An unchanged name set must not re-ask the user-session question OR
     rebuild the cache wholesale — that pair is the whole 1 Hz saving.

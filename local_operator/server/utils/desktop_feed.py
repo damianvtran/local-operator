@@ -383,22 +383,26 @@ def _fingerprint(path: Path) -> tuple[int, int, int] | None:
 _DB_SIDECAR_SUFFIXES = ("-wal", "-journal")
 
 
-def _read_config_values(path: Path) -> dict[str, Any]:
+def _read_config_values(path: Path) -> dict[str, Any] | None:
     """The settings ``config.yml`` currently sets, flattened to ``{key: value}``.
 
     RAW YAML, deliberately: a ``ConfigManager`` constructor can MOVE a malformed
     file aside, and a change WATCHER must never be what renames a user's config
     (``config_watch``'s rule; ``settings_io.config_value``'s docstring carries
     the same reasoning). Sub-mapping entries flatten to dotted keys, top-level
-    dotted keys (the ``display.*`` family) join as themselves, and anything
-    unparseable reads as ``{}`` — a broken file is not a publishable change.
+    dotted keys (the ``display.*`` family) join as themselves; an ABSENT file is
+    a first run and reads as ``{}``, while any unparseable/unreadable file reads
+    as ``None`` — distinct states, because a broken file must announce NOTHING
+    and keep the last good snapshot, never look like "every key was deleted".
     """
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
     except (OSError, yaml.YAMLError):
-        return {}
+        return None
     if not isinstance(data, dict):
-        return {}
+        return None
     flat: dict[str, Any] = {}
     values = data.get("values")
     if isinstance(values, dict):
@@ -529,13 +533,15 @@ class DesktopFeed:
         #: database PLUS its journal sidecars, so it is a tuple of tuples rather
         #: than one ``(ino, size, mtime_ns)``.
         self._fingerprint: tuple[tuple[int, int, int] | None, ...] | None = None
-        #: The settings doorbell's cursor pair (wave 4 slice A): the config
-        #: file's fingerprint and the flattened values it carried, primed at
-        #: baseline so a language already set when the client connected is not
-        #: replayed, and compared every tick so any origin's write — including a
-        #: hand edit — publishes exactly one ``config`` frame per real change.
-        #: ``_config_values is None`` means "never primed" (``{}`` is a legit
-        #: state: a readable file that sets nothing).
+        #: The settings doorbell's cursor set (wave 4 slice A): the config
+        #: file's fingerprint, the last GOOD flattened values, and the primed
+        #: flag. Primed at baseline so a language already set when the client
+        #: connected is not replayed, and compared every tick so any origin's
+        #: write — including a hand edit — publishes exactly one ``config``
+        #: frame per real change. ``_config_values is None`` after priming means
+        #: "no readable snapshot yet" (a broken file at baseline); ``{}`` is a
+        #: legit state: a readable file that sets nothing.
+        self._config_primed = False
         self._config_fingerprint: tuple[int, int, int] | None = None
         self._config_values: dict[str, Any] | None = None
         #: Set when a tick read its delta but could not finish processing it
@@ -1041,6 +1047,7 @@ class DesktopFeed:
         # language already configured when the client connected is what the
         # client's own capabilities read shows, and announcing it would be a
         # frame about last week. Only a change AFTER connect publishes.
+        self._config_primed = True
         self._config_fingerprint = _fingerprint(self.config_path)
         self._config_values = _read_config_values(self.config_path)
         # THE STATUS BASELINE, on the same rule: a status that predates this
@@ -1239,32 +1246,50 @@ class DesktopFeed:
         # process wrote it. The values compare costs a raw YAML read only when
         # the stat moved, and names the keys that actually changed, so a
         # metadata-only touch publishes nothing.
+        #
+        # A BROKEN FILE ANNOUNCES NOTHING: an unreadable config publishes no
+        # frame (there is nothing truthful to name), the last good snapshot is
+        # kept, and the REPAIR is what publishes — diffed against that snapshot
+        # so it names exactly what moved across the broken window. And note the
+        # first write on a config carrying no defaults materializes the
+        # manager's in-memory defaults along with the written key, so THAT one
+        # frame names every materialized key beside the semantic one; a config
+        # already carrying its defaults frames exactly the keys a caller moved.
         config_fingerprint = await asyncio.to_thread(_fingerprint, self.config_path)
-        if self._config_values is None or config_fingerprint != self._config_fingerprint:
+        if not self._config_primed or config_fingerprint != self._config_fingerprint:
             values = await asyncio.to_thread(_read_config_values, self.config_path)
-            if self._config_values is None:
+            if not self._config_primed:
                 # Defensive pre-baseline prime (tests drive ``_tick`` directly):
                 # nothing to compare against, so nothing is news.
+                self._config_primed = True
                 self._config_fingerprint = config_fingerprint
                 self._config_values = values
             else:
-                changed = sorted(
-                    key
-                    for key in set(values) | set(self._config_values)
-                    if values.get(key) != self._config_values.get(key)
-                )
                 self._config_fingerprint = config_fingerprint
-                self._config_values = values
-                if changed:
-                    # ``resolve_language()`` rather than a re-derivation from
-                    # the parsed dict: the frame must agree with
-                    # ``GET /v1/capabilities``'s ``language`` field, and the
-                    # resolver is that field's one truth (SYS1).
-                    language = await asyncio.to_thread(resolve_language)
-                    self._publish(
-                        "config",
-                        {"changed_keys": changed, "language": language},
+                if values is not None:
+                    previous = self._config_values or {}
+                    changed = sorted(
+                        key
+                        for key in set(values) | set(previous)
+                        if values.get(key) != previous.get(key)
                     )
+                    self._config_values = values
+                    if changed:
+                        # The language comes from the SNAPSHOT just parsed —
+                        # ``resolve_language(config=...)`` takes the raw value
+                        # (an absent/`auto` one exercises the chain) — so the
+                        # frame agrees with ``GET /v1/capabilities`` without the
+                        # feed ever constructing a ConfigManager: that path can
+                        # rename a malformed file aside, and a watcher must
+                        # never be the thing that does.
+                        raw = values.get("language")
+                        language = await asyncio.to_thread(
+                            resolve_language, raw if isinstance(raw, str) else "auto"
+                        )
+                        self._publish(
+                            "config",
+                            {"changed_keys": changed, "language": language},
+                        )
         # 3. THE CATALOGUE HAS ITS OWN SCHEDULE (R2). Deliberately outside the
         # doorbell branch above: it was reached only when the attention database
         # had moved, so on a quiet store — which is the common case — session
