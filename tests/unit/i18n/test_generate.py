@@ -50,6 +50,11 @@ def test_per_key_functions_are_emitted_with_typed_kwargs(generated, i18n_generat
                 # sanitisation — a digit-leading suffix and a keyword ARGUMENT.
                 "demo.words.2fa": "two-factor prompts",
                 "demo.words.klass": "{class, select, login {Sign in} other {Continue}}",
+                # Multi-argument message: the keyword-only marker `*` is emitted
+                # ONCE for the block. Emitting it per argument (its own earlier
+                # shape) is a SyntaxError, caught when tui.analytics landed the
+                # first two-argument message.
+                "demo.words.pair": "Pair {left} and {right}",
             }
         ),
         encoding="utf-8",
@@ -77,6 +82,10 @@ def import_() -> Msg:
 
 def klass(*, class_: str) -> Msg:
     return Msg("demo.words.klass", {"class": class_})
+
+
+def pair(*, left: str, right: str) -> Msg:
+    return Msg("demo.words.pair", {"left": left, "right": right})
 
 
 def plain() -> Msg:
