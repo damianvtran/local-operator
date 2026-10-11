@@ -824,6 +824,24 @@ def _worst_rung(*rungs: str) -> str:
     return _KNOWLEDGE_ORDER[worst]
 
 
+def _entry_rung(amount_micro: int | None, *rungs: str) -> str:
+    """An entry's rung: the worst of its contributors, floored at ``partial``.
+
+    An entry that carries STATED money must never read ``unknown`` (review
+    round 3): ``unknown`` is combine's "nothing stateable" rung, and stated
+    money contradicts it. A contributor that is unsized ALONE (the relayed
+    record set, an own-records set beside a stated inference half) is
+    therefore rated at the ENTRY level — where some of the money IS stated —
+    reading ``partial`` exactly as combine rates the same bundle ``partial``
+    at the session and ``subagents`` level. Entries with no stated amount
+    keep ``unknown``: that is the honest reading of "nothing was sized".
+    """
+    knowledge = _worst_rung(*rungs)
+    if knowledge == "unknown" and amount_micro is not None:
+        return "partial"
+    return knowledge
+
+
 def _record_rung(records: Sequence[ChannelSpendRecord]) -> str:
     """One rung for a set of records, from the same booleans the rows derive.
 
@@ -959,7 +977,7 @@ def _breakdown_entry(
         "id": entry_id,
         "label": label,
         "amount_micro": amount_micro,
-        "knowledge": _worst_rung(*rungs),
+        "knowledge": _entry_rung(amount_micro, *rungs),
         "unstated_records": int(unstated_records),
         "bases": sorted({str(basis) for basis in bases}),
     }
@@ -995,8 +1013,10 @@ def _group_entries_past_cap(entries: list[dict[str, Any]]) -> list[dict[str, Any
     aggregate["amount_micro"] = _sum_stated(
         [aggregate["amount_micro"], *(entry["amount_micro"] for entry in folded)]
     )
-    aggregate["knowledge"] = _worst_rung(
-        str(aggregate["knowledge"]), *(str(entry["knowledge"]) for entry in folded)
+    aggregate["knowledge"] = _entry_rung(
+        aggregate["amount_micro"],
+        str(aggregate["knowledge"]),
+        *(str(entry["knowledge"]) for entry in folded),
     )
     aggregate["unstated_records"] = int(aggregate["unstated_records"]) + sum(
         int(entry["unstated_records"]) for entry in folded

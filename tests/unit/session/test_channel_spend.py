@@ -976,7 +976,7 @@ def test_the_breakdown_entry_cap_groups_the_remainder() -> None:
         folded["amount_micro"] == 12000 + 13000
     ), "chan13 was never sized; only its count survives"
     assert folded["unstated_records"] == 1
-    assert folded["knowledge"] == "unknown", "an unsized folded entry may not read exact"
+    assert folded["knowledge"] == "partial", "stated money is never rated unknown"
     assert sum(entry["amount_micro"] or 0 for entry in entries) == generated["total_micro"]
 
     # A session that ALREADY has an ``other`` entry folds the remainder into
@@ -1145,6 +1145,38 @@ def test_a_degraded_children_bundle_degrades_the_inference_entry() -> None:
     assert entries["inference"]["amount_micro"] == 400000
     assert entries["inference"]["knowledge"] == "partial"
     assert entries["inference"]["unstated_records"] == 0
+
+
+def test_an_inference_named_relay_cannot_sink_the_entry_below_partial() -> None:
+    """MAJOR (review round 3): stated money is never rated ``unknown``.
+
+    The shape round 2 cited: a 400,000 µ$ exact ledger plus ONE relayed child
+    record whose channel is ``inference`` and which has no stated amount. The
+    record set alone rates ``unknown``, but the entry CARRIES stated money,
+    and combine rates the same bundle ``partial`` at the session and
+    ``subagents`` level — the entry must read ``partial`` too, never
+    ``unknown``.
+    """
+    generated = payload(
+        [],
+        children=ChildrenSnapshot(total_micro=400000, knowledge="exact"),
+        child_records=[
+            record(
+                record_id="inference:kid",
+                channel="inference",
+                amount_micro=None,
+                status="cancelled",
+            )
+        ],
+    )
+    assert generated["knowledge"] == "partial", "the session over the same inputs"
+    assert generated["children"]["knowledge"] == "partial"
+    entries = {entry["id"]: entry for entry in generated["breakdown"]["by_source"]}
+    assert entries["inference"]["amount_micro"] == 400000
+    assert entries["inference"]["knowledge"] == "partial"
+    assert entries["inference"]["unstated_records"] == 1
+    agents = {entry["id"]: entry for entry in generated["breakdown"]["by_agent"]}
+    assert agents["subagents"]["knowledge"] == "partial", "the sibling over the same money"
 
 
 def test_custom_type_literal_is_pinned() -> None:
