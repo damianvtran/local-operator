@@ -411,8 +411,13 @@ async def test_reminder_expires_and_re_arms_when_a_blocked_reason_is_rewritten(
     # corrected condition rather than repeating the stale one.
     nudges = await session._todo_continuation()
     assert len(nudges) == 1
-    assert "waiting on finance" in nudges[0].details["text"]
-    assert "waiting on legal" not in nudges[0].details["text"]
+    # Narrowed for the type checker: the list is ``AgentMessage``, and only the
+    # custom message carries ``details``. A non-CustomMessage here is itself the
+    # failure (the reminder is not a plain user turn by construction).
+    nudge = nudges[0]
+    assert isinstance(nudge, CustomMessage)
+    assert "waiting on finance" in nudge.details["text"]
+    assert "waiting on legal" not in nudge.details["text"]
     await session.dispose()
 
 
