@@ -20,6 +20,7 @@ from local_operator.session.channel_spend import (
     fold_records,
 )
 from local_operator.session.frontend_state import FrontendSpendChannels
+from local_operator.tui.costs import UNKNOWN_COST_CELL
 from local_operator.tui.widgets.session_panel import (
     SessionDiagnostics,
     _Body,
@@ -29,7 +30,10 @@ from tests.unit.tui.test_session_panel import runtime
 
 
 def payload(
-    *, tracked: bool = True, children: ChildrenSnapshot | None = None
+    *,
+    tracked: bool = True,
+    children: ChildrenSnapshot | None = None,
+    pending: list[dict[str, object]] | None = None,
 ) -> FrontendSpendChannels:
     records = [
         ChannelSpendRecord(
@@ -89,6 +93,26 @@ def payload(
         children=children or ChildrenSnapshot(),
         tracked=tracked,
         lost=False,
+        pending=pending or (),
+    )
+    return FrontendSpendChannels.model_validate(snapshot)
+
+
+def voice_only_payload() -> FrontendSpendChannels:
+    """The voice-only shape: nothing folded, two voice charges pending.
+
+    The exact shape the PR's real-path evidence produced — ``rows []``,
+    ``total_micro 0``, ``knowledge unknown``, ``tracked`` (the session marker
+    exists) — and the one design round 1 (D1) measured as showing NO section
+    at all.
+    """
+    snapshot = combine(
+        [],
+        tracked=True,
+        pending=[
+            {"record_id": "tts:one", "channel": "tts", "ts_ms": 1},
+            {"record_id": "stt:two", "channel": "stt", "ts_ms": 2},
+        ],
     )
     return FrontendSpendChannels.model_validate(snapshot)
 
@@ -296,3 +320,47 @@ def test_notes_shed_whole_at_narrow_widths() -> None:
         # A crop is a line that cuts the parenthetical mid-word; the full
         # spelling is fine wherever it appears whole.
         assert "(API price" not in line or "(API price)" in line, line
+
+
+def test_pending_voice_spend_is_stated_beside_the_total() -> None:
+    """D1 (design round 1): recorded-but-excluded voice money must SAY so.
+
+    The total is unchanged (the same figure as every other surface, and the
+    money genuinely is not in it), but the section now states the exclusion in
+    plain words with the count — never the `$—` class, which means "price not
+    stated" and would read as if the amount were unknown.
+    """
+    text = rendered(
+        replace(
+            runtime(),
+            spend_channels=payload(
+                pending=[
+                    {"record_id": "tts:one", "channel": "tts", "ts_ms": 1},
+                    {"record_id": "stt:two", "channel": "stt", "ts_ms": 2},
+                ]
+            ),
+        )
+    )
+    assert "Voice spend for this conversation is recorded but not yet included" in text, text
+    assert "2\u00a0requests." in text, text  # NBSP: count + noun stay one unit (D2-2)
+    # The total keeps its own knowledge-derived figure and mark untouched.
+    assert "$1.01+" in text and "+ lower bound" in text
+    # No wire vocabulary, and no fabricated zero for the excluded money.
+    assert "pending]" not in text and "pending_owner_append" not in text
+    assert "$0.0000" not in text, "$0 must never stand in for the excluded money"
+
+
+def test_a_voice_only_session_draws_the_state_instead_of_nothing() -> None:
+    """D1: the voice-only shape (rows [], total 0) used to draw nothing at all.
+
+    Charged money read as non-existent on the exact surface whose job is to
+    account for spend. The section now draws — header and the pending note —
+    and the Total prints `$—` (nothing is stateable about what the fold holds)
+    rather than a fabricated ``$0.0000``.
+    """
+    text = rendered(replace(runtime(), spend_channels=voice_only_payload()))
+    assert "Spend by channel" in text, text
+    assert "Voice spend for this conversation is recorded but not yet included" in text, text
+    assert "2\u00a0requests." in text
+    assert UNKNOWN_COST_CELL in text, "an empty fold totals $—, never a fabricated zero"
+    assert "$0.0000" not in text

@@ -6355,6 +6355,17 @@ class SessionStreamFn:
             serving_provider = getattr(usage, "provider", None) or request.model.provider
             serving_model = getattr(usage, "model_id", None) or request.model.model_id
             from local_operator.providers.registry import credential_provider_id
+            from local_operator.session.spend import inference_billing_labels
+
+            # The basis/source labels are decided from the RAW provider id and
+            # the receipt BEFORE the collapse below (PR-3, design §3.4): the
+            # raw stamp is the only place a subscription login flavour
+            # (``openai-device``) is distinguishable from the metered provider
+            # it stores under, and the receipt is a fact of this call alone.
+            # The background writer prices later and cannot recover either.
+            billing_basis, cost_source = inference_billing_labels(
+                str(serving_provider or ""), getattr(usage, "usd_cost", None)
+            )
 
             # Login flavours (``xai-oauth``, ``openai-device``) are the same
             # billable provider as their storage id. Canonicalize at record
@@ -6384,6 +6395,8 @@ class SessionStreamFn:
                     component_chars=component_chars,
                     ok=ok,
                     usd_cost=getattr(usage, "usd_cost", None),
+                    billing_basis=billing_basis,
+                    cost_source=cost_source,
                     request_id=request_id,
                     parent_session_id=getattr(self, "_parent_session_id", "") or "",
                     purpose=request.purpose,

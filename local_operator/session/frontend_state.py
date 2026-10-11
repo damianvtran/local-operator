@@ -107,7 +107,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     #: runtime contract, and a reduced host simply has none of them. Declared
     #: AFTER the imports, not in the typing block above, because flake8 resolves
     #: a name used here against the module's import order.
-    AccrueSpendFn = Callable[[int | None, dict[str, str] | None], int]
+    AccrueSpendFn = Callable[..., int]
     SeedSpendFn = Callable[..., SessionSpend]
     ScheduleSpendFn = Callable[[int, Any, dict[str, str]], None]
     IdentityFn = Callable[[Any], dict[str, str]]
@@ -1285,6 +1285,21 @@ class FrontendSpendChannels(BaseModel):
     by_basis: dict[str, int] = Field(default_factory=dict)
     rows: list[FrontendSpendChannelRow] = Field(default_factory=list)
     children: FrontendSpendChildren = Field(default_factory=FrontendSpendChildren)
+    #: ADDITIVE on the v1 wire, and present ONLY when the session knows of
+    #: voice records that exist (in analytics) but are not in the fold — the
+    #: §4.2 return-path fallback: ``{"voice": "pending_owner_append",
+    #: "calls": N, "reason": "..."}``. Their money is NOT in ``total_micro``
+    #: (the same total shows everywhere); this key is how a surface says why.
+    #: Absent for every other session, so the golden fixture and every legacy
+    #: reader keep the exact key set they always had.
+    pending: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_pending(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload = handler(self)
+        if self.pending is None:
+            payload.pop("pending", None)
+        return payload
 
 
 class SlashCapability(BaseModel):
@@ -7165,15 +7180,20 @@ class FrontendStateStore:
         # and letting the seed price it would bill the call twice.
         self._seed_legacy_spend(session, None)
         micro = int(round(paint_cost * 1_000_000)) if paint_cost is not None else None
+        # The call's billing basis (PR-3): the SAME decision the analytics
+        # record takes, from the SAME raw usage stamps AND the same unstamped
+        # fallback (the effective model), so the wire's basis array and the
+        # ledger's basis column cannot disagree about one call.
+        basis = _usage_billing_basis(usage, getattr(session, "effective_model", None))
         # ``cast`` rather than a bare call: these are duck-typed members on a
         # session facade (a reduced host may not have them at all), so pyright
         # sees ``object`` where the runtime contract is the call signature
         # below. The ``callable`` guard IS the runtime contract.
         accrue = getattr(session, "accrue_spend", None)
         if callable(accrue):
-            index = int(cast("AccrueSpendFn", accrue)(micro, identity))
+            index = int(cast("AccrueSpendFn", accrue)(micro, identity, basis=basis))
         else:
-            index = spend.accrue(micro, identity)
+            index = spend.accrue(micro, identity, basis=basis)
         schedule = getattr(session, "schedule_spend_price", None)
         if callable(schedule) and not usage_prices_known(usage):
             # A provider receipt is already the exact bill; nothing to converge.
@@ -8528,6 +8548,56 @@ def _usd_to_micro(value: Any) -> int:
         return 0
 
 
+def _usage_billing_basis(usage: Any, effective_model: Any = None) -> str | None:
+    """The billing basis label for ONE usage, or ``None`` when unscorable.
+
+    The same :func:`~local_operator.session.spend.inference_billing_labels`
+    the analytics record uses, read from the SAME raw stamps — the usage's
+    pre-collapse serving provider (falling back to the effective model for an
+    UNSTAMPED usage, the :func:`serving_identity` rule both sides share) and
+    its receipt — so the wire's basis array and the ledger's basis column
+    cannot disagree about one call. The fallback is load-bearing: the
+    analytics label reads ``usage.provider or request.model.provider``, and
+    without the same elbow here a truly-unstamped call served by a
+    subscription flavour would read ``billed`` on the wire and
+    ``subscription_api_equivalent`` in ``calls`` (review round 1, MINOR 4).
+    Never raises: a label is not worth a broken frame, and a missing one reads
+    as ``not_tracked`` — the state the wire has always shown for money with no
+    recorded basis.
+    """
+    try:
+        from local_operator.session.spend import inference_billing_labels
+
+        provider = str(getattr(usage, "provider", "") or "")
+        if not provider:
+            provider = str(getattr(effective_model, "provider", "") or "")
+        return inference_billing_labels(provider, getattr(usage, "usd_cost", None))[0]
+    except Exception:  # noqa: BLE001 — an unlabelable call is not a broken frame
+        return None
+
+
+def _pending_channels(session: Any) -> list[dict[str, Any]]:
+    """The §4.2 fallback markers this session's fold does not hold, or ``[]``.
+
+    A host without the reader (a reduced facade, a test double) has no pending
+    state to publish, and a reader that faults degrades to the same answer: a
+    marker is never worth a broken refresh. A reader returning a non-sequence
+    is the same class of answer — the ``isinstance`` is the runtime contract,
+    not a typing formality (the callable narrowing above it is what pyright
+    sees; a reduced facade's answer is not guaranteed to be a list).
+    """
+    reader = getattr(session, "pending_channel_records", None)
+    if not callable(reader):
+        return []
+    try:
+        entries = reader()
+    except Exception:  # noqa: BLE001 — a marker read is not worth a broken refresh
+        return []
+    if not isinstance(entries, Iterable):
+        return []
+    return [dict(entry) for entry in entries if isinstance(entry, Mapping)]
+
+
 def _spend_channels_payload(
     session: Any,
     ledger: Mapping[str, Any],
@@ -8575,6 +8645,7 @@ def _spend_channels_payload(
                 getattr(session, "channels_tracked", getattr(session, "channels_started", False))
             ),
             lost=bool(getattr(session, "channels_lost", False)),
+            pending=_pending_channels(session),
         )
     except Exception:  # noqa: BLE001 — a publish must never break a refresh
         logger.debug("spend_channels payload failed", exc_info=True)

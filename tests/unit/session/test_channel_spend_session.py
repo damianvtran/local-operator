@@ -16,7 +16,10 @@ from typing import Any
 from local_operator.harness.types import Message, ModelSpec, Usage
 from local_operator.session.channel_spend import (
     CHANNEL_SPEND_CUSTOM_TYPE,
+    PENDING_OWNER_APPEND,
+    PENDING_OWNER_APPEND_REASON,
     ChannelSpendRecord,
+    write_pending_record,
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -613,3 +616,51 @@ def test_backfill_ignores_non_image_rows_that_report_a_cost(tmp_path: Path) -> N
     asyncio.run(seed())
     rows = Transcript(directory).channel_backfill_rows()
     assert rows == [], "a non-image tool's per-call cost is not an image record"
+
+
+def test_pending_voice_records_mark_the_published_object(tmp_path: Path) -> None:
+    """The §4.2 fallback at the session seam: mark, do not fold, retire by fold.
+
+    A route-emitted voice record exists in the session's sidecar but not in the
+    fold (the daemon could not append it). The published object must carry the
+    ``pending_owner_append`` state — and must NOT add the money to the total
+    (surfaces never disagree) — while a record the fold actually holds retires
+    the marker, because the fold's own ``record_id`` set is the exclusion rule.
+    """
+
+    async def scenario() -> None:
+        root = tmp_path
+        session = make_session(root)
+        directory = session.transcript.directory
+        directory.mkdir(parents=True, exist_ok=True)
+        record = ChannelSpendRecord(
+            record_id="tts:route-1",
+            channel="tts",
+            provider="elevenlabs",
+            model="eleven_flash_v2_5",
+            units=25,
+            unit="chars",
+            amount_micro=1000,
+            billing_basis="billed",
+            cost_source="server_reported",
+        )
+        assert write_pending_record(directory, record) is True  # what the route does
+
+        session._publish_channel_spend()
+        payload = published(session._frontend_state_store)
+        assert payload.pending == {
+            "voice": PENDING_OWNER_APPEND,
+            "calls": 1,
+            "reason": PENDING_OWNER_APPEND_REASON,
+        }
+        assert payload.total_micro == 0, "the pending money is NOT in the total"
+
+        # Once the fold holds the same record id, the marker is excluded —
+        # which is what retires it when a future owner-append lands.
+        session.record_channel_spend(record)
+        await _settle(session)
+        after = published(session._frontend_state_store)
+        assert after.pending is None
+        assert after.total_micro == 1000
+
+    asyncio.run(scenario())
