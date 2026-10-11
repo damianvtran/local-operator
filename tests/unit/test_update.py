@@ -4477,7 +4477,10 @@ def test_a_failing_roll_hook_is_one_sentence_and_the_exit_code_stands(
             stack.enter_context(patcher)
         assert update_command(check=False) == 0
     captured = capsys.readouterr()
-    assert "updated; the mesh roll could not be queued: boom" in captured.err, captured.err
+    assert (
+        "updated, but the mesh roll could not be queued: boom — "
+        "run `lop network update` to roll by hand" in captured.err
+    ), captured.err
     # The machine report line is still the last stdout line: a failed queue
     # never un-says the install.
     assert json.loads(captured.out.strip().splitlines()[-1])["update_report"]

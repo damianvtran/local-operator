@@ -615,6 +615,12 @@ async def test_update_success_queues_the_mesh_roll_as_a_notice(tmp_path, monkeyp
                     break
             assert app.return_code == REEXEC_CODE
             assert any("queued: d_a" in text for text in _notices(app)), _notices(app)
+            # D1 (round 1): the one-member mesh is the ordinary case, and its
+            # sentence was the "1 peers" render the design round named — the
+            # count now reads "(s)" and the line is the asking form.
+            assert any(
+                "will ask 1 peer(s) to move to this build" in text for text in _notices(app)
+            ), _notices(app)
 
     record = rollouts.latest_active(root=tmp_path)
     assert record is not None, "the TUI exit opened no record"

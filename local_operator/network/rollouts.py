@@ -373,6 +373,32 @@ def member_terminal(member: Mapping[str, Any]) -> bool:
     return True
 
 
+#: The ``skipped`` codes no later re-run can move (round 1, R1-2): the
+#: member's kind cannot run updates at all, or its build predates the frames.
+#: ``no_grant`` is deliberately NOT one — a later grant makes that member
+#: rollable, so closing with the nudge stays honest for it.
+UNROLLABLE_SKIP_CODES: frozenset[str] = frozenset({"unsupported_kind", "predates_rolling_updates"})
+
+
+def _rollable_remainder(record: Mapping[str, Any]) -> bool:
+    """Could a later ``lop network update`` still move a remaining member? (R1-2)
+
+    The closing nudge ("re-run ``lop network update`` to roll what remains")
+    must not fire for a remainder that only holds members no re-run can move —
+    a ``skipped (unsupported_kind)`` pool member, or a build that predates the
+    frames — or the sentence promises an action that cannot work. The skip
+    itself stays NAMED in the summary's sets; only the nudge is withheld.
+    """
+    for member in record.get("members", []):
+        state = str(member.get("state") or "")
+        if state in DONE_STATES:
+            continue
+        if state == "skipped" and str(member.get("code") or "") in UNROLLABLE_SKIP_CODES:
+            continue
+        return True
+    return False
+
+
 def _mark_applying(record: dict[str, Any], device: str) -> bool:
     """Set one member to the in-flight ``applying`` state before its ask.
 
@@ -412,10 +438,18 @@ def summary(record: Mapping[str, Any]) -> str:
         groups.setdefault(label, []).append(str(member.get("name") or member.get("device") or "?"))
     parts = "; ".join(f"{label}: {', '.join(names)}" for label, names in sorted(groups.items()))
     count = len(record.get("members", []))
-    line = f"rollout {record.get('id')} is {record.get('state')} to {count} peers ({parts})"
-    if record.get("state") == "done" and any(
-        str(member.get("state")) not in DONE_STATES for member in record.get("members", [])
-    ):
+    state = str(record.get("state") or "")
+    # The count reads "(s)" (the repo's convention), and the OPEN line says
+    # what the roll is about to DO — it is an ask, not a status adjective
+    # (round 1, D1/D2: "is active to 1 peers" was neither plural nor speech a
+    # person uses). The closing states keep a plain reader-only fallback.
+    lead = (
+        f"will ask {count} peer(s) to move to this build"
+        if state == "active"
+        else f"is {state}: {count} peer(s)"
+    )
+    line = f"rollout {record.get('id')} {lead} ({parts})"
+    if state == "done" and _rollable_remainder(record):
         line += (
             "; this rollout is no longer active — re-run `lop network update` to roll what remains"
         )
@@ -619,7 +653,7 @@ def _close_record(
         done = sum(1 for m in record.get("members", []) if str(m.get("state")) in DONE_STATES)
         total = len(record.get("members", []))
         counts = f"{done} of {total} moved"
-        if state == "done" and done < total:
+        if state == "done" and _rollable_remainder(record):
             counts += (
                 "; this rollout is no longer active — re-run `lop network update` "
                 "to roll what remains"
@@ -998,9 +1032,10 @@ class RolloutOpen:
     summary is the operator's first sight of the roll (RU §7.3), so the TEXT
     is owned here and each front end renders it on its own surface (the CLI
     prints it; ``/update`` shows it as a notice). ``failure`` is the one
-    sentence a front end shows when the hook could not queue anything —
-    "updated; the mesh roll could not be queued: …" — because the install is
-    already in and nothing here may change an exit code.
+    sentence a front end shows when the hook could not queue anything — with
+    the next step its siblings carry ("updated, but the mesh roll could not be
+    queued: … — run `lop network update` to roll by hand"; round 1, D3) —
+    because the install is already in and nothing here may change an exit code.
     """
 
     lines: tuple[str, ...] = ()
@@ -1072,6 +1107,9 @@ def open_after_update(
     of the hook itself must not touch the exit code, so every exception is
     caught and reported as the one sentence (note §3).
     """
+    # Hoisted above the ``try`` (R1-1, round 1): the ``except`` returns the
+    # lines already opened, and a failure BEFORE the loop must find it bound.
+    lines: list[str] = []
     try:
         # Function-local, not module-level: this module is on the relay's
         # import path and ``update`` pulls httpx and the installer machinery.
@@ -1100,7 +1138,6 @@ def open_after_update(
             return RolloutOpen()
 
         moment = time.time() if now is None else now
-        lines: list[str] = []
         for record, snapshot in networks:
             opened = open_record(
                 network=str(record.network_id),
@@ -1119,7 +1156,17 @@ def open_after_update(
             lines.append(summary(opened))
         return RolloutOpen(lines=tuple(lines))
     except Exception as exc:  # noqa: BLE001 — the install already succeeded (note §3)
-        return RolloutOpen(failure=f"updated; the mesh roll could not be queued: {exc}")
+        # R1-1 (round 1): lines opened before the failure are RETURNED, not
+        # discarded — those networks' records are on disk and will be driven,
+        # so both front ends render lines-then-sentence and the operator is
+        # never told "could not be queued" for a network where it was.
+        return RolloutOpen(
+            lines=tuple(lines),
+            failure=(
+                f"updated, but the mesh roll could not be queued: {exc} — "
+                "run `lop network update` to roll by hand"
+            ),
+        )
 
 
 def _audit_rollout_started(

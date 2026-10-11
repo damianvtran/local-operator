@@ -294,7 +294,7 @@
   "wire.settings.max_learnings_history.label": "Max learnings history",
   "wire.settings.memory_guard.description": "A per-command RAM ceiling, so one oversized command is killed instead of taking the whole device down.",
   "wire.settings.memory_guard.title": "Command memory limit",
-  "wire.settings.mesh_updates.description": "The roll that follows a local update: after `lop update` moves this device to a newer build, every other active member is asked to move to the same build — one at a time, each waiting for that member to go idle, never forced. A member that has not granted this device `update` is skipped, by name, with the remedy. Takes effect at once: a change gates the next update, and a roll already running halts at its next member boundary — an install already begun finishes.",
+  "wire.settings.mesh_updates.description": "The roll that follows a local update: after `lop update` moves this device to a newer build, every other active member is asked to move to the same build — one at a time, each waiting for that member to go idle, never forced. A member that has not granted this device `update` is skipped, by name, with the remedy. Takes effect at once: the next update uses the new setting, and a roll already running stops before its next member — an install already begun finishes.",
   "wire.settings.mesh_updates.title": "Mesh updates",
   "wire.settings.model.description": "Provider, model and reasoning effort for new conversations. Existing sessions keep their model; /model saved adopts the default here.",
   "wire.settings.model.title": "Model",

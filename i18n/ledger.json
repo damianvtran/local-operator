@@ -118,7 +118,7 @@
     {
       "locale": "es",
       "namespace": "wire.settings",
-      "source_sha256": "d134d64acc2cd356309ca0947d926f494683c47c833b1fd9f94ec4ae44ca76f5",
+      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
       "translator": {
         "agent": "i18n-translator",
         "model": "deepseek/deepseek-flash",
@@ -132,7 +132,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Round-2 recheck passed: 21 fix-round keys verified vs en (merge/pull/commit English; gating prefix exact; backoff unified), residual sweep + regression scan clean; valns OK 747 keys; sha 5e04c5d3 — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+      "note": "Delta pass: 8-key S3b switch delta vs en 9377f848; backticks byte-exact; es==en key sets/order (+8/-0); 0 B/M; accepted 1 MINOR (40-cell label vs the 29-cell TUI budget, as 57 existing es labels) + 2 NITs (roll→propagación, mesh→malla, member→miembro recorded); runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
     },
     {
       "locale": "es",
@@ -308,7 +308,7 @@
     {
       "locale": "fr",
       "namespace": "wire.settings",
-      "source_sha256": "d134d64acc2cd356309ca0947d926f494683c47c833b1fd9f94ec4ae44ca76f5",
+      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
       "translator": {
         "agent": "i18n-translator",
         "model": "deepseek/deepseek-flash",
@@ -322,7 +322,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Round-2 recheck passed: 4/4 round-1 fixes verified on sha d927c21b (changed set = exactly the 4 keys; chunks-merge + byte-identity proof); valns OK 747 keys; check.py ok; render smoke 745/747+2; clusters clean — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+      "note": "Delta re-audit passed: 8-key S3b switch delta vs en 9377f848; backticks byte-exact; 0 B/M; accepted 2 MINOR + 1 fit NIT ('Propager le maillage' object; 'avec son nom' phrasing); 2nd independent pass concurred; runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
     },
     {
       "locale": "fr",

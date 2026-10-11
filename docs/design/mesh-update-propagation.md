@@ -252,6 +252,18 @@ contact detector (Q3).
 >   `not_authorised` frame remains the named security-reviewed follow-up, with
 >   no producer at this head — and `meshupdate.update_peer` already maps a
 >   coded frame to `no_grant` + RU §2's remedy the day one lands.
+>
+> **Errata — round 1 (2026-10-11).** The review folds, recorded here because
+> each settles the note's own words: the open summary reads **"will ask N
+> peer(s) to move to this build"** (D2 — the line is an ask, and counts read
+> "(s)" at any N, D1); the closing nudge fires only when a member a re-run
+> could still move remains (R1-2) — a `skipped (unsupported_kind)` /
+> `predates_rolling_updates` remainder no longer draws a promise that cannot
+> be kept, while the skip stays named in the sets; a partial multi-network
+> open returns the lines it already opened alongside the failure sentence
+> (R1-1); and that sentence (§3 above) now carries its siblings' next step —
+> **"updated, but the mesh roll could not be queued: … — run `lop network
+> update` to roll by hand"** (D3).
 
 *The first release.* No member advertises `mesh-update-v1` or holds the grant before this
 ships, so the release carrying it is the last that needs a hand update on each existing

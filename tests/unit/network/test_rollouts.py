@@ -170,6 +170,13 @@ def test_the_summary_names_queued_and_skipped(tmp_path: Path) -> None:
     line = rollouts.summary(record)
     # RU §7.3 NAMES the sets (round 1, M4): counts alone hid WHO was skipped.
     assert "queued: d_a" in line and "skipped (no_grant): d_b" in line, line
+    # Round 1, D1/D2: the open line is an ask in speech a person uses, and the
+    # count reads "(s)" — the repo's convention — even at one.
+    assert "will ask 2 peer(s) to move to this build" in line, line
+    one = _open(root, devices=["d_c"], network="n2")
+    assert "will ask 1 peer(s) to move to this build" in rollouts.summary(one), rollouts.summary(
+        one
+    )
 
 
 def test_a_concurrent_open_does_not_retire_a_newer_record(tmp_path: Path) -> None:
@@ -1045,9 +1052,81 @@ def test_a_hook_failure_is_one_sentence_and_never_raises(
     result = rollouts.open_after_update("0.27.0", "0.28.0", via="tui", root=root, now=1000.0)
     assert result.lines == ()
     assert result.failure == (
-        "updated; the mesh roll could not be queued: no space left on device"
+        "updated, but the mesh roll could not be queued: no space left on device — "
+        "run `lop network update` to roll by hand"
     ), result.failure
     assert rollouts.latest_active(root=root) is None
+
+
+def test_a_partial_multi_network_open_keeps_the_lines_it_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1 (round 1): a failure on network N loses nothing already queued.
+
+    Every opened record is on disk and will be driven, so its summary line
+    must reach the front ends WITH the failure sentence — otherwise the
+    operator is told "could not be queued" for a network where it was.
+    """
+    root = tmp_path / "cfg"
+    _seed_mesh(root, network_id="n_trigger00000000000000000000001", name="a-net")
+    _seed_mesh(
+        root,
+        network_id="n_trigger00000000000000000000002",
+        name="b-net",
+        members=[("d_c", "device")],
+    )
+    real = rollouts.open_record
+    calls: list[str] = []
+
+    def flaky(*, network: str, **kwargs: Any) -> Any:
+        calls.append(network)
+        if len(calls) == 2:
+            raise OSError("no space left on device")
+        return real(network=network, **kwargs)
+
+    monkeypatch.setattr(rollouts, "open_record", flaky)
+    result = rollouts.open_after_update("0.27.0", "0.28.0", via="update", root=root, now=1000.0)
+
+    assert len(calls) == 2, calls
+    assert len(result.lines) == 1, result.lines
+    assert "will ask 1 peer(s) to move to this build" in result.lines[0], result.lines
+    assert result.failure is not None and "could not be queued" in result.failure, result.failure
+    # The first network's record is on disk — the driver will find and resume it.
+    assert rollouts.latest_active(root=root) is not None
+
+
+def test_the_closing_nudge_is_withheld_for_an_unrollable_remainder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2 (round 1): the nudge must not name a remainder no re-run can move.
+
+    A ``skipped (unsupported_kind)`` member — the pool shape this slice's open
+    seeds — can never be rolled by a later ``lop network update``, so the
+    sentence would promise an action that cannot work. The skip stays NAMED in
+    the sets; only the nudge is withheld, and a rollable remainder still gets
+    it (the other direction below).
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    _seed_mesh(root, members=[("d_a", "device"), ("d_pod", "pool")])
+    rollouts.open_after_update("0.27.0", "0.28.0", via="update", root=root, now=1000.0)
+    record = rollouts.latest_active(root=root)
+    assert record is not None
+    _scripted(monkeypatch, [_answer("done", version="0.28.0")])
+    rollouts.step_record(cast(Any, server), record["id"], now=2000.0)
+    closed = _live(record["id"], root)
+    assert closed["state"] == "done", closed
+    rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
+    assert rows and "1 of 2 moved" in rows[-1].detail["counts"], rows
+    assert "no longer active" not in rows[-1].detail["counts"], rows[-1].detail
+    assert "skipped (unsupported_kind): d_pod" in rollouts.summary(closed), rollouts.summary(closed)
+
+    # The other direction: a rollable remainder keeps the nudge — re-running
+    # really can move a deferred member.
+    other = _open(root, devices=["d_e"], network="n2")
+    _member(other, "d_e").update({"state": "deferred", "code": "busy"})
+    other["state"] = "done"
+    assert "no longer active" in rollouts.summary(other), rollouts.summary(other)
 
 
 def test_the_switch_halts_a_policy_driven_roll_at_the_next_boundary(
