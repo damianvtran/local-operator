@@ -210,10 +210,11 @@ error and never to a zero.
   never read exacter than its money; `unstated_records` is a COUNT of records
   with no stated amount and no failure (the failed-unbilled presumption
   counts nothing); `bases` are the distinct basis spellings inside the entry.
-  An entry exists only on activity — no fabricated zeros — and entries past
-  `SPEND_BREAKDOWN_ENTRY_CAP` (12) group into the `other` entry with their
-  money summed, worst rung applied and counts preserved. Published list order
-  IS the render order.
+  An entry exists only on activity — no fabricated zeros — and a partition
+  never carries more than `SPEND_BREAKDOWN_ENTRY_CAP` (12) entries: the first
+  eleven keep their rank and the remainder is aggregated into the `other`
+  entry (money summed, worst rung applied, counts preserved). Published list
+  order IS the render order.
 - **`vocabulary` = core's display words** for the ids and spellings THIS
   object carries (`{channels: {id: {label}}, bases: {spelling: {label,
   source_class, marker, note?}}}`). A value in `CHANNEL_LABELS`/`BASIS_META`
@@ -282,7 +283,7 @@ beside `subagents` 520,000.
 | `by_basis` | `billed`/`subscription_api_equivalent`/`estimated`/`not_tracked_micro` are micro-USD sums that add up to `total_micro`; `not_tracked_calls` is a COUNT of records with NO stated amount. A record with a stated amount and a `not_tracked` basis lands in `not_tracked_micro` (m1/Q10). |
 | `rows` | Aggregated rows: inference by provider/model (`label` = the identity bucket) then one row per (channel, provider, model, unit). `amount_micro: null` = nothing in that group was sized. `basis` lists the bases present; `price_versions` lists the labels. |
 | `children` | The subagent/forked-children contribution already inside `total_micro` (PR-1: the children's inference ledger; relayed child channel records join in the follow-up). Optional `reason` (string) qualifies a degraded knowledge — a resumed parent that cannot re-read earlier children's journals says so (m4/Q9). |
-| `breakdown` | ADDITIVE (composer-hover slice): two complete, independently reconcilable partitions of `total_micro` — `by_agent` (parent/subagents) and `by_source` (per channel). Never add the two together; entries carry their own knowledge rung and an `other` group past the entry cap. Absent = old producer. |
+| `breakdown` | ADDITIVE (composer-hover slice): two complete, independently reconcilable partitions of `total_micro` — `by_agent` (parent/subagents) and `by_source` (per channel). Never add the two together; entries carry their own knowledge rung and each partition is bounded at the entry cap (12; `other` absorbs the overflow). Absent = old producer. |
 | `vocabulary` | ADDITIVE: core's display words for the channel ids and basis spellings this object carries (`label`/`source_class`/`marker`/optional `note`). A registered value curates, an unknown one is echoed with `source_class: "unknown"` and never a subscription claim. Absent = old producer; a surface then keeps its legacy word maps. |
 
 ### Knowledge matrix
