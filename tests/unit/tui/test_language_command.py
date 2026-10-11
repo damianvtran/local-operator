@@ -18,6 +18,8 @@ import pytest
 from local_operator.config import ConfigManager
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.autocomplete import ArgumentChoice
+from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -36,8 +38,36 @@ async def _boot(pilot, app: OperatorApp) -> None:
             return
 
 
+async def _type(pilot, app: OperatorApp, text: str) -> None:
+    # Set the line AND park the caret at the end, as typing it would: the slash
+    # pickers are caret-anchored (inline detection), so a text-set that leaves
+    # the caret at the origin sits before the slash where no command is live.
+    editor = app.query_one(Editor)
+    editor.text = text
+    editor.move_cursor(editor._end_of_buffer())
+    editor._sync_picker()
+    await pilot.pause()
+    await pilot.pause()
+
+
 def _notices(app: OperatorApp) -> list[str]:
     return [block.text() or "" for block in app.query(NoticeBlock)]
+
+
+def _language_notices(app: OperatorApp) -> list[str]:
+    """The command's own receipts — every one must fit the 70-cell budget."""
+    return [
+        n for n in _notices(app) if n.startswith("language:") or n.startswith("unknown language")
+    ]
+
+
+def _choice_map(picker) -> dict[str, ArgumentChoice]:
+    """The open argument list as name -> row, narrowed for the type checker."""
+    rows: dict[str, ArgumentChoice] = {}
+    for name, choice in picker.suggestions():
+        assert isinstance(choice, ArgumentChoice), choice
+        rows[name] = choice
+    return rows
 
 
 def _stored(config_dir: Path) -> str | None:
@@ -53,15 +83,16 @@ async def test_bare_language_names_the_active_language(config_dir: Path) -> None
         app._run_slash_command("/language")
         await pilot.pause()
         texts = _notices(app)
-        # Resolved language, its English name, the value space, and the
-        # pointer at the /settings row — the operator's "the settings path
-        # plus a discoverable command affordance".
+        # Resolved language, its English name, the value space, and the space
+        # as the browse — the accepted command shape.
         assert any(
             text.startswith("language: en (English)")
             and "<auto|en>" in text
-            and "/settings" in text
+            and "space lists" in text
             for text in texts
         ), texts
+        for text in _language_notices(app):
+            assert len(text) <= 70, text  # ASCII receipts: cells == chars
 
 
 @pytest.mark.asyncio
@@ -79,6 +110,8 @@ async def test_a_switch_persists_the_same_key_the_settings_row_writes(
         assert any(
             text.startswith("language: en saved — active en (English)") for text in _notices(app)
         ), _notices(app)
+        for text in _language_notices(app):
+            assert len(text) <= 70, text
 
 
 @pytest.mark.asyncio
@@ -94,6 +127,51 @@ async def test_switching_to_auto_when_already_auto_writes_nothing(
         # receipt must not flip it into an explicitly stored one.
         assert _stored(config_dir) is None
         assert any("language: already auto" in text for text in _notices(app)), _notices(app)
+        for text in _language_notices(app):
+            assert len(text) <= 70, text
+
+
+@pytest.mark.asyncio
+async def test_the_lang_alias_resolves_to_the_same_command(config_dir: Path) -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/lang en")
+        await pilot.pause()
+        # The one-resolver rule: `/lang` reaches the same handler, the same
+        # write and the same receipt.
+        assert _stored(config_dir) == "en"
+        assert any(
+            text.startswith("language: en saved — active en (English)") for text in _notices(app)
+        ), _notices(app)
+        for text in _language_notices(app):
+            assert len(text) <= 70, text
+
+
+@pytest.mark.asyncio
+async def test_the_space_opens_the_choices_on_the_current_value(config_dir: Path) -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type(pilot, app, "/language ")
+        picker = editor.picker
+        assert picker.is_open(), "the space must open the choices list"
+        rows = _choice_map(picker)
+        assert list(rows) == ["auto", "en"], list(rows)
+        assert picker.highlighted_name() == "auto", "the browse starts where the user is"
+        assert rows["auto"].detail == "← current"
+        # After a committed switch the marker moves with the value.
+        app._run_slash_command("/language en")
+        await pilot.pause()
+        editor.focus()
+        await _type(pilot, app, "/language ")
+        picker = editor.picker
+        rows = _choice_map(picker)
+        assert picker.highlighted_name() == "en"
+        assert rows["en"].detail == "← current"
+        assert rows["auto"].detail == ""
 
 
 @pytest.mark.asyncio
@@ -117,3 +195,5 @@ async def test_unknown_and_unshipped_values_are_refused_with_the_option_list(
             "unknown language 'fr' — available: auto, en" in text for text in _notices(app)
         ), _notices(app)
         assert _stored(config_dir) is None
+        for text in _language_notices(app):
+            assert len(text) <= 70, text
