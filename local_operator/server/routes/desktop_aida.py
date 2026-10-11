@@ -349,10 +349,7 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
             if outcome == "failed":
                 raise HTTPException(
                     500,
-                    {
-                        "code": "aida_greet_failed",
-                        "message": "The greeting could not be scheduled; try again (see the logs).",
-                    },
+                    _wd.aida_greet_failed().envelope(code="aida_greet_failed"),
                 )
             if outcome == "already":
                 # ``already`` covers delivered and a racing second arm; the
