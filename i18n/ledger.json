@@ -493,7 +493,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit passed: 30 keys; placeholders/order byte-equal; valns OK; keyed ex-subst 28/27 rendered <=32; NFC clean; TIP_MIN_WIDTH vi=59=en pin; cmux & subagents 57/59; setup fold + key_resume 'mở' judged sound; cites provisional; deepseek-flash (anthropic fallback). Second pass + reconcile: fork/hotkeys cites EXACT; cmux cite fixed (fix-2, now «Nơi nhánh mở» prefix of the settings label) with key_resume «mở lại» + mesh «mạng mesh»; recheck passed on sha 43392347."
+      "note": "Independent audit passed: 30 keys; placeholders/order byte-equal; valns OK; keyed ex-subst 28/27 rendered <=32; NFC clean; TIP_MIN_WIDTH vi=59=en pin; cmux & subagents 57/59; setup fold + key_resume 'mở' judged sound; cites provisional; deepseek-flash (anthropic fallback). Second pass + reconcile: fork/hotkeys cites EXACT; cmux cite fixed (fix-2, now «Nơi nhánh mở» prefix of the settings label) with key_resume «mở lại» + mesh «mạng mesh»; recheck passed on sha 43392347. Remediation-1: tip.cmux unquoted (55/57; cite still a prefix of the settings label; mirrors fr); recheck passed; sha ad5acd7a."
     },
     {
       "locale": "ru",
@@ -721,12 +721,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit passed: 51 keys; mechanical/tokens/NFC clean; heavy-row fit re-measured exact; 0 blocker/major, 1 MINOR + 3 NIT accepted (device term, guide records, price phrase); run ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+      "note": "Independent audit passed: 51 keys; mechanical/tokens/NFC clean; heavy-row fit re-measured exact; 0 blocker/major, 1 MINOR + 3 NIT accepted (device term, guide records, price phrase); run ran deepseek-flash (anthropic quota fallback from pinned sonnet). Remediation-1: fork 96→81 cells (tokens byte-exact; --window whole from 53-col columns; 46-col parity unreachable keeping tách nhánh+cuộc trò chuyện — deviation recorded in vi.md); recheck passed; sha 4ae7ffca."
     },
     {
       "locale": "ru",
       "namespace": "wire.settings",
-      "source_sha256": "d134d64acc2cd356309ca0947d926f494683c47c833b1fd9f94ec4ae44ca76f5",
+      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
       "translator": {
         "agent": "i18n-translator",
         "model": "deepseek/deepseek-flash",
@@ -740,12 +740,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Round-2 recheck passed: 10/10 round-1 findings resolved; 14 keys verified vs en; pre-fix reconstruction (033dbdba) diff = exactly those 14 lines; valns OK 747 keys; sha 1d33292d; regression scan clean — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+      "note": "Round-2 recheck passed: 10/10 round-1 findings resolved; 14 keys verified vs en; pre-fix reconstruction (033dbdba) diff = exactly those 14 lines; valns OK 747 keys; sha 1d33292d; regression scan clean — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet). Rebase-delta: +8 keys (mesh_updates.*, network_rollout_on_update.*) at en positions; 747 priors byte-identical; delta re-audited passed; sha b226a4f5."
     },
     {
       "locale": "vi",
       "namespace": "wire.settings",
-      "source_sha256": "d134d64acc2cd356309ca0947d926f494683c47c833b1fd9f94ec4ae44ca76f5",
+      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
       "translator": {
         "agent": "i18n-translator",
         "model": "deepseek/deepseek-flash",
@@ -759,7 +759,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Round-1 fixes rechecked and verified: 43/43 claimed keys byte-verified (F1 … ×4; F2 tắt/bật/hỏi trước; orthography sweep 28→0 open forms, closed kept; host ×2; Trần ×4; 3 NITs); valns OK; NFC clean; no new issues. Ran deepseek-flash (anthropic fallback from pinned sonnet)."
+      "note": "Round-1 fixes rechecked and verified: 43/43 claimed keys byte-verified (F1 … ×4; F2 tắt/bật/hỏi trước; orthography sweep 28→0 open forms, closed kept; host ×2; Trần ×4; 3 NITs); valns OK; NFC clean; no new issues. Ran deepseek-flash (anthropic fallback from pinned sonnet). Rebase-delta: +8 keys at en positions; 747 priors byte-identical; delta re-audited passed (2 NITs recorded); sha 6a4875b6."
     }
   ]
 }

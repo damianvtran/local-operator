@@ -16,7 +16,7 @@
   "wire.slash.exit": "Thoát ứng dụng",
   "wire.slash.failovers": "Xem chuỗi dự phòng mô hình và mô hình đang phục vụ",
   "wire.slash.fast": "Bật/tắt đầu ra nhanh hơn với giá cao cấp",
-  "wire.slash.fork": "Tách nhánh cuộc trò chuyện này; --switch tại đây, --window nơi khác; <message> bắt đầu công việc",
+  "wire.slash.fork": "Tách nhánh cuộc trò chuyện; --switch ở đây, --window nơi khác; <message> vào việc",
   "wire.slash.goal": "Đặt mục tiêu và vào việc; /goal --clear xóa mục tiêu",
   "wire.slash.help": "Liệt kê mọi lệnh",
   "wire.slash.highlights": "Hủy, thử lại, điều chỉnh điểm nhấn dưới câu trả lời",

@@ -81,6 +81,9 @@ catalogues before landing here.
   «ответвить» / «ветка» for the action sense.
 - Do not render "slice" as «срез» — use «часть» / «раздел» / «подсистема»
   (the calque was rejected in wave-2 review).
+- Roll terminology (S3b, wave-2 delta): «раскатка» (noun) / «раскатывать»
+  (verb) for the mesh rollout; «участник» for member (keep «пиры» for
+  peers); «право `update`» for the grant; «в простой» for idle.
 - Recorded width exception: `tui.welcome.tip.cmux` renders «пространство или
   поверхность» — «рабочее» is dropped because the full term cannot fit the
   57/59-cell tip pool alongside the cite; accepted by the wave-2 audit.

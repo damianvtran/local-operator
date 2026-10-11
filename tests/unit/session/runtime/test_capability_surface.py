@@ -652,7 +652,7 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     # Bare: the report, word for word with the terminal's.
     bare = await handle._slash_result("language", "", SlashResult)
     assert bare.style == "info"
-    assert bare.text == "language: en (English) — /language <auto|en|fr|es|ru|vi>; space lists"
+    assert bare.text == "language: en (English) — /language <auto|en|fr|es|ru|vi>; space"
 
     # Unknown: the option-list refusal, and nothing written.
     refused = await handle._slash_result("language", "xx", SlashResult)
@@ -669,3 +669,11 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     # Repeating the value is the terminal's no-op receipt.
     already = await handle._slash_result("language", "en", SlashResult)
     assert already.text == "language: already en — resolves to en (English)"
+
+    # Wave-2 QA: the longest resolved name (vi) must also fit the 70-cell
+    # budget — switch through the same branch, then read the bare report.
+    switched = await handle._slash_result("language", "vi", SlashResult)
+    assert switched.text == "language: vi saved — active vi (Vietnamese)"
+    wide = await handle._slash_result("language", "", SlashResult)
+    assert wide.text == "language: vi (Vietnamese) — /language <auto|en|fr|es|ru|vi>; space"
+    assert len(wide.text) <= 70
