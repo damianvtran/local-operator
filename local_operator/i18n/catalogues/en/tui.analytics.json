@@ -33,7 +33,7 @@
   "tui.analytics.model.meta": "from the ledger · all time",
   "tui.analytics.model.pending": "reading the ledger…",
   "tui.analytics.model.title": "By model",
-  "tui.analytics.rate.legend": "decode rate over {shown, number} of {total, plural, one {# call} other {# calls}}",
+  "tui.analytics.rate.legend": "decode rate over {shown, number} of {total, number} calls",
   "tui.analytics.search.by_provider": "By provider",
   "tui.analytics.search.counted_read": "{count, plural, one {{shown} read} other {{shown} reads}}",
   "tui.analytics.search.counted_search": "{count, plural, one {{shown} search} other {{shown} searches}}",
