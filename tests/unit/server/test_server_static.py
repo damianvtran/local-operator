@@ -57,7 +57,7 @@ async def test_get_image_not_an_image(test_app_client, served_dir):
     response = await test_app_client.get(f"/v1/static/images?path={text_file}")
     assert response.status_code == 400
     data = response.json()
-    assert "not an allowed image type" in data["detail"]
+    assert data["detail"]["text"] == "File is not an allowed image type: text/plain"
 
 
 @pytest.mark.asyncio
@@ -116,7 +116,7 @@ async def test_get_html_not_an_html_file(test_app_client, served_dir):
     response = await test_app_client.get(f"/v1/static/html?path={text_file}")
     assert response.status_code == 400
     data = response.json()
-    assert "not an allowed HTML type" in data["detail"]
+    assert data["detail"]["text"] == "File is not an allowed HTML type: text/plain"
 
 
 @pytest.mark.asyncio
