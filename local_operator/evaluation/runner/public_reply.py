@@ -514,11 +514,16 @@ def _decode_leading_json(payload: str, *, channel_arguments: bool = False) -> tu
     tolerance reads is not always ASCII: ``思考中：``, a fullwidth-bar DSML wrapper).
 
     ``channel_arguments`` states that the payload is the argument text of a
-    dedicated reply-channel call, and it is threaded into the competing-batch
-    rule alone: the ids this decoder reads a remainder against must come from
-    the same unwrap the normaliser will use, or a channel-wrapped decision
-    could be superseded by material its own remainder carries without the
-    refusal that rule exists for.
+    dedicated reply-channel call. It rides EVERY reader that decodes the same
+    bytes -- the competing-batch rule below (the ids a remainder is judged
+    against must come from the same unwrap the normaliser will use), the
+    candidate scan underneath it, and :func:`_carried_value`'s inner decode of
+    a string payload -- because a reader that drops it reads a DIFFERENT
+    reply: it can miss a second decision an invented-name wrapper hides in a
+    remainder (measured: ``{"reply_json": "<batch>, {\"zzz\": <batch>}"}``
+    accepted with the remainder silently dropped), or refuse at a later
+    boundary a reply this decoder accepted. One fact about one byte string;
+    it must not be lost between readers.
 
     ``json.loads`` demands that the WHOLE string be one value, so a model that
     emitted a complete, correct batch and then appended a stray token lost the
@@ -1432,7 +1437,7 @@ def read_action_sequence(text: str, *, _depth: int = 0) -> list[Any] | None:
     return actions
 
 
-def _carried_value(text: str) -> Any:
+def _carried_value(text: str, *, channel_arguments: bool = False) -> Any:
     """The value a wrapper's JSON-encoded payload holds.
 
     The leading JSON value, as the wrapper has always been read, plus the one
@@ -1440,6 +1445,18 @@ def _carried_value(text: str) -> Any:
     MORE than its first value, where the whole string reads as a SEQUENCE of
     single actions (``"{action}, {action}]"``) and the sequence is returned
     instead.
+
+    ``channel_arguments`` rides the inner decode for the same reason every
+    other reader of these bytes carries it (see ``_decode_leading_json``): the
+    competing-batch rule runs INSIDE that decode, over the string's own
+    remainder, and a candidate the channel reading would unwrap must be
+    unwrapped here too -- measured before this flag reached the inner call:
+    ``{"reply_json": "<batch>, {\"zzz\": {\"actions\": [same-obs]}}"}`` was
+    accepted with the hidden batch silently dropped, while the identical
+    candidate under a declared key refused and the bare spelling refused. The
+    sequence fallback below needs no scan of its own: its tail grammar admits
+    only the note fragment (``_sequence_tail``), so a batch after a sequence
+    fails the reader and the payload keeps its refusal (measured: batch-shape).
 
     What deliberately does NOT move: a payload whose first value is a single
     action and whose remainder is not a clean sequence keeps the refusal it
@@ -1449,7 +1466,7 @@ def _carried_value(text: str) -> Any:
     ``at_end``) is read only as a reply's whole content.
     """
 
-    decoded, trailing, _framing = _decode_leading_json(text)
+    decoded, trailing, _framing = _decode_leading_json(text, channel_arguments=channel_arguments)
     if not trailing:
         return decoded
     sequence = read_action_sequence(text)
@@ -1495,6 +1512,12 @@ def _unwrap_tool_call(value: Any, *, channel_arguments: bool = False) -> Any:
       ABOUT a decision, and executing it is exactly what
       :data:`_REPLY_CARRIER_KEYS` exists to prevent.
 
+    The stages compose as a PIPELINE, not a symmetric set: a declared wrapper
+    around a model-named one still reaches the envelope
+    (``{"input": "{\"reply_json\": ...}"}`` on the channel), while the
+    reverse order states nothing at the inner layer and keeps the refusal it
+    had.
+
     A layer whose value is a STRING is parsed as JSON (that is the
     ``input``-as-a-JSON-string shape) through :func:`_carried_value`, not
     through a second parser, so the tolerance and the competing-batch rule a
@@ -1516,7 +1539,7 @@ def _unwrap_tool_call(value: Any, *, channel_arguments: bool = False) -> Any:
                 # carried out of the normaliser: a wrapper's tolerance is not
                 # this reply's framing, and the record belongs to the reply
                 # that was read.
-                inner = _carried_value(inner)
+                inner = _carried_value(inner, channel_arguments=channel_arguments)
         else:
             if len(value) != 1:
                 return value
@@ -1526,7 +1549,7 @@ def _unwrap_tool_call(value: Any, *, channel_arguments: bool = False) -> Any:
             inner = value[sole]
             if isinstance(inner, str):
                 try:
-                    inner = _carried_value(inner)
+                    inner = _carried_value(inner, channel_arguments=channel_arguments)
                 except DecisionParseError:
                     return value
             if channel_arguments:
@@ -1534,11 +1557,13 @@ def _unwrap_tool_call(value: Any, *, channel_arguments: bool = False) -> Any:
                 if decision is None:
                     return value
                 if sole not in _REPLY_CARRIER_KEYS:
-                    # The roster the sealed counts cannot keep: names live in
-                    # the log line (the bounded renderer below is the same
-                    # whole-or-nothing guard the extra-key tolerance uses), so
-                    # a reader can see which names the model invented -- and
-                    # a future campaign can count them by replaying the corpus.
+                    # The roster the sealed counts cannot keep: an accepted
+                    # reply's published bytes are the canonical envelope, so
+                    # the invented name survives ONLY in this line -- a reader
+                    # of the run's logs can see which names the model invents;
+                    # only REFUSED turns can be recounted from sealed
+                    # artifacts. (The renderer below is the same bounded
+                    # whole-or-nothing guard the extra-key tolerance uses.)
                     logger.warning(
                         "model reply-channel call carried its decision under the sole "
                         "key %s; read structurally on the channel, where the call's "
@@ -1995,14 +2020,25 @@ _ESCAPE_DECODERS = (
 )
 
 
-def redact_public_reply(payload: str, redactions: RedactionSet) -> str:
+def redact_public_reply(
+    payload: str, redactions: RedactionSet, *, channel_arguments: bool = False
+) -> str:
     """Drop an entire unsafe note before either evidence or accepted replay.
 
     Scan decoded text (including percent escapes) before serializing: scanning
     raw JSON alone would miss a credential spelt with JSON unicode escapes.
     This is the existing resolved-secret boundary, not a general secret detector.
+
+    ``channel_arguments`` is the knowledge that these bytes are the
+    reply-channel call's own arguments; this re-decode is the SECOND reader of
+    an already-accepted reply, so a caller holding one must carry the flag
+    beside it (``ModelDecision.channel_arguments``). Without it the re-decode
+    takes the prose path and refuses the very replies the channel reading
+    admitted -- raised outside every rejection handler, so the episode seals
+    failed/unscored as an adapter error (measured on the r3 wrapped-with-note
+    family).
     """
-    value = decode_public_reply(payload)
+    value = decode_public_reply(payload, channel_arguments=channel_arguments)
     notes = value["public_observations"]
     try:
         redactions.assert_clear(notes)
@@ -2365,8 +2401,10 @@ def public_reply_contract(action_binding: str = LEGACY_ACTION_BINDING) -> dict[s
             'under a sole "reply", "answer", "streaming_json" or '
             '"reply_again_corrected" key in prose, and under a sole key of ANY name when '
             "the reply arrives as the dedicated reply-channel call's own arguments "
-            "(there the call's arguments ARE the reply, and a tolerated name is "
-            "logged); keys the reply contract does not use, including "
+            "(there the call's arguments ARE the reply; a value that is a list carrying "
+            "exactly ONE envelope counts as that envelope, while two decision-valued "
+            "payloads are refused like two action arrays; a tolerated name is logged); "
+            "keys the reply contract does not use, including "
             'a "reply_version", are ignored'
         ),
         "binding": (

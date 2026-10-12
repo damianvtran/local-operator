@@ -1837,6 +1837,10 @@ def parse_decision(
     return ModelDecision(
         action_batch=batch,
         public_reply=public_reply,
+        # The structural-reading fact rides the decision because MANY readers
+        # decode these bytes again (episode recording is one); a reader without
+        # it reads a different reply. See ``ModelDecision.channel_arguments``.
+        channel_arguments=channel_arguments,
         route=route,
         usage=usage or ModelUsage(),
         cost_micros=cost_micros,

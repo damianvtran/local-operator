@@ -58,6 +58,7 @@ from tests.unit.evaluation.runner.conftest import (
     ScriptedModel,
     build_config,
     build_spec,
+    observation,
     payloads,
     selector,
 )
@@ -640,6 +641,57 @@ async def test_scored_zero_is_distinct_from_unscored(tmp_path: Path, episode_id:
     root = outcome.bundle_root
     assert root is not None
     assert verify_bundle(root).valid
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_channel_reply_survives_episode_recording(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """B1 regression: every re-reader of an accepted reply reads it the same way.
+
+    The episode records each accepted reply by RE-DECODING it
+    (``redact_public_reply``); a reply accepted only by the channel's
+    structural reading must carry that fact across the boundary
+    (``ModelDecision.channel_arguments``), or the re-decode refuses OUTSIDE
+    every rejection handler and the episode seals failed/unscored as an
+    adapter error. The wrapped-with-note shape is the r3 family this change
+    exists to recover -- the note is exactly what made the pre-fix re-decode
+    raise -- while the no-note and bare spellings pin that the ordinary paths
+    did not move.
+    """
+
+    # Deferred: test_public_reply imports this module for ``_rescue_ok``.
+    from tests.unit.evaluation.runner.test_provider_client import (
+        _client,
+        finish_payload,
+    )
+    from tests.unit.evaluation.runner.test_public_reply import envelope
+    from tests.unit.evaluation.runner.test_reply_channel import ChannelStream, _spec
+
+    cases = (
+        (
+            "wrapped-with-note",
+            lambda current: json.dumps(
+                {"reply_json": envelope(finish_payload(current), "Live notes")}
+            ),
+        ),
+        ("wrapped-no-note", lambda current: json.dumps({"reply_json": finish_payload(current)})),
+        ("bare-with-note", lambda current: envelope(finish_payload(current), "Live notes")),
+    )
+    for label, build in cases:
+        case_episode = f"{episode_id}-{label}"
+        current = observation(case_episode, 0)
+        client = _client(ChannelStream(build(current)), model_spec=_spec(supports_tools=True))
+        adapter = FakeAdapter(
+            tmp_path, case_episode, score=ScoreArtifact(status="scored", binary=1)
+        )
+        runner = _runner(tmp_path, case_episode, adapter=adapter, model=client)
+
+        outcome = await runner.run()
+
+        assert outcome.status == "completed", (label, outcome.status)
+        assert outcome.score is not None and outcome.score.status == "scored", label
+        assert outcome.bundle_root is not None and verify_bundle(outcome.bundle_root).valid, label
 
 
 @pytest.mark.asyncio
