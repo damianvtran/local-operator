@@ -31,14 +31,13 @@ field the wire cannot carry cannot be honoured) and ``num_images > 1`` is a
 recorded SKIP rather than a silent single-image delivery. Both labels are
 carried into the guide.
 
-**Editing** (wired media wave-2 edit lane, 2026-10-10): the source travels as
-an image content block appended to ``input`` — ``{"type": "image", "data":
-<b64>, "mime_type": ...}``, the docs' own block shape — with up to 14
-references per the model family. This rung sends ONE source (the
-single-source v1 wire) and splits the tool's data URI into the block's two
-fields. No API mask exists (the docs describe prompt-driven "semantic
-masking"), and the endpoint has no count parameter, so ``num_images > 1``
-stays a recorded skip.
+**Editing** (wired media wave-2 edit lane, 2026-10-10; multi-source
+2026-10-11): each source travels as an image content block appended to
+``input`` — ``{"type": "image", "data": <b64>, "mime_type": ...}``, the
+docs' own block shape — with up to 14 references per the model family; this
+rung appends ONE block per source. No API mask exists (the docs describe
+prompt-driven "semantic masking"), and the endpoint has no count parameter,
+so ``num_images > 1`` stays a recorded skip.
 
 Imagen is shut down in the Gemini API (docs, 2026-10-09): this rung never
 targets it.
@@ -116,7 +115,7 @@ async def run_google(
     key: str,
     num_images: int,
     image_size: str,
-    source_url: str | None,
+    source_urls: list[str] | None,
     seed: int | None,
     model: str | None,
     emit: ProgressFn | None,
@@ -150,19 +149,21 @@ async def run_google(
     # this reads the module attribute at call time.
     from local_operator.imagegen import rungs as image_rungs
 
-    # An EDIT request appends the source as an image content block; the
-    # data-URI splitter is shared with the other rungs' edit paths.
+    # An EDIT request appends one image content block per source (the model
+    # family documents up to 14 references); the data-URI splitter is shared
+    # with the other rungs' edit paths, and its refusal is per entry.
     input_blocks: list[dict[str, str]] = [{"type": "text", "text": prompt}]
-    if source_url is not None:
-        parts = image_rungs._data_uri_parts(source_url)
-        if parts is None:
-            raise APIError(
-                "Google edits require a base64 data-URI source.",
-                status_code=None,
-                code="invalid_response",
-            )
-        mime_type, data_b64 = parts
-        input_blocks.append({"type": "image", "data": data_b64, "mime_type": mime_type})
+    if source_urls:
+        for source in source_urls:
+            parts = image_rungs._data_uri_parts(source)
+            if parts is None:
+                raise APIError(
+                    "Google edits require a base64 data-URI source.",
+                    status_code=None,
+                    code="invalid_response",
+                )
+            mime_type, data_b64 = parts
+            input_blocks.append({"type": "image", "data": data_b64, "mime_type": mime_type})
     body = {
         "model": model_id,
         "input": input_blocks,

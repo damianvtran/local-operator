@@ -166,6 +166,44 @@ def test_approval_text_names_provider_quantity_and_size(
     assert edited_one.startswith("Edit 1 image (/tmp/in.png) at square HD")
 
 
+def test_a_multi_source_approval_names_the_count_and_reads_the_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §1 describer: total>1 reads ``f"{total} sources"``, and the
+    provider line is resolved WITH the count (``sources_count``) so it never
+    names a provider that would skip the call."""
+    calls: list[dict[str, Any]] = []
+
+    def fake_label(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        return "Radient"
+
+    monkeypatch.setattr(image_tool, "_preferred_route_label", fake_label)
+    text = image_tool._describe_generate_image_approval(
+        {
+            "prompt": "merge",
+            "source_image_paths": ["/a.png", "/b.png"],
+            "source_attachments": ["a" * 32],
+        },
+        ".",
+    )
+    assert text == (
+        "Edit 1 image (3 sources) at square HD via Radient — "
+        "a paid provider call on your account."
+    )
+    assert calls == [{"editing": True, "sources_count": 3}]
+
+
+def test_a_one_source_plural_keeps_the_single_source_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(image_tool, "_preferred_route_label", lambda **_: "Radient")
+    text = image_tool._describe_generate_image_approval(
+        {"prompt": "make it night", "source_image_paths": ["/tmp/in.png"]}, "."
+    )
+    assert text.startswith("Edit 1 image (/tmp/in.png) at square HD")
+
+
 def test_the_size_display_map_covers_every_accepted_token_and_falls_back_raw() -> None:
     """D2's map: every wire enum value has a prompt-facing spelling, and an
     unmapped token passes through raw rather than failing or blanking."""
@@ -505,7 +543,7 @@ async def test_strength_without_a_source_image_is_rejected() -> None:
     )
     assert result.is_error is True
     text = result.content[0].text  # type: ignore[union-attr]
-    assert "strength requires source_image_path" in text
+    assert "strength requires at least one source." in text
 
 
 @pytest.mark.asyncio
@@ -539,7 +577,9 @@ async def test_a_real_source_image_travels_as_a_data_uri(
     )
 
     assert result.is_error is False
-    assert str(seen["source_url"]).startswith("data:image/png;base64,")
+    sources = seen["sources"]
+    assert isinstance(sources, list)
+    assert str(sources[0]).startswith("data:image/png;base64,")
     assert seen["strength"] == 0.4
     assert (result.details or {})["source_image_path"] == str(source)
     assert (result.details or {})["strength"] == 0.4
@@ -659,7 +699,9 @@ async def test_a_source_attachment_resolves_through_the_session_store(
     )
 
     assert result.is_error is False
-    assert str(seen["source_url"]).startswith("data:image/png;base64,")
+    sources = seen["sources"]
+    assert isinstance(sources, list)
+    assert str(sources[0]).startswith("data:image/png;base64,")
     assert seen["strength"] == 0.4
     details = result.details or {}
     assert details["source_attachment"] == ref.digest
@@ -687,17 +729,108 @@ async def test_an_unknown_attachment_digest_is_an_argument_fault() -> None:
 
 
 @pytest.mark.asyncio
-async def test_both_sources_at_once_are_refused() -> None:
+async def test_the_singular_and_plural_fields_of_a_kind_are_refused_together() -> None:
+    """Spec §1 rules 1-3, exact sentences: one FORM per kind — the plural is
+    an alternative to its singular twin, never a companion."""
+    for args, sentence in (
+        (
+            {"prompt": "x", "source_image_path": "/a.png", "source_image_paths": ["/b.png"]},
+            "Pass source_image_path or source_image_paths, not both.",
+        ),
+        (
+            {"prompt": "x", "source_attachment": "a" * 32, "source_attachments": ["b" * 32]},
+            "Pass source_attachment or source_attachments, not both.",
+        ),
+        ({"prompt": "x", "source_image_paths": []}, "source_image_paths must not be empty."),
+        ({"prompt": "x", "source_attachments": []}, "source_attachments must not be empty."),
+    ):
+        result = await image_tool.execute_generate_image("call-1", args, None, None, None)
+        assert result.is_error is True, args
+        assert sentence in result.content[0].text  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_more_than_sixteen_sources_fail_as_an_argument_fault() -> None:
+    """16 is the hub's highest per-pin ceiling and the tool's per-call
+    maximum (spec §1 rule 4); the failure is model-correctable and happens
+    BEFORE any file is read."""
     result = await image_tool.execute_generate_image(
         "call-1",
-        {"prompt": "x", "source_image_path": "/a.png", "source_attachment": "a" * 32},
+        {"prompt": "x", "source_image_paths": [f"/in/{i}.png" for i in range(17)]},
         None,
         None,
         None,
     )
     assert result.is_error is True
     text = result.content[0].text  # type: ignore[union-attr]
-    assert "exactly one of source_image_path or source_attachment" in text
+    assert "At most 16 sources per call (got 17)." in text
+
+
+@pytest.mark.asyncio
+async def test_a_path_and_an_attachment_mix_in_one_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Kinds mix freely (spec §1): the old one-of-the-two refusal is gone —
+    a local path beside a session digest now fuses into ONE source list."""
+    source = tmp_path / "in.png"
+    source.write_bytes(PNG_1X1)
+    ref = AttachmentStore().put_bytes(PNG_1X1, "image/png")
+    assert ref is not None
+    seen: dict[str, object] = {}
+
+    async def fake_cascade(**kwargs):
+        seen.update(kwargs)
+        return _outcome()
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1",
+        {"prompt": "x", "source_image_path": str(source), "source_attachment": ref.digest},
+        None,
+        None,
+        ToolContext(cwd=str(tmp_path)),
+    )
+    assert result.is_error is False
+    assert len(seen["sources"]) == 2  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_a_multi_source_call_loads_paths_then_attachments_singular_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fusion order (spec §1): paths before attachments, each list in order —
+    the EXACT list reaches the cascade — and details names each source once,
+    in the field that introduced it (singular keys stay single-only)."""
+    seen: list[list[str]] = []
+
+    async def fake_cascade(**kwargs):
+        seen.append(list(kwargs["sources"]))
+        return _outcome()
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    monkeypatch.setattr(image_tool, "_load_source_image", lambda raw, cwd: f"path:{raw}")
+    monkeypatch.setattr(image_tool, "_load_source_attachment", lambda digest: f"digest:{digest}")
+
+    digest_a = "a" * 32
+    digest_b = "b" * 32
+    result = await image_tool.execute_generate_image(
+        "call-1",
+        {
+            "prompt": "merge",
+            "source_image_path": "/one.png",
+            "source_attachments": [digest_a, digest_b],
+        },
+        None,
+        None,
+        None,
+    )
+    assert result.is_error is False
+    assert seen == [["path:/one.png", f"digest:{digest_a}", f"digest:{digest_b}"]]
+    details = result.details or {}
+    assert details["source_image_path"] == "/one.png"
+    assert details["source_attachments"] == [digest_a, digest_b]
+    assert "source_image_paths" not in details
+    assert "source_attachment" not in details
 
 
 @pytest.mark.asyncio
@@ -878,6 +1011,63 @@ async def test_the_edit_caption_says_edited_not_generated(
     )
     generated_text = generated.content[0].text  # type: ignore[union-attr]
     assert generated_text.startswith("Generated 1 image with")
+
+
+@pytest.mark.asyncio
+async def test_a_multi_source_edit_caption_names_the_source_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Spec §1 caption: total>1 appends ``, from {total} sources`` after the
+    model parenthetical; one source keeps the caption byte-identical."""
+    source = tmp_path / "in.png"
+    source.write_bytes(PNG_1X1)
+    ref = AttachmentStore().put_bytes(PNG_1X1, "image/png")
+    assert ref is not None
+
+    async def fake_cascade(**kwargs):
+        return _outcome()
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1",
+        {"prompt": "merge", "source_image_path": str(source), "source_attachment": ref.digest},
+        None,
+        None,
+        ToolContext(cwd=str(tmp_path)),
+    )
+    assert result.is_error is False
+    caption = result.content[0].text  # type: ignore[union-attr]
+    assert "Edited 1 image with Radient (flux/dev), from 2 sources, " in caption
+
+
+@pytest.mark.asyncio
+async def test_a_no_figure_success_caption_says_so_and_the_row_says_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D11: with no per-call figure the caption states it explicitly and the
+    ledger row keeps ``amount=None``/``not_tracked`` with the sentence as its
+    detail — no invented rate, no new basis value."""
+    records: list[Any] = []
+    context = ToolContext(cwd=".", record_channel_spend=records.append)
+
+    async def fake_cascade(**kwargs):
+        return _outcome(cost=None)
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, None, context
+    )
+    assert result.is_error is False
+    caption = result.content[0].text  # type: ignore[union-attr]
+    assert "No per-call cost was reported (this provider bills at its published rates)." in caption
+    assert "Cost $" not in caption
+    assert records, "the row was emitted"
+    row = records[-1]
+    assert row.amount_micro is None
+    assert row.billing_basis == "not_tracked"
+    assert row.detail == (
+        "no per-call figure was reported by the provider; billing is at its published rates"
+    )
 
 
 @pytest.mark.asyncio

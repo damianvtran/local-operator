@@ -86,7 +86,7 @@ async def run_openrouter(
     key: str,
     num_images: int,
     image_size: str,
-    source_url: str | None,
+    source_urls: list[str] | None,
     seed: int | None,
     model: str | None,
     emit: ProgressFn | None,
@@ -100,6 +100,15 @@ async def run_openrouter(
     # take effect before the spend. A no-op without a signal.
     if pause is not None:
         await pause(0.0)
+    if source_urls is not None and len(source_urls) > 1:
+        # Belt-and-braces: the cascade's capability filter already pre-skips
+        # this rung (SINGLE/1) for a multi request, so this guard only fires
+        # for a direct caller — skip, never silently send one of several.
+        raise RungSkipped(
+            f"OpenRouter edits take one reference image in this version; "
+            f"{len(source_urls)} requested — skipped.",
+            reason_class="unsupported",
+        )
     model_id = (model or OPENROUTER_DEFAULT_IMAGE_MODEL).strip()
     body: dict[str, Any] = {"model": model_id, "prompt": prompt}
     aspect = OPENROUTER_ASPECT_RATIOS.get(image_size)
@@ -118,7 +127,7 @@ async def run_openrouter(
     from local_operator.imagegen import rungs as image_rungs
 
     async with image_rungs._client_scope(client) as http:
-        if source_url is not None:
+        if source_urls:
             # Capability check BEFORE sending (audit §C.iv) — see the module
             # docstring for the skip-vs-raise split.
             models_payload = await image_rungs._request_json(
@@ -163,7 +172,7 @@ async def run_openrouter(
                     f"(input_modalities: {modalities!r}); edit skipped.",
                     reason_class="unsupported",
                 )
-            body["input_references"] = [{"type": "image_url", "image_url": {"url": source_url}}]
+            body["input_references"] = [{"type": "image_url", "image_url": {"url": source_urls[0]}}]
         payload = await image_rungs._request_json(
             http,
             "POST",

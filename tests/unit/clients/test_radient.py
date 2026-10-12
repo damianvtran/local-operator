@@ -594,13 +594,54 @@ def test_generate_image_with_source_url(
             "num_images": 1,
             "image_size": "square_hd",
             "sync_mode": True,
-            "source_url": "https://example.com/source.jpg",
+            # Canonical key: the legacy ``source_url`` payload key is
+            # REFUSED by the hub today, so both spellings cross canonically.
+            "image_url": "https://example.com/source.jpg",
             "strength": 0.7,
         },
     )
 
     # Verify the response was parsed correctly
     assert isinstance(response, RadientImageGenerationResponse)
+
+
+def test_generate_image_with_source_urls_sends_canonical_files(
+    radient_client: RadientClient,
+    mock_image_generation_response: Dict[str, Any],
+) -> None:
+    """The list spelling: N>1 sends ``image_urls``; N==1 sends ``image_url``;
+    passing both spellings is refused before any request."""
+    mock_requests_post = MagicMock()
+    mock_requests_post.return_value.status_code = 200
+    mock_requests_post.return_value.json.return_value = mock_image_generation_response
+
+    with patch("requests.post", mock_requests_post):
+        radient_client.generate_image(
+            prompt="test prompt",
+            source_urls=["https://example.com/one.jpg", "https://example.com/two.jpg"],
+        )
+
+    payload = mock_requests_post.call_args.kwargs["json"]
+    assert payload["image_urls"] == [
+        "https://example.com/one.jpg",
+        "https://example.com/two.jpg",
+    ]
+    assert "image_url" not in payload and "source_url" not in payload
+
+    mock_requests_post.reset_mock()
+    with patch("requests.post", mock_requests_post):
+        radient_client.generate_image(prompt="test prompt", source_urls=["https://one.jpg"])
+    payload = mock_requests_post.call_args.kwargs["json"]
+    assert payload["image_url"] == "https://one.jpg"
+    assert "image_urls" not in payload
+
+    with pytest.raises(ValueError):
+        radient_client.generate_image(
+            prompt="test prompt",
+            source_url="https://one.jpg",
+            source_urls=["https://two.jpg"],
+        )
+    assert mock_requests_post.call_count == 1, "the refusal happened before any request"
 
 
 def test_generate_image_api_error(radient_client: RadientClient) -> None:
@@ -622,6 +663,9 @@ def test_generate_image_api_error(radient_client: RadientClient) -> None:
             radient_client.generate_image(prompt="test prompt")
         assert "Failed to generate image" in str(exc_info.value)
         assert "Error message from API" in str(exc_info.value)
+        # Typed since the legacy-client pass: APIError IS a RuntimeError, so
+        # old catchers keep working while new callers switch on the status.
+        assert isinstance(exc_info.value, APIError)
 
 
 def test_get_image_generation_status_success(
