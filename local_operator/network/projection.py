@@ -77,6 +77,7 @@ from local_operator.session.placement import (
     read_stamp,
 )
 from local_operator.session.runtime.types import (
+    JOURNAL_ORDER_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
     SessionRecord,
 )
@@ -1246,6 +1247,11 @@ class RemoteSessionClient(AttachClient):
         auth: dict[str, Any] = {}
         if self._events:
             auth["events"] = True
+            # Match the local attach's capability AND viewer declaration. This
+            # is carriage, not authority: only the authenticated owner can emit
+            # coordinates, and legacy owners/viewers see no added auth key.
+            if JOURNAL_ORDER_CAPABILITY in capabilities:
+                auth["journal_order"] = True
         if self._frontend_state:
             auth["frontend_state"] = True
         if self._display_window and "display-history-window-v1" in capabilities:
@@ -1340,6 +1346,8 @@ def peer_stored_history_page(
     before_id: str | None = None,
     limit: int = 100,
     open_frame: bool = False,
+    journal_order: bool = False,
+    order_ids: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """One page of a PEER's stored journal, or ``None`` when it cannot be served.
 
@@ -1388,6 +1396,7 @@ def peer_stored_history_page(
         # ``network/relay.py`` owns the spelling on both halves): a caller that
         # did not ask sends today's frame, byte-for-byte.
         **({"open_frame": True} if open_frame else {}),
+        **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
     )
     if not reply or reply.get("refused"):
         return None
@@ -1409,6 +1418,21 @@ def peer_stored_history_page(
     for key in ("runs", "runs_state", "head_cut"):
         if key in reply:
             page[key] = reply[key]
+    if journal_order:
+        # Only a ready owner page activates ordering. Until peer readiness wakes
+        # land, building/unverifiable/old-owner replies remain legacy unsupported
+        # rather than strand the renderer in journalMode with no correction.
+        if reply.get("journal_order_state") == "ready" and reply.get("journal_generation"):
+            for key in (
+                "journal_order_state",
+                "journal_generation",
+                "journal_ordinals",
+                "journal_missing_ids",
+            ):
+                if key in reply:
+                    page[key] = reply[key]
+        else:
+            page["journal_order_state"] = "unsupported"
     return page
 
 

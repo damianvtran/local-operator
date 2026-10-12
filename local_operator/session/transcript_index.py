@@ -2328,6 +2328,38 @@ def resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     return entry
 
 
+def apply_journal_order(
+    root: Path,
+    session_id: str,
+    answer: dict[str, Any],
+    source: tuple[int, int, float] | None,
+    ids: list[str],
+) -> bool:
+    """Join owner coordinates only when page and resident index share a witness.
+
+    Both desktop-local and peer-stored reads must use this equality check:
+    current disk state alone cannot attest rows read before a concurrent rewrite.
+    False leaves the page untouched; each transport owns its readiness policy.
+    """
+    index = fresh_resident(root, session_id)
+    if index is None or not index.journal_generation or source is None:
+        return False
+    if source != (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime")):
+        return False
+    if any(row["id"] not in index.journal_rows for row in answer["entries"]):
+        return False
+    answer["entries"] = [
+        {**row, "journal_seq": index.journal_rows[row["id"]]} for row in answer["entries"]
+    ]
+    answer["journal_order_state"] = "ready"
+    answer["journal_generation"] = index.journal_generation
+    answer["journal_ordinals"] = {
+        id_: index.journal_rows[id_] for id_ in ids if id_ in index.journal_rows
+    }
+    answer["journal_missing_ids"] = [id_ for id_ in ids if id_ not in index.journal_rows]
+    return True
+
+
 def fresh_resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     """The resident index for a session, but only while it is still CURRENT.
 
