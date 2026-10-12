@@ -1440,6 +1440,61 @@ class TestServiceDaemonRefresh:
         # refresh prints nothing), so this sentence must not name a daemon.
         assert "mobile" not in refresh.lines[0]
 
+    def test_a_linux_relay_unit_reaches_the_new_wheel_child(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The relay unit is the daemon this stage may refresh on Linux (2026-10-11).
+
+        The drill's defect: on Linux the scan found nothing, the stage answered
+        the A24 sentence, and a node's relay kept advertising the previous build
+        while the install had moved. With the relay's unit installed the stage
+        must spawn the same new-wheel child the macOS scan spawns — the child's
+        own platform table (``_linux_refresh_steps``) then carries the relay's
+        step — and parse its ``daemon_report:`` lines like any other platform's.
+        """
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", False)
+        monkeypatch.setattr(update_mod, "_linux_relay_unit_installed", lambda: True)
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout='daemon_report: {"name":"network relay","status":"already"}\n',
+        )
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[]),
+            patch("subprocess.run", return_value=completed) as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+
+        run.assert_called_once()
+        assert "--services-only" in run.call_args.args[0], run.call_args.args[0]
+        assert refresh.lines == ()
+        assert refresh.statuses == (update_mod.DaemonStatus("network relay", "already"),)
+
+    def test_a_linux_host_without_the_relay_unit_still_says_the_a24_sentence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Byte-identical to the shipped sentence — the pin is the whole point.
+
+        A host with no relay unit still has nothing this child may refresh, so
+        the honest A24 sentence must not be eaten by the Linux arm's arrival.
+        """
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", False)
+        monkeypatch.setattr(update_mod, "_linux_relay_unit_installed", lambda: False)
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[]),
+            patch("subprocess.run") as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+
+        run.assert_not_called()
+        assert refresh.lines == (
+            "service daemons: not refreshed — this step rewrites launchd "
+            f"agents, which only macOS has (this host is {update_mod.PLATFORM_LABEL}); "
+            "re-run each supervised daemon's own installer to move its "
+            "unit or task onto this build",
+        )
+        assert refresh.warnings == ()
+
     def test_an_installed_agent_is_repaired_whatever_the_platform_says(self, branded_image) -> None:
         """The platform branch decides the empty-scan answer, not whether to work.
 
@@ -1671,6 +1726,10 @@ class TestServiceDaemonRefresh:
             return repair
 
         monkeypatch.setattr(update_mod, "_repair_refusal", lambda: None)
+        # THE PLATFORM TABLE'S macOS HALF (2026-10-11): the child now walks
+        # ``_linux_refresh_steps`` off darwin, and this cell is about the macOS
+        # rows — pinned rather than inferred from the runner (CI runs Linux).
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
         for module, name in (
             (browser_install, "browser bridge"),
             (tunnel_install, "tunnel"),
@@ -1897,6 +1956,9 @@ class TestServiceDaemonRefresh:
         from local_operator.wakes import install as wakes_install
 
         monkeypatch.setattr(update_mod, "_repair_refusal", _REAL_REPAIR_REFUSAL)
+        # Pin the macOS half of the platform table: this cell is about the macOS
+        # plist walk (see the concurrency cell for the full reason).
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
 
         plists = [
             Path("/Users/x/Library/LaunchAgents/com.local-operator.mobile.plist"),
@@ -1949,7 +2011,7 @@ class TestServiceDaemonRefresh:
         assert "mobile" not in captured.out
         assert captured.err == ""
 
-    def test_the_child_repairs_every_daemon_and_reports_each(self, capsys) -> None:
+    def test_the_child_repairs_every_daemon_and_reports_each(self, capsys, monkeypatch) -> None:
         """One line per daemon that CHANGED; silence for one already current.
 
         Each daemon is ANNOUNCED before it is repaired (the line the parent reads
@@ -1966,6 +2028,9 @@ class TestServiceDaemonRefresh:
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
+        # Pin the macOS half of the platform table: this cell is about the macOS
+        # rows this child walks (see the concurrency cell for the full reason).
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
         outcomes = (
             (browser_install, launchd.PlistRefresh("browser bridge", "current")),
             (tunnel_install, launchd.PlistRefresh("tunnel", "failed", "boom")),
