@@ -72,10 +72,20 @@ def registries(tmp_path: Path) -> tuple[AgentRegistry, TeamRegistry]:
     return agents, teams
 
 
-def _session(tmp_path: Path, registries: tuple[AgentRegistry, TeamRegistry]) -> Session:
-    """A session over ``tmp_path/sess``; making a second one RESUMES it."""
+def _session(
+    tmp_path: Path,
+    registries: tuple[AgentRegistry, TeamRegistry],
+    session_cls: type[Session] = Session,
+) -> Session:
+    """A session over ``tmp_path/sess``; making a second one RESUMES it.
+
+    ``session_cls`` is how the refusal cells reach the no-seam branch a real
+    ``Session`` cannot: a SUBCLASS with ``attach_team`` stripped, built on a
+    fresh transcript — a stored attachment would be restored THROUGH the
+    missing seam and raise at construction (Q-NIT-2 in #2072's thread).
+    """
     agents, teams = registries
-    return Session(
+    return session_cls(
         model=MODEL,
         stream_fn=ScriptedStream([[]]),
         tools=[],
@@ -393,6 +403,27 @@ async def routed(tmp_path: Path, registries) -> Any:
         await session.dispose()
 
 
+@pytest_asyncio.fixture
+async def routed_without_a_team_seam(tmp_path: Path, registries: Any) -> Any:
+    """The ROUTED handler over a session that cannot attach — the viewer's shape.
+
+    Same construction as ``routed``, with the attach seam REMOVED: the refusal
+    cells below drive the one branch a real ``Session`` (LOCAL and fully
+    equipped) can never reach. ``test_resumed_attachment.py``'s
+    ``NoRunTeamSession`` is the follower-seam twin of this shape.
+    """
+
+    class NoRunTeamSession(Session):
+        attach_team = None  # type: ignore[assignment]
+
+    session = _session(tmp_path, registries, session_cls=NoRunTeamSession)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        yield handle, session
+    finally:
+        await session.dispose()
+
+
 class TestTheRoutedCommands:
     @pytest.mark.asyncio
     async def test_slash_team_claims_the_slot(self, routed) -> None:
@@ -623,3 +654,54 @@ class TestTheRoutedCommands:
         outcome = await handle.run_slash_authoritative("team", "lopdev", [])
 
         assert "Replaced profile" not in outcome["text"]
+
+    @pytest.mark.asyncio
+    async def test_slash_team_clear_refusal_names_what_the_session_can_do(
+        self, routed_without_a_team_seam
+    ) -> None:
+        """The routed half of the no-team detach refusal, byte-pinned.
+
+        M12 follow-up (#2072/#2078): this copy had drifted to "this session
+        cannot run a team" while the CONTRACT sentence — held by
+        ``tui/app.py::_team_detach_receipt`` and shared by the TUI-local
+        handler and the follower seam (whose half is pinned in
+        ``test_resumed_attachment.py``) — states what the session CAN do. A
+        mutation of this routed copy reddened NOTHING across #2072's sweep, so
+        this cell owns the routed half and the two cannot drift apart silently.
+        """
+        handle, _ = routed_without_a_team_seam
+
+        outcome = await handle.run_slash_authoritative("team", "clear", [])
+
+        assert outcome["kind"] == "notice"
+        assert outcome["style"] == "warning"
+        assert outcome["text"] == (
+            "this session can list and chart teams, but not run one, "
+            "so there is no team to detach"
+        )
+        # A refusal must not be published as a detach: no ``data`` rides it.
+        assert outcome["data"] == {}
+
+    @pytest.mark.asyncio
+    async def test_slash_team_attach_refusal_names_what_the_session_can_do(
+        self, routed_without_a_team_seam
+    ) -> None:
+        """The routed attach refusal, aligned to the TUI-local sentence (M12).
+
+        The attach-half twin of the cell above: this copy and the follower seam
+        in ``tui/app.py`` said "this session cannot run a team. /team chart …"
+        where the local handler says what the session can do — the same drift
+        shape, routed for this follow-up's scope in #2072's thread. The
+        follower half is pinned in ``test_resumed_attachment.py``.
+        """
+        handle, _ = routed_without_a_team_seam
+
+        outcome = await handle.run_slash_authoritative("team", "lopdev", [])
+
+        assert outcome["kind"] == "notice"
+        assert outcome["style"] == "warning"
+        assert outcome["text"] == (
+            "this session can list and chart teams, but not run one. "
+            "/team chart <name> shows a roster"
+        )
+        assert outcome["data"] == {}
