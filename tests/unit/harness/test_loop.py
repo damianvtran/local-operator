@@ -159,6 +159,68 @@ def tool_call_delta(index: int, *, id: str | None = None, name: str | None = Non
 
 
 @pytest.mark.asyncio
+async def test_output_envelope_closes_transport_and_retires_pending_calls() -> None:
+    """Neither an intact pending call nor a malformed sibling runs after a local refusal."""
+    from local_operator.providers.clients import OpenAICompatClient
+
+    closed: list[bool] = []
+    executed: list[str] = []
+
+    class Runaway(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for calls in [
+                [
+                    {
+                        "index": 0,
+                        "id": "call_intact",
+                        "function": {"name": "echo", "arguments": '{"text":"ok"}'},
+                    }
+                ],
+                [
+                    {
+                        "index": 1,
+                        "id": "call_partial",
+                        "function": {"name": "echo", "arguments": '{"text":"' + "x" * 200000},
+                    }
+                ],
+            ]:
+                payload = {"choices": [{"delta": {"tool_calls": calls}}]}
+                yield ("data: " + json.dumps(payload) + "\n\n").encode()
+                await asyncio.sleep(0)
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            closed.append(True)
+
+    def server(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=Runaway(), headers={"content-type": "text/event-stream"})
+
+    spec = ModelSpec(provider="radient", model_id="auto", max_output_tokens=1024)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(server)) as http:
+        client = OpenAICompatClient("https://test.invalid/v1", http_client=http)
+
+        def stream(request: ChatRequest, signal: AbortSignal | None):
+            return client.stream(request, "test-token")
+
+        events = [
+            event
+            async for event in AgentLoop().run(
+                [Message.user("read metadata")],
+                LoopContext(system_blocks=[], messages=[], tools=[echo_tool(executed)]),
+                make_config(stream, model=spec),
+                None,
+            )
+        ]
+    end = next(event for event in events if isinstance(event, AgentEndEvent))
+    assert "local output resource envelope" in (end.error or "")
+    assert not end.aborted
+    assert closed == [True]
+    assert executed == []
+    assert any(isinstance(event, ToolCallComposeEvent) for event in events)
+    assert not any(isinstance(event, ToolExecutionStartEvent) for event in events)
+
+
+@pytest.mark.asyncio
 async def test_full_turn_text_tool_text():
     """Stream emits text, then a tool call (deltas split), then more text;
     after execution the model stops. Assert event order and final messages."""

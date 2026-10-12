@@ -144,7 +144,7 @@ def _context(root: Path, *, may_delegate: bool = True, **overrides: Any) -> Tool
         "cwd": str(root),
         "session_id": REQUESTER_ID,
         "scratchpad_dir": str(root / "sessions" / REQUESTER_ID / "scratchpad"),
-        "subagent_launcher": lambda label, prompt, *, agent="task", effort=None: "job-x",
+        "subagent_launcher": lambda label, prompt, *, agent="task", **kwargs: "job-x",
         "may_delegate": may_delegate,
     }
     fields.update(overrides)
@@ -239,7 +239,7 @@ def test_default_set_drops_sessions_without_a_launcher_and_appends_it_with_one()
         for tool in create_tools(
             ToolContext(
                 cwd=".",
-                subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "j",
+                subagent_launcher=lambda label, prompt, *, agent="task", **kwargs: "j",
             )
         )
     ]

@@ -15804,7 +15804,13 @@ class Session:
         )
 
     def _launch_subagent(
-        self, label: str, prompt: str, *, agent: str = "task", effort: str | None = None
+        self,
+        label: str,
+        prompt: str,
+        *,
+        agent: str = "task",
+        effort: str | None = None,
+        model: str | None = None,
     ) -> str:
         """Register one one-shot child run on this session's job manager.
 
@@ -15842,7 +15848,12 @@ class Session:
         # team, cycle, depth cap) raises here before any model is priced or
         # job registered (BEN-7-D1/D2/D3).
         target = resolve_launch_target(agent, self)
-        model_spec = self._resolve_subagent_model(target.role, effort, strict=True)
+        if model is not None and model != "inherit":
+            from local_operator.harness.subagent import model_may_choose_tier
+
+            if not model_may_choose_tier():
+                raise ValueError("specific task models require subagents.model_choice=model")
+        model_spec = self._resolve_subagent_model(target.role, effort, strict=True, model=model)
         return run_subagent(
             label=label,
             prompt=prompt,
@@ -15855,14 +15866,17 @@ class Session:
             # above already carries the resolved MODEL; this carries the LEVEL,
             # which the spec cannot reconstruct (see ``run_subagent``).
             effort=effort,
+            model_selector=model,
         )
 
     def _resolve_subagent_model(
-        self, agent: str, effort: str | None, *, strict: bool = False
+        self, agent: str, effort: str | None, *, strict: bool = False, model: str | None = None
     ) -> ModelSpec | None:
         """Effort tier -> ModelSpec via config; None keeps the parent's model.
 
-        Precedence: an explicit ``effort`` on the launch beats the role's own
+        Precedence: an explicit per-run ``model`` bypasses role defaults (inherit
+        returns no pin; direct selectors validate before launch). Otherwise an
+        explicit ``effort`` on the launch beats the role's own
         default, which beats the session model. That order is what lets a role
         say "this job is usually cheap" while a caller who knows this instance
         is hard can still pay for the better model. No role hardcodes a tier
@@ -15898,6 +15912,20 @@ class Session:
         for whom failing would be worse than inheriting. See
         :meth:`_launch_subagent` for the incident that made the launch strict.
         """
+        if model is not None:
+            # Explicit run choices override the role, but never rewrite it.
+            # Retain the inherit sentinel separately from omission so restart
+            # can follow the lineage without accidentally re-applying a pin.
+            if effort is not None:
+                raise ValueError("pass either model or effort, not both")
+            if model == "inherit":
+                return None
+            from local_operator.mobile.peer_model import validate_subagent_selection
+
+            provider, separator, model_id = model.partition("/")
+            if not separator or not provider or not model_id or any(c.isspace() for c in model):
+                raise ValueError("model must be 'inherit' or <provider>/<model-id>")
+            return validate_subagent_selection(provider, model_id)
         wanted = effort
         if wanted is None and agent and agent != "task":
             from local_operator.agent_profiles import resolve_profile

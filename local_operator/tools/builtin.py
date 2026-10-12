@@ -25190,7 +25190,7 @@ def _effort_tier_field_description(session_model_label: str | None = None) -> st
     return (
         "Swaps this child's MODEL (not its reasoning level): "
         f"{describe_effort_tiers(tiers, session_model_label=session_model_label)}. "
-        "Omit to inherit this session's model and reasoning effort."
+        "Omit to keep role defaults; model=inherit skips role pins."
     )
 
 
@@ -25200,7 +25200,7 @@ def _effort_tier_field_description(session_model_label: str | None = None) -> st
 #: a model asked to explain the refusal) can find the switch that changes it.
 _OPERATOR_CHOICE_EFFORT_SENTENCE = (
     "No effort tiers are yours to choose (subagents.model_choice=operator): "
-    "children inherit this session's model — do not pass 'effort'."
+    "omit effort; model=inherit bypasses role pins."
 )
 
 
@@ -25223,14 +25223,13 @@ def _task_tool_description(model_choice: bool) -> str:
         tiers = configured_effort_tiers()
         if tiers:
             effort = (
-                "Omit 'effort' to inherit this session's model and reasoning effort, "
+                "Omit effort to keep role defaults, "
                 "or set it to one of the configured tiers the schema lists."
             )
         else:
             effort = (
-                "No effort tiers are configured (subagents.models), so every child "
-                "inherits this session's model and reasoning effort; do not pass "
-                "'effort'."
+                "No effort tiers are configured (subagents.models); omit effort. "
+                "Use model=inherit to bypass role pins."
             )
     # ``team:<name>`` is documented ONCE, on TaskItem.agent's description
     # below: both ride this same tool schema on every request (and the
@@ -25246,6 +25245,43 @@ def _task_tool_description(model_choice: bool) -> str:
         "designer, scout — see the `agent` tool). "
         f"{effort}"
     )
+
+
+def _validate_task_model(value: str | None) -> str | None:
+    """A per-run pick never changes the operator's profiles or model defaults."""
+    if value is None:
+        return None
+    value = value.strip()
+    if value == "inherit":
+        # Inheritance spends only the parent's already-selected model; unlike
+        # exact swaps it is safe under the operator-only model-choice policy.
+        return value
+    if not model_may_choose_tier():
+        error = (
+            EnvironmentDependentRejectionError
+            if _ADVERTISED_MODEL_CHOICE.get() is True
+            else ValueError
+        )
+        raise error(
+            "specific task models require subagents.model_choice=model; use model='inherit'"
+        )
+    provider, separator, model_id = value.partition("/")
+    if not separator or not provider or not model_id or any(c.isspace() for c in value):
+        raise ValueError("model must be 'inherit' or <provider>/<model-id>")
+    return value
+
+
+def _advertise_task_model(parameters: dict[str, Any], model_choice: bool) -> dict[str, Any]:
+    """Operator mode offers only inheritance, not arbitrary cost escalation."""
+    for schema in [parameters, *parameters.get("$defs", {}).values()]:
+        field = schema.get("properties", {}).get("model")
+        if field is not None and not model_choice:
+            field["anyOf"] = [{"type": "string", "enum": ["inherit"]}, {"type": "null"}]
+            field["description"] = (
+                "Omit to keep role/tier defaults. 'inherit' follows the parent, "
+                "skipping role pins. Exact models require subagents.model_choice=model."
+            )
+    return parameters
 
 
 class TaskItem(BaseModel):
@@ -25305,6 +25341,35 @@ class TaskItem(BaseModel):
     # shows and `lop config edit` does not take. Two spellings for one key in
     # one file is how the next reader learns the wrong one.
     effort: str | None = Field(default=None)
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Omit to keep role/tier defaults. 'inherit' follows the parent, skipping role pins; "
+            "provider/model-id pins this run. Never combine with effort."
+        ),
+    )
+
+    @field_validator("model")
+    @classmethod
+    def _model_is_allowed(cls, value: str | None) -> str | None:
+        return _validate_task_model(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _raw_model_conflict(cls, value: Any) -> Any:
+        if (
+            isinstance(value, dict)
+            and value.get("model") is not None
+            and value.get("effort") is not None
+        ):
+            raise ValueError("pass either model or effort, not both")
+        return value
+
+    @model_validator(mode="after")
+    def _exclusive_model_choice(self) -> "TaskItem":
+        if self.model is not None and self.effort is not None:
+            raise ValueError("pass either model or effort, not both")
+        return self
 
     @field_validator("effort")
     @classmethod
@@ -25337,6 +25402,18 @@ class TaskParams(BaseModel):
     # description: the rendered one replaces it on every build path, and the
     # fallback it used to carry spelled the key a second way.
     effort: str | None = Field(default=None)
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Omit to keep role/tier defaults. 'inherit' follows the parent, skipping role pins; "
+            "provider/model-id pins this run. Never combine with effort."
+        ),
+    )
+
+    @field_validator("model")
+    @classmethod
+    def _model_is_allowed(cls, value: str | None) -> str | None:
+        return _validate_task_model(value)
 
     @field_validator("effort")
     @classmethod
@@ -25359,20 +25436,33 @@ class TaskParams(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _raw_model_conflict(cls, value: Any) -> Any:
+        if (
+            isinstance(value, dict)
+            and value.get("model") is not None
+            and value.get("effort") is not None
+        ):
+            raise ValueError("pass either model or effort, not both")
+        return value
+
     @model_validator(mode="after")
     def _one_form(self) -> "TaskParams":
         """Single form xor batch form, whole — the pydantic voice keeps the
         'invalid arguments' contract for a half-supplied call."""
+        if self.model is not None and self.effort is not None:
+            raise ValueError("pass either model or effort, not both")
         if (self.label is None) != (self.prompt is None):
             raise ValueError("single-task form needs both label and prompt")
         single = self.label is not None
         if single and self.tasks:
             raise ValueError("pass either 'tasks' (batch) or label/prompt, not both")
-        if not single and (self.agent or self.effort):
+        if not single and (self.agent or self.effort or self.model):
             # Silently ignoring these would be worse than refusing: the caller
             # believes it asked for a role, and every child in the batch would
             # run without one.
-            raise ValueError("in the batch form, set 'agent'/'effort' on each tasks[] item")
+            raise ValueError("in the batch form, set 'agent'/'effort'/'model' on each tasks[] item")
         if not single and not self.tasks:
             raise ValueError("nothing to launch: pass 'tasks' or label/prompt")
         if not single and not self.context.strip() and len(self.tasks) == 1:
@@ -26003,6 +26093,7 @@ async def execute_task(
                 prompt=params.prompt,
                 agent=params.agent or "task",
                 effort=params.effort,
+                model=params.model,
             )
         )
 
@@ -26015,7 +26106,16 @@ async def execute_task(
     failures: list[str] = []
     for item in items:
         try:
-            job_id = launcher(item.label, _full_prompt(item), agent=item.agent, effort=item.effort)
+            if item.model is not None and item.effort is not None:
+                raise ValueError("pass either model or effort, not both")
+            options: dict[str, Any] = {"agent": item.agent, "effort": item.effort}
+            if item.model is not None:
+                options["model"] = item.model
+            from local_operator.mobile.peer_model import prepared_subagent_selections
+
+            selectors = [item.model] if item.model is not None and item.model != "inherit" else []
+            async with prepared_subagent_selections(selectors):
+                job_id = launcher(item.label, _full_prompt(item), **options)
         except Exception as exc:  # noqa: BLE001 — engine failure surfaces as an error result
             # An unavailable tier is the one launch failure the model is
             # tempted to "fix" by retrying at another tier, which is how a
@@ -26048,12 +26148,25 @@ async def execute_task(
                 # ``run_subagent``), and it covers a ROLE PIN the arguments do
                 # not mention at all.
                 "model": _job_model_label(context, job_id),
+                "model_selection_source": (
+                    str(getattr(context.jobs.get(job_id), "model_selection_source", "") or "")
+                    if context and context.jobs
+                    else ""
+                ),
             }
         )
     if not launched:
         detail = failures[0] if failures else "no tasks to launch"
         return _error(tool_call_id, "task", f"could not launch subagent(s): {detail}")
-    lines = [_launched_line(entry, context) for entry in launched]
+    lines = [
+        _launched_line(entry, context)
+        + (
+            f" [selection: {entry['model_selection_source']}]"
+            if entry.get("model_selection_source")
+            else ""
+        )
+        for entry in launched
+    ]
     body = (
         f"launched {len(launched)} subagent(s) as concurrent background jobs:\n"
         + "\n".join(lines)
@@ -26081,6 +26194,7 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
         description=_effort_tier_field_description(context.session_model_label),
         model_choice=model_choice,
     )
+    parameters = _advertise_task_model(parameters, model_choice)
     return AgentTool(
         name="task",
         label="Subagent task",
@@ -27157,6 +27271,19 @@ def _coerce_hub_to(value: Any) -> Any:
 
 
 class HubParams(BaseModel):
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Omit to keep role/tier defaults. 'inherit' follows the parent, skipping role pins; "
+            "provider/model-id pins this run. Never combine with effort."
+        ),
+    )
+
+    @field_validator("model")
+    @classmethod
+    def _model_is_allowed(cls, value: str | None) -> str | None:
+        return _validate_task_model(value)
+
     """Parent-side hub arguments."""
 
     model_config = ConfigDict(extra="forbid")
@@ -27703,6 +27830,8 @@ async def _execute_hub_parent(
     except ValidationError as exc:
         return _validation_error(tool_call_id, "hub", exc)
 
+    if params.model is not None and params.op != "resume":
+        return _error(tool_call_id, "hub", "model is only valid for op='resume'")
     if params.op == "list":
         return _hub_list(tool_call_id, comms, scope, context)
 
@@ -27790,7 +27919,12 @@ async def _execute_hub_parent(
         previous_models = {job_id: _previous_model(comms, job_id) for job_id in ids}
         resumed: list[tuple[str, str | None, str | None]] = [
             # (resumed-from id, new job id, error)
-            (job_id, *comms.resume(job_id, message))
+            (
+                job_id,
+                *await comms.resume_async(
+                    job_id, message, **({"model": params.model} if params.model is not None else {})
+                ),
+            )
             for job_id in ids
         ]
         session_model = str(getattr(context, "session_model_label", "") or "")
@@ -27815,6 +27949,12 @@ async def _execute_hub_parent(
                         new_job_id,
                         previous_models.get(from_id, ""),
                         session_model,
+                    )
+                    + (
+                        " [selection: "
+                        f"{getattr(comms.job(new_job_id), 'model_selection_source', '')}]"
+                        if getattr(comms.job(new_job_id), "model_selection_source", "")
+                        else ""
                     )
                 )
             else:
@@ -27940,7 +28080,9 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
                 else ""
             )
         ),
-        parameters=_lead_hub_schema() if leads else HubParams.model_json_schema(),
+        parameters=_advertise_task_model(
+            _lead_hub_schema() if leads else HubParams.model_json_schema(), model_may_choose_tier()
+        ),
         # Write, like 'task' and 'wake': these ops redirect, kill and restart
         # autonomous work. The gate is per TOOL, not per op, so the tier is
         # the highest any op needs — 'resume' starts a child session, which is

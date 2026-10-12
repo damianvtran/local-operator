@@ -74,7 +74,7 @@ async def test_memberships_without_a_login_shows_the_re_login_remedy(
         response = await test_app_client.get("/v1/memberships")
 
     assert response.status_code == 401
-    assert response.json()["detail"] == ORG_LOGIN_REMEDY
+    assert response.json()["detail"]["text"] == ORG_LOGIN_REMEDY
     mock_client.assert_not_called()
 
 
@@ -162,7 +162,7 @@ async def test_team_publish_unknown_local_team_keeps_the_local_404(
         response = await test_app_client.post("/v1/teams/no-such-team/publish?tenant_id=org-1")
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "Team with ID no-such-team not found"
+    assert response.json()["detail"]["text"] == "Team with ID no-such-team not found"
     mock_client.return_value.publish_team_document.assert_not_called()
     # The local refusal happens before any hub client exists, matching the
     # agent routes' ordering.
@@ -180,7 +180,7 @@ async def test_team_publish_without_a_login_shows_the_re_login_remedy(
         response = await test_app_client.post(f"/v1/teams/{team.id}/publish?tenant_id=org-1")
 
     assert response.status_code == 401
-    assert response.json()["detail"] == ORG_LOGIN_REMEDY
+    assert response.json()["detail"]["text"] == ORG_LOGIN_REMEDY
     mock_client.assert_not_called()
 
 
@@ -245,7 +245,7 @@ async def test_team_pull_refuses_a_document_owned_by_another_tenant(
         response = await test_app_client.get("/v1/teams/pull/team-9?tenant_id=org-1")
 
     assert response.status_code == 409
-    assert "belongs to organization org-2" in response.json()["detail"]
+    assert "belongs to organization org-2" in response.json()["detail"]["text"]
     assert TeamRegistry(temp_dir).list_teams() == []
 
 
@@ -305,7 +305,7 @@ async def test_team_pull_refuses_an_id_that_could_escape_its_segment(
         response = await test_app_client.get(f"/v1/teams/pull/{encoded}")
 
     assert response.status_code == 404
-    assert "not found" in response.json()["detail"]
+    assert "not found" in response.json()["detail"]["text"]
     mock_client.assert_not_called()
 
 
@@ -334,7 +334,7 @@ async def test_team_pull_refuses_a_tenantless_document_when_a_tenant_is_declared
         response = await test_app_client.get("/v1/teams/pull/team-9?tenant_id=org-1")
 
     assert response.status_code == 409
-    assert "does not name an owning organization" in response.json()["detail"]
+    assert "does not name an owning organization" in response.json()["detail"]["text"]
     assert TeamRegistry(temp_dir).list_teams() == []
 
 
