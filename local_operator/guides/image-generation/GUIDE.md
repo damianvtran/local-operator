@@ -129,32 +129,51 @@ reproducibility there.
 
 ## Editing an image (image-to-image)
 
-Pass a source and the call becomes an edit. Two ways to name it:
+Pass one or more sources and the call becomes an edit. Four fields name
+them:
 
-- `source_image_path` — a local file; read locally and uploaded to the
-  provider as a data URI.
-- `source_attachment` — the digest from a previous result's caption
-  (`generate_image` captions name the digest of every image they attached);
-  pass that digest back to edit the image the harness just made.
+- `source_image_path` / `source_image_paths` — local files; read locally and
+  uploaded to the provider as data URIs (one path, or a list, in order).
+- `source_attachment` / `source_attachments` — digests from previous results'
+  captions (`generate_image` captions name the digest of every image they
+  attached); pass one back, or a list, to edit images the harness just made.
 
-One source per call in v1; multi-source is a documented extension point (the
-rung specs' typed `max_sources` field). A source rides as a data URI or an
-https URL; the Radient hub refuses a request body over 16 MiB, so a very
-large local source can fail there first.
+Kinds mix freely in one call: the combined order is every path first, then
+every attachment, each list in the order given (a two-path + one-digest call
+edits path1, path2, digest1). One source is the classic single-edit; two to
+sixteen sources combine in one request — 16 is the hub's highest per-pin
+ceiling and the tool's per-call maximum (`At most 16 sources per call`).
+The plural fields are alternatives to their singular twins, not companions:
+pass `source_image_path` or `source_image_paths`, not both (same for the
+attachment pair).
 
-`strength` (0..1) tunes how far the edit may move from the source, where the
-provider supports it (FAL's flux-class image-to-image apps; its
+Per-provider ceilings decide what actually runs. Radient reads the ceiling
+off the live listing per pin at call time (its edit default, GPT Image 2.5
+sunburst edit, takes 16); FAL's multi-reference editors take up to 10
+(`blackforestlabs/flux-3/edit-image`, the unpinned multi-source default — a
+pinned single-reference app is skipped, never swapped); OpenAI's GPT-image
+models take up to 16; Google up to 14; xAI up to 5; OpenRouter takes one
+reference in this version. A provider that cannot take the count is skipped
+with its ceiling named, and the ChatGPT-plan rung skips edits explicitly —
+an edit never silently becomes a fresh image or a quietly smaller edit.
+
+Each source rides as a data URI or an https URL; the Radient hub refuses a
+request body over 16 MiB, so many large local sources can hit that cap
+before the source-count cap does.
+
+`strength` (0..1) tunes how far the edit may move from the source(s), where
+the provider supports it (FAL's flux-class image-to-image apps; its
 multi-reference editors document no strength field). Where the harness can
 detect the drop — FAL's schema-guided path — the result says the value was
 ignored rather than dropping it silently; on Radient it rides the hub's
 verbatim passthrough, and a pin that does not document it gives no drop
-signal, so the result does not claim one. `strength` without a source is
-rejected.
+signal, so the result does not claim one. `strength` requires at least one
+source.
 
-Edits run on Radient, FAL, OpenAI, Google, xAI and OpenRouter. The
-ChatGPT-plan rung records an explicit skip, so an edit never silently
-degrades to a fresh image: if no capable provider is available the call fails
-and names what to set up.
+Edits run on Radient, FAL, OpenAI, Google, xAI and OpenRouter. Cost: FAL,
+OpenAI and Google report no per-call figure — their captions say so
+explicitly — and bill at their published rates on your key; Radient and xAI
+report per-call figures as before.
 
 **Which edit model.** On Radient the harness resolves the pin the hub marks
 as its edit default — GPT Image 2.5 sunburst edit, the best single-edit
@@ -167,7 +186,7 @@ specifically.
 
 Digests come from results. An image pasted straight into the chat has no
 digest you can cite yet — reference a local file with `source_image_path`
-when the bytes exist on disk.
+(or `source_image_paths`) when the bytes exist on disk.
 
 ## Cancelling and restarting
 

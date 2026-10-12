@@ -54,7 +54,12 @@ def test_the_v1_spec_facts_are_pinned() -> None:
     # in v1 — no branch reads this value.
     assert fal.cancel_support == CancelSupport.SIGNAL
     assert fal.cost == "rate_table"
-    assert (fal.sources, fal.max_sources, fal.mask) == (SourceSupport.SINGLE, 1, False)
+    # Multi-source wire (2026-10-11): N>1 rides
+    # ``blackforestlabs/flux-3/edit-image`` (``image_urls``, 1..10 refs);
+    # single keeps the flux-class ``image_url``. The flip lands beside the
+    # wire in ``rungs.run_fal`` — declaration and wiring move together (D4),
+    # and the drift tests fail either direction alone.
+    assert (fal.sources, fal.max_sources, fal.mask) == (SourceSupport.MULTI, 10, False)
 
     openai = cascade.RUNG_SPECS[ImageRoute.OPENAI]
     assert openai.capabilities == frozenset({"t2i", "i2i"}), "the edits path is wired"
