@@ -829,12 +829,13 @@ class TeamBridgeClient:
     ) -> dict[str, Any]:
         """The org switch state — booleans + a generic code only (§5.5, S-22).
 
-        Member-readable by contract, and the ONLY member signal that tells a
-        CONFIRMED admin/ops kill apart from a plan lapse, which is why the F
-        reading asks it (review round 1, Q3 / design round 1, D3). Reasons are
-        never returned and none are requested; the status discipline reads this
-        at the same boundary, for the retained tenant only, and caches it with
-        the F answer it belongs to.
+        Member-readable by contract, and the only member signal that tells a
+        confirmed admin/ops kill apart from a plan lapse. The status discipline
+        does NOT read it (review round 2, R9): F's sentence became the neutral
+        closed-set member for every cause, so there is nothing left to
+        confirm — and no poll reads this surface. Retained as a read-only
+        transport method for callers that need the booleans themselves; the
+        ``access`` parameter keeps it usable under an explicit grant.
         """
 
         return await self._send("GET", f"/tenants/{tenant_id}/messaging/state", access=access)

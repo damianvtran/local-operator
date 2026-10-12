@@ -11,6 +11,8 @@ status cache.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -442,3 +444,150 @@ async def test_every_route_requires_the_desktop_bearer(tmp_path: Path, monkeypat
         ]:
             response = await client.request(method, path, json={"state": "paused"})
             assert response.status_code == 401, (method, path)
+
+
+# ---------------------------------------------------------------------------
+# The retained consumer (review round 3, Q6): the STATUS route over ONE
+# server-style manager must see an EXTERNAL process's writes on the NEXT
+# request. QA measured the defect: with the same retained manager, a fresh
+# reader saw the new pair while this route kept returning the stale one until
+# that very manager was reloaded (masked in production by the general
+# settings route's explicit reload, which this test never calls).
+# ---------------------------------------------------------------------------
+
+
+def _external(lines: str) -> None:
+    """Run a REAL separate process against the isolated config; fail loudly."""
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CMUX_", "LOP_"))}
+    result = subprocess.run(
+        [sys.executable, "-c", lines],
+        env=env,
+        cwd=str(Path(__file__).resolve().parents[3]),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest_asyncio.fixture
+async def retained_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """One retained manager == the dependency identity, with the REAL route stack.
+
+    No FakeClient and no discipline stub: the isolated config carries NO
+    Radient credentials, so the real discipline answers ``signed_out`` with
+    zero wire calls while the LOCAL block still renders from the config keys —
+    exactly the surface this regression is about. Mounted ASGI WITHOUT the
+    app's lifespan: the defect under test is the retained manager's lifetime,
+    not a startup hook, and that scope is stated rather than implied (this is
+    not a full-daemon claim).
+    """
+
+    for name in list(os.environ):
+        if name.startswith(("CMUX_", "LOP_")):
+            monkeypatch.delenv(name)
+    root = tmp_path / ".local-operator"
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(root)  # THE retained manager
+    app.include_router(desktop_team_bridge.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost", headers=AUTH
+    ) as client:
+        yield client, root, app
+
+
+async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
+    """Q6: the NEXT status request sees an external write — no reload, no GET.
+
+    Deliberately no fiction: no fixture poll, no manager replacement, no
+    intervening general-settings GET (whose explicit reload would mask the
+    failure). The response bodies below are the HTTP layer's real output.
+    """
+
+    client, root, app = retained_api
+    manager = app.state.config_manager
+
+    first = await client.get("/v1/desktop/team-bridge/status?boundary=app_start")
+    assert first.status_code == 200
+    first_body = first.json()["result"]
+    assert first_body["state"] == STATE_SIGNED_OUT
+    assert first_body["local"] == {"enabled": False, "onboarding": "", "session": ""}
+
+    # A real separate process writes the registered keys through settings_io.
+    _external(
+        "import pathlib\n"
+        "from local_operator import settings_io\n"
+        "from local_operator.config import ConfigManager\n"
+        f"cm = ConfigManager(pathlib.Path({str(root)!r}))\n"
+        "settings_io.write_setting(cm, settings_io.BY_KEY['team_bridge.enabled'], True)\n"
+        "settings_io.write_setting(cm, settings_io.BY_KEY['team_bridge.session'],"
+        " 'synthetic-r3-live-session')\n"
+    )
+    second = await client.get("/v1/desktop/team-bridge/status?boundary=surface_open")
+    second_local = second.json()["result"]["local"]
+    assert second_local["enabled"] is True
+    assert second_local["session"] == "synthetic-r3-live-session"
+    assert app.state.config_manager is manager  # same dependency identity
+
+    # Disable + clear converge on the next request as well.
+    _external(
+        "import pathlib\n"
+        "from local_operator import settings_io\n"
+        "from local_operator.config import ConfigManager\n"
+        f"cm = ConfigManager(pathlib.Path({str(root)!r}))\n"
+        "settings_io.write_setting(cm, settings_io.BY_KEY['team_bridge.enabled'], False)\n"
+        "settings_io.write_setting(cm, settings_io.BY_KEY['team_bridge.session'], '')\n"
+    )
+    third = await client.get("/v1/desktop/team-bridge/status?boundary=surface_open")
+    assert third.json()["result"]["local"] == {
+        "enabled": False,
+        "onboarding": "",
+        "session": "",
+    }
+
+    # An onboarding-only document edit (a key settings_io cannot write — it is
+    # deliberately unregistered) is adopted even though NO registered key
+    # moved: the watcher swaps its snapshot while reporting no change.
+    _external(
+        "import pathlib, yaml\n"
+        f"p = pathlib.Path({str(root)!r}, 'config.yml')\n"
+        "doc = yaml.safe_load(p.read_text()) or {}\n"
+        "doc.setdefault('values', {}).setdefault('team_bridge', {})['onboarding'] = 'seen'\n"
+        "p.write_text(yaml.safe_dump(doc))\n"
+    )
+    fourth = await client.get("/v1/desktop/team-bridge/status?boundary=window_focus")
+    assert fourth.json()["result"]["local"]["onboarding"] == "seen"
+
+    # A malformed document keeps the LAST-GOOD snapshot: bytes untouched, no
+    # ``.bad`` backup, values unchanged.
+    malformed = "::: not yaml :::\n"
+    _external(
+        "import pathlib\n" f"pathlib.Path({str(root)!r}, 'config.yml').write_text({malformed!r})\n"
+    )
+    malformed_bytes = (root / "config.yml").read_bytes()
+    fifth = await client.get("/v1/desktop/team-bridge/status?boundary=window_focus")
+    fifth_local = fifth.json()["result"]["local"]
+    assert fifth_local == {"enabled": False, "onboarding": "seen", "session": ""}
+    # The unreadable document is left EXACTLY as written: no repair, no
+    # rewrite, no ``config.yml.bad.<ts>`` moved aside (the last-good snapshot
+    # is kept instead — the write guard's behaviour, not ``_load_config``'s).
+    assert (root / "config.yml").read_bytes() == malformed_bytes
+    assert list(root.glob("config.yml.bad*")) == []
+
+    # A restored valid document advances.
+    _external(
+        "import pathlib, yaml\n"
+        f"p = pathlib.Path({str(root)!r}, 'config.yml')\n"
+        "p.write_text(yaml.safe_dump({'values': {'team_bridge':"
+        " {'enabled': True, 'session': 'synthetic-r3-restored'}}}))\n"
+    )
+    sixth = await client.get("/v1/desktop/team-bridge/status?boundary=surface_open")
+    sixth_local = sixth.json()["result"]["local"]
+    assert sixth_local["enabled"] is True
+    assert sixth_local["session"] == "synthetic-r3-restored"
+    assert app.state.config_manager is manager

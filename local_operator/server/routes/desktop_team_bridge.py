@@ -56,6 +56,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.config import ConfigManager
+from local_operator.config_watch import process_watcher
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
@@ -201,7 +202,24 @@ async def status(
     from local_operator.team_bridge.settings import TeamBridgeSettings
 
     check = await get_status_discipline(config_manager.config_dir).check(boundary)
-    local = TeamBridgeSettings.from_config(config_manager)
+    # The local keys come from the DIRECTORY-scoped process watcher's last-good
+    # snapshot, NOT the injected manager's cache: the server constructs ONE
+    # manager (``server/app.py``) and never reloads it, so an external write
+    # (the CLI, the settings page, another process) left this block stale
+    # forever — measured with a retained manager in review round 3 (Q6): a
+    # fresh reader saw the new pair while this route still returned the old
+    # one, and an explicit reload of the same manager fixed it without any
+    # cache involvement. ``poll_now`` re-stats and re-parses; a malformed or
+    # missing document KEEPS the last-good snapshot (no ``.bad`` backup, no
+    # defaults gap), and a document whose change moved no REGISTERED key still
+    # adopts (``team_bridge.onboarding`` is deliberately unregistered). The
+    # watcher is the existing directory-scoped singleton the session consumers
+    # already run — read here at the boundary that renders it; no server-wide
+    # reload/subscription is introduced, and the manager stays the root/auth
+    # source it always was.
+    watcher = process_watcher(config_manager.config_dir)
+    watcher.poll_now()
+    local = TeamBridgeSettings.from_values(watcher.values)
     consent = consent_for_display(check)
     # §5.6's A–G reading, computed ONCE (the same function the availability
     # record uses), so a renderer binds to the backend's policy instead of

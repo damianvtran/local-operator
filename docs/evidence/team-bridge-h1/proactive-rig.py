@@ -21,6 +21,18 @@ ROOT = Path(os.environ["LOCAL_OPERATOR_SCRATCHPAD"]) / "proactive-r2"
 ROOT.mkdir(exist_ok=True)
 sys.path.insert(0, str(WT))
 
+# Inherited live-host identifiers must not reach the TUI boot below: the
+# harness reads CMUX_*/LOP_* around import/boot time, and an inherited
+# CMUX_WORKSPACE_ID let a headless boot rename the operator's real cmux
+# workspaces (team incident). An isolated HOME, run_test and synthetic
+# sessions neutralise FILESYSTEM and identity state — never ENV-carried
+# identifiers; only this strip does (review round 3, R12/Q7). The
+# LOCAL_OPERATOR_* prefix is deliberately NOT matched: this rig's own
+# scratch/config variables are distinct from the LOP_ harness namespace.
+for k in list(os.environ):
+    if k.startswith(("CMUX_", "LOP_")):
+        os.environ.pop(k, None)
+
 home = ROOT / "home"
 cfg = home / ".local-operator"
 cfg.mkdir(parents=True, exist_ok=True)

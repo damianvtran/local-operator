@@ -224,19 +224,22 @@ def _patience_policy() -> Any:
 
 
 def _bridge_settings() -> Any:
-    """The bridge's OWN reader for the local machine prefs (review round 2, Q6).
+    """The bridge's OWN reader for the local machine prefs (review round 3, Q6).
 
-    ``TeamBridgeSettings.from_config(ConfigManager(paths.config_dir()))`` is
-    the exact pair the desktop status route's ``local`` block calls, and
-    ``paths.config_dir()`` is read per call — so the probe points it at the
-    watched directory, observes through the public bridge settings plumbing
-    rather than the raw config document, and a write from another process
-    lands on the next read (no restart).
+    Mirrors the FIXED route: the directory-scoped process watcher's last-good
+    snapshot after a poll — never the retained-manager cache (that cache was
+    the Q6 defect; the end-to-end retained-consumer regression lives in
+    ``tests/unit/server/test_desktop_team_bridge.py``). ``paths.config_dir()``
+    is read per call, so the probe points it at the watched directory and an
+    external write lands on the next read.
     """
+    from local_operator.config_watch import process_watcher
     from local_operator.paths import config_dir
     from local_operator.team_bridge.settings import TeamBridgeSettings
 
-    return TeamBridgeSettings.from_config(ConfigManager(config_dir()))
+    watcher = process_watcher(config_dir())
+    watcher.poll_now()
+    return TeamBridgeSettings.from_values(watcher.values)
 
 
 def _bash_shell(watcher: ConfigWatcher) -> str:

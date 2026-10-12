@@ -33,11 +33,20 @@ env -u NO_COLOR TERM=xterm-256color \
 ```
 
 `capture-rig.py`/`proactive-rig.py` are the exact capture scripts used for
-these frames. They pin `LOCAL_OPERATOR_NO_SHIMMER=1` (still frames), strip
-inherited `CMUX_*`/`LOP_*`, and write a settled pair (two captures with a
-pause between) plus a `.geometry.json` per frame; `frames-results.json`
-carries the per-case numbers below, including the F `space` no-write check,
-and `r2-proactive-results.json` the pane arithmetic.
+these frames. They pin `LOCAL_OPERATOR_NO_SHIMMER=1` (still frames), and BOTH
+strip every inherited `CMUX_*`/`LOP_*` variable BEFORE their first harness
+import — an isolated HOME, `run_test` and synthetic sessions neutralise
+filesystem and identity state, never env-carried live-host identifiers, and a
+headless boot carrying an inherited `CMUX_WORKSPACE_ID` has renamed the
+operator's real cmux workspaces before (the team incident the rule exists
+for); `LOCAL_OPERATOR_*` — each rig's own scratch/config namespace — is
+deliberately retained. They write a settled pair (two captures with a pause
+between) plus a `.geometry.json` per frame; `frames-results.json` carries the
+per-case numbers below, including the F `space` no-write check, and
+`r2-proactive-results.json` the pane arithmetic. A regression
+(`tests/unit/team_bridge/test_evidence_rigs.py`) executes each rig's stdlib
+prologue in a subprocess with sentinel `CMUX_*`/`LOP_*` values and asserts
+none survive to the import boundary.
 
 The before-baseline is QA round-1's `verified-*` frames (dark-only B/F set, and
 their observed defects): D1's faint 1.97:1 helper and the configured-CoS helper
