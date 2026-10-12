@@ -139,11 +139,11 @@ class GenerateImageParams(BaseModel):
     )
     source_image_paths: list[str] | None = Field(
         default=None,
-        description="Local images to edit, in order (multi-source).",
+        description="Local images to edit, in order.",
     )
     source_attachments: list[str] | None = Field(
         default=None,
-        description="Session image digests to edit, in order (multi-source).",
+        description="Session image digests to edit, in order.",
     )
     strength: float | None = Field(
         default=None,
@@ -940,8 +940,10 @@ def _generated_result(
     if outcome.cost_usd is not None:
         cost_text = f" Cost ${outcome.cost_usd:g}."
     else:
-        # FAL/OpenAI/Google report no per-call figure; saying so beats an
-        # absent sentence a reader could take for an omitted charge.
+        # FAL and Google report no per-call figure, and so does the OpenAI
+        # path except when an edit estimates one from the response's usable
+        # usage; saying so beats an absent sentence a reader could take for
+        # an omitted charge.
         cost_text = " No per-call cost was reported (this provider bills at its published rates)."
     sources_text = f", from {source_total} sources" if source_total > 1 else ""
     caption = (

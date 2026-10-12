@@ -170,10 +170,11 @@ verbatim passthrough, and a pin that does not document it gives no drop
 signal, so the result does not claim one. `strength` requires at least one
 source.
 
-Edits run on Radient, FAL, OpenAI, Google, xAI and OpenRouter. Cost: FAL,
-OpenAI and Google report no per-call figure — their captions say so
-explicitly — and bill at their published rates on your key; Radient and xAI
-report per-call figures as before.
+Edits run on Radient, FAL, OpenAI, Google, xAI and OpenRouter. Cost: FAL and
+Google report no per-call figure — their captions say so explicitly — and
+bill at their published rates on your key; an OpenAI edit shows an estimated
+figure when the response carries usage, and otherwise says no figure was
+reported; Radient, xAI and OpenRouter report per-call figures as before.
 
 **Which edit model.** On Radient the harness resolves the pin the hub marks
 as its edit default — GPT Image 2.5 sunburst edit, the best single-edit
