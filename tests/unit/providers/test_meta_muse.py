@@ -494,3 +494,195 @@ def test_logout_commit_observer_failure_does_not_restore_durable_deletion(
         assert not store._conn.in_transaction
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("fault", ["interrupt", "raise-rollback"])
+def test_native_sqlite_transaction_abort_retains_account_key(tmp_path: Path, fault):
+    import sqlite3
+
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    native = store._conn._conn
+    try:
+        row = seed(store)
+        armed = [False]
+        if fault == "interrupt":
+
+            def progress():
+                if armed[0]:
+                    armed[0] = False
+                    return 1
+                return 0
+
+            def trace(sql):
+                if sql.startswith("DELETE FROM auth_credentials "):
+                    armed[0] = True
+
+            native.set_progress_handler(progress, 1)
+            native.set_trace_callback(trace)
+        else:
+            native.execute(
+                "CREATE TRIGGER rollback_logout BEFORE DELETE ON auth_credentials "
+                "BEGIN SELECT RAISE(ROLLBACK, 'fixture native rollback'); END"
+            )
+            native.commit()
+        with pytest.raises(sqlite3.Error) as caught:
+            store.delete_credential(row.id)
+        native.set_progress_handler(None, 0)
+        native.set_trace_callback(None)
+        assert caught.value.sqlite_errorname == (
+            "SQLITE_INTERRUPT" if fault == "interrupt" else "SQLITE_CONSTRAINT_TRIGGER"
+        )
+        restored = store.get_credential(row.id)
+        assert restored is not None
+        assert store._row_matches_key(restored, KEY)
+        assert not store._conn.in_transaction
+    finally:
+        native.set_progress_handler(None, 0)
+        native.set_trace_callback(None)
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "other_writer", ["same-ref-metadata", "replacement-login", "successful-logout"]
+)
+def test_transaction_loss_rechecks_immutable_owner_under_reacquired_reservation(
+    tmp_path: Path, monkeypatch, other_writer
+):
+    import json
+    import sqlite3
+
+    from local_operator.secrets.access import open_store
+
+    first = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    second = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        row = seed(first)
+        execute = first._conn.execute
+        interleaved = []
+        new_key = KEY + "_replacement"
+
+        def aborted_commit():
+            first._conn.rollback()
+            raise sqlite3.OperationalError("fixture transaction aborted")
+
+        def interleave_before_reacquire(sql, *args, **kwargs):
+            if sql == "BEGIN IMMEDIATE" and not interleaved:
+                assert not first._conn.in_transaction
+                interleaved.append(other_writer)
+                if other_writer == "same-ref-metadata":
+                    second._conn.execute(
+                        "UPDATE auth_credentials SET data = ? WHERE id = ?",
+                        (json.dumps({**row.data, "observed_metadata": "updated"}), row.id),
+                    )
+                    second._conn.commit()
+                elif other_writer == "replacement-login":
+                    seed(second, key=new_key)
+                else:
+                    second.delete_credential(row.id)
+            return execute(sql, *args, **kwargs)
+
+        monkeypatch.setattr(first._conn, "commit", aborted_commit)
+        monkeypatch.setattr(first._conn, "execute", interleave_before_reacquire)
+        with pytest.raises(sqlite3.OperationalError, match="fixture transaction aborted"):
+            first.delete_credential(row.id)
+        assert interleaved == [other_writer]
+        current = first.get_credential(row.id)
+        if other_writer == "successful-logout":
+            assert current is None and open_store(tmp_path).list() == []
+        else:
+            assert current is not None
+            expected = KEY if other_writer == "same-ref-metadata" else new_key
+            assert first._row_matches_key(current, expected)
+            assert len(open_store(tmp_path).list()) == 1
+            if other_writer == "same-ref-metadata":
+                assert current.data["observed_metadata"] == "updated"
+                assert current.data["access_secret_ref"] == row.data["access_secret_ref"]
+            else:
+                assert current.data["access_secret_ref"] != row.data["access_secret_ref"]
+        assert not first._conn.in_transaction
+    finally:
+        second.close()
+        first.close()
+
+
+def test_lost_savepoint_normalizes_rollback_and_reacquires(tmp_path: Path, monkeypatch):
+    import sqlite3
+
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        row = seed(store)
+        execute = store._conn.execute
+        normalized = []
+
+        def fail_commit():
+            raise sqlite3.OperationalError("fixture precommit failure")
+
+        def lost_savepoint(sql, *args, **kwargs):
+            if sql == "ROLLBACK TO SAVEPOINT muse_logout":
+                # Cause the actual SQLite savepoint lookup error, not a fake
+                # transaction flag or silently ignored rollback exception.
+                execute("RELEASE SAVEPOINT muse_logout")
+            if sql == "BEGIN IMMEDIATE":
+                normalized.append(not store._conn.in_transaction)
+            return execute(sql, *args, **kwargs)
+
+        monkeypatch.setattr(store._conn, "commit", fail_commit)
+        monkeypatch.setattr(store._conn, "execute", lost_savepoint)
+        with pytest.raises(sqlite3.OperationalError, match="fixture precommit failure"):
+            store.delete_credential(row.id)
+        assert normalized == [True]
+        current = store.get_credential(row.id)
+        assert current is not None and store._row_matches_key(current, KEY)
+        assert not store._conn.in_transaction
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("failure", ["reacquire", "sealed-restore"])
+def test_incomplete_recovery_is_explicit_and_never_restores_unlocked(
+    tmp_path: Path, monkeypatch, failure
+):
+    import sqlite3
+
+    from local_operator.providers.auth_store import AuthStoreError
+    from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.store import SecretStore
+
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        row = seed(store)
+        execute, get_credential = store._conn.execute, store.get_credential
+        reads = []
+
+        def aborted_commit():
+            store._conn.rollback()
+            raise sqlite3.OperationalError("fixture transaction aborted")
+
+        def read(ident):
+            reads.append(ident)
+            return get_credential(ident)
+
+        def unavailable_reservation(sql, *args, **kwargs):
+            if sql == "BEGIN IMMEDIATE":
+                raise sqlite3.OperationalError("fixture reservation unavailable")
+            return execute(sql, *args, **kwargs)
+
+        def failed_set(*_args, **_kwargs):
+            assert store._conn.in_transaction
+            raise SecretStoreError("fixture restoration unavailable")
+
+        with monkeypatch.context() as faults:
+            faults.setattr(store._conn, "commit", aborted_commit)
+            faults.setattr(store, "get_credential", read)
+            if failure == "reacquire":
+                faults.setattr(store._conn, "execute", unavailable_reservation)
+            else:
+                faults.setattr(SecretStore, "set", failed_set)
+            with pytest.raises((AuthStoreError, SecretStoreError), match="compensation incomplete"):
+                store.delete_credential(row.id)
+        assert len(reads) == (2 if failure == "reacquire" else 3)
+        assert store.get_credential(row.id) is not None
+        assert not store._row_matches_key(row, KEY)
+        assert not store._conn.in_transaction
+    finally:
+        store.close()
