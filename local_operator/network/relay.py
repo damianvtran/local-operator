@@ -6136,14 +6136,13 @@ class RelayServer:
                     # every other row's value goes unread, and the tracker's
                     # cold scan is a real read that a row the section will not
                     # order must not buy. Payable here: busy, wedged, and a
-                    # waiting gate (``pending``); the local half's fourth
-                    # running code, ``delegating``, is derived from live child
-                    # counts a federated row does not carry, so a remote
-                    # delegating session can never be filed under Running and
-                    # its clock would never be read. ``None`` elsewhere is the
-                    # unknown this key means on the wire — the value the
-                    # renderer's fallback (``created_at``, then catalogue
-                    # order) runs on, never a minted epoch.
+                    # waiting gate (``pending``); ``delegating`` is not — it
+                    # derives from live child counts a federated row does not
+                    # carry, so a remote row can never be filed under Running
+                    # for it and its clock would never be read. ``None``
+                    # elsewhere is the unknown this key means on the wire — the
+                    # value the renderer's fallback (``created_at``, then
+                    # catalogue order) runs on, never a minted epoch.
                     "last_user_at": (
                         last_user_at(self.root / "sessions" / record.session_id)
                         if record.busy or state == "wedged" or record.pending
