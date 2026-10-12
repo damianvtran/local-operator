@@ -20,6 +20,7 @@ Two pieces:
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hashlib
 import time
@@ -155,16 +156,175 @@ class AccountScreeningCycle:
         )
         if turn is None:
             return None
+        # WHOLE-DURATION turn lifetime (R8/Q15): the keeper covers the
+        # COMPLETE cycle — fetch/preparation, the callback and cleanup — not
+        # only the inference inside the screener. It renews the exact
+        # claimed turn while the work runs and, on ownership loss, CANCELS
+        # the work and joins it; the successor's turn is never released.
+        lost = {"flag": False}
+        work = asyncio.ensure_future(self._run_body(items, screen, turn))
+        keeper = asyncio.ensure_future(self._keep_turn(turn, work, lost))
         try:
-            schedule = self._store.screen_schedule(self._owner) or {}
-            target = select_next_screening_target(items, last_sender=schedule.get("last_sender"))
-            if target is None:
+            return await work
+        except asyncio.CancelledError:
+            if lost["flag"]:
+                # Ownership moved mid-cycle: no result, no receipt, and the
+                # successor keeps the lease.
                 return None
-            self._store.set_screen_cursor(self._owner, canonical_sender(target))
-            with turn_binding(self._store._account_scope(self._owner), turn):
-                return await screen(target)
+            raise
         finally:
-            self._store.release_screen_turn(self._owner, turn=turn)
+            keeper.cancel()
+            try:
+                await keeper
+            except BaseException:  # noqa: BLE001 — the keeper is already done
+                pass
+            if not lost["flag"]:
+                self._store.release_screen_turn(self._owner, turn=turn)
+
+    async def _run_body(
+        self,
+        items: Sequence[Mapping[str, Any]],
+        screen: Callable[[Mapping[str, Any]], Awaitable[Any]],
+        turn: str,
+    ) -> Any:
+        schedule = self._store.screen_schedule(self._owner) or {}
+        target = select_next_screening_target(items, last_sender=schedule.get("last_sender"))
+        if target is None:
+            return None
+        self._store.set_screen_cursor(self._owner, canonical_sender(target))
+        with turn_binding(self._store._account_scope(self._owner), turn):
+            return await screen(target)
+
+    async def _keep_turn(
+        self, turn: str, work: "asyncio.Future[Any]", lost: dict[str, bool]
+    ) -> None:
+        """Renew the claimed turn while the cycle body runs; on loss, cancel
+        the body (fencing) and flag the loss for the caller."""
+
+        while True:
+            await asyncio.sleep(20.0)
+            try:
+                ok = self._store.renew_screen_turn(
+                    self._owner,
+                    turn=turn,
+                    now=time.time(),
+                    ttl=max(self._ttl, 90.0),
+                )
+            except Exception:  # noqa: BLE001 — a refusal is treated as loss
+                ok = False
+            if not ok:
+                lost["flag"] = True
+                work.cancel()
+                return
+
+
+def default_status_fetcher(
+    *,
+    config_dir: Path,
+    owner: Any,
+    transport: Any = None,
+) -> Callable[[], Awaitable[Mapping[str, Any]]]:
+    """The PRODUCTION SDK-status fetcher (R8/Q3).
+
+    Calls the H1 client's own ``status`` with the owner's PINNED OAuth
+    access — the ordinary SDK/auth path, no parallel transport and no model-
+    key cascade. The RAW nested DTO is returned untouched; the caller
+    normalizes it strictly and re-verifies the owner after the await.
+    ``transport`` is injected only by proof rigs.
+    """
+
+    async def _fetch() -> Mapping[str, Any]:
+        from local_operator.team_bridge.client import TeamBridgeClient
+
+        client = TeamBridgeClient(
+            config_dir,
+            base_url=owner.canonical_base_url,
+            credential_id=owner.credential_id,
+            transport=transport,
+        )
+        access = await client.current_access()
+        result = await client.status(access=access)
+        return result if isinstance(result, Mapping) else {}
+
+    return _fetch
+
+
+def _owner_frame_digest(owner: Any) -> str:
+    """The initiating owner frame digest — reused here so a cached status is
+    bound to the exact owner that cached it (R8/Q3)."""
+
+    from local_operator.team_bridge.store import _owner_frame_digest as _digest
+
+    return _digest(owner)
+
+
+def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any) -> tuple[str, str]:
+    """Strictly normalize the RAW SDK status DTO (R8/Q3).
+
+    The real response nests the selector under ``screening`` and carries
+    eligibility as ``available``/``tenants``/``endpoint``; the LOCAL
+    embedded template hash is the only template authority — server bytes are
+    HASHED and compared, never executed. Every missing, unknown, disabled or
+    mismatched shape is a typed refusal (``policy_stale``), never a default
+    and never an arbitrary flat mapping.
+    """
+
+    from local_operator.team_bridge.screening import (
+        SCREENING_TEMPLATE_V1_SHA256,
+        SCREENING_VERSION_V1,
+    )
+    from local_operator.team_bridge.store import StoreRefused
+
+    if not isinstance(status, Mapping):
+        raise StoreRefused("policy_stale", "accepted status is not a mapping")
+    if not status.get("available"):
+        raise StoreRefused("policy_stale", "messaging is not available for this account")
+    screening = status.get("screening")
+    if not isinstance(screening, Mapping):
+        raise StoreRefused("policy_stale", "status carries no screening selector")
+    version = screening.get("version")
+    template = screening.get("template")
+    if not isinstance(version, str) or not version:
+        raise StoreRefused("policy_stale", "screening version missing")
+    if isinstance(template, str):
+        template_bytes = template.encode("utf-8")
+    elif isinstance(template, (bytes, bytearray)):
+        template_bytes = bytes(template)
+    else:
+        raise StoreRefused("policy_stale", "screening template missing")
+    if version != SCREENING_VERSION_V1:
+        raise StoreRefused("policy_stale", "unknown screening version")
+    digest = hashlib.sha256(template_bytes).hexdigest()
+    if digest != SCREENING_TEMPLATE_V1_SHA256:
+        raise StoreRefused(
+            "policy_stale", "screening template bytes do not match the local selector"
+        )
+    # Consent/API versions: when the server sends them they must be strings
+    # (a None/absent pair is not trusted as authority, but the VALUES are
+    # verified upstream by the caller's own compatibility contract).
+    for key in ("consent_version", "api_version"):
+        if key in status and not isinstance(status.get(key), str):
+            raise StoreRefused("policy_stale", f"{key} has an unsupported shape")
+    tenants = status.get("tenants")
+    tenant_ids: set[str] = set()
+    if isinstance(tenants, Sequence) and not isinstance(tenants, (str, bytes)):
+        for entry in tenants:
+            if isinstance(entry, str):
+                tenant_ids.add(entry)
+            elif isinstance(entry, Mapping):
+                tid = entry.get("tenant_id") or entry.get("id")
+                if isinstance(tid, str):
+                    tenant_ids.add(tid)
+    if str(owner.tenant_id) not in tenant_ids:
+        raise StoreRefused("policy_stale", "owner tenant is not an eligible tenant")
+    endpoint = status.get("endpoint")
+    if not isinstance(endpoint, Mapping):
+        raise StoreRefused("policy_stale", "status carries no endpoint")
+    if str(endpoint.get("id") or "") != str(owner.endpoint_id):
+        raise StoreRefused("policy_stale", "status endpoint does not match the owner")
+    if not (endpoint.get("active") is True or endpoint.get("state") == "active"):
+        raise StoreRefused("policy_stale", "endpoint is not active")
+    return version, digest
 
 
 @dataclasses.dataclass(frozen=True)
@@ -213,38 +373,52 @@ async def run_screening_cycle(
         make_screening_runner,
         resolve_default_selection,
     )
-    from local_operator.team_bridge.screening import (
-        SCREENING_TEMPLATE_V1_SHA256,
-        SCREENING_VERSION_V1,
-        screen_message_async,
-    )
+    from local_operator.team_bridge.screening import screen_message_async
     from local_operator.team_bridge.store import Store, StoreRefused
 
     selection = resolve_default_selection(config_dir)
     if selection is None:
         return None
-    # ACCEPTED STATUS (R7/Q3): the owner-pinned SDK status is received
-    # through the normal accepted-status seam (an injected controlled fetcher
-    # or an explicit mapping in proof; no service/vendor call from here).
-    # The SECURITY template selector stays LOCAL: a status whose version or
-    # template hash differs from the embedded selector is a TYPED REFUSAL —
-    # never silently accepted — and the previously published authority is
-    # retained untouched.
-    status: "Mapping[str, Any]"
+    # ACCEPTED STATUS (R8/Q3): the owner-pinned SDK status is received
+    # through the normal accepted-status seam — an injected fetcher (the
+    # production one calls the H1 client's own ``status`` with the PINNED
+    # OAuth access) or an explicitly CACHED mapping that carries its own
+    # provenance. The RAW nested DTO is normalized STRICTLY; the LOCAL
+    # embedded template hash is the only template authority. A missing
+    # source, unknown version, mismatched bytes, disabled/ineligible
+    # tenant/endpoint, or an unprovenanced cache is a TYPED REFUSAL — never
+    # a default, never an arbitrary flat mapping, never a dispatch.
+    store = Store(config_dir)
     if status_fetcher is not None:
         fetched = await status_fetcher()
-        status = fetched if isinstance(fetched, Mapping) else {}
+        if not isinstance(fetched, Mapping):
+            raise StoreRefused("policy_stale", "status fetch returned no mapping")
+        status = fetched
     elif accepted_status is not None:
-        status = accepted_status
+        cached = accepted_status
+        if not isinstance(cached, Mapping):
+            raise StoreRefused("policy_stale", "accepted status is not a mapping")
+        if cached.get("owner_frame") != _owner_frame_digest(owner):
+            raise StoreRefused("policy_stale", "cached status provenance does not match the owner")
+        status = cached
     else:
-        status = {}
-    version = str(status.get("screening_version") or SCREENING_VERSION_V1)
-    template_hash = str(status.get("template_sha256") or SCREENING_TEMPLATE_V1_SHA256)
-    if version != SCREENING_VERSION_V1 or template_hash != SCREENING_TEMPLATE_V1_SHA256:
-        raise StoreRefused(
-            "policy_stale",
-            "accepted screening status does not match the local embedded selector",
-        )
+        # None is NOT authority (R8/Q3): without a status source there is
+        # nothing to accept, so nothing is published and nothing dispatches.
+        raise StoreRefused("policy_stale", "no accepted status source")
+    version, template_hash = _normalize_accepted_status(status, owner)
+    # OWNER PIN (R8/Q3): the awaited fetch may have raced an AuthStore
+    # credential-row switch; the owner captured BEFORE the await must still
+    # be the live, resolved owner, or nothing publishes and nothing
+    # dispatches under the old identity.
+    live = store.resolve_owner(
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        canonical_base_url=owner.canonical_base_url,
+    )
+    if live != owner or not store.current_generation_is_live(owner):
+        raise StoreRefused("policy_stale", "owner identity moved while the status was awaited")
     # ONE capture: provider/model/approvals come from the SAME resolver the
     # factory uses, and the canonical revision DIGEST binds version, hash,
     # provider, model and approved map — so a same-version different-SHA
@@ -259,7 +433,6 @@ async def run_screening_cycle(
             ).encode("utf-8")
         ).hexdigest()[:32]
     )
-    store = Store(config_dir)
     current = store.current_screening_policy(owner)
     expected = (
         version,
@@ -313,6 +486,9 @@ async def run_screening_cycle(
             message_id=message_id,
             auth_store=auth_store,
             settings=settings,
+            # The SAME capture this composition resolved — never a second
+            # resolve that could certify a different config (R8/Q3).
+            selection=selection,
         )
         if runner is None:
             return None

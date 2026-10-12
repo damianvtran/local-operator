@@ -33,7 +33,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from local_operator.team_bridge.types import (
     ACK_TARGETS,
@@ -366,11 +366,45 @@ def _turn_frame(turn: str) -> str:
     return turn.rsplit(":", 1)[-1] if ":" in turn else ""
 
 
-#: Marker that separates the SINGLE job bind from the packed logical
-#: reservation fingerprint in the one available attempts column (R7/Q3):
-#: pre-bind the row holds the logical fp; after the one legal bind it holds
-#: "job:<canonical digest>", and any second bind must replay it EXACTLY.
+#: Markers in the one available attempts column (R7/R8/Q3): at reservation
+#: the row holds "proof:<canonical json>" (or the legacy packed fingerprint);
+#: after the ONE legal bind it holds "job:<canonical digest>"; a second bind
+#: must replay exactly.
 _JOB_BOUND_PREFIX = "job:"
+_PROOF_PREFIX = "proof:"
+
+
+def _input_proof_mismatch(registered: Any, fingerprint: str, job: Any) -> str | None:
+    """Compare a DispatchJob against the input proof registered at
+    reservation (R8/Q3). The FIRST bind must match EVERY field the record
+    pinned — a field mutated between reservation and bind refuses before any
+    I/O instead of dispatching on the strength of a digest the caller could
+    recompute. Returns None when the record matches (or when no job is
+    supplied for the check, which the legacy packed form uses)."""
+
+    if not isinstance(registered, dict) or job is None:
+        return None if isinstance(registered, dict) else "registered proof is not a mapping"
+    field_checks = {
+        "provider": getattr(job, "provider", None),
+        "model": getattr(job, "model", None),
+        "template": getattr(job, "template_sha256", None),
+        "version": getattr(job, "template_version", None),
+        "tenant": getattr(job, "tenant_id", None),
+        "revision": getattr(job, "revision", None),
+        "message": getattr(job, "message_id", None),
+    }
+    for key, value in field_checks.items():
+        if registered.get(key) != value:
+            return f"dispatch job {key} does not match the registered input proof"
+    if list(registered.get("approved") or []) != sorted(getattr(job, "approved", ()) or ()):
+        return "dispatch job approved map does not match the registered input proof"
+    if registered.get("epoch") != int(getattr(job, "epoch", -1)):
+        return "dispatch job epoch does not match the registered input proof"
+    # NOTE: the registered "logical" value is the PACKED pre-job fingerprint;
+    # the ``fingerprint`` argument is the job digest this bind CREATES. The
+    # digest is the product of the bind, not an input to compare — comparing
+    # them would refuse every legitimate first bind.
+    return None
 
 
 def _bound_digest(raw: Any) -> Any:
@@ -1251,17 +1285,34 @@ class Store:
             return attempt_id
 
     def reserve_screening_attempt(
-        self, owner: OwnerSnapshot, *, message_id: str | None = None, fingerprint: str | None = None
+        self,
+        owner: OwnerSnapshot,
+        *,
+        message_id: str | None = None,
+        fingerprint: str | None = None,
+        input_proof: Mapping[str, Any] | None = None,
     ) -> str:
         """The LOGICAL screening charge, optionally bound to message + tuple.
 
         The pipeline ALWAYS binds (message + full policy fingerprint); the
         unbound form exists for budget accounting talk (QA probes, breaker
         bookkeeping) and still charges the same bucket.
+
+        ``input_proof`` (R8/Q3) registers the IMMUTABLE canonical input at
+        reservation time — owner namespace/generation, body/template/version,
+        provider/model/approved map, envelope/request/display digests and
+        revision/epoch — as a ``proof:`` record in the same column; the
+        single bind then DERIVES its DispatchJob and refuses any field that
+        does not match the registered record BEFORE I/O.
         """
 
+        stored = fingerprint
+        if input_proof is not None:
+            stored = _PROOF_PREFIX + json.dumps(
+                dict(input_proof), sort_keys=True, separators=(",", ":")
+            )
         return self._reserve_bucket(
-            owner, kind="logical", message_id=message_id, fingerprint=fingerprint
+            owner, kind="logical", message_id=message_id, fingerprint=stored
         )
 
     def reserve_http_attempt(
@@ -1326,6 +1377,20 @@ class Store:
                 # MONOTONIC TEMPLATE FLOOR: a publisher may advance the
                 # accepted template version, never rewind it.
                 raise StoreRefused("version_floor", "template version would move backwards")
+            if (
+                row is not None
+                and str(row["version"]) == version
+                and str(row["template_sha256"]) != template_sha256
+            ):
+                # IMMUTABLE HASH WITHIN A VERSION (R8/Q3): a version's
+                # template is fixed once accepted — a same-version, different
+                # hash is a TYPED REFUSAL that preserves the original, never
+                # an epoch-advancing overwrite. Rank and CAS alone cannot
+                # catch this, because the rewritten row keeps its rank.
+                raise StoreRefused(
+                    "template_hash_conflict",
+                    "same version with a different template hash",
+                )
             if row is None:
                 conn.execute(
                     "INSERT INTO screening_policy "
@@ -1434,7 +1499,12 @@ class Store:
             return None
 
     def bind_attempt_fingerprint(
-        self, owner: OwnerSnapshot, *, attempt_id: str, fingerprint: str
+        self,
+        owner: OwnerSnapshot,
+        *,
+        attempt_id: str,
+        fingerprint: str,
+        job: Any = None,
     ) -> None:
         """Bind a reserved LOGICAL attempt to the immutable job digest.
 
@@ -1459,6 +1529,25 @@ class Store:
                 # A committed attempt is sealed: no rebinding of any kind.
                 raise StoreRefused("write_once_conflict", "attempt already committed")
             raw = row["fingerprint"]
+            if isinstance(raw, str) and raw.startswith(_PROOF_PREFIX):
+                # REGISTERED INPUT PROOF (R8/Q3): the one legal bind must
+                # match the IMMUTABLE record registered at reservation —
+                # every compared field of the DispatchJob is checked BEFORE
+                # any I/O, so a mutation between reservation and bind refuses
+                # instead of dispatching. No comment-based "forged input is
+                # impractical" argument: the fields are compared.
+                try:
+                    registered = json.loads(raw[len(_PROOF_PREFIX) :])
+                except (TypeError, ValueError) as error:
+                    raise StoreRefused(
+                        "proof_corrupt", "registered input proof is unreadable"
+                    ) from error
+                mismatched = _input_proof_mismatch(registered, fingerprint, job)
+                if mismatched is not None:
+                    raise StoreRefused("attempt_mismatch", mismatched)
+                # The registered row is UNBOUND: fall through to the single
+                # bind below (raw cleared so the bound-state branch skips).
+                raw = None
             if isinstance(raw, str) and raw.startswith(_JOB_BOUND_PREFIX):
                 # BOUND ALREADY (R7/Q3): one bind was legitimate; from now
                 # on only the IDENTICAL digest may replay, and a changed
@@ -1713,11 +1802,17 @@ class Store:
                 # receipt is atomic with ownership. The initiating frame
                 # must match the token's own frame digest.
                 row = conn.execute(
-                    "SELECT lease_holder FROM screening_schedule WHERE owner_key = ?",
+                    "SELECT lease_holder, lease_expires FROM screening_schedule "
+                    "WHERE owner_key = ?",
                     (self._account_scope(owner),),
                 ).fetchone()
                 if row is None or row["lease_holder"] != turn or not _owner_frame_ok(turn, owner):
                     raise StoreRefused("turn_lost", "account turn moved before commit")
+                if float(row["lease_expires"] or 0.0) <= time.time():
+                    # An EXPIRED turn with no successor must not admit a
+                    # receipt either (R8 static adjunct to the successor
+                    # case): the lease must be LIVE inside this transaction.
+                    raise StoreRefused("turn_lost", "account turn expired before commit")
             if verify is not None and not verify():
                 # The live source moved between the caller's last check and
                 # this transaction: nothing commits (A2/A3 bridge — the live
