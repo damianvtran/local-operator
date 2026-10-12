@@ -22,6 +22,13 @@ from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 
+# Cheap and stdlib-only on purpose: the two registry drainers (this route and
+# the TUI page) must be able to ask "may the agent-messages section render
+# here, right now" without importing the client stack or fetching anything
+# (RFC §5.6 makes the section's visibility dynamic; §5.4 says the static
+# registry is not the gate). See `team_bridge.availability`.
+from local_operator.team_bridge import availability as bridge_availability
+
 router = APIRouter(tags=["Settings"], dependencies=[Depends(require_desktop)])
 # The underlying manager writes a whole YAML snapshot. Serialize this server's
 # read/merge/write operations, not just the final rename, to preserve siblings.
@@ -156,6 +163,7 @@ async def list_settings(manager: ConfigManager = Depends(get_config_manager)):
             manager.reload()
         except settings_io.ConfigUnreadableError:
             raise HTTPException(409, _we.config_unreadable().envelope())
+        root = manager.config_dir
         return CRUDResponse(
             status=200,
             message="Settings retrieved.",
@@ -168,8 +176,19 @@ async def list_settings(manager: ConfigManager = Depends(get_config_manager)):
                         "description": section.description,
                     }
                     for section in settings_io.SECTIONS
+                    # §5.6: a dynamically-gated section (agent messages) is
+                    # ABSENT — both its header and every row belonging to it —
+                    # until this daemon has observed an eligible state. The
+                    # record is written by the status discipline's boundary
+                    # reads (`team_bridge.availability`); a daemon that never
+                    # read shows nothing, which is the fail-closed direction.
+                    if bridge_availability.section_visible(section.name, root)
                 ],
-                settings=[_view(manager, setting) for setting in settings_io.SETTINGS],
+                settings=[
+                    _view(manager, setting)
+                    for setting in settings_io.SETTINGS
+                    if bridge_availability.section_visible(setting.section, root)
+                ],
             ),
         )
 

@@ -58,6 +58,7 @@ from local_operator.server.routes import (
     desktop_radient,
     desktop_runtimes,
     desktop_sessions,
+    desktop_team_bridge,
     desktop_tunnel,
     desktop_wakes,
     health,
@@ -829,6 +830,13 @@ app.include_router(desktop_radient.router)
 # whatever the order: no sibling declares a single-segment `/v1/desktop/{...}`
 # template that could swallow it.
 app.include_router(desktop_tunnel.router)
+# Agent messages (Team Bridge, capability `features.team_bridge`):
+# `/v1/desktop/team-bridge/{status,settings,allowlist}`. Registered after the
+# tunnel block for the reason every block here gives -- FastAPI matches in
+# declaration order -- and its two-segment literal templates collide with
+# nothing registered above: no sibling declares a `/v1/desktop/team-bridge...`
+# path or a single-segment `/v1/desktop/{...}` template that could swallow it.
+app.include_router(desktop_team_bridge.router)
 # `/v1/desktop/quota-notice`, the pre-emptive no-quota notice (design:
 # "pre-emptive no-quota notice"). A single-segment literal path with nothing
 # registered above it that could swallow it, and its own module rather than a
