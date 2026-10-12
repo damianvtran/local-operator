@@ -442,6 +442,27 @@ async def test_eval_tool_bridge_uses_this_calls_dispatch(context) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["project", "agent", "secret"])
+async def test_eval_tool_bridge_preserves_named_payload(context, tool_name) -> None:
+    """The routing name must not consume a tool's legitimate name field.
+
+    A real worker catches argument-binding failures that a direct dispatch
+    mock would bypass. No project, agent or secret store is accessed here.
+    """
+    seen = []
+
+    async def dispatch(name, arguments):
+        seen.append((name, arguments))
+        return {"is_error": False, "text": "named payload reached dispatch"}
+
+    context.dispatch_tool = dispatch
+    result = await _call(context, f"tool({tool_name!r}, op='show', name='synthetic-name')['text']")
+    assert not result.is_error, result.text
+    assert "named payload reached dispatch" in result.text
+    assert seen == [(tool_name, {"op": "show", "name": "synthetic-name"})]
+
+
+@pytest.mark.asyncio
 async def test_a_failed_bridged_tool_call_reaches_the_result_text(context) -> None:
     """The incident's invisible-failure shape: the cell ignores the dict.
 
