@@ -36,6 +36,15 @@ translators and the auditor.
 - tool trace → ट्रेस · transcript → ट्रांसक्रिप्ट
 - approvals → स्वीकृतियाँ (singular स्वीकृति) · schedule → शेड्यूल
 - relay → रिले · compaction → संपीडन (संदर्भ संपीडन)
+- Wave-3 endorsed calls: runtime → रनटाइम · catch-up → कैच-अप · job → जॉब
+- credentials → क्रेडेंशियल (plural क्रेडेंशियल्स) · embedded → अंतर्निहित
+- mesh → मेश · surface → सरफ़ेस · manager → मैनेजर · hints → संकेत ·
+  hotkeys → हॉटकीज़
+- child (agent) and subagent → उप-एजेंट consistently; the earlier child-only
+  transliteration was abandoned during settings polish, not kept as an exception.
+- monitor as a stored object → मॉनिटर; watching/monitoring as an activity →
+  निगरानी. This deliberate noun/activity register split does not change the
+  Latin tool name `monitor` (glossary §1).
 
 ## Plurals
 
