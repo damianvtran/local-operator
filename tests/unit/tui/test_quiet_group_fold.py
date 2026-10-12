@@ -226,3 +226,33 @@ def test_a_not_yet_visible_assistant_row_refuses_a_fold() -> None:
     visible.update_text("on it")
     visible.finalize_text()
     assert quiet_group_plan([_peer("one"), visible, _peer("two")]) == []
+
+
+def test_a_picture_continues_only_its_own_owners_contiguous_chain() -> None:
+    """R6-1 / Q-R8-1: the inside arm reads the row's OWN source coordinate —
+    the same owner's NEXT part continues the chain, and nothing else does."""
+    from local_operator.tui.widgets.image_block import ImageBlock
+    from local_operator.tui.widgets.transcript import _source_owner_of
+
+    def picture(anchor: str | None, part: int | None) -> ImageBlock:
+        block = ImageBlock(None, "image/png")
+        if anchor is not None:
+            block.navigation_anchor_id = anchor
+        if part is not None:
+            block.navigation_anchor_part = part
+        return block
+
+    second = picture("h1", 2)
+    assert quiet_group_record_of(second, prev_kind="inside", prev_owner=("h1", 1)).kind == "inside"
+    # A different owner's picture, an unstamped picture, and a gap in the
+    # chain all keep the conservative splitter reading.
+    assert quiet_group_record_of(second, prev_kind="inside", prev_owner=("h2", 1)).kind == "image"
+    assert quiet_group_record_of(second, prev_kind="inside", prev_owner=None).kind == "image"
+    assert (
+        quiet_group_record_of(picture("h1", 3), prev_kind="inside", prev_owner=("h1", 1)).kind
+        == "image"
+    )
+    # The legacy arm is untouched: a picture directly after a tool or hub row.
+    assert quiet_group_record_of(picture("t", 1), prev_kind="tool").kind == "inside"
+    assert quiet_group_record_of(picture("h", 1), prev_kind="hub").kind == "inside"
+    assert _source_owner_of(picture(None, None)) is None

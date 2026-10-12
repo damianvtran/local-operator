@@ -1737,8 +1737,8 @@ class TestQuietGroupFold:
             real = transcript_mod.quiet_group_record_of
             flip = {"on": False}
 
-            def flipped(block, *, prev_kind=None):
-                record = real(block, prev_kind=prev_kind)
+            def flipped(block, *, prev_kind=None, prev_owner=None):
+                record = real(block, prev_kind=prev_kind, prev_owner=prev_owner)
                 if flip["on"] and block is card:
                     return transcript_mod.QuietGroupRecord(
                         kind="user", id=record.id, text="re-read as a splitter"

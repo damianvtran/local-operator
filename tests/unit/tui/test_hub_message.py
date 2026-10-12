@@ -723,3 +723,78 @@ async def test_seated_picture_joins_its_owner_group_membership() -> None:
         assert states["count"] == 2, states
         assert states["bars"] == [2, 2], states
         assert states["open_users"] == 1, states
+
+
+@pytest.mark.asyncio
+async def test_contiguous_owned_pictures_all_join_their_owner_run() -> None:
+    """R6-1 / Q-R8-1 plural acceptance: every picture under ONE receipt joins
+    that receipt's bar (parts 1..n continuing the body's part 0), the full-
+    initial and the late-adopted histories reach the SAME fold shape, and the
+    visibility of each picture follows the bar for both."""
+
+    def receipt_pics(receipt_id: str, count: int) -> Message:
+        message = _marked_receipt(receipt_id, "picture body")
+        for _ in range(count):
+            message.content.append(ImageContent(data=_healthy_png(), mime_type="image/png"))
+        return message
+
+    def snapshot(view: TranscriptView) -> dict[str, Any]:
+        bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
+        bar = bars[0]
+        images = [block for block in view.blocks() if isinstance(block, ImageBlock)]
+        return {
+            "bars": [block.group.count for block in bars],
+            "row_ids": list(bar.group.row_ids),
+            "parts": [block.navigation_anchor_part for block in images],
+            "labels": [block._label for block in images],
+            "members": [block in bar._members for block in images],
+        }
+
+    async def painted(initial: int, later: list[int]) -> dict[str, Any]:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            view = app.query_one(TranscriptView)
+            app._project_settled_rows([receipt_pics("qa_h1", initial)])
+            await pilot.pause()
+            app._project_settled_rows([receipt_pics("qa_h2", 0)])
+            await pilot.pause()
+            for count in later:
+                app._project_settled_rows([receipt_pics("qa_h1", count)])
+                await pilot.pause()
+            states = snapshot(view)
+            bar = next(block for block in view.blocks() if isinstance(block, QuietGroupBlock))
+            images = [block for block in view.blocks() if isinstance(block, ImageBlock)]
+            bar.toggle_expanded()
+            await pilot.pause()
+            states["open"] = [block.display for block in images]
+            bar.toggle_expanded()
+            await pilot.pause()
+            states["reclosed"] = [block.display for block in images]
+            states["collapsed"] = None
+            images = [block for block in view.blocks() if isinstance(block, ImageBlock)]
+            # Re-read the collapsed visibility last, after the toggles.
+            states["collapsed"] = [block.display for block in images]
+            return states
+
+    initial = await painted(3, [])
+    late = await painted(1, [2, 3, 3, 0])
+    assert (
+        initial["row_ids"]
+        == late["row_ids"]
+        == [
+            "qa_h1:0",
+            "qa_h1:1",
+            "qa_h1:2",
+            "qa_h1:3",
+            "qa_h2:0",
+        ]
+    )
+    assert initial["parts"] == late["parts"] == [1, 2, 3]
+    assert initial["labels"] == late["labels"] == ["#1", "#2", "#3"]
+    assert initial["members"] == late["members"] == [True, True, True]
+    assert initial["bars"] == late["bars"] == [2]
+    for states in (initial, late):
+        assert states["collapsed"] == [False, False, False], states
+        assert states["open"] == [True, True, True], states
+        assert states["reclosed"] == [False, False, False], states
