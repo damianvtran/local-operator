@@ -6816,7 +6816,10 @@ def _usage_cost(usage: Any) -> float | None:
     value = (
         usage.get("usd_cost") if isinstance(usage, Mapping) else getattr(usage, "usd_cost", None)
     )
-    if value is None:
+    # bool is a Python number but not a provider dollar receipt. Reject it
+    # before float coercion, including on the catalogue fallback's second
+    # cost_for_usage call, or True/False can re-enter as a $1/$0 bill.
+    if value is None or isinstance(value, bool):
         return None
     try:
         cost = float(value)

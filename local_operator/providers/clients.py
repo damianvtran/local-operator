@@ -332,7 +332,10 @@ def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
     if not isinstance(raw_usage, Mapping):
         return None
     value = raw_usage.get("cost")
-    if value is None:
+    # Reject JSON booleans before Usage's float field can erase their type.
+    # Otherwise the pricing guard sees a seemingly legitimate $1/$0 receipt
+    # and cannot recover the fact that the provider never stated money.
+    if value is None or isinstance(value, bool):
         return None
     try:
         cost = float(value)
