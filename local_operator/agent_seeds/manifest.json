@@ -151,6 +151,38 @@
       "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/manager.md"
     },
     {
+      "name": "qa-tester",
+      "label": "QA tester",
+      "description": "Independent execution proof for a change: preflights the rig, exercises real paths and negative cases, and reports a scoped QA matrix without editing the repository.",
+      "when_to_use": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+      "version": "1.0.0",
+      "instructions_sha256": "cb6bad7e5ebc0966e16fb8a9311b22810a5408529c49c6baf7032011178ce40a",
+      "instructions_chars": 2056,
+      "tools": [
+        "read",
+        "glob",
+        "grep",
+        "list_variables",
+        "read_variable",
+        "bash",
+        "todo",
+        "web_search",
+        "web_fetch",
+        "browser"
+      ],
+      "effort": null,
+      "delegate": false,
+      "tags": [
+        "role",
+        "tools:read,glob,grep,list_variables,read_variable,bash,todo,web_search,web_fetch,browser",
+        "class:reactive"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/qa-tester.md"
+    },
+    {
       "name": "reviewer",
       "label": "Reviewer",
       "description": "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews.",

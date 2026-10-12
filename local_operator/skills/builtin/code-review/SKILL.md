@@ -37,6 +37,10 @@ The same practice for any agent: reviewing a diff, a patch, or another agent's w
 - Scope to the delta: `git diff <previous_reviewed_head>..<current_head>`. Verify the fixes; do not re-audit unchanged, previously approved files.
 - No new out-of-scope findings; note them as follow-ups instead.
 - A fix that unexpectedly touches more is in scope again: check its blast radius.
+- A genuine late BLOCKER/MAJOR with a reproduced code path stays admissible;
+  delta scope is not a waiver for correctness, security or regression risk.
+- Collect all initial review streams before ONE remediation commit; see
+  `guide://delivery` for compatibility proof and metadata-only addenda.
 
 ## Verdict
 
