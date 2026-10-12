@@ -582,6 +582,26 @@ def _published_reply(artifact: str) -> str | None:
 #: would make the replay's cost a function of how badly a run went.
 _MARKER_CACHE: dict[str, tuple[str, ...]] = {}
 
+#: What a sealed ``stream:`` line says when the decoder judged the reply-channel
+#: call's own argument bytes. Old-generation artifacts carry no stream line at
+#: all and were all read as prose by the build that refused them, so absence
+#: reads as prose.
+_CHANNEL_READ = "channel=read"
+
+
+def _channel_of(artifact: str) -> bool:
+    """Whether a sealed reply was judged on the reply-channel call's bytes.
+
+    This is the axis the channel reading moves on, so the replay has to read it
+    from the artifact rather than assume one: the same bytes may be a decision
+    on the channel and a statement about one in prose.
+    """
+
+    for line in artifact.splitlines():
+        if line.startswith("stream: "):
+            return _CHANNEL_READ in line
+    return False
+
 
 def _declared_markers(episode: str) -> tuple[str, ...]:
     """The boundary markers the harness would have declared for that episode.
@@ -608,7 +628,7 @@ def _declared_markers(episode: str) -> tuple[str, ...]:
     return markers
 
 
-def _replay_verdict(reply: str) -> str:
+def _replay_verdict(reply: str, channel: bool) -> str:
     """The verdict a reply's own bytes earn it, through the runtime's decoder.
 
     Mirrors ``parse_decision``'s FRAMING layer and nothing else: the corpus
@@ -620,17 +640,20 @@ def _replay_verdict(reply: str) -> str:
     word (``at_end``, so a one-action head is never promoted over material the
     runtime would refuse) -- so the class printed for an artifact is the class
     the run would have given it, rather than a second opinion about the same
-    bytes.
+    bytes. ``channel`` is the artifact's own stream line: the reply-channel
+    call's arguments are read structurally (``channel_arguments``), prose keeps
+    the named carriers, and a replay that guessed this axis differently from
+    the run would measure a different decoder.
     """
 
     payload = reply.strip()
     try:
-        decoded, trailing, _framing = _decode_leading_json(payload)
+        decoded, trailing, _framing = _decode_leading_json(payload, channel_arguments=channel)
         if not isinstance(decoded, dict):
             return "batch-shape"
         if trailing and read_action_sequence(payload) is not None:
             return _ACCEPTED_SHAPE
-        normalise_public_reply(decoded, at_end=not trailing)
+        normalise_public_reply(decoded, at_end=not trailing, channel_arguments=channel)
     except (DecisionParseError, ValueError) as error:
         # The same reason string ``parse_decision`` would hand the classifier,
         # so the replayed class is derived by the SAME function the run used.
@@ -694,9 +717,10 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
     tagged_accepted = 0
     for artifact, episode in published:
         reply = _published_reply(artifact) or ""
-        verdict_before = _replay_verdict(reply)
+        channel = _channel_of(artifact)
+        verdict_before = _replay_verdict(reply, channel)
         stripped, removed = strip_reasoning_boundary_markers(reply, _declared_markers(episode))
-        verdict_after = _replay_verdict(stripped)
+        verdict_after = _replay_verdict(stripped, channel)
         before[verdict_before] = before.get(verdict_before, 0) + 1
         after[verdict_after] = after.get(verdict_after, 0) + 1
         if not removed:
@@ -728,12 +752,13 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
         print(f"  {tagged_accepted:4d}  tagged replies accepted")
 
 
-def _stated_actions(reply: str) -> list[Any] | None:
+def _stated_actions(reply: str, channel: bool) -> list[Any] | None:
     """The actions one reply STATES under a read-tolerance, or ``None``.
 
     The family readers mirror the runtime's own decision points -- the sequence
     read, the single-action shape, the generic tool-call unwrap, the carrier
-    names -- and the actions this returns are what the caller compares against
+    names, and (on the reply channel, ``channel``) a sole key of any name --
+    and the actions this returns are what the caller compares against
     ``decode_public_reply``: two readers of the same bytes, so a tolerance that
     read the wrong thing would fail the equality rather than the accounting.
     ``None`` means no read-tolerance covers the reply, which is what pins
@@ -750,7 +775,7 @@ def _stated_actions(reply: str) -> list[Any] | None:
     if trailing:
         return read_action_sequence(payload)
     try:
-        framed = _unwrap_tool_call(value)
+        framed = _unwrap_tool_call(value, channel_arguments=channel)
     except DecisionParseError:
         return None
     if framed is not value:
@@ -796,8 +821,9 @@ def test_the_sealed_batch_shape_replies_are_read_or_legibly_refused(
     empty array, two competing arrays) -- still refused; an ``actions`` STRING
     carrying the array (``_actions_from_json_string``), recovered by the older
     tolerance; and the foreign CALL shapes the reply-shape change reads (a
-    sole-key carrier, one action object, an actions SEQUENCE, a bare array
-    under a wrapper), recovered by the same decoder the run uses. The claim is
+    sole-key carrier, a sole key of ANY name on the reply channel, one action
+    object, an actions SEQUENCE, a bare array under a wrapper), recovered by
+    the same decoder the run uses. The claim is
     the accounting, over the paid runs rather than over a sample: every reply a
     read-tolerance fires on is now ACCEPTED, and the actions accepted are the
     ones that reply STATES (asserted per family, never a salvage of something
@@ -808,14 +834,21 @@ def test_the_sealed_batch_shape_replies_are_read_or_legibly_refused(
 
     The counts are printed rather than pinned, for the reason the replay test
     above gives: the corpus is a paid run's output that grows as canary runs
-    land. Recounted 2026-10-11 over this machine's runs: 134 published
-    batch-shape refusals, 87 recovered by this build's tolerances -- 73
-    admitted, 14 read but refused by their own validation -- 46 still refused
-    as ``batch-shape``, and 1 that replays ``incomplete-json``. The string
-    family, which the original accounting was built around, has itself rotated
-    out of the live corpus (0 recoveries here) while the new families carry the
-    class; that is why the recovery assertion asks for ANY family, not for
-    that one.
+    land. Recounted 2026-10-11 over this machine's runs (r2 sealed, r3 still
+    sealing): 210 published batch-shape refusals, 134 recovered by this
+    build's tolerances, 70 still refused as ``batch-shape``, and 6 that replay
+    ``incomplete-json``. The r2 corpus alone keeps its published figures -- 134
+    refusals, 87 recovered (73 admitted, 14 read but refused by their own
+    validation), 46 still refused, 1 incomplete-json -- and the r3 growth is
+    the channel reading: 47 of its 75 batch-shape refusals are a sole key the
+    model invented (``reply_json``, ``reply_objects``, ``reply_text``,
+    ``content`` -- plus one ``fields`` over a bare action list), complete and
+    correctly bound inside a name no carrier list had ever seen. Three of the
+    remaining replies sit behind the 4000-char evidence bound and no decoder
+    can read those bytes. The string family, which the original accounting was
+    built around, has itself rotated out of the live corpus (0 recoveries
+    here) while the new families carry the class; that is why the recovery
+    assertion asks for ANY family, not for that one.
     """
 
     sealed = [
@@ -831,16 +864,19 @@ def test_the_sealed_batch_shape_replies_are_read_or_legibly_refused(
     still_refused: dict[str, int] = {}
     for artifact, episode in sealed:
         reply = (_published_reply(artifact) or "").strip()
+        channel = _channel_of(artifact)
         decoded, coerced = _actions_from_json_string(_actions_value(reply))
-        verdict = _replay_verdict(reply)
+        verdict = _replay_verdict(reply, channel)
         if coerced:
             assert verdict == _ACCEPTED_SHAPE, (episode, verdict)
             # The actions that execute are the array the model stated inside the
             # string -- never a salvage of something else.
-            assert decode_public_reply(reply)["actions"] == decoded, episode
+            assert (
+                decode_public_reply(reply, channel_arguments=channel)["actions"] == decoded
+            ), episode
             recovered_string.append(episode)
         else:
-            stated = _stated_actions(reply)
+            stated = _stated_actions(reply, channel)
             if stated is not None:
                 # A foreign CALL shape this build reads. The actions accepted
                 # are the ones the reply itself states -- with the sibling-
@@ -849,7 +885,9 @@ def test_the_sealed_batch_shape_replies_are_read_or_legibly_refused(
                 # salvaged something else still fails the equality.
                 assert verdict == _ACCEPTED_SHAPE, (episode, verdict)
                 expected, _dropped = drop_sibling_action_fields(stated)
-                assert decode_public_reply(reply)["actions"] == expected, episode
+                assert (
+                    decode_public_reply(reply, channel_arguments=channel)["actions"] == expected
+                ), episode
                 recovered_new.append(episode)
             else:
                 assert verdict != _ACCEPTED_SHAPE, (episode, verdict)

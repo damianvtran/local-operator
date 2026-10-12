@@ -930,11 +930,21 @@ def test_window_end_revokes_on_the_broker_loop(
     the DELETE), not the number of seconds a config says.
     """
     monkeypatch.setattr(owner_mod, "_grant_ttl_s", lambda root: 1.0)
+    audited = threading.Event()
+    audit_sink = owner.broker._github_audit_sink
+
+    def record(cause: str, key: str, holder: str, revoked: int, deferred: int) -> None:
+        audit_sink(cause, key, holder, revoked, deferred)
+        audited.set()
+
+    # Subscribe before minting: the lender captures this sink when it is built.
+    # The fake server's DELETE receipt precedes the executor's return AND the
+    # audit write, so it cannot synchronize assertions about the completed reap.
+    monkeypatch.setattr(owner.broker, "_github_audit_sink", record)
     token = _ask_grant(owner, BORROWER_DEVICE)["access_token"]
     assert github_api.live(token)
-    assert _wait_for(
-        lambda: github_api.revoke_requests == [token], timeout=10.0
-    ), "the window-end revoker never fired"
+    assert audited.wait(timeout=10.0), "the window-end revoke audit never completed"
+    assert github_api.revoke_requests == [token]
     assert not github_api.live(token)
     rows = _audit_rows(owner, "credential.revoke")
     assert rows and rows[-1]["detail"]["cause"] == "grant_expired", rows

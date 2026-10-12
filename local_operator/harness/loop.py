@@ -4869,6 +4869,11 @@ class AgentLoop:
         the CALL otherwise — a hallucinated name has no tool, and that name is
         exactly what a "which tool does this model get wrong" view needs.
         """
+        if config.capture_prepared_write is not None:
+            try:
+                config.capture_prepared_write(item.call, result)
+            except Exception:
+                logger.debug("prepared write capture failed", exc_info=True)
         callback = config.record_tool_call
         if callback is None:
             return

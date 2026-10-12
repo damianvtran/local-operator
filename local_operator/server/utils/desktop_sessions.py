@@ -149,6 +149,7 @@ from local_operator.session.transcript import (
     read_latest_custom_entry,
     validate_page_request,
 )
+from local_operator.supplements.contract import supplement_read_options
 
 # The move shares the TUI's own `/move` machinery rather than a second resolver:
 # `expand_path` resolves a relative target against the SESSION's directory and
@@ -3212,6 +3213,7 @@ class DesktopSessionBridge:
         open_frame: bool = False,
         journal_order: bool = False,
         order_ids: list[str] | None = None,
+        supplements: bool = False,
     ) -> dict[str, Any]:
         # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
         # everything this method does before the page (the attention glance, the
@@ -3325,6 +3327,7 @@ class DesktopSessionBridge:
                 entry_times=entry_times,
                 open_frame=open_frame,
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                **supplement_read_options(supplements),
                 # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
                 # read may spend what REMAINS of it on facts and nothing more. See
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
@@ -3367,6 +3370,20 @@ class DesktopSessionBridge:
             },
         }
 
+    def _can_paint_supplements(self, declared: bool) -> bool:
+        """Cold history has no attach socket; negotiate its reader, not another viewer.
+
+        Match the runtime's reader-method capability advertisement. If a facade
+        is bound to a specific owner, its actual record must advertise the family;
+        a disconnected current reader can still paint durable stored graphs.
+        """
+        from local_operator.supplements.contract import SUPPLEMENTS_READ_OP, negotiated
+
+        if declared is not True or not callable(getattr(self.remote, SUPPLEMENTS_READ_OP, None)):
+            return False
+        record = getattr(self.remote, "_runtime_record", None)
+        return record is None or negotiated(record.capabilities, True)
+
     async def history(
         self,
         *,
@@ -3380,6 +3397,7 @@ class DesktopSessionBridge:
         open_frame: bool = False,
         journal_order: bool = False,
         order_ids: list[str] | None = None,
+        supplements: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
         """One page of the durable journal.
@@ -3530,6 +3548,7 @@ class DesktopSessionBridge:
                 entry_times=entry_times,
                 journal_order=journal_order,
                 order_ids=order_ids,
+                supplements=self._can_paint_supplements(supplements),
                 deadline=(
                     deadline
                     if deadline is not None
@@ -3609,6 +3628,7 @@ class DesktopSessionBridge:
         deadline: float,
         journal_order: bool = False,
         order_ids: list[str] | None = None,
+        supplements: bool = False,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
 
@@ -3670,6 +3690,7 @@ class DesktopSessionBridge:
             anchored_index = await self._frame_index(deadline)
             result = build_frame(
                 anchored,
+                supplements=supplements,
                 index=anchored_index,
                 runs_state="building",
                 has_more=page.has_more,
@@ -3757,9 +3778,9 @@ class DesktopSessionBridge:
             collected = rows + collected
             if not collected:
                 break
-            kept, reached = align_page(collected, limit)
-            paintable_rows = paintable(collected)
-            if reached and len(paintable(kept)) >= limit:
+            kept, reached = align_page(collected, limit, supplements=supplements)
+            paintable_rows = paintable(collected, supplements=supplements)
+            if reached and len(paintable(kept, supplements=supplements)) >= limit:
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
             # what the client asked for and it must not wait behind a scan, while
@@ -3818,9 +3839,10 @@ class DesktopSessionBridge:
         # extra rows — measured on the S3 fixture, serving the overshoot was 231
         # rows and 264 KB against 100 rows and 114 KB — so the hunt that failed is
         # not paid for, and ``runs`` carries that run's true size instead.
-        kept, reached = align_page(collected, limit)
+        kept, reached = align_page(collected, limit, supplements=supplements)
         result = build_frame(
             kept,
+            supplements=supplements,
             index=index,
             runs_state="building",
             has_more=has_more,
@@ -5359,6 +5381,7 @@ class DesktopSessionBridge:
                 entry_times=entry_times,
                 open_frame=open_frame,
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                **supplement_read_options(sub.supplements),
             )
             if open_trace.enabled():
                 open_trace.mark(

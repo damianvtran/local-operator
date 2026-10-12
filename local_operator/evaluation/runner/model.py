@@ -77,6 +77,19 @@ class ModelDecision(ProtocolModel):
     # Only validated visible model output, never provider reasoning. None keeps
     # old clients/history on their byte-identical canonical-action replay path.
     public_reply: str | None = None
+    #: Whether ``public_reply`` holds the reply-channel call's OWN argument
+    #: bytes -- the fact that licenses (and requires) the structural sole-key
+    #: reading wherever these bytes are decoded again
+    #: (``public_reply.decode_public_reply``'s ``channel_arguments``). Kept
+    #: BESIDE the bytes because only the parse site knows it
+    #: (``EpisodeModelClient.decide`` saw the ``channel_reply`` it substituted);
+    #: a consumer that re-decodes the same bytes without it reads a DIFFERENT
+    #: reply -- measured on this change: the episode recording path's re-decode
+    #: refused every wrapped-with-note reply, so each recovered turn sealed as
+    #: failed/unscored with an adapter-category error. Removing this field is
+    #: only safe together with removing the structural reading itself;
+    #: runner-side structure, never hashed.
+    channel_arguments: bool = False
     route: RouteIdentity
     usage: ModelUsage = Field(default_factory=ModelUsage)
     cost_micros: SafeCount = 0

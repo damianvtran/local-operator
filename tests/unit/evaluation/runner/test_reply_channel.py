@@ -16,6 +16,7 @@ across turns.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from typing import Any, AsyncIterator
 
@@ -248,6 +249,102 @@ async def test_a_legacy_bare_batch_is_accepted_on_the_channel_too() -> None:
 
     assert decision.public_reply is None
     decision.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+async def test_a_sole_key_wrapper_arriving_on_the_channel_is_read_structurally(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The measured 2026-10-11 shape: the envelope under an invented sole key.
+
+    46 of r3's 66 batch-shape refusals were a complete, correctly-bound
+    envelope double-encoded under a name the carrier list had never seen
+    (``reply_json`` 19, ``reply_objects`` 15, ``reply_text`` 11, ``content``
+    1). On the call's own channel the reading is structural -- any sole key
+    whose value states exactly one decision -- and the roster line names the
+    tolerated key, because that is what makes the next invented name
+    measurable without paying for another corpus.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    wrapped = json.dumps({"reply_json": body})
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        decision = await _client(
+            ChannelStream(wrapped), model_spec=_spec(supports_tools=True)
+        ).decide(current, _turns(current))
+
+    plain = await _client(ChannelStream(body), model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
+    assert decision.action_batch.to_canonical_json() == plain.action_batch.to_canonical_json()
+    assert decision.action_batch.protocol_version == plain.action_batch.protocol_version
+    assert "sole key 'reply_json'" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_same_sole_key_wrapper_as_prose_stays_refused() -> None:
+    """Bound (ii): the reading lives on the CHANNEL; prose keeps the list.
+
+    The same bytes written as prose are refused exactly as before, because in
+    prose a sole key can be a statement ABOUT a decision -- the very shape the
+    named-carrier list exists to keep out.
+    """
+
+    from tests.unit.evaluation.runner.test_provider_client import ScriptedStream
+
+    current = observation()
+    wrapped = json.dumps({"reply_json": envelope(finish_payload(current), "note")})
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(ScriptedStream(wrapped), model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "batch-shape"
+
+
+@pytest.mark.asyncio
+async def test_the_actions_string_reader_refuses_a_hidden_batch_at_the_client() -> None:
+    """Round-2 residual (M1/Q3): the string reader's refusal reaches the client.
+
+    The actions-as-JSON-string spellings ``_actions_from_json_string`` coerces
+    run a competing-batch scan of their own; without the channel fact a hidden
+    same-observation batch under an invented key was invisible there, and the
+    real client ADMITTED the visible batch with the remainder silently dropped
+    (measured: ``ADMITTED[1]`` on both spellings). Both spellings now refuse at
+    this boundary, with the carrier's own class -- the same classes their
+    declared-key and bare siblings get -- while a candidate naming another
+    observation stays the tolerated quotation.
+    """
+
+    current = observation()
+    action = json.loads(finish_payload(current))["actions"][0]
+    array = json.dumps([dict(action)])
+    hidden = json.dumps({"zzz": {"actions": [dict(action)]}})
+    quotation = json.dumps({"zzz": {"actions": [dict(action, observation_id="0" * 64)]}})
+
+    with pytest.raises(DecisionRejected) as top:
+        await _client(
+            ChannelStream(json.dumps({"actions": array + " , " + hidden})),
+            model_spec=_spec(supports_tools=True),
+        ).decide(current, _turns(current))
+    assert top.value.class_key == "batch-shape"
+
+    with pytest.raises(DecisionRejected) as nested:
+        await _client(
+            ChannelStream(json.dumps({"action_batch": {"actions": array + " , " + hidden}})),
+            model_spec=_spec(supports_tools=True),
+        ).decide(current, _turns(current))
+    assert nested.value.class_key == "envelope-shape"
+
+    decision = await _client(
+        ChannelStream(json.dumps({"actions": array + " , " + quotation})),
+        model_spec=_spec(supports_tools=True),
+    ).decide(current, _turns(current))
+    assert len(decision.action_batch.actions) == 1
 
 
 def test_the_channel_hands_back_raw_bytes_rather_than_a_repaired_object() -> None:

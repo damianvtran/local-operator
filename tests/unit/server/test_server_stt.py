@@ -215,6 +215,13 @@ async def test_paths_refuses_half_a_model_query(test_app_client, store_override)
     store_override(FakeStore())
     response = await test_app_client.get("/v1/stt/paths?provider=openrouter")
     assert response.status_code == 422
+    assert response.json() == {
+        "detail": {
+            "code": "wire.errors.media.provider_model_pair",
+            "params": {},
+            "text": "provider and model must be provided together, or neither.",
+        }
+    }
 
 
 @pytest.mark.asyncio
@@ -271,7 +278,16 @@ async def test_transcriptions_maps_a_credit_refusal_to_402(
     )
 
     assert response.status_code == 402
-    assert "ElevenLabs credit balance is too low" in response.json()["detail"]
+    sentence = (
+        "Transcription is unavailable: your ElevenLabs credit balance is too low. "
+        "Add credits to continue. Upstream responded 402: "
+        '{"detail": {"message": "payment required"}}'
+    )
+    assert response.json()["detail"] == {
+        "code": "wire.errors.media.media_refusal",
+        "params": {"error": sentence},
+        "text": sentence,
+    }
 
 
 @pytest.mark.asyncio
@@ -287,23 +303,53 @@ async def test_transcriptions_maps_an_upstream_fault_to_502(
     )
 
     assert response.status_code == 502
-    assert response.json()["detail"].startswith("Transcription failed upstream.")
-    assert "the wire said no" in response.json()["detail"]
+    # A lower-layer classifier owns this prose. Pin the entire response so
+    # extraction cannot lose either its diagnostic tail or the error param.
+    sentence = (
+        'Transcription failed upstream. Upstream responded 500: {"error": "the wire said no"}'
+    )
+    assert response.json()["detail"] == {
+        "code": "wire.errors.media.media_refusal",
+        "params": {"error": sentence},
+        "text": sentence,
+    }
 
 
 @pytest.mark.asyncio
-async def test_transcriptions_409_when_no_rung_exists(test_app_client, store_override) -> None:
+@pytest.mark.parametrize("model_audio", [False, True])
+async def test_transcriptions_409_when_no_rung_exists(
+    test_app_client, store_override, monkeypatch, model_audio
+) -> None:
     store_override(FakeStore())
+    query = "?provider=openrouter&model=audio-model" if model_audio else ""
+    if model_audio:
+        monkeypatch.setattr(
+            stt_routes,
+            "_resolve_query_model",
+            lambda provider, model: SimpleNamespace(supports_audio_input=True),
+        )
     response = await test_app_client.post(
-        "/v1/stt/transcriptions",
+        "/v1/stt/transcriptions" + query,
         files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
     )
 
     assert response.status_code == 409
     detail = response.json()["detail"]
-    assert detail["code"] == "stt_unavailable"
-    assert detail["model_audio"] is False
-    assert [rung["path"] for rung in detail["rungs"]][0] == "provider_stt_radient"
+    # The existing machine category and resolver extras must survive alongside
+    # the new envelope. Compare all rungs, not just the first one's path.
+    paths = (await test_app_client.get("/v1/stt/paths" + query)).json()["result"]
+    sentence = (
+        "The selected model accepts audio input."
+        if model_audio
+        else "No transcription provider is available and no model is selected for the audio path."
+    )
+    assert detail == {
+        "code": "stt_unavailable",
+        "params": {"error": sentence},
+        "text": sentence,
+        "rungs": paths["rungs"],
+        "model_audio": model_audio,
+    }
 
 
 @pytest.mark.asyncio

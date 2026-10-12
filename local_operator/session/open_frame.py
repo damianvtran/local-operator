@@ -205,7 +205,67 @@ class FrameResult:
     dropped_rows: int = 0
 
 
-def strip_entry(entry: Mapping[str, Any]) -> dict[str, Any] | None:
+def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Paint only bounded contract metadata, never component markup or arbitrary custom data."""
+    import math
+
+    from local_operator.redaction_shapes import scrub_shapes
+    from local_operator.supplements.contract import (
+        SupplementComponent,
+        SupplementDetails,
+        SupplementFile,
+        SupplementImage,
+    )
+
+    details = payload.get("details")
+    if not isinstance(details, Mapping) or not isinstance(details.get("anchor"), str):
+        return None
+    if not details["anchor"] or len(details["anchor"]) > 128:
+        return None
+
+    def scalar(value: Any) -> Any:
+        if isinstance(value, str):
+            return scrub_shapes(value[:2048])
+        if value is None or isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value if -(1 << 63) <= value < (1 << 63) else None
+        if isinstance(value, float) and math.isfinite(value):
+            return value
+        return None
+
+    clean: dict[str, Any] = {}
+    arrays = {
+        "files": (SupplementFile, 16),
+        "components": (SupplementComponent, 3),
+        "images": (SupplementImage, 3),
+    }
+    for key in SupplementDetails.__annotations__:
+        value = details.get(key)
+        if key not in details or key in {"instruction", "decision"}:
+            continue  # Unpainted errand prompt/analytics never need cross renderer IPC.
+        if key in arrays:
+            schema, cap = arrays[key]
+            clean[key] = [
+                {field: scalar(item[field]) for field in schema.__annotations__ if field in item}
+                for item in (value[:cap] if isinstance(value, list) else [])
+                if isinstance(item, Mapping)
+            ]
+        elif key in {"more", "detail", "attempts"}:
+            cap = {"more": 20, "detail": 16, "attempts": 4}[key]
+            clean[key] = [
+                scalar(item)
+                for item in (value[:cap] if isinstance(value, list) else [])
+                if isinstance(item, str)
+            ]
+        else:
+            clean[key] = scalar(value)
+    if len(json.dumps(clean, separators=(",", ":"))) > 32768:
+        return None
+    return {"custom_type": "supplement_v1", "details": clean}
+
+
+def strip_entry(entry: Mapping[str, Any], *, supplements: bool = False) -> dict[str, Any] | None:
     """One wire row reduced to what a surface paints, or ``None`` to drop it.
 
     The input is the desktop envelope (``{id, ts, ts_source, type, payload}``)
@@ -218,6 +278,12 @@ def strip_entry(entry: Mapping[str, Any]) -> dict[str, Any] | None:
     payload = entry.get("payload")
     payload = dict(payload) if isinstance(payload, Mapping) else {}
     if etype == "custom":
+        if payload.get("custom_type") == "supplement_v1" and supplements is True:
+            kept = _supplement_payload(payload)
+            envelope = {
+                key: entry[key] for key in ("id", "ts", "ts_source", "type") if key in entry
+            }
+            return {**envelope, "payload": kept} if kept is not None else None
         # THE ALLOW-LIST (see ``_KEPT_CUSTOM_TYPE``): one type paints, and every
         # other custom envelope is a row no surface can draw — so it may not be
         # served and may not spend the client's row budget either.
@@ -273,7 +339,9 @@ def strip_entry(entry: Mapping[str, Any]) -> dict[str, Any] | None:
     return {**entry, "payload": payload}
 
 
-def paintable(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def paintable(
+    rows: Iterable[Mapping[str, Any]], *, supplements: bool = False
+) -> list[dict[str, Any]]:
     """The rows of ``rows`` a transcript paints, in order, stripped.
 
     The ONE definition of a paintable row on this plane, so the count a page is
@@ -285,7 +353,7 @@ def paintable(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """
     out: list[dict[str, Any]] = []
     for row in rows:
-        stripped = strip_entry(row)
+        stripped = strip_entry(row, supplements=supplements)
         if stripped is not None:
             out.append(stripped)
     return out
@@ -368,6 +436,7 @@ def align_page(
     limit: int,
     *,
     extra_rows: int = OPEN_FRAME_MAX_EXTRA_ROWS,
+    supplements: bool = False,
 ) -> tuple[list[Mapping[str, Any]], bool]:
     """Cut ``rows`` to the page the contract promises: (kept rows, head reached).
 
@@ -397,7 +466,9 @@ def align_page(
     if limit < 1:
         return list(rows), True
     order = list(rows)
-    painted = [(index, strip_entry(row)) for index, row in enumerate(order)]
+    painted = [
+        (index, strip_entry(row, supplements=supplements)) for index, row in enumerate(order)
+    ]
     paintable = [(index, entry) for index, entry in painted if entry is not None]
     if not paintable:
         return order, True
@@ -541,6 +612,7 @@ def build_frame(
     cursor_missing: bool = False,
     has_newer: bool | None = None,
     anchor_id: str | None = None,
+    supplements: bool = False,
 ) -> FrameResult:
     """Strip, cap and publish one page from rows already read, newest last.
 
@@ -559,7 +631,7 @@ def build_frame(
     """
     ordered = list(raw_entries)
     raw_rows = len(ordered)
-    dropped = sum(1 for raw in ordered if strip_entry(raw) is None)
+    dropped = sum(1 for raw in ordered if strip_entry(raw, supplements=supplements) is None)
     # FROM THE NEWEST END, because the caps decide what a page can hold and the
     # rows a reader cannot lose are the recent ones: a page truncated at its
     # OLDEST end is a page with a short tail, which is the defect this contract
@@ -568,7 +640,9 @@ def build_frame(
     # not a smaller page, it is a blank transcript, and today's reader serves
     # that row too.
     painted = [
-        stripped for stripped in (strip_entry(raw) for raw in ordered) if stripped is not None
+        stripped
+        for stripped in (strip_entry(raw, supplements=supplements) for raw in ordered)
+        if stripped is not None
     ]
     sizes = [len(json.dumps(entry, separators=(",", ":"))) for entry in painted]
     anchor_index = None
