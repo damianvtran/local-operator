@@ -77,7 +77,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from local_operator.paths import AGENT_HOME_ENV, CONFIG_DIR_ENV
 from local_operator.session.spec import (
@@ -89,9 +89,15 @@ from local_operator.session.spec import (
 )
 
 if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
+    from contextlib import AbstractAsyncContextManager
+
     from local_operator.harness.types import AgentEvent, EventHandler
     from local_operator.output_contract import MarkdownSchema, decode_output
-    from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
+    from local_operator.session.protocol import (
+        OwningSessionProtocol,
+        SessionProtocol,
+        ViewerSessionProtocol,
+    )
     from local_operator.session.runtime.launch import (
         EngageOutcome,
         Errand,
@@ -700,6 +706,49 @@ def _assert_session_dir_under_root(session: Any, roots: SessionRoots) -> None:
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
+
+
+# TYPE-ONLY surface: overloads that describe the DECORATED context manager.
+# The implementation below is untouched -- same ``@asynccontextmanager``, same
+# body, same runtime behaviour -- so this hunk changes what the SDK EXPOSES TO
+# TYPE CHECKERS and nothing else. WHY it exists (review round 1, R1): the
+# owning methods live on ``OwningSessionProtocol``, NOT on the shared
+# ``SessionProtocol`` (widening the shared protocol forced every conformer to
+# grow stubs), so a default-own caller must be typed as an OWNER to call
+# ``subscribe_requests``/``shutdown_owned_work`` without Any/cast, an attach
+# caller must be typed as the viewer (which has no owning surface), and a
+# dynamic-mode caller keeps the base type and narrows explicitly. Ordinary
+# ``def`` overloads, because the decorated result is an
+# ``AbstractAsyncContextManager``, not a coroutine. Annotation-only; the
+# sibling ``sdk.py`` owner (PR2273) was told exactly this hunk is coming.
+@overload
+def open_session(
+    spec: SessionSpec,
+    *,
+    roots: SessionRoots,
+    mode: Literal["own"] = "own",
+    allow_multi_root: bool = False,
+) -> AbstractAsyncContextManager[OwningSessionProtocol]: ...
+
+
+@overload
+def open_session(
+    spec: SessionSpec,
+    *,
+    roots: SessionRoots,
+    mode: Literal["attach"],
+    allow_multi_root: bool = False,
+) -> AbstractAsyncContextManager[ViewerSessionProtocol]: ...
+
+
+@overload
+def open_session(
+    spec: SessionSpec,
+    *,
+    roots: SessionRoots,
+    mode: Literal["own", "attach"],
+    allow_multi_root: bool = False,
+) -> AbstractAsyncContextManager[SessionProtocol]: ...
 
 
 @asynccontextmanager

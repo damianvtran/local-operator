@@ -1540,6 +1540,19 @@ def _make_runner(
                     # manager accumulator even when retention evicts its row.
                     await _dispose_child(child)
                 finally:
+                    # Record the child's cleanup VERDICT on its owning ancestor
+                    # BEFORE detaching the job edge (review round 2,
+                    # R7-descendant / QA Q5): once this returns, nothing else
+                    # holds the child object, and a settled job is not proof
+                    # its resources joined cleanly. Recorded through this
+                    # existing finalization path, one hop per level; the
+                    # child's verdict is itself recursive, so a grandchild's
+                    # failure reaches the root the same way.
+                    verdict = child._cleanup_verdict_errors()
+                    if verdict:
+                        parent_session._record_descendant_cleanup_failures(
+                            child.session_id, verdict
+                        )
                     if job is not None:
                         # Clear the live edge even if teardown itself fails: a
                         # retained parent row must never pin the child Session.
@@ -3117,6 +3130,16 @@ async def _construct_child_session(
         # Register before Session.__init__, which can itself fail. close() is
         # idempotent: this fallback also runs if a later child dispose hook fails.
         cleanup.push_async_callback(child_stream.close)
+        # Bind the child stream's request-observation IDENTITY from the fields
+        # this construction already carries: a record for a request the child
+        # makes must name the job and role it belongs to, and these are the
+        # only identity a subagent has (the same ``job_id``/``agent_type`` the
+        # Session constructor receives below). Guarded by the same
+        # ``is not parent_stream`` check as the model pin: binding the PARENT
+        # stream would mislabel the parent's own requests.
+        bind_actor = getattr(child_stream, "bind_request_actor", None)
+        if callable(bind_actor):
+            bind_actor(job_id=job_id, actor_role=agent)
         if model_spec is not None:
             # PIN the child's routing to the model the launch resolved (a role
             # tier, or a resumed child's recorded tier). Marked on the CHILD's
