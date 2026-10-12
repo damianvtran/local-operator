@@ -6,7 +6,9 @@ right for a human pressing Esc. A supervised agent's tools have external side
 effects a machine operator cannot repair — a half-transferred ``git push``, a
 partly-created merge request — so a supervisor's cancel must land at the
 boundary where every call has ALREADY produced a paired result, and before the
-next model request is spent.
+next model request is spent. The loop's RECOVERY decisions (the nameless-call
+re-ask, the empty-truncation retreat) are next-model safe points too: each of
+them must read the same boundary before it spends another request.
 """
 
 from __future__ import annotations
@@ -15,12 +17,19 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.loop import AgentLoop, LoopContext
+from local_operator.harness.loop import (
+    NAMELESS_CALL_RECOVERY_PROMPT,
+    AgentLoop,
+    LoopContext,
+)
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentTool,
     Message,
+    ModelSpec,
+    NoticeEvent,
     StreamEndEvent,
+    StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
     ToolExecutionEndEvent,
@@ -131,3 +140,203 @@ async def test_a_raising_hook_does_not_strand_the_turn() -> None:
     assert stream.calls == 2, "a raising hook must not stop the turn"
     ends = [event for event in events if isinstance(event, AgentEndEvent)]
     assert ends and not ends[-1].aborted
+
+
+# ---------------------------------------------------------------------------
+# Recovery decisions are next-model safe points too.
+#
+# The post-tool boundary is not the only place the loop decides to spend
+# another provider request: the nameless-call re-ask and the empty-truncation
+# retreat each `continue` BEFORE the boundary, so a boundary cancel requested
+# on the Nth request used to be outrun by its own recovery -- request N+1 was
+# spent after `request_graceful_cancel` had landed (QA step-boundary matrix,
+# nameless-recovery: three root rows where the caller's budget admitted two).
+# These pins hold every such recovery to the same rule as the boundary itself,
+# and hold the controls that the recoveries still fire without a cancel.
+# ---------------------------------------------------------------------------
+
+
+class _NamelessOnSecondCall:
+    """A tool batch, then a NAMELESS call, then text.
+
+    The second request's only call carries arguments and no name, so the loop
+    drops it at assembly and arms its nameless-call recovery -- the decision
+    that used to `continue` straight past the post-tool boundary. ``cancelled``
+    flips while that request streams: the harness-level stand-in for a
+    supervisor's ``request_graceful_cancel`` landing with request 2 in flight.
+    ``calls`` is the assertion that matters: whether a third provider request
+    was spent after the boundary was requested.
+    """
+
+    def __init__(self, *, cancel_on_nameless: bool) -> None:
+        self.calls = 0
+        self.cancel_on_nameless = cancel_on_nameless
+        self.cancelled = False
+
+    async def __call__(self, request: Any, signal: Any) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamToolCallDelta(index=0, id="call_1", name="touch")
+            yield StreamToolCallDelta(index=0, argument_delta="{}")
+            yield StreamEndEvent(stop_reason="toolUse")
+            return
+        if self.calls == 2:
+            yield StreamToolCallDelta(index=0, id="call_nameless", argument_delta="{}")
+            if self.cancel_on_nameless:
+                self.cancelled = True
+            yield StreamEndEvent(stop_reason="toolUse")
+            return
+        yield StreamTextDelta(delta="done")
+        yield StreamEndEvent(stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_nameless_recovery_does_not_spend_a_request_after_the_cancel() -> None:
+    """A requested boundary outranks the nameless-call re-ask (the N+1 leak).
+
+    Before this pin the recovery ``continue`` skipped the post-tool boundary,
+    so the loop spent request 3 after ``request_graceful_cancel`` had landed on
+    request 2 -- one more model call than the caller's budget admitted, with
+    the terminal only then aborted. Post-fix the turn ends inside request 2,
+    as aborted, and the drop is still told to the user.
+    """
+    stream = _NamelessOnSecondCall(cancel_on_nameless=True)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(stream, graceful_cancel_requested=lambda: stream.cancelled)
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 2, "no third request may be spent after the cancel"
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and ends[-1].aborted is True, "the turn must end as aborted"
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert any("without a tool name" in text for text in notices), "the drop is still told"
+    assert not any("re-asking" in text for text in notices), "no re-ask was attempted"
+    assert all(
+        NAMELESS_CALL_RECOVERY_PROMPT not in getattr(message, "text", "")
+        for message in ends[-1].messages
+    ), "the recovery prompt must not be on the wire"
+
+
+@pytest.mark.asyncio
+async def test_nameless_recovery_still_reasks_without_a_cancel() -> None:
+    """Control: with no cancel the re-ask still happens, prompt and all."""
+    stream = _NamelessOnSecondCall(cancel_on_nameless=False)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(stream, graceful_cancel_requested=lambda: stream.cancelled)
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 3, "the recovery re-ask must still be spent"
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and not ends[-1].aborted
+    assert any(
+        NAMELESS_CALL_RECOVERY_PROMPT in getattr(message, "text", "")
+        for message in ends[-1].messages
+    ), "the recovery prompt rides the re-ask"
+
+
+#: A model WITH a reasoning ladder. The empty-truncation retreat can only
+#: exist when ``_lower_effort`` finds a rung below the current one; the
+#: ladder-less default model answers ``None``, so the retry arm needs this.
+_LADDER_MODEL = ModelSpec(
+    provider="test",
+    model_id="m",
+    reasoning_efforts=("low", "medium", "high"),
+    reasoning_effort="high",
+)
+
+
+class _SilentLengthThenText:
+    """A SILENT length stop (no text, no calls) on request 1; text later."""
+
+    def __init__(self, *, cancel_on_silent: bool) -> None:
+        self.calls = 0
+        self.cancel_on_silent = cancel_on_silent
+        self.cancelled = False
+
+    async def __call__(self, request: Any, signal: Any) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            if self.cancel_on_silent:
+                self.cancelled = True
+            yield StreamEndEvent(stop_reason="length")
+            return
+        yield StreamTextDelta(delta="recovered")
+        yield StreamEndEvent(stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_empty_truncation_retreat_does_not_spend_a_request_after_the_cancel() -> None:
+    """The same N+1 rule for the silent-length retreat (the retry arm).
+
+    The retreat's `continue` was the second path that outran the boundary.
+    With a cancel requested the turn must end inside the truncated request --
+    and the notice must name the boundary rather than claim a ladder rung the
+    loop never consulted.
+    """
+    stream = _SilentLengthThenText(cancel_on_silent=True)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(
+        stream, model=_LADDER_MODEL, graceful_cancel_requested=lambda: stream.cancelled
+    )
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 1, "no retreat request may be spent after the cancel"
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and ends[-1].aborted is True
+    assert config.model.reasoning_effort == "high", "the retreat must not be consumed"
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert any("step boundary was requested" in text for text in notices)
+
+
+@pytest.mark.asyncio
+async def test_empty_truncation_retreat_still_retries_without_a_cancel() -> None:
+    """Control: the retreat itself still works, at one rung lower (QA GAP)."""
+    stream = _SilentLengthThenText(cancel_on_silent=False)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(stream, model=_LADDER_MODEL, graceful_cancel_requested=lambda: False)
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 2, "the retreat retry must still be spent"
+    assert config.model.reasoning_effort == "medium", "the retry must step one rung down"
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert any("retrying at effort medium" in text for text in notices)
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and not ends[-1].aborted
+
+
+class _MalformedArgumentsOnce:
+    """One request carrying a call with unparseable arguments; text later."""
+
+    def __init__(self, *, cancel_on_call: bool) -> None:
+        self.calls = 0
+        self.cancel_on_call = cancel_on_call
+        self.cancelled = False
+
+    async def __call__(self, request: Any, signal: Any) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamToolCallDelta(index=0, id="call_bad", name="touch")
+            yield StreamToolCallDelta(index=0, argument_delta='{"path": ')
+            if self.cancel_on_call:
+                self.cancelled = True
+            yield StreamEndEvent(stop_reason="toolUse")
+            return
+        yield StreamTextDelta(delta="done")
+        yield StreamEndEvent(stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_malformed_arguments_respect_the_boundary() -> None:
+    """Unparseable arguments pair as an invalid-arguments result, then the
+    boundary cancels -- the call is recorded, not re-asked, no N+1."""
+    stream = _MalformedArgumentsOnce(cancel_on_call=True)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(stream, graceful_cancel_requested=lambda: stream.cancelled)
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 1, "no second request may be spent after the cancel"
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and ends[-1].aborted is True
+    assert any(
+        "not valid JSON" in getattr(message, "text", "") for message in ends[-1].messages
+    ), "the malformed call must leave its paired invalid-arguments record"
