@@ -942,11 +942,55 @@ async def _screen_core(
         _persist_hold(store, owner, message_id, "runner_unavailable")
         return ScreenResult("hold", hold_code="runner_unavailable")
 
+    # Canonical provider (R6/R8/Q3): the job must carry a REAL configured
+    # provider, never an empty string from a fixture snapshot. The trusted
+    # source is the same resolver the production factory uses — the
+    # operative config — with a snapshot override when the published
+    # authority supplies one (the ONE-capture snapshot does). No
+    # caller-supplied strings certify here. Derived BEFORE the reservation
+    # so the registered input proof pins the same value the job will carry.
+    _canonical_provider = getattr(snapshot, "provider", None) or ""
+    if not _canonical_provider:
+        from local_operator.team_bridge.model_boundary import resolve_default_selection
+
+        _resolved = resolve_default_selection(config_dir)
+        _canonical_provider = _resolved.provider if _resolved is not None else ""
+
+    # 8b. IMMUTABLE INPUT PROOF (R8/Q3): every canonical field of this
+    #     dispatch is registered at reservation — owner namespace/generation,
+    #     body/template/version, provider/model/approved map, envelope,
+    #     request, display digests and revision/epoch — so the ONE bind can
+    #     compare the DispatchJob against the record BEFORE any I/O and
+    #     refuse a field mutated in between.
+    input_proof = {
+        "owner": (
+            f"{owner.credential_id}|{owner.account_id}|{owner.tenant_id}"
+            f"|{owner.endpoint_id}|{owner.canonical_base_url}"
+            f"|{owner.enrollment_generation}"
+        ),
+        "body": envelope.body_sha256,
+        "template": snapshot.template_sha256,
+        "version": snapshot.screening_version,
+        "provider": _canonical_provider,
+        "model": snapshot.default_model or "",
+        "approved": sorted(snapshot.approved_serving_identities),
+        "envelope": envelope.envelope_digest,
+        "request": hashlib.sha256(envelope.type_label.encode("utf-8")).hexdigest(),
+        "display": hashlib.sha256(
+            f"{envelope.sender_display}|{envelope.organization}".encode("utf-8")
+        ).hexdigest(),
+        "revision": snapshot.admission_revision,
+        "epoch": int(epoch),
+        "message": message_id,
+        "tenant": owner.tenant_id,
+        "logical": fingerprint,
+    }
+
     # 9. Durable LOGICAL reservation BEFORE inference I/O. Exhaustion/busy/
     #    schema failures are typed holds; never a reset.
     try:
         attempt_id = store.reserve_screening_attempt(
-            owner, message_id=message_id, fingerprint=fingerprint
+            owner, message_id=message_id, fingerprint=fingerprint, input_proof=input_proof
         )
     except StoreRefused as failure:
         code = _HOLD_FOR_SCHEMA.get(failure.code)
@@ -962,17 +1006,6 @@ async def _screen_core(
     #     logical row, every physical row and the finish/receipt binding.
     from local_operator.team_bridge.model_boundary import AdmissionJob
 
-    # Canonical provider (R6/Q3): the job must carry a REAL configured
-    # provider, never an empty string from a fixture snapshot. The trusted
-    # source is the same resolver the production factory uses — the
-    # operative config — with a snapshot override when the published
-    # authority supplies one. No caller-supplied strings certify here.
-    _canonical_provider = getattr(snapshot, "provider", None) or ""
-    if not _canonical_provider:
-        from local_operator.team_bridge.model_boundary import resolve_default_selection
-
-        _resolved = resolve_default_selection(config_dir)
-        _canonical_provider = _resolved.provider if _resolved is not None else ""
     job = AdmissionJob(
         owner_generation=owner.enrollment_generation,
         credential_id=owner.credential_id,
@@ -999,7 +1032,9 @@ async def _screen_core(
     )
     fingerprint = job.digest
     try:
-        store.bind_attempt_fingerprint(owner, attempt_id=attempt_id, fingerprint=fingerprint)
+        store.bind_attempt_fingerprint(
+            owner, attempt_id=attempt_id, fingerprint=fingerprint, job=job
+        )
     except StoreRefused:
         _persist_hold(store, owner, message_id, "retry_later")
         return ScreenResult("hold", hold_code="retry_later")

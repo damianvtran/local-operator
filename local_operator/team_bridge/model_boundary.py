@@ -804,6 +804,7 @@ def make_screening_runner(
     settings: Any = None,
     fingerprint: str | None = None,
     expected_epoch: int | None = None,
+    selection: "DefaultSelection | None" = None,
 ) -> "ScreenModelRunner | None":
     """The production builder: canonical default + a fresh GUARDED transport.
 
@@ -816,7 +817,12 @@ def make_screening_runner(
     INFERENCE auth, separate from the bridge's pinned person OAuth.
     """
 
-    selection = resolve_default_selection(config_dir)
+    # ONE canonical capture (R8/Q3): when the caller already resolved the
+    # selection (the composition captures provider/model/approved ONCE), the
+    # factory MUST use that same object — resolving again here could certify
+    # a config the earlier await never saw.
+    if selection is None:
+        selection = resolve_default_selection(config_dir)
     if selection is None:
         return None
     # LAZY construction (R6/Q10): the dedicated client and stream fn are

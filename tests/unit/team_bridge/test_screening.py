@@ -894,3 +894,169 @@ def test_accepted_status_mismatch_is_a_typed_refusal(tmp_path) -> None:
         _asyncio.run(drive())
     assert err.value.code == "policy_stale"
     assert store.current_screening_policy(owner) is None  # nothing published
+
+
+def test_strict_status_normalizer_refusal_arms(tmp_path) -> None:
+    """R8/Q3: the RAW nested SDK status is normalized strictly — unknown
+    version, template mismatch, disabled, absent screening, wrong tenant or
+    endpoint all refuse with a typed policy_stale."""
+
+    from local_operator.team_bridge.scheduler import _normalize_accepted_status
+    from local_operator.team_bridge.store import StoreRefused
+
+    store, owner = _setup(tmp_path)
+    base = {
+        "available": True,
+        "screening": {"version": "bridge-screen-v1", "template": "TEMPLATE"},
+        "tenants": [owner.tenant_id],
+        "endpoint": {"id": owner.endpoint_id, "active": True},
+    }
+    arms = []
+    bad = dict(base)
+    bad["screening"] = {"version": "bridge-screen-v9", "template": "TEMPLATE"}
+    arms.append(bad)  # unknown version
+    arms.append(base)  # template bytes do not hash to the frozen selector
+    bad = dict(base)
+    bad["available"] = False
+    arms.append(bad)  # disabled
+    bad = dict(base)
+    bad.pop("screening")
+    arms.append(bad)  # absent screening
+    bad = dict(base)
+    bad["tenants"] = ["someone-else"]
+    arms.append(bad)  # wrong tenant
+    bad = dict(base)
+    bad["endpoint"] = {"id": "bep_other", "active": True}
+    arms.append(bad)  # wrong endpoint
+    bad = dict(base)
+    bad["endpoint"] = {"id": owner.endpoint_id, "active": False}
+    arms.append(bad)  # inactive endpoint
+    for arm in arms:
+        with pytest.raises(StoreRefused) as err:
+            _normalize_accepted_status(arm, owner)
+        assert err.value.code == "policy_stale"
+
+
+def test_first_bind_refuses_mutated_job_fields(tmp_path) -> None:
+    """R8/Q3: the input proof registered at reservation pins provider/model/
+    template/tenant/approved/epoch; a DispatchJob whose field was mutated
+    between reservation and bind refuses BEFORE any I/O."""
+
+    import dataclasses as _dataclasses
+
+    from local_operator.team_bridge.model_boundary import AdmissionJob
+    from local_operator.team_bridge.store import StoreRefused
+
+    store, owner = _setup(tmp_path)
+    proof = {
+        "owner": "7|acc|tnt|bep|hub|1",
+        "body": "b" * 64,
+        "template": "t" * 64,
+        "version": "bridge-screen-v1",
+        "provider": "openai",
+        "model": "qa/default-model",
+        "approved": ["qa/default-model"],
+        "envelope": "e" * 64,
+        "request": "r" * 64,
+        "display": "d" * 64,
+        "revision": "rev-1",
+        "epoch": 1,
+        "message": "bmsg_1",
+        "tenant": "tnt_1",
+        "logical": "rev-1|b|e",
+    }
+    attempt = store.reserve_screening_attempt(
+        owner, message_id="bmsg_1", fingerprint="rev-1|b|e", input_proof=proof
+    )
+    job = AdmissionJob(
+        owner_generation=owner.enrollment_generation,
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        hub_url=owner.canonical_base_url,
+        message_id="bmsg_1",
+        attempt_id=attempt,
+        body_sha256="b" * 64,
+        template_sha256="t" * 64,
+        template_version="bridge-screen-v1",
+        provider="openai",
+        model="qa/default-model",
+        approved=("qa/default-model",),
+        envelope_digest="e" * 64,
+        request_digest="r" * 64,
+        display_digest="d" * 64,
+        revision="rev-1",
+        epoch=1,
+        turn="cap",
+    )
+    mutated = _dataclasses.replace(job, provider="anthropic")
+    with pytest.raises(StoreRefused) as err:
+        store.bind_attempt_fingerprint(
+            owner, attempt_id=attempt, fingerprint=mutated.digest, job=mutated
+        )
+    assert err.value.code == "attempt_mismatch"
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job.digest, job=job)
+
+
+def test_same_version_different_hash_publisher_refuses(tmp_path) -> None:
+    """R8/Q3: a native publication of the SAME version with a DIFFERENT
+    template hash is a typed refusal and the original row is retained."""
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    store, owner = _setup(tmp_path)
+    epoch = store.publish_screening_policy(
+        owner,
+        version="bridge-screen-v1",
+        template_sha256="t" * 64,
+        default_model="qa/default-model",
+        revision="rev-1",
+    )
+    with pytest.raises(StoreRefused) as err:
+        store.publish_screening_policy(
+            owner,
+            version="bridge-screen-v1",
+            template_sha256="s" * 64,
+            default_model="qa/default-model",
+            revision="rev-2",
+        )
+    assert err.value.code == "template_hash_conflict"
+    row = store.current_screening_policy(owner)
+    assert row is not None and row["template_sha256"] == "t" * 64
+    assert int(row["epoch"]) == epoch
+
+
+def test_expired_turn_cannot_admit_receipt(tmp_path) -> None:
+    """R8 static adjunct: a turn whose lease EXPIRED (no successor) must not
+    admit a receipt from inside the commit transaction."""
+
+    import sqlite3 as _sqlite3
+    import time as _time
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    store, owner = _setup(tmp_path)
+    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    assert turn is not None
+    conn = _sqlite3.connect(state_db_path(tmp_path))
+    try:
+        conn.execute(
+            "UPDATE screening_schedule SET lease_expires = ? WHERE owner_key = ?",
+            (_time.time() - 5.0, store._account_scope(owner)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    attempt = store.reserve_screening_attempt(owner, message_id="bmsg_1", fingerprint=None)
+    with pytest.raises(StoreRefused) as err:
+        store.finish_screening(
+            owner,
+            "bmsg_1",
+            attempt_id=attempt,
+            fingerprint="unused",
+            expected_epoch=1,
+            hold_code="model_hold",
+            turn=turn,
+        )
+    assert err.value.code == "turn_lost"
