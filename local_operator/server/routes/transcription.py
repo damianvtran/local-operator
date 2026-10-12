@@ -15,6 +15,7 @@ from local_operator.clients.radient import (
 )
 from local_operator.clients.radient_cost import cost_from_payload
 from local_operator.config import ConfigManager
+from local_operator.i18n.keys import wire_errors_media as _wm
 from local_operator.server.dependencies import get_config_manager, get_radient_client
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.utils.voice_spend import emit_voice_spend
@@ -81,7 +82,7 @@ async def create_transcription_endpoint(
     if not radient_client.api_key:
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Radient API key is not configured on the server.",
+            detail=_wm.radient_key_missing().envelope(),
         )
 
     # Save the uploaded file temporarily.
@@ -101,7 +102,7 @@ async def create_transcription_endpoint(
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to save uploaded audio file: {str(e)}",
+            detail=_wm.save_audio_failed(error=str(e)).envelope(),
         )
     finally:
         await file.close()
@@ -154,10 +155,10 @@ async def create_transcription_endpoint(
         # but good to have a catch here.
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Temporary audio file not found after saving.",
+            detail=_wm.temp_audio_missing().envelope(),
         )
     except ValueError as ve:  # For validation errors from the client
-        raise HTTPException(status_code=400, detail=str(ve))
+        raise HTTPException(status_code=400, detail=_wm.media_refusal(error=str(ve)).envelope())
     except APIError as upstream:
         raise _classify_upstream_failure(upstream, provider or "upstream")
     except RuntimeError as re:  # For API errors or other runtime issues from the client
@@ -165,11 +166,14 @@ async def create_transcription_endpoint(
         # only for a server-side configuration fault (no Radient API key) or an
         # unforeseen internal error. Every failure that came from Radient or
         # from the provider it called arrives typed, handled above.
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(re))
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_wm.media_refusal(error=str(re)).envelope(),
+        )
     except Exception as e:
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected error occurred during transcription: {str(e)}",
+            detail=_wm.transcription_unexpected(error=str(e)).envelope(),
         )
     finally:
         # Clean up the temporary directory and its contents
