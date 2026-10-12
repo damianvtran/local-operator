@@ -4134,7 +4134,13 @@ class RelayServer:
         #: triple (see :meth:`_frame_memo_key`) and bounded because a relay
         #: serves a viewer's handful of sessions, not the store. Guarded by its
         #: own lock: stored reads run on LINK READER THREADS, and two viewers can
-        #: open the same conversation at once.
+        #: open the same conversation at once. Answers are SHARED: callers must
+        #: not mutate the dict or its nested rows/runs; fitting copies when it
+        #: trims and serializers only read. Eight ordinary capped frames retain
+        #: about 12 MiB of serialized entry payload (8 * OPEN_FRAME_MAX_BYTES),
+        #: plus run facts and Python-object overhead, versus the page cache's
+        #: 24 MiB budget. This is an ENTRY-count bound, not a heap-byte bound:
+        #: build_frame permits one oversized row, so 12 MiB is not a hard ceiling.
         self._frame_memo: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
         self._frame_memo_lock = threading.Lock()
         #: req numbers for relay-initiated requests on a link (stream opens).
@@ -4333,9 +4339,12 @@ class RelayServer:
         same wherever it lands, so it lands HERE, at serve start, on a daemon
         thread — startup is the one moment nothing is waiting on a frame.
         """
-        threading.Thread(
-            target=warm_open_frame_strip_now, name="warm-open-strip", daemon=True
-        ).start()
+        try:
+            threading.Thread(
+                target=warm_open_frame_strip_now, name="warm-open-strip", daemon=True
+            ).start()
+        except Exception:  # noqa: BLE001 — thread exhaustion defers only the warm
+            logger.debug("open-frame strip warm could not start", exc_info=True)
 
     def _run_start_hooks(self) -> None:
         """Run each slice's one-shot start hook, on its own daemon thread.

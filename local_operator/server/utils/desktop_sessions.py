@@ -4027,7 +4027,7 @@ class DesktopSessionBridge:
                 cold=cold,
                 rows=len(rows) if rows is not None else None,
             )
-        if stored:
+        if rows is None or (cold and not rows):
             return await self._peer_stored_history(
                 before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
             )
