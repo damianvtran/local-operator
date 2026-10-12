@@ -3704,7 +3704,7 @@ class RuntimeServer:
             if conn.bind_token != token:
                 return
             payload = update.model_dump(mode="json") if hasattr(update, "model_dump") else update
-            self._relay_frontend_to(conn, payload)
+            self._relay_frontend_to(conn, payload, token)
 
         return on_update
 
@@ -3931,6 +3931,12 @@ class RuntimeServer:
                     # bind's, when it lands) return early instead of relaying a
                     # second copy of every delta into this connection.
                     conn.bind_token += 1
+                    # Retire buffered edges in the SAME synchronous step. The
+                    # replacement atomic join's snapshot covers the old attempt;
+                    # replaying its pending q after replacement sync q is a gap.
+                    # Do this BEFORE joining: a new attempt's q+1 suffix must
+                    # survive the unchanged sync-then-pending flush below.
+                    conn.frontend_pending.clear()
                     # ...and its subscription is released as it lands. Registered
                     # BEFORE the off-loop call, not after: the released callback is
                     # attached to ``bind_task`` either way, and doing it first means
@@ -7984,17 +7990,24 @@ class RuntimeServer:
 
     # -- v5 frontend state relay ----------------------------------------------
 
-    def _relay_frontend_to(self, conn: _ClientConn, data: dict[str, Any]) -> None:
+    def _relay_frontend_to(self, conn: _ClientConn, data: dict[str, Any], token: int) -> None:
         loop = self._loop
         if loop is None or self._closed.is_set():
             return
         try:
-            loop.call_soon_threadsafe(self._relay_frontend_to_on_loop, conn, data)
+            loop.call_soon_threadsafe(self._relay_frontend_to_on_loop, conn, data, token)
         except RuntimeError:
             pass
 
-    def _relay_frontend_to_on_loop(self, conn: _ClientConn, data: dict[str, Any]) -> None:
-        if id(conn.writer) not in self._clients:
+    def _relay_frontend_to_on_loop(
+        self, conn: _ClientConn, data: dict[str, Any], token: int
+    ) -> None:
+        # Producer validation is only an optimization: retirement can occur
+        # after call_soon_threadsafe queued this delivery. Keep its CAPTURED
+        # generation, never stamp the current one onto an abandoned edge.
+        # This complements clearing pending at handoff: neither alone retires
+        # both the already scheduled and the already buffered old updates.
+        if conn.bind_token != token or id(conn.writer) not in self._clients:
             return
         from local_operator.session.frontend_state import filter_update_trajectories
 
