@@ -187,12 +187,12 @@ class SessionRow(BaseModel):
     #: a row this build cannot answer for carries the null rather than an
     #: omission.
     #:
-    #: REMOTE ROWS carry no VALUE in this build — the mesh lane owns the
-    #: producer half and adds the same name and unit later; until then the
-    #: key holds the declared default on those rows like every other field only
-    #: the local half fills, and an older daemon omits it entirely. A client
-    #: reads null/absent as "fall back to the row's creation time", which is
-    #: also what it does before the first user message of a session exists.
+    #: REMOTE ROWS carry the peer's claim whenever the peer computes one (the
+    #: mesh producer half: ``network/relay.py`` computes it on outbound peer
+    #: rows); a peer that predates it omits the key entirely, and a peer row
+    #: whose transcript holds no typed user send holds the declared default. A
+    #: client reads null/absent as "fall back to the row's creation time",
+    #: which is also what it does before the first user message exists.
     last_user_at: float | None = None
 
     @field_validator("subagents_running", "subagents_queued", mode="before")

@@ -27,14 +27,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import concurrent.futures
+import contextlib
 import gc
 import json
 import logging
 import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -239,6 +243,24 @@ def _seed_journal(root: Path, session_id: str, texts: list[str]) -> list[str]:
         ids.append(message.id)
     (directory / "transcript.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return ids
+
+
+@contextlib.contextmanager
+def _live_pid() -> Iterator[int]:
+    """One more real live pid, for a cell that needs two live records at once.
+
+    Spawned rather than invented — ``classify`` reads the pid, so a fabricated
+    number would be a live-looking value only until the machine answered for
+    it — and killed in the ``finally`` whatever the test does. One pid holds
+    one record file (``registry.record_path`` is keyed by pid), which is why a
+    second live record needs a second running process.
+    """
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    try:
+        yield child.pid
+    finally:
+        child.kill()
+        child.wait()
 
 
 def _append_hidden_row(root: Path, session_id: str) -> str:
@@ -1404,6 +1426,255 @@ def test_a_live_rows_started_is_the_records_epoch_not_its_bool(root: Path) -> No
     assert row["state"] == "live", "the record must classify live for the cell to mean anything"
     assert not isinstance(row["started"], bool), "no consumer needs the bool on the wire"
     assert row["started"] == 1789400000.0
+
+
+def test_the_live_half_carries_the_persons_last_send_clock(root: Path) -> None:
+    """A RUNNING row's ordering clock is the person's own last send, off the journal.
+
+    The desktop sidebar's RUNNING order reads ``last_user_at`` (falling back to
+    ``created_at``, then catalogue order), and the origin's peer listing is
+    where a remote row gets its claim — the producer half of the carry half
+    #2084 shipped, read with the same tracker the local half uses
+    (``session/last_user.py``).
+
+    THE SCAN, PINNED IN ONE NUMBER: the newest QUALIFYING row is the STEER — an
+    ordinary unstamped user row carrying a producer identity, exactly what
+    ``_drain_steering`` writes — while an assistant row and a harness injection
+    (``kind: custom``) land AFTER the last typed prompt. A reader that skipped
+    steers would answer the prompt's ts, one that counted non-typed rows would
+    answer one of theirs, and only the person's own words answer the steer's
+    ``1789400300.0``.
+    """
+    import os
+
+    from local_operator.harness.types import Message
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+    from local_operator.session.transcript import (
+        ENTRY_MESSAGE,
+        TranscriptEntry,
+        encode_message_payload,
+    )
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    prompt = Message.user("the original prompt")
+    steer = Message.user("actually, do it the other way")
+    steer_payload = encode_message_payload(steer)
+    # The write ``transcript.append_message`` gives a producer steer: the
+    # ordinary user payload plus the producer identity, nothing else.
+    steer_payload["producer_command_id"] = "cid-steer"
+    directory = root / "sessions" / SESSION
+    directory.mkdir(parents=True)
+    journal = [
+        TranscriptEntry(prompt.id, 1789400000.0, ENTRY_MESSAGE, encode_message_payload(prompt)),
+        TranscriptEntry(
+            "a" * 24,
+            1789400100.0,
+            ENTRY_MESSAGE,
+            encode_message_payload(Message.assistant("working")),
+        ),
+        TranscriptEntry(
+            "c" * 24,
+            1789400200.0,
+            ENTRY_MESSAGE,
+            {"kind": "custom", "custom_type": "job_result", "details": {"text": "a job"}},
+        ),
+        TranscriptEntry(steer.id, 1789400300.0, ENTRY_MESSAGE, steer_payload),
+    ]
+    (directory / "transcript.jsonl").write_text(
+        "\n".join(entry.to_json() for entry in journal) + "\n", encoding="utf-8"
+    )
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=SESSION,
+            conversation_name="live one",
+            cwd=str(root),
+            model_label="test/model",
+            control_port=0,
+            control_key="",
+            started=True,
+            started_at=1789400000.0,
+            # THE PAY RULE'S POSITIVE LIMB: a running row is one the sidebar's
+            # RUNNING order can read, so this one buys the scan.
+            busy=True,
+        ),
+        root,
+    )
+    row = next(item for item in server.local_session_rows() if item["session_id"] == SESSION)
+    assert row["state"] == "live", "the record must classify live for the cell to mean anything"
+    assert row["last_user_at"] == 1789400300.0, (
+        "the value must be the steer's ts — the newest qualifying row — so a "
+        "reader that skipped steers, or counted assistant/custom rows, lands "
+        f"elsewhere: {row['last_user_at']!r}"
+    )
+
+
+def test_the_send_clock_is_bought_only_for_rows_the_remote_section_can_order(
+    root: Path,
+) -> None:
+    """The local half's pay rule, mirrored on the origin's peer listing.
+
+    ``desktop_sessions`` computes ``last_user_at`` only for the status codes the
+    sidebar files under RUNNING — "a row the section will not order must not buy
+    one", because the tracker's cold scan is a real read. The remote order reads
+    the same field on the same condition, and the running status codes a
+    federated row can reach are ``busy`` (pinned above), ``wedged`` and a waiting
+    gate (``pending``); ``delegating`` is derived from live child counts a
+    federated row does not carry, so it can never appear remotely and buys
+    nothing. Everything else publishes ``None`` — the unknown whose fallback
+    (``created_at``, then catalogue order) behaves exactly as before this field
+    existed — including rows whose transcripts COULD answer: an idle resident
+    and a cold session on disk both carry a qualifying journal here and must
+    still read ``None``.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+    from local_operator.session.transcript import (
+        ENTRY_MESSAGE,
+        TranscriptEntry,
+        encode_message_payload,
+    )
+
+    def _typed_journal(session_id: str, ts: float) -> None:
+        directory = root / "sessions" / session_id
+        directory.mkdir(parents=True)
+        message = Message.user("a typed prompt")
+        entry = TranscriptEntry(message.id, ts, ENTRY_MESSAGE, encode_message_payload(message))
+        (directory / "transcript.jsonl").write_text(entry.to_json() + "\n", encoding="utf-8")
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    idle = "1de1de1de1de"
+    cold = "c01dc01dc01d"
+    gate = "9a7e9a7e9a7e"
+    wedged = "6ed66ed66ed6"
+
+    # 1. AN IDLE RESIDENT: live, with a qualifying row, filed under Today on the
+    # far side — no scan.
+    _typed_journal(idle, 1789400000.0)
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=idle,
+            conversation_name="idle one",
+            cwd=str(root),
+            model_label="test/model",
+            control_port=0,
+            control_key="",
+        ),
+        root,
+    )
+    # 2. A COLD SESSION ON DISK: same journal, no record at all — nothing files
+    # it under Running remotely, so it buys no scan either.
+    _typed_journal(cold, 1789400000.0)
+
+    # 3. A WAITING GATE and 4. A WEDGED RUN: both file under Running on the far
+    # side, so both buy the scan.
+    with _live_pid() as gate_pid, _live_pid() as wedged_pid:
+        _typed_journal(gate, 1789400100.0)
+        registry.publish(
+            SessionRecord(
+                pid=gate_pid,
+                kind="tui",
+                session_id=gate,
+                conversation_name="gated one",
+                cwd=str(root),
+                model_label="test/model",
+                control_port=0,
+                control_key="",
+                detached=True,
+                pending="approval",
+            ),
+            root,
+        )
+        _typed_journal(wedged, 1789400200.0)
+        registry.publish(
+            SessionRecord(
+                pid=wedged_pid,
+                kind="tui",
+                session_id=wedged,
+                conversation_name="wedged one",
+                cwd=str(root),
+                model_label="test/model",
+                control_port=0,
+                control_key="",
+            ),
+            root,
+        )
+        # ``publish`` re-stamps the heartbeat of the process that owns the
+        # record, so the stale stamp a WEDGED run would have is written
+        # afterwards, into the record file itself.
+        record_file = registry.record_path(wedged_pid, root)
+        stale = json.loads(record_file.read_text())
+        stale["heartbeat_at"] = time.time() - 3600.0
+        record_file.write_text(json.dumps(stale))
+        rows = {item["session_id"]: item for item in server.local_session_rows()}
+
+    by_id = rows
+    assert by_id[idle]["state"] == "live", "the cell needs a live idle row to mean anything"
+    assert by_id[idle]["last_user_at"] is None, "an idle row is Today's, and buys no scan"
+    assert by_id[cold]["state"] == "stored", "the cell needs a cold row to mean anything"
+    assert by_id[cold]["last_user_at"] is None, "a cold row is never filed under Running"
+    assert by_id[gate]["last_user_at"] == 1789400100.0, "a waiting gate IS a running row"
+    assert by_id[wedged]["state"] == "wedged", "the cell needs a wedged row to mean anything"
+    assert by_id[wedged]["last_user_at"] == 1789400200.0, "a wedged run IS a running row"
+
+
+def test_the_ordering_clock_crosses_a_dialed_listing(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole chain over a real socket: B's journal -> B's rows -> A's listing.
+
+    The cells above pin each layer in isolation; this one is the real path a
+    viewer walks — A dials B, B answers ``net_catalog`` with the row it built
+    from its own record and journal, and A's federated listing carries the
+    value. A frame filter or a fan-out that rebuilt rows instead of copying
+    them would drop an unknown key silently, which no builder-level cell can
+    see; the dialed hop is where that class of loss lives.
+    """
+    import os
+
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    _seed_journal(server_b.root, SESSION, ["the original prompt", "do it the other way"])
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=SESSION,
+            conversation_name="live one",
+            cwd=str(server_b.root),
+            model_label="test/model",
+            control_port=0,
+            control_key="",
+            started=True,
+            started_at=1700000000.0,
+            # A running row is one the remote sidebar can order, so B buys the
+            # scan; the value below is the newest typed row ``_seed_journal``
+            # wrote.
+            busy=True,
+        ),
+        server_b.root,
+    )
+    _dial_to(server_a, record, host_b, port_b)
+    payload = _call(server_a.root, "peer_session_rows")["detail"]
+    row = next(item for item in payload["sessions"] if item["session_id"] == SESSION)
+    assert row["locality"] == "remote", row
+    assert row["last_user_at"] == 1700000001.0, (
+        "the person's clock must cross the link — the newest typed row's ts — "
+        f"not be dropped between B's answer and A's listing: {row['last_user_at']!r}"
+    )
 
 
 def test_a_cold_session_on_a_peer_still_lists_and_can_be_engaged(

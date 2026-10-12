@@ -6100,6 +6100,7 @@ class RelayServer:
         session), so a reader can distinguish "local" from "written by a build
         that does not know about the mesh".
         """
+        from local_operator.session.last_user import last_user_at
         from local_operator.session.placement import local_placement, read_stamp
         from local_operator.session.runtime import registry
 
@@ -6128,6 +6129,25 @@ class RelayServer:
                     # bool's own readers read the RECORD, not a federated row
                     # (the unengaged send gate, the broadcast/steer admission).
                     "started": float(record.started_at or 0.0),
+                    # THE PERSON'S OWN CLOCK, on the rows the remote sidebar's
+                    # RUNNING order can read it on — the local half's own pay
+                    # rule (``server/utils/desktop_sessions.py``): a running
+                    # row orders by when the person last sent it a message,
+                    # every other row's value goes unread, and the tracker's
+                    # cold scan is a real read that a row the section will not
+                    # order must not buy. Payable here: busy, wedged, and a
+                    # waiting gate (``pending``); ``delegating`` is not — it
+                    # derives from live child counts a federated row does not
+                    # carry, so a remote row can never be filed under Running
+                    # for it and its clock would never be read. ``None``
+                    # elsewhere is the unknown this key means on the wire — the
+                    # value the renderer's fallback (``created_at``, then
+                    # catalogue order) runs on, never a minted epoch.
+                    "last_user_at": (
+                        last_user_at(self.root / "sessions" / record.session_id)
+                        if record.busy or state == "wedged" or record.pending
+                        else None
+                    ),
                     "pid": record.pid,
                     "kind": record.kind,
                     "capabilities": list(record.capabilities),
@@ -6227,6 +6247,10 @@ class RelayServer:
                     # listing normally ranks on is exactly what this session has
                     # not written yet.
                     "started": float(stamp.created_at or 0.0),
+                    # No turn yet and no runtime behind the row, so there is
+                    # nothing this clock would order — the same rule and
+                    # spelling as the two halves above (``None`` = no claim).
+                    "last_user_at": None,
                     "pid": 0,
                     "kind": "daemon",
                     "capabilities": [],
@@ -6326,6 +6350,11 @@ class RelayServer:
                     "pending": None,
                     "detached": True,
                     "started": float(getattr(entry.row, "mtime", 0.0) or 0.0),
+                    # Cold on disk, so never filed under Running remotely: no
+                    # scan is bought for it either — same rule and spelling as
+                    # the live half (``local_session_rows``), ``None`` = no
+                    # claim.
+                    "last_user_at": None,
                     "pid": 0,
                     "kind": "daemon",
                     "capabilities": [],
