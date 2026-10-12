@@ -293,6 +293,17 @@ carrying `— blocked: {reason}`.
 > revisit only if a model conflates same-text items in different phases (rare;
 > texts are unique identifiers by the tool's own contract).
 
+> **As built (2026-10-12): the blocked pass fires once per blocked IDENTITY
+> change, not once per turn.** `_run_turn_pipeline` resets only the pending
+> latch (`_todo_reminder_fingerprint`); `_blocked_reminder_fingerprint` —
+> `(phase, text, status)` per blocked item — is cross-turn by design, so an
+> unchanged parked set is not re-asserted on every wake or quiet end, a new or
+> moved item earns exactly one reconciliation, and a reason-only rewrite no
+> longer re-fires (it still expires the stale rendered assertion, because the
+> full fingerprint rides the reminder's `details`). The pending branch keeps
+> its per-turn re-arm; both latches are in-memory, so a restart re-asks once
+> per current set.
+
 ### 5.2 `todo_fingerprint` — grows to a 3-tuple
 
 > **As built (round-1 remediation, 2026-10-10): the live arity is a 4-tuple,
