@@ -2950,6 +2950,39 @@ class SubagentComms:
             return Delivery(job_id, record.label, "failed", "job stopped before the pause landed")
         return Delivery(job_id, record.label, "paused")
 
+    async def resume_async(
+        self, job_id: str, message: str, *, model: str | None = None
+    ) -> tuple[str | None, str | None]:
+        """Prepare exact selectors before the loop-owned resume transaction."""
+        from local_operator.mobile.peer_model import prepared_subagent_selections
+
+        if model is not None and model != "inherit":
+            from local_operator.harness.subagent import model_may_choose_tier
+
+            if not model_may_choose_tier():
+                return None, "specific task models require subagents.model_choice=model"
+        selectors: list[str] = []
+        record = self._record(job_id)
+        selector = model if model is not None else record.model_selector if record else None
+        if selector is not None and selector != "inherit":
+            selectors.append(selector)
+        # Snapshot selectors here, not mutable comms records in a worker:
+        # a settled owning ancestor can require metadata resolution too.
+        seen: set[str] = set()
+        ancestor_id = record.parent_job_id if record else None
+        while ancestor_id and ancestor_id not in seen:
+            seen.add(ancestor_id)
+            ancestor = self._record(ancestor_id)
+            if ancestor is None:
+                break
+            if ancestor.model_selector is not None and ancestor.model_selector != "inherit":
+                selectors.append(ancestor.model_selector)
+            ancestor_id = ancestor.parent_job_id
+        async with prepared_subagent_selections(selectors):
+            # Status, policy, lineage and transcript presence are rechecked
+            # after the await on the loop that registers/folds the job rows.
+            return self.resume(job_id, message, model=model)
+
     def resume(
         self, job_id: str, message: str, *, model: str | None = None
     ) -> tuple[str | None, str | None]:

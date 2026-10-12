@@ -6,7 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from local_operator.harness.comms import SubagentComms
-from local_operator.harness.types import ModelSpec, TextContent
+from local_operator.harness.types import Message, ModelSpec, TextContent
+from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import (
     TaskParams,
     build_task_tool,
@@ -222,6 +223,132 @@ async def test_nested_inherit_replays_nearest_direct_pin_after_restart(tmp_path,
         assert row(session, resumed_id).model_label == "deepseek/deepseek-chat"
         assert row(session, resumed_id).owns_model is False
         assert "its parent's model" in text(result)
+    finally:
+        release.set()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["task", "hub", "ancestor"])
+async def test_exact_selector_validation_does_not_block_shared_loop(tmp_path, monkeypatch, surface):
+    """The loop must run while validation is held, not merely meet a timing budget."""
+    import asyncio
+    import threading
+
+    session = setup(tmp_path, monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    worker_threads: list[int] = []
+    loop_thread = threading.get_ident()
+    monkeypatch.setattr(
+        "local_operator.mobile.peer_model.validate_peer_selection", lambda p, m: PIN
+    )
+    job_id, _ = await launch(session, model="deepseek/deepseek-chat")
+    if surface == "ancestor":
+        record = session.subagent_comms._record(job_id)
+        assert record is not None
+        session.subagent_comms.record_launch(
+            "worker",
+            "worker",
+            parent_job_id=job_id,
+            model_selector="inherit",
+            model_selection_source="explicit_inherit",
+        )
+        worker = session.subagent_comms._record("worker")
+        assert worker is not None
+        worker.session_dir = record.session_dir.parent / "worker-transcript"
+        await Transcript(worker.session_dir).append_message(Message.user("go"))
+        job_id = "worker"
+
+    def held_validation(provider, model_id):
+        worker_threads.append(threading.get_ident())
+        entered.set()
+        # Safety bound only: assertions use synchronization, not elapsed time.
+        if not release.wait(5):
+            raise ValueError("loop could not release metadata validation")
+        return PIN
+
+    monkeypatch.setattr("local_operator.mobile.peer_model.validate_peer_selection", held_validation)
+    before = len(session.subagent_comms.snapshot())
+    if surface == "task":
+        operation = execute_task(
+            "held",
+            {"label": "held", "prompt": "go", "model": "deepseek/deepseek-chat"},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+    else:
+        operation = execute_hub(
+            "held",
+            {"op": "resume", "to": [job_id], "message": "go"},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+
+    async def run_operation():
+        return await operation
+
+    pending = asyncio.create_task(run_operation())
+    try:
+        async with asyncio.timeout(10):
+            while not entered.is_set():
+                await asyncio.sleep(0)
+        # This code can execute only if validation yielded the loop. No new
+        # job may register before the worker produces its validated spec.
+        assert not pending.done()
+        assert len(session.subagent_comms.snapshot()) == before
+        assert worker_threads == [worker_threads[0]] and worker_threads[0] != loop_thread
+        release.set()
+        result = await pending
+        assert not result.is_error, text(result)
+    finally:
+        release.set()
+        await pending
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_exact_validation_never_registers_a_child(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    session = setup(tmp_path, monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def held(provider, model_id):
+        entered.set()
+        release.wait(5)
+        finished.set()
+        return PIN
+
+    monkeypatch.setattr("local_operator.mobile.peer_model.validate_peer_selection", held)
+
+    async def run():
+        return await execute_task(
+            "cancel",
+            {"label": "cancel", "prompt": "go", "model": "deepseek/deepseek-chat"},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+
+    pending = asyncio.create_task(run())
+    try:
+        async with asyncio.timeout(10):
+            while not entered.is_set():
+                await asyncio.sleep(0)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        release.set()
+        async with asyncio.timeout(10):
+            while not finished.is_set():
+                await asyncio.sleep(0)
+        assert not session.subagent_comms.snapshot()
     finally:
         release.set()
         await session.dispose()
