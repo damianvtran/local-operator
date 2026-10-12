@@ -96,6 +96,7 @@ from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.adapters.api import (
     ADAPTER_SCHEMA_VERSION,
     AskUserExchangeParams,
+    AskUserExchangeResult,
     CleanupParams,
     CloseParams,
     ExecuteParams,
@@ -693,22 +694,51 @@ ExecuteBatch = Callable[[ActionBatch], Awaitable[Any]]
 RecoverObservation = Callable[[], Awaitable[Observation]]
 
 
-def _ask_delivery_sentence(answer: str | None) -> str:
+def _split_ask_delivery(delivery: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """The ask seam's return, split into (canonical receipt, answer text).
+
+    The real seam returns the adapter's ``AskUserExchangeResult`` -- the
+    canonical public receipt (ask_id, request digest, accepted/declined,
+    public answer). Scripted doubles may return a bare answer string (no
+    receipt exists at that seam, and none is invented); ``None`` is a
+    declined/empty exchange either way.
+    """
+
+    if isinstance(delivery, AskUserExchangeResult):
+        return delivery.model_dump(mode="json"), delivery.answer
+    if delivery is None:
+        return None, None
+    return None, str(delivery)
+
+
+def _ask_delivery_sentence(answer: str | None, receipt: dict[str, Any] | None) -> str:
     """The ask exchange's report, as the model reads it on the tool result.
 
     Written to be honest in BOTH directions: an empty/declined exchange says so
     explicitly (never an invented answer, never silence), and a real answer is
     quoted verbatim -- the answer text is the exchange's product and the whole
     point of carrying it into the next root request.
+
+    THE RECEIPT RIDES THE TEXT (R4, review round 1). The MCP forwarding layer
+    delivers only the reply's CONTENT blocks to the next root request -- the
+    bridge-local ``details`` never reach the model -- so the canonical
+    exchange receipt is rendered INTO the text when one exists (a bare
+    scripted answer has no receipt to render).
     """
 
     if answer is None:
-        return (
+        sentence = (
             "The simulated user did not provide an answer for this ask (declined "
             "or empty); continue with what you know and do not repeat the same "
             "question."
         )
-    return f"The simulated user answered: {answer}"
+    else:
+        sentence = f"The simulated user answered: {answer}"
+    if receipt is not None:
+        sentence += "\nask_user exchange receipt: " + json.dumps(
+            receipt, sort_keys=True, ensure_ascii=False
+        )
+    return sentence
 
 
 @dataclass
@@ -737,7 +767,11 @@ class ActionBridge:
     execute: ExecuteBatch
     max_steps: int
     record: RecordBatch | None = None
-    ask: Callable[[ActionBatch], Awaitable[str | None]] | None = None
+    #: The ask seam. The real driver returns the adapter's canonical
+    #: ``AskUserExchangeResult`` (receipt + answer); scripted doubles may
+    #: return a bare answer string, which the bridge renders without inventing
+    #: a receipt (see ``_split_ask_delivery``).
+    ask: Callable[[ActionBatch], Awaitable[Any]] | None = None
     #: The re-bind seam (see :data:`RecoverObservation`): exactly ONE read of
     #: the environment's current observation, attempted only after an execute
     #: failure the adapter declared committed. The bridge owns WHEN; the
@@ -1252,18 +1286,26 @@ class ActionBridge:
                         "details": {"rejection_class": "ask_user-unsupported"},
                     }
                 self._consume_output_epoch("ask_user")
-                answer = await self.ask(batch)
-                # The exchange's THIRD consumer: the answer text and the
-                # receipt ride the native result (staged here; attached to
-                # whichever path answers this call). The ask-sentinel defect
-                # was this value being dropped on the floor while the refresh
-                # execute below still ran -- the model asked, the user
-                # answered, and the next root request could not see it.
-                self._pending_ask_delivery = [TextContent(text=_ask_delivery_sentence(answer))]
+                delivery = await self.ask(batch)
+                # The exchange's THIRD consumer: the answer text AND the
+                # canonical receipt ride the native result's CONTENT (staged
+                # here; attached to whichever path answers this call). The
+                # ask-sentinel defect was this value being dropped on the
+                # floor while the refresh execute below still ran -- and the
+                # MCP forwarding layer only carries CONTENT to the next root
+                # request, so a receipt kept solely in ``details`` would be
+                # dropped again at that boundary (R4, review round 1).
+                receipt, answer_text = _split_ask_delivery(delivery)
+                self._pending_ask_delivery = [
+                    TextContent(text=_ask_delivery_sentence(answer_text, receipt))
+                ]
                 self._pending_ask_receipt = {
-                    "answered": answer is not None,
-                    "answer": answer,
+                    "answered": answer_text is not None,
+                    "answer": answer_text,
+                    "receipt": receipt,
                 }
+                if self.record is not None and receipt is not None:
+                    self.record("ask_exchange", {"receipt": receipt})
             else:
                 # The batch is ADMITTED here: ONE external output epoch,
                 # consumed BEFORE the guest-execution await. The old increment
@@ -2034,6 +2076,19 @@ async def run_session_episode(
     cleanup_done = False
     plan: CleanupPlan | None = None
     rescue_complete: bool | None = None
+    #: Bound by ``open_episode_session``; declared BEFORE the try so the
+    #: exception path can always read them (an early failure -- launch,
+    #: handshake, prepare -- must not NameError its own close-out).
+    handle: EpisodeSession | None = None
+    #: The owned-work shutdown's receipt (``OwnedShutdownResult``), bound by
+    #: the close-out and read by the score/release gates: ``complete=False``
+    #: refuses the score and retains the worker. ``None`` means no receipt was
+    #: produced at all -- unverified, never read as success.
+    shutdown_result: Any = None
+    #: The release gate's disposition (R2): True when owned work is unverified
+    #: and the worker must NOT be released. Read by the cleanup paths and the
+    #: closing ``_close_adapter_session``.
+    retain_resources = False
     outcome: SessionArmOutcome
 
     def _mark_rescue_required() -> None:
@@ -2196,14 +2251,10 @@ async def run_session_episode(
         #: episode's final turn ended, captured outside the record path so a
         #: torn record cannot cost the outcome its reason.
         last_turn_end: AgentEndEvent | None = None
-        #: Bound by ``open_episode_session`` below; the sink reads it late
-        #: (a wedge can only be set by a call, which only happens after the
-        #: session is prompting, i.e. after this assignment).
-        handle: EpisodeSession | None = None
-        #: The owned-work shutdown's receipt (``OwnedShutdownResult``), bound by
-        #: the close-out below and read by the score gate: ``complete=False``
-        #: refuses the score. ``None`` means no receipt was produced at all.
-        shutdown_result: Any = None
+        # ``handle``/``shutdown_result`` are declared BEFORE the try so the
+        # exception path can always read them; this is where ``handle`` -- the
+        # session the sink reads late (a wedge can only be set by a call, which
+        # only happens once the session is prompting) -- comes into scope.
 
         def _sink(event: AgentEvent) -> None:
             # The sink sits on the engine's own dispatch path, where handler
@@ -2251,18 +2302,20 @@ async def run_session_episode(
             # admitted output epoch is PAIRED into the transcript, request the
             # loop's own graceful boundary -- the current group's remaining
             # calls finish and pair, and the next root request is never
-            # spent. The bridge's own budget refusal stays the fail-closed
-            # fallback for any call that still arrives. ``end_requested``
-            # excludes the finish/wedge terminals, which already end the
-            # episode; the check is a state test, never a tool-call-name
-            # heuristic (the declaration names the ONE action tool the arm
-            # installed itself).
+            # spent. ``end_requested`` is deliberately NOT read here: a
+            # terminal finish ends guest admission but NOT the SDK turn, and
+            # without this stop the model spends one more root request on a
+            # decision the terminal bridge can only refuse (measured by
+            # review round 1: finish at epoch N recorded N+1 root requests
+            # with no stop marker). The bridge's own budget refusal stays the
+            # fail-closed fallback for any call that still arrives; the check
+            # is a state test, never a tool-call-name heuristic (the
+            # declaration names the ONE action tool the arm installed itself).
             if (
                 not budget_stop_sent
                 and handle is not None
                 and isinstance(event, ToolExecutionEndEvent)
                 and event.tool_name == declaration.tool_name
-                and bridge.end_requested is None
                 and bridge.steps >= config.max_steps
             ):
                 budget_stop_sent = True
@@ -2352,14 +2405,60 @@ async def run_session_episode(
                 shutdown_result = await handle.session.shutdown_owned_work(
                     "episode-turn-complete", timeout_s=config.cleanup_timeout
                 )
-            except Exception as error:  # noqa: BLE001 - the close-out must still reach aclose
+            except Exception as error:  # noqa: BLE001 - the close-out must still reach the close
                 record.write(
                     "error",
                     {"scope": "shutdown", "diagnostic": f"{type(error).__name__}: {error}"},
                 )
-            await handle.aclose()
+            # BOUNDED CLOSE (R2, review round 1): the context exit joins the
+            # SAME canonical cleanup, and after a completed shutdown it
+            # returns immediately. After an INCOMPLETE one it used to be
+            # awaited with NO bound -- re-entering the stuck cleanup forever
+            # (measured: still pending at .03 s against a held hook). It is
+            # bounded now; on a timeout the exit is cancelled and this join
+            # attempt dropped. Within the live process the canonical cleanup
+            # keeps running under its own shield; past process exit
+            # (``asyncio.run`` cancels pending tasks at teardown) the durable
+            # retention is the DESCRIPTOR + TTL, and the disposition below
+            # retains the worker instead of releasing it. Nothing here claims
+            # the owned task survived the caller's exit.
+            close_joined = False
             try:
-                _flush_request_observation(record, handle)
+                close_joined = await _bounded_close(handle, config.cleanup_timeout)
+                if close_joined and (shutdown_result is None or not shutdown_result.complete):
+                    # A FRESH VERIFIED JOIN: the canonical cleanup finished
+                    # after the first bound, so the exit joined it -- re-query
+                    # the owning receipt (incomplete receipts are never
+                    # cached; a fresh call re-reads the CURRENT state under a
+                    # small bound, resolving immediately when the task is
+                    # done). Only a receipt that NOW reads complete may
+                    # re-enable the score and the release below; anything
+                    # else keeps the retention disposition.
+                    try:
+                        refreshed = await handle.session.shutdown_owned_work(
+                            "episode-turn-complete", timeout_s=_OWNED_REJOIN_TIMEOUT_S
+                        )
+                        shutdown_result = refreshed
+                    except Exception as error:  # noqa: BLE001 - see above
+                        record.write(
+                            "error",
+                            {
+                                "scope": "shutdown-rejoin",
+                                "diagnostic": f"{type(error).__name__}: {error}",
+                            },
+                        )
+            except BaseException as error:  # noqa: BLE001 - a close-out must reach the flush
+                record.write(
+                    "error",
+                    {"scope": "close", "diagnostic": f"{type(error).__name__}: {error}"},
+                )
+            if not close_joined:
+                record.write(
+                    "close_retained",
+                    {"timeout_s": config.cleanup_timeout, "steps": bridge.steps},
+                )
+            try:
+                _flush_request_observation(record, handle, close_joined=close_joined)
             except BaseException as error:  # noqa: BLE001 - a close-out must complete
                 if not record_errors:
                     record_errors.append(error)
@@ -2398,9 +2497,11 @@ async def run_session_episode(
         # the episode reached, and it may only be taken once every piece of
         # owned work is joined. An incomplete or absent receipt is UNVERIFIED
         # -- a score over it would read as a finished episode while children
-        # it owns might still touch the world. No score, no readiness claim;
-        # the WORKER cleanup below still runs so nothing leaks.
+        # it owns might still touch the world. No score, no readiness claim.
         owned_complete = bool(shutdown_result is not None and shutdown_result.complete)
+        #: R2's release gate: owned work STARTED (a session was opened) and is
+        #: not verified joined -- so the worker must not be released.
+        retain_resources = handle is not None and not owned_complete
         if shutdown_result is not None:
             record.write(
                 "shutdown",
@@ -2424,8 +2525,17 @@ async def run_session_episode(
                 incomplete_detail = "; ".join(shutdown_result.errors)
             else:
                 incomplete_detail = shutdown_result.reason
+            retain_note = (
+                " The worker was NOT released: owned work is unverified, the "
+                "rescue descriptor is retained, and a fresh verified join (or a "
+                "separately authorized supervisor teardown) must precede any "
+                "release."
+                if retain_resources
+                else ""
+            )
             stop_diagnostic = (
-                f"owned-work shutdown did not complete before scoring: {incomplete_detail}"
+                f"owned-work shutdown did not complete before scoring: {incomplete_detail}."
+                f"{retain_note}"
             )
         # --- score, then cleanup, then close (mirrors _close_out) -----------
         score: Any = None
@@ -2472,32 +2582,57 @@ async def run_session_episode(
                     {"scope": "score", "diagnostic": f"{type(error).__name__}: {error}"},
                 )
         receipts: tuple[Any, ...] = ()
-        try:
-            receipts = await adapter_session.cleanup(
-                CleanupParams(
-                    operation_id=f"cleanup-{spec.episode_id}",
-                    cleanup_plan=plan,
-                    action_ids=tuple(action.action_id for action in plan.actions),
-                ),
-                timeout=config.cleanup_timeout,
-            )
-        except BaseException as error:
+        if retain_resources:
+            # THE DESTRUCTIVE-RELEASE GATE (R2): releasing the worker (the
+            # cleanup RPC's close_session/release_instance/revoke_lease) is
+            # only safe once the owned tree is a VERIFIED join -- an
+            # unverified cleanup may still have live jobs calling into that
+            # worker, and tearing the resource down underneath them is the
+            # hazard this gate exists for. The release is SKIPPED here; the
+            # rescue descriptor is RETAINED (never discarded, rescue never
+            # attempted) so the resource stays discoverable for a later
+            # verified teardown (the sweep) or the TTL schedule, and
+            # ``rescue_required`` marks the worker as not-confirmed-clean.
+            rescue_required = True
             record.write(
-                "error",
-                {"scope": "cleanup", "diagnostic": f"{type(error).__name__}: {error}"},
+                "cleanup_retained",
+                {
+                    "reason": "owned work unverified; release deferred",
+                    "pending_job_ids": (
+                        list(shutdown_result.pending_job_ids) if shutdown_result is not None else []
+                    ),
+                    "errors": (list(shutdown_result.errors) if shutdown_result is not None else []),
+                    "descriptor_retained": descriptor is not None,
+                    "descriptor_id": descriptor.descriptor_id if descriptor is not None else None,
+                },
             )
+        else:
+            try:
+                receipts = await adapter_session.cleanup(
+                    CleanupParams(
+                        operation_id=f"cleanup-{spec.episode_id}",
+                        cleanup_plan=plan,
+                        action_ids=tuple(action.action_id for action in plan.actions),
+                    ),
+                    timeout=config.cleanup_timeout,
+                )
+            except BaseException as error:
+                record.write(
+                    "error",
+                    {"scope": "cleanup", "diagnostic": f"{type(error).__name__}: {error}"},
+                )
+            # A dead worker cannot produce evidence, and "attempted" alone is
+            # never evidence of cleanup -- ``aggregate_cleanup`` is the one
+            # statement of that rule (exactly one receipt per declared action;
+            # only ``succeeded`` and ``not_needed`` aggregate clean).
+            rescue_required = rescue_required or _cleanup_forces_rescue(plan, receipts)
+            if rescue_required and descriptor is not None:
+                rescue_complete = await _attempt_rescue(
+                    descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
+                )
+            elif descriptor is not None:
+                _discard_descriptor(config)
         cleanup_done = True
-        # A dead worker cannot produce evidence, and "attempted" alone is never
-        # evidence of cleanup -- ``aggregate_cleanup`` is the one statement of
-        # that rule (exactly one receipt per declared action; only ``succeeded``
-        # and ``not_needed`` aggregate clean).
-        rescue_required = rescue_required or _cleanup_forces_rescue(plan, receipts)
-        if rescue_required and descriptor is not None:
-            rescue_complete = await _attempt_rescue(
-                descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
-            )
-        elif descriptor is not None:
-            _discard_descriptor(config)
         # A score failure on a run that already ended wedged is a CONSEQUENCE
         # of the wedge (a failed re-read poisons the session, and a poisoned
         # session cannot score), so the wedge stays the reported diagnostic --
@@ -2540,21 +2675,46 @@ async def run_session_episode(
         # a failed episode regardless of what the model did. Cleanup is
         # attempted even when the failure landed mid-turn -- the runner's
         # failure path runs the same close-out for the same reason -- and a
-        # cleanup that cannot complete forces the rescue path.
+        # cleanup that cannot complete forces the rescue path. THE SAME
+        # RELEASE GATE AS THE NORMAL PATH (R2): when owned work STARTED and is
+        # unverified, nothing is released here either; the descriptor stays
+        # for a later verified teardown.
+        exc_retain = handle is not None and not (
+            shutdown_result is not None and bool(shutdown_result.complete)
+        )
+        retain_resources = retain_resources or exc_retain
         if adapter_session is not None and plan is not None and not cleanup_done:
-            try:
-                receipts = await adapter_session.cleanup(
-                    CleanupParams(
-                        operation_id=f"cleanup-{spec.episode_id}",
-                        cleanup_plan=plan,
-                        action_ids=tuple(action.action_id for action in plan.actions),
-                    ),
-                    timeout=config.cleanup_timeout,
-                )
-                rescue_required = rescue_required or _cleanup_forces_rescue(plan, receipts)
-            except BaseException:
+            if exc_retain:
                 rescue_required = True
-        if rescue_required and descriptor is not None:
+                record.write(
+                    "cleanup_retained",
+                    {
+                        "reason": "owned work unverified; release deferred",
+                        "pending_job_ids": (
+                            list(shutdown_result.pending_job_ids)
+                            if shutdown_result is not None
+                            else []
+                        ),
+                        "descriptor_retained": descriptor is not None,
+                        "descriptor_id": (
+                            descriptor.descriptor_id if descriptor is not None else None
+                        ),
+                    },
+                )
+            else:
+                try:
+                    receipts = await adapter_session.cleanup(
+                        CleanupParams(
+                            operation_id=f"cleanup-{spec.episode_id}",
+                            cleanup_plan=plan,
+                            action_ids=tuple(action.action_id for action in plan.actions),
+                        ),
+                        timeout=config.cleanup_timeout,
+                    )
+                    rescue_required = rescue_required or _cleanup_forces_rescue(plan, receipts)
+                except BaseException:
+                    rescue_required = True
+        if rescue_required and descriptor is not None and not exc_retain:
             rescue_complete = await _attempt_rescue(
                 descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
             )
@@ -2579,8 +2739,21 @@ async def run_session_episode(
         )
     finally:
         if bridge is not None:
+            # The local action server stops even on the retained disposition:
+            # it is caller-local plumbing (a socket the episode's own MCP
+            # child serves), no retained work can be calling it (children are
+            # denied the action tool and the root turn is over), and it
+            # releases no worker resource. The worker-side releases are the
+            # ones the gate in ``_close_adapter_session`` holds back.
             await bridge.stop()
-        await _close_adapter_session(adapter_session, supervisor, spec, config, rescue_required)
+        await _close_adapter_session(
+            adapter_session,
+            supervisor,
+            spec,
+            config,
+            rescue_required,
+            retain_resources=retain_resources,
+        )
 
     # --- the seal -----------------------------------------------------------
     # Every other writer has stopped above, so nothing is competing with these
@@ -2698,7 +2871,53 @@ def _cleanup_forces_rescue(plan: CleanupPlan, receipts: Sequence[Any]) -> bool:
         return True
 
 
-def _flush_request_observation(record: RecordSink, handle: EpisodeSession) -> None:
+#: The bound for the close-out's RE-QUERY of the owning receipt after a late
+#: verified join. The canonical task is already done by then, so the call
+#: resolves immediately; the small bound only guards a pathological state.
+_OWNED_REJOIN_TIMEOUT_S = 5.0
+
+
+async def _bounded_close(handle: EpisodeSession, timeout_s: float) -> bool:
+    """Exit the session's context under a BOUND; True when it joined and returned.
+
+    WHY THIS EXISTS (R2, review round 1). ``handle.aclose()`` runs the SDK
+    context exit, which JOINS the canonical disposal -- the same cleanup
+    ``shutdown_owned_work`` joins. After an incomplete shutdown that join used
+    to be awaited with no bound, so a stuck cleanup hung the whole close-out
+    (measured: still pending at .03 s against a held hook). Here the exit is
+    awaited inside ``asyncio.wait``: when it completes, the join is verified;
+    when the bound fires the exit is CANCELLED and abandoned -- safely,
+    because ``dispose`` joins the canonical task under its own shield, so
+    cancelling THIS waiter never cancels the shared cleanup.
+
+    WHAT RETENTION MEANS, EXACTLY (architect note, 2026-10-12). Within a LIVE
+    process the canonical cleanup keeps running and stays joinable by a later
+    in-process entrant; the waiter cancellation only drops THIS join attempt.
+    The CLI, however, returns through ``asyncio.run`` in ``run_episode``,
+    which CANCELS pending tasks at teardown -- so nothing here may claim the
+    owned task survives process exit, and no receipt may read as completed
+    cleanup. The DURABLE retention across the caller's exit is the rescue
+    DESCRIPTOR plus the TTL/outer-supervisor story, never the in-process
+    task; see ``_close_adapter_session`` for the no-release gate that pairs
+    with it. Deliberately NOT ``asyncio.wait_for``: ``wait_for`` waits
+    indefinitely for the cancelled coroutine to actually finish, which is
+    exactly the unbounded re-entry this bound exists to prevent.
+    """
+
+    exit_task = asyncio.ensure_future(handle.aclose())
+    done, _pending = await asyncio.wait({exit_task}, timeout=timeout_s)
+    if exit_task in done:
+        failure = exit_task.exception()
+        if failure is not None:
+            raise failure
+        return True
+    exit_task.cancel()
+    return False
+
+
+def _flush_request_observation(
+    record: RecordSink, handle: EpisodeSession, *, close_joined: bool | None = None
+) -> None:
     """Serialize the queued request-final rows and price them ONCE.
 
     THE TWO MONEY FIGURES, kept separate (blueprint §2; ``cost_summary`` is
@@ -2707,11 +2926,21 @@ def _flush_request_observation(record: RecordSink, handle: EpisodeSession) -> No
     is the same canonical table projection for rows without a stamp, so a
     direct-route run keeps an estimate even though ``recorded_only`` alone
     would lose it. ``missing_usage_request_ids`` names rows where NO usage
-    frame arrived: unknown, NEVER a priced zero -- and because retry/fallback
-    sub-streams can be entirely unreported by a logical final, the recorded
-    figure is a LOWER BOUND and is labelled as such. Cache read/write and
+    frame arrived: unknown, NEVER a priced zero. Cache read/write and
     reasoning ride inside the usage buckets the canonical pricer already
     separates; nothing here re-adds them to input/output.
+
+    INVOICE COVERAGE IS CONSERVATIVE BY CONSTRUCTION (R1, review round 1).
+    The observer reports LOGICAL-REQUEST finals, and a final's
+    ``usage_coverage == "reported_final"`` covers only the LAST attempt's
+    receipt: a retry that billed an earlier attempt is not reconciled here
+    (measured: a two-attempt request billed .03 + .12 while the deduplicated
+    final recorded .12 with coverage "reported_final"). So
+    ``recorded_is_lower_bound`` is TRUE whenever any rows were observed --
+    the recorded total may understate the bill -- and it flips False only
+    under a future invoice-wide reconciliation, never from the per-request
+    coverage label alone. ``invoice_coverage`` names the coverage actually
+    held (``logical_final_only``).
     """
 
     from local_operator.model.costs import cost_summary
@@ -2721,10 +2950,13 @@ def _flush_request_observation(record: RecordSink, handle: EpisodeSession) -> No
     recorded_usd, recorded_unknown = cost_summary(usages, recorded_only=True)
     estimated_usd, estimated_unknown = cost_summary(usages, recorded_only=False)
     purposes: dict[str, int] = {}
+    coverage_counts: dict[str, int] = {}
     missing_usage_request_ids: list[str] = []
     for row in rows:
         purpose = str(row.get("purpose") or "unknown")
         purposes[purpose] = purposes.get(purpose, 0) + 1
+        coverage = str(row.get("usage_coverage") or "missing")
+        coverage_counts[coverage] = coverage_counts.get(coverage, 0) + 1
         if row.get("usage") is None:
             missing_usage_request_ids.append(str(row.get("request_id") or ""))
     record.write(
@@ -2732,13 +2964,20 @@ def _flush_request_observation(record: RecordSink, handle: EpisodeSession) -> No
         {
             "count": len(rows),
             "purpose_counts": purposes,
+            "usage_coverage_counts": coverage_counts,
             "rows": rows,
             "missing_usage_request_ids": missing_usage_request_ids,
             "recorded_usd": recorded_usd,
             "recorded_unknown": recorded_unknown,
-            "recorded_is_lower_bound": bool(recorded_unknown or missing_usage_request_ids),
+            "recorded_is_lower_bound": bool(rows) or bool(recorded_unknown),
+            "invoice_coverage": "logical_final_only",
             "estimated_usd": estimated_usd,
             "estimated_unknown": estimated_unknown,
+            # PROVISIONAL ACCOUNTING (R2 acceptance): when the session's close
+            # did not join, final rows can still arrive and this snapshot is
+            # explicitly NOT a sealed complete account -- the flag says which
+            # it is. ``None`` keeps the legacy callers' shape.
+            "close_joined": close_joined,
         },
     )
 
@@ -2841,8 +3080,16 @@ def _make_recover(
 
 def _make_ask(
     adapter_session: VerifiedAdapterSession, config: EpisodeConfig, answer_owner: str
-) -> Callable[[ActionBatch], Awaitable[str | None]] | None:
-    """The ask seam, adapter-owned answers only (the pilot arm's posture)."""
+) -> Callable[[ActionBatch], Awaitable[AskUserExchangeResult | None]] | None:
+    """The ask seam, adapter-owned answers only (the pilot arm's posture).
+
+    Returns the CANONICAL ``AskUserExchangeResult`` (R4, review round 1): the
+    public receipt -- ask_id, request digest, accepted/declined, public answer
+    -- crosses to the bridge so it can ride the native tool result's content.
+    Returning only ``result.answer`` (the old shape) threw the receipt away at
+    this very boundary, and the MCP forwarding layer drops ``details``, so the
+    next root request could never see it. One exchange RPC, unchanged.
+    """
 
     if answer_owner != "adapter":
         # Host-owned answers need a responder surface the pilot arm does not
@@ -2851,7 +3098,7 @@ def _make_ask(
         # that answers these today.
         return None
 
-    async def ask(batch: ActionBatch) -> str | None:
+    async def ask(batch: ActionBatch) -> AskUserExchangeResult:
         from local_operator.evaluation.runner.episode import _ask_prompt
 
         ask_id, prompt = _ask_prompt(batch)
@@ -2863,7 +3110,7 @@ def _make_ask(
         )
         adapter_session.begin_ask(begin)
         result = await adapter_session.finish_ask(begin, timeout=config.step_timeout)
-        return result.answer
+        return result
 
     return ask
 
@@ -2946,9 +3193,27 @@ async def _close_adapter_session(
     spec: EpisodeSpec,
     config: EpisodeConfig,
     rescue_required: bool,
+    *,
+    retain_resources: bool = False,
 ) -> None:
-    """Mirror ``EpisodeRunner._close_session``: close, then terminate."""
+    """Mirror ``EpisodeRunner._close_session``: close, then terminate.
 
+    THE RETENTION GATE (R2): with ``retain_resources`` set (owned work
+    unverified), NOTHING is released -- no ``close_session`` RPC and no
+    supervisor terminate. The adapter close would tear the session down
+    under possibly-live owned calls, and the terminate kills the local
+    worker process out from under a cleanup that may still be using it. The
+    worker process is self-reaping in the long run (when this caller exits,
+    its owner-fd EOF ends it -- the same rescue invariant used when a parent
+    dies unexpectedly), and the DURABLE retention is the rescue descriptor
+    plus the TTL schedule: a fresh verified join, or a separately authorized
+    supervisor teardown, precedes any release. This is a caller-side
+    disposition only -- it neither claims the in-process cleanup completed
+    nor that it survived the caller's exit.
+    """
+
+    if retain_resources:
+        return
     if adapter_session is not None and not rescue_required:
         try:
             await adapter_session.close(

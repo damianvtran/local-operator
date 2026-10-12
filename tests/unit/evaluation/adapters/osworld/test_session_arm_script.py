@@ -60,13 +60,18 @@ def _run_rig(
     challenge_reply: str | None = None,
     ending: str = "finish",
     max_steps: int | None = None,
+    task_id: str = "task_plain",
+    tasks: dict[str, str] | None = None,
+    provider: dict[str, object] | None = None,
+    ask_first: bool = False,
+    cleanup_hook: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     selector_dir = root / "adapter"
     selector = spawn_helpers.build_spawnable_adapter(
         selector_dir,
         wheel,
-        {"task_plain": fixtures.PLAIN},
-        provider={"provider": "fake", "scripted_score": 1.0},
+        tasks if tasks is not None else {"task_plain": fixtures.PLAIN},
+        provider=provider or {"provider": "fake", "scripted_score": 1.0},
         interpreter=interpreter,
     )
     # The session engagement's source pin (blueprint §4): a selector without
@@ -128,9 +133,13 @@ def _run_rig(
         args += ["--child-acts", child_acts]
     if challenge_reply is not None:
         args += ["--challenge-reply", challenge_reply]
-    args += ["--ending", ending]
+    args += ["--ending", ending, "--task-id", task_id]
     if max_steps is not None:
         args += ["--max-steps", str(max_steps)]
+    if ask_first:
+        args += ["--ask-first"]
+    if cleanup_hook is not None:
+        args += ["--cleanup-hook", cleanup_hook]
     completed = subprocess.run(
         args, capture_output=True, text=True, env=env, cwd=str(REPO), check=False
     )
@@ -459,9 +468,7 @@ def test_the_step_budget_stops_before_the_next_root_request(
     """
 
     root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
-    completed, run_root, log = _run_rig(
-        root, adapter_wheel, spawn_interpreter, max_steps=1
-    )
+    completed, run_root, log = _run_rig(root, adapter_wheel, spawn_interpreter, max_steps=1)
 
     outcome = _outcome(completed, expect_status="truncated")
     assert outcome["steps"] == 1
@@ -478,3 +485,148 @@ def test_the_step_budget_stops_before_the_next_root_request(
     # script would have made (the finish) was never spent.
     events = _log_events(log)
     assert len([event for event in events if event.get("episode")]) == 1, events
+
+
+def test_the_budget_stop_fires_after_a_terminal_finish_at_the_nth_epoch(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """R3: a terminal finish at epoch N must not spend root request N+1.
+
+    Review round 1 measured the gap on this exact shape: with ``--max-steps
+    1`` the accepted failed finish consumed epoch 1 but the run recorded TWO
+    root turn requests and no ``budget_stop``. The stop now fires on the
+    PAIRED result of the Nth admitted epoch regardless of the terminal
+    ``end_requested``, so the second request is never spent.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root, adapter_wheel, spawn_interpreter, ending="budget-failed-finish", max_steps=1
+    )
+
+    outcome = _outcome(completed)
+    assert outcome["steps"] == 1
+    assert outcome["terminal_reason"] == "finish"
+
+    kinds = _record_kinds(run_root)
+    assert kinds.count("budget_stop") == 1
+    assert kinds.count("action_finish") == 1
+    # The observer's root-turn count is the discriminator: ONE root request,
+    # not two. (This is the caller's stop boundary, not a claim that root
+    # requests equal official epochs.)
+    requests_row = _record_payloads(run_root, "requests")[0]
+    assert requests_row["purpose_counts"] == {"turn": 1}
+
+
+def test_the_budget_stop_fires_after_the_accepted_challenge_at_the_nth_epoch(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """R3: challenged at epoch 1, accepted at epoch 2 == the budget: stop there.
+
+    Pre-fix this shape recorded THREE root turn requests (the accepted finish
+    ended guest admission but not the SDK turn, and no stop was sent); the
+    fix leaves it at two: the opening request and the one post-challenge
+    re-declaration, with the stop closing admission at the accepted epoch.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root, adapter_wheel, spawn_interpreter, ending="budget-done-finish", max_steps=2
+    )
+
+    outcome = _outcome(completed)
+    assert outcome["steps"] == 2
+    assert outcome["terminal_reason"] == "finish"
+
+    kinds = _record_kinds(run_root)
+    assert kinds.count("action_completion_challenged") == 1
+    assert kinds.count("action_finish") == 1
+    assert kinds.count("budget_stop") == 1
+    requests_row = _record_payloads(run_root, "requests")[0]
+    assert requests_row["purpose_counts"] == {"turn": 2}
+
+
+def test_the_ask_receipt_reaches_the_next_actual_request(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """R4: the canonical exchange receipt rides the tool result CONTENT.
+
+    The MCP forwarding layer delivers only the reply's content blocks to the
+    next root request, so a receipt kept in the bridge-local ``details`` is
+    dropped at that boundary (measured in review round 1: the answer arrived,
+    the receipt did not). The scripted client LOGS the tool text of the
+    request it sees AFTER the ask, and this test asserts the canonical
+    receipt (ask_id, request digest, accepted, public answer) is present
+    there -- the actual next ChatRequest, not a bridge dictionary.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root,
+        adapter_wheel,
+        spawn_interpreter,
+        task_id="task_simulator",
+        tasks={"task_simulator": fixtures.SIMULATOR},
+        provider={"provider": "fake", "scripted_score": 1.0, "has_user_simulator": True},
+        ask_first=True,
+    )
+
+    outcome = _outcome(completed)
+    assert outcome["terminal_reason"] == "finish"
+    # Epochs: the ask exchange and the terminal finish at admission.
+    assert outcome["steps"] == 2
+
+    rows = _log_events(log)
+    next_request = next((row for row in rows if row.get("emit") == "next-request-tool-text"), None)
+    assert next_request is not None, rows
+    text = "\n".join(next_request["tool_text"])
+    assert "The simulated user answered: simulated user answer" in text
+    assert "ask_user exchange receipt" in text
+    assert '"ask_id": "ask-rig-1"' in text
+    assert '"request_digest":' in text
+    assert '"accepted": true' in text
+    # One exchange row with the canonical receipt in the record.
+    exchange_rows = _record_payloads(run_root, "action_ask_exchange")
+    assert len(exchange_rows) == 1
+    assert exchange_rows[0]["receipt"]["ask_id"] == "ask-rig-1"
+
+
+def test_an_incomplete_owned_join_retains_the_worker_end_to_end(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """R2: a cancelled cleanup hook keeps the release RPCs from ever going out.
+
+    Real SDK + MCP + spawned worker with the reviewer's fault (a public
+    dispose hook raising CancelledError): the owning receipt is honestly
+    incomplete, and the close-out must (a) return BOUNDED, (b) refuse the
+    score, and (c) NEVER send the destructive cleanup RPCs -- the traced
+    adapter cleanup must not appear at all, and the record must carry the
+    retained disposition instead of receipts the worker never earned.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root, adapter_wheel, spawn_interpreter, cleanup_hook="cancelled"
+    )
+
+    outcome = _outcome(completed, expect_status="failed")
+    assert outcome["score"] is None
+    assert outcome["rescue_required"] is True
+    assert outcome["rescue_complete"] is None
+    assert "NOT released" in (outcome["diagnostic"] or "")
+
+    # NO destructive release ever ran: the traced cleanup RPC is absent.
+    rows = _log_events(log)
+    assert not any(row.get("emit") == "cleanup-rpc" for row in rows), rows
+
+    kinds = _record_kinds(run_root)
+    assert "cleanup_retained" in kinds
+    assert "score_refused" in kinds

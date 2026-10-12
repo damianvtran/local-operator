@@ -32,11 +32,17 @@ must name the release they ran.
 | Whole-system all-actor compute | Root + child/grandchild/helper requests, observed and reported | Reported, not capped: final-row callbacks alone cannot bound concurrent child calls. Any optional bound is declared separately. |
 
 The episode's Nth-epoch stop is enforced by the arm itself: when the tool
-result that consumed the Nth admitted epoch is paired, the caller requests
-the loop's existing graceful boundary — the current group's calls finish and
-pair, and no further root request is admitted. The bridge's own budget
-refusal remains the fail-closed fallback, so guest admission closes AT the
-budget, never one decision later.
+result that consumed the Nth admitted epoch is paired — a waiting batch, an
+accepted or failed finish, or a challenged proposal — the caller requests
+the loop's existing graceful boundary: the current group's calls finish and
+pair, and no further root request is admitted. Terminal finishes are
+INCLUDED (`end_requested` is deliberately not read): a finish ends guest
+admission but NOT the SDK turn, so without the stop the model spends one
+more root request on a decision the terminal bridge can only refuse
+(measured in review round 1: a finish at epoch N recorded N+1 root requests
+with no stop marker). The bridge's own budget refusal remains the
+fail-closed fallback, so guest admission closes AT the budget, never one
+decision later.
 
 ## Model policy (preflight requirement, not a proved admission mechanism)
 
@@ -72,12 +78,31 @@ row. Money is kept as separate figures through the canonical
   `recorded_only` alone would lose them);
 - `missing_usage_request_ids`: rows with no usage frame at all — unknown,
   NEVER a priced zero;
-- `recorded_is_lower_bound`: set whenever any row is unknown — retry/fallback
-  sub-streams can be entirely unreported by a logical final, so the recorded
-  total is a lower bound until the invoice is reconciled.
+- `recorded_is_lower_bound`: TRUE whenever any rows were observed, and FALSE
+  only under a future invoice-wide reconciliation. The observer reports
+  LOGICAL-REQUEST finals, and a final's coverage cannot certify the complete
+  bill: a retried request bills every attempt while the deduplicated final
+  records only the last receipt (measured: .03 + .12 billed, .12 recorded,
+  coverage still reading `reported_final`). The recorded total is therefore
+  conservatively a lower bound, never a certified total;
+- `invoice_coverage`: names the coverage actually held
+  (`logical_final_only`); `usage_coverage_counts` reports the per-row labels
+  as observed.
 
 Cache read/write and reasoning ride inside the usage buckets the shared
 pricer already separates; nothing re-adds them to input/output.
+
+## Ask delivery
+
+The adapter-owned ask exchange returns the canonical
+`AskUserExchangeResult` to the caller, and the receipt — `ask_id`, request
+digest, accepted/declined, public answer, never simulator state — is
+rendered INTO the native tool result's CONTENT beside the answer sentence.
+That placement is load-bearing: the MCP forwarding layer delivers only the
+reply's content blocks to the next root request, so a receipt kept in the
+bridge-local `details` never reaches the model (measured in review round 1).
+One exchange RPC per ask, one epoch consumed at admission, and the frame
+refresh rides the same epoch — no extra call, no double charge.
 
 ## Shutdown and the score gate
 
@@ -85,13 +110,30 @@ The close-out calls `shutdown_owned_work(reason, timeout_s=…)` explicitly:
 delegation admission closes, the turn aborts, and the canonical disposal
 joins every child/grandchild job. The subscription outlives the event sink
 and detaches only AFTER the SDK context exits, so cancellation-final usage is
-captured. Scoring is REFUSED unless the shutdown receipt is
-`complete=True`; an incomplete receipt keeps its pending job ids and errors
-attached (`complete=False` is unverified, never a pretend kill), the outcome
-says why, and worker cleanup still runs so nothing leaks. Ordinary abort
-semantics are unchanged: first-Esc child continuation, TUI cancellation and
-the wall kill switch behave exactly as before; the explicit shutdown is the
-OWNING CALLER's terminal, not a keybinding.
+captured. Scoring is REFUSED unless the shutdown receipt is `complete=True`;
+an incomplete receipt keeps its pending job ids and errors attached
+(`complete=False` is unverified, never a pretend kill), and the outcome says
+why.
+
+**The release gate.** With an incomplete (or absent) receipt the worker is
+NOT released: no cleanup RPC (`close_session`/`release_instance`/
+`revoke_lease`), no adapter close, no supervisor terminate — an unverified
+cleanup may still have live owned calls into that worker. The rescue
+descriptor is retained (`cleanup_retained` in the record, `rescue_required`
+true, `rescue_complete` null), so a later verified join or the TTL/supervisor
+schedule finishes the story. The context exit is BOUNDED (`_bounded_close`):
+after an incomplete shutdown it is awaited only to its bound, and the join
+attempt is dropped on timeout. Within a live process the canonical cleanup
+keeps running under its own shield; the CLI, however, returns through
+`asyncio.run`, which cancels pending tasks at teardown — so the durable
+retention across process exit is the DESCRIPTOR plus the launchd TTL, never
+a claim that the in-process cleanup completed or survived. A late join that
+DOES complete re-queries the owning receipt (a fresh, truthful read —
+incomplete receipts are never cached); only a receipt that now reads
+`complete=True` re-enables scoring and the normal release path. Ordinary
+abort semantics are unchanged: first-Esc child continuation, TUI
+cancellation and the wall kill switch behave exactly as before; the explicit
+shutdown is the OWNING CALLER's terminal, not a keybinding.
 
 ## The selector's core-source pin
 
@@ -103,6 +145,11 @@ against the RUNNING interpreter before launch/allocation and REFUSES a
 selector without one — a selector built before this composition fails
 clearly instead of launching against a tree nobody identified. The module
 set is exact: a partial or over-broad pin is refused, not read as a pass.
+The declared `commit` must be a hex SHA (7–40 characters) and is accepted
+only as a PREFIX of the running checkout's commit — never the reverse —
+and an absent pin is OMITTED from the wire so an old selector's canonical
+bytes stay byte-identical for old consumers (a PRESENT pin sent to an old
+worker fails closed at the hello handshake, before allocation).
 Build a pin for a tree with:
 
 ```sh

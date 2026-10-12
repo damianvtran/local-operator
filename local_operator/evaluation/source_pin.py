@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,11 @@ CORE_SOURCE_MODULES: tuple[tuple[str, str], ...] = (
 #: The canonical key set, derived rather than re-spelled, so verification and
 #: computation cannot drift apart.
 CORE_SOURCE_KEYS: tuple[str, ...] = tuple(key for key, _ in CORE_SOURCE_MODULES)
+
+
+#: The declared commit's allowed syntax: hex, 7..40 characters -- a full SHA
+#: or a reasonably abbreviated prefix of one (R6, review round 1).
+_COMMIT_RE = re.compile(r"[0-9a-f]{7,40}")
 
 
 class SourcePinError(RuntimeError):
@@ -140,14 +146,22 @@ def verify_core_source(pin: "CoreSourcePin") -> dict[str, Any]:
             "that will run the arm"
         )
     actual_commit = resolve_core_commit()
-    if (
-        pin.commit
-        and actual_commit
-        and not (actual_commit.startswith(pin.commit) or pin.commit.startswith(actual_commit))
-    ):
+    # COMMIT SYNTAX FIRST (R6): hex, 7..40 characters. The earlier
+    # two-direction prefix check accepted a malformed extension ('<sha>
+    # -corrupt') because the ACTUAL commit is a prefix of it -- an inverted
+    # acceptance. The model validates this on construction; the check is
+    # repeated here so a bypassed construction cannot slip past, and the
+    # prefix direction below is ONE-WAY: the declared pin must be a prefix of
+    # the actual commit, never the reverse.
+    if not _COMMIT_RE.fullmatch(pin.commit):
+        raise SourcePinError(
+            "the selector's core_source commit is not a sha (hex, 7..40 characters): "
+            f"{pin.commit!r}; refusing before allocation"
+        )
+    if actual_commit and not actual_commit.startswith(pin.commit):
         raise SourcePinError(
             "the running checkout's commit does not match the selector's core_source "
-            f"commit (selector={pin.commit[:12]}, actual={actual_commit[:12]}); refusing "
+            f"commit (selector={pin.commit}, actual={actual_commit[:12]}); refusing "
             "before allocation"
         )
     return {
