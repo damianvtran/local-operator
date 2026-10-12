@@ -154,20 +154,21 @@ def test_unsupported_config_falls_through_to_env() -> None:
 
 
 def test_unshipped_locale_falls_back_to_en() -> None:
-    # hi is supported but NOT shipped yet (waves: es+fr -> ru+vi -> hi+zh-CN): every
-    # chain path lands on en until its wave passes audit and ships.
-    assert resolve.resolve_language("hi", environ={}) == "en"
-    assert resolve.resolve_language("auto", environ={"LOP_LANG": "hi"}) == "en"
-    assert resolve.resolve_language("auto", environ={"LANG": "hi_IN.UTF-8"}, system="Linux") == "en"
+    # Urdu is supported but waits for the final RTL wave: every chain path
+    # lands on en until its wave passes audit and ships.
+    assert resolve.resolve_language("ur", environ={}) == "en"
+    assert resolve.resolve_language("auto", environ={"LOP_LANG": "ur"}) == "en"
+    assert resolve.resolve_language("auto", environ={"LANG": "ur_PK.UTF-8"}, system="Linux") == "en"
 
 
 def test_os_is_consulted_last_and_filtered() -> None:
     assert resolve.resolve_language("auto", environ={}, system="Linux") == "en"
-    # The OS locale is consulted last AND filtered by the shipped set: ru now
-    # ships (wave 2) and passes through; hi does not yet (hi+zh-CN is a later
-    # wave) and falls back to en.
+    # The OS locale is consulted last AND filtered by the shipped set: hi and
+    # zh-CN now ship with wave 3; ur still waits for the final RTL wave.
     assert resolve.resolve_language("auto", environ={"LANG": "ru_RU.UTF-8"}, system="Linux") == "ru"
-    assert resolve.resolve_language("auto", environ={"LANG": "hi_IN.UTF-8"}, system="Linux") == "en"
+    assert resolve.resolve_language("auto", environ={"LANG": "hi_IN.UTF-8"}, system="Linux") == "hi"
+    assert resolve.resolve_language("auto", environ={"LANG": "zh_CN.UTF-8"}, system="Linux") == "zh-CN"
+    assert resolve.resolve_language("auto", environ={"LANG": "ur_PK.UTF-8"}, system="Linux") == "en"
 
 
 # ---------------------------------------------------------------------------
@@ -222,9 +223,9 @@ def test_kill_switch_forces_en_over_config_and_env() -> None:
 
 
 def test_shipped_locales_reads_generated_set() -> None:
-    # Waves 1-2 shipped es/fr then ru/vi: the generated set reads from
-    # data/shipped.json.
-    assert resolve.shipped_locales() == ("en", "fr", "es", "ru", "vi")
+    # Waves 1-3 shipped es/fr, ru/vi, then hi/zh-CN: the generated set reads
+    # from data/shipped.json in the canonical SUPPORTED_LOCALES order.
+    assert resolve.shipped_locales() == ("en", "fr", "es", "zh-CN", "ru", "vi", "hi")
 
 
 def test_language_options_lead_with_auto() -> None:
@@ -252,15 +253,15 @@ def test_preferred_language_line_accepts_supported_but_unshipped_locales() -> No
 
     A supported locale whose translation wave has not shipped resolves to
     ``en`` for every live SURFACE (it cannot render unaudited catalogues), but
-    the model line must state the user's actual preference: an OS-Hindi user
-    gets en UI copy today AND a model told to answer in Hindi. A later
+    the model line must state the user's actual preference: an OS-Urdu user
+    gets en UI copy today AND a model told to answer in Urdu. A later
     "unify the two filters" edit fails HERE rather than silently muting the
-    feature until hi ships.
+    feature until ur ships.
     """
-    assert resolve.resolve_language("hi", environ={}, system="Linux") == "en"
+    assert resolve.resolve_language("ur", environ={}, system="Linux") == "en"
 
-    line = resolve.preferred_language_line("hi", environ={}, system="Linux")
-    assert "Hindi (hi)" in line
+    line = resolve.preferred_language_line("ur", environ={}, system="Linux")
+    assert "Urdu (ur)" in line
 
 
 def test_preferred_language_line_reads_the_env_override() -> None:

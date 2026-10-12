@@ -55,7 +55,7 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 | prompt | translate | prompt · prompt · 提示词 · промпт · prompt · پرامپٹ · प्रॉम्प्ट |
 | compaction | translate | compactage · compactación · 压缩 · сжатие · nén · کمپریشن · संपीडन |
 | schedule | translate — tool/command names stay | planification · programación · 定时 · расписание · lịch · شیڈول · शेड्यूल |
-| monitor | translate — tool name stays | surveillance · monitorización · 监控 · мониторинг · giám sát · نگرانی · निगरानी |
+| monitor | translate — tool name stays | surveillance · monitorización · 监控 · мониторинг · giám sát · نگرانی · निगरानी / मॉनिटर⁷ |
 | relay | translate — identifiers stay | relais · relé · 中继 · ретранслятор · chuyển tiếp · ریلے · रिले |
 | usage | translate | utilisation · uso · 用量 · использование · lượng sử dụng · استعمال · उपयोग |
 | cost | translate | coût · coste⁴ · 费用 · стоимость · chi phí · لاگت · लागत |
@@ -63,8 +63,8 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 | team | translate | équipe · equipo · 团队 · команда · nhóm · ٹیم · टीम |
 | skill | translate | compétence · habilidad · 技能 · навык · kỹ năng · مہارت · कौशल |
 | device | translate | appareil · dispositivo · 设备 · устройство · thiết bị · ڈیوائس · डिवाइस |
-| credentials | translate | identifiants · credenciales · —⁶ · учётные данные · thông tin xác thực · —⁶ · —⁶ |
-| job | translate | tâche · trabajo · —⁶ · задание · tác vụ · —⁶ · —⁶ |
+| credentials | translate | identifiants · credenciales · 凭据 · учётные данные · thông tin xác thực · —⁶ · क्रेडेंशियल |
+| job | translate | tâche · trabajo · 任务 · задание · tác vụ · —⁶ · जॉब |
 
 1. `wake` in `ur`/`hi`: verb forms read best inside a sentence ("10 بجے
    جاگے گا", "10 बजे जागेगा"); for the noun label use the table's form. The
@@ -80,9 +80,14 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 5. `vi` telemetry: keep the English word — the native phrase ("đo lường từ
    xa") is long and absent from developer register. Recorded here as the
    per-locale decision.
-6. Wave-2 terms: fr/es renderings shipped in wave 1; ru/vi in wave 2 (see
-   their guides). The zh-CN/ur/hi cells stay `—` until their own waves record
-   renderings — do not invent them here.
+6. `credentials` and `job`: fr/es recorded renderings in wave 1; ru/vi in
+   wave 2; zh-CN/hi in wave 3 (see their guides). The ur cells stay `—` until
+   its wave records endorsed renderings; do not invent them here. Hindi uses
+   क्रेडेंशियल्स for the plural of क्रेडेंशियल.
+7. Hindi distinguishes watching/monitoring (निगरानी) from a stored monitor
+   object (मॉनिटर), not from the Latin tool name `monitor`. Child agents and
+   subagents consistently use उप-एजेंट; the abandoned child-only spelling is
+   not an exception. Other endorsed wave-3 calls live in the hi/zh-CN guides.
 
 ### Wave-2 kept-English set (all locales)
 

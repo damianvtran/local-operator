@@ -1,0 +1,9 @@
+{
+  "tui.status.agents": "{count, plural, other {# 个智能体}}",
+  "tui.status.band.starting": "启动中……",
+  "tui.status.band.working": "工作中",
+  "tui.status.jobs": "{count, plural, other {# 个任务}}",
+  "tui.status.model.connecting": "连接中……",
+  "tui.status.model.setup": "初始设置",
+  "tui.status.tunnel.parked": "远程访问已关闭"
+}
