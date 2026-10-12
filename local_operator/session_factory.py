@@ -1760,6 +1760,13 @@ class _KnowledgeHooks:
     #: ecosystem roots by existence, so a root created mid-session would change
     #: the list and quietly widen what the session scans.
     skill_roots: list[Path] = field(default_factory=list)
+    #: The world boundary this session was constructed with, when it has one.
+    #: Carried so the resolver's miss-path rescan clips to the same scope the
+    #: initial walk used — a refresh that silently re-widened the scan would
+    #: re-admit exactly what the boundary excluded (measured: an in-world
+    #: symlink to an outer skill dir was admitted by the reachable walk; QA
+    #: round 1, Q2). ``None`` on every ordinary session.
+    world_root: Path | None = None
     frozen_block: str | None = None
     #: Compaction entry id observed when ``frozen_block`` was computed. A
     #: change here (a new compaction marker) re-opens selection once — the
@@ -2036,13 +2043,13 @@ def _knowledge_credential(key: str, config_dir: Path) -> str | None:
     return os.environ.get(key) or None
 
 
-def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str) -> None:
+def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str, *, world_root: Path | None = None) -> None:
     """Expose configured names before deferred live connections can race turn one."""
     try:
         from local_operator.mcp.config import load_all_mcp_configs
         from local_operator.mcp.resources import render_mcp_suggestions
 
-        names = tuple(load_all_mcp_configs(cwd)[0])
+        names = tuple(load_all_mcp_configs(cwd, boundary=world_root)[0])
         hooks.mcp_catalogue = lambda query: render_mcp_suggestions(names, query)
         # Published for the classification roster, which needs a server's NAME
         # (plus the harness-owned capability hint) as a candidate. Set beside the
@@ -2059,6 +2066,7 @@ async def _setup_knowledge(
     agent_registry: AgentRegistry,
     warnings_out: list[str],
     cwd: str | Path | None = None,
+    world_root: Path | None = None,
 ) -> _KnowledgeHooks:
     """Discover and index user skills, packaged guides, and private agent hints.
 
@@ -2066,6 +2074,11 @@ async def _setup_knowledge(
     only their short descriptions join the ordinary skill descriptions sent to
     the configured semantic backend. Agent hints always use ``LocalEmbedder``.
     Any layer can fail independently without making session startup fail.
+
+    ``world_root``, when set, is the world boundary the SDK caller validated;
+    ``default_skill_roots`` clips its project ancestor walk there and refuses
+    to inherit the controller home's or the ecosystem's user libraries — the
+    world's own trees plus the packaged catalog are the discovery scope.
 
     No credential carrier is threaded in, deliberately: the embedder's
     credential closure below reads a provider-class STORE row and the process
@@ -2090,12 +2103,15 @@ async def _setup_knowledge(
         # discovered project-local skills for whatever directory the process
         # happened to start in -- every other consumer here already takes the
         # session's cwd, and this one silently did not.
-        hooks.skill_roots = default_skill_roots(Path(cwd) if cwd is not None else None)
+        hooks.skill_roots = default_skill_roots(
+            Path(cwd) if cwd is not None else None, boundary=world_root
+        )
+        hooks.world_root = world_root
         #: The baseline the freshness checks compare against, taken HERE because the
         #: tree has just been walked: recording it at first use instead would make a
         #: session's first message look like a change and pay a second full scan.
         hooks.skills_fingerprint = _skills_fingerprint(hooks)
-        skills, discovery_warnings = discover_skills(hooks.skill_roots)
+        skills, discovery_warnings = discover_skills(hooks.skill_roots, boundary=world_root)
         warnings_out.extend(discovery_warnings)
         guides = discover_guides()
         hooks.skills_by_name = {skill.name: skill for skill in skills}
@@ -2484,7 +2500,7 @@ def _current_skill_resources(hooks: _KnowledgeHooks) -> list[Any]:
     try:
         from local_operator.skills.discovery import discover_skills
 
-        discovered, _warnings = discover_skills(list(hooks.skill_roots))
+        discovered, _warnings = discover_skills(list(hooks.skill_roots), boundary=hooks.world_root)
     except Exception:  # noqa: BLE001 — the roster must survive a scan fault
         logger.debug("classification: live skill rescan failed", exc_info=True)
         return known
@@ -3459,7 +3475,9 @@ def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | No
     # running, because they inherit this closure and it mutates
     # ``hooks.skills_by_name`` IN PLACE. Guides are packaged release resources
     # and cannot change at runtime, so the guide resolver takes no roots.
-    skill_resolver = make_skill_resolver(hooks.skills_by_name, hooks.skill_roots)
+    skill_resolver = make_skill_resolver(
+        hooks.skills_by_name, hooks.skill_roots, boundary=hooks.world_root
+    )
 
     def resolver(url: str) -> str | None:
         guide_result = guide_resolver(url)
@@ -4226,12 +4244,18 @@ async def _prepare(
     *,
     has_ui: bool,
     cwd: str | None = None,
+    world_root: Path | None = None,
 ) -> _SessionPlan:
     """Shared wiring core used by :func:`create_session` and
     :func:`build_initial_blocks`. Returns the Session kwargs plus the blocks
     provider; raises ``ValueError`` when hosting/model config is missing.
     ``cwd`` (default: process cwd) is the single working-directory source for
-    the tool context, the session and MCP discovery."""
+    the tool context, the session and MCP discovery. ``world_root``, when an
+    SDK caller carries a world boundary (see ``sdk._resolve_world_root``), is
+    threaded into the same discovery loaders as a clip and installed as the
+    session's ``confinement_root`` AT CONSTRUCTION — before the first tool
+    context and before any child can be built; ``None`` (every ordinary
+    caller) leaves the plan byte-identical to the pre-boundary behaviour."""
     # Resolving a saved model now reads its journal, which can be large. Keep
     # agent/profile I/O and identity resolution off the loop together, before
     # the contiguous lease/claim critical section below. Snapshot the command
@@ -4458,12 +4482,14 @@ async def _prepare(
     config_dir = Path(agent_registry.config_dir)
     effective_cwd = cwd if cwd is not None else os.getcwd()
     knowledge_warnings: list[str] = []
-    hooks = await _setup_knowledge(config_dir, agent_registry, knowledge_warnings, effective_cwd)
+    hooks = await _setup_knowledge(
+        config_dir, agent_registry, knowledge_warnings, effective_cwd, world_root=world_root
+    )
     # Configuration discovery is local filesystem work and must precede the
     # first prompt. The TUI deliberately defers live MCP connections; deriving
     # names only from the eventual manager let the knowledge block freeze empty
     # before that background task won the race.
-    _seed_mcp_routing(hooks, effective_cwd)
+    _seed_mcp_routing(hooks, effective_cwd, world_root=world_root)
     # The classification seam, built here because the package's cold import must
     # not land inside a turn (see ``_attach_classification``). Built unless
     # values.classification.auto is explicitly off — the default is ON, so the
@@ -4653,7 +4679,7 @@ async def _prepare(
     from local_operator.context_files import load_repo_guidance
 
     try:
-        repo_guidance = load_repo_guidance(effective_cwd)
+        repo_guidance = load_repo_guidance(effective_cwd, boundary=world_root)
     except Exception:  # noqa: BLE001 — never block session construction
         repo_guidance = ""
 
@@ -4726,6 +4752,13 @@ async def _prepare(
         # identity; no provenance subscribes a session to mutable defaults.
         model_source=model_source,
     )
+    if world_root is not None:
+        # Installed at CONSTRUCTION, not post-open: the session must be
+        # confined before its first tool context is built and before any child
+        # can copy the field. ``None`` adds no key at all so the ordinary
+        # path's kwargs dict cannot drift from what existing callers built;
+        # see local_operator.tools.confinement for the mechanism and limits.
+        session_kwargs["confinement_root"] = str(world_root)
     return _SessionPlan(
         session_kwargs=session_kwargs,
         system_blocks_provider=system_blocks_provider,
@@ -4845,6 +4878,7 @@ async def wire_mcp_into_session(
     *,
     has_ui: bool = False,
     _deferred_boot: bool = False,
+    boundary: Path | None = None,
 ) -> McpManager | None:
     """Discover MCPs but expose their schemas only after explicit reads.
 
@@ -4861,6 +4895,13 @@ async def wire_mcp_into_session(
     get the warning on stderr. Any failure degrades to an empty catalogue, so
     MCP enrichment never becomes a session startup requirement. Returns the
     manager for the caller to dispose, or ``None``.
+
+    ``boundary`` is the session's world boundary when it has one: it travels
+    to the manager so EVERY load — the startup connect, an explicit connect
+    by name, and every reload — answers with the same clipped config set. It
+    is a parameter rather than read off the session because the deferred-boot
+    closure runs before construction state a reader might reach for is
+    settled.
     """
     from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
 
@@ -4904,6 +4945,13 @@ async def wire_mcp_into_session(
                 discover_and_load_mcp_tools,
                 secret_base=getattr(session, "config_dir", None),
                 register_secret=getattr(variables, "register_redaction", None),
+                # The world boundary travels through the same tolerance seam as
+                # the credential pair: in-tree callers of this wiring patch the
+                # loader with reduced fakes, and a hard kwarg would break every
+                # one of them. The boundary is enforced inside the loaders
+                # themselves (the manager carries it), so a caller that cannot
+                # receive it cannot be a session's real loader.
+                boundary=boundary,
             ),
         )
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
@@ -5621,6 +5669,7 @@ async def create_session(
     *,
     has_ui: bool = False,
     cwd: str | None = None,
+    world_root: Path | None = None,
     _force_local_takeover: bool = False,
     defer_mcp_wiring: bool = False,
     mcp_publication_gate: "PublicationGate | None" = None,
@@ -5799,6 +5848,7 @@ async def create_session(
         agent_registry,
         has_ui=has_ui,
         cwd=effective_cwd,
+        world_root=world_root,
     )
     try:
         session = Session(**plan.session_kwargs)
@@ -5918,6 +5968,7 @@ async def create_session(
                     auth_store=plan.auth_store,
                     has_ui=has_ui,
                     _deferred_boot=True,
+                    boundary=world_root,
                 )
                 if manager is not None:
                     attach_mcp_dispose(session, manager)
@@ -5949,6 +6000,7 @@ async def create_session(
         knowledge_hooks=plan.knowledge_hooks,
         auth_store=plan.auth_store,
         has_ui=has_ui,
+        boundary=world_root,
     )
     if mcp_manager is not None:
         attach_mcp_dispose(session, mcp_manager)

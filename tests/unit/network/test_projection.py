@@ -289,3 +289,48 @@ def test_a_slow_peer_wake_does_not_stall_the_daemon_loop(
     asyncio.run(_run())
 
     assert seen["thread"] != main_thread, "the relay round trip ran on the event-loop thread"
+
+
+#: "The peer did not send this key at all" — the ABSENT case for the cells below,
+#: which must build the row through ``PeerRow.from_json`` rather than a double.
+_NO_KEY = object()
+
+
+@pytest.mark.parametrize(
+    "claim, expected",
+    [
+        pytest.param(1789400111.5, 1789400111.5, id="epoch-float"),
+        pytest.param("1789400111.5", 1789400111.5, id="numeric-string"),
+        pytest.param(True, None, id="bool"),
+        pytest.param(0.0, None, id="claimed-zero"),
+        pytest.param(-5.0, None, id="negative"),
+        pytest.param(float("nan"), None, id="nan"),
+        pytest.param(float("inf"), None, id="inf"),
+        pytest.param("garbage", None, id="garbage-string"),
+        pytest.param(None, None, id="null"),
+        pytest.param(_NO_KEY, None, id="absent"),
+    ],
+)
+def test_a_peers_last_user_claim_is_number_or_absent_on_the_row(
+    claim: object, expected: float | None
+) -> None:
+    """The sidebar lane's clock, parsed at the mesh boundary: number or NO claim.
+
+    ``last_user_at`` is the desktop sidebar's RUNNING-order clock (#2074); the
+    origin's peer listing publishes it number-or-``None`` — the unknown the
+    renderer's fallback (``created_at``, then catalogue order) runs on — and the
+    receive side reads every unusable spelling the same way, so nothing is ever
+    minted into a date: ``float(True) == 1.0`` was exactly that hazard one field
+    over (``started``, #2044). The numeric-string spelling a mixed fleet can
+    still send is accepted; a claimed zero is no claim, matching the renderer's
+    own ``<= 0`` refusal. ``to_row_json`` keeps one spelling for the field —
+    the claim, or ``null`` for unknown — the same shape its ``origin``/``
+    last_synced_at`` no-claims already use.
+    """
+    fields: dict[str, object] = {"session_id": "s_1"}
+    if claim is not _NO_KEY:
+        fields["last_user_at"] = claim
+    row = projection.PeerRow.from_json(fields, device_id="d_peer")
+    assert row.last_user_at == expected, f"{claim!r} parsed to {row.last_user_at!r}"
+    emitted = row.to_row_json()
+    assert emitted["last_user_at"] == expected

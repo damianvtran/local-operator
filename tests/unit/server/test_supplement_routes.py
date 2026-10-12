@@ -63,7 +63,7 @@ def _desktop_client(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = DesktopSessions(tmp_path)
-    return TestClient(app), {"Authorization": "Bearer token"}
+    return TestClient(app, headers={"Host": "127.0.0.1:1111"}), {"Authorization": "Bearer token"}
 
 
 def _session(tmp_path, session_id: str = SESSION):

@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
@@ -272,9 +273,9 @@ async def usage(
     controller = auth.controller()
     try:
         if provider and controller.provider(provider) is None:
-            raise HTTPException(422, "Unknown provider")
+            raise HTTPException(422, _wd.unknown_provider().envelope())
         if refresh and not live:
-            raise HTTPException(422, "Refresh requires live usage")
+            raise HTTPException(422, _wd.refresh_requires_live().envelope())
         reports = (
             await controller.fetch_usage([provider] if provider else None, force_refresh=refresh)
             if live
@@ -314,7 +315,7 @@ async def analytics(
     from local_operator.analytics.store import AnalyticsStore
 
     if since_ms is not None and until_ms is not None and since_ms > until_ms:
-        raise HTTPException(422, "The start must precede the end")
+        raise HTTPException(422, _wd.start_after_end().envelope())
 
     def read_report():
         store = AnalyticsStore(request.app.state.config_manager.config_dir / "analytics.db")
@@ -424,7 +425,7 @@ async def analytics_models(
     from local_operator.analytics.store import AnalyticsStore
 
     if since_ms is not None and until_ms is not None and since_ms > until_ms:
-        raise HTTPException(422, "The start must precede the end")
+        raise HTTPException(422, _wd.start_after_end().envelope())
     if since_ms is None and until_ms is None and days is not None:
         since_ms = int(time.time() * 1000) - days * 86_400_000
 
@@ -659,7 +660,7 @@ async def _read_skills(roots: list[pathlib.Path], name: str | None) -> dict[str,
     if name is not None:
         by_name = {item.name: item for item in discovered}
         if name not in by_name:
-            raise HTTPException(404, "Skill not found")
+            raise HTTPException(404, _wd.skill_not_found().envelope())
         detail = await asyncio.to_thread(resolve_skill_url, "skill://" + name, by_name)
     return {
         "skills": [{"name": item.name, "description": item.description} for item in discovered],
@@ -756,7 +757,7 @@ async def entities(
 ):
     spec = slash_command_for("/" + command.removeprefix("/"))
     if spec is None:
-        raise HTTPException(422, "Unknown command")
+        raise HTTPException(422, _wd.unknown_command().envelope())
     # READ: the rows are the local registries and catalogs, the current value is a
     # canonical facade field, and the profile registries are resolved from config
     # (with their own 503 when even those are unavailable — a durable verdict, not
@@ -792,7 +793,7 @@ async def entities(
         elif spec.name in {"team", "agent"}:
             registry = remote.team_registry if spec.name == "team" else remote.agent_registry
             if registry is None:
-                raise HTTPException(503, "The profile registry is unavailable")
+                raise HTTPException(503, _wd.profile_registry_unavailable().envelope())
             if spec.name == "team":
                 from local_operator.org_chart import resolve_org
 

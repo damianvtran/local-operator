@@ -71,7 +71,7 @@ async def _run(recorder: _Recorder, **kwargs: Any):
         key="gk-1",
         num_images=1,
         image_size="square_hd",
-        source_url=None,
+        source_urls=None,
         seed=None,
         model=None,
         emit=None,
@@ -184,7 +184,7 @@ async def test_an_edit_appends_the_source_as_an_image_content_block() -> None:
     response = _steps_response({"type": "image", "data": PNG_B64, "mime_type": "image/png"})
     http = _client(recorder.handler(response))
 
-    result = await _run(recorder, source_url=f"data:image/png;base64,{PNG_B64}", client=http)
+    result = await _run(recorder, source_urls=[f"data:image/png;base64,{PNG_B64}"], client=http)
 
     body = recorder.bodies[0]
     # The docs' own block shape: base64 WITHOUT the data-URI prefix, the mime
@@ -195,12 +195,46 @@ async def test_an_edit_appends_the_source_as_an_image_content_block() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_multi_source_edit_appends_one_block_per_source_in_order() -> None:
+    recorder = _Recorder()
+    response = _steps_response({"type": "image", "data": PNG_B64, "mime_type": "image/png"})
+    http = _client(recorder.handler(response))
+
+    await _run(
+        recorder,
+        source_urls=[f"data:image/png;base64,{PNG_B64}", "data:image/jpeg;base64,QUJD"],
+        client=http,
+    )
+
+    body = recorder.bodies[0]
+    assert body["input"][0] == {"type": "text", "text": "a cat"}
+    assert body["input"][1] == {"type": "image", "data": PNG_B64, "mime_type": "image/png"}
+    assert body["input"][2] == {"type": "image", "data": "QUJD", "mime_type": "image/jpeg"}
+
+
+@pytest.mark.asyncio
 async def test_an_edit_with_a_non_data_uri_source_is_refused_before_the_wire() -> None:
     recorder = _Recorder()
     http = _client(recorder.handler(httpx.Response(200, json={})))
 
     with pytest.raises(APIError):
-        await _run(recorder, source_url="https://example.com/x.png", client=http)
+        await _run(recorder, source_urls=["https://example.com/x.png"], client=http)
+    assert recorder.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_multi_source_edit_refuses_a_non_data_uri_entry_before_the_wire() -> None:
+    # The refusal is per ENTRY: one bad source among several refuses the
+    # whole call, before anything reaches the wire.
+    recorder = _Recorder()
+    http = _client(recorder.handler(httpx.Response(200, json={})))
+
+    with pytest.raises(APIError):
+        await _run(
+            recorder,
+            source_urls=[f"data:image/png;base64,{PNG_B64}", "https://example.com/x.png"],
+            client=http,
+        )
     assert recorder.requests == []
 
 

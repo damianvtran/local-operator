@@ -64,6 +64,7 @@ if str(REPO) not in sys.path:
 
 from local_operator.i18n import catalogues  # noqa: E402
 from local_operator.i18n import runtime as msg_runtime  # noqa: E402
+from scripts.i18n.login import check_login  # noqa: E402
 
 PRODUCT_TREE = "local_operator"
 #: The scanned corpus, repo-relative. `scripts/i18n/` is scanned because it is
@@ -489,7 +490,15 @@ def check_catalogues() -> list[str]:
             try:
                 translated = catalogues.load_catalogue(locale, namespace)
             except catalogues.CatalogueNotFound:
-                problems.append(f"{locale}/{namespace}: missing (en has it)")
+                # PER-NAMESPACE COVERAGE (2026-10-11 amendment, docs/design/
+                # i18n.md §6): a locale that does not carry a namespace is NOT
+                # an error — a namespace born after the locale's last
+                # translation wave (an extraction slice's child) rides
+                # en-fallback (§2.5) until its own wave lands, and the
+                # per-namespace ship gate (`generate.py::_shipped_locales`)
+                # decides whether the locale is offered at all. Only PRESENT
+                # files are validated below: key parity, arguments and plural
+                # categories against en, exactly as before.
                 continue
             except catalogues.CatalogueInvalid as exc:
                 problems.append(f"{locale}/{namespace}: {exc}")
@@ -664,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(line)
         else:
             advisories.append(f"advisory: {line}")
-    problems = check_catalogues()
+    problems = check_catalogues() + check_login(REPO)
     for line in advisories + failures + problems:
         print(line)
     if failures or problems:

@@ -5922,6 +5922,25 @@ def _installed_daemon_plists() -> list[Path]:
     return found
 
 
+def _linux_relay_unit_installed() -> bool:
+    """The Linux half of the scan: is the relay's systemd user unit installed?
+
+    Asked of the relay's own path reader (never a second spelling), and built
+    the same cheap, safe way as :func:`_installed_daemon_plists`: with ``HOME``
+    redirected it finds nothing and the whole repair stays inert. The Linux
+    branch of :func:`refresh_service_daemons_after_upgrade` and the child's own
+    step table both ask this question; ``refresh_unit_if_stale`` re-answers
+    addressability and image identity for itself, so this only decides whether
+    the arm exists at all on this host.
+    """
+    try:
+        from local_operator.network import relay
+
+        return sys.platform.startswith("linux") and relay.systemd_path().exists()
+    except Exception:  # noqa: BLE001 — a probe must not fail an upgrade
+        return False
+
+
 def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> DaemonRefresh:
     """Repair the supervised daemons ``lop-update`` used to leave behind.
 
@@ -5967,10 +5986,18 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
     do". What is true on those hosts is the opposite of reassuring: a systemd
     unit or a scheduled task written by an older build is still running the
     previous interpreter, which is exactly the drift this step exists to
-    repair. Re-registering those units is a real follow-up and is deliberately
-    NOT invented here — a unit/Task-XML rewrite is not the plist rewrite this
-    child performs, and it needs each installer's own identity guard — so what
-    ships this round is the sentence that says the refresh did not happen.
+    repair.
+
+    THE RELAY'S LINUX UNIT IS NOW THE FIRST EXCEPTION (2026-10-11, stale-relay
+    memo): when it is installed, the Linux branch below spawns this same
+    new-wheel child, whose ``_linux_refresh_steps`` table carries the relay's
+    own refresh (``network/relay.refresh_unit_if_stale`` — the unit migration
+    and the proven-move restart; the drill showed a node's install moved while
+    its relay kept advertising the previous build). The other daemons' units
+    remain A24's follow-up: a unit/Task-XML rewrite is not the plist rewrite
+    this child performs, and each needs its own installer's identity guard — so
+    on a host with no relay unit what ships is still the sentence that says the
+    refresh did not happen.
 
     THE ANNOUNCEMENT IS MADE *AFTER* THE SCAN, not instead of it. The scan is
     the module's own question ("which of our agents are installed") and it is
@@ -5989,16 +6016,24 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
     installed = _installed_daemon_plists()
     if not installed:
         if not _DAEMONS_ARE_LAUNCHD_AGENTS:
-            return DaemonRefresh(
-                name,
-                lines=(
-                    "service daemons: not refreshed — this step rewrites launchd "
-                    f"agents, which only macOS has (this host is {PLATFORM_LABEL}); "
-                    "re-run each supervised daemon's own installer to move its "
-                    "unit or task onto this build",
-                ),
-            )
-        return DaemonRefresh(name)
+            if not _linux_relay_unit_installed():
+                return DaemonRefresh(
+                    name,
+                    lines=(
+                        "service daemons: not refreshed — this step rewrites launchd "
+                        f"agents, which only macOS has (this host is {PLATFORM_LABEL}); "
+                        "re-run each supervised daemon's own installer to move its "
+                        "unit or task onto this build",
+                    ),
+                )
+            # THE LINUX ARM (2026-10-11, stale-relay memo): the relay unit is
+            # installed, so this host HAS a daemon this child can move — fall
+            # through to the same new-wheel child the macOS scan spawns, and
+            # let the child's platform step table pick the rows
+            # (``_linux_refresh_steps``). The A24 sentence above stays for
+            # every host that still has nothing this child may refresh.
+        else:
+            return DaemonRefresh(name)
     import subprocess
 
     invocation = _daemon_refresh_invocation()
@@ -6265,7 +6300,11 @@ def _repair_refusal() -> str | None:
 
 
 def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]], ...]:
-    """The supervised daemons THIS CHILD walks, in the order it starts them.
+    """The supervised daemons THIS CHILD walks ON MACOS, in the order it starts them.
+
+    This is the macOS half of the platform table (:func:`_platform_refresh_steps`);
+    Linux answers with :func:`_linux_refresh_steps`. Every rule below describes the
+    macOS walk unchanged.
 
     Each entry carries the daemon's name as its own repair sentence prints it, the
     command that restores it, and the repair itself. The two words exist for ONE
@@ -6316,6 +6355,39 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
         ("wakes supervisor", "lop wake install", wakes_install.refresh_plist_if_stale),
         ("network relay", "lop network install", relay_install.refresh_plist_if_stale),
     )
+
+
+def _linux_refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]], ...]:
+    """The Linux child's step table: the relay's unit, when it is installed.
+
+    ONE ENTRY, deliberately (2026-10-11, stale-relay memo): the relay is the
+    only Linux unit this child may refresh. The other three daemons' units are
+    audit A24's named follow-up — each needs its own installer's identity guard
+    before a rewrite — and inventing them here would widen a slice scoped to
+    the stale relay. The gate is the unit FILE, the same cheap probe the
+    parent's Linux branch asks; ``refresh_unit_if_stale`` re-answers platform,
+    addressability and image identity for itself, so this only decides whether
+    a step exists at all.
+    """
+    if not _linux_relay_unit_installed():
+        return ()
+    from local_operator.network import relay as relay_install
+
+    return (("network relay", "lop network install", relay_install.refresh_unit_if_stale),)
+
+
+def _platform_refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]], ...]:
+    """THE PLATFORM STEP TABLE: which daemons THIS child walks on THIS host.
+
+    The macOS table is :func:`_refresh_steps` unchanged; Linux answers with
+    :func:`_linux_refresh_steps`. The shape (name, recovery, repair) is
+    platform-invariant so ``daemons_refresh_command`` — its announcements, its
+    machine lines, and the parent's kill attribution — stays one
+    implementation.
+    """
+    if _DAEMONS_ARE_LAUNCHD_AGENTS:
+        return _refresh_steps()
+    return _linux_refresh_steps()
 
 
 def _refresh_announcement(name: str, recovery: str) -> str:
@@ -6575,7 +6647,7 @@ def daemons_refresh_command() -> int:
         # "nothing needed repairing" and "this process is not allowed to".
         print(f"warning: {refusal}", file=sys.stderr)
         return 0
-    steps = _refresh_steps()
+    steps = _platform_refresh_steps()
     # ONE LOCK AROUND THE CHILD'S OUTPUT. The repairs run in threads, and an
     # interleaved announcement would read as two half lines — the parent parses
     # these lines back to attribute a killed child, and a mangled one names the
@@ -6995,8 +7067,39 @@ def _emit_update_report(*, install_version: str, target: str, stage: StageReport
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
 
+def _roll_after_update(*, before: str, after: str, via: str, roll: bool) -> None:
+    """S3b's post-install hook: queue the mesh's rollout, render what it queued.
+
+    Called from the two successful-install exits between ``_run_services_tail``
+    and ``_emit_update_report`` — the summary precedes the frozen report line
+    — and NOT from the no-install exit or the daemon-refresh child (note §3:
+    that child runs concurrent repairs behind marker lines the desktop parses,
+    and it also runs when nothing was installed).
+
+    EVERYTHING here is best-effort: the install is already in, so the hook's
+    own contract is that it never raises and never changes an exit code (note
+    §3) — a failure is one sentence on stderr. The import is function-local
+    because ``update`` is on ``lop``'s startup path and ``network`` is not
+    (``tests/unit/test_import_graph.py``).
+    """
+    from local_operator.network import rollouts
+
+    result = rollouts.open_after_update(before=before, after=after, via=via, no_roll=not roll)
+    for line in result.lines:
+        print(line)
+    if result.failure:
+        print(result.failure, file=sys.stderr)
+
+
 def _generation_upgrade(
-    total: int, *, services: bool = True, install_version: str = "", target: str = ""
+    total: int,
+    *,
+    services: bool = True,
+    install_version: str = "",
+    target: str = "",
+    roll: bool = True,
+    before_version: str = "",
+    via: str = "snapshot",
 ) -> int:
     """The tail every successful install shares: report, prune, refresh, succeed.
 
@@ -7012,6 +7115,13 @@ def _generation_upgrade(
     leaving a daemon where it is. The process's single machine-readable report
     line (:func:`_emit_update_report`) is emitted last, after every human line
     the successful exit prints.
+
+    ``roll``/``before_version``/``via`` are S3b's trigger inputs (note §3):
+    ``via`` names the front end, ``before_version`` is the version the pointer
+    named when the command started (captured by the caller, because by hook
+    time ``disk_build`` describes the generation just installed), and
+    ``roll=False`` is ``--no-roll``. The hook writes the mesh's rollout record
+    between the services tail and the report line.
     """
     _print_current_generation()
     for line in prune_notice_lines(
@@ -7019,11 +7129,14 @@ def _generation_upgrade(
     ):
         print(line)
     stage = _run_services_tail(services=services)
+    _roll_after_update(before=before_version, after=install_version, via=via, roll=roll)
     _emit_update_report(install_version=install_version, target=target, stage=stage)
     return total
 
 
-def _snapshot_command(value: str, *, services: bool = True, allow_downgrade: bool = False) -> int:
+def _snapshot_command(
+    value: str, *, services: bool = True, allow_downgrade: bool = False, roll: bool = True
+) -> int:
     """``lop update --from-snapshot <dir-or-ref>``: install a local build.
 
     The in-repo half of what the out-of-tree ``lop-update`` script does today,
@@ -7068,6 +7181,14 @@ def _snapshot_command(value: str, *, services: bool = True, allow_downgrade: boo
             file=sys.stderr,
         )
         return 1
+    # THE HOOK'S ``before`` (S3b), captured before any install work: by the
+    # time the hook runs, ``disk_build`` describes the generation just
+    # installed, and the trigger's strictly-newer gate must compare the MOVE,
+    # not the result with itself. Unreadable (None) stays "" — both sides must
+    # parse for the hook to fire, and a snapshot that changes only the source
+    # ref has nothing for members to do (note §3, condition 1).
+    stamp_before = disk_build()
+    before_version = str(stamp_before.version) if stamp_before is not None else ""
     try:
         snapshot = resolve_snapshot(value)
     except UpdateError as exc:
@@ -7232,7 +7353,13 @@ def _snapshot_command(value: str, *, services: bool = True, allow_downgrade: boo
             # sits outside the guard.
             _remove_tree(snapshot.path)
     return _generation_upgrade(
-        0, services=services, install_version=installed_version, target=installed_version
+        0,
+        services=services,
+        install_version=installed_version,
+        target=installed_version,
+        roll=roll,
+        before_version=before_version,
+        via="snapshot",
     )
 
 
@@ -7245,6 +7372,7 @@ def update_command(
     from_snapshot: str | None = None,
     services: bool = True,
     allow_downgrade: bool = False,
+    roll: bool = True,
 ) -> int:
     """``lop update``, ``lop update --check``, ``--from-snapshot`` and the repair.
 
@@ -7291,7 +7419,9 @@ def update_command(
         if check:
             print("--check compares against PyPI; --from-snapshot installs a tree", file=sys.stderr)
             return 1
-        return _snapshot_command(from_snapshot, services=services, allow_downgrade=allow_downgrade)
+        return _snapshot_command(
+            from_snapshot, services=services, allow_downgrade=allow_downgrade, roll=roll
+        )
 
     if allow_downgrade:
         print(
@@ -7368,5 +7498,6 @@ def update_command(
     for line in pruned:
         print(line)
     stage = _run_services_tail(services=services)
+    _roll_after_update(before=result.installed, after=installed, via="update", roll=roll)
     _emit_update_report(install_version=installed, target=result.latest, stage=stage)
     return 0

@@ -46,6 +46,7 @@ from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 # host-free module (see its docstring).
 from local_operator.harness.rows import visible_transcript_rows  # noqa: F401
 from local_operator.harness.types import ModelSpec, SupplementProgressEvent
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.resume import (
     ORIGIN_AGENT_CONFIG,
     ORIGIN_SUBAGENT,
@@ -64,7 +65,7 @@ from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 # one module owns the scan, its cache and its invalidation, and this adapter is
 # only the door. Imported as a module so tests can drive its decision paths off
 # the bridge without a second seam.
-from local_operator.session import transcript_find, transcript_index
+from local_operator.session import open_trace, transcript_find, transcript_index
 
 # The pin store is the sidebar's OWN module, reused rather than re-implemented —
 # for the reason the `move_targets` import above cites, which is also that
@@ -140,6 +141,7 @@ from local_operator.session.retention import (
     session_activity,
 )
 from local_operator.session.runtime import registry
+from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
@@ -147,6 +149,7 @@ from local_operator.session.transcript import (
     read_latest_custom_entry,
     validate_page_request,
 )
+from local_operator.supplements.contract import supplement_read_options
 
 # The move shares the TUI's own `/move` machinery rather than a second resolver:
 # `expand_path` resolves a relative target against the SESSION's directory and
@@ -977,7 +980,7 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
             return None
         except OSError as error:
             raise HTTPException(
-                409, f"cannot read the session's working-directory marker: {error}"
+                409, _wd.cwd_marker_read_failed(error=str(error)).envelope()
             ) from None
 
     def restore_marker(previous_bytes: bytes | None) -> None:
@@ -1024,7 +1027,9 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
         # the route's ``errors()`` ladder: that ladder's ``OSError`` arm claims
         # ONLY the disk-full errnos (ENOSPC/EDQUOT) and re-raises the rest, so
         # this one would reach the user as a 500 rather than as the path it is.
-        raise HTTPException(409, f"cannot move to {requested}: {error}") from None
+        raise HTTPException(
+            409, _wd.move_failed(requested=requested, error=str(error)).envelope()
+        ) from None
 
     resolved = str(directory)
     if _same_directory(resolved, previous):
@@ -1110,9 +1115,7 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
         # actionable fact is that the marker could not be written. It is
         # deliberately NOT ``MoveIndeterminate`` either — nothing reached an
         # owner and no state is in doubt.
-        raise HTTPException(
-            409, f"cannot write the session's working-directory marker: {error}"
-        ) from None
+        raise HTTPException(409, _wd.cwd_marker_write_failed(error=str(error)).envelope()) from None
     bridge.cwd = resolved
     try:
         # The receipt's ``outcome`` IS this call's return vocabulary: the facade
@@ -1227,6 +1230,7 @@ class DesktopSubscription:
     #: negotiation the runtime's attach gate runs, with the query parameter as
     #: this transport's half).
     supplements: bool = False
+    journal_order: bool = False
     expires: float = 0.0
     overflow: bool = False
     #: False until ``events`` has finished the OPEN handshake -- i.e. until the
@@ -1308,6 +1312,8 @@ class DesktopSessionBridge:
         #: slow-client overflow uses, so the cause is not recoverable from the
         #: subscription alone. No behaviour reads it.
         self._closing = False
+        self._order_pending: dict[str, tuple[dict[str, Any], tuple[int, int, float] | None]] = {}
+        self._order_correction: asyncio.Task[Any] | None = None
         self.touched = time.monotonic()
         self.lock = asyncio.Lock()
         self.watch_lock = asyncio.Lock()
@@ -1592,6 +1598,8 @@ class DesktopSessionBridge:
         (see :meth:`_read_attach_settled`).
         """
         task: asyncio.Task[bool] | None = None
+        trace_at = time.monotonic()
+        attach_landed: bool | None = None
         async with self.lock:
             self.users += 1
             self.touched = time.monotonic()
@@ -1633,6 +1641,7 @@ class DesktopSessionBridge:
                         else READ_FIRST_FRAME_GRACE_S
                     )
                     done, _ = await asyncio.wait({task}, timeout=grace)
+                    attach_landed = bool(done)
                     if not done:
                         self.read_attach_outran.add(task)
             else:
@@ -1653,6 +1662,20 @@ class DesktopSessionBridge:
             raise
         if self.attention_task is None:
             self.attention_task = asyncio.create_task(self._poll_attention())
+        if open_trace.enabled():
+            # The read envelope's own decomposition: the work before the wait
+            # (lock, facade, attach start) versus the attach wait itself, and
+            # whether the attach landed inside the grace. ``attach_landed`` is
+            # None when no wait happened at all (an already-attached facade) —
+            # the difference between "warm" and "waited and still cold".
+            open_trace.mark(
+                "a.acquire",
+                (time.monotonic() - trace_at) * 1000,
+                session=self.session_id,
+                read=read,
+                attach_started=task is not None,
+                attach_landed=attach_landed,
+            )
         return remote
 
     def _start_read_attach(self, remote: AttachedSession) -> asyncio.Task[bool] | None:
@@ -2110,6 +2133,9 @@ class DesktopSessionBridge:
 
     async def close(self) -> None:
         self._closing = True
+        self._order_pending.clear()
+        if self._order_correction is not None:
+            self._order_correction.cancel()
         for sub in self.subscribers.values():
             self._disconnect(sub)
         self._cancel_dwells()
@@ -2347,6 +2373,12 @@ class DesktopSessionBridge:
             # ``supplements`` must not meet the family at all: an older renderer
             # would paint the unknown event visibly (memo §2.7).
             if not sub.supplements and supplement_event_frame(frame):
+                continue
+            if (
+                not sub.journal_order
+                and frame.get("type") == "event"
+                and frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
+            ):
                 continue
             if sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES:
                 if sub.opened:
@@ -3175,7 +3207,13 @@ class DesktopSessionBridge:
         return task
 
     async def snapshot(
-        self, *, entry_times: bool = False, open_frame: bool = False
+        self,
+        *,
+        entry_times: bool = False,
+        open_frame: bool = False,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
+        supplements: bool = False,
     ) -> dict[str, Any]:
         # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
         # everything this method does before the page (the attention glance, the
@@ -3208,6 +3246,10 @@ class DesktopSessionBridge:
             self.attention_served_stale = True
         except (sqlite3.Error, OSError):
             pass
+        if open_trace.enabled():
+            open_trace.mark(
+                "a.snap.attention", (time.monotonic() - started) * 1000, session=self.session_id
+            )
         # THE GATE READS THE STORE'S OWN FIELD RATHER THAN A STATE CLONE, because
         # the clone is now taken LAST (see the watermark note above the return).
         # ``self.remote.frontend_state`` is the store object itself
@@ -3245,7 +3287,11 @@ class DesktopSessionBridge:
         # pays a second round trip (``/history``) for the transcript the click had
         # already asked for. Merging is by row id on both sides, which is the rule a
         # live local owner's snapshot already relies on.
-        if cursor or (remote is not None and (remote.is_cold or self.remote_row is not None)):
+        if (
+            journal_order
+            or cursor
+            or (remote is not None and (remote.is_cold or self.remote_row is not None))
+        ):
             # THE PAGE IS THE JOURNAL'S TAIL. Its upper bound is NOT the frontend
             # cursor above, and that is the fix rather than a detail: this is a
             # read of the TRANSCRIPT, while ``history_cursor`` is a FRONTEND
@@ -3280,12 +3326,18 @@ class DesktopSessionBridge:
             history = await self.history(
                 entry_times=entry_times,
                 open_frame=open_frame,
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                **supplement_read_options(supplements),
                 # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
                 # read may spend what REMAINS of it on facts and nothing more. See
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
                 # why the renderer's own paint time is the reason for it.
                 deadline=started + OPEN_FRAME_SNAPSHOT_BUDGET_S,
             )
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.snap.history", (time.monotonic() - started) * 1000, session=self.session_id
+                )
         # THE WATERMARK IS READ WITH THE STATE IT DESCRIBES, AND NOTHING AWAITS
         # BETWEEN THEM. Both reads used to sit ABOVE the ``history()`` await, so
         # this frame's ``seq`` was a watermark older than the last suspension in
@@ -3302,6 +3354,10 @@ class DesktopSessionBridge:
         # pins it.
         state = self.state()
         seq, epoch = self.sequence, self.epoch
+        if open_trace.enabled():
+            open_trace.mark(
+                "a.snap.total", (time.monotonic() - started) * 1000, session=self.session_id
+            )
         return {
             "session_id": self.session_id,
             "epoch": epoch,
@@ -3314,6 +3370,20 @@ class DesktopSessionBridge:
             },
         }
 
+    def _can_paint_supplements(self, declared: bool) -> bool:
+        """Cold history has no attach socket; negotiate its reader, not another viewer.
+
+        Match the runtime's reader-method capability advertisement. If a facade
+        is bound to a specific owner, its actual record must advertise the family;
+        a disconnected current reader can still paint durable stored graphs.
+        """
+        from local_operator.supplements.contract import SUPPLEMENTS_READ_OP, negotiated
+
+        if declared is not True or not callable(getattr(self.remote, SUPPLEMENTS_READ_OP, None)):
+            return False
+        record = getattr(self.remote, "_runtime_record", None)
+        return record is None or negotiated(record.capabilities, True)
+
     async def history(
         self,
         *,
@@ -3325,6 +3395,9 @@ class DesktopSessionBridge:
         limit: int = 100,
         entry_times: bool = False,
         open_frame: bool = False,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
+        supplements: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
         """One page of the durable journal.
@@ -3390,6 +3463,28 @@ class DesktopSessionBridge:
         leaves the wire reader exactly as it was, serve-stamp included.
         """
         validate_page_request(before_id, through_id, around_id, before, after, limit)
+        if order_ids is not None and (
+            len(order_ids) > 512
+            or any(not isinstance(id_, str) or not 1 <= len(id_) <= 128 for id_ in order_ids)
+        ):
+            raise ValueError("order_ids must contain at most 512 entry ids of 1..128 characters")
+        if self.remote_row is not None and journal_order:
+            # The receiver's journal/index can never order the peer's rows.
+            # Until the owner transport negotiates this field, state unsupported.
+            answer = await self.history(
+                before_id=before_id,
+                through_id=through_id,
+                around_id=around_id,
+                before=before,
+                after=after,
+                limit=limit,
+                entry_times=entry_times,
+                open_frame=open_frame,
+                deadline=deadline,
+            )
+            if answer.get("journal_generation"):
+                return answer
+            return {**answer, "journal_order_state": "unsupported"}
         if open_frame:
             # A PEER'S FRAME IS BUILT BY ITS OWNER, AND THE FLAG NOW TRAVELS WITH
             # THE REQUEST (docs/DESKTOP_API.md §"The open frame"): the stored
@@ -3440,6 +3535,7 @@ class DesktopSessionBridge:
                     after=after,
                     limit=limit,
                     entry_times=entry_times,
+                    **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 )
                 return {**page, "runs": [], "runs_state": "unsupported", "head_cut": False}
             return await self._open_frame_history(
@@ -3450,6 +3546,9 @@ class DesktopSessionBridge:
                 after=after,
                 limit=limit,
                 entry_times=entry_times,
+                journal_order=journal_order,
+                order_ids=order_ids,
+                supplements=self._can_paint_supplements(supplements),
                 deadline=(
                     deadline
                     if deadline is not None
@@ -3501,7 +3600,7 @@ class DesktopSessionBridge:
                 "has_more": False,
                 "cursor_missing": bool(before_id or through_id or around_id),
             }
-        return {
+        answer = {
             # EVERY ROW HERE IS A JOURNAL ENTRY, so its ``ts`` is the entry time by
             # construction — the ``entry`` value of the closed vocabulary, and the
             # reason a LOCAL page needs no negotiation to be honest. Stamped here
@@ -3514,6 +3613,7 @@ class DesktopSessionBridge:
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,
         }
+        return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
     async def _open_frame_history(
         self,
@@ -3526,6 +3626,9 @@ class DesktopSessionBridge:
         limit: int,
         entry_times: bool,
         deadline: float,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
+        supplements: bool = False,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
 
@@ -3587,6 +3690,7 @@ class DesktopSessionBridge:
             anchored_index = await self._frame_index(deadline)
             result = build_frame(
                 anchored,
+                supplements=supplements,
                 index=anchored_index,
                 runs_state="building",
                 has_more=page.has_more,
@@ -3621,9 +3725,10 @@ class DesktopSessionBridge:
             # window, not a tail cut, so the only honest reading of ``head_cut``
             # here is "a cap dropped rows from this window".
             answer["head_cut"] = result.capped
-            return answer
+            return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
         collected: list[dict[str, Any]] = []
+        order_pages: list[Any] = []
         has_more = False
         cursor_missing = False
         cursor = before_id
@@ -3666,15 +3771,16 @@ class DesktopSessionBridge:
             if not collected:
                 cursor_missing = page.reconciled
             has_more = page.has_more
+            order_pages.append(page)
             rows = self._wire_rows(page.entries)
             if not rows:
                 break
             collected = rows + collected
             if not collected:
                 break
-            kept, reached = align_page(collected, limit)
-            paintable_rows = paintable(collected)
-            if reached and len(paintable(kept)) >= limit:
+            kept, reached = align_page(collected, limit, supplements=supplements)
+            paintable_rows = paintable(collected, supplements=supplements)
+            if reached and len(paintable(kept, supplements=supplements)) >= limit:
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
             # what the client asked for and it must not wait behind a scan, while
@@ -3733,9 +3839,10 @@ class DesktopSessionBridge:
         # extra rows — measured on the S3 fixture, serving the overshoot was 231
         # rows and 264 KB against 100 rows and 114 KB — so the hunt that failed is
         # not paid for, and ``runs`` carries that run's true size instead.
-        kept, reached = align_page(collected, limit)
+        kept, reached = align_page(collected, limit, supplements=supplements)
         result = build_frame(
             kept,
+            supplements=supplements,
             index=index,
             runs_state="building",
             has_more=has_more,
@@ -3770,7 +3877,7 @@ class DesktopSessionBridge:
         # page's oldest run from the rows it holds), which makes the false answer
         # worse than no answer.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
-        return answer
+        return self._journal_page(answer, order_pages, order_ids or []) if journal_order else answer
 
     @staticmethod
     def _wire_rows(entries: Any) -> list[dict[str, Any]]:
@@ -3828,6 +3935,115 @@ class DesktopSessionBridge:
         except Exception:  # noqa: BLE001 — a failed scan is an absent fact, not an error
             logger.debug("open frame: refresh failed", exc_info=True)
             return None
+
+    @staticmethod
+    def _order_descriptor(entry: dict[str, Any]) -> dict[str, Any]:
+        payload = entry.get("payload") or {}
+        details = payload.get("details") or {}
+        return {
+            "id": entry["id"],
+            "type": entry.get("type"),
+            "role": payload.get("role"),
+            "tool_call_id": payload.get("tool_call_id"),
+            "anchor": details.get("anchor") if isinstance(details, dict) else None,
+        }
+
+    def _apply_journal_order(
+        self, answer: dict[str, Any], source: tuple[int, int, float] | None, ids: list[str]
+    ) -> bool:
+        from local_operator.session import transcript_index
+
+        index = transcript_index.fresh_resident(self.root, self.session_id)
+        if index is None or not index.journal_generation or source is None:
+            return False
+        if source != (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime")):
+            return False
+        if any(row["id"] not in index.journal_rows for row in answer["entries"]):
+            return False
+        answer["entries"] = [
+            {**row, "journal_seq": index.journal_rows[row["id"]]} for row in answer["entries"]
+        ]
+        answer["journal_order_state"] = "ready"
+        answer["journal_generation"] = index.journal_generation
+        answer["journal_ordinals"] = {
+            id_: index.journal_rows[id_] for id_ in ids if id_ in index.journal_rows
+        }
+        answer["journal_missing_ids"] = [id_ for id_ in ids if id_ not in index.journal_rows]
+        return True
+
+    def _journal_page(
+        self, answer: dict[str, Any], pages: list[Any], ids: list[str]
+    ) -> dict[str, Any]:
+        """Opt-in source facts, from a single verified page/index view only.
+
+        A cold/stale index starts the existing background singleflight and a
+        coalesced metadata correction. No scan blocks a page or live callback.
+        Extra ids name already-loaded rows outside this page, never a new read
+        service; their count/string bounds cap the response and source remains
+        THIS session. Missing ids are explicitly unknown.
+        """
+        from local_operator.session import transcript_index
+
+        ids = list(dict.fromkeys(ids))
+        sources = [page.source_signature for page in pages]
+        source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+        if self._apply_journal_order(answer, source, ids):
+            return answer
+        answer["journal_order_state"] = "building" if source is not None else "unavailable"
+        for row in answer["entries"]:
+            self._order_pending[row["id"]] = (self._order_descriptor(row), source)
+        for id_ in ids:
+            self._order_pending.setdefault(id_, ({"id": id_}, source))
+        if len(self._order_pending) > 4096:
+            self._order_pending.clear()
+            self.publish("event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+            return answer
+        if self._order_correction is None or self._order_correction.done():
+
+            async def correct() -> None:
+                try:
+                    task, _ = transcript_index.start_refresh(self.root, self.session_id)
+                    await asyncio.shield(task)
+                    if self._closing:
+                        return
+                    index = transcript_index.fresh_resident(self.root, self.session_id)
+                    rows = []
+                    pending, self._order_pending = self._order_pending, {}
+                    if index is None or not index.journal_generation:
+                        self.publish("event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+                        return
+                    expected = (
+                        index.sig.get("inode"),
+                        index.sig.get("size"),
+                        index.sig.get("mtime"),
+                    )
+                    mismatch = False
+                    for id_, (descriptor, original) in pending.items():
+                        if original != expected:
+                            mismatch = True
+                            continue
+                        seq = index.journal_rows.get(id_)
+                        if seq is not None:
+                            rows.append({**descriptor, "journal_seq": seq})
+                    for at in range(0, len(rows), 128):
+                        self.publish(
+                            "event",
+                            {
+                                "type": JOURNAL_ORDER_EVENT,
+                                "journal_generation": index.journal_generation,
+                                "rows": rows[at : at + 128],
+                            },
+                        )
+                    if mismatch:
+                        self.publish("event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+                except Exception:  # noqa: BLE001 - source failure is no authority
+                    logger.debug("desktop journal-order correction failed", exc_info=True)
+                    self._order_pending.clear()
+                    if not self._closing:
+                        self.publish("event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+
+            self._order_correction = asyncio.create_task(correct())
+        return answer
 
     def _frame_answer(self, result: Any) -> dict[str, Any]:
         """The frame's page as the wire states it, in the existing envelope."""
@@ -3949,12 +4165,29 @@ class DesktopSessionBridge:
             # NO FACADE AT ALL is the same fact as a cold one for this page's
             # purposes: nothing on this device can read the wire, so the owner's
             # stored journal is the only source -- and it does not need a facade.
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.remote.branch", session=self.session_id, source="stored", facade=False
+                )
             return await self._peer_stored_history(
                 before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
             )
         if remote.is_cold:
+            attach_at = time.monotonic()
             with contextlib.suppress(ConnectionError, OSError, TimeoutError):
                 await remote.attach_existing(budget=READ_ATTACH_BUDGET_S)
+            if open_trace.enabled():
+                # THE SECOND ATTACH ATTEMPT (the first is ``acquire``'s): paid
+                # only while the facade is still cold after the acquire, and
+                # bounded by the same read envelope. Marked separately because
+                # "the acquire waited" and "the snapshot waited" are different
+                # stretches of the wire's first-frame gap.
+                open_trace.mark(
+                    "a.remote.attach2",
+                    (time.monotonic() - attach_at) * 1000,
+                    session=self.session_id,
+                    still_cold=remote.is_cold,
+                )
         # THE WIRE ANSWERS ONLY WHEN IT CAN ANSWER AT ALL, and there are TWO ways it
         # cannot (agent review round 1, R1-3 — the predicate this comment used to
         # describe was ``is_cold`` alone, which is not the predicate the code runs).
@@ -3971,6 +4204,15 @@ class DesktopSessionBridge:
         # wire.
         cold = remote.is_cold
         rows = self._remote_rows(remote, before_id=before_id, through_id=through_id)
+        stored = rows is None or (cold and not rows)
+        if open_trace.enabled():
+            open_trace.mark(
+                "a.remote.branch",
+                session=self.session_id,
+                source="stored" if stored else "wire",
+                cold=cold,
+                rows=len(rows) if rows is not None else None,
+            )
         if rows is None or (cold and not rows):
             return await self._peer_stored_history(
                 before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
@@ -4125,6 +4367,7 @@ class DesktopSessionBridge:
 
         device_id = str(getattr(self.remote_row, "owner_device", "") or "")
         if device_id:
+            ask_at = time.monotonic()
             page = await asyncio.to_thread(
                 peer_stored_history_page,
                 self.root,
@@ -4134,6 +4377,20 @@ class DesktopSessionBridge:
                 limit=limit,
                 open_frame=open_frame,
             )
+            if open_trace.enabled():
+                # THE MESH ASK, END TO END: control-socket dial, this device's
+                # relay, the hop to the owner's relay, its stored read and build,
+                # and every serialization on the way back. A ``None`` page is
+                # still a timed answer (the ask was made; it failed).
+                open_trace.mark(
+                    "a.stored.ask",
+                    (time.monotonic() - ask_at) * 1000,
+                    session=self.session_id,
+                    device=device_id,
+                    limit=limit,
+                    open_frame=open_frame,
+                    served=page is not None,
+                )
             if page is not None:
                 cut = self._cut_stored_page(page, before_id=before_id, through_id=through_id)
                 # ``ts_source: "entry"`` IS THIS SOURCE'S OWN FACT, and it is
@@ -5053,7 +5310,11 @@ class DesktopSessionBridge:
         await remote.withdraw_desktop_watch()
 
     def subscribe(
-        self, *, frontend_replace: bool = False, supplements: bool = False
+        self,
+        *,
+        frontend_replace: bool = False,
+        supplements: bool = False,
+        journal_order: bool = False,
     ) -> DesktopSubscription:
         """Register one event subscriber.
 
@@ -5079,7 +5340,9 @@ class DesktopSessionBridge:
                 "A working-directory move is in progress; this viewer cannot follow it. "
                 "Update the desktop app, then reconnect."
             )
-        sub = DesktopSubscription(frontend_replace=frontend_replace, supplements=supplements)
+        sub = DesktopSubscription(
+            frontend_replace=frontend_replace, supplements=supplements, journal_order=journal_order
+        )
         self.subscribers[sub.id] = sub
         return sub
 
@@ -5091,7 +5354,10 @@ class DesktopSessionBridge:
         after_seq: int,
         entry_times: bool = False,
         open_frame: bool = False,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        gen_at = time.monotonic()
         try:
             cutoff = self.sequence
             first = self.replay[0][0]["seq"] if self.replay else cutoff + 1
@@ -5102,11 +5368,28 @@ class DesktopSessionBridge:
                     for f, _ in self.replay
                     if after_seq < f["seq"] <= cutoff
                     and (sub.supplements or not supplement_event_frame(f))
+                    and (
+                        sub.journal_order
+                        or f.get("type") != "event"
+                        or f.get("payload", {}).get("type") != JOURNAL_ORDER_EVENT
+                    )
                 ]
                 if not gap
                 else []
             )
-            snapshot = await self.snapshot(entry_times=entry_times, open_frame=open_frame)
+            snapshot = await self.snapshot(
+                entry_times=entry_times,
+                open_frame=open_frame,
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                **supplement_read_options(sub.supplements),
+            )
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.gen.snapshot",
+                    (time.monotonic() - gen_at) * 1000,
+                    session=self.session_id,
+                    open_frame=open_frame,
+                )
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
             # ``snapshot()``'s state and sequence are its last reads with nothing
             # awaiting between them, so no frame can have been published after
@@ -5114,7 +5397,9 @@ class DesktopSessionBridge:
             # split below exact rather than a race: everything at or below the
             # watermark is already inside ``frontend`` and is dropped as
             # superseded, and anything above it is newer than the snapshot and
-            # must be delivered after it.
+            # must be delivered after it. Order corrections are the exception:
+            # they are not frontend state and their IDs may be outside both the
+            # bounded page and order_ids lookup; the drain below preserves them.
             #
             # The frames are drained BEFORE ``open`` is yielded, and ``opened``
             # is set before the first yield of the handshake, so the overflow
@@ -5127,6 +5412,7 @@ class DesktopSessionBridge:
             # trap a reader pays for later. The rename is this branch's, so
             # main's block stays byte-identical.
             pending_frames: list[dict[str, Any]] = []
+            replayed_sequences = {prior["seq"] for prior in replay}
             while True:
                 try:
                     item = sub.queue.get_nowait()
@@ -5137,7 +5423,17 @@ class DesktopSessionBridge:
                     break
                 frame, size = item
                 sub.queued_bytes -= size
-                if frame["seq"] > snapshot["seq"]:
+                # Source metadata is not folded into frontend and a bounded
+                # snapshot need not carry its IDs. Preserve it through cutover
+                # unless this exact frame is already in the initial replay;
+                # ordinary frontend facts retain their existing supersession.
+                order_fact = (
+                    sub.journal_order
+                    and frame.get("type") == "event"
+                    and frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
+                )
+                already_replayed = frame["seq"] in replayed_sequences
+                if frame["seq"] > snapshot["seq"] or (order_fact and not already_replayed):
                     pending_frames.append(frame)
             sub.opened = True
             open_payload: dict[str, Any] = {
@@ -5164,6 +5460,12 @@ class DesktopSessionBridge:
                 open_payload["attaching"] = bool(
                     (snapshot.get("payload") or {}).get("attaching", False)
                 )
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.gen.open_yield",
+                    (time.monotonic() - gen_at) * 1000,
+                    session=self.session_id,
+                )
             yield {
                 "session_id": self.session_id,
                 "epoch": self.epoch,
@@ -5176,6 +5478,12 @@ class DesktopSessionBridge:
             # The open frame is metadata, NOT permission to skip this replay.
             for frame in replay:
                 yield frame
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.gen.snapshot_yield",
+                    (time.monotonic() - gen_at) * 1000,
+                    session=self.session_id,
+                )
             yield snapshot
             for frame in pending_frames:
                 yield frame

@@ -15,16 +15,23 @@ from typing import Any
 
 import pytest
 
+from local_operator.session import channel_spend as channel_spend_module
 from local_operator.session.channel_spend import (
     BASIS_BILLED,
     BASIS_ESTIMATED,
+    BASIS_META,
     BASIS_NOT_TRACKED,
     BASIS_SUBSCRIPTION,
+    BASIS_VALUES,
+    CHANNEL_LABELS,
+    CHANNEL_ORDER,
     CHANNEL_SPEND_CUSTOM_TYPE,
+    CHANNELS,
     NOT_TRACKED_MICRO,
     PENDING_OWNER_APPEND,
     PENDING_OWNER_APPEND_REASON,
     PENDING_SIDECAR_NAME,
+    SPEND_BREAKDOWN_ENTRY_CAP,
     ChannelSpend,
     ChannelSpendRecord,
     ChildrenSnapshot,
@@ -79,6 +86,7 @@ def payload(
     *,
     inference: InferenceSnapshot | None = None,
     children: ChildrenSnapshot | None = None,
+    child_records: list[ChannelSpendRecord] | None = None,
     tracked: bool = True,
     lost: bool = False,
     pending: list[dict[str, Any]] | None = None,
@@ -87,6 +95,7 @@ def payload(
         fold_records(records).rows(),
         inference=inference or InferenceSnapshot(),
         children=children or ChildrenSnapshot(),
+        child_records=child_records or (),
         tracked=tracked,
         lost=lost,
         pending=pending or (),
@@ -477,16 +486,15 @@ def test_image_label_mapping(
 
 
 # -- the frozen wire contract ----------------------------------------------
+#
+# ``golden_payload`` is the fixture's ONE regeneration source: the golden
+# test compares the file against it, so a deliberate wire change updates both
+# in one place and an accidental one fails here.
 
 
-def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
-    """The fixture is what ``combine`` produces, and its KEYS are the contract.
-
-    The UI PR types against this file. If a key is renamed or dropped, this test
-    (and the UI's own contract test) fails on purpose — the alternative is a
-    silent wire break discovered on a user's screen.
-    """
-    records = [
+def golden_records() -> list[ChannelSpendRecord]:
+    """The fixture's five records — the one source the fixture regenerates from."""
+    return [
         ChannelSpendRecord(
             record_id="image:req_7f3a",
             rev=1,
@@ -563,24 +571,95 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
             price_version="client-search-table-2026-09",
         ),
     ]
-    generated = payload(
-        records,
-        inference=InferenceSnapshot(
-            micro=900000,
-            calls=12,
-            priced_calls=12,
-            knowledge="exact",
-            by_identity={
-                "anthropic/claude-sonnet-5-5": {
-                    "provider": "anthropic",
-                    "model_id": "claude-sonnet-5-5",
-                    "micro": 900000,
-                    "calls": 12,
-                    "unpriced": 0,
-                }
-            },
-        ),
+
+
+def golden_inference() -> InferenceSnapshot:
+    """The fixture's inference half: twelve priced calls on one identity."""
+    return InferenceSnapshot(
+        micro=900000,
+        calls=12,
+        priced_calls=12,
+        knowledge="exact",
+        by_identity={
+            "anthropic/claude-sonnet-5-5": {
+                "provider": "anthropic",
+                "model_id": "claude-sonnet-5-5",
+                "micro": 900000,
+                "calls": 12,
+                "unpriced": 0,
+            }
+        },
     )
+
+
+def golden_child_records() -> list[ChannelSpendRecord]:
+    """The fixture's relayed child record — the design note's §4.3 subagents half.
+
+    A child session's image call relayed into the parent: it rides
+    ``child_records`` (never ``rows``), lands in BOTH partitions — the
+    ``subagents`` entry and the ``image`` source entry — and keeps the golden
+    object exercising the dedup + children fold, not assuming them.
+    """
+    return [
+        ChannelSpendRecord(
+            record_id="image:child1",
+            ts_ms=1760000005000,
+            session_id="child",
+            channel="image",
+            provider="radient",
+            model="gpt-image-2",
+            units=1,
+            unit="images",
+            amount_micro=20000,
+            billing_basis=BASIS_BILLED,
+            cost_source="server_reported",
+            status="ok",
+        )
+    ]
+
+
+def golden_payload() -> dict[str, Any]:
+    """The golden fixture's exact payload, produced by ``combine``.
+
+    The §4.3 scenario: the five records, a 500,000 µ$ children ledger and ONE
+    relayed child image record (20,000 µ$), so both partitions reconcile to
+    ``total_micro = 1,536,000`` and the fixture carries every additive shape
+    the UI PR types against.
+
+    Regenerate ``tests/fixtures/spend_channels_v1.json`` after a DELIBERATE
+    wire change by dumping this object the way the fixture is stored — two
+    space indent plus a trailing newline::
+
+        .venv/bin/python - <<'PY'
+        import json
+
+        from tests.unit.session.test_channel_spend import golden_payload
+
+        path = "tests/fixtures/spend_channels_v1.json"
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(golden_payload(), handle, indent=2)
+            handle.write("\n")
+        PY
+    """
+    return payload(
+        golden_records(),
+        inference=golden_inference(),
+        children=ChildrenSnapshot(total_micro=500000, knowledge="exact"),
+        child_records=golden_child_records(),
+    )
+
+
+def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
+    """The fixture is what ``combine`` produces, and its KEYS are the contract.
+
+    The scenario is the design note's §4.3: the five records, a 500,000 µ$
+    children ledger and ONE relayed child image record (20,000 µ$), so both
+    partitions reconcile to the same 1,536,000 µ$ total. The UI PR types
+    against this file. If a key is renamed or dropped, this test (and the UI's
+    own contract test) fails on purpose — the alternative is a silent wire
+    break discovered on a user's screen.
+    """
+    generated = golden_payload()
     fixture = json.loads(FIXTURE.read_text())
     assert generated == fixture, "the fixture drifted from the code that produces it"
 
@@ -592,6 +671,8 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
         "by_basis",
         "rows",
         "children",
+        "breakdown",
+        "vocabulary",
     }
     assert set(fixture["rows"][0]) == {
         "channel",
@@ -616,11 +697,557 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
         "not_tracked_micro",
         "not_tracked_calls",
     }
+    # The additive sections' keys are the contract too: an entry and a basis
+    # meta each carry exactly the fields the UI types against, so a rename
+    # fails loudly here (design §4.2/§5).
+    assert set(fixture["breakdown"]) == {"by_agent", "by_source"}
+    entry_keys = {"id", "label", "amount_micro", "knowledge", "unstated_records", "bases"}
+    assert set(fixture["breakdown"]["by_agent"][0]) == entry_keys
+    assert set(fixture["breakdown"]["by_source"][0]) == entry_keys
+    assert set(fixture["vocabulary"]) == {"channels", "bases"}
+    assert set(fixture["vocabulary"]["channels"]["image"]) == {"label"}
+    assert set(fixture["vocabulary"]["bases"]["billed"]) == {"label", "source_class", "marker"}
+    assert set(fixture["vocabulary"]["bases"]["subscription_api_equivalent"]) == {
+        "label",
+        "source_class",
+        "marker",
+        "note",
+    }, "the subscription note is the only explanatory line on the wire"
+
+    # The golden SHAPE — the design note's §4.3 scenario verbatim, so a shape
+    # change fails HERE first. Both partitions reconcile to the one 1,536,000 µ$
+    # total; the relayed child record rides BOTH the ``subagents`` entry and
+    # its own ``image`` source entry; the children ledger's not-tracked basis
+    # sits in the ``inference`` entry's bases.
+    assert fixture["total_micro"] == 1536000
+    assert fixture["children"] == {"total_micro": 520000, "knowledge": "exact"}
+    assert fixture["by_basis"]["not_tracked_micro"] == 1420000
+    assert fixture["breakdown"]["by_agent"] == [
+        {
+            "id": "parent",
+            "label": "Parent agent",
+            "amount_micro": 1016000,
+            "knowledge": "partial",
+            "unstated_records": 1,
+            "bases": ["billed", "estimated", "not_tracked", "subscription_api_equivalent"],
+        },
+        {
+            "id": "subagents",
+            "label": "Subagents",
+            "amount_micro": 520000,
+            "knowledge": "exact",
+            "unstated_records": 0,
+            "bases": ["billed", "not_tracked"],
+        },
+    ]
+    assert fixture["breakdown"]["by_source"] == [
+        {
+            "id": "inference",
+            "label": "Inference",
+            "amount_micro": 1400000,
+            "knowledge": "exact",
+            "unstated_records": 0,
+            "bases": ["not_tracked"],
+        },
+        {
+            "id": "image",
+            "label": "Image",
+            "amount_micro": 126000,
+            "knowledge": "partial",
+            "unstated_records": 1,
+            "bases": ["billed", "subscription_api_equivalent"],
+        },
+        {
+            "id": "search",
+            "label": "Search",
+            "amount_micro": 8000,
+            "knowledge": "exact",
+            "unstated_records": 0,
+            "bases": ["estimated"],
+        },
+        {
+            "id": "read",
+            "label": "Read",
+            "amount_micro": 2000,
+            "knowledge": "exact",
+            "unstated_records": 0,
+            "bases": ["estimated"],
+        },
+    ]
+    assert fixture["vocabulary"] == {
+        "channels": {
+            "inference": {"label": "Inference"},
+            "image": {"label": "Image"},
+            "search": {"label": "Search"},
+            "read": {"label": "Read"},
+        },
+        "bases": {
+            "billed": {"label": "billed", "source_class": "paygo", "marker": "billed"},
+            "subscription_api_equivalent": {
+                "label": "API-equivalent",
+                "source_class": "subscription",
+                "marker": "API-equivalent · subscription",
+                "note": (
+                    "You're on a subscription, so API-equivalent amounts are list-price "
+                    "equivalents — not what you are charged."
+                ),
+            },
+            "estimated": {"label": "estimated", "source_class": "paygo", "marker": "estimated"},
+            "not_tracked": {
+                "label": "not tracked",
+                "source_class": "unknown",
+                "marker": "not tracked",
+            },
+        },
+    }
+    for partition in ("by_agent", "by_source"):
+        assert (
+            sum(entry["amount_micro"] or 0 for entry in fixture["breakdown"][partition])
+            == fixture["total_micro"]
+        )
 
     # And the wire MODEL accepts it unchanged: the fixture and the published
     # field are the same contract, not two lookalikes.
     parsed = FrontendSpendChannels.model_validate(fixture)
     assert parsed.model_dump(mode="json") == fixture
+
+
+def test_both_partitions_reconcile_to_the_total() -> None:
+    """Every published shape: Σ by_agent == Σ by_source == total_micro.
+
+    The two partitions are views of ONE total (design §4.5), so each must
+    reconcile on its own — a ``null``-amount entry (money we cannot size)
+    contributes nothing rather than a zero, and no piece appears twice.
+    """
+    shapes = [
+        golden_payload(),
+        payload([]),
+        payload([record(record_id="search:only")]),
+        payload([], inference=InferenceSnapshot(micro=900000, calls=12, priced_calls=12)),
+        payload([], children=ChildrenSnapshot(total_micro=300000, knowledge="floor")),
+        payload(
+            [
+                record(
+                    record_id="image:1",
+                    channel="image",
+                    amount_micro=53000,
+                    basis=BASIS_BILLED,
+                ),
+                record(
+                    record_id="image:2",
+                    channel="image",
+                    amount_micro=None,
+                    status="cancelled",
+                ),
+                record(record_id="search:2"),
+            ],
+            inference=InferenceSnapshot(
+                micro=900000, calls=12, priced_calls=11, knowledge="partial"
+            ),
+            children=ChildrenSnapshot(total_micro=300000, knowledge="floor"),
+            lost=True,
+        ),
+    ]
+    for shape in shapes:
+        for partition in ("by_agent", "by_source"):
+            stated = sum(
+                entry["amount_micro"]
+                for entry in shape["breakdown"][partition]
+                if entry["amount_micro"] is not None
+            )
+            assert stated == shape["total_micro"], (
+                f"{partition} does not reconcile: {stated} != {shape['total_micro']} "
+                f"for {shape['breakdown'][partition]!r}"
+            )
+
+
+def test_a_new_channel_and_basis_flow_through_the_breakdown_without_schema_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design §5.3: an unregistered channel/basis renders ECHOED, then curated.
+
+    ``video`` + ``video_credits`` is exactly what the coming video-spend PR
+    will emit before anyone touches this module: the by-source entry exists
+    with the fallback label, and the vocabulary names the id and ECHOES the
+    basis (``source_class: "unknown"``, no note — never a subscription claim).
+    Registering the pair in the tables flips both to the curated words, in
+    canonical order, with every row and amount untouched.
+    """
+    records = [
+        record(record_id="search:1", amount_micro=8000),
+        record(
+            record_id="video:1",
+            channel="video",
+            basis="video_credits",
+            amount_micro=21000,
+            provider="veo",
+            units=1,
+            unit="videos",
+        ),
+    ]
+    generated = payload(records)
+    assert [entry["id"] for entry in generated["breakdown"]["by_source"]] == [
+        "search",
+        "video",
+    ], "an unknown channel sorts after every registered one"
+    video = generated["breakdown"]["by_source"][1]
+    assert video["label"] == "Video", "the fallback label is id.capitalize()"
+    assert video["amount_micro"] == 21000
+    assert video["bases"] == ["video_credits"]
+    assert generated["vocabulary"]["channels"]["video"] == {"label": "Video"}
+    assert generated["vocabulary"]["bases"]["video_credits"] == {
+        "label": "video_credits",
+        "source_class": "unknown",
+        "marker": "video_credits",
+    }, "a foreign spelling is echoed — never a subscription claim"
+
+    # Register the pair the way a later analytics PR would: label, canonical
+    # order, basis meta. Nothing else in the tables moves.
+    monkeypatch.setitem(channel_spend_module.CHANNEL_LABELS, "video", "Video generation")
+    order: list[str] = list(channel_spend_module.CHANNEL_ORDER)
+    order.insert(order.index("image") + 1, "video")
+    monkeypatch.setattr(channel_spend_module, "CHANNEL_ORDER", tuple(order))
+    monkeypatch.setitem(
+        channel_spend_module.BASIS_META,
+        "video_credits",
+        {"label": "video credits", "source_class": "paygo", "marker": "video credits"},
+    )
+
+    curated = payload(records)
+    assert [entry["id"] for entry in curated["breakdown"]["by_source"]] == [
+        "video",
+        "search",
+    ], "registration moves the id into its canonical order"
+    assert curated["breakdown"]["by_source"][0]["label"] == "Video generation"
+    assert curated["vocabulary"]["channels"]["video"] == {"label": "Video generation"}
+    assert curated["vocabulary"]["bases"]["video_credits"] == {
+        "label": "video credits",
+        "source_class": "paygo",
+        "marker": "video credits",
+    }
+    # Nothing else moved: the same money and the same rows (compared as a set:
+    # a row's own order follows the display order registration just changed).
+    assert curated["total_micro"] == generated["total_micro"]
+    assert {row["channel"]: row for row in curated["rows"]} == {
+        row["channel"]: row for row in generated["rows"]
+    }, "registration must not change any row's own numbers"
+
+
+def test_the_vocabulary_registries_cover_every_registered_value() -> None:
+    """Registration cannot drift: the tables cover the id sets they name.
+
+    ``CHANNEL_LABELS`` must name every ``CHANNELS`` id, ``CHANNEL_ORDER`` must
+    place it (published order IS render order), and ``BASIS_META`` must
+    describe every ``BASIS_VALUES`` spelling with the three fields every basis
+    carries. Adding a channel or basis without its display words fails HERE
+    rather than shipping an object that cannot name it.
+    """
+    assert set(CHANNELS) <= set(CHANNEL_LABELS)
+    assert set(CHANNELS) <= set(CHANNEL_ORDER)
+    assert set(BASIS_VALUES) <= set(BASIS_META)
+    for spelling, meta in BASIS_META.items():
+        assert set(meta) <= {"label", "source_class", "marker", "note"}, spelling
+        assert {"label", "source_class", "marker"} <= set(meta), spelling
+        assert meta["source_class"] in {"paygo", "subscription", "unknown"}, spelling
+        assert meta["marker"], spelling
+
+
+def test_the_breakdown_entry_cap_groups_the_remainder() -> None:
+    """At most ``SPEND_BREAKDOWN_ENTRY_CAP`` entries; the rest fold into ``other``.
+
+    The same overflow discipline as the wire's row cap (design §4.6; review
+    round 1, MINOR): the first ``cap - 1`` ranked entries keep their places
+    and everything past that edge aggregates into ONE ``other`` entry — money
+    summed, worst rung applied, counts preserved — so the partition never
+    exceeds the cap, loses no money and still reconciles.
+    """
+    records = [
+        record(
+            record_id=f"chan{index:02d}:1",
+            channel=f"chan{index:02d}",
+            amount_micro=None if index == 13 else (index + 1) * 1000,
+            status="cancelled" if index == 13 else "ok",
+        )
+        for index in range(14)
+    ]
+    generated = payload(records)
+    entries = generated["breakdown"]["by_source"]
+    assert len(entries) == SPEND_BREAKDOWN_ENTRY_CAP
+    assert [entry["id"] for entry in entries[:-1]] == [
+        f"chan{index:02d}" for index in range(SPEND_BREAKDOWN_ENTRY_CAP - 1)
+    ]
+    folded = entries[-1]
+    assert folded["id"] == "other"
+    assert folded["label"] == "Other"
+    assert (
+        folded["amount_micro"] == 12000 + 13000
+    ), "chan13 was never sized; only its count survives"
+    assert folded["unstated_records"] == 1
+    assert folded["knowledge"] == "partial", "stated money is never rated unknown"
+    assert sum(entry["amount_micro"] or 0 for entry in entries) == generated["total_micro"]
+
+    # A session that ALREADY has an ``other`` entry folds the remainder into
+    # it rather than emitting a second one — the count then sits below the
+    # cap and the partition stays a partition.
+    with_other = payload(
+        [
+            *records,
+            record(record_id="other:1", channel="other", amount_micro=777),
+        ]
+    )
+    other_entries = with_other["breakdown"]["by_source"]
+    assert len(other_entries) == SPEND_BREAKDOWN_ENTRY_CAP - 1
+    assert other_entries[0]["id"] == "other"
+    assert other_entries[0]["amount_micro"] == 777 + 11000 + 12000 + 13000
+    assert sum(entry["amount_micro"] or 0 for entry in other_entries) == with_other["total_micro"]
+
+
+def test_entry_knowledge_never_reads_exacter_than_its_parts() -> None:
+    """The rung matrix across both partitions: unknown > partial > floor > exact.
+
+    Entry rungs come from combine's OWN booleans (design §4.5): an unsized
+    record reads ``partial`` (or ``unknown`` when nothing is sized), the
+    inference half contributes its rung, the children-ledger rung lands on the
+    ``inference`` entry and the published children knowledge on ``subagents``.
+    """
+    generated = payload(
+        [
+            record(
+                record_id="cls:1",
+                channel="classification",
+                amount_micro=None,
+                status="ok",
+            ),
+            record(record_id="image:1", channel="image", amount_micro=53000, basis=BASIS_BILLED),
+            record(
+                record_id="image:2",
+                channel="image",
+                amount_micro=None,
+                status="cancelled",
+            ),
+            record(record_id="search:1", amount_micro=8000),
+        ],
+        inference=InferenceSnapshot(micro=900000, calls=12, priced_calls=12, knowledge="floor"),
+        children=ChildrenSnapshot(total_micro=300000, knowledge="floor"),
+        child_records=[
+            record(record_id="tts:kid", channel="tts", amount_micro=40000, basis=BASIS_BILLED),
+        ],
+    )
+    entries = {entry["id"]: entry for entry in generated["breakdown"]["by_source"]}
+    assert entries["classification"]["amount_micro"] is None
+    assert entries["classification"]["knowledge"] == "unknown"
+    assert entries["classification"]["unstated_records"] == 1
+    assert entries["image"]["knowledge"] == "partial", "a stated + unsized group"
+    assert entries["search"]["knowledge"] == "exact"
+    assert entries["inference"]["knowledge"] == "floor", "the ledger rung rides inference"
+    assert entries["tts"]["knowledge"] == "exact", "a relayed, stated child record"
+    agents = {entry["id"]: entry for entry in generated["breakdown"]["by_agent"]}
+    assert agents["parent"]["knowledge"] == "partial", "own records degrade the parent"
+    assert agents["subagents"]["knowledge"] == "floor", "the published children knowledge"
+    assert (
+        sum(entry["amount_micro"] or 0 for entry in generated["breakdown"]["by_agent"])
+        == generated["total_micro"]
+    )
+
+    # With no unsized own record, the parent still cannot read exacter than
+    # the inference half it carries.
+    floor_only = payload(
+        [record(record_id="search:1")],
+        inference=InferenceSnapshot(micro=900000, calls=12, priced_calls=12, knowledge="floor"),
+    )
+    assert floor_only["breakdown"]["by_agent"][0]["knowledge"] == "floor"
+
+
+def test_the_inference_half_rung_follows_combines_activity_gate() -> None:
+    """MAJOR (review round 1): an entry mirrors the session over the inference half.
+
+    A never-accrued accumulator can carry money with NO calls (a remainder) or
+    unpriced calls only. ``combine`` counts the half's ``unknown`` only when
+    calls exist, and maps that case to ``partial`` — so the ``parent`` and
+    ``inference`` entries must derive their rungs from the same two facts, or
+    one reads vaguer than the session over the identical money (or exacter,
+    the other way).
+    """
+    remainder = payload(
+        [record(record_id="search:1")],
+        inference=InferenceSnapshot(micro=400000, calls=0),
+    )
+    assert remainder["knowledge"] == "exact"
+    agents = {entry["id"]: entry for entry in remainder["breakdown"]["by_agent"]}
+    sources = {entry["id"]: entry for entry in remainder["breakdown"]["by_source"]}
+    assert agents["parent"]["knowledge"] == "exact", "money without calls is not unpriced activity"
+    assert sources["inference"]["knowledge"] == "exact"
+
+    unpriced = payload(
+        [record(record_id="search:1")],
+        inference=InferenceSnapshot(micro=0, calls=2, priced_calls=0, knowledge="unknown"),
+    )
+    assert unpriced["knowledge"] == "partial"
+    agents = {entry["id"]: entry for entry in unpriced["breakdown"]["by_agent"]}
+    sources = {entry["id"]: entry for entry in unpriced["breakdown"]["by_source"]}
+    assert (
+        agents["parent"]["knowledge"] == "partial"
+    ), "unpriced calls degrade to partial, never vaguer"
+    assert sources["inference"]["knowledge"] == "partial"
+
+
+def test_all_unsized_entries_read_null_never_zero() -> None:
+    """MAJOR (review round 2): an entry whose contributors are all unstated is null.
+
+    Nothing is stated anywhere, so every entry reads ``null`` + its unsized
+    count — never a fabricated 0 — and the siblings AGREE with each other on
+    the same payload (parent, the channel entry, and the subagents entry).
+    """
+    generated = payload(
+        [
+            record(
+                record_id="image:1",
+                channel="image",
+                amount_micro=None,
+                status="cancelled",
+            )
+        ],
+        child_records=[
+            record(
+                record_id="image:kid",
+                channel="image",
+                amount_micro=None,
+                status="cancelled",
+            )
+        ],
+    )
+    agents = {entry["id"]: entry for entry in generated["breakdown"]["by_agent"]}
+    sources = {entry["id"]: entry for entry in generated["breakdown"]["by_source"]}
+    assert agents["parent"]["amount_micro"] is None
+    assert agents["parent"]["unstated_records"] == 1
+    assert sources["image"]["amount_micro"] is None
+    assert sources["image"]["unstated_records"] == 2, "the own and the relayed record"
+    assert agents["subagents"]["amount_micro"] is None
+    assert agents["subagents"]["unstated_records"] == 1
+
+
+def test_a_degraded_children_bundle_degrades_the_inference_entry() -> None:
+    """MAJOR (review round 2): an entry never reads ``unknown`` over stated money.
+
+    A children ledger of 400,000 µ$ with a relayed child record that has NO
+    stated amount: the ledger money is stated (the inference entry carries
+    400,000) and the bundle itself degrades to ``partial`` for the unsized
+    relay — the entry takes that worst rung rather than out-reading the
+    bundle.
+    """
+    generated = payload(
+        [],
+        children=ChildrenSnapshot(total_micro=400000, knowledge="exact"),
+        child_records=[
+            record(
+                record_id="image:kid",
+                channel="image",
+                amount_micro=None,
+                status="cancelled",
+            )
+        ],
+    )
+    assert generated["children"]["knowledge"] == "partial", "the bundle's own degradation"
+    entries = {entry["id"]: entry for entry in generated["breakdown"]["by_source"]}
+    assert entries["inference"]["amount_micro"] == 400000
+    assert entries["inference"]["knowledge"] == "partial"
+    assert entries["inference"]["unstated_records"] == 0
+
+
+def test_an_inference_named_relay_cannot_sink_the_entry_below_partial() -> None:
+    """MAJOR (review round 3): stated money is never rated ``unknown``.
+
+    The shape round 2 cited: a 400,000 µ$ exact ledger plus ONE relayed child
+    record whose channel is ``inference`` and which has no stated amount. The
+    record set alone rates ``unknown``, but the entry CARRIES stated money,
+    and combine rates the same bundle ``partial`` at the session and
+    ``subagents`` level — the entry must read ``partial`` too, never
+    ``unknown``.
+    """
+    generated = payload(
+        [],
+        children=ChildrenSnapshot(total_micro=400000, knowledge="exact"),
+        child_records=[
+            record(
+                record_id="inference:kid",
+                channel="inference",
+                amount_micro=None,
+                status="cancelled",
+            )
+        ],
+    )
+    assert generated["knowledge"] == "partial", "the session over the same inputs"
+    assert generated["children"]["knowledge"] == "partial"
+    entries = {entry["id"]: entry for entry in generated["breakdown"]["by_source"]}
+    assert entries["inference"]["amount_micro"] == 400000
+    assert entries["inference"]["knowledge"] == "partial"
+    assert entries["inference"]["unstated_records"] == 1
+    agents = {entry["id"]: entry for entry in generated["breakdown"]["by_agent"]}
+    assert agents["subagents"]["knowledge"] == "partial", "the sibling over the same money"
+
+
+def test_inference_bases_come_from_pr3s_route_columns() -> None:
+    """PR-3 integration: the inference half states its REAL per-route bases.
+
+    The bases derive from the by-identity ``bases: {basis: micro}`` columns —
+    the same data the rows and ``by_basis`` read — so a plan-funded call
+    reads ``subscription_api_equivalent`` on both entries instead of the
+    legacy blanket ``not_tracked``, and ``not_tracked`` appears only for
+    money those columns do not attribute.
+    """
+    subscribed = payload(
+        [],
+        inference=InferenceSnapshot(
+            micro=900000,
+            calls=12,
+            priced_calls=12,
+            knowledge="exact",
+            by_identity={
+                "openai/chat": {
+                    "provider": "openai",
+                    "model_id": "gpt-5",
+                    "micro": 900000,
+                    "calls": 12,
+                    "unpriced": 0,
+                    "bases": {"subscription_api_equivalent": 900000},
+                }
+            },
+        ),
+    )
+    agents = {entry["id"]: entry for entry in subscribed["breakdown"]["by_agent"]}
+    sources = {entry["id"]: entry for entry in subscribed["breakdown"]["by_source"]}
+    assert agents["parent"]["bases"] == ["subscription_api_equivalent"]
+    assert sources["inference"]["bases"] == ["subscription_api_equivalent"]
+    assert (
+        "subscription_api_equivalent" in subscribed["vocabulary"]["bases"]
+    ), "the curated display word rides the object — no UI edit"
+
+    # Half-attributed: the unattributed remainder keeps the honest fallback,
+    # BESIDE the real spelling — never instead of it.
+    remainder = payload(
+        [],
+        inference=InferenceSnapshot(
+            micro=900000,
+            calls=13,
+            priced_calls=12,
+            knowledge="partial",
+            by_identity={
+                "openai/chat": {
+                    "provider": "openai",
+                    "model_id": "gpt-5",
+                    "micro": 800000,
+                    "calls": 12,
+                    "unpriced": 0,
+                    "bases": {"subscription_api_equivalent": 800000},
+                }
+            },
+        ),
+    )
+    entries = {entry["id"]: entry for entry in remainder["breakdown"]["by_source"]}
+    assert entries["inference"]["bases"] == [
+        "not_tracked",
+        "subscription_api_equivalent",
+    ]
 
 
 def test_custom_type_literal_is_pinned() -> None:

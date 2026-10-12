@@ -128,9 +128,13 @@ from bisect import bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
+from uuid import uuid4
 
 from local_operator.session.runtime.engagement import TRANSCRIPT_FILENAME
+
+if TYPE_CHECKING:
+    from local_operator.session.transcript import TranscriptPage
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +176,10 @@ CROSS_SESSION_TOOL_NAME = "send"
 #: key at all, and serving it to the open frame would read as "this session has
 #: no runs" — the absence the wire uses for "no facts available" — while the
 #: rows to derive them from are all still there. Only a rescan can mint them.
-TRANSCRIPT_INDEX_VERSION = 4
+#: 5: all-row journal ordinals and their equality domain. Earlier caches only
+#: cover the search/rail subsets; they cannot prove a visible custom row's
+#: position. Rebuilding on version mismatch is preferable to fabricating it.
+TRANSCRIPT_INDEX_VERSION = 5
 
 #: Per-doc cap on stored message text. A match beyond the cap is a stated miss.
 DOC_TEXT_CAP = 32 * 1024
@@ -552,7 +559,34 @@ class TranscriptIndex:
     #: without one — and so the field's arrival is not a second constructor
     #: arity every existing call site has to learn.
     runs: list[RunRecord] = field(default_factory=list)
+    #: Opaque scan lineage: append preserves it, rebuild/cache loss remints it.
+    #: Equality only; response freshness belongs to the caller's request fence.
+    journal_generation: str = ""
+    #: ALL complete rows by entry id, not just search/rail rows. Derived during
+    #: the scan already paid for those views; page readers do indexed lookups.
+    journal_rows: dict[str, int] = field(default_factory=dict)
     version: int = TRANSCRIPT_INDEX_VERSION
+
+
+def journal_coordinates_for_page(
+    index: TranscriptIndex, page: "TranscriptPage"
+) -> tuple[str, dict[str, int]] | None:
+    """Coordinates only when the payload and index share one verified source.
+
+    Feature support does not imply readiness. A stale/building index, raced
+    page, unknown domain or missing id has no authority; never fabricate a
+    coordinate for it or attach a fresh generation to an old page's payload.
+    This is a bounded lookup over the page, with no filesystem/journal scan.
+    """
+    source = page.source_signature
+    indexed = (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime"))
+    if not index.journal_generation or source is None or source != indexed:
+        return None
+    if any(entry.id not in index.journal_rows for entry in page.entries):
+        return None
+    return index.journal_generation, {
+        entry.id: index.journal_rows[entry.id] for entry in page.entries
+    }
 
 
 def _index_dir(config_dir: str | Path) -> Path:
@@ -623,6 +657,18 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
         naming=naming if isinstance(naming, dict) else {},
         scan=scan,
         runs=parsed_runs,
+        journal_generation=(
+            raw["journal_generation"] if isinstance(raw.get("journal_generation"), str) else ""
+        ),
+        journal_rows=(
+            {
+                str(key): value
+                for key, value in raw.get("journal_rows", {}).items()
+                if isinstance(key, str) and type(value) is int and value >= 0
+            }
+            if isinstance(raw.get("journal_rows"), dict)
+            else {}
+        ),
     )
 
 
@@ -653,6 +699,8 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         "runs": [r.to_payload() for r in index.runs],
         "naming": index.naming,
         "scan": index.scan.to_payload(),
+        "journal_generation": index.journal_generation,
+        "journal_rows": index.journal_rows,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2004,7 +2052,10 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
     """A first read (or a rewrite's forced rescan) of the whole journal."""
     reader = _RowReader(path, 0, 0)
     state = _Derivation()
+    journal_rows: dict[str, int] = {}
     for row in reader:
+        if row.id:
+            journal_rows[row.id] = row.ordinal
         state.consume(row)
     _assert_same_file(reader)
     checkpoints, messages, runs = state.emit(prior_checkpoints=[], prior_messages=[], turn_base=0)
@@ -2024,6 +2075,8 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
             "last_id": reader.last_id,
             "complete": not reader.torn,
         },
+        journal_generation=uuid4().hex,
+        journal_rows=journal_rows,
         naming=naming,
         runs=runs,
         scan=ScanState(
@@ -2062,7 +2115,13 @@ def _scan_incremental(
     keep_runs = [r for r in previous.runs if r.last_seq < cut]
     reader = _RowReader(path, window_offset, window_rows)
     state = _Derivation(carry=carry)
+    # This is a suffix RE-READ, not merely an append. Retain only the prefix
+    # before the reader's ordinal resume point; derive suffix ids in this same
+    # verified view so stale suffix mappings cannot survive a re-derivation.
+    journal_rows = {id_: seq for id_, seq in previous.journal_rows.items() if seq < window_rows}
     for row in reader:
+        if row.id:
+            journal_rows[row.id] = row.ordinal
         state.consume(row)
     _assert_same_file(reader)
     checkpoints, messages, runs = state.emit(
@@ -2087,6 +2146,8 @@ def _scan_incremental(
             "last_id": reader.last_id,
             "complete": not reader.torn,
         },
+        journal_generation=previous.journal_generation,
+        journal_rows=journal_rows,
         naming=naming,
         runs=runs,
         scan=ScanState(
@@ -2141,11 +2202,12 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
             return None
         raw = _read_raw(config_dir, session_id)
         previous = _index_from_raw(raw)
-        if previous is not None and _sig_matches(previous.sig, st):
+        if previous is not None and previous.journal_generation and _sig_matches(previous.sig, st):
             return previous
         try:
             if (
                 previous is not None
+                and bool(previous.journal_generation)
                 and st.st_ino == previous.sig.get("inode")
                 and st.st_size > previous.scan.offset
                 and _verify_tail(path, previous.scan.offset, str(previous.sig.get("last_id", "")))

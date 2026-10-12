@@ -456,6 +456,24 @@ def test_a_handshake_in_flight_when_a_peer_panic_arrives_is_refused(
 
     alarm, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
     assert alarm is not None, reason
+    with server_a._links_lock:
+        existing = [link for link in server_a.links.values() if link.alive]
+    assert len(existing) == 1, [link.link_id for link in existing]
+    receiving_alarm = existing[0]
+    assert receiving_alarm.device_id == server_b.identity.device_id
+    before_close = threading.Event()
+    allow_close = threading.Event()
+    original_send = receiving_alarm.send
+
+    def hold_panic_report(frame: dict[str, Any]) -> None:
+        # This report follows the trust write and victim snapshot, but precedes
+        # their closes. Hold that actual boundary rather than hope CI schedules it.
+        if frame.get("op") == "ack" and frame.get("req") == 424242:
+            before_close.set()
+            assert allow_close.wait(15.0), "the test never released the panic handler"
+        original_send(frame)
+
+    monkeypatch.setattr(receiving_alarm, "send", hold_panic_report)
     try:
         with _parked_member_handshake(
             server_b,
@@ -477,18 +495,31 @@ def test_a_handshake_in_flight_when_a_peer_panic_arrives_is_refused(
             )
             frame["req"] = 424242
             alarm.send(frame)
-            # WAITED ON THE STATE, not on a sleep: the panic is applied or it is not.
-            assert net_fixtures.wait_for(
-                lambda: store.load(record.network_id, server_a.root).trust != "active"
-            ), "the peer's panic never landed on this device"
+            assert before_close.wait(15.0), "the peer's panic never reached its report"
+            assert store.load(record.network_id, server_a.root).trust != "active"
 
             peer.release()
             refused = bool(peer.outcome) and peer.outcome[0].startswith("refused:")
-            live = [link.link_id for link in server_a.links.values() if link.alive]
-            assert refused and not live, (
+            with server_a._links_lock:
+                new_live = [
+                    link.link_id
+                    for link in server_a.links.values()
+                    if link.alive and link not in existing
+                ]
+            assert refused and not new_live, (
                 "this device went untrusted and still answered a link made after it: "
                 f"the mid-handshake peer read {peer.outcome or ['nothing']} and the "
-                f"relay held {live or 'no'} live link(s)"
+                f"relay held {new_live or 'no'} newly admitted live link(s)"
             )
+            # Trust is the admission boundary, not completion of victim shutdown.
+            # Keep refusal immediate while the old alarm link is deliberately live;
+            # then wait on its actual close event before asserting global emptiness.
+            assert receiving_alarm.alive
+            allow_close.set()
+            assert receiving_alarm._closed.wait(15.0), "the existing panic link never closed"
+            with server_a._links_lock:
+                live = [link.link_id for link in server_a.links.values() if link.alive]
+            assert not live, f"the panic finished closing its alarm link but left {live} live"
     finally:
+        allow_close.set()
         alarm.close("test")

@@ -13,6 +13,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from local_operator.agents import AgentRegistry
+from local_operator.i18n.keys import wire_errors_agents as _wa
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server.dependencies import get_agent_registry, get_scheduler_service
 from local_operator.server.models.schemas import (
@@ -46,7 +47,9 @@ async def create_schedule_for_agent(
     try:
         agent_registry.get_agent(str(agent_id))
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=str(agent_id)).envelope()
+        )
     try:
         new_schedule_model = ScheduleModel(agent_id=agent_id, **schedule_data.model_dump())
         agent_state = agent_registry.load_agent_state(str(agent_id))
@@ -64,7 +67,7 @@ async def create_schedule_for_agent(
         raise
     except Exception as e:
         logger.exception(f"Error creating schedule for agent {agent_id}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_wa.agents_refusal(error=str(e)).envelope())
 
 
 @router.get(
@@ -108,7 +111,7 @@ async def list_all_schedules(
         raise
     except Exception as e:
         logger.exception("Error listing all schedules")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_wa.agents_refusal(error=str(e)).envelope())
 
 
 @router.get(
@@ -128,7 +131,9 @@ async def list_schedules_for_agent(
     try:
         agent_registry.get_agent(str(agent_id))
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=str(agent_id)).envelope()
+        )
     try:
         agent_state = agent_registry.load_agent_state(str(agent_id))
         agent_schedules = sorted(agent_state.schedules, key=lambda s: s.created_at, reverse=True)
@@ -153,7 +158,7 @@ async def list_schedules_for_agent(
         raise
     except Exception as e:
         logger.exception(f"Error listing schedules for agent {agent_id}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_wa.agents_refusal(error=str(e)).envelope())
 
 
 @router.get(
@@ -180,12 +185,15 @@ async def get_schedule_by_id(
                         result=ScheduleResponse.model_validate(schedule.model_dump()).model_dump(),
                     )
                     return JSONResponse(status_code=200, content=jsonable_encoder(response))
-        raise HTTPException(status_code=404, detail=f"Schedule with ID {schedule_id} not found")
+        raise HTTPException(
+            status_code=404,
+            detail=_wa.schedule_not_found_id(schedule_id=str(schedule_id)).envelope(),
+        )
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Error retrieving schedule {schedule_id}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_wa.agents_refusal(error=str(e)).envelope())
 
 
 @router.patch(
@@ -221,7 +229,10 @@ async def edit_schedule(
                 break
 
         if not schedule_found or not updated_schedule_model:
-            raise HTTPException(status_code=404, detail=f"Schedule with ID {schedule_id} not found")
+            raise HTTPException(
+                status_code=404,
+                detail=_wa.schedule_not_found_id(schedule_id=str(schedule_id)).envelope(),
+            )
 
         if updated_schedule_model.is_active:
             scheduler_service.add_or_update_job(updated_schedule_model)
@@ -240,7 +251,7 @@ async def edit_schedule(
         raise
     except Exception as e:
         logger.exception(f"Error updating schedule {schedule_id}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_wa.agents_refusal(error=str(e)).envelope())
 
 
 @router.delete(
@@ -272,7 +283,10 @@ async def remove_schedule(
                 break
 
         if not schedule_found_and_removed:
-            raise HTTPException(status_code=404, detail=f"Schedule with ID {schedule_id} not found")
+            raise HTTPException(
+                status_code=404,
+                detail=_wa.schedule_not_found_id(schedule_id=str(schedule_id)).envelope(),
+            )
 
         response = CRUDResponse(
             status=200,
@@ -284,4 +298,4 @@ async def remove_schedule(
         raise
     except Exception as e:
         logger.exception(f"Error removing schedule {schedule_id}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_wa.agents_refusal(error=str(e)).envelope())

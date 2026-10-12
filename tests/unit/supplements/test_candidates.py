@@ -50,6 +50,27 @@ def test_an_edit_call_is_not_a_door(tmp_path: Path) -> None:
     assert out.candidates == () and out.skipped == "prefilter"
 
 
+@pytest.mark.parametrize(
+    "name", ["report.md", "report.html", "report.htm", "report.pdf", "report.docx"]
+)
+def test_deliverable_document_edits_are_metadata_candidates(name: str, tmp_path: Path) -> None:
+    target = _write(tmp_path / name)
+    out = _run([call("edit", path=str(target))], "Updated document.", tmp_path)
+    assert [c.path for c in out.candidates] == [name]
+    assert out.candidates[0].why == "updated by edit"
+
+
+def test_relative_final_deliverable_paths_are_admitted_but_links_still_dedup(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "docs" / "report.md")
+    assert [c.path for c in _run([], "Prepared docs/report.md for you.", tmp_path).candidates] == [
+        "docs/report.md"
+    ]
+    assert not _run([], "See [report](docs/report.md).", tmp_path).candidates
+    assert not _run([], "See https://example.test/docs/report.md", tmp_path).candidates
+
+
 def test_a_failed_write_is_not_evidence(tmp_path: Path) -> None:
     _write(tmp_path / "report.md")
     items = [

@@ -59,7 +59,14 @@ from typing import Any, Final, Mapping
 #: 2 — the ``div.ttl`` table title and its CSS rule strip (memo §8 F9, §2.8's no-chrome
 #: rule): a component renders body-only, so a served document re-derives with no drawn
 #: title. Ships with the existing rows: a row stores a digest, never prelude bytes.
-PRELUDE_VERSION: Final = 2
+#:
+#: 3 — the frame's own ground: the ROOT element now paints ``--lo-canvas`` instead of leaving
+#: the canvas unpainted, so a live theme flip keeps the surface's token instead of the UA
+#: canvas (#ffffff / #121212) a host that composites an opaque canvas showed
+#: (local-operator-mobile PR #83). Bumped for the same reason as 2, and because the desktop
+#: UI's frozen story documents (its ``supplement-document-fixtures.ts``, copied verbatim from
+#: ``tests/fixtures/supplements/documents/``) name this number as their regeneration trigger.
+PRELUDE_VERSION: Final = 3
 
 #: The document CSP (memo §4.1), verbatim.
 CONTENT_SECURITY_POLICY: Final = (

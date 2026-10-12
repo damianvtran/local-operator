@@ -26,6 +26,7 @@ from pydantic import (
 from starlette.background import BackgroundTask
 
 from local_operator.harness.types import ModelSpec
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.media import (
     SUPPORTED_AUDIO_MIME_TYPES,
     SUPPORTED_IMAGE_MIME_TYPES,
@@ -97,6 +98,7 @@ from local_operator.server.utils.store_failures import (
     sqlite_store_failure,
     store_failure,
 )
+from local_operator.session import open_trace
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import (
     SUPERSEDED_TOKEN_CODE,
@@ -128,7 +130,10 @@ from local_operator.slash_commands import (
     slash_command_for,
     whole_draft_command,
 )
-from local_operator.supplements.contract import STEER_TEXT_MAX_CHARS
+from local_operator.supplements.contract import (
+    STEER_TEXT_MAX_CHARS,
+    supplement_read_options,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1005,27 +1010,24 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
     try:
         spec = validate_model_selection(provider, model_id)
     except ModelSelectionRefused as refused:
-        raise HTTPException(422, {"code": refused.code, "message": refused.message}) from refused
+        raise HTTPException(
+            422, _wd.desktop_refusal(error=refused.message).envelope(code=refused.code)
+        ) from refused
     effort = (model.reasoning_effort or "").strip().lower()
     if effort:
         if not spec.reasoning_efforts:
             raise HTTPException(
                 422,
-                {
-                    "code": "effort_unsupported",
-                    "message": f"{model_id} has no reasoning-effort levels",
-                },
+                _wd.effort_levels_missing(model=model_id).envelope(code="effort_unsupported"),
             )
         if effort not in spec.reasoning_efforts:
             raise HTTPException(
                 422,
-                {
-                    "code": "effort_unsupported",
-                    "message": (
-                        f"{model_id} accepts {', '.join(spec.reasoning_efforts)} "
-                        f"\u2014 not '{effort}'"
-                    ),
-                },
+                _wd.effort_not_in_levels(
+                    model=model_id,
+                    levels=", ".join(spec.reasoning_efforts),
+                    effort=effort,
+                ).envelope(code="effort_unsupported"),
             )
         spec = spec.model_copy(update={"reasoning_effort": effort})
     elif spec.reasoning_effort is not None:
@@ -1492,9 +1494,12 @@ async def _remote_lifecycle(
     code = str(result.get("code") or "session_lifecycle_refused")
     message = str(result.get("message") or "")
     if not message:
-        message = f"{device_name or device_id} refused that and said nothing further"
+        # The fallback sentence is catalogue-owned (E2a); the envelope's text is
+        # the same string it always rendered.
+        message = _wd.remote_refusal_silent(device=device_name or device_id).envelope()["text"]
     raise HTTPException(
-        404 if code == "session_not_found" else 409, {"code": code, "message": message}
+        404 if code == "session_not_found" else 409,
+        _wd.desktop_refusal(error=message).envelope(code=code),
     )
 
 
@@ -1589,7 +1594,10 @@ async def _remote_receipt(request: Request, session_id: str, token: str) -> dict
     # with the party named (``readiness.CODE_BEHIND``) — in the
     # ``authorizer._CAUSE_FOR`` shape: finer words where a local caller branches,
     # one coarse class for the machine consumer.
-    raise HTTPException(409, {"code": "session_is_remote", "cause": cause, "message": message})
+    raise HTTPException(
+        409,
+        _wd.desktop_refusal(error=message).envelope(code="session_is_remote") | {"cause": cause},
+    )
 
 
 #: The fixed phrase inside the refusal ``Authorizer.check`` gives an op this
@@ -1642,13 +1650,9 @@ async def _refuse_remote_write(request: Request, session_id: str, *, noun: str) 
     label = device_name or device_id
     raise HTTPException(
         409,
-        {
-            "code": "session_is_remote",
-            "message": (
-                f"The {noun} for {session_id} lives on {label}, and this desktop "
-                "cannot write it there yet; nothing was changed here."
-            ),
-        },
+        _wd.session_is_remote_write(noun=noun, session_id=session_id, label=label).envelope(
+            code="session_is_remote"
+        ),
     )
 
 
@@ -1820,12 +1824,8 @@ def _runtime_busy_refusal() -> "HTTPException":
     """
     return HTTPException(
         503,
-        {
-            "code": RUNTIME_BUSY,
-            "message": RUNTIME_UNREACHABLE_MESSAGE,
-            "retryable": True,
-            "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS,
-        },
+        _wd.runtime_unreachable().envelope(code=RUNTIME_BUSY)
+        | {"retryable": True, "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS},
         headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
     )
 
@@ -1855,7 +1855,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # not admitting, so the client's move is to rediscover the successor
         # through the record (design §7) — a message and a code it can key on,
         # never a traceback.
-        raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            503, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except OperatorAuthorityRequired as error:
         # THE REFUSAL IS THE ANSWER (agent review round 1 R1-2 = design D1 = UX
         # U4 = QA Q1). This one arrived as a bare ``RuntimeError`` and fell
@@ -1868,13 +1870,17 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         #
         # ``code`` rides along so a client can key on the category rather than
         # on the sentence, exactly as the ladder's other arms do.
-        raise HTTPException(422, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            422, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except SubagentChildUnavailable as error:
         # The child read route's containment refusal (design § 9.1). Not folded
         # into the generic 404 below because the code is part of the contract:
         # the reader distinguishes nothing from it, but it is retryable, and a
         # client that cannot see WHY would have to guess whether to re-probe.
-        raise HTTPException(404, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            404, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except PeerSessionUnreachable as error:
         # A PEER HOLDS THIS CONVERSATION AND THIS DEVICE CANNOT REACH THAT DEVICE
         # (mesh slice DB2). 409 with the family's own code, which is the answer
@@ -1888,7 +1894,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # pick refuses with, so the two surfaces cannot describe one situation two
         # ways (``mesh-ui.md`` §1.3's degraded states — the finding that produced
         # the shared composer).
-        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except PeerSessionUnresolved as error:
         # A PEER WAS SILENT, SO THIS DEVICE CANNOT SAY THE CONVERSATION IS NOT
         # ITS OWN — the other half of mesh slice DB2 (design note §S2). The
@@ -1904,13 +1912,17 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         #
         # The sentence is composed in ``remote_open`` beside the unreachable
         # one, so the two refusals cannot drift apart on different surfaces.
-        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except PeerAttachmentUnavailable as error:
         # The bytes are on the device that holds the conversation, and this
         # device's content-addressed store is what the route reads. 409 rather
         # than 404 for the same reason as above: the image exists, and the reader
         # is told where it is instead of being told it does not.
-        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except SessionStoreUnavailable as error:
         # The catalogue refused to answer, most often because the store's
         # ``sessions/`` directory could not be walked at all (descriptor
@@ -1955,18 +1967,10 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # ConnectionError arm below).
         raise HTTPException(
             503,
-            {
-                "code": error.code,
-                "message": (
-                    "Conversations could not be read right now. "
-                    "This recovers on its own; retry in a moment."
-                ),
-            },
+            _wd.conversations_unreadable().envelope(code=error.code),
         ) from None
     except KeyError:
-        raise HTTPException(
-            404, "Requested session, profile, team or subscription not found"
-        ) from None
+        raise HTTPException(404, _wd.requested_not_found().envelope()) from None
     except MoveIndeterminate as error:
         # 503 with the same NAMED-CONDITION body ``DaemonRetiring`` and
         # ``SubagentChildUnavailable`` use in this ladder (review round 2, N3),
@@ -1986,7 +1990,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # ``AttachedSession.set_working_directory`` (where the exception is still
         # live) and the settlement refusal in ``_settle_unconfirmed_move`` (with
         # all four readbacks).
-        raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            503, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except DraftAlreadyMaterialised as error:
         # THE DRAFT'S ONE REFUSAL (spec §1.4), sitting ABOVE the
         # ``(ReceiptConflict, ValueError)`` arm deliberately: that arm's
@@ -1996,7 +2002,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # retry a create that can never succeed. 422 as the spec fixes, in the
         # same named-condition body shape the arms above use, so a renderer keys
         # on the code instead of parsing prose.
-        raise HTTPException(422, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            422, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except (ReceiptConflict, ValueError) as error:
         from local_operator.session.errors import (
             AsideUnanswered,
@@ -2056,7 +2064,8 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # keys never vary.
             raise HTTPException(
                 409,
-                {"code": error.code, "message": str(error), "reason": error.reason},
+                _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+                | {"reason": error.reason},
             ) from None
         if isinstance(
             error,
@@ -2088,7 +2097,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # claim the ``MoveIndeterminate`` arm above states for the same
             # body shape ("The client is already built for this shape: it reads
             # ``detail.message`` when ``detail`` is an object").
-            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+            raise HTTPException(
+                409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            ) from None
         if isinstance(error, AsideUnanswered):
             # THE REFUSAL IS THE ANSWER, exactly as it is for the three arms around
             # it: the aside ran, the provider answered, and the model would not
@@ -2105,14 +2116,18 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # carries the code a renderer keys on and the sentence that says what
             # to do (ask again). A ``ValueError`` subclass precisely so it lands in
             # THIS arm rather than the arms below.
-            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+            raise HTTPException(
+                409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            ) from None
         if isinstance(error, SupersededCompletionToken):
             # Stale, not broken: the caller's token is real but no longer current,
             # and the remedy is to re-read the conversation's attention state and
             # acknowledge the token it names. The machine code is what lets the
             # renderer take that path quietly instead of backing off as if the
             # store had refused (the `code` field of its control error).
-            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+            raise HTTPException(
+                409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            ) from None
         if isinstance(error, SessionDeletionRefused):
             # A DELETION THE MACHINE REFUSED, and it is a 409 rather than the
             # generic ``str(error)`` arm below for the one reason that matters to
@@ -2121,7 +2136,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # that control instead of retrying a call that cannot succeed. The
             # conversation exists, so 404 would be a lie about the user's own
             # work, and nothing failed, so 500 would be a lie about the machine.
-            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+            raise HTTPException(
+                409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            ) from None
         raise HTTPException(409, str(error)) from None
     except sqlite3.Error as error:
         # THREE CONDITIONS, THREE ANSWERS, and the split is the point: this arm
@@ -2165,7 +2182,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # the party that can see which guard fired is the only one that can say what
         # to do about it, and re-deriving words here is how two surfaces come to
         # disagree about one machine's state.
-        raise HTTPException(503, {"code": error.code, "message": error.sentence}) from None
+        raise HTTPException(
+            503, _wd.desktop_refusal(error=error.sentence).envelope(code=error.code)
+        ) from None
     except ConnectionError as error:
         if getattr(error, "owner_alive", False):
             # THE OWNER IS ALIVE AND SIMPLY DID NOT ANSWER THIS REQUEST IN TIME.
@@ -2207,14 +2226,13 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # in step for copy to keep rendering.
         raise HTTPException(
             503,
-            {
-                "code": RUNTIME_UNREACHABLE,
-                "message": detail or RUNTIME_UNREACHABLE_MESSAGE,
-            },
+            _wd.desktop_refusal(
+                error=detail or _wd.runtime_unreachable().envelope()["text"]
+            ).envelope(code=RUNTIME_UNREACHABLE),
         ) from None
     except (RuntimeError, asyncio.TimeoutError):
         raise HTTPException(
-            503, {"code": RUNTIME_UNREACHABLE, "message": RUNTIME_UNREACHABLE_MESSAGE}
+            503, _wd.runtime_unreachable().envelope(code=RUNTIME_UNREACHABLE)
         ) from None
     except OSError as error:
         # THE LAST ARM, and only for the disk. Placed here rather than beside the
@@ -2268,36 +2286,28 @@ def _requested_scope(scope_kind: str, scope_name: str) -> CatalogueScope | None:
     if kind and not name:
         raise HTTPException(
             422,
-            {
-                "code": "scope_name_required",
-                "message": "scope_name is required when scope_kind is given.",
-            },
+            _wd.scope_name_required().envelope(code="scope_name_required"),
         )
     if name and not kind:
         raise HTTPException(
             422,
-            {
-                "code": "scope_kind_required",
-                "message": "scope_kind is required when scope_name is given.",
-            },
+            _wd.scope_kind_required().envelope(code="scope_kind_required"),
         )
     if not kind:
         return None
     if kind not in SCOPE_KINDS:
         raise HTTPException(
             422,
-            {
-                "code": "scope_kind_unknown",
-                "message": f"scope_kind must be one of {', '.join(SCOPE_KINDS)}.",
-            },
+            _wd.scope_kind_unknown(kinds=", ".join(SCOPE_KINDS)).envelope(
+                code="scope_kind_unknown"
+            ),
         )
     if len(name) > SCOPE_NAME_MAX_LENGTH:
         raise HTTPException(
             422,
-            {
-                "code": "scope_name_too_long",
-                "message": f"scope_name must be at most {SCOPE_NAME_MAX_LENGTH} characters.",
-            },
+            _wd.scope_name_too_long(max_length=str(SCOPE_NAME_MAX_LENGTH)).envelope(
+                code="scope_name_too_long"
+            ),
         )
     return CatalogueScope(kind, name)
 
@@ -2849,13 +2859,7 @@ async def create_session(body: CreateSession, request: Request):
                 if body.peer is not None:
                     raise HTTPException(
                         422,
-                        {
-                            "code": "agents_config_local_only",
-                            "message": (
-                                "A configuration run edits this device's agents and teams, "
-                                "so it cannot be started on another device."
-                            ),
-                        },
+                        _wd.agents_config_local_only().envelope(code="agents_config_local_only"),
                     )
                 # THE SERVER OWNS THE RUN'S SHAPE, so these four are refused rather
                 # than ignored. Silent tolerance would let a renderer believe it had
@@ -2877,14 +2881,9 @@ async def create_session(body: CreateSession, request: Request):
                 if supplied:
                     raise HTTPException(
                         422,
-                        {
-                            "code": "agents_config_client_fields",
-                            "message": (
-                                "A configuration run chooses its own working directory "
-                                "and model, so " + ", ".join(supplied) + " cannot be sent "
-                                "with it."
-                            ),
-                        },
+                        _wd.agents_config_client_fields(fields=", ".join(supplied)).envelope(
+                            code="agents_config_client_fields"
+                        ),
                     )
                 # SINGLE FLIGHT, per config root. The registries are global to
                 # this machine and two runs racing on one row would be
@@ -2898,14 +2897,8 @@ async def create_session(body: CreateSession, request: Request):
                 if active is not None:
                     raise HTTPException(
                         409,
-                        {
-                            "code": "agents_config_running",
-                            "message": (
-                                "A configuration run is already going. Open it to follow "
-                                "it, or stop it first."
-                            ),
-                            "session_id": active,
-                        },
+                        _wd.agents_config_running().envelope(code="agents_config_running")
+                        | {"session_id": active},
                     )
             elif body.peer:
                 if body.model is not None:
@@ -2951,7 +2944,9 @@ async def create_session(body: CreateSession, request: Request):
             code = str(result.get("code") or "peer_refused")
             raise HTTPException(
                 503 if code in _CREATE_UNCONFIRMED_CODES else 409,
-                {"code": code, "message": str(result.get("message") or "that device refused")},
+                _wd.desktop_refusal(
+                    error=str(result.get("message") or "that device refused")
+                ).envelope(code=code),
             )
         return reply(result)
 
@@ -3147,6 +3142,12 @@ async def snapshot(
     request: Request,
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
+    supplements: int = Query(default=0, ge=0),
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3195,7 +3196,14 @@ async def snapshot(
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.snapshot(entry_times=bool(entry_ts), open_frame=bool(open_frame)))
+        return reply(
+            await bridge.snapshot(
+                entry_times=bool(entry_ts),
+                open_frame=bool(open_frame),
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                **supplement_read_options(bool(supplements)),
+            )
+        )
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -3230,15 +3238,9 @@ async def _remote_open_refusal(request: Request, session_id: str) -> None:
     label = device_name or device_id
     raise HTTPException(
         409,
-        {
-            "code": "session_is_remote",
-            "message": (
-                f"{session_id} lives on {label}, and this desktop cannot open a "
-                "conversation on another device yet. Move it home with "
-                f"`lop sessions move {session_id} --to local`, or pilot it from the "
-                f"terminal with `/network sessions --peer {label} --engage {session_id}`."
-            ),
-        },
+        _wd.session_is_remote_open(session_id=session_id, label=label).envelope(
+            code="session_is_remote"
+        ),
     )
 
 
@@ -3253,6 +3255,12 @@ async def history(
     limit: int = Query(default=100, ge=1, le=500),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
+    supplements: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3294,6 +3302,8 @@ async def history(
                 limit=limit,
                 entry_times=bool(entry_ts),
                 open_frame=bool(open_frame),
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                **supplement_read_options(bool(supplements)),
             )
         )
 
@@ -3868,7 +3878,7 @@ async def command(session_id: str, body: Command, request: Request):
     """
     spec = slash_command_for("/" + body.command.removeprefix("/"))
     if spec is None or not spec.desktop_destination:
-        raise HTTPException(422, "Unknown command")
+        raise HTTPException(422, _wd.unknown_command().envelope())
     if spec.name == "credential" and body.args:
         # The ONE command whose trailing text this route REFUSES rather than
         # consumes, because the secret is entered in the masked form. Left as its
@@ -3883,9 +3893,7 @@ async def command(session_id: str, body: Command, request: Request):
         # and the registry's `ANY` is what keeps the secret out of a paid turn
         # for a client whose command surface is off and which therefore plans
         # every draft as `send`.
-        raise HTTPException(
-            422, "Enter credentials in the masked credential form, not command text"
-        )
+        raise HTTPException(422, _wd.masked_credential_form().envelope())
     if spec.name == "session" and body.args.strip() == SESSION_COPY_FLAG:
         # Beside `/credential` because it is the same kind of refusal: a sentence
         # naming where the gesture works, not a shape check. Forwarding it would
@@ -3894,7 +3902,7 @@ async def command(session_id: str, body: Command, request: Request):
         # gesture (decision D3); any other `/session` text forwards as before.
         raise HTTPException(
             422,
-            f"{SESSION_COPY_FLAG} works only in the terminal; the /session view shows the ID",
+            _wd.session_copy_terminal_only(flag=SESSION_COPY_FLAG).envelope(),
         )
     refusal = command_argument_refusal(spec, body.args)
     if refusal is not None:
@@ -4103,7 +4111,7 @@ async def answer(session_id: str, body: Answer, request: Request):
                 raise HTTPException(409, message) from None
             return reply({"detail": detail})
         if body.epoch != bridge.remote.frontend_state.epoch:
-            raise HTTPException(409, "This answer belongs to an earlier session owner")
+            raise HTTPException(409, _wd.answer_epoch_mismatch().envelope())
         try:
             detail = await bridge.remote.answer_gate(
                 body.request_id,
@@ -4123,10 +4131,11 @@ async def answer(session_id: str, body: Answer, request: Request):
             # prose, and the copy names the remedies.
             raise HTTPException(
                 422,
-                {"code": error.code, "message": str(error), "still_pending": True},
+                _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+                | {"still_pending": True},
             ) from None
         except RuntimeError:
-            raise HTTPException(409, "This question or approval is no longer pending") from None
+            raise HTTPException(409, _wd.question_no_longer_pending().envelope()) from None
         return reply({"detail": detail})
 
 
@@ -5341,6 +5350,11 @@ async def events(
     frontend_replace: int = Query(default=0, ge=0),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
     supplements: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
@@ -5367,7 +5381,9 @@ async def events(
             # themselves are journaled either way; this gates the live carriage,
             # not the record.
             sub = bridge.subscribe(
-                frontend_replace=bool(frontend_replace), supplements=bool(supplements)
+                frontend_replace=bool(frontend_replace),
+                supplements=bool(supplements),
+                journal_order=bool(journal_order),
             )
         except LegacySubscriberDuringMove as error:
             await context.__aexit__(None, None, None)
@@ -5427,11 +5443,22 @@ async def events(
                     after_seq=after_seq,
                     entry_times=bool(entry_ts),
                     open_frame=bool(open_frame),
+                    **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 )
             ) as frames:
                 try:
                     async for frame in frames:
-                        yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                        ser_at = time.monotonic() if open_trace.enabled() else 0.0
+                        text = "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                        if ser_at:
+                            open_trace.mark(
+                                "a.wire.frame",
+                                (time.monotonic() - ser_at) * 1000,
+                                session=session_id,
+                                kind=frame.get("type") if isinstance(frame, dict) else "",
+                                chars=len(text),
+                            )
+                        yield text
                 finally:
                     # STAMPED BEFORE THE GENERATOR IS CLOSED, AND THE ORDER IS
                     # LOAD-BEARING RATHER THAN TIDY (F-B). Closing it arms the
@@ -5502,7 +5529,7 @@ async def desktop_events(request: Request):
     """
     engine = feed(request)
     if len(engine.subscribers) >= SUBSCRIBER_COUNT:
-        raise HTTPException(503, "Too many desktop feed subscribers")
+        raise HTTPException(503, _wd.feed_subscriber_limit().envelope())
     # Off the loop: the connect floor's store read can wait the contention
     # budget out, and this is the route a client is waiting on (see
     # ``DesktopFeed.subscribe_off_loop``).
@@ -5554,7 +5581,7 @@ async def desktop_presence(
     """
     engine = feed(request)
     if body.subscription_id not in engine.subscribers:
-        raise HTTPException(404, "Unknown desktop feed subscription")
+        raise HTTPException(404, _wd.feed_subscription_unknown().envelope())
     engine.presence.update(
         body.subscription_id,
         can_notify=bool(body.can_notify),

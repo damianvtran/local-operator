@@ -113,9 +113,9 @@ async def test_a_never_pulled_response_attaches_nothing(config_home: Path) -> No
 async def test_a_real_change_publishes_through_the_shared_builder(config_home: Path) -> None:
     """A change detected against the FILE (a hand edit + the watcher's poll)
     produces one frame via the shared payload builder, naming the changed key
-    and the freshly resolved tag. ``fr`` resolves to ``en`` today (shipped
-    filter) — the change is still announced, and that asymmetry is the
-    contract, not an accident."""
+    and the freshly resolved tag. ``fr`` now resolves to ``fr`` — wave 1 ships
+    the locale, so the frame's tag follows it (the shipped filter and the
+    announcement contract are unchanged)."""
     (config_home / "config.yml").write_text("values:\n  language: en\n", encoding="utf-8")
     daemon = MobileDaemon(password="pw")
     app = build_app(daemon)
@@ -129,7 +129,7 @@ async def test_a_real_change_publishes_through_the_shared_builder(config_home: P
         watcher.poll_now()
 
         frame = await asyncio.wait_for(anext(iterator), timeout=5)
-        assert _parse(frame) == config_frame_payload(("language",), "en")
+        assert _parse(frame) == config_frame_payload(("language",), "fr")
     finally:
         await iterator.aclose()
 

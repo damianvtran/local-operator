@@ -559,6 +559,32 @@ def _lower_effort(model: "ModelSpec") -> str | None:
     return rungs[index - 1] if index > 0 else None
 
 
+def _graceful_cancel_requested(config: LoopConfig) -> bool:
+    """Has a supervisor asked the loop to stop at the next safe boundary?
+
+    Read at EVERY next-model safe point, not just the post-response boundary:
+    the post-tool boundary AND each recovery decision that would otherwise
+    spend another provider request on this turn (the nameless-call re-ask, the
+    empty-truncation retreat). Those recoveries exist to keep a turn alive;
+    the one thing they must never do is outlive the caller's stop -- a
+    recovery firing here while the flag was set spent request N+1 AFTER the
+    cancel landed on request N, which is the leak reported from the QA
+    step-boundary matrix (a nameless call on the Nth request was re-asked and
+    paid for with a third request the caller's budget never admitted).
+
+    Asked as one helper because the dangerous rule is the same at every site:
+    a broken host hook must degrade to "no cancel" and never strand a turn
+    (see the boundary's own note). A copied try/except is how one site ends up
+    raising where another swallows, so every caller shares this reading.
+    """
+    if config.graceful_cancel_requested is None:
+        return False
+    try:
+        return bool(config.graceful_cancel_requested())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # How long the batch waits for tools to unwind after an ABORT before it stops
 # waiting and settles the turn anyway. An abort is a user pressing Esc, so the
 # turn must end on a human timescale; a tool whose cleanup is slower than this
@@ -1638,7 +1664,21 @@ class AgentLoop:
                         # state, so a sentence cut mid-word is continued rather
                         # than rewritten. That beats the alternative this
                         # replaces, which was ending the entire run.
-                        if connectivity_continuations < MAX_CONNECTIVITY_CONTINUATIONS:
+                        #
+                        # A STOP OUTRANKS THE RESUME (round-1 review R1 / QA
+                        # Q1): resuming would spend request N+1 on a turn the
+                        # caller already stopped at request N, and the notice
+                        # below would promise the remainder "is being fetched
+                        # on the next attempt" -- a promise this path then
+                        # breaks. Skipping the resume falls through to the
+                        # failure terminal below: the same bounded end the
+                        # spent-budget path takes, with the requested stop as
+                        # the verdict instead of a lone provider error.
+                        graceful_cut = _graceful_cancel_requested(config)
+                        if (
+                            connectivity_continuations < MAX_CONNECTIVITY_CONTINUATIONS
+                            and not graceful_cut
+                        ):
                             connectivity_continuations += 1
                             # TRUNCATED calls are dropped; COMPLETE ones are not.
                             # A call still being dictated when the socket died is
@@ -1891,6 +1931,15 @@ class AgentLoop:
                     new_messages.append(stored)
 
                     if stop_reason in ("error", "aborted", "refusal"):
+                        # A STOP OUTRANKS EVERY RESEND IN THIS SECTION (round-1
+                        # review R1 / QA Q2): the echo fill and the thinking-off
+                        # retreat would each spend request N+1 -- and mutate the
+                        # run's model -- on a turn the caller already stopped at
+                        # request N. Read ONCE here so both gates and the
+                        # terminal's verdict agree on a single reading; the
+                        # protected helper keeps a broken hook at no-cancel, and
+                        # the retries stay live whenever no stop is pending.
+                        graceful_error = _graceful_cancel_requested(config)
                         # FIRST recovery for a refused reasoning echo: re-send the
                         # SAME request with the echo filled.
                         #
@@ -1947,6 +1996,7 @@ class AgentLoop:
                             and turn_model is not None
                             and not turn_model.requires_reasoning_echo
                             and _is_reasoning_echo_rejection(stream_error)
+                            and not graceful_error
                         ):
                             reasoning_echo_fill_retries += 1
                             # The refused turn must not reach the retry's
@@ -2021,6 +2071,7 @@ class AgentLoop:
                             and not assistant.text.strip()
                             and not assistant.tool_calls
                             and _is_reasoning_echo_rejection(stream_error)
+                            and not graceful_error
                         ):
                             thinking_off = _thinking_off_effort(config.model)
                             if thinking_off is not None:
@@ -2070,7 +2121,17 @@ class AgentLoop:
                         # result. `aborted` is computed HERE rather than at the
                         # event below because the markers must agree with it:
                         # same verdict line, one reading.
-                        aborted = stop_reason == "aborted" or bool(signal and signal.aborted)
+                        # A requested stop is a verdict of its own kind even
+                        # when the stop is what SKIPPED the resends above: the
+                        # turn ends because the caller asked, not because the
+                        # provider failed (round-1 review R1 / QA Q1-Q2). The
+                        # fault markers below read this same line, so they
+                        # cannot disagree with it.
+                        aborted = (
+                            stop_reason == "aborted"
+                            or bool(signal and signal.aborted)
+                            or graceful_error
+                        )
                         # Q-1 (round 1): the terminal left by an exhausted
                         # continuation budget must name its own history. The
                         # notices streamed the budget being spent while the run
@@ -2130,8 +2191,19 @@ class AgentLoop:
                         # call the turn continues on its own; the drop is still
                         # told to the user, because it is real either way.
                         reasks_left = nameless_call_recoveries < MAX_NAMELESS_CALL_RECOVERIES
+                        # A requested boundary outranks the recovery: the re-ask
+                        # would spend request N+1 on a turn the caller already
+                        # stopped at request N. Skipping it here -- instead of
+                        # re-asking and only aborting afterwards -- falls
+                        # through to the post-tool boundary below, which ends
+                        # the turn as aborted: the same terminal a cancel
+                        # landing after a completed batch gets.
+                        graceful = _graceful_cancel_requested(config)
                         recovering = (
-                            not assistant.tool_calls and stop_reason == "toolUse" and reasks_left
+                            not assistant.tool_calls
+                            and stop_reason == "toolUse"
+                            and reasks_left
+                            and not graceful
                         )
                         ending = (
                             not assistant.tool_calls
@@ -2190,6 +2262,13 @@ class AgentLoop:
                         # cannot describe one event in two voices.
                         has_text = bool(assistant.text and assistant.text.strip())
                         silent = not has_text and not assistant.tool_calls
+                        # Same boundary rule as the nameless re-ask above: a
+                        # requested stop must not pay for the retreat's extra
+                        # request. Read only for the silent arm -- the recovery
+                        # this gates exists only there, and a non-silent length
+                        # turn already reaches the post-response boundary
+                        # below.
+                        graceful_length = silent and _graceful_cancel_requested(config)
                         # The limit's ARM, per call, computed ONCE — the notice
                         # below states the turn's arm from this list and the
                         # placeholder loop stamps each call's marker from it, so
@@ -2198,8 +2277,19 @@ class AgentLoop:
                         # same call. Empty (and therefore harmless) on the arms
                         # with no call: `silent`, and the prose arms.
                         cut_calls = [_limit_cut_arguments(call) for call in assistant.tool_calls]
-                        if silent and empty_truncation_retries < MAX_EMPTY_TRUNCATION_RETRIES:
-                            lower = _lower_effort(config.model)
+                        retry_eligible = (
+                            silent and empty_truncation_retries < MAX_EMPTY_TRUNCATION_RETRIES
+                        )
+                        # The ladder is consulted even when the boundary has
+                        # already claimed the retreat: WHICH rung the turn would
+                        # have gone to is what the notice below reports, and it
+                        # is the difference between "no cheaper setting exists"
+                        # (nothing was skipped) and "a stop was
+                        # requested" (a rung existed and stayed unspent).
+                        # Claiming a ladder cause that was never consulted is
+                        # the false-cause class this family exists to remove.
+                        lower = _lower_effort(config.model) if retry_eligible else None
+                        if retry_eligible and not graceful_length:
                             if lower is not None:
                                 empty_truncation_retries += 1
                                 # The empty turn must not reach the retry's
@@ -2234,12 +2324,17 @@ class AgentLoop:
                             # and it names WHICH limit ended the retreat
                             # (review N1) so the user knows whether another
                             # manual retry could still step down.
-                            cause = (
-                                f"{empty_truncation_retries} lower-effort "
-                                f"{'retries' if empty_truncation_retries != 1 else 'retry'} spent"
-                                if empty_truncation_retries >= MAX_EMPTY_TRUNCATION_RETRIES
-                                else "no lower effort setting to retry at"
-                            )
+                            if empty_truncation_retries >= MAX_EMPTY_TRUNCATION_RETRIES:
+                                noun = "retry" if empty_truncation_retries == 1 else "retries"
+                                cause = f"{empty_truncation_retries} lower-effort {noun} spent"
+                            elif lower is None:
+                                cause = "no lower effort setting to retry at"
+                            else:
+                                # The ladder HAD a rung and it was not spent:
+                                # the boundary claimed the retreat, and that is
+                                # the only cause left to name -- a ladder claim
+                                # here would be false.
+                                cause = "a stop was requested"
                             yield NoticeEvent(
                                 text=(
                                     "the model spent its whole output budget "
@@ -2379,19 +2474,15 @@ class AgentLoop:
                             redact=config.redact_tool_result,
                         )
 
-                    graceful_cancel = False
-                    if config.graceful_cancel_requested is not None:
-                        # Asked HERE, at the boundary, precisely because the
-                        # tools that just ran may have pushed a commit or opened
-                        # a merge request. A supervisor's cancel stops the run
-                        # without tearing one of those in half; the completed
-                        # work stays in the transcript and the turn ends as
-                        # aborted, exactly like a signalled stop would.
-                        try:
-                            graceful_cancel = bool(config.graceful_cancel_requested())
-                        # A broken host hook must not strand the turn.
-                        except Exception:  # noqa: BLE001
-                            graceful_cancel = False
+                    # Asked HERE, at the boundary, precisely because the tools
+                    # that just ran may have pushed a commit or opened a merge
+                    # request. A supervisor's cancel stops the run without
+                    # tearing one of those in half; the completed work stays in
+                    # the transcript and the turn ends as aborted, exactly like
+                    # a signalled stop would. The same protected reading is
+                    # shared with the recovery decisions above
+                    # (``_graceful_cancel_requested``) so the sites cannot drift.
+                    graceful_cancel = _graceful_cancel_requested(config)
                     if (signal is not None and signal.aborted) or graceful_cancel:
                         # The abort landed while the batch was running. Its
                         # results are already appended above (every call paired,
@@ -4869,6 +4960,11 @@ class AgentLoop:
         the CALL otherwise — a hallucinated name has no tool, and that name is
         exactly what a "which tool does this model get wrong" view needs.
         """
+        if config.capture_prepared_write is not None:
+            try:
+                config.capture_prepared_write(item.call, result)
+            except Exception:
+                logger.debug("prepared write capture failed", exc_info=True)
         callback = config.record_tool_call
         if callback is None:
             return

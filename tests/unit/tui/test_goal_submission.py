@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from textual.pilot import Pilot
 
 from local_operator.harness.types import ImageContent
 from local_operator.session.frontend_state import (
@@ -16,6 +17,22 @@ from local_operator.tui.events import CompactionEnded
 from local_operator.tui.widgets.editor import Attachment, PastedText
 from local_operator.tui.widgets.transcript import UserBlock
 from tests.unit.tui.test_app_pilot import FakeSession, GoalSession, _factory
+
+
+async def _await_goal_session(app: OperatorApp, pilot: Pilot[None], session: GoalSession) -> None:
+    """Wait for this test's session, not merely the initial command frame.
+
+    Boot adopts the session in a worker: a drained pilot frame can still expose
+    source commands before that worker attaches the expected session. Keep the
+    semantic assertions below single-shot, and fail loudly if boot never reaches
+    both prerequisites instead of accepting another session or retrying a goal.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if app._session is session and app._source_commands_ready():
+            return
+    assert app._session is session, "goal setup never adopted the expected session"
+    assert app._source_commands_ready(), "goal setup source commands never became ready"
 
 
 @pytest.mark.asyncio
@@ -48,7 +65,7 @@ async def test_goal_metadata_forms_do_not_start_work(arg):
     session.set_goal("existing")
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_goal_session(app, pilot, session)
         app._run_slash_command(f"/goal {arg}".rstrip())
         await pilot.pause()
         assert session.goal == ("existing" if not arg else "")
@@ -62,7 +79,7 @@ async def test_tui_owner_completes_only_unclaimed_goal_receipts(consumers):
     session = GoalSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_goal_session(app, pilot, session)
         result = await app.run_slash_authoritative("goal", "ship it", None, consumers=consumers)
         await app.workers.wait_for_complete()
         assert session.goal == "ship it"
@@ -98,7 +115,7 @@ async def test_goal_paste_is_held_during_compaction_and_submitted_once_afterward
     marker = "[Paste #1, 40 lines]"
     payload = "\n".join(f"task {index}" for index in range(40))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_goal_session(app, pilot, session)
         app._compacting = True
         app._run_slash_command(f"/goal {marker}", {1: PastedText(payload, marker)})
         await pilot.pause()
@@ -107,6 +124,12 @@ async def test_goal_paste_is_held_during_compaction_and_submitted_once_afterward
         assert app._prompt_held_for_compaction == payload
         assert app._typed_held_for_compaction == marker
         app._compacting = False
+        app.on_compaction_ended(CompactionEnded(reason="manual", success=True))
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert session.prompts == [payload]
+        assert [row.text() for row in app.query(UserBlock)] == [payload]
+        # A duplicate completion event must not consume the held goal twice.
         app.on_compaction_ended(CompactionEnded(reason="manual", success=True))
         await app.workers.wait_for_complete()
         await pilot.pause()

@@ -85,6 +85,16 @@ primary: lop update, /update         primary relay (mesh-rollout)           memb
 - **The member's relay is rolled by the update it just ran.** The services stage restarts a
   relay left a generation behind (`update.py:6147` → `relay.py:11701`), and RU §4.5 puts the
   executor in that relay. (Derived from those two; Q4.)
+- **The Linux member rolls the relay too, as of 2026-10-11 (stale-relay memo).** The
+  services stage's Linux arm (`network/relay.refresh_unit_if_stale` — migrate the unit,
+  then restart only on a proven build move) makes the bullet above true off macOS; the
+  drill showed a node's install move while its relay kept advertising the previous build.
+  The precondition is the relay unit's `KillMode=process`: a restart no longer kills the
+  member's session runtimes (they reparent to `systemd --user` and re-attach at the
+  relay's next start), and network stop/kill does not kill them at all — sessions are
+  ended through their own verbs. Bootstrap: the running relay executes its own roll, so
+  one manual `lop network restart` per Linux node follows the fix's install (session-safe
+  under the invariant), and every subsequent move is automatic.
 - **Membership, not links.** `DefinitionsSyncer._targets` walks every other `active` member of
   every network (`definitions.py:2236`), because a walk over live links "fired NEVER" on a
   quiet mesh (`:2140-2148`, measured).
@@ -233,6 +243,37 @@ contact detector (Q3).
 > `not_authorised`** frame — the security-reviewed authoriser change the S3a PR
 > names as its S3b/follow-up trigger — parks the rollout-scoped
 > `skipped (no_grant)` with RU §2's remedy.
+
+> **Errata — the trigger's implementation (S3b, 2026-10-11).** Two points this
+> note left to its implementation, settled in the S3b PR:
+>
+> - **Registration (Q5): a section of its own, not `network`.** The key stays
+>   `network.rollout_on_update` and stays stored in the config file's `network:`
+>   block (RU §3); the registry `Section`, though, is **`mesh_updates`, Scope
+>   LIVE** — the policy is live in both consumers (each update front end reads
+>   it at its own start; the relay's driver re-reads it before every ask, §5),
+>   while every key under `network` is read once at relay start and that
+>   section's description says so. Scope is uniform within a section by
+>   construction (AGENTS.md), so the honest label is a section of its own —
+>   the `session_cleanup`/`memory_guard` split, read off `SECTIONS`.
+> - **The coded refusal stays a follow-up.** The r2 errata above stands: S3b
+>   ships the documented non-claiming path (a codeless `refused` is retried on
+>   the cadence, §4) and does NOT change the authoriser. The coded
+>   `not_authorised` frame remains the named security-reviewed follow-up, with
+>   no producer at this head — and `meshupdate.update_peer` already maps a
+>   coded frame to `no_grant` + RU §2's remedy the day one lands.
+>
+> **Errata — round 1 (2026-10-11).** The review folds, recorded here because
+> each settles the note's own words: the open summary reads **"will ask N
+> peer(s) to move to this build"** (D2 — the line is an ask, and counts read
+> "(s)" at any N, D1); the closing nudge fires only when a member a re-run
+> could still move remains (R1-2) — a `skipped (unsupported_kind)` /
+> `predates_rolling_updates` remainder no longer draws a promise that cannot
+> be kept, while the skip stays named in the sets; a partial multi-network
+> open returns the lines it already opened alongside the failure sentence
+> (R1-1); and that sentence (§3 above) now carries its siblings' next step —
+> **"updated, but the mesh roll could not be queued: … — run `lop network
+> update` to roll by hand"** (D3).
 
 *The first release.* No member advertises `mesh-update-v1` or holds the grant before this
 ships, so the release carrying it is the last that needs a hand update on each existing

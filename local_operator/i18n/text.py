@@ -16,9 +16,9 @@ measurement — a per-message read put hundreds of file parses on that import):
       _t = tr("tui.welcome")
       TIP_PASTE = _t(tip_paste())
 
-Both degrade to the message CODE when the catalogue or the message is
-missing, or the message does not render — the same additive contract
-``messages.render`` documents — so a wheel without its catalogues loses the
+Both fall back to English when the selected catalogue or key is missing,
+then degrade to the message CODE if English is missing or does not render — the
+same additive contract ``messages.render`` documents — so a wheel without its catalogues loses the
 copy, never the app.
 
 **Locale is the process's ACTIVE locale**, not a pin: ``active_locale()``
@@ -50,11 +50,15 @@ a move reads the new tree's file once rather than per message.
 from __future__ import annotations
 
 import functools
+import logging
 from collections.abc import Callable
 
 from . import catalogues
+from . import resolve as _locale
 from . import runtime as _runtime
 from .messages import Msg
+
+_logger = logging.getLogger(__name__)
 
 #: The process's active locale. A plain string, read by every resolver call:
 #: the app owns WHEN it moves (boot resolution, ``/language``, the config
@@ -75,14 +79,12 @@ def active_locale() -> str:
 def set_active_locale(locale: str) -> None:
     """Move the process to ``locale``; re-materialise registered constants.
 
-    No validation here, deliberately: the resolver chain (``i18n.resolve``)
-    is the one place a tag is checked against the shipped set, and a
-    catalogue that is missing simply degrades each message to its code (see
-    ``_sources``), so a typo'd tag loses copy rather than raising. The move
-    is a no-op — no refresher runs — when the locale does not change, which
-    keeps idempotent callers free.
+    Eligibility is checked before the no-op comparison: disk-only catalogues
+    must not activate through this direct entrypoint. An unchanged effective
+    locale runs no refreshers, keeping idempotent callers free.
     """
     global _active_locale
+    locale = _locale.eligible_locale(locale)
     if locale == _active_locale:
         return
     _active_locale = locale
@@ -103,10 +105,9 @@ def register_refresh(refresh: Callable[[], None]) -> None:
 def _sources(root: str, namespace: str, locale: str) -> dict[str, str]:
     """One namespace's catalogue for one locale, read once per process key.
 
-    Empty on a missing or malformed file: the resolver below then degrades
-    each of that namespace's messages to its own code, which is what keeps a
-    broken wheel from making an import fail (the S1 failure model) and an
-    unshipped locale from quoting message codes at a user.
+    Empty on a missing or malformed file: the resolver retries English before
+    degrading to the code. Raw reads remain available for offline tooling;
+    production eligibility belongs at the public entrypoints, not here.
     """
     try:
         return catalogues.load_catalogue(locale, namespace)
@@ -126,13 +127,27 @@ def tr(namespace: str) -> Callable[[Msg], str]:
     """
 
     def resolve(message: Msg) -> str:
-        locale = _active_locale
-        sources = _sources(str(catalogues.catalogue_root()), namespace, locale)
+        # Recheck the operational switch on cached resolvers too: toggling it
+        # must not leave previously selected translations live until a move.
+        locale = _locale.eligible_locale(_active_locale)
+        root = str(catalogues.catalogue_root())
+        sources = _sources(root, namespace, locale)
         source = sources.get(message.code)
+        source_locale = locale
+        if source is None and locale != "en":
+            source = _sources(root, namespace, "en").get(message.code)
+            source_locale = "en"
         if source is None:
             return message.code
+        if source_locale != locale:
+            _logger.debug(
+                "i18n fallback code=%s requested=%s source=%s",
+                message.code,
+                locale,
+                source_locale,
+            )
         try:
-            return _runtime.render_message(source, dict(message.params), locale)
+            return _runtime.render_message(source, dict(message.params), source_locale)
         except _runtime.MessageError:
             return message.code
 

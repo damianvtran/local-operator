@@ -8,6 +8,8 @@ WHAT THIS OWNS (all of it generated, all of it committed):
 * ``local_operator/i18n/keys/<namespace>.py`` — one function per message key,
   typed from the message's own placeholders (RFC §2.4: per-key functions, NOT
   `@overload`s — the overload shape did not finish a 5,000-key typecheck);
+* ``local_operator/mobile/web/src/i18n/keys.gen.ts`` — type-only wire/relay
+  key map and two-overload translator contract from the same ICU parser;
 * ``local_operator/i18n/data/shipped.json`` — the shipped-locale set computed
   from ``i18n/ledger.json`` (§6: a locale ships iff every namespace has a
   ledger entry that passed against the CURRENT en source hash). ``en`` is
@@ -153,7 +155,13 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
                     f"generate.py: {namespace}: arguments of {key!r} sanitise to "
                     f"duplicate identifiers {sanitised}; rename one in the catalogue"
                 )
-            signature = ", ".join(f"*, {safe}: {ann}" for safe, (_, ann) in zip(sanitised, params))
+            # ONE bare ``*`` introduces the keyword-only block: emitting it per
+            # parameter (``*, a: str, *, b: str``) is a SyntaxError and only
+            # ever went unnoticed while every message carried one argument —
+            # the analytics slice's first two-argument message caught it.
+            signature = "*, " + ", ".join(
+                f"{safe}: {ann}" for safe, (_, ann) in zip(sanitised, params)
+            )
             pairs = ", ".join(f'"{name}": {safe}' for safe, (name, _) in zip(sanitised, params))
         else:
             signature = ""
@@ -192,19 +200,46 @@ def _render_keys_init(modules: list[str]) -> str:
     )
 
 
+def _en_sha(namespace: str) -> str | None:
+    """The current ``en`` hash for ``namespace``, or ``None`` when absent.
+
+    ``None`` never equals a ledger's ``source_sha256`` string, so a carried
+    namespace with no ``en`` counterpart (a renamed child still on disk)
+    fails the freshness comparison instead of raising through the gate.
+    """
+    try:
+        return catalogues.catalogue_sha256("en", namespace)
+    except catalogues.CatalogueNotFound:
+        return None
+
+
 def _shipped_locales() -> list[str]:
     """The shipped set: en, plus locales with complete, fresh ledger passes.
 
     Freshness is the §6 gate: an entry counts iff its ``source_sha256`` equals
     the CURRENT hash of the en file for that namespace. A stale entry is not a
-    pass; a locale with any namespace missing or stale is not shipped.
+    pass; a locale with any of ITS OWN namespaces missing or stale is not
+    shipped.
+
+    PER-NAMESPACE since the 2026-10-11 amendment (docs/design/i18n.md §6): the
+    set a locale is judged over is the set it CARRIES — the catalogue files
+    that exist for that locale — not every namespace that exists in ``en``. A
+    new en-only namespace (an extraction slice's child, before its translation
+    wave) therefore does not un-ship passing locales; clients read that
+    namespace from ``en`` (per-namespace fallback, §2.5). The gate's
+    guarantees are unchanged: a locale ships only namespaces whose audits
+    passed against the CURRENT en bytes, and a stale member still un-ships the
+    locale. The earlier all-en-namespaces reading assumed §9's ordering (all
+    extraction before any shipping wave); once the programme interleaved the
+    two, it would have un-shipped every locale on every extraction slice that
+    adds a namespace (measured 2026-10-11: one new en namespace dropped the
+    generated set es/fr → en only).
     """
     shipped: set[str] = {"en"}
     if not LEDGER.is_file():
         return [loc for loc in SUPPORTED_LOCALES if loc in shipped]
     ledger = _read_json(LEDGER)
     entries = ledger.get("entries", []) if isinstance(ledger, dict) else []
-    en_namespaces = catalogues.namespaces("en")
     by_locale: dict[str, dict[str, dict[str, Any]]] = {}
     for entry in entries:
         if not isinstance(entry, dict):
@@ -219,11 +254,23 @@ def _shipped_locales() -> list[str]:
         record = by_locale.get(locale)
         if not record:
             continue
+        try:
+            carried = catalogues.namespaces(locale)
+        except catalogues.CatalogueNotFound:
+            continue
+        if not carried:
+            continue
         if all(
-            (entry := record.get(namespace)) is not None
-            and entry.get("status") == "passed"
-            and entry.get("source_sha256") == catalogues.catalogue_sha256("en", namespace)
-            for namespace in en_namespaces
+            (entry := record.get(namespace)) is not None and entry.get("status") == "passed"
+            # `en_sha is not None` is LOAD-BEARING, not belt-and-braces: the
+            # entry is read with `.get`, so a `passed` entry that OMITS
+            # `source_sha256` yields None too — and None == None would then read
+            # a carried namespace with no `en` counterpart as FRESH (round-1
+            # minor M1, reproduced: locale ships with an unverifiable
+            # namespace). Requiring a real `en` hash first keeps the docstring's
+            # promise structural instead of incidental.
+            and (en_sha := _en_sha(namespace)) is not None and entry.get("source_sha256") == en_sha
+            for namespace in carried
         ):
             shipped.add(locale)
     return [loc for loc in SUPPORTED_LOCALES if loc in shipped]
@@ -232,6 +279,59 @@ def _shipped_locales() -> list[str]:
 def _render_shipped() -> str:
     payload = {"schema": 1, "locales": _shipped_locales()}
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def _render_ts_key_map(namespaces: dict[str, dict[str, str]]) -> str:
+    """Relay key/parameter types from the SAME parsed ICU arguments as Python.
+
+    This artifact carries types only, never an implicit bootstrap of every
+    backend string. Relay-owned copy bundles separately; wire fetching later
+    follows an explicit used-key manifest. Keep the two-overload shape from
+    RFC §2.4, matching the desktop contract rather than a conditional tuple.
+    """
+    types = {
+        "plural": "number",
+        "number": "number",
+        "date": "Date | number",
+        "time": "Date | number",
+    }
+    lines = [
+        "/** GENERATED by scripts/i18n/generate.py — do not edit by hand.",
+        " * Type-only relay contract; no wire catalogue is bundled implicitly.",
+        " * Regenerate with generate.py; --check rejects drift in CI. */",
+        "export type MessageParams = {",
+    ]
+    seen: set[str] = set()
+    for namespace in sorted(namespaces):
+        for key, message in sorted(namespaces[namespace].items()):
+            if key in seen:
+                raise SystemExit(f"generate.py: duplicate TS message key {key!r}")
+            seen.add(key)
+            arguments = msg_runtime.message_arguments(message)
+            params = "; ".join(
+                f"{json.dumps(name)}: {types.get(kind, 'string')}" for name, kind in arguments
+            )
+            shape = "{ " + params + " }" if arguments else "undefined"
+            lines.append(f"  {json.dumps(key)}: {shape};")
+    lines.extend(
+        [
+            "};",
+            "export type MessageKey = keyof MessageParams;",
+            "export type WithParams = {",
+            "  [K in MessageKey]: MessageParams[K] extends undefined ? never : K;",
+            "}[MessageKey];",
+            "export type WithoutParams = {",
+            "  [K in MessageKey]: MessageParams[K] extends undefined ? K : never;",
+            "}[MessageKey];",
+            "/** Both overloads are mandatory: bare keys never accept parameters. */",
+            "export interface Translator {",
+            "  <K extends WithParams>(key: K, params: MessageParams[K]): string;",
+            "  (key: WithoutParams): string;",
+            "}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _planned_files(emitted: Path) -> dict[Path, str]:
@@ -243,12 +343,18 @@ def _planned_files(emitted: Path) -> dict[Path, str]:
     }
     en_dir = catalogues.catalogue_root() / "en"
     modules: list[str] = []
+    relay_types: dict[str, dict[str, str]] = {}
     for namespace in catalogues.namespaces("en"):
         messages = _read_json(en_dir / f"{namespace}.json")
+        if namespace.startswith(("wire.", "relay.")):
+            relay_types[namespace] = messages
         module = namespace.replace(".", "_").replace("-", "_")
         modules.append(module)
         planned[KEYS_DIR / f"{module}.py"] = _render_keys_module(namespace, messages)
     planned[KEYS_DIR / "__init__.py"] = _render_keys_init(modules)
+    planned[REPO / "local_operator/mobile/web/src/i18n/keys.gen.ts"] = _render_ts_key_map(
+        relay_types
+    )
     return planned
 
 

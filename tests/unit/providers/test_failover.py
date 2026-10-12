@@ -502,6 +502,44 @@ def _request(provider: str = "openai", model_id: str = "gpt-4o") -> ChatRequest:
     return ChatRequest(model=ModelSpec(provider=provider, model_id=model_id))
 
 
+async def test_local_output_envelope_never_retries_rotates_or_hops() -> None:
+    from local_operator.providers.clients import StreamOutputEnvelopeExceeded
+
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        payload = {"choices": [{"delta": {"content": " " * 129}}]}
+        return httpx.Response(
+            200,
+            content=("data: " + json.dumps(payload) + "\n\n").encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    auth = FakeAuth({"openai": ["first", "second"], "anthropic": ["fallback"]})
+    settings = {
+        "retry": {
+            "fallbackChains": {"default": [{"provider": "anthropic", "model": "claude-test"}]}
+        }
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://test.invalid/v1", http_client=http)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return client
+
+        with pytest.raises(StreamOutputEnvelopeExceeded):
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    ChatRequest(model=_request().model, max_tokens=1), auth, settings, client_for
+                )
+            ]
+    assert len(requests) == 1
+    assert auth.rotations == []
+    assert auth.keys == {"openai": ["first", "second"], "anthropic": ["fallback"]}
+
+
 async def test_stream_success_passes_events_through() -> None:
     events: list[Any] = [StreamTextDelta(delta="hi"), StreamEndEvent(stop_reason="stop")]
     client = ScriptedClient(events)

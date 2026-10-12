@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import copy
 import gzip
+import html
 import json
 import logging
 import os
@@ -42,7 +43,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Protocol
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -59,7 +60,10 @@ from local_operator.harness.approval import (
     operator_nonce,
     request_proof,
 )
+from local_operator.i18n import catalogues
 from local_operator.i18n.frames import config_frame_payload
+from local_operator.i18n.keys import relay_login
+from local_operator.i18n.messages import Msg, render
 from local_operator.i18n.resolve import resolve_language
 from local_operator.mobile import mesh as mobile_mesh
 from local_operator.mobile import projects as mobile_projects
@@ -2624,14 +2628,28 @@ def _history_page(
 
 
 def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[bytes, str] | None:
-    """Decode the ``index``-th image block of message ``entry_id`` from the
-    session's on-disk transcript into raw bytes plus mime type.
+    """The image family's resolution: ``_attachment_bytes`` with ``kind="image"``.
+
+    Kept as its own name because the image route and its tests read through
+    it; the split changed no image semantics — the walk below still counts
+    inline images and store-backed artifacts of kind ``image`` on one shared
+    index.
+    """
+    return _attachment_bytes(record, entry_id, index, "image")
+
+
+def _attachment_bytes(
+    record: SessionRecord, entry_id: str, index: int, kind: str
+) -> tuple[bytes, str] | None:
+    """Decode the ``index``-th block of ``kind`` on message ``entry_id`` from
+    the session's on-disk transcript into raw bytes plus mime type.
 
     Reads from disk (not the live fold) so it serves attachments from history
     the projection tail dropped as well as recent ones, and reuses the
-    transcript's own attachment resolution — the same base64 the model saw.
-    Returns ``None`` for any miss (unknown message, out-of-range index, a
-    reference that no longer resolves) so the caller answers a clean 404.
+    transcript's own attachment resolution — the same bytes the model saw (or
+    the store digest it referenced). Returns ``None`` for any miss (unknown
+    message, out-of-range index, an unknown kind, a reference that no longer
+    resolves) so the caller answers a clean 404.
 
     Runs off the event loop (``asyncio.to_thread`` at the call site): building
     the history rehydrates every message and is not loop-safe work.
@@ -2679,18 +2697,29 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
             )
     if message is None or not isinstance(message.content, list):
         return None
-    # ``index`` is the position among IMAGE blocks (what _image_refs emits),
-    # not among all content blocks — text blocks do not count. THE WALK IS THE
-    # CONTRACT with ``projection._image_refs``: both count inline image blocks
-    # and output artifacts of kind ``image`` (``AttachmentContent``) on one
-    # shared index, in content order; either side changing alone fetches the
-    # wrong bytes for every later block.
-    blocks = [
-        block
-        for block in message.content
-        if isinstance(block, ImageContent)
-        or (isinstance(block, AttachmentContent) and block.kind == "image")
-    ]
+    # ``index`` is the position among blocks of ``kind`` (what the family's
+    # refs walk emits), not among all content blocks — text blocks do not
+    # count. THE WALK IS THE CONTRACT with the projection: ``kind="image"``
+    # (``projection._image_refs``) counts inline image blocks and output
+    # artifacts of kind ``image`` on one shared index; ``kind="video"``
+    # (``projection._video_refs``) counts ONLY output artifacts of kind
+    # ``video``, in its own index space. Either side changing alone fetches
+    # the wrong bytes for every later block.
+    if kind == "image":
+        blocks = [
+            block
+            for block in message.content
+            if isinstance(block, ImageContent)
+            or (isinstance(block, AttachmentContent) and block.kind == "image")
+        ]
+    elif kind == "video":
+        blocks = [
+            block
+            for block in message.content
+            if isinstance(block, AttachmentContent) and block.kind == "video"
+        ]
+    else:
+        return None
     if index < 0 or index >= len(blocks):
         return None
     block = blocks[index]
@@ -2704,7 +2733,8 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
         if resolved is None:
             return None
         raw, sidecar_mime = resolved
-        return raw, block.content_type or sidecar_mime or "image/png"
+        fallback = "image/png" if kind == "image" else "video/mp4"
+        return raw, block.content_type or sidecar_mime or fallback
     data = block.data
     if not data:
         return None
@@ -2714,6 +2744,52 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
         logger.warning("image fetch: undecodable base64 for %s[%d]", entry_id, index)
         return None
     return raw, block.mime_type or "image/png"
+
+
+#: A single byte-range (RFC 9110 ``bytes=`` forms): an optional first byte
+#: with an optional inclusive last, or the suffix form (``bytes=-N``).
+#: Anchored, so a malformed or MULTI-range header (``bytes=0-1,5-6``) does
+#: not match and the caller serves the full 200 — the spec's remedy for a
+#: Range the server does not honour.
+_SINGLE_RANGE = re.compile(r"bytes=(\d*)-(\d*)", re.ASCII)
+
+
+def _range_window(header: str, size: int) -> tuple[int, int] | Literal["unsatisfiable"] | None:
+    """Resolve one ``Range`` header against ``size``.
+
+    Three answers, and each has a different HTTP shape on purpose: the
+    inclusive ``(first, last)`` window to serve as 206; ``None`` when there
+    is no single satisfiable range to honour (absent, malformed, multi, or
+    an inverted pair like ``bytes=5-3`` — all ignored, full 200), and
+    ``"unsatisfiable"`` for the one case the spec answers differently: a
+    start at or past EOF is a 416, so a media client learns its request was
+    refused instead of receiving a whole body it did not ask for.
+    """
+    match = _SINGLE_RANGE.fullmatch(header.strip())
+    if match is None:
+        return None
+    first_txt, last_txt = match.groups()
+    if not first_txt and not last_txt:
+        return None  # ``bytes=-``: not one of the grammar's forms; ignore.
+    if first_txt:
+        first = int(first_txt)
+        if first >= size:
+            return "unsatisfiable"
+        if not last_txt:
+            return (first, size - 1)
+        last = int(last_txt)
+        if last < first:
+            return None  # An inverted pair is invalid; ignore the header.
+        return (first, min(last, size - 1))
+    # Suffix form: the LAST N bytes. A suffix at or past EOF is the whole
+    # representation (206 with everything), never an error; ``-0`` selects
+    # nothing and is unsatisfiable by definition.
+    length = int(last_txt)
+    if length == 0:
+        return "unsatisfiable"
+    if length >= size:
+        return (0, size - 1) if size > 0 else "unsatisfiable"
+    return (size - length, size - 1)
 
 
 def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
@@ -4443,7 +4519,7 @@ def build_app(daemon: MobileDaemon):
     async def login_page(request: Request) -> Response:
         if authed(request):
             return RedirectResponse("/", status_code=303)
-        return HTMLResponse(_LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()))
+        return HTMLResponse(await asyncio.to_thread(_render_login_html))
 
     async def login_submit(request: Request) -> Response:
         denied = cross_origin_mutation(request)
@@ -4453,9 +4529,7 @@ def build_app(daemon: MobileDaemon):
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
             return HTMLResponse(
-                _LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()).replace(
-                    "<!--ERROR-->", _LOGIN_ERROR
-                ),
+                await asyncio.to_thread(_render_login_html, error=True),
                 status_code=401,
             )
         response = RedirectResponse("/", status_code=303)
@@ -4579,9 +4653,63 @@ def build_app(daemon: MobileDaemon):
             "unread": daemon.table.unread_block(),
             "capabilities": {
                 "features": _feature_flags(),
+                "i18n": {"catalogues": 1},
                 "stt": await stt_availability(),
             },
         }
+
+    async def api_i18n_catalogue(request: Request) -> Response:
+        """Public negotiation data, never session/user content or a core proxy.
+
+        The relay advertises this adapter separately from features.i18n: that
+        feature describes core's contract, not this app's routing table. Only
+        backend-owned wire namespaces may cross this seam; relay copy bundles
+        with its own client. Existing catalogue loaders own path validation.
+        """
+        from local_operator.i18n import catalogues, resolve
+        from local_operator.i18n.http import etag_matches
+
+        locale = request.path_params["locale"]
+        namespace = request.path_params["namespace"]
+        # Match core's public asset boundary, not language-preference inference:
+        # exact shipment and the operational switch precede hash/load/304, so
+        # held bytes cannot be activated by a conditional request either.
+        if (
+            not resolve.is_shipped(locale)
+            or resolve.eligible_locale(locale) != locale
+            or not namespace.startswith("wire.")
+        ):
+            return JSONResponse(
+                {"detail": "Catalogue not found."}, status_code=404
+            )  # i18n: ignore protocol diagnostic
+
+        def load() -> tuple[str, dict[str, str]]:
+            return (
+                catalogues.catalogue_sha256(locale, namespace),
+                catalogues.load_catalogue(locale, namespace),
+            )
+
+        try:
+            sha, messages = await asyncio.to_thread(load)
+        except catalogues.CatalogueNotFound:
+            return JSONResponse(
+                {"detail": "Catalogue not found."}, status_code=404
+            )  # i18n: ignore protocol diagnostic
+        except catalogues.CatalogueInvalid as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=500)
+        headers = {"ETag": f'"{sha}"', "Cache-Control": "no-cache"}
+        if etag_matches(request.headers.get("if-none-match", ""), sha):
+            return Response(status_code=304, headers=headers)
+        # Same three-field CRUD envelope as core, without importing its
+        # Pydantic/FastAPI models into the independent Starlette daemon.
+        return JSONResponse(
+            {
+                "status": 200,
+                "message": "Catalogue retrieved.",  # i18n: ignore protocol diagnostic
+                "result": {"messages": messages, "content_sha256": sha},
+            },
+            headers=headers,
+        )
 
     async def api_sessions(request: Request) -> Response:
         denied = gate(request)
@@ -5504,6 +5632,75 @@ def build_app(daemon: MobileDaemon):
             content=data,
             media_type=mime_type,
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
+    async def api_session_attachment(request: Request) -> Response:
+        """One attachment's bytes, with byte-Range (206) support.
+
+        The generalization of ``api_session_image`` the video player needs:
+        same on-disk transcript resolution, laziness and cache semantics,
+        but keyed by the artifact ``kind`` and answering HTTP Range
+        requests — phone Safari will not play a <video> that arrives as a
+        full-body 200, and a media element asking for a byte window is the
+        normal case, not an exotic one.
+
+        ``kind`` scopes the index: each family (image, video) counts only
+        its own blocks, exactly the walk its refs emitter writes, so a
+        request answers the bytes its ref meant or nothing (404). An
+        unknown kind is a 404 too — nothing of that family exists on this
+        surface.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        entry_id = request.query_params.get("entry", "")
+        if not entry_id:
+            return JSONResponse({"error": "entry id is required"}, status_code=400)
+        kind = request.query_params.get("kind", "")
+        if kind not in ("image", "video"):
+            return JSONResponse({"error": "no such attachment"}, status_code=404)
+        try:
+            index = int(request.query_params.get("i", "0"))
+        except ValueError:
+            return JSONResponse({"error": "bad attachment index"}, status_code=400)
+        found = await asyncio.to_thread(_attachment_bytes, entry.record, entry_id, index, kind)
+        if found is None:
+            return JSONResponse({"error": "no such attachment"}, status_code=404)
+        data, mime_type = found
+        cache = {"Cache-Control": "public, max-age=31536000, immutable"}
+        window = _range_window(request.headers.get("range", ""), len(data))
+        if isinstance(window, str):
+            # "unsatisfiable": the spec's own answer for a range set nothing
+            # can satisfy (a start at or past EOF).
+            return Response(
+                content=b"",
+                status_code=416,
+                headers={
+                    "Content-Range": f"bytes */{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    **cache,
+                },
+            )
+        if window is not None:
+            first, last = window
+            return Response(
+                content=data[first : last + 1],
+                status_code=206,
+                media_type=mime_type,
+                headers={
+                    "Content-Range": f"bytes {first}-{last}/{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    **cache,
+                },
+            )
+        return Response(
+            content=data,
+            media_type=mime_type,
+            headers={"Accept-Ranges": "bytes", **cache},
         )
 
     # -- the supplement read family (memo §2.7; RFC D5) ----------------------------------
@@ -7167,6 +7364,7 @@ def build_app(daemon: MobileDaemon):
         Route("/login", login_submit, methods=["POST"]),
         Route("/logout", logout),
         Route("/api/sessions", api_sessions),
+        Route("/api/i18n/catalogues/{locale:str}/{namespace:str}", api_i18n_catalogue),
         # The badge read (push/ack-sync S1): the same aggregate the list payload
         # carries as its top-level ``unread`` block, served on its own so a
         # client can refresh the number without pulling the rows.
@@ -7222,6 +7420,7 @@ def build_app(daemon: MobileDaemon):
             methods=["POST"],
         ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
+        Route("/api/sessions/{session_id:str}/attachment", api_session_attachment),
         Route(
             "/api/sessions/{session_id:str}/supplements/{digest:str}/document",
             api_session_supplement_document,
@@ -7825,16 +8024,60 @@ def _list_models() -> list[dict[str, Any]]:
 #: a bad POST re-renders this page with the field refocused and cleared, and
 #: without a live region a screen-reader user was told nothing about the
 #: failed attempt (measured: `role` null, parent `aria-live` null).
-_LOGIN_ERROR = '<p class="error" role="alert">Wrong password.</p>'
+def _render_login_html(*, error: bool = False) -> str:
+    """Resolve at the request boundary, not import time or browser preferences.
+
+    The gate precedes the SPA/bootstrap and must work without JavaScript.
+    Escape catalogue output even in text nodes: translator-supplied markup must
+    never execute on the authentication surface. One-pass substitution prevents
+    translated text resembling a token from being substituted twice.
+    """
+    locale = resolve_language()
+    messages: dict[str, Msg] = {
+        "TITLE": relay_login.page_title(),
+        "PASSWORD": relay_login.password_label(),
+        "SUBMIT": relay_login.submit_label(),
+        "ERROR": relay_login.error_password(),
+    }
+    # Language-of-page describes the copy actually rendered, not preference.
+    # A shipped locale may lack this newly extracted namespace; select its
+    # English fallback once so assistive pronunciation and direction agree
+    # with every message. Never probe any locale the backend did not resolve.
+    try:
+        source = catalogues.load_catalogue(locale, "relay.login")
+        # A valid map can still be empty/partial. Include the refusal even on
+        # GET so a failed attempt cannot switch languages or silently mix
+        # English per-key fallback under non-English page metadata.
+        if not {message.code for message in messages.values()}.issubset(source):
+            locale = "en"
+    except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
+        locale = "en"
+
+    def text(message: Msg) -> str:
+        return html.escape(render(message.code, message.params, locale=locale))
+
+    values = {
+        "LANG": html.escape(locale, quote=True),
+        "DIR": "rtl" if locale == "ur" else "ltr",
+        "MARK_DATA_URI": html.escape(_mark_data_uri(), quote=True),
+        "TITLE": text(messages["TITLE"]),
+        "PASSWORD": text(messages["PASSWORD"]),
+        "SUBMIT": text(messages["SUBMIT"]),
+        "ERROR": (
+            '<p class="error" role="alert">' + text(messages["ERROR"]) + "</p>" if error else ""
+        ),
+    }
+    return re.sub(r"__([A-Z_]+)__", lambda match: values[match[1]], _LOGIN_HTML)
+
 
 _LOGIN_HTML = """<!doctype html>
-<html lang="en">
+<html lang="__LANG__" dir="__DIR__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14110c">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>local operator — sign in</title>
+<title>__TITLE__</title>
 <style>
   /* Values from local_operator/tui/theme.py BRAND_TOKENS.dark — the login
      page is server-rendered so the auth gate has zero client-side surface,
@@ -7939,13 +8182,13 @@ _LOGIN_HTML = """<!doctype html>
     <img class="mark" src="__MARK_DATA_URI__" width="72" height="72" alt="">
     <h1>local operator</h1>
   </div>
-  <!--ERROR-->
+  __ERROR__
   <div class="field">
-    <label for="password">password</label>
+    <label for="password">__PASSWORD__</label>
     <input id="password" type="password" name="password"
            autocomplete="current-password" autofocus required>
   </div>
-  <button type="submit">sign in</button>
+  <button type="submit">__SUBMIT__</button>
 </form>
 <script>
   /* U2: clear private authenticated state (uncertain command envelopes and

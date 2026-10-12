@@ -991,7 +991,7 @@ async def test_a_fork_cut_through_a_named_entry(
             refusal = refused_fork.json()["detail"]
             assert refusal["code"] == "fork_refused", refusal
             assert refusal["reason"] == "entry_unknown", refusal
-            assert refusal["message"] == (
+            assert refusal["text"] == (
                 "that message is not part of this conversation; "
                 "pick a message from this session to fork from"
             ), refusal
@@ -999,7 +999,7 @@ async def test_a_fork_cut_through_a_named_entry(
             assert parent_transcript.read_bytes() == parent_bytes
             print(
                 f"A foreign entry id: 409 {refusal['code']}/{refusal['reason']} — "
-                f"{refusal['message']}"
+                f"{refusal['text']}"
             )
 
             # The ABSENT target is still the call this route has always made.
@@ -1041,14 +1041,14 @@ async def test_a_fork_cut_through_a_named_entry(
             anchor_detail = anchor_refusal.json()["detail"]
             assert anchor_detail["code"] == "fork_refused", anchor_detail
             assert anchor_detail["reason"] == "before_anchor", anchor_detail
-            assert anchor_detail["message"] == (
+            assert anchor_detail["text"] == (
                 "that message sits before the conversation's last summary; "
                 "fork from a message after the summary instead"
             ), anchor_detail
             assert parent_transcript.read_bytes() == anchored_bytes
             print(
                 f"A cut before the newest anchor: 409 {anchor_detail['code']}/"
-                f"{anchor_detail['reason']} — {anchor_detail['message']}"
+                f"{anchor_detail['reason']} — {anchor_detail['text']}"
             )
 
             # A MALFORMED INTERIOR refuses the cut too, with its own cause. The
@@ -1080,13 +1080,13 @@ async def test_a_fork_cut_through_a_named_entry(
             broken_detail = broken.json()["detail"]
             assert broken_detail["code"] == "fork_refused", broken_detail
             assert broken_detail["reason"] == "incomplete_tool_calls", broken_detail
-            assert broken_detail["message"] == (
+            assert broken_detail["text"] == (
                 "history has incomplete tool calls before later messages"
             ), broken_detail
             assert parent_transcript.read_bytes() == broken_bytes
             print(
                 f"A malformed interior: 409 {broken_detail['code']}/"
-                f"{broken_detail['reason']} — {broken_detail['message']}"
+                f"{broken_detail['reason']} — {broken_detail['text']}"
             )
 
             # A SECOND BOUNDARY FORK WHILE ONE IS ALREADY WAITING refuses with its
@@ -1109,10 +1109,10 @@ async def test_a_fork_cut_through_a_named_entry(
             pending_detail = second.json()["detail"]
             assert pending_detail["code"] == "fork_refused", pending_detail
             assert pending_detail["reason"] == "fork_pending", pending_detail
-            assert pending_detail["message"] == "A fork is already waiting for a safe boundary"
+            assert pending_detail["text"] == "A fork is already waiting for a safe boundary"
             print(
                 f"A second boundary fork: 409 {pending_detail['code']}/"
-                f"{pending_detail['reason']} — {pending_detail['message']}"
+                f"{pending_detail['reason']} — {pending_detail['text']}"
             )
             # Release the parked turn before teardown: the pending fork then lands
             # at its boundary, which is exactly what the refusal protected.

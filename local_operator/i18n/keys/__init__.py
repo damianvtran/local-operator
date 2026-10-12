@@ -8,10 +8,17 @@ shape RFC §2.4 proved: a mistyped key or kwarg fails pyright.
 from __future__ import annotations
 
 from . import (
+    relay_login,
+    tui_analytics,
     tui_status,
     tui_transcript,
     tui_welcome,
     wire_errors,
+    wire_errors_agents,
+    wire_errors_auth,
+    wire_errors_desktop,
+    wire_errors_files,
+    wire_errors_media,
     wire_errors_settings,
     wire_exec,
     wire_incidents,
@@ -21,10 +28,17 @@ from . import (
 )
 
 __all__ = [
+    "relay_login",
+    "tui_analytics",
     "tui_status",
     "tui_transcript",
     "tui_welcome",
     "wire_errors",
+    "wire_errors_agents",
+    "wire_errors_auth",
+    "wire_errors_desktop",
+    "wire_errors_files",
+    "wire_errors_media",
     "wire_errors_settings",
     "wire_exec",
     "wire_incidents",

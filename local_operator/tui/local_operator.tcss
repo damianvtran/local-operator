@@ -269,7 +269,8 @@ TranscriptView {
  * be the "blank row between everything" regression). */
 TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ReasoningBlock, ToolCard,
 WakeBlock,
-PeerMessageBlock {
+PeerMessageBlock,
+QuietGroupBlock {
     width: 1fr;
     height: auto;
 }
@@ -391,7 +392,7 @@ Screen > .screen--selection {
  * even after the resize rebuilds the row to fit — a ledger of one-line
  * traces silently doubles in height. Pinning makes the worst case a clipped
  * cell for one frame, which is the right failure. */
-ToolCard, WakeBlock, PeerMessageBlock {
+ToolCard, WakeBlock, PeerMessageBlock, QuietGroupBlock {
     height: 1;
     background: $lo-surface;
     /* NOTE: the one-cell LEFT inset these cards carry is drawn by the row
@@ -413,7 +414,10 @@ ToolCard, WakeBlock, PeerMessageBlock {
  * row per line of revealed output (each already truncated to width, so
  * nothing reflows). The class beats the type selector above. WakeBlock,
  * PeerMessageBlock and MonitorDeltaBlock use their own class names because
- * they are different widgets; the height contract is the same. */
+ * they are different widgets; the height contract is the same. The quiet-group
+ * bar (S5) needs no expanded class of its own: opening it reveals the member
+ * rows beside it in the container, not rows of its own, so it stays pinned at
+ * one line in both states. */
 ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded,
 MonitorDeltaBlock.monitor-expanded {
     height: auto;
@@ -485,7 +489,8 @@ MonitorDeltaBlock.monitor-expanded {
  *
  * Expanded rows are exempt: they are already `height: auto` and content-sized,
  * and the payload gives the pointer plenty to hit. */
-.comfortable-rows ToolCard, .comfortable-rows WakeBlock, .comfortable-rows PeerMessageBlock {
+.comfortable-rows ToolCard, .comfortable-rows WakeBlock, .comfortable-rows PeerMessageBlock,
+.comfortable-rows QuietGroupBlock {
     height: 3;
     /* Restates the base rule's left inset rather than adding to it: Textual
      * resolves `padding` as ONE declaration, so writing only the vertical
@@ -515,7 +520,8 @@ ToolCard.tool-error {
 /* Mouse affordance: the whole row is the click target for expand/collapse,
  * so the whole row lights on hover. Last rule wins over the state tints —
  * pointing at a row should always look the same. */
-ToolCard:hover, WakeBlock:hover, PeerMessageBlock:hover, .interactive-notice:hover {
+ToolCard:hover, WakeBlock:hover, PeerMessageBlock:hover, QuietGroupBlock:hover,
+.interactive-notice:hover {
     background: $lo-overlay;
 }
 
@@ -532,7 +538,8 @@ ToolCard:hover, WakeBlock:hover, PeerMessageBlock:hover, .interactive-notice:hov
  * Last rule in the block, so it wins over the state tints AND over :hover:
  * where the keyboard is, is the more load-bearing fact. Still no border —
  * elevation is a background step here as everywhere. */
-ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, .interactive-notice:focus {
+ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, QuietGroupBlock:focus,
+.interactive-notice:focus {
     background: $lo-tint-select;
 }
 

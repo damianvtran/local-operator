@@ -349,7 +349,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 blurb=(
                     "Relaunch a stopped, paused or failed subagent against its "
                     "own transcript so it continues where it left off; names "
-                    "several targets to fan one message out to a whole batch at once."
+                    "several targets to fan one message out to a whole batch at once. "
+                    "Optional model=inherit follows the parent instead of role pins; "
+                    "model=provider/id pins the continuation (model-choice policy applies). "
+                    "Omission replays the saved per-run selector."
                 ),
             ),
         ),
@@ -495,8 +498,12 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "and may restrict the child's tools.\n"
             "- ``subagents.model_choice=model`` is the operator's switch that "
             "hands the child's model back; ``effort`` swaps the child's MODEL "
-            "(not its reasoning level), and omitting it inherits this session's "
-            "model and reasoning effort."
+            "(not its reasoning level). Omission keeps role pins, else inherits. "
+            "Single and batch tasks accept model=inherit to bypass role pins, "
+            "or model=provider/id for an exact per-run pin; never combine with effort. "
+            "Exact picks require model_choice=model and validate catalogue/credentials "
+            "before launch. Inherit is available in operator mode too. "
+            "Leave unused optional fields absent, especially effort."
         ),
     ),
     # -- item-7 notes (failure semantics + the system-prompt cuts) ----------
@@ -529,8 +536,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "`guide://image-generation` + `docs/design/image-providers.md`.\n"
             "\n"
             "Cost: Radient, xAI and OpenRouter report `cost_usd` per "
-            "generation; FAL/OpenAI/Google bill your key at published rates; "
-            "the ChatGPT-plan rung spends plan quota (no cash figure). "
+            "generation; FAL and Google bill your key at published rates with "
+            "no per-call figure; an OpenAI edit shows an estimated figure "
+            "when the response carries usage, and reports no figure "
+            "otherwise; the ChatGPT-plan rung spends plan quota (no cash "
+            "figure). "
             "`num_images` multiplies cost — it is the spend knob, and the "
             "ChatGPT-plan and Google rungs generate one image per call "
             "(larger requests fail over). The harness prompts for approval "
@@ -538,8 +548,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "are the spend knobs.\n"
             "\n"
             "`source_image_path` (a local file) or `source_attachment` (a "
-            "result caption's digest) makes it an edit — one source per "
-            "call in v1: the bytes ride to "
+            "result caption's digest) makes it an edit; "
+            "`source_image_paths`/`source_attachments` take lists and fuse "
+            "with them in order (paths first, attachments after) — up to 16 "
+            "sources combined; per-provider ceilings in "
+            "`guide://image-generation`. The bytes ride to "
             "the provider as a data URI; `strength` (0..1) applies with a "
             "source, where supported. Edits run on Radient, FAL, OpenAI, "
             "Google, xAI and OpenRouter; the ChatGPT-plan rung skips "

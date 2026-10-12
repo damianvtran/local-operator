@@ -206,7 +206,7 @@ async def test_update_agent_not_found(test_app_client, dummy_registry: AgentRegi
 
     assert response.status_code == 404
     data = response.json()
-    assert "Agent not found" in data.get("detail", "")
+    assert "Agent not found" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -257,7 +257,7 @@ async def test_delete_agent_not_found(test_app_client, dummy_registry: AgentRegi
 
     assert response.status_code == 404
     data = response.json()
-    assert "Agent not found" in data.get("detail", "")
+    assert "Agent not found" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -281,7 +281,11 @@ async def test_create_agent_success(dummy_registry: AgentRegistry):
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Host": "127.0.0.1:1111"},
+    ) as ac:
         response = await ac.post("/v1/agents", json=create_payload.model_dump())
 
     assert response.status_code == 201
@@ -322,7 +326,11 @@ async def test_create_agent_invalid_data(dummy_registry: AgentRegistry):
     )  # Invalid empty name
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Host": "127.0.0.1:1111"},
+    ) as ac:
         response = await ac.post("/v1/agents", json=invalid_payload.model_dump())
 
     assert response.status_code == 400
@@ -491,7 +499,7 @@ async def test_get_agent_not_found(test_app_client, dummy_registry: AgentRegistr
 
     assert response.status_code == 404
     data = response.json()
-    assert "Agent not found" in data.get("detail", "")
+    assert "Agent not found" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -809,7 +817,7 @@ async def test_get_agent_conversation_page_out_of_bounds(
 
     assert response.status_code == 400
     data = response.json()
-    assert "Page 4 is out of bounds" in data.get("detail", "")
+    assert "Page 4 is out of bounds" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -820,7 +828,7 @@ async def test_get_agent_conversation_not_found(test_app_client, dummy_registry:
 
     assert response.status_code == 404
     data = response.json()
-    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+    assert f"Agent with ID {non_existent_id} not found" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -1050,7 +1058,7 @@ async def test_get_agent_execution_history_page_out_of_bounds(
 
     assert response.status_code == 400
     data = response.json()
-    assert "Page 4 is out of bounds" in data.get("detail", "")
+    assert "Page 4 is out of bounds" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -1063,7 +1071,7 @@ async def test_get_agent_execution_history_not_found(
 
     assert response.status_code == 404
     data = response.json()
-    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+    assert f"Agent with ID {non_existent_id} not found" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -1191,7 +1199,7 @@ async def test_clear_agent_conversation_not_found(test_app_client, dummy_registr
 
     assert response.status_code == 404
     data = response.json()
-    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+    assert f"Agent with ID {non_existent_id} not found" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -1243,7 +1251,7 @@ async def test_get_agent_system_prompt_not_found(test_app_client, dummy_registry
 
     assert response.status_code == 404
     data = response.json()
-    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+    assert f"Agent with ID {non_existent_id} not found" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -1308,7 +1316,7 @@ async def test_update_agent_system_prompt_not_found(test_app_client, dummy_regis
 
     assert response.status_code == 404
     data = response.json()
-    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+    assert f"Agent with ID {non_existent_id} not found" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -1593,9 +1601,9 @@ async def test_upload_agent_to_radient_missing_api_key(
     data = response.json()
     # Accept either 401 or 400 for missing API key, depending on implementation
     assert (
-        "RADIENT_API_KEY is required" in data.get("detail", "")
-        or "Missing RADIENT_API_KEY" in data.get("detail", "")
-        or "Missing required credential" in data.get("detail", "")
+        "RADIENT_API_KEY is required" in data["detail"]["text"]
+        or "Missing RADIENT_API_KEY" in data["detail"]["text"]
+        or "Missing required credential" in data["detail"]["text"]
     )
 
 
@@ -1622,8 +1630,8 @@ async def test_upload_agent_to_radient_agent_not_found(
     assert response.status_code == 404
     data = response.json()
     assert (
-        f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
-        or "not found" in data.get("detail", "").lower()
+        f"Agent with ID {non_existent_id} not found" in data["detail"]["text"]
+        or "not found" in data["detail"]["text"].lower()
     )
 
 
@@ -1675,9 +1683,9 @@ async def test_upload_agent_to_radient_error(test_app_client, dummy_registry: Ag
 
     assert response.status_code == 400 or response.status_code == 500
     data = response.json()
-    assert "Error uploading agent to Radient" in data.get(
-        "detail", ""
-    ) or "Upload failed" in data.get("detail", "")
+    # A prefix-only OR accepts a lost exception tail. Pin the full sentence
+    # so moving the error into envelope params cannot silently discard it.
+    assert data["detail"]["text"] == "Error uploading agent to Radient: Upload failed"
 
 
 @pytest.mark.asyncio
@@ -1809,9 +1817,8 @@ async def test_download_agent_from_radient_error(test_app_client, dummy_registry
 
     assert response.status_code == 400 or response.status_code == 500
     data = response.json()
-    assert "Error downloading agent from Radient" in data.get(
-        "detail", ""
-    ) or "Download failed" in data.get("detail", "")
+    # The download twin must also reject a preserved prefix with a lost tail.
+    assert data["detail"]["text"] == "Error downloading agent from Radient: Download failed"
 
 
 @pytest.mark.asyncio

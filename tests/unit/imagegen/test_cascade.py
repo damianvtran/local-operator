@@ -326,7 +326,7 @@ async def test_an_edit_walk_dispatches_radient_and_pre_records_only_incapable(
         await cascade.run_image_cascade(
             prompt="make it night",
             config_dir=tmp_path,
-            source_url="data:image/png;base64,AAAA",
+            sources=["data:image/png;base64,AAAA"],
         )
 
     assert calls == [ImageRoute.RADIENT], "the incapable rung is never called"
@@ -354,7 +354,7 @@ async def test_an_edit_with_no_capable_provider_never_runs_text_to_image(
         await cascade.run_image_cascade(
             prompt="make it night",
             config_dir=tmp_path,
-            source_url="data:image/png;base64,AAAA",
+            sources=["data:image/png;base64,AAAA"],
         )
 
     assert calls == [], "no dispatch, ever — the walk never falls back to T2I"
@@ -372,7 +372,7 @@ async def test_an_edit_with_nothing_configured_still_names_the_capable_ones(
     _pin_probes(monkeypatch)
     with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
         await cascade.run_image_cascade(
-            prompt="x", config_dir=tmp_path, source_url="data:image/png;base64,AAAA"
+            prompt="x", config_dir=tmp_path, sources=["data:image/png;base64,AAAA"]
         )
     assert "No available provider can edit images" in str(caught.value)
     assert "sign in or add a key" in str(caught.value)
@@ -393,7 +393,7 @@ async def test_an_edit_all_failed_header_says_editing(
 
     with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
         await cascade.run_image_cascade(
-            prompt="x", config_dir=tmp_path, source_url="data:image/png;base64,AAAA"
+            prompt="x", config_dir=tmp_path, sources=["data:image/png;base64,AAAA"]
         )
 
     assert str(caught.value).startswith("Image editing failed on every available provider:")
@@ -418,7 +418,7 @@ async def test_an_edit_attempt_list_stays_in_cascade_order(
 
     with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
         await cascade.run_image_cascade(
-            prompt="x", config_dir=tmp_path, source_url="data:image/png;base64,AAAA"
+            prompt="x", config_dir=tmp_path, sources=["data:image/png;base64,AAAA"]
         )
 
     assert calls == [ImageRoute.FAL, ImageRoute.GOOGLE]
@@ -433,6 +433,68 @@ async def test_an_edit_attempt_list_stays_in_cascade_order(
         "failed",
     ]
     assert caught.value.attempts[1].message == "ChatGPT plan cannot edit images."
+
+
+@pytest.mark.asyncio
+async def test_a_multi_source_edit_pre_records_an_available_rung_under_the_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The filter is ``sources != NONE and max_sources >= N``: OpenRouter
+    # (SINGLE/1) available beside Radient (16) with N=2 is a pre-recorded
+    # skip naming its limit — never a call, never a silently smaller edit.
+    _pin_probes(monkeypatch, radient=True, openrouter=True)
+    fake, calls = _make_route_script({ImageRoute.RADIENT: APIError("r down", status_code=500)})
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
+        await cascade.run_image_cascade(
+            prompt="x",
+            config_dir=tmp_path,
+            sources=["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"],
+        )
+
+    assert calls == [ImageRoute.RADIENT], "the under-count rung is never called"
+    assert [attempt.outcome for attempt in caught.value.attempts] == ["failed", "skipped"]
+    skipped = caught.value.attempts[1]
+    assert skipped.route == ImageRoute.OPENROUTER
+    assert skipped.message == "OpenRouter cannot edit with 2 sources (supports 1)."
+
+
+@pytest.mark.asyncio
+async def test_a_multi_source_edit_with_nothing_configured_reads_the_count_and_capable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch)
+    with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
+        await cascade.run_image_cascade(
+            prompt="x",
+            config_dir=tmp_path,
+            sources=["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"],
+        )
+    assert str(caught.value) == (
+        "No available provider can edit with 2 sources (capable of 2: Radient, FAL, "
+        "OpenAI, Google, xAI — sign in or add a key)"
+    )
+    assert caught.value.attempts == ()
+
+
+@pytest.mark.asyncio
+async def test_a_multi_source_edit_walk_forwards_the_list_to_the_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, radient=True)
+    forwarded: list[list[str] | None] = []
+
+    async def fake(route, **kwargs):
+        forwarded.append(kwargs["sources"])
+        return _result()
+
+    monkeypatch.setattr(cascade, "_run_route", fake)
+    sources = ["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]
+    outcome = await cascade.run_image_cascade(prompt="x", config_dir=tmp_path, sources=sources)
+
+    assert forwarded == [sources], "the same list reaches the rung seam"
+    assert outcome.route == ImageRoute.RADIENT
 
 
 @pytest.mark.asyncio
@@ -687,7 +749,7 @@ async def test_an_edit_end_to_end_reaches_a_real_rungs_wire(
         outcome = await cascade.run_image_cascade(
             prompt="make it night",
             config_dir=tmp_path,
-            source_url="data:image/png;base64,AAAA",
+            sources=["data:image/png;base64,AAAA"],
             client=client,
         )
 
@@ -757,7 +819,7 @@ async def test_an_un_pinned_edit_end_to_end_reaches_the_real_radient_wire(
         outcome = await cascade.run_image_cascade(
             prompt="make it night",
             config_dir=tmp_path,
-            source_url="data:image/png;base64,AAAA",
+            sources=["data:image/png;base64,AAAA"],
             client=client,
         )
 

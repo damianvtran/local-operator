@@ -113,7 +113,10 @@ from tests.unit.session.runtime.test_server import FakeHandle
 #: A populated ``spend_channels`` the size a busy session produces: one row per
 #: serving identity plus one per metered channel, with the LAST row deliberately
 #: left unstated so the grouping's knowledge rule is exercised by the same
-#: fixture the cap test uses.
+#: fixture the cap test uses. The additive ``breakdown``/``vocabulary`` sections
+#: (design §4/§5) ride it too, derived from the same rows a producer would have
+#: folded into them — the frame arms must measure the whole object, not a
+#: v1-shaped subset the next producer change would silently outgrow.
 def _busy_spend_channels(row_count: int = 40) -> FrontendSpendChannels:
     rows = [
         {
@@ -130,31 +133,81 @@ def _busy_spend_channels(row_count: int = 40) -> FrontendSpendChannels:
         }
         for index in range(row_count)
     ]
+    channel_micro = {
+        channel: sum(
+            row["amount_micro"]
+            for row in rows
+            if row["channel"] == channel and row["amount_micro"] is not None
+        )
+        for channel in ("inference", "search")
+    }
+    total_micro = sum(channel_micro.values())
     return FrontendSpendChannels.model_validate(
         {
             "version": 1,
             "tracked": True,
-            "total_micro": sum(
-                row["amount_micro"] for row in rows if row["amount_micro"] is not None
-            ),
+            "total_micro": total_micro,
             "knowledge": "partial",
             "by_basis": {
                 "billed": 0,
                 "subscription_api_equivalent": 0,
-                "estimated": sum(
-                    row["amount_micro"]
-                    for row in rows
-                    if row["basis"] == ["estimated"] and row["amount_micro"] is not None
-                ),
-                "not_tracked_micro": sum(
-                    row["amount_micro"]
-                    for row in rows
-                    if row["basis"] == ["not_tracked"] and row["amount_micro"] is not None
-                ),
+                "estimated": channel_micro["search"],
+                "not_tracked_micro": channel_micro["inference"],
                 "not_tracked_calls": 1,
             },
             "rows": rows,
             "children": {"total_micro": 0, "knowledge": "exact"},
+            # The breakdown reconciles to the same ``total_micro`` the rows
+            # state (no children: no subagents entry), and the vocabulary
+            # covers exactly the ids and bases the object carries.
+            "breakdown": {
+                "by_agent": [
+                    {
+                        "id": "parent",
+                        "label": "Parent agent",
+                        "amount_micro": total_micro,
+                        "knowledge": "partial",
+                        "unstated_records": 1,
+                        "bases": ["estimated", "not_tracked"],
+                    }
+                ],
+                "by_source": [
+                    {
+                        "id": "inference",
+                        "label": "Inference",
+                        "amount_micro": channel_micro["inference"],
+                        "knowledge": "exact",
+                        "unstated_records": 0,
+                        "bases": ["not_tracked"],
+                    },
+                    {
+                        "id": "search",
+                        "label": "Search",
+                        "amount_micro": channel_micro["search"],
+                        "knowledge": "partial",
+                        "unstated_records": 1,
+                        "bases": ["estimated"],
+                    },
+                ],
+            },
+            "vocabulary": {
+                "channels": {
+                    "inference": {"label": "Inference"},
+                    "search": {"label": "Search"},
+                },
+                "bases": {
+                    "estimated": {
+                        "label": "estimated",
+                        "source_class": "paygo",
+                        "marker": "estimated",
+                    },
+                    "not_tracked": {
+                        "label": "not tracked",
+                        "source_class": "unknown",
+                        "marker": "not tracked",
+                    },
+                },
+            },
         }
     )
 
@@ -1414,7 +1467,13 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
     # republishes it from the store (see
     # ``_yield_spend_channels_when_the_frame_has_no_room``). Without the yield
     # the object's rows ride a frame that cannot be sent at all, which is the
-    # failure this arm exists to catch.
+    # failure this arm exists to catch. The fixture carries the ADDITIVE
+    # ``breakdown``/``vocabulary`` sections too (see ``_busy_spend_channels``),
+    # so the yield is exercised against the whole object, not a v1-shaped
+    # subset the next producer change could outgrow while this guard stayed
+    # green; the post-yield residual is unchanged BY CONSTRUCTION — the key is
+    # popped whole before it is measured — and the arm's bound is what proves
+    # that it did not move.
     channels_store = FrontendStateStore(
         state.model_copy(update={"spend_channels": _busy_spend_channels()})
     )
@@ -6661,6 +6720,12 @@ def test_spend_channel_rows_are_capped_and_the_remainder_is_grouped() -> None:
     assert aggregate["amount_micro"] == sum(
         int(row.amount_micro) for row in dropped if row.amount_micro is not None
     ), "the grouped row must keep the dropped rows' stated money"
+    # With the additive sections the frame measures 5,793 B — the object is
+    # 4,314 B of nothing else, and the sections are 754 B of IT (breakdown 452
+    # + vocabulary 271), so the growth this bound must absorb stays O(1) at the
+    # row cap rather than tracking the session. That is ~180x under the
+    # 1,048,576-byte line: what keeps this frame sendable is the ROW CAP this
+    # test is about, not leftover slack. MEASURED on this head.
     assert _line_bytes(frame) < _MAX_LINE_BYTES
 
 

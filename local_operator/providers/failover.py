@@ -826,8 +826,10 @@ class ProviderError(RenderedStreamError):
         retry_after_ms: int | None = None,
         auth_error: bool = False,
         kind: ProviderErrorKind | None = None,
+        request_sent: bool = True,
         transport: bool = False,
         transport_cause: BaseException | None = None,
+        fail_closed: bool = False,
     ) -> None:
         provider_text = message.strip() if isinstance(message, str) else str(message)
         #: Classified BEFORE the floor text is substituted, so the classifier only
@@ -842,8 +844,15 @@ class ProviderError(RenderedStreamError):
         text = provider_text or _describe_bare_status(status)
         super().__init__(text)
         self.status = status
+        # Only pre-dispatch constructors may state False; absent usage elsewhere
+        # is unknown spend, never proof that the request was free.
+        self.request_sent = request_sent
         self.message = text
         self.retryable = retryable
+        # Non-retryable normally still permits another fallback target. Local
+        # resource refusals must stop the entire attempt chain, even before any
+        # delta was forwarded (or when a host buffers the whole response).
+        self.fail_closed = fail_closed
         self.retry_after_ms = retry_after_ms
         self.auth_error = auth_error
         #: PROVENANCE, not classification: this error was built from a transport
@@ -4395,6 +4404,12 @@ async def stream_with_failover(
             except asyncio.CancelledError:
                 raise
             except ProviderError as exc:
+                if exc.fail_closed:
+                    # A local generated-output envelope is not bad credentials
+                    # or provider weather: replaying it on another account/route
+                    # repeats the resource failure and hides the original cause.
+                    record(exc, primary=is_primary)
+                    raise
                 if forwarded_any:
                     # Partial output already reached the caller, so this attempt
                     # cannot be retried HERE — replaying it would stream deltas
@@ -5490,6 +5505,7 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
         ),
         retryable=True,
         kind="quota",
+        request_sent=False,
     )
 
 

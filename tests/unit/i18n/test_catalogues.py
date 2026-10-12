@@ -17,7 +17,6 @@ from local_operator.i18n import catalogues
 #: below stays the part that must never change.
 _PENDING_EXTRACTION = (
     "wire.errors",
-    "wire.exec",
     "wire.incidents",
     "wire.notices",
 )
@@ -27,13 +26,22 @@ def test_shipped_wire_namespaces_exist() -> None:
     # M0 shipped the six `wire.*` namespace files as STUBS (RFC §5): the files
     # exist so later slices populate them. `wire.slash` was populated by the S2
     # extraction slice, `wire.settings` by S1, and `wire.errors.settings` (a
-    # CHILD of `wire.errors`, RFC §2.2) by the E1 slice; the rest stay empty
+    # CHILD of `wire.errors`, RFC §2.2) by the E1 slice; E2 added
+    # `wire.errors.desktop` (also a child of `wire.errors`) the same way,
+    # `wire.exec` by E2b, `wire.errors.agents` by E2c, and `wire.errors.media`
+    # by E2d; the files slice adds populated `wire.errors.files`. The rest stay empty
     # until their own slices land. The TUI wave writes `tui.*` files instead —
     # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
     # in its own slice test, so this list does not churn per TUI slice.
-    assert catalogues.locales() == ("en",)
+    # Waves 1-2: es/fr then ru/vi trees ship with their waves.
+    assert catalogues.locales() == ("en", "es", "fr", "ru", "vi")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
+        "wire.errors.agents",
+        "wire.errors.auth",
+        "wire.errors.desktop",
+        "wire.errors.files",
+        "wire.errors.media",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
@@ -43,11 +51,52 @@ def test_shipped_wire_namespaces_exist() -> None:
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
+    assert catalogues.load_catalogue("en", "wire.errors.agents") != {}
     assert catalogues.load_catalogue("en", "wire.errors.settings") != {}
+    assert catalogues.load_catalogue("en", "wire.errors.media") != {}
+    assert catalogues.load_catalogue("en", "wire.errors.files") != {}
+    assert catalogues.load_catalogue("en", "wire.exec") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     assert "tui.welcome" in catalogues.namespaces("en")
     assert catalogues.load_catalogue("en", "tui.welcome") != {}
+
+
+@pytest.mark.parametrize("mutation", ["unexpected-namespace", "missing-declared", "empty-declared"])
+def test_exact_wire_namespace_contract_rejects_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    # Exercise the real exact-set/population assertion against synthetic roots,
+    # so an extraction cannot silently weaken it to a subset or an empty stub.
+    locales = catalogues.locales()
+    namespaces = catalogues.namespaces("en")
+    for variant in ("pristine", "mutated"):
+        root = tmp_path / variant
+        for locale in locales:
+            directory = root / locale
+            directory.mkdir(parents=True)
+            if locale != "en":
+                (directory / "fixture.json").write_text("{}", encoding="utf-8")
+                continue
+            for namespace in namespaces:
+                if variant == "mutated" and mutation == "missing-declared":
+                    if namespace == "wire.errors.files":
+                        continue
+                empty = namespace in _PENDING_EXTRACTION or (
+                    variant == "mutated"
+                    and mutation == "empty-declared"
+                    and namespace == "wire.errors.files"
+                )
+                body = {} if empty else {"fixture": "populated"}
+                (directory / f"{namespace}.json").write_text(json.dumps(body), encoding="utf-8")
+            if variant == "mutated" and mutation == "unexpected-namespace":
+                (directory / "wire.errors.unexpected.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+        if variant == "pristine":
+            test_shipped_wire_namespaces_exist()
+        else:
+            with pytest.raises(AssertionError):
+                test_shipped_wire_namespaces_exist()
 
 
 def test_hash_is_over_file_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

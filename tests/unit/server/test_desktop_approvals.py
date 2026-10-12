@@ -170,8 +170,8 @@ async def test_approve_without_a_signing_surface_is_409_with_the_setup_sentence(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "approval_signing_unavailable"
-    assert "ask Local Operator to set up operator authority" in detail["message"]
-    assert "`" not in detail["message"], "no terminal command may be named (§2.9)"
+    assert "ask Local Operator to set up operator authority" in detail["text"]
+    assert "`" not in detail["text"], "no terminal command may be named (§2.9)"
     assert A.load_record(record["approval_id"])["state"] == "requested"
 
 

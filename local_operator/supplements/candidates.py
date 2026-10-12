@@ -129,7 +129,7 @@ _EVAL_WRITES: Final = re.compile(
 #: Tier-3 prose path: ``/abs/x.pdf`` or ``~/x.csv``. No spaces, so a sentence cannot swallow
 #: its neighbour; ``(?<![\w:/.])`` rejects URLs and mid-token matches.
 _PROSE_PATH: Final = re.compile(
-    r"(?<![\w:/.\-])(?P<path>(?:~|/)[\w.\-+@%/~]*\.[A-Za-z0-9]{1,8})(?![\w/])"
+    r"(?<![\w:/.\-])(?P<path>(?:(?:~|/|\./)?[\w.\-+@%]+/)*[\w.\-+@%]+\.[A-Za-z0-9]{1,8})(?![\w/])"
 )
 _CODE_SPAN: Final = re.compile(r"`+([^`\n]+)`+")
 _MD_LINK: Final = re.compile(r"\[(?P<text>[^\]\n]*)\]\((?P<target>[^)\s]+)(?:\s+\"[^\"]*\")?\)")
@@ -160,6 +160,8 @@ class Candidate:
     @property
     def why(self) -> str:
         """The row's ``why`` string (memo §2.4 example ``written by write``)."""
+        if self.tool == "edit":
+            return "updated by edit"
         if self.tier == TIER_PROSE:
             return "named in the answer"
         return f"written by {self.tool}"
@@ -176,6 +178,8 @@ class Prefilter:
     #: Why each rejected path was rejected (reason -> count), for the absorption line and for
     #: tests that prove each guard fires. Paths themselves are not kept (privacy).
     rejected: dict[str, int] = field(default_factory=dict)
+    #: Content is private local promotion input, never part of decision options.
+    prepared: tuple[tuple[Candidate, str], ...] = ()
 
 
 def kind_of(name: str) -> str:
@@ -246,10 +250,13 @@ def _harvest(
 def _from_call(
     call: ToolCallItem, intent: str, order: int
 ) -> Iterable[tuple[str, int, str, str, int]]:
-    if call.name == "write":
+    if call.name == "write" or (
+        call.name == "edit"
+        and kind_of(call.args.get("path", "")) in {"markdown", "text", "html", "document", "pdf"}
+    ):
         path = call.args.get("path", "")
         if path:
-            yield (path, TIER_WRITE, "write", intent, order)
+            yield (path, TIER_WRITE, call.name, intent, order)
     elif call.name == "bash":
         for path in _bash_outputs(call.args.get("command", "")):
             yield (path, TIER_COMMAND, "bash", intent, order)
@@ -392,8 +399,33 @@ def prefilter(
         rejected[reason] = rejected.get(reason, 0) + 1
 
     candidates: dict[str, Candidate] = {}
-    if want_files:
+    prepared_content: dict[str, tuple[str, str]] = {}
+    failed_calls = {item.tool_call_id for item in items if item.role == "tool" and item.is_error}
+    if want_graphics:
+        for item in items:
+            for call in item.tool_calls:
+                if call.id in failed_calls:
+                    continue
+                if call.name in {"bash", "eval"}:
+                    prepared_content.clear()
+                if call.name in {"write", "edit"}:
+                    raw = os.path.expanduser(call.args.get("path", ""))
+                    absolute = os.path.normpath(
+                        raw if os.path.isabs(raw) else os.path.join(cwd, raw)
+                    )
+                    identity = os.path.realpath(absolute)
+                    prepared_content.pop(identity, None)
+                    if call.prepared_html and call.name == "write" and len(prepared_content) < 3:
+                        prepared_content[identity] = (absolute, call.prepared_html)
+    prepared: list[tuple[Candidate, str]] = []
+    if want_files or prepared_content:
         mentions = _harvest(items)
+        # Links participate in admission too, but remain deduped below when already
+        # visible. Metadata discovery must never turn read source files into products.
+        for match in _MD_LINK.finditer(answer_text):
+            target = match.group("target")
+            if kind_of(target) in _DELIVERABLE_KINDS and ":" not in target:
+                mentions.append((target, TIER_PROSE, "answer", "", 10_000))
         for match in _PROSE_PATH.finditer(answer_text):
             if kind_of(match.group("path")) in _DELIVERABLE_KINDS:
                 mentions.append((match.group("path"), TIER_PROSE, "answer", "", 10_000))
@@ -431,7 +463,10 @@ def prefilter(
                 reject("sensitive")
                 continue
             display = _display_path(absolute, cwd, home)
-            if not _spellings(raw.strip(), absolute, display, home).isdisjoint(visible):
+            captured = prepared_content.get(os.path.realpath(absolute))
+            if (captured is None or captured[0] != absolute) and not _spellings(
+                raw.strip(), absolute, display, home
+            ).isdisjoint(visible):
                 reject("already-visible")
                 continue
             held = candidates.get(absolute)
@@ -449,12 +484,23 @@ def prefilter(
                 order=order,
                 intent=intent,
             )
-    ordered = tuple(sorted(candidates.values(), key=lambda c: (c.tier, -c.order, c.path)))
+    prepared = [
+        (candidate, captured[1])
+        for candidate in candidates.values()
+        if (captured := prepared_content.get(os.path.realpath(candidate.absolute))) is not None
+        and captured[0] == candidate.absolute
+    ][:3]
+    ordered = (
+        tuple(sorted(candidates.values(), key=lambda c: (c.tier, -c.order, c.path)))
+        if want_files
+        else ()
+    )
     evidence = extract(items, answer_text) if want_graphics else Evidence(structured=False)
     return Prefilter(
         candidates=ordered,
         evidence=evidence,
-        skipped=None if (ordered or evidence.structured) else "prefilter",
+        skipped=None if (ordered or evidence.structured or prepared) else "prefilter",
         elapsed_ms=(time.perf_counter() - started) * 1000.0,
         rejected=rejected,
+        prepared=tuple(prepared),
     )

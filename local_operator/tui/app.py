@@ -14329,6 +14329,16 @@ class OperatorApp(App[None]):
         more = bool(self._resume_pending_head) or bool(
             session is not None and getattr(session, "history_before_token", None)
         )
+        # The quiet-group fold's head verdict for a span beginning right below
+        # this notice (design §5, S5): it follows the same ``more`` truth the
+        # copy is reconciled against, so a fold cannot claim "at least N" over
+        # a head this row itself calls the conversation's start.
+        # The declared type is the wider `NoticeBlock` (a reduced presentation
+        # can seat a plain notice here), but the flip only exists on the real
+        # control — the same concrete-type test, for the same reason, as the
+        # interactivity correction below.
+        if isinstance(notice, OlderHistoryNotice):
+            notice.set_quiet_group_head_cut(more)
         # Which VOCABULARY the two "more exists" states use. Once the context
         # replay is drained, what remains above is pre-compaction history — a
         # different kind of row, not merely an older one — so the copy says
@@ -14634,6 +14644,24 @@ class OperatorApp(App[None]):
                     # when the turn dies instead of returning a result.
                     live_cards[block.tool_call_id] = block
 
+    def _quiet_head_cut_for(self, history: list[Any], bound: int | None, start: int | None) -> bool:
+        """Whether this projection pass cuts older rows off the view's top.
+
+        Mirrors the slice ``project_settled_rows`` is about to take — an
+        explicit ``start`` defers ``history[:start]``; a ``bound`` defers
+        whatever the tail snap leaves above it — and feeds the quiet-group
+        fold (design §5, S5), whose rows stream through the view as the pass
+        appends: a group forming at the view's first row states a minimum
+        ("at least N") when older rows exist but are not on hand, and an
+        exact count when the window truly starts at the conversation's first
+        row.
+        """
+        if start is not None:
+            return start > 0
+        if bound is not None and len(history) > bound:
+            return _resume_tail_start(history, bound) > 0
+        return bool(self._resume_pending_head)
+
     def _project_settled_rows(
         self, history: list[Any], *, bound: int | None = None, start: int | None = None
     ) -> bool:
@@ -14716,6 +14744,15 @@ class OperatorApp(App[None]):
             # `_stop_multiplexer_broadcast` instead. A line number in a comment
             # survives only until the next edit above it.
             fold_width = self._transcript_view().scrollable_content_region.width
+            # The quiet-group fold streams with this pass's appends (design
+            # §5, S5), so the window's head verdict has to be in place BEFORE
+            # the first row lands — a group forming at the view's first row
+            # must state a minimum when this pass cuts older rows off the top.
+            # `_quiet_head_cut_for` mirrors the slice below, so the verdict
+            # this sets is the window's post-pass state as well.
+            self._transcript_view().set_quiet_head_cut(
+                self._quiet_head_cut_for(history, bound, start)
+            )
             projected = project_settled_rows(
                 self, history, bound=bound, start=start, fold_width=fold_width
             )
@@ -15617,6 +15654,16 @@ class OperatorApp(App[None]):
             # stays the top row and the conversation keeps its order.
             mounted = transcript.blocks()
             index = 1 if mounted and notice is not None and mounted[0] is notice else 0
+            # THE QUIET-GROUP FOLD, before the mount (design §5, S5): a page
+            # is built off-screen and inserted positionally, so its groups
+            # fold into the list here — and the head verdict is the window's
+            # own remaining state, so a leading span below the head notice
+            # (or at the view's old top) states a minimum while older pages
+            # remain. `fold_quiet_group_page` only rewrites this list; the
+            # insert below still owns the mount, the anchor and the lease.
+            blocks = transcript.fold_quiet_group_page(
+                blocks, index, head_cut=bool(self._resume_pending_head)
+            )
             # Flag BEFORE the insert's settle: a click arriving while gaps
             # are still answering must see a working transaction, not a
             # wedge. Mutated on this object so identity (F1) is unchanged.
@@ -17011,6 +17058,18 @@ class OperatorApp(App[None]):
         # Failure is a notice, never a rollback: the wheel is already in.
         mobile = refresh_mobile_after_upgrade()
 
+        # The standing instruction (S3b): this update rolls the mesh — the same
+        # record the CLI hook opens, on this front end's ``via`` token. The
+        # helper never raises and never touches the install's success (a
+        # failure is one sentence), and the summary is shown as a notice the
+        # way the services lines above are; the write happens here, in the
+        # worker, not in the closure that renders on the app thread.
+        from local_operator.network import rollouts
+
+        trigger = rollouts.open_after_update(
+            before=str(result.installed or ""), after=str(installed or ""), via="tui"
+        )
+
         # ``restarting…`` only once exit 75 is actually happening — a
         # typed-ahead loop used to make ``_request_relaunch`` refuse after
         # this line had already painted. Wrapped so ``call_from_thread``
@@ -17042,6 +17101,12 @@ class OperatorApp(App[None]):
                     "the foreground lop mobile serve process to pick up the new UI",
                     "warning",
                 )
+            # The mesh roll's summary, and the one sentence a hook failure
+            # prints (never a rollback — the install is already in).
+            for line in trigger.lines:
+                self._system_notice(line)
+            if trigger.failure:
+                self._system_notice(trigger.failure, "warning")
             if self._relaunch_refusal():
                 self._system_notice(f"updated to v{installed}; relaunch when local work is idle")
             else:
@@ -42023,7 +42088,7 @@ class OperatorApp(App[None]):
             # (`_language_choices`), and the /settings row has the same list.
             self._system_notice(
                 f"language: {resolved} ({language_name(resolved)}) — "
-                f"/language <{'|'.join(options)}> switches; space lists"
+                f"/language <{'|'.join(options)}>; space"
             )
             return
         key = (
@@ -52179,9 +52244,13 @@ class OperatorApp(App[None]):
             )
         attach = getattr(session, "attach_team", None)
         if not callable(attach):
+            # The contract sentence the TUI-local handler prints (M12
+            # follow-up, #2072): say what this session can still do, not just
+            # what it cannot — the follower and routed seams must agree here.
             return SlashResult(
                 kind="notice",
-                text="this session cannot run a team. /team chart <name> shows a roster",
+                text="this session can list and chart teams, but not run one. "
+                "/team chart <name> shows a roster",
                 style="warning",
             )
         # Read BEFORE the attach: it is the team a TEAM SWITCH displaces, and
@@ -54952,16 +55021,29 @@ class OperatorApp(App[None]):
         """
         self._streaming_block = None
 
-    def _ensure_streaming_block(self) -> AssistantBlock:
-        """The block for the message being streamed, mounted on first use."""
+    def _ensure_streaming_block(self, text: str) -> AssistantBlock:
+        """The block for the message being streamed, with ``text`` applied.
+
+        ``text`` is the accumulated message text, and on the MOUNT it is
+        applied BEFORE the block is appended. The quiet-group fold reads every
+        mounted append as it lands (``note_quiet_append``) and freezes that
+        reading, so a block appended before its first text would be read as an
+        assistant row with no visible prose — interior to a group — and a
+        later receipt could then fold the bar over a real, streaming answer.
+        Mounting with the text applied is the order the replay path already
+        uses (``session_presentation`` commits the text before appending).
+        """
         block = self._streaming_block
         if block is None:
             block = AssistantBlock()
+            block.update_text(text)
             self._streaming_block = block
             self._append_block(block)
             # Only on the MOUNT, not on every delta: the deltas arrive at 30 Hz
             # and would all re-derive the same phrase.
             self._refresh_working_activity()
+            return block
+        block.update_text(text)
         return block
 
     def _ensure_reasoning_block(self) -> ReasoningBlock:
@@ -55048,7 +55130,7 @@ class OperatorApp(App[None]):
         # thinking-then-answer in the transcript even when both updates land in
         # the same frame.
         self._retire_reasoning_block()
-        self._ensure_streaming_block().update_text(message.text)
+        self._ensure_streaming_block(message.text)
 
     def on_assistant_message_end(self, message: AssistantMessageEnd) -> None:
         # A tool-only call ends its message with no prose at all, so this is the
@@ -55091,7 +55173,10 @@ class OperatorApp(App[None]):
                 block.finalize_text()
             self._refresh_working_activity()
             return
-        block = self._ensure_streaming_block()
+        # TUI-020: adopt the authoritative text carried by the event — applied
+        # by the ensure call, which folds it into the MOUNT as well (the order
+        # the quiet-group fold's reading of the row requires).
+        block = self._ensure_streaming_block(message.text)
         # ONE classification for this event, made BEFORE anything renders and
         # read by both consumers below: the rail mark, and `display.narration`'s
         # removal further down. Two separate reads of the same two fields is how
@@ -55102,8 +55187,6 @@ class OperatorApp(App[None]):
             stop_reason=message.stop_reason,
             has_tool_calls=message.has_tool_calls,
         )
-        # TUI-020: adopt the authoritative text carried by the event.
-        block.update_text(message.text)
         block.completion_anchor_id = message.message_id
         block.navigation_anchor_id = message.message_id
         # MARKED before `finalize_text()`, which is what commits the rows AND

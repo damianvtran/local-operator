@@ -253,7 +253,12 @@ MEASURED_TOKENS: dict[str, int] = {
     #: edit + its drift caveat) is documented. Doc-only: the wire description
     #: and schema are untouched, so ``bench_context_budget.py``'s arms are
     #: unmoved by this change.
-    "generate_image": 838,
+    # 838 -> 918 (2026-10-11, multi-source edit lane): the source clause now
+    # names the plural fields and the 16-source ceiling.
+    # 918 -> 935 (2026-10-11, round-1 remediation F2): the cost sentence no
+    # longer lumps OpenAI with the never-reporting rungs — an OpenAI edit
+    # shows an estimated figure when the response carries usage.
+    "generate_image": 935,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -275,7 +280,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # 673 -> 677 (round 1 remediation, D2/D4): the verb became mechanism-neutral
     # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
     # paused child is halted-and-resumable, not stopped. Re-measured.
-    "hub": 650,
+    "hub": 725,
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.
@@ -303,7 +308,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # wire (the description keeps one sentence); re-measured via this test's
     # own print, and it is the ONLY count this change moved.
     "setting": 191,
-    "task": 484,
+    "task": 620,
     "team": 489,
     "team_delete": 90,
     "todo": 540,
@@ -330,7 +335,7 @@ MEASURED_TOKENS: dict[str, int] = {
 #: intent-description cut as the canonical table above.
 #: 639 -> 635 (and `task` 488 -> 484 above): the sentence the depth gate added to
 #: the model_choice note is gone again (revert of the nested tier-choice gate).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 815, "task": 635}
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 815, "task": 768}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
