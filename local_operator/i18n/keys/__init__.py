@@ -8,6 +8,7 @@ shape RFC §2.4 proved: a mistyped key or kwarg fails pyright.
 from __future__ import annotations
 
 from . import (
+    tui_analytics,
     tui_status,
     tui_transcript,
     tui_welcome,
@@ -21,6 +22,7 @@ from . import (
 )
 
 __all__ = [
+    "tui_analytics",
     "tui_status",
     "tui_transcript",
     "tui_welcome",
