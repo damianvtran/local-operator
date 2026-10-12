@@ -62,6 +62,12 @@ export function createMessageRuntime(readContext: () => LocaleSnapshot, changed:
 	function registerWire(namespace: string, locale: string, messages: Record<string, string>): boolean {
 		return namespace.startsWith("wire.") && register(wires, namespace, locale, messages);
 	}
+	function unregisterWire(namespace: string, locale: string): void {
+		const locales = wires.get(namespace);
+		if (!locales?.delete(locale)) return;
+		if (locales.size === 0) wires.delete(namespace);
+		changed();
+	}
 	function uiLocaleFor(backendLocale: string | null): string {
 		// No own catalogues in B: English/LTR even if backend preference is fr.
 		// A later namespace extraction may register audited bundles. Require the
@@ -114,5 +120,5 @@ export function createMessageRuntime(readContext: () => LocaleSnapshot, changed:
 		const rendered = render(code, params);
 		return rendered ? { ...rendered, direction: directionFor(rendered.locale) } : { text, locale: null, direction: null };
 	}
-	return { t, renderEnvelope, registerBundle, registerWire, uiLocaleFor };
+	return { t, renderEnvelope, registerBundle, registerWire, unregisterWire, uiLocaleFor };
 }

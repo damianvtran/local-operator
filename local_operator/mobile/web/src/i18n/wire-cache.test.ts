@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createWireLoader } from "./wire-cache";
+import { createMessageRuntime } from "./runtime";
 import type { Capabilities } from "../types";
 const hash = "a".repeat(64);
 const etag = `"${hash}"`;
@@ -13,6 +14,46 @@ function rig(fetcher = vi.fn<typeof fetch>()) {
 }
 
 describe("explicit wire loader", () => {
+	for (const status of [200, 304]) for (const withdrawn of [null, { features: { i18n: 0 }, i18n: { catalogues: 1 } }, { features: { i18n: 1 }, i18n: { catalogues: 0 } }]) {
+		it(`withdrawal ${JSON.stringify(withdrawn)} refuses delayed ${status} and reenables cold`, async () => {
+			const r = rig();
+			if (status === 304) { r.fetcher.mockResolvedValueOnce(success()); expect(await r.loader.request("wire.exec")).toBe(true); }
+			const previous = r.activate.mock.calls.length;
+			let finish!: (response: Response) => void;
+			r.fetcher.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+			const promise = r.loader.request("wire.exec");
+			r.caps(withdrawn);
+			finish(status === 200 ? success() : new Response(null, { status: 304, headers: { ETag: etag } }));
+			expect(await promise).toBe(false);
+			expect(r.loader.size()).toBe(0); expect(r.activate).toHaveBeenCalledTimes(previous);
+			r.caps({ features: { i18n: 1 }, i18n: { catalogues: 1 } }); r.fetcher.mockResolvedValueOnce(success());
+			expect(await r.loader.request("wire.exec")).toBe(true);
+			expect(r.fetcher.mock.calls.at(-1)?.[1]?.headers).toEqual({});
+		});
+	}
+	it("withdrawal removes active served copy and aborts even if reenabled before response", async () => {
+		let caps: Capabilities | null = { features: { i18n: 1 }, i18n: { catalogues: 1 } };
+		const context = { backendLocale: "fr", uiLocale: "en", direction: "ltr" as const, revision: 0 };
+		const runtime = createMessageRuntime(() => context, () => { context.revision++; });
+		const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(success());
+		const loader = createWireLoader({ context: () => ({ origin: "https://relay.test", locale: context.backendLocale }), capabilities: () => caps, fetch: fetcher,
+			activate: (namespace, locale, messages) => { runtime.registerWire(namespace, locale, messages); },
+			deactivate: (namespace, locale) => { runtime.unregisterWire(namespace, locale); },
+		});
+		expect(await loader.request("wire.exec")).toBe(true);
+		expect(runtime.renderEnvelope("wire.exec.fixture", {}, "Exact fallback").locale).toBe("fr");
+		let finish!: (response: Response) => void;
+		fetcher.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+		const delayed = loader.request("wire.exec");
+		caps = null; expect(loader.invalidateCapabilities()).toBe(false);
+		expect(loader.size()).toBe(0);
+		expect(runtime.renderEnvelope("wire.exec.fixture", {}, "Exact fallback")).toEqual({ text: "Exact fallback", locale: null, direction: null });
+		caps = { features: { i18n: 1 }, i18n: { catalogues: 1 } };
+		finish(success()); expect(await delayed).toBe(false);
+		expect(runtime.renderEnvelope("wire.exec.fixture", {}, "Exact fallback").locale).toBe(null);
+		fetcher.mockResolvedValueOnce(success()); expect(await loader.request("wire.exec")).toBe(true);
+		expect(fetcher.mock.calls.at(-1)?.[1]?.headers).toEqual({});
+	});
 	it("never fetches without both capabilities, valid backend locale and an explicitly requested wire namespace", async () => {
 		const r = rig();
 		for (const caps of [null, { features: { i18n: 1 } }, { i18n: { catalogues: 1 } }]) {
