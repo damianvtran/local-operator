@@ -951,6 +951,65 @@ def _public_responses_sse() -> bytes:
     )
 
 
+@pytest.mark.parametrize("codex", [False, True])
+async def test_responses_preserves_optional_tool_arguments_on_wire(codex: bool) -> None:
+    """Responses must not promote optional operation fields to required ones."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200, content=_responses_sse(), headers={"content-type": "text/event-stream"}
+        )
+
+    async def unused_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
+        raise AssertionError("serialization must not execute a peer action")
+
+    # Requiring every property makes message delivery choose the model-switch
+    # arm too: omitted model and empty model are intentionally not equivalent.
+    schema = {
+        "type": "object",
+        "properties": {"message": {"type": "string"}, "model": {"type": "string"}},
+        "required": ["message"],
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        await _collect(
+            client.stream(
+                ChatRequest(
+                    model=ModelSpec(
+                        provider="openai", model_id="gpt-5", supports_responses_api=True
+                    ),
+                    messages=[Message.user("send a message")],
+                    tools=[
+                        AgentTool(
+                            name="send",
+                            description="Send or switch",
+                            parameters=schema,
+                            execute=unused_execute,
+                        )
+                    ],
+                ),
+                "test-token",
+                oauth_access=(
+                    OAuthAccess("test-token", credential_id=1, org_id="test-account", kind="oauth")
+                    if codex
+                    else None
+                ),
+            )
+        )
+    definition = captured["body"]["tools"][0]
+    assert definition.get("strict") is False
+    assert definition["parameters"] == schema
+    assert schema["required"] == ["message"]
+    assert captured["url"] == (
+        "https://chatgpt.com/backend-api/codex/responses"
+        if codex
+        else "https://api.openai.com/v1/responses"
+    )
+
+
 async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
     captured: dict[str, Any] = {}
 
@@ -1021,6 +1080,7 @@ async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
             "type": "function",
             "name": "get_weather",
             "description": "Get weather",
+            "strict": False,
             "parameters": {
                 "type": "object",
                 "properties": {"city": {"type": "string"}},
