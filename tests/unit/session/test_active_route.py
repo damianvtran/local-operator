@@ -207,6 +207,52 @@ async def test_explicit_auto_persists_intent_but_displays_resolved_target_defaul
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider, model_id, primary_effort, hop_effort, effective_effort, retained",
+    [
+        ("radient", "auto", "high", "auto", "auto", True),
+        ("radient", "auto", "high", "low", "low", True),
+        ("radient", "auto", "high", "high", "high", False),
+        ("radient", "auto", "high", None, "high", False),
+        ("radient", "auto", "auto", "auto", "auto", False),
+        ("deepseek", "deepseek-flash", "max", "high", "high", True),
+        ("deepseek", "deepseek-flash", "high", "auto", "high", True),
+    ],
+)
+async def test_resume_same_selector_distinguishes_route_effort_intent(
+    tmp_path, provider, model_id, primary_effort, hop_effort, effective_effort, retained
+):
+    """A reset/different depth is a route even when the model is unchanged.
+
+    Compare intent, not only the resolved dial: a target whose default is high
+    can still explicitly reset a high primary. Only absent/identical effort
+    represents an adopted/no-op pin, as in expand_fallback_targets.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    primary = build_model_spec(provider, model_id).model_copy(
+        update={"reasoning_effort": primary_effort}
+    )
+    selector = f"{provider}/{model_id}"
+    stream = RoutedStream()
+    session = _session(tmp_path, stream, model=primary)
+    await stream.route_handler(FallbackTarget(selector, hop_effort), "synthetic quota")
+    assert _route_entries(session)[-1]["active"] == {"selector": selector, "effort": hop_effort}
+    assert session.effective_model.reasoning_effort == effective_effort
+
+    resumed_stream = RoutedStream()
+    resumed = _session(tmp_path, resumed_stream, model=primary)
+    assert resumed.model.reasoning_effort == primary_effort
+    assert resumed.effective_model.reasoning_effort == effective_effort
+    if retained:
+        assert resumed._active_route == (selector, hop_effort)
+        assert resumed_stream.restored == [(selector, hop_effort, selector)]
+    else:
+        assert resumed._active_route is None
+        assert resumed_stream.restored == []
+
+
+@pytest.mark.asyncio
 async def test_resume_after_recovery_restores_nothing(tmp_path):
     first = RoutedStream()
     _session(tmp_path, first)  # binds the route handler; entries land in tmp_path/sess
