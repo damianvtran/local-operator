@@ -794,6 +794,69 @@ def _split_inner(inner: str) -> tuple[str, dict[str, Any]]:
     return body, data
 
 
+def _without_timer_delays(script: str) -> str:
+    """Blank only a literal second argument; callback/source claims remain inspectable.
+
+    This is deliberately not a JavaScript parser. Ambiguous regex literals or
+    unbalanced syntax receive no exemption; refusing a delay is safer than
+    accidentally erasing a callback. Limit nested walks to keep the work bounded.
+    """
+    spans: list[tuple[int, int]] = []
+    for match in list(re.finditer(r"\b(?:setTimeout|setInterval)\s*\(", script))[:128]:
+        stack = ["("]
+        commas: list[int] = []
+        quote = ""
+        index = match.end()
+        close: int | None = None
+        while index < len(script):
+            char = script[index]
+            if quote:
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == quote:
+                    quote = ""
+            elif char in {"'", '"', "`"}:
+                quote = char
+            elif script.startswith("//", index):
+                newline = script.find("\n", index + 2)
+                if newline < 0:
+                    break
+                index = newline
+            elif script.startswith("/*", index):
+                end = script.find("*/", index + 2)
+                if end < 0:
+                    break
+                index = end + 2
+                continue
+            elif char == "/":
+                break  # Can't prove division vs regex without a full JS parser.
+            elif char in "([{":
+                stack.append(char)
+            elif char in ")]}":
+                if not stack or {"(": ")", "[": "]", "{": "}"}[stack[-1]] != char:
+                    break
+                stack.pop()
+                if not stack:
+                    close = index
+                    break
+            elif char == "," and stack == ["("]:
+                commas.append(index)
+            index += 1
+        if close is None or not commas:
+            continue
+        begin = commas[0] + 1
+        end = commas[1] if len(commas) > 1 else close
+        argument = script[begin:end]
+        if re.fullmatch(r"\s*\d+\s*", argument):
+            digits = re.search(r"\d+", argument)
+            assert digits is not None
+            spans.append((begin + digits.start(), begin + digits.end()))
+    for begin, end in sorted(set(spans), reverse=True):
+        script = script[:begin] + " " * (end - begin) + script[end:]
+    return script
+
+
 def validate_output(
     text: str, evidence: Sequence[Dataset], *, authored: bool = False
 ) -> ValidationResult:
@@ -854,9 +917,7 @@ def validate_output(
             }
             for script in re.findall(r"<script\b[^>]*>(.*?)</script\s*>", body, re.I | re.S):
                 # Timer delay is infrastructure, not a displayed data claim.
-                script = re.sub(
-                    r"(setTimeout|setInterval)\s*\((.*?),\s*\d+\s*\)", "", script, flags=re.S
-                )
+                script = _without_timer_delays(script)
                 script = re.sub(
                     r"\.style\.(?:width|height|padding|margin|gap|fontSize)\s*=\s*"
                     r"([\"'])[\d.]+(?:px|em|rem|%|vh|vw)\1",

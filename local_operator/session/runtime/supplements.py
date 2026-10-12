@@ -995,6 +995,27 @@ class SupplementRunner:
             logger.debug("supplement turn could not be priced", exc_info=True)
             return None
 
+    def _metadata_text(self, value: str, *, fallback: str, limit: int) -> str:
+        """Raw authored bytes stay private; journal/live labels must use history's scrubber."""
+        import sys
+
+        from local_operator.ansi import sanitize_prompt_line
+        from local_operator.redaction_shapes import scrub_shapes
+
+        safe = value
+        redact = getattr(self._session, "_redact_tool_result_text", None)
+        if callable(redact):
+            safe = redact(safe)
+        runtime = sys.modules.get("local_operator.secrets.runtime")
+        if runtime is not None:
+            safe = runtime.scrub(safe)
+        if not isinstance(safe, str):
+            return fallback
+        safe = scrub_shapes(safe)
+        if safe != value or not safe.strip():
+            return fallback
+        return sanitize_prompt_line(safe, limit=limit) or fallback
+
     async def _store(self, components: Sequence[Component]) -> list[dict[str, Any]]:
         """Store each accepted component as a blob and build the row's ``components[]``.
 
@@ -1021,8 +1042,12 @@ class SupplementRunner:
             entries.append(
                 {
                     "attachment": ref.digest,
-                    "title": component.title,
-                    "source": component.source,
+                    "title": self._metadata_text(
+                        component.title, fallback="Supporting visual", limit=160
+                    ),
+                    "source": self._metadata_text(
+                        component.source, fallback="Local turn evidence", limit=320
+                    ),
                     "mime": "text/html",
                     "height_hint": component.height_hint,
                 }

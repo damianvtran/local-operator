@@ -73,6 +73,16 @@ MAX_COMPONENTS: Final = 3
 STEER_TEXT_MAX_CHARS: Final = 500
 
 
+class SupplementReadOptions(TypedDict, total=False):
+    """Only the additive reader keyword; omission keeps old callbacks byte-compatible."""
+
+    supplements: bool
+
+
+def supplement_read_options(declared: bool) -> SupplementReadOptions:
+    return {"supplements": True} if declared else {}
+
+
 class SupplementFile(TypedDict):
     """A file callout. ``path`` is session-relative or ``~/``-relative, NEVER absolute, so
     the operator's directory layout does not replicate to peers (memo S-R14)."""

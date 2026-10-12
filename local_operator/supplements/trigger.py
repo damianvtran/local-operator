@@ -146,7 +146,9 @@ def snapshot_message(
             if getattr(call, "name", "") == "write" and prepared_writes is not None:
                 import os
 
-                absolute = os.path.abspath(os.path.join(cwd, os.path.expanduser(path)))
+                absolute = os.path.realpath(
+                    os.path.abspath(os.path.join(cwd, os.path.expanduser(path)))
+                )
                 prepared = prepared_writes.get(absolute, "")
                 if len(prepared) > text_budget:
                     prepared = ""

@@ -399,7 +399,7 @@ def prefilter(
         rejected[reason] = rejected.get(reason, 0) + 1
 
     candidates: dict[str, Candidate] = {}
-    prepared_content: dict[str, str] = {}
+    prepared_content: dict[str, tuple[str, str]] = {}
     failed_calls = {item.tool_call_id for item in items if item.role == "tool" and item.is_error}
     if want_graphics:
         for item in items:
@@ -413,9 +413,10 @@ def prefilter(
                     absolute = os.path.normpath(
                         raw if os.path.isabs(raw) else os.path.join(cwd, raw)
                     )
-                    prepared_content.pop(absolute, None)
+                    identity = os.path.realpath(absolute)
+                    prepared_content.pop(identity, None)
                     if call.prepared_html and call.name == "write" and len(prepared_content) < 3:
-                        prepared_content[absolute] = call.prepared_html
+                        prepared_content[identity] = (absolute, call.prepared_html)
     prepared: list[tuple[Candidate, str]] = []
     if want_files or prepared_content:
         mentions = _harvest(items)
@@ -462,7 +463,8 @@ def prefilter(
                 reject("sensitive")
                 continue
             display = _display_path(absolute, cwd, home)
-            if absolute not in prepared_content and not _spellings(
+            captured = prepared_content.get(os.path.realpath(absolute))
+            if (captured is None or captured[0] != absolute) and not _spellings(
                 raw.strip(), absolute, display, home
             ).isdisjoint(visible):
                 reject("already-visible")
@@ -483,9 +485,10 @@ def prefilter(
                 intent=intent,
             )
     prepared = [
-        (candidate, prepared_content[candidate.absolute])
+        (candidate, captured[1])
         for candidate in candidates.values()
-        if candidate.absolute in prepared_content
+        if (captured := prepared_content.get(os.path.realpath(candidate.absolute))) is not None
+        and captured[0] == candidate.absolute
     ][:3]
     ordered = (
         tuple(sorted(candidates.values(), key=lambda c: (c.tier, -c.order, c.path)))
