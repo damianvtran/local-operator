@@ -59,6 +59,7 @@ def _run_rig(
     child_acts: str | None = None,
     challenge_reply: str | None = None,
     ending: str = "finish",
+    max_steps: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     selector_dir = root / "adapter"
     selector = spawn_helpers.build_spawnable_adapter(
@@ -128,6 +129,8 @@ def _run_rig(
     if challenge_reply is not None:
         args += ["--challenge-reply", challenge_reply]
     args += ["--ending", ending]
+    if max_steps is not None:
+        args += ["--max-steps", str(max_steps)]
     completed = subprocess.run(
         args, capture_output=True, text=True, env=env, cwd=str(REPO), check=False
     )
@@ -437,3 +440,41 @@ def test_a_delegated_child_cannot_drive_or_end_the_episode(
         event.get("emit") == "child-refusal-seen" and event.get("episode") is True
         for event in events
     )
+
+
+def test_the_step_budget_stops_before_the_next_root_request(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """Close guest admission AT the budget (blueprint §3), on the real loop.
+
+    The script would request a wait and then a finish; run with ``--max-steps
+    1``, the FIRST admitted batch consumes the only epoch, and the Nth-stop
+    must fire when that batch's result is paired: the loop's own graceful
+    boundary ends the turn, the finish is NEVER requested, and the reached
+    state is still scored (truncated, not failed). Without the sink stop this
+    is exactly the N+1 shape: the model would spend one more request whose
+    only possible answer is the bridge's budget refusal.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root, adapter_wheel, spawn_interpreter, max_steps=1
+    )
+
+    outcome = _outcome(completed, expect_status="truncated")
+    assert outcome["steps"] == 1
+    assert outcome["terminal_reason"] == "max-steps"
+    # The budget stops the run, not the score: the state reached still scores.
+    assert outcome["score"]["status"] == "scored"
+
+    kinds = _record_kinds(run_root)
+    assert kinds.count("action_batch") == 1
+    assert kinds.count("budget_stop") == 1
+    assert "action_finish" not in kinds
+
+    # The proof the stop landed AT the budget: the second episode request the
+    # script would have made (the finish) was never spent.
+    events = _log_events(log)
+    assert len([event for event in events if event.get("episode")]) == 1, events

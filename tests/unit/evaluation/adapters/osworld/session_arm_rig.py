@@ -402,6 +402,15 @@ def main(argv: list[str] | None = None) -> int:
             "narration message (the discriminating negative)"
         ),
     )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=6,
+        help=(
+            "the episode's admitted-output-epoch budget (blueprint §3; the default 6 "
+            "leaves headroom over the committed script's three epochs)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     worktree = args.worktree.resolve()
@@ -424,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
         "--secret-env",
         "AWS_SECRET_ACCESS_KEY",
         "--max-steps",
-        "6",
+        str(args.max_steps),
         "--max-usd",
         "0.01",
         "--infra",
