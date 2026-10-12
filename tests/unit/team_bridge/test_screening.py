@@ -964,9 +964,9 @@ def test_status_law_normalizer_positive_and_refusal_arms(tmp_path) -> None:
         "screening": {"version": SCREENING_VERSION_V1, "template": SCREENING_TEMPLATE_V1},
         "consent": {"version": "bridge_consent_v1", "text": "Consent body."},
     }
-    version, digest = _normalize_accepted_status(base, owner, store)
-    assert version == SCREENING_VERSION_V1
-    assert digest == SCREENING_TEMPLATE_V1_SHA256
+    law = _normalize_accepted_status(base, owner, store)
+    assert law.version == SCREENING_VERSION_V1
+    assert law.template_hash == SCREENING_TEMPLATE_V1_SHA256
 
     def refuse(mutate) -> str:
         arm = _copy.deepcopy(base)
