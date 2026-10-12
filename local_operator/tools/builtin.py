@@ -13692,10 +13692,7 @@ class SendParams(BaseModel):
     )
     repeat: bool = Field(
         default=False,
-        description=(
-            "Deliver again even after an identical confirmed send this turn. "
-            "Use only when the user explicitly requested a deliberate repeat."
-        ),
+        description=("Repeat a confirmed same-turn send only on explicit user request."),
     )
     model: str | None = Field(
         default=None,
