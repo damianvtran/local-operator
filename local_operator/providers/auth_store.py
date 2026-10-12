@@ -2594,7 +2594,9 @@ class AuthStore:
         except AuthStoreError:
             return None
 
-    async def ensure_oauth_fresh_or_raise(self, credential_id: int) -> dict[str, Any] | None:
+    async def ensure_oauth_fresh_or_raise(
+        self, credential_id: int, *, force: bool = False
+    ) -> dict[str, Any] | None:
         """`ensure_oauth_fresh`, but a refresh that fails keeps its cause.
 
         The probe above collapses every unusable state into ``None``, which is
@@ -2605,11 +2607,19 @@ class AuthStore:
         disabled, or not an OAuth credential; a refresh that failed raises
         :class:`AuthStoreError` with the underlying transport or IdP error
         chained on ``__cause__``, so a caller can classify on it.
+
+        ``force`` skips the expiry pre-check and refreshes unconditionally, for
+        the one caller that has an authoritative rejection the clock cannot
+        see: an owner-pinned request whose bearer the server answered 401 to
+        (the bridge client, ``team_bridge``). It does NOT bypass the
+        tombstoned-grant check — a grant the IdP has declared dead is dead
+        whatever the caller believes — and it stays refresh-single-flight like
+        every other path through ``_ensure_oauth_fresh``.
         """
         row = self._refreshable_row(credential_id)
         if row is None:
             return None
-        return await self._ensure_oauth_fresh(row)
+        return await self._ensure_oauth_fresh(row, force=force)
 
     def refresh_deferred(self, credential_id: int) -> bool:
         """Whether an unsettled send is holding this row's refresh off right now.
