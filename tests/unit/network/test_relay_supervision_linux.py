@@ -1040,7 +1040,7 @@ def test_refresh_unit_a_same_pid_restart_is_a_refusal_with_the_remedy(
 
     outcome = relay.refresh_unit_if_stale()
 
-    assert calls == [("restart", relay.SYSTEMD_UNIT)], calls
+    assert calls == [("daemon-reload",), ("restart", relay.SYSTEMD_UNIT)], calls
     assert outcome.kind == "failed", outcome
     assert outcome.detail == (
         f"it was still on an older install ({_GEN}) and the restart it accepted "
@@ -1088,6 +1088,81 @@ def test_refresh_unit_reload_failure_stops_before_any_restart(
     # The file WAS rewritten (the failure is post-write) and now carries the
     # migration — the running relay is untouched, which the no-restart asserts.
     assert "KillMode=process\n" in unit.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("retry_succeeds", [False, True])
+def test_refresh_unit_retries_the_loaded_policy_after_a_failed_reload(
+    linux_host: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_succeeds: bool,
+) -> None:
+    """Disk-current after a failed reload is not manager-current (R1/Q1).
+
+    Model loaded policy separately from disk: only a successful reload changes
+    KillMode. The real restart wrapper must verify a new serving PID as well.
+    No real systemctl is reachable from this cell.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(_migratable_unit(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls: list[tuple[str, ...]] = []
+    loaded_mode = "control-group"
+    restart_modes: list[str] = []
+    reloads = 0
+
+    def _manager(*args: str, **kwargs: Any) -> Any:
+        nonlocal loaded_mode, reloads
+        calls.append(tuple(args))
+        if args == ("daemon-reload",):
+            reloads += 1
+            if reloads == 1 or not retry_succeeds:
+                return SimpleNamespace(returncode=1, stdout="", stderr="reload failed")
+            assert "KillMode=process\n" in unit.read_text(encoding="utf-8")
+            loaded_mode = "process"
+        elif args == ("restart", relay.SYSTEMD_UNIT):
+            restart_modes.append(loaded_mode)
+        else:
+            raise AssertionError(f"unexpected manager call: {args}")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", _manager)
+    # First call must fail before the PID probe; the second call owns all three
+    # readings consumed by the refresh and the real restart verification.
+    _pin_supervision(
+        monkeypatch,
+        managed=_Script(111, 111, 222),
+        record=_RelayRecordScript(111, 222),
+    )
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: tmp_path / _GEN)
+
+    first = relay.refresh_unit_if_stale()
+    assert first.kind == "failed", first
+    assert calls == [("daemon-reload",)], calls
+    assert "KillMode=process\n" in unit.read_text(encoding="utf-8")
+    assert loaded_mode == "control-group"
+
+    second = relay.refresh_unit_if_stale()
+    assert calls[:2] == [("daemon-reload",), ("daemon-reload",)], calls
+    if retry_succeeds:
+        assert calls == [
+            ("daemon-reload",),
+            ("daemon-reload",),
+            ("restart", relay.SYSTEMD_UNIT),
+        ], calls
+        assert restart_modes == ["process"], restart_modes
+        assert second.kind == "restarted", second
+        assert second.summary() == (
+            "network relay daemon: restarted onto the new build — expect a brief mesh blip"
+        )
+    else:
+        assert calls == [("daemon-reload",), ("daemon-reload",)], calls
+        assert restart_modes == []
+        assert loaded_mode == "control-group"
+        assert second.kind == "failed", second
+        assert "lop network install" in second.detail
 
 
 def test_refresh_unit_a_raising_probe_is_a_failure_never_an_escape(
