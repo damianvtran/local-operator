@@ -1827,9 +1827,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # ever read to ADD to ``wanted`` (protecting a generation), never to choose
     # a path to delete, which is why a hostile record cannot redirect it.
     (
-        "local_operator/update.py::_remove_tree",
+        "local_operator/update.py::_remove_tree_unlocked",
         "shutil.rmtree",
-        "<stable>/generations/<id> — reserved by this call, or listed from generations_dir()",
+        "<stable>/generations/<id> — reserved/listed generations only; the owned "
+        "transaction wrapper retains current and live attempts before this same deletion",
+        1,
     ),
     (
         "local_operator/update.py::flip_pointer",
@@ -1882,6 +1884,35 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/update.py::_write_executable",
         "<path>.unlink",
         "cleanup of this function's own mkstemp temp FILE beside the shim",
+    ),
+    (
+        "local_operator/update.py::_download_candidate_artifact",
+        "<path>.rename",
+        "owned staged regular wheel FILE -> reserved generation/artifact FILE after SHA256; "
+        "never a session directory",
+        1,
+    ),
+    (
+        "local_operator/update.py::_download_candidate_artifact",
+        "<path>.unlink",
+        "failed owned temporary artifact FILE only; unlink cannot remove a directory",
+        1,
+    ),
+    # Node-local install attempt records, not session directories. Registration
+    # replaces a staged regular JSON FILE; retirement unlinks only that FILE
+    # after nonce/PID ownership checks. Exact operation counts stay enforced.
+    (
+        "local_operator/install_transaction.py::register_attempt",
+        "<path>.replace",
+        "owned staged JSON FILE -> INSTALLROOT/generation/.install-attempt.json FILE; "
+        "not a sessions/ path, and file replacement cannot replace a directory",
+        1,
+    ),
+    (
+        "local_operator/install_transaction.py::finish_attempt",
+        "<path>.unlink",
+        "nonce/PID-validated INSTALLROOT/generation attempt FILE only; unlink refuses directories",
+        1,
     ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),

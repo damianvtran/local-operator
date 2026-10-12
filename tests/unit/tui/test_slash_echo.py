@@ -863,6 +863,8 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
                 "designer",
                 "hollow-role",
                 "manager",
+                # Packaged QA is now addressable just like the other starters.
+                "qa-tester",
                 "reviewer",
                 "scout",
                 "tui-designer",

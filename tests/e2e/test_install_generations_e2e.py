@@ -14,9 +14,9 @@ So these cells drive the PRODUCTION machinery around a real runtime:
 * the real install-and-flip (``update.install_into_generation`` →
   ``update.flip_pointer``), with a fake ``uv`` runner — a full wheel build is
   minutes of the e2e budget and the property under test is where uv is AIMED and
-  what happens to the running process, not what uv compiles. The live-host proof
-  (a real install with the fleet up, pid set identical before and after, zero
-  new DiagnosticReports) belongs to QA;
+  what happens to the running process, not what uv compiles. Busy admission
+  remains mandatory even with immutable generations; no live busy-fleet install
+  or real signed-artifact proof is claimed by this fixture;
 * the real stable launchers, and the real console script behind them, for the cell
   that resolves the generation ``current`` names — a console script the fixture
   writes with an absolute shebang, exactly as ``uv`` does.
@@ -44,11 +44,13 @@ re-parented a cell's runtime.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -107,6 +109,28 @@ def _seed(config: Path, session_id: str) -> Path:
     return directory
 
 
+def _artifact_payload(version: str) -> bytes:
+    """Controlled transport bytes, not a claim to compile a real signed wheel."""
+    return f"owned lifecycle artifact for {version}".encode()
+
+
+def _fixture_publication(version: str, **kwargs):
+    filename = f"local_operator-{version}-py3-none-"
+    filename += "macosx_11_0_universal2.whl" if sys.platform == "darwin" else "any.whl"
+    return {
+        "info": {"version": version},
+        "urls": [
+            {
+                "filename": filename,
+                "packagetype": "bdist_wheel",
+                "yanked": False,
+                "url": f"https://files.pythonhosted.org/lifecycle/{version}.whl",
+                "digests": {"sha256": hashlib.sha256(_artifact_payload(version)).hexdigest()},
+            }
+        ],
+    }, ""
+
+
 @pytest.fixture
 def layout_home(headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """``headless_tui_env`` PLUS a private ``HOME`` — what these cells require.
@@ -123,6 +147,23 @@ def layout_home(headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.Monk
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    # Transport/signature are explicit dependency fixtures; download bounds,
+    # SHA256 verification, local origin, admission and publication remain real.
+    import httpx
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        version = request.url.path.rsplit("/", 1)[-1].removesuffix(".whl")
+        return httpx.Response(200, content=_artifact_payload(version))
+
+    @contextmanager
+    def stream(method: str, url: str, **kwargs):
+        with httpx.Client(transport=httpx.MockTransport(serve)) as client:
+            with client.stream(method, url, **kwargs) as response:
+                yield response
+
+    monkeypatch.setattr(update_mod, "_pypi_release_document", _fixture_publication)
+    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(update_mod, "_verify_signed_candidate", lambda generation, mode: None)
     return headless_tui_env
 
 
@@ -224,6 +265,8 @@ def _fake_uv(version: str):
     """Stand in for ``uv tool install``: build the tree it would build."""
 
     def _run(argv: list[str], env: dict[str, str]) -> int:
+        artifact = Path(argv[argv.index("--from") + 1])
+        assert artifact.read_bytes() == _artifact_payload(version)
         venv = Path(env["UV_TOOL_DIR"]) / "local-operator"
         bin_dir = Path(env["UV_TOOL_BIN_DIR"])
         # Version-derived, never hardcoded: a child started from the generation
@@ -244,6 +287,10 @@ def _fake_uv(version: str):
         dist.mkdir(parents=True, exist_ok=True)
         (dist / "METADATA").write_text(
             f"Metadata-Version: 2.1\nName: local-operator\nVersion: {version}\n", encoding="utf-8"
+        )
+        (dist / "direct_url.json").write_text(
+            json.dumps({"url": artifact.resolve().as_uri(), "archive_info": {}}),
+            encoding="utf-8",
         )
         (dist / "entry_points.txt").write_text(
             "[console_scripts]\nlop = local_operator.cli:main\n"
@@ -344,20 +391,26 @@ def _reap(child: subprocess.Popen[bytes]) -> None:
         child.kill()
 
 
-def _install_new_generation(version: str = "0.55.1") -> Path:
-    """Land a build the way ``lop update`` does: new generation, then flip."""
+def _install_new_generation() -> Path:
+    """The next fixture release, never a stale hardcoded downgrade from CI."""
+    current = update_mod.parse_version(
+        update_mod.generation_version(update_mod.current_generation())
+    )
+    assert current is not None, "the old generation must have real distribution metadata"
+    major, minor, patch = current
+    version = f"{major}.{minor}.{patch + 1}"
     return update_mod.install_into_generation(runner=_fake_uv(version), version=version)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks and signals")
 def test_a_busy_runtime_survives_a_real_install_and_flip(layout_home: Path) -> None:
-    """The incident, inverted: the swap lands mid-turn and the runtime does not notice.
+    """The incident prevented: busy refuses; only actual idle admits the swap.
 
     A runtime parked on a real ``bash`` tool (``sleep 8``, issued by the mock
-    provider) while a build is installed into a NEW generation and ``current``
-    is flipped onto it. Asserted on what the operator would have lost: the same
-    pid, a turn that finishes, and NO ``runtime-killed`` / ``install-mid-update``
-    incident — the two tokens the 2026-09-15 deaths were recorded under.
+    provider) must retain its pid/current/tree when the installer refuses. Its
+    real turn then finishes before a NEW generation may be installed/flipped.
+    Asserted on what the operator would have lost: the same pid, a turn that
+    finishes, and NO ``runtime-killed`` / ``install-mid-update`` incident.
 
     The child is launched through ``<gen>/tools/local-operator/bin/python3``
     (see :func:`_spawn`), and the tree it started from is asserted from the
@@ -404,8 +457,26 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(layout_home: Path) -> N
         _wait_for(config, session_id, lambda found: found.busy, timeout=90, what="a busy runtime")
         assert child.poll() is None, "the runtime died before the swap"
 
-        # THE SWAP, through the production install path.
+        # Immutable generations do NOT waive admission. Refuse the real busy
+        # turn without moving current or cutting it off; only actual idle allows
+        # the production install path. No force/admission fixture suppression.
+        with pytest.raises(update_mod.UpdateError, match="sessions are busy"):
+            _install_new_generation()
+        assert update_mod.current_generation() == first
+        assert child.poll() is None and _wait_for_record(config, session_id).pid == record.pid
+        assert _incidents(directory) == []
+        _wait_for(
+            config,
+            session_id,
+            lambda found: not found.busy,
+            timeout=90,
+            what="actual idle before permitted install",
+        )
         second = _install_new_generation()
+        print(
+            f"ACTUAL busy admission refused; idle install admitted; pid={child.pid} "
+            f"old_current_preserved=True new_current={second.name}"
+        )
         assert second != first
         assert update_mod.current_generation() == second
         assert child.poll() is None, "the runtime died during the install and flip"
@@ -459,7 +530,15 @@ def test_an_unwatched_runtime_keeps_its_pid_and_is_not_recorded_as_gone(
     try:
         record = _wait_for_record(config, session_id)
         before_heartbeat = float(record.heartbeat_at)
-        _install_new_generation("0.55.2")
+        _wait_for(
+            config,
+            session_id,
+            lambda found: not found.busy,
+            timeout=90,
+            what="idle unwatched runtime before permitted install",
+        )
+        installed = _install_new_generation()
+        print(f"ACTUAL unwatched idle install current={installed.name} pid={child.pid}")
 
         # It stays resident and keeps beating: "disappeared without exiting
         # cleanly" is exactly what this asserts cannot happen.

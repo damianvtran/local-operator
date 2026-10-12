@@ -921,6 +921,11 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         supports_responses_api = bool(getattr(info, "supports_responses_api", False))
 
     definition = get_provider_definition(canonical)
+    if canonical == "meta-muse":
+        # The subscription endpoint is Responses-only, including a newly
+        # discovered model with no bundled row (not a fabricated Full alias).
+        supports_responses_api = True
+        supports_cache = False
     if canonical == "openai" and _OPENAI_RESPONSES_API.search(model_name.lower()):
         supports_responses_api = True
         supports_cache = True
@@ -1891,10 +1896,12 @@ def _catalogue_credential(
     key = _catalogue_api_key(provider, base=base)
     if key:
         return key, _env_secret_is_oauth(key), None
-    return _oauth_listing_token(provider)
+    return _oauth_listing_token(provider, base=base)
 
 
-def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
+def _oauth_listing_token(
+    provider: str, *, base: Path | None = None
+) -> tuple[str, bool, str | None]:
     """The newest stored token and account scope, or ``("", False, None)``.
 
     Best-effort by construction: an unreadable store, a missing table or a row
@@ -1922,11 +1929,22 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
         from local_operator.providers.registry import credential_provider_id
 
         storage = credential_provider_id(provider)
-        rows = shared_auth_store().list_credentials(provider=storage)
+        store = (
+            shared_auth_store(config_dir=base) if provider == "meta-muse" else shared_auth_store()
+        )
+        rows = store.list_credentials(provider=storage)
         for row in reversed(rows):
-            token = str(row.data.get("access") or "")
+            if provider == "meta-muse":
+                extractor = store._oauth_key_fn(provider)
+                token = extractor(row.data) if extractor is not None else ""
+            else:
+                token = str(row.data.get("access") or "")
             if token:
-                account_id = row.data.get("account_id") or row.data.get("org_id")
+                account_id = (
+                    row.data.get("account_id")
+                    or row.data.get("org_id")
+                    or (row.data.get("email") if provider == "meta-muse" else None)
+                )
                 return (
                     token,
                     row.credential_type == "oauth",

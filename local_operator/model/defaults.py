@@ -57,6 +57,9 @@ class SuggestedModel(NamedTuple):
 #: local runtimes serve whatever the user pulled, and a decision-only provider
 #: (TypeSafe) cannot serve a chat at all.
 SUGGESTED_MODELS: dict[str, SuggestedModel] = {
+    # Official models documentation names this wire ID; no published Full
+    # wire ID exists, so a marketing label must not become a broken alias.
+    "meta-muse": SuggestedModel("muse-wonder-1.0", "Muse Wonder 1.0"),
     # platform.claude.com models overview: "start with Claude Opus 5.5 for most
     # workloads"; also served by the live /v1/models listing under a Claude
     # Pro/Max OAuth grant, so the subscription route can use it too.

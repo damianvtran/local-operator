@@ -1201,3 +1201,447 @@ def test_the_output_contract_helpers_are_lazy_reexports() -> None:
 
     assert sdk.decode_output is output_contract.decode_output
     assert sdk.MarkdownSchema is output_contract.MarkdownSchema
+
+
+# SDK4 pins keyed consumption at the public API, not the presence of a key near
+# a raise. A fake factory isolates credentials/providers; the SDK's validation,
+# scoping, attachment, declaration and disposal branches remain executable.
+_SDK4_NAMESPACE = "wire.errors.sdk_startup"
+_SDK4_CASES = (
+    "attach_hosting_unconfigured",
+    "attach_runtime_missing",
+    "profile_attach_failed",
+    "tool_inventory_mismatch",
+)
+_SDK4_OPAQUE = "  producer {opaque} 'quoted' %(token)s Ω\n"
+
+
+@pytest.fixture
+def sdk4_boundary(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from local_operator import agents, config, exec_startup, session_factory
+    from local_operator.i18n import resolve
+
+    # Our local --basetemp is a durable, session-owned scratchpad. CI may use
+    # TMPDIR, so volatile is explicitly allowed for that fixture portability.
+    # HOME changes only inside the Python fixture, never for git/gh/keychain.
+    home = tmp_path / "sdk4-home"
+    root = home / "config"
+    work = home / "work"
+    agent_home = home / "agents"
+    for directory in (root, work, agent_home):
+        directory.mkdir(parents=True, exist_ok=True)
+    payload = b"values:\n  language: en\n"
+    (root / "config.yml").write_bytes(payload)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(agent_home))
+    for name in tuple(os.environ):
+        if name.startswith("CMUX_") or name in (
+            "XPC_FLAGS",
+            "LOP_LANG",
+            "LOP_I18N",
+            "LANG",
+            "LC_ALL",
+            "LC_MESSAGES",
+        ):
+            monkeypatch.delenv(name, raising=False)
+    from local_operator import agent_shell
+
+    for name in (
+        agent_shell.AGENT_SHELL_ENV,
+        agent_shell.MAY_DELEGATE_ENV,
+        agent_shell.ALLOW_NESTED_SESSION_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+    roots = SessionRoots(config_dir=root, agent_home=agent_home, cwd=work, allow_volatile=True)
+    state = SimpleNamespace(
+        values={"language": "en"},
+        reads=0,
+        managers=0,
+        calls=[],
+        disposed=0,
+        profile_calls=[],
+        inventory_calls=[],
+        case=None,
+    )
+
+    class Manager:
+        def __init__(self, *, config_dir):
+            assert config_dir == root
+            state.managers += 1
+
+        def get_config(self):
+            state.reads += 1
+            return SimpleNamespace(values=state.values)
+
+    class Session:
+        @property
+        def owns_runtime(self):
+            return state.case == "attach_runtime_missing"
+
+        async def dispose(self):
+            state.disposed += 1
+
+        def attach_agent_profile(self, profile):
+            state.profile_calls.append(profile)
+            return state.case != "profile_attach_failed"
+
+        def set_tool_inventory(self, inventory, *, unattended):
+            state.inventory_calls.append((tuple(inventory), unattended))
+
+        def set_approval_handler(self, gate):
+            state.approval_handler = gate
+
+    state.session = Session()
+    state.cause = session_factory.HostingNotConfiguredError(_SDK4_OPAQUE)
+
+    async def factory(args, manager, registry, **kwargs):
+        assert os.environ["LOCAL_OPERATOR_CONFIG_DIR"] == str(root)
+        assert os.environ["LOCAL_OPERATOR_HOME"] == str(agent_home)
+        state.calls.append(kwargs)
+        if state.case == "attach_hosting_unconfigured":
+            raise state.cause
+        return state.session
+
+    monkeypatch.setattr(config, "ConfigManager", Manager)
+    monkeypatch.setattr(agents, "AgentRegistry", lambda **kwargs: object())
+    monkeypatch.setattr(exec_startup, "resolve_startup", lambda args: None)
+    monkeypatch.setattr(session_factory, "create_session", factory)
+    monkeypatch.setattr(resolve, "config_value", lambda *args: pytest.fail("implicit config read"))
+    state.roots = roots
+    state.config_bytes = payload
+    return state
+
+
+def _sdk4_spec(case):
+    if case.startswith("attach_"):
+        return SessionSpec(resume="sdk4-'Ω-{id}-%(x)s"), "attach"
+    if case == "profile_attach_failed":
+        return SessionSpec(profile="sdk4-'Ω-{role}-%(x)s"), "own"
+    return SessionSpec(tools=("read",), approvals=ApprovalPolicy.declared(["grep"])), "own"
+
+
+def _sdk4_params(case, spec):
+    if case == "attach_hosting_unconfigured":
+        return {"resume": repr(spec.resume), "error": _SDK4_OPAQUE}
+    if case == "attach_runtime_missing":
+        return {"resume": repr(spec.resume)}
+    if case == "profile_attach_failed":
+        return {"profile": repr(spec.profile)}
+    return {"spec_tools": str(spec.tools), "policy_tools": str(spec.approvals.tools)}
+
+
+def _sdk4_english(case, spec):
+    # The baseline f-strings, copied from 4c780f7f, are deliberately independent
+    # of generated functions: this oracle catches punctuation/quoting drift.
+    if case == "attach_hosting_unconfigured":
+        return (
+            f"no live runtime is serving {spec.resume!r}, and this root cannot start "
+            f"one: {_SDK4_OPAQUE} Configure hosting for this root (its config.yml), then "
+            "engage the id with spawn_session()/deliver() and attach once a runtime exists."
+        )
+    if case == "attach_runtime_missing":
+        return (
+            f"no live runtime is serving {spec.resume!r}; open it with "
+            "mode='own' to run it in this process, or engage it first with "
+            "spawn_session()/deliver() and attach once a runtime exists."
+        )
+    if case == "profile_attach_failed":
+        return f"Could not attach profile {spec.profile!r}"
+    return (
+        f"spec.tools {spec.tools} and ApprovalPolicy.declared({spec.approvals.tools}) "
+        "name different inventories; state the run's reach once"
+    )
+
+
+async def _sdk4_assert_refusal(state, case, expected):
+    from local_operator.i18n import text
+
+    state.case = case
+    state.reads = state.disposed = 0
+    state.calls.clear()
+    state.profile_calls.clear()
+    state.inventory_calls.clear()
+    spec, mode = _sdk4_spec(case)
+    active = text.active_locale()
+    with pytest.raises(SessionSpecError) as caught:
+        async with sdk.open_session(spec, roots=state.roots, mode=mode):
+            pytest.fail("startup refusal yielded a session")
+    error = caught.value
+    assert type(error) is SessionSpecError and isinstance(error, ValueError)
+    assert not hasattr(error, "code") and not hasattr(error, "params")
+    assert str(error) == expected and error.args == (expected,)
+    assert error.__cause__ is (state.cause if case == "attach_hosting_unconfigured" else None)
+    assert state.disposed == (1 if case == "attach_runtime_missing" else 0)
+    assert len(state.calls) == 1 and state.calls[0]["has_ui"] == (mode == "attach")
+    assert state.profile_calls == ([spec.profile] if case == "profile_attach_failed" else [])
+    assert state.inventory_calls == []
+    assert text.active_locale() == active
+    assert (state.roots.config_path / "config.yml").read_bytes() == state.config_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _SDK4_CASES)
+async def test_sdk4_baseline_english_contract(sdk4_boundary, case):
+    spec, _ = _sdk4_spec(case)
+    await _sdk4_assert_refusal(sdk4_boundary, case, _sdk4_english(case, spec))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _SDK4_CASES)
+async def test_sdk4_catalogue_marker_reaches_public_exception(sdk4_boundary, monkeypatch, case):
+    from local_operator.i18n import messages
+
+    spec, _ = _sdk4_spec(case)
+    params = _sdk4_params(case, spec)
+    marker = "SDK4-MARKER Ω %(literal)s " + " | ".join("{" + p + "}" for p in params)
+    original = messages._lookup
+    monkeypatch.setattr(
+        messages,
+        "_lookup",
+        lambda locale, namespace, code: (
+            marker if code == f"{_SDK4_NAMESPACE}.{case}" else original(locale, namespace, code)
+        ),
+    )
+    expected = "SDK4-MARKER Ω %(literal)s " + " | ".join(params.values())
+    await _sdk4_assert_refusal(sdk4_boundary, case, expected)
+    assert sdk4_boundary.reads == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _SDK4_CASES)
+@pytest.mark.parametrize(
+    "mutation", ["literal", "wrong_key", "wrong_parameter", "prefix", "suffix", "catalogue_marker"]
+)
+async def test_sdk4_execution_oracle_rejects_broken_consumers(
+    sdk4_boundary, monkeypatch, case, mutation
+):
+    import ast
+    import textwrap
+
+    from local_operator.i18n import messages
+
+    # Compile JUST the current function in memory; never copy sdk.py or edit a
+    # consumer on disk. Controls corrupt executable data flow, not an AST count.
+    source = textwrap.dedent(inspect.getsource(sdk._build_session))
+    tree = ast.parse(source)
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+            calls = [
+                n
+                for n in ast.walk(node.exc)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == case
+            ]
+            if calls:
+                found.append((node, calls[0]))
+    assert len(found) == 1, "one executable keyed raise must exist for this refusal"
+    raised, keyed = found[0]
+    spec, _ = _sdk4_spec(case)
+    if mutation == "literal":
+        raised.exc.args[0] = ast.Constant(_sdk4_english(case, spec))
+    elif mutation == "wrong_key":
+        keyed.func.attr = (
+            "profile_attach_failed" if case != "profile_attach_failed" else "attach_runtime_missing"
+        )
+        keyed.keywords = [
+            ast.keyword(
+                arg="profile" if case != "profile_attach_failed" else "resume",
+                value=ast.Constant("wrong"),
+            )
+        ]
+    elif mutation == "wrong_parameter":
+        keyed.keywords[0].value = ast.Constant("CORRUPTED-PARAMETER")
+    elif mutation == "prefix":
+        raised.exc.args[0] = ast.BinOp(
+            left=ast.Constant("CORRUPTED-PREFIX "), op=ast.Add(), right=raised.exc.args[0]
+        )
+    elif mutation == "suffix":
+        raised.exc.args[0] = ast.BinOp(
+            left=raised.exc.args[0], op=ast.Add(), right=ast.Constant(" CORRUPTED-SUFFIX")
+        )
+    ast.fix_missing_locations(tree)
+    namespace = dict(sdk.__dict__)
+    exec(compile(tree, "<sdk4-counterfactual>", "exec"), namespace)
+    monkeypatch.setattr(sdk, "_build_session", namespace["_build_session"])
+    params = _sdk4_params(case, spec)
+    marker = "CONTROL " + " | ".join("{" + p + "}" for p in params)
+    original = messages._lookup
+    monkeypatch.setattr(
+        messages,
+        "_lookup",
+        lambda locale, namespace, code: (
+            ("CORRUPTED-CATALOGUE" if mutation == "catalogue_marker" else marker)
+            if code == f"{_SDK4_NAMESPACE}.{case}"
+            else original(locale, namespace, code)
+        ),
+    )
+    expected = "CONTROL " + " | ".join(params.values())
+    with pytest.raises(AssertionError):
+        await _sdk4_assert_refusal(sdk4_boundary, case, expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _SDK4_CASES)
+@pytest.mark.parametrize(
+    "values, environ, resolved, rendered",
+    [
+        *[
+            ({"language": locale}, {}, locale, locale)
+            for locale in ("en", "fr", "es", "ru", "vi", "hi")
+        ],
+        ({}, {"LOP_LANG": "es"}, "es", "es"),
+        ({"language": 7}, {"LOP_LANG": "vi"}, "vi", "vi"),
+        ({"language": []}, {"LC_ALL": "ru_RU.UTF-8"}, "ru", "ru"),
+        ({"language": "auto"}, {"LANG": "hi_IN.UTF-8"}, "hi", "hi"),
+        ({}, {}, "en", "en"),
+        ({"language": "zh-CN"}, {}, "en", "en"),
+        ({"language": "ur"}, {}, "en", "en"),
+        ({"language": "unknown"}, {}, "en", "en"),
+        ({"language": "fr"}, {"LOP_LANG": "es"}, "fr", "fr"),
+        ({"language": "fr"}, {"LOP_I18N": "0"}, "en", "en"),
+    ],
+)
+async def test_sdk4_explicit_locale_and_english_child_fallback(
+    sdk4_boundary, monkeypatch, case, values, environ, resolved, rendered
+):
+    from local_operator.i18n import messages, resolve
+
+    sdk4_boundary.values = values
+    for name, value in environ.items():
+        monkeypatch.setenv(name, value)
+    original_resolve = resolve.resolve_language
+    original_render = messages.render
+    original_lookup = messages._lookup
+    observed = []
+    lookups = []
+
+    def resolve_explicit(language):
+        assert language is not None
+        assert language == (
+            values["language"]
+            if isinstance(values.get("language"), str)
+            else resolve.DEFAULT_LANGUAGE
+        )
+        return original_resolve(language, system="Linux", environ=environ)
+
+    def render_explicit(code, params, *, locale):
+        observed.append(locale)
+        return original_render(code, params, locale=locale)
+
+    def lookup(locale, namespace, code):
+        lookups.append(locale)
+        return original_lookup(locale, namespace, code)
+
+    monkeypatch.setattr(resolve, "resolve_language", resolve_explicit)
+    monkeypatch.setattr(messages, "render", render_explicit)
+    monkeypatch.setattr(messages, "_lookup", lookup)
+    spec, _ = _sdk4_spec(case)
+    await _sdk4_assert_refusal(sdk4_boundary, case, _sdk4_english(case, spec))
+    assert observed == [resolved]
+    assert lookups == (["en"] if rendered == "en" else [rendered, "en"])
+    assert sdk4_boundary.reads == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "positive", ["normal", "profile", "matched_inventory", "attached_existing"]
+)
+async def test_sdk4_success_never_resolves_or_reads_locale(sdk4_boundary, monkeypatch, positive):
+    import builtins
+
+    from local_operator.i18n import messages, resolve, text
+
+    original_import = builtins.__import__
+    active = text.active_locale()
+
+    def import_guard(name, globals=None, locals=None, fromlist=(), level=0):
+        # A polluted pytest host cannot prove absence in sys.modules. Trace the
+        # actual SDK import requests instead, even when Python has cached them.
+        if (
+            name.startswith("local_operator.i18n")
+            and (globals or {}).get("__name__") == sdk.__name__
+        ):
+            pytest.fail("successful SDK path imported locale machinery")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_guard)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("successful SDK startup must not render/read locale")
+
+    monkeypatch.setattr(resolve, "resolve_language", forbidden)
+    monkeypatch.setattr(messages, "render", forbidden)
+    state = sdk4_boundary
+    mode = "own"
+    if positive == "profile":
+        spec = SessionSpec(profile="sdk4-success")
+    elif positive == "matched_inventory":
+        spec = SessionSpec(tools=("read",), approvals=ApprovalPolicy.declared(("read",)))
+    elif positive == "attached_existing":
+        spec = SessionSpec(resume="sdk4-existing")
+        mode = "attach"
+    else:
+        spec = SessionSpec()
+    async with sdk.open_session(spec, roots=state.roots, mode=mode) as session:
+        assert session is state.session
+        assert state.disposed == 0
+    assert state.disposed == 1 and state.managers == 1 and state.reads == 0
+    assert len(state.calls) == 1 and state.calls[0]["has_ui"] == (mode == "attach")
+    assert state.profile_calls == (["sdk4-success"] if positive == "profile" else [])
+    assert state.inventory_calls == ([(("read",), True)] if positive == "matched_inventory" else [])
+    assert text.active_locale() == active
+    assert (state.roots.config_path / "config.yml").read_bytes() == state.config_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "refusal", ["invalid_mode", "attach_no_resume", "invalid_world", "isolation"]
+)
+async def test_sdk4_pre_root_refusals_never_construct_or_read_locale(
+    sdk4_boundary, monkeypatch, refusal
+):
+    from local_operator.i18n import messages, resolve
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("pre-root refusal must not resolve/render locale")
+
+    monkeypatch.setattr(resolve, "resolve_language", forbidden)
+    monkeypatch.setattr(messages, "render", forbidden)
+    state = sdk4_boundary
+    mode = "own"
+    spec = SessionSpec()
+    expected = SessionSpecError
+    if refusal == "invalid_mode":
+        # A runtime caller can violate the Literal type; exercise that boundary
+        # intentionally rather than weakening open_session's public signature.
+        mode = cast(Any, "invalid")
+    elif refusal == "attach_no_resume":
+        mode = "attach"
+    elif refusal == "invalid_world":
+        spec = SessionSpec(world_root=state.roots.config_path)
+    else:
+        from local_operator.session import spec as spec_module
+
+        synthetic_uid_home = state.roots.cwd_path / "synthetic-uid-home"
+        monkeypatch.setattr(spec_module, "uid_home_dir", lambda: synthetic_uid_home)
+        state.roots = SessionRoots(
+            config_dir=synthetic_uid_home / ".local-operator",
+            agent_home=state.roots.agent_home_path,
+            cwd=state.roots.cwd_path,
+            allow_volatile=True,
+        )
+        expected = SessionIsolationError
+    with pytest.raises(expected):
+        async with sdk.open_session(spec, roots=state.roots, mode=mode):
+            pytest.fail("pre-root refusal yielded a session")
+    assert state.calls == [] and state.managers == 0 and state.reads == 0 and state.disposed == 0
+
+
+def test_sdk4_import_preserves_lazy_locale_boundary():
+    imported = _imported_modules("local_operator.sdk")
+    assert not any(name.startswith("local_operator.i18n") for name in imported)

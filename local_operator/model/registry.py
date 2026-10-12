@@ -464,6 +464,9 @@ def _dispatch_model_info(hosting: str, model: str) -> ModelInfo:
         return ollama_default_model_info.model_copy(
             update={"id": hosting, "name": LOCAL_PRESETS[hosting][0]}
         )
+    elif hosting == "meta-muse":
+        if model in meta_muse_models:
+            return meta_muse_models[model]
     elif hosting == "deepseek":
         if model in deepseek_models:
             return deepseek_models[model]
@@ -2989,7 +2992,54 @@ glm_models: Dict[str, ModelInfo] = {
 #: curated name at once to find out which ones are shared by two models (see
 #: ``model/naming.py``), and rebuilding that from a hard-coded second list of
 #: hostings would rot the moment a provider is added here and not there.
+# Meta's official model docs and coding-agent recipe name Wonder 1.0 and
+# Spark 1.3. Spark 1.2 is observed in OpenCodex's Muse catalogue. These are
+# discoverability seeds, NOT account-entitlement or allowance-debit evidence.
+# Authenticated /muse-code/models (2026-10-12) states 1,007,997 context and
+# 128,000 output for these rows. Full is discovery-only: its real ID and
+# visibility were observed there, not invented as a public API alias.
+meta_muse_models: Dict[str, ModelInfo] = {
+    "muse-wonder-1.0": ModelInfo(
+        id="muse-wonder-1.0",
+        name="Muse Wonder 1.0",
+        context_window=1_007_997,
+        max_tokens=128_000,
+        supports_images=True,
+        supports_tools=True,
+        reasoning=True,
+        reasoning_default_effort="medium",
+        supports_responses_api=True,
+        description="Muse Wonder via unofficial Muse Code sign-in; account availability varies.",
+        recommended=True,
+    ),
+    "muse-spark-1.3": ModelInfo(
+        id="muse-spark-1.3",
+        name="Muse Spark 1.3",
+        context_window=1_007_997,
+        max_tokens=128_000,
+        supports_images=True,
+        supports_tools=True,
+        reasoning=True,
+        reasoning_default_effort="medium",
+        supports_responses_api=True,
+        description="Muse Spark through unofficial Muse Code sign-in; account availability varies.",
+    ),
+    "muse-spark-1.2": ModelInfo(
+        id="muse-spark-1.2",
+        name="Muse Spark 1.2",
+        context_window=1_007_997,
+        max_tokens=128_000,
+        supports_images=True,
+        supports_tools=True,
+        reasoning=True,
+        reasoning_default_effort="medium",
+        supports_responses_api=True,
+        description="Muse Spark 1.2 via unofficial Muse Code sign-in; account availability varies.",
+    ),
+}
+
 _STATIC_MODEL_MAPS: Dict[str, Dict[str, "ModelInfo"]] = {
+    "meta-muse": meta_muse_models,
     "anthropic": anthropic_models,
     "openai": openai_models,
     "google": google_models,
