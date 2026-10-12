@@ -798,3 +798,43 @@ async def test_contiguous_owned_pictures_all_join_their_owner_run() -> None:
         assert states["collapsed"] == [False, False, False], states
         assert states["open"] == [True, True, True], states
         assert states["reclosed"] == [False, False, False], states
+
+
+@pytest.mark.asyncio
+async def test_a_human_prefix_picture_stays_visible_and_the_receipt_run_folds() -> None:
+    """R8-1 / Q-R9-A1 real-app acceptance: a human row carrying its OWN
+    picture is a boundary — the picture stays visible and never seeds the
+    receipt chain — and the two-receipt run behind it still folds; only the
+    receipt's own picture hides with its bar."""
+    human = Message.user("audit the ingest path", id="qa_human")
+    human.content.append(ImageContent(data=_healthy_png(), mime_type="image/png"))
+    receipt = _marked_receipt("qa_h1", "picture body")
+    receipt.content.append(ImageContent(data=_healthy_png(), mime_type="image/png"))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        view = app.query_one(TranscriptView)
+        app._project_settled_rows([human])
+        await pilot.pause()
+        app._project_settled_rows([receipt])
+        await pilot.pause()
+        app._project_settled_rows([_marked_receipt("qa_h2", "picture body")])
+        await pilot.pause()
+
+        bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
+        assert len(bars) == 1 and bars[0].group.count == 2
+        assert list(bars[0].group.row_ids) == ["qa_h1:0", "qa_h1:1", "qa_h2:0"]
+        images = [block for block in view.blocks() if isinstance(block, ImageBlock)]
+        human_pic = next(block for block in images if block.navigation_anchor_id == "qa_human")
+        receipt_pic = next(block for block in images if block.navigation_anchor_id == "qa_h1")
+        assert human_pic.display is True, "the human's own picture stays visible"
+        assert human_pic not in bars[0]._members
+        assert receipt_pic.display is False and receipt_pic in bars[0]._members
+
+        bars[0].toggle_expanded()
+        await pilot.pause()
+        assert receipt_pic.display is True and human_pic.display is True
+        bars[0].toggle_expanded()
+        await pilot.pause()
+        assert receipt_pic.display is False and human_pic.display is True
