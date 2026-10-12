@@ -1,62 +1,4 @@
 {
-  "F_lapse": {
-    "http": 200,
-    "result": {
-      "capability": 1,
-      "state": "ready",
-      "boundary": "app_start",
-      "from_cache": false,
-      "checked_at": "2026-10-12T07:31:14.660972+00:00",
-      "fetched_at": "2026-10-12T07:31:14.660972+00:00",
-      "update_required": false,
-      "account_id": "h1-r1-lapse",
-      "tenant_id": "tnt_bridge_qa_3",
-      "surface_state": "F",
-      "state_note": "Plan ended \u2014 reading only",
-      "visibility": {
-        "settings": true,
-        "inbox": true,
-        "account_door": true,
-        "onboarding": false
-      },
-      "read_only": true,
-      "can_receive": false,
-      "can_decide": false,
-      "local": {
-        "enabled": false,
-        "onboarding": "",
-        "session": ""
-      },
-      "screening": {
-        "required": true
-      },
-      "consent_account_guard": true,
-      "texts_rejected": [],
-      "status": {
-        "api_version": "1",
-        "available": false,
-        "tenants": [
-          {
-            "tenant_id": "tnt_bridge_qa_3",
-            "tenant_name": "Lapsed synthetic org",
-            "eligible": false,
-            "endpoint": {
-              "id": "bep-h1-lapse",
-              "label": "Retained agent",
-              "state": "active"
-            },
-            "counts": {
-              "unread": 0,
-              "requests_pending": 0,
-              "blocked": 0
-            }
-          }
-        ]
-      },
-      "consent": null,
-      "error": null
-    }
-  },
   "F_kill": {
     "http": 200,
     "result": {
@@ -64,8 +6,8 @@
       "state": "ready",
       "boundary": "app_start",
       "from_cache": false,
-      "checked_at": "2026-10-12T07:31:15.030017+00:00",
-      "fetched_at": "2026-10-12T07:31:15.030017+00:00",
+      "checked_at": "2026-10-12T08:52:41.069978+00:00",
+      "fetched_at": "2026-10-12T08:52:41.069978+00:00",
       "update_required": false,
       "account_id": "h1-r1-lapse",
       "tenant_id": "tnt_bridge_qa_3",
@@ -182,6 +124,64 @@
         "text": "I understand that enabling agent messages lets my agent exchange messages with other members' agents in my organization (your organization, the team on your Radient plan). Incoming messages are screened on my device by the model I have chosen, which receives their content. Messages I send are screened the same way by the receiving member's chosen model, which may be a third-party provider whose retention of that content Radient does not control. Messages are kept for up to 400 days (plus backup windows). Radient provides no screen through which my organization's administrators or Radient staff can read message content, but Radient operators with database access could technically read stored messages, and that access is restricted by policy and logged. When I answer an approval request, my decision is recorded with my name, the ask I answered and how it was made. The requesting side may treat it as my answer under its own process, limited to what was asked. I can pause or turn this off at any time, and my organization's administrators can turn it off for everyone.",
         "source": "served"
       },
+      "error": null
+    }
+  },
+  "F_unknown": {
+    "http": 200,
+    "result": {
+      "capability": 1,
+      "state": "ready",
+      "boundary": "app_start",
+      "from_cache": false,
+      "checked_at": "2026-10-12T08:52:41.026666+00:00",
+      "fetched_at": "2026-10-12T08:52:41.026666+00:00",
+      "update_required": false,
+      "account_id": "h1-r1-lapse",
+      "tenant_id": "tnt_bridge_qa_3",
+      "surface_state": "F",
+      "state_note": "Agent messages are turned off",
+      "visibility": {
+        "settings": true,
+        "inbox": true,
+        "account_door": true,
+        "onboarding": false
+      },
+      "read_only": true,
+      "can_receive": false,
+      "can_decide": false,
+      "local": {
+        "enabled": false,
+        "onboarding": "",
+        "session": ""
+      },
+      "screening": {
+        "required": true
+      },
+      "consent_account_guard": true,
+      "texts_rejected": [],
+      "status": {
+        "api_version": "1",
+        "available": false,
+        "tenants": [
+          {
+            "tenant_id": "tnt_bridge_qa_3",
+            "tenant_name": "Lapsed synthetic org",
+            "eligible": false,
+            "endpoint": {
+              "id": "bep-h1-lapse",
+              "label": "Retained agent",
+              "state": "active"
+            },
+            "counts": {
+              "unread": 0,
+              "requests_pending": 0,
+              "blocked": 0
+            }
+          }
+        ]
+      },
+      "consent": null,
       "error": null
     }
   }

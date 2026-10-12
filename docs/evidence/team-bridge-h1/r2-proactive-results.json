@@ -1,0 +1,110 @@
+[
+  {
+    "theme_requested": "dark",
+    "theme_effective": "dark",
+    "facts_source": "proactive \u00b7 medium \u00b7 3 tools \u00b7 model/name",
+    "helper_room": 80,
+    "fits_in_room": true,
+    "painted_plain": "    proactive \u00b7 medium \u00b7 3 tools \u00b7 model/name",
+    "expected_prior_plain": "    proactive \u00b7 medium \u00b7 3 tools \u00b7 model/name",
+    "cell_width_actual": 45,
+    "cell_width_expected": 45,
+    "extra_cells": 0,
+    "marker_class": true,
+    "pane_size": [
+      31,
+      24
+    ],
+    "body_size": [
+      112,
+      24
+    ],
+    "app_size": [
+      150,
+      40
+    ],
+    "settled_pair_identical": true,
+    "result": "PASS"
+  },
+  {
+    "theme_requested": "dark",
+    "theme_effective": "dark",
+    "facts_source": "proactive \u00b7 medium \u00b7 3 tools \u00b7 model/name",
+    "helper_room": 27,
+    "fits_in_room": false,
+    "painted_plain": "    proactive \u00b7 medium \u00b7 3 too\u2026",
+    "expected_prior_plain": "    proactive \u00b7 medium \u00b7 3 tools \u00b7 model/name",
+    "cell_width_actual": 31,
+    "cell_width_expected": 45,
+    "extra_cells": -14,
+    "marker_class": true,
+    "pane_size": [
+      31,
+      24
+    ],
+    "body_size": [
+      112,
+      24
+    ],
+    "app_size": [
+      150,
+      40
+    ],
+    "settled_pair_identical": true,
+    "result": "PASS"
+  },
+  {
+    "theme_requested": "light",
+    "theme_effective": "light",
+    "facts_source": "proactive \u00b7 medium \u00b7 3 tools \u00b7 model/name",
+    "helper_room": 80,
+    "fits_in_room": true,
+    "painted_plain": "    proactive \u00b7 medium \u00b7 3 tools \u00b7 model/name",
+    "expected_prior_plain": "    proactive \u00b7 medium \u00b7 3 tools \u00b7 model/name",
+    "cell_width_actual": 45,
+    "cell_width_expected": 45,
+    "extra_cells": 0,
+    "marker_class": true,
+    "pane_size": [
+      31,
+      24
+    ],
+    "body_size": [
+      112,
+      24
+    ],
+    "app_size": [
+      150,
+      40
+    ],
+    "settled_pair_identical": true,
+    "result": "PASS"
+  },
+  {
+    "theme_requested": "light",
+    "theme_effective": "light",
+    "facts_source": "proactive \u00b7 medium \u00b7 3 tools \u00b7 model/name",
+    "helper_room": 27,
+    "fits_in_room": false,
+    "painted_plain": "    proactive \u00b7 medium \u00b7 3 too\u2026",
+    "expected_prior_plain": "    proactive \u00b7 medium \u00b7 3 tools \u00b7 model/name",
+    "cell_width_actual": 31,
+    "cell_width_expected": 45,
+    "extra_cells": -14,
+    "marker_class": true,
+    "pane_size": [
+      31,
+      24
+    ],
+    "body_size": [
+      112,
+      24
+    ],
+    "app_size": [
+      150,
+      40
+    ],
+    "settled_pair_identical": true,
+    "result": "PASS"
+  }
+]

@@ -279,6 +279,11 @@ def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _P
         if index:
             line.append((" · ", faint))
         line.append((f"{pending_indent}{part}", muted if part == "proactive" else faint))
+        # ONE indent, FIRST part only (review round 2, R10): without this reset
+        # every part carries the 4 spaces, the line overruns its caller's
+        # ``room - 4`` budget by 4*(parts-1) cells and the tail drops — measured
+        # 28→36 cells with `high` clipped on a populated 4-part facts line.
+        pending_indent = ""
     return line
 
 

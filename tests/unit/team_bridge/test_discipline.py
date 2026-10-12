@@ -27,8 +27,8 @@ from local_operator.team_bridge.client import (
     SCREENING_TEMPLATE_V1,
     SCREENING_TEMPLATE_V1_SHA256,
     SCREENING_VERSION_V1,
-    STATE_NOTE_KILL,
     STATE_NOTE_LAPSED,
+    STATE_NOTE_NEUTRAL,
     STATE_READY,
     STATE_SIGNED_OUT,
     STATE_UNAVAILABLE,
@@ -213,15 +213,13 @@ async def test_state_f_keeps_the_section_while_ineligible(
     counter = _Counter(lambda request: httpx.Response(200, json={"msg": "ok", "result": payload}))
     check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
     assert availability.section_visible("team_bridge", tmp_path) is True
-    # F asks the members-readable switch state ONCE to tell a CONFIRMED kill
-    # apart from the lapse default (review round 1, Q3): exactly two requests,
-    # and a confirmation that cannot be read stays the lapse sentence — never
-    # a claim of a kill that was not confirmed.
-    assert [r.url.path for r in counter.requests] == [
-        "/v1/messaging/status",
-        "/v1/tenants/tnt_1/messaging/state",
-    ]
-    assert check.state_note == STATE_NOTE_LAPSED
+    # R9: every F cause reads the NEUTRAL sentence and the round-1 tenants-state
+    # confirmation read is gone — the status dispatch is the ONLY request.
+    assert [r.url.path for r in counter.requests] == ["/v1/messaging/status"]
+    assert check.state_note == STATE_NOTE_NEUTRAL
+    # And the lapse reading is NOT admissible on an eligibility-only answer:
+    # no kill flags is scope-exclusion-shaped too (review round 2, R9).
+    assert check.state_note != STATE_NOTE_LAPSED
 
 
 @pytest.mark.asyncio
@@ -765,10 +763,27 @@ async def test_the_supported_api_version_shapes_admit(
 
 
 @pytest.mark.asyncio
-async def test_a_confirmed_kill_reads_the_kill_sentence_and_caches_with_it(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    "state_answer",
+    [
+        {"disabled": True, "ops_disabled": False, "effective": True},
+        {"disabled": False, "ops_disabled": False, "effective": False},
+        None,
+    ],
+    ids=["kill-confirmed", "no-flags", "state-route-unreadable"],
+)
+async def test_every_f_cause_reads_the_neutral_sentence_without_extra_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state_answer: dict[str, object] | None
 ):
-    """Q3/D3: F's sentence is the kill one ONLY when the switch confirms it."""
+    """R9: F's sentence is the closed set's NEUTRAL member for EVERY cause.
+
+    A confirmed kill, no flags at all and an unreadable confirmation must
+    render identical bytes, and the round-1 tenants-state read is gone — the
+    ``state_answer=None`` arm would 503 the probe if it were still called.
+    QA round 2 rendered a false "Plan ended" from an ops-killed status and
+    from a transport failure; the v1 payload carries no positive plan
+    evidence, so no cause may be attributed locally (S-1).
+    """
 
     payload = _ready_payload(
         available=False,
@@ -785,25 +800,26 @@ async def test_a_confirmed_kill_reads_the_kill_sentence_and_caches_with_it(
 
     def responder(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/messaging/state"):
-            body = {
-                "msg": "ok",
-                "result": {"disabled": True, "ops_disabled": False, "effective": True},
-            }
-            return httpx.Response(200, json=body)
+            if state_answer is None:
+                return httpx.Response(503, json={"msg": "unavailable"})
+            return httpx.Response(200, json={"msg": "ok", "result": state_answer})
         return httpx.Response(200, json={"msg": "ok", "result": payload})
 
     counter = _Counter(responder)
     discipline = _discipline(counter, tmp_path)
     check = await discipline.check(Boundary.APP_START)
-    assert check.state_note == STATE_NOTE_KILL
+    assert [r.url.path for r in counter.requests] == ["/v1/messaging/status"]
+    assert check.state_note == STATE_NOTE_NEUTRAL
     observed = availability.observed(tmp_path)
     assert observed is not None
     assert observed["read_only"] is True
-    assert observed["note"] == STATE_NOTE_KILL
-    # The cached answer keeps the sentence; no second confirmation read.
+    assert observed["note"] == STATE_NOTE_NEUTRAL
+    # A cache-expired re-check re-dispatches the STATUS only; still no state
+    # read, and the sentence is stable across the two answers.
     monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+    cached = await discipline.check(Boundary.SURFACE_OPEN)
+    assert cached.state_note == STATE_NOTE_NEUTRAL
     assert len(counter.requests) == 2
-    assert check.state_note == STATE_NOTE_KILL
 
 
 def test_surface_projection_matches_the_5_6_matrix():

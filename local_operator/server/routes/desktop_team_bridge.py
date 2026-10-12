@@ -225,9 +225,9 @@ async def status(
         # the retained endpoint's row — never "several rows, so none".
         "tenant_id": selected_tenant_id(check.payload),
         "surface_state": projection["surface_state"],
-        #: §5.6 F's sentence when this answer PROVES F ("Plan ended — reading
-        #: only" / "Agent messages are turned off"), else None (review round
-        #: 1, Q3 / design round 1, D3).
+        #: §5.6 F's sentence when this answer PROVES F — the neutral
+        #: "Agent messages are turned off" in v1 (review round 2, R9) — else
+        #: None (review round 1, Q3 / design round 1, D3).
         "state_note": check.state_note,
         "visibility": projection["visibility"],
         "read_only": projection["read_only"],

@@ -223,6 +223,22 @@ def _patience_policy() -> Any:
     return patience_engine.policy(config_dir())
 
 
+def _bridge_settings() -> Any:
+    """The bridge's OWN reader for the local machine prefs (review round 2, Q6).
+
+    ``TeamBridgeSettings.from_config(ConfigManager(paths.config_dir()))`` is
+    the exact pair the desktop status route's ``local`` block calls, and
+    ``paths.config_dir()`` is read per call — so the probe points it at the
+    watched directory, observes through the public bridge settings plumbing
+    rather than the raw config document, and a write from another process
+    lands on the next read (no restart).
+    """
+    from local_operator.paths import config_dir
+    from local_operator.team_bridge.settings import TeamBridgeSettings
+
+    return TeamBridgeSettings.from_config(ConfigManager(config_dir()))
+
+
 def _bash_shell(watcher: ConfigWatcher) -> str:
     """What `execute_bash` resolves per call (it reads through `paths.config_dir()`,
     which the probe points at the watcher's directory)."""
@@ -703,6 +719,19 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # is that very resolver against the watched directory, in the setting's own
     # units (hours).
     "projects.stale_after_hours": (2, lambda s, w: stale_after_s() / 3600.0),
+    # -- team_bridge: the local machine prefs, observed through the public
+    # bridge settings plumbing the status route's ``local`` block calls -------
+    # The section is LIVE because the surfaces consult these keys on every
+    # paint (the composed gate, RFC §5.4) — no restart. Observed through
+    # ``TeamBridgeSettings.from_config`` (the normalising reader IS what makes
+    # a stored value consumable, so the reader is what must move), never the
+    # raw document. The CI honesty test failed by name without these:
+    # "LIVE sections with no live-apply probe: ['team_bridge']".
+    "team_bridge.enabled": (True, lambda s, w: _bridge_settings().enabled),
+    "team_bridge.session": (
+        "synthetic-live-probe-session",
+        lambda s, w: _bridge_settings().session,
+    ),
 }
 
 #: LIVE sections whose keys have no session-side apply because a HOST owns

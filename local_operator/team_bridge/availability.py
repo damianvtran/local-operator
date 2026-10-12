@@ -52,11 +52,12 @@ def record(
     """Remember the last status answer this process observed for ``config_dir``.
 
     ``read_only``/``note`` are the §5.6 F posture: the flow cannot resume, and
-    ``note`` is the contract's own sentence ("Plan ended — reading only" /
-    "Agent messages are turned off") that the drainers render instead of
-    pretending an edit resumes anything. They travel with the SAME record the
-    status boundary wrote — one answer, one posture — so a surface never
-    re-derives the sentence nor fetches around this module.
+    ``note`` is the contract's own sentence that the drainers render instead of
+    pretending an edit resumes anything — v1 emits the neutral "Agent messages
+    are turned off", with "Plan ended — reading only" reserved for a future
+    positively-evidenced lapse (review round 2, R9). They travel with the SAME
+    record the status boundary wrote — one answer, one posture — so a surface
+    never re-derives the sentence nor fetches around this module.
     """
 
     _STATE[_key(config_dir)] = {

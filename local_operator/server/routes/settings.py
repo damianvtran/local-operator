@@ -84,9 +84,9 @@ class SettingView(BaseModel):
     #: A live sentence about this row's CURRENT server-side posture, and
     #: whether the row can change effective behaviour. Agent messages in
     #: §5.6 F (plan lapse / confirmed kill): the local preference rows stay
-    #: visible for honesty, but the note is the contract's own sentence
-    #: ("Plan ended — reading only" / "Agent messages are turned off") and
-    #: the UI presents the controls view-only rather than implying an edit
+    #: visible for honesty, but the note is the contract's own sentence — the
+    #: neutral "Agent messages are turned off" in v1 (review round 2, R9) —
+    #: and the UI presents the controls view-only rather than implying an edit
     #: resumes the flow (H1 review round 1, Q3/D3). Additive and optional,
     #: like the three fields above: a client that ignores them sees the
     #: response it saw before, and every other row carries the defaults.
