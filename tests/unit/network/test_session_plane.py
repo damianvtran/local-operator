@@ -2892,6 +2892,49 @@ def test_the_relay_warms_the_open_frame_strip_calls_at_start(
     assert calls == ["injection", "chrome"], calls
 
 
+def test_relay_start_runs_the_open_frame_prewarm_once(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the real startup hookup, not just the standalone warm body.
+
+    The event is a completion signal, not a performance assertion: removing
+    start()'s prewarm call must fail this cell even when the body test passes.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    warmed = threading.Event()
+    calls: list[int] = []
+
+    def _warm() -> None:
+        calls.append(threading.get_ident())
+        warmed.set()
+
+    monkeypatch.setattr(relay, "warm_open_frame_strip_now", _warm)
+    startup_thread = threading.get_ident()
+    try:
+        server_b.start()
+        assert warmed.wait(10), "relay startup never scheduled the strip warm"
+        assert len(calls) == 1, calls
+        assert calls[0] != startup_thread, "startup must not pay the warm inline"
+    finally:
+        server_b.stop()
+
+
+def test_open_frame_prewarm_thread_exhaustion_defers_only_the_warm(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Thread creation can fail before the warm body's failure guard is reached."""
+    _server_a, server_b, _h, _p = peer_pair
+
+    def _cannot_start(_thread: threading.Thread) -> None:
+        raise RuntimeError("synthetic thread exhaustion")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", _cannot_start)
+        with caplog.at_level(logging.DEBUG, logger=relay.__name__):
+            server_b._warm_open_frame_strip()  # noqa: SLF001 — startup's optional hook
+    assert "open-frame strip warm could not start" in caplog.text
+
+
 def test_the_owner_open_frame_sizes_the_reply_with_its_runs_included(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:

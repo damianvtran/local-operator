@@ -6,8 +6,10 @@ relay — and "where did the milliseconds go" is a question only rows from more
 than one of them can answer, correlated by time. A log line forces a choice of
 level the operator must enable globally; this trace is one file per process,
 turned on with ``LOP_OPEN_TRACE=<path>`` in exactly the process under study
-(a rig cell, or a live machine with the env set for one daemon), and it costs
-one module-level ``None`` check when it is off.
+(a rig cell, or a live machine with the env set for one daemon). Disabled
+tracing performs no JSON encoding or file I/O: the writer returns on a
+module-level ``None`` check. Call sites still read span-start clocks, so the
+disabled overhead is small, not literally zero.
 
 ROWS ARE APPEND-ONLY JSONL under a lock: ``at`` (epoch ms), ``stage``, an
 optional ``ms`` span the caller just finished timing, and whatever fields the
