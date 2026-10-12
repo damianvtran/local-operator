@@ -3139,10 +3139,11 @@ async def snapshot(
     request: Request,
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
-    journal_order: int = Query(default=0, ge=0, le=1),
-    order_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Query(
-        default=[], max_length=512
-    ),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3249,10 +3250,11 @@ async def history(
     limit: int = Query(default=100, ge=1, le=500),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
-    journal_order: int = Query(default=0, ge=0, le=1),
-    order_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Query(
-        default=[], max_length=512
-    ),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -5341,10 +5343,11 @@ async def events(
     frontend_replace: int = Query(default=0, ge=0),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
-    journal_order: int = Query(default=0, ge=0, le=1),
-    order_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Query(
-        default=[], max_length=512
-    ),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
     supplements: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must

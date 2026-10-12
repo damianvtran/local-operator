@@ -2819,7 +2819,13 @@ tool-call identity and supplement anchor where applicable). This corrects an
 already-streamed row even if the history-delta filter excluded it, without a
 later token/page. A streamed settle before fsync remains provisional. No scan
 runs per token or synchronously in the bridge event relay. Desktop subscribers
-also opt in, for live and replay alike. Cold page indexes issue the same late
+also opt in, for live and replay alike. The mesh's closed owner-dial auth
+allowlist forwards `journal_order`; it does not drop the declaration or borrow
+receiver authority. The actual attach handshake omits it for older owners and
+the runtime ANDs declaration with its own capability. New route flags use
+Annotated query constraints with ordinary Python defaults (0/None), so direct
+route callers retain legacy behavior as well as HTTP-bound callers.
+Cold page indexes issue the same late
 metadata correction; a raced/unavailable source requests authoritative reconcile.
 
 Order metadata is NOT frontend state: a snapshot's sequence watermark cannot

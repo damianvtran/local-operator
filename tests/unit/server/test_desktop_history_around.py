@@ -567,3 +567,18 @@ async def test_off_page_order_correction_survives_snapshot_cutover(
                 await stream.aclose()
         await harness.pool.close()
     ti._reset_for_tests()
+
+
+def test_source_route_defaults_are_plain_python_values():
+    import inspect
+
+    handlers = [
+        value
+        for _, value in inspect.getmembers(desktop_sessions, inspect.isfunction)
+        if "journal_order" in inspect.signature(value).parameters
+    ]
+    assert len(handlers) == 3
+    for handler in handlers:
+        parameters = inspect.signature(handler).parameters
+        assert parameters["journal_order"].default == 0
+        assert parameters["order_ids"].default is None
