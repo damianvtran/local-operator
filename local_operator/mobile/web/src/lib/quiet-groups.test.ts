@@ -219,7 +219,7 @@ describe("the relay-web vocabulary's own boundaries", () => {
 		// Parent/subagent are explicit internal receipt kinds, unlike the generic
 		// notice above. Their full rows stay available through the existing fold.
 		for (const kind of ["parent_message", "subagent_message"] as const) {
-			const rows = around({...peer("h3"), kind});
+			const rows = around({...peer("h3"), kind, details: {direction: "to_child"}});
 			const groups = quietGroupsOf(rows);
 			expect(groups).toHaveLength(1);
 			expect(groups[0]!.rowIds).toEqual(rows.map(row => row.id));
@@ -287,6 +287,13 @@ it("one hub bridges three actual tools without counting as work or weakening bou
 	expect(quietGroupsOf([tools[0]!, hub, tools[1]!])).toEqual([]);
 	expect(quietGroupsOf([hub, {...hub, id: "h2", kind: "subagent_message"}])).toHaveLength(1);
 	expect(quietGroupsOf([tools[0]!, hub, user("u"), tools[1]!, tools[2]!])).toEqual([]);
+});
+
+it("unclassified legacy parent/subagent launch rows stay semantic boundaries", () => {
+	for (const kind of ["parent_message", "subagent_message"] as const) {
+		const launch = {...peer("launch"), kind, text: "any launch wording", details: {}};
+		expect(quietGroupsOf([peer("p1"), peer("p2"), launch, peer("p3"), peer("p4")]).map(group => group.rowIds)).toEqual([["p1", "p2"], ["p3", "p4"]]);
+	}
 });
 
 function user(id: string): QuietGroupRecord {

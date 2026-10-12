@@ -114,6 +114,14 @@ export type SegmentSpan = { from: number; to: number };
  * starts nothing. On this wire only two kinds are triggers: an inbound peer
  * message and a wake receipt.
  */
+/** A parent-looking row can be the real child launch/user request. Only
+ * producer direction proves arriving hub traffic; old unclassified rows retain
+ * their inline rendering and boundary rather than guessing from body or IDs. */
+export function isHubReceipt(record: Pick<TranscriptEntry, "kind" | "details">): boolean {
+	return (record.kind === "parent_message" || record.kind === "subagent_message") &&
+		(record.details?.direction === "to_child" || record.details?.direction === "to_parent");
+}
+
 const HUB_LABEL_SPACE = /\s+/g;
 const HUB_LABEL_CONTROLS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g;
 
@@ -129,7 +137,7 @@ export function hubReceiptLabel(record: Pick<TranscriptEntry, "kind" | "details"
 }
 
 function quietFamilyOf(record: QuietGroupRecord): QuietGroupFamily | null {
-	if (record.kind === "peer_message" || record.kind === "parent_message" || record.kind === "subagent_message") return "peer";
+	if (record.kind === "peer_message" || isHubReceipt(record)) return "peer";
 	if (record.kind === "notice" && record.details?.notice_kind === "wake") return "wake";
 	return null;
 }
@@ -157,9 +165,10 @@ function groupSplitterOf(record: QuietGroupRecord): boolean {
 		case "reasoning":
 			return false;
 		case "peer_message":
+			return false;
 		case "parent_message":
 		case "subagent_message":
-			return false;
+			return !isHubReceipt(record);
 		case "notice":
 			return record.details?.notice_kind !== "wake";
 		case "assistant":
@@ -285,7 +294,7 @@ export function quietGroupOfSegment(
 			if (isFailedCall(record)) failed += 1;
 			continue;
 		}
-		if (record.kind === "peer_message" || record.kind === "parent_message" || record.kind === "subagent_message") {
+		if (record.kind === "peer_message" || isHubReceipt(record)) {
 			const label = record.kind === "peer_message" ? quietSenderLabel(record.details?.sender ?? {}) : hubReceiptLabel(record);
 			senderCounts.set(label, (senderCounts.get(label) ?? 0) + 1);
 		}
@@ -331,7 +340,7 @@ export function quietGroupOfSegment(
 		failed,
 		open: options.open ?? (span.to === records.length - 1),
 		rowIds,
-		...(realActions >= 3 && (triggers.length < 2 || triggers.some(r => r.kind === "parent_message" || r.kind === "subagent_message")) ? {mixedActions: true} : {}),
+		...(realActions >= 3 && (triggers.length < 2 || triggers.some(r => isHubReceipt(r))) ? {mixedActions: true} : {}),
 		...(triggers.some(r => r.details?.expects_reply === true) ? {replyRequested: triggers.filter(r => r.details?.expects_reply === true).length} : {}),
 		...(triggers.some(r => r.details?.steer === true) ? {steered: triggers.filter(r => r.details?.steer === true).length} : {}),
 	};

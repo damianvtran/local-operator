@@ -12,7 +12,7 @@
 // session containing every restored row (see the PR's before/after evidence);
 // keeping them as literal rows rather than hand-built objects is what makes
 // this a test of the contract between the two halves rather than of a mock.
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Transcript } from "./components/transcript";
 import type { TranscriptEntry } from "./types";
@@ -211,10 +211,12 @@ describe("a hub steer never leaks its envelope", () => {
 		render(
 			<Transcript
 				pid="1"
-				entries={[entry({ id: "a", kind: "parent_message", text: "focus on the parser" })]}
+				entries={[entry({ id: "a", kind: "parent_message", text: "focus on the parser", details: {direction: "to_child", body: "focus on the parser", text: "<parent-message>model envelope</parent-message>", steer: true} })]}
 			/>,
 		);
 
+		expect(screen.queryByText("focus on the parser")).toBeNull();
+		fireEvent.click(screen.getByText("Hub · From Parent · Steered").closest("button")!);
 		expect(screen.getByText("focus on the parser")).toBeTruthy();
 		expect(document.body.textContent).not.toContain("<parent-message>");
 	});
