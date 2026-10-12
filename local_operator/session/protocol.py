@@ -665,6 +665,21 @@ class OwningSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
+    def request_graceful_cancel(self, reason: str = "cancelled") -> None:
+        """Ask the loop to stop at the next safe boundary, not mid-tool.
+
+        TYPE-ONLY declaration of the concrete
+        ``Session.request_graceful_cancel``: a viewer cannot steer another
+        process's turn loop, so the method belongs on the owning extension,
+        not the shared ``SessionProtocol`` -- the same segregation as
+        :meth:`subscribe_requests` and :meth:`shutdown_owned_work` (review
+        round 1, R1). Callers holding an owning session get a spelled
+        signature instead of widening it by cast. The request is sticky and
+        honoured at every next-model safe point; the turn then ends as
+        ``aborted`` with completed work intact.
+        """
+        ...
+
 
 @runtime_checkable
 class ViewerSessionProtocol(SessionProtocol, Protocol):
