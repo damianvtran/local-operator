@@ -431,3 +431,288 @@ def test_unparseable_session_namespace_is_not_idle(isolated: Path) -> None:
     with pytest.raises(update.UpdateError, match="cannot prove fleet idle"):
         update.install_into_generation(isolated, version="0.70.7", runner=source_runner("0.70.7"))
     assert bad.read_text() == "{broken"
+
+
+def test_wrong_owned_lock_refuses_before_metadata_write(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import stat
+
+    root = update.stable_root()
+    root.mkdir(parents=True)
+    lock = root / tx.LOCK_NAME
+    lock.write_text("KEEP-LOCK-BYTES")
+    real = os.fstat
+
+    def foreign_regular(fd: int):
+        sample = real(fd)
+        if stat.S_ISREG(sample.st_mode):
+            values = list(sample)
+            values[4] = sample.st_uid + 1  # labelled ownership observation seam
+            return os.stat_result(values)
+        return sample
+
+    monkeypatch.setattr(tx.os, "fstat", foreign_regular)
+    with pytest.raises(tx.InstallTransactionError, match="unsafe or changed"):
+        with tx.transaction(root, operation="foreign lock"):
+            pytest.fail("foreign-owned lock accepted")
+    assert lock.read_text() == "KEEP-LOCK-BYTES"
+
+
+@pytest.mark.parametrize("shape", ["symlink", "directory", "fifo", "hardlink", "writable"])
+def test_unsafe_existing_lock_shape_preserves_external_bytes(isolated: Path, shape: str) -> None:
+    root = update.stable_root()
+    root.mkdir(parents=True)
+    lock = root / tx.LOCK_NAME
+    sentinel = isolated / "sentinel"
+    sentinel.write_text("KEEP-USER-BYTES")
+    if shape == "symlink":
+        lock.symlink_to(sentinel)
+    elif shape == "directory":
+        lock.mkdir()
+    elif shape == "fifo":
+        os.mkfifo(lock)
+    elif shape == "hardlink":
+        os.link(sentinel, lock)
+    else:
+        lock.write_text("KEEP-LOCK-BYTES")
+        lock.chmod(0o666)
+    with pytest.raises(tx.InstallTransactionError):
+        with tx.transaction(root, operation="unsafe fixture", timeout=0):
+            pytest.fail("unsafe lock accepted")
+    assert sentinel.read_text() == "KEEP-USER-BYTES"
+    print(f"ACTUAL unsafe lock {shape} refused; external sentinel unchanged")
+    if shape == "writable":
+        assert lock.read_text() == "KEEP-LOCK-BYTES"
+
+
+def test_wrong_owned_root_refuses_before_lock_creation(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = update.stable_root()
+    root.mkdir(parents=True)
+    owner = os.getuid()
+    monkeypatch.setattr(tx.os, "getuid", lambda: owner + 1)
+    with pytest.raises(tx.InstallTransactionError, match="owned directory"):
+        with tx.transaction(root, operation="foreign owner"):
+            pytest.fail("foreign-owned directory accepted")
+    assert not (root / tx.LOCK_NAME).exists()
+
+
+def test_root_replacement_after_flock_refuses_before_metadata_write(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    root = update.stable_root()
+    root.mkdir(parents=True)
+    lock = root / tx.LOCK_NAME
+    lock.write_text("KEEP-LOCK-BYTES")
+    moved = root.with_name("detached-root")
+    real = fcntl.flock
+    swapped = False
+
+    def replace_after_acquire(fd: int, mode: int) -> None:
+        nonlocal swapped
+        real(fd, mode)
+        if mode & fcntl.LOCK_EX and not swapped:
+            swapped = True
+            root.rename(moved)
+            root.mkdir()
+            (root / tx.LOCK_NAME).write_text("KEEP-NEW-LOCK-BYTES")
+
+    monkeypatch.setattr(fcntl, "flock", replace_after_acquire)
+    with pytest.raises(tx.InstallTransactionError, match="changed install lock/root"):
+        with tx.transaction(root, operation="root race"):
+            pytest.fail("changed root accepted")
+    assert (moved / tx.LOCK_NAME).read_text() == "KEEP-LOCK-BYTES"
+    assert (root / tx.LOCK_NAME).read_text() == "KEEP-NEW-LOCK-BYTES"
+
+
+def test_identical_exact_artifact_reuses_current_without_second_builder(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(update, "_HOST_IS_MACOS", False)
+    monkeypatch.setattr(
+        update, "_pypi_release_document", lambda target: (publication_document(target), "")
+    )
+    builds = 0
+
+    def build(argv: list[str], env: dict[str, str]) -> int:
+        nonlocal builds
+        builds += 1
+        return tiny_tree(argv, env)
+
+    first = update.install_into_generation(version="0.70.7", runner=build)
+    second = update.install_into_generation(version="0.70.7", runner=build)
+    assert first == second == update.current_generation()
+    assert builds == 1
+    print(f"ACTUAL identical exact reuse same={first == second}, builder_calls={builds}")
+    assert len(list(update.generations_dir().iterdir())) == 1
+
+
+def test_actual_mesh_capture_bound_tracks_worker_and_preserves_failure_output(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network.meshupdate import _CapturedInstall
+
+    candidate, nonce, _ = update._register_candidate("mesh-bound", "0.70.7", "source")
+    real = tx.run_installer
+    monkeypatch.setattr(
+        tx, "run_installer", lambda argv, **kwargs: real(argv, timeout=2.0, **kwargs)
+    )
+    capture = _CapturedInstall()
+    with pytest.raises(tx.InstallTransactionError, match="exceeded"):
+        capture(
+            [
+                sys.executable,
+                "-c",
+                "import sys,time; print('mesh failure evidence',flush=True);time.sleep(60)",
+            ],
+            update._generation_env(candidate),
+        )
+    record = tx.read_record(candidate / tx.ATTEMPT_NAME)
+    assert record is not None and isinstance(record.get("worker"), dict)
+    assert "mesh failure evidence" in capture.output
+    print(
+        f"ACTUAL mesh bound worker={record['worker']['pid']} "
+        f"alive={tx.owner_alive(record['worker'])} output={capture.output!r}"
+    )
+    assert tx.owner_alive(record["worker"]) is False
+    update._discard_candidate(candidate, nonce)
+
+
+def test_actual_mesh_capture_cancel_reaps_owned_worker(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network.meshupdate import _CapturedInstall
+
+    candidate, nonce, _ = update._register_candidate("mesh-cancel", "0.70.7", "source")
+    real = subprocess.Popen.wait
+    cancelled = False
+
+    def cancel_once(process, *args, **kwargs):
+        nonlocal cancelled
+        if process.args[0] == sys.executable and not cancelled:
+            cancelled = True
+            raise KeyboardInterrupt("owned fixture cancellation")
+        return real(process, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "wait", cancel_once)
+    with pytest.raises(KeyboardInterrupt):
+        _CapturedInstall()(
+            [sys.executable, "-c", "import time;time.sleep(60)"], update._generation_env(candidate)
+        )
+    record = tx.read_record(candidate / tx.ATTEMPT_NAME)
+    assert record is not None and tx.owner_alive(record["worker"]) is False
+    print(f"ACTUAL mesh cancellation worker={record['worker']['pid']} alive=False")
+    update._discard_candidate(candidate, nonce)
+
+
+def test_actual_mesh_capture_owner_crash_keeps_live_worker_candidate(isolated: Path) -> None:
+    import signal
+    import time
+
+    source = Path(update.__file__).resolve().parent.parent
+    script = """from pathlib import Path
+import sys
+from local_operator import update
+from local_operator.network.meshupdate import _CapturedInstall
+candidate,_,_=update._register_candidate('mesh-crash','0.70.7','source')
+print(str(candidate),flush=True)
+_CapturedInstall()([sys.executable,'-c','import time;time.sleep(60)'],
+                   update._generation_env(candidate))
+"""
+    env = {
+        "HOME": str(isolated),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(isolated / "child-config"),
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": str(source),
+    }
+    owner = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env=env,
+        cwd=isolated,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    worker = None
+    try:
+        assert owner.stdout is not None
+        candidate = Path(owner.stdout.readline().strip())
+        assert candidate.is_relative_to(isolated)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            record = tx.read_record(candidate / tx.ATTEMPT_NAME)
+            if record and record.get("worker"):
+                worker = record["worker"]["pid"]
+                break
+            time.sleep(0.01)
+        assert worker is not None
+        os.kill(owner.pid, signal.SIGKILL)
+        owner.wait(timeout=3)
+        assert tx.attempt_protected(candidate)
+        plan = update.prune_generations(keep=0, referenced=(), now=10**12)
+        assert candidate.exists() and not plan.removed
+        print(
+            f"ACTUAL crashed mesh owner={owner.pid} worker={worker} "
+            f"protected={tx.attempt_protected(candidate)} "
+            f"candidate_exists={candidate.exists()} prune_removed={len(plan.removed)}"
+        )
+    finally:
+        if worker:
+            try:
+                os.killpg(worker, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if owner.poll() is None:
+            os.killpg(owner.pid, signal.SIGKILL)
+            owner.wait(timeout=3)
+
+
+def test_actual_member_handler_reports_superseded_tail_current_and_serving(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.network import meshupdate as mesh
+
+    monkeypatch.setattr(update, "_HOST_IS_MACOS", False)
+    monkeypatch.setattr(
+        update, "_pypi_release_document", lambda target: (publication_document(target), "")
+    )
+    update.install_into_generation(isolated, version="0.70.6", runner=source_runner("0.70.6"))
+    monkeypatch.setattr(mesh, "detect_install_kind", lambda: update.InstallKind.UV_TOOL)
+    monkeypatch.setattr(
+        mesh,
+        "current_member_version",
+        lambda: update.generation_version(update.current_generation()),
+    )
+    monkeypatch.setattr(
+        mesh, "check_published", lambda target: (True, "controlled publication dependency")
+    )
+    monkeypatch.setattr(mesh, "_audit_member", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mesh, "roll_services_after_reply", lambda: None)
+    monkeypatch.setattr(mesh, "reengage_displaced", lambda *args, **kwargs: (0, ""))
+
+    def supersede(*args, **kwargs):
+        update.install_into_generation(version="0.70.8", runner=tiny_tree)
+        return [], "controlled external convergence seam"
+
+    monkeypatch.setattr(mesh, "refresh_runtimes", supersede)
+    # Minimal controlled context: actual handler body, not a serving/network proof.
+    server: Any = SimpleNamespace(root=isolated / "config")
+    result = mesh.member_execute(
+        server,
+        None,
+        {"target": {"version": "0.70.7", "source_ref": ""}},
+        runner=tiny_tree,
+    )
+    assert result["state"] == "done"
+    assert result["promoted"] == "0.70.7"
+    assert result["now_current"] == result["version"] == "0.70.8"
+    assert result["serving"] == mesh.origin_target()["version"]
+    assert update.generation_version(update.current_generation()) == "0.70.8"
+    print("ACTUAL superseded member receipt " + json.dumps(result, sort_keys=True))

@@ -347,10 +347,15 @@ class _CapturedInstall:
         self.output = ""
 
     def __call__(self, argv: list[str], env: dict[str, str]) -> int:
-        proc = subprocess.run(argv, check=False, env=env, capture_output=True, text=True)
-        if int(proc.returncode) != 0:
-            self.output = _flatten_output(proc.stdout, proc.stderr)
-        return int(proc.returncode)
+        from local_operator.install_transaction import run_installer
+
+        code = run_installer(argv, env=env, on_output=self._remember_output)
+        if code == 0:
+            self.output = ""
+        return code
+
+    def _remember_output(self, output: str) -> None:
+        self.output = _flatten_output(output)
 
 
 def _flatten_output(*chunks: str) -> str:
@@ -1069,7 +1074,13 @@ def _execute_validated(
         }
 
     version_now = current_member_version()
-    if version_now != target_version:
+    # Another registered candidate may complete before or during the unlocked
+    # convergence tail. A newer current does not undo this successful promotion.
+    from local_operator.update import parse_version
+
+    observed = parse_version(version_now)
+    requested = parse_version(target_version)
+    if version_now != target_version and not (observed and requested and observed > requested):
         _audit_member(
             server,
             link,
@@ -1100,11 +1111,9 @@ def _execute_validated(
         rollout=rollout,
         detail={"method": method, "from": current, "version": target_version},
     )
-    # THE TAIL RUNS UNDER THE SAME LOCK (agent review round 1, m5): the
-    # lock covers the WHOLE pass, so a second origin naming a distinct
-    # target while the sweep/re-engage window is open is refused
-    # ``update_in_progress`` instead of installing under a rotation the
-    # first receipt is about to describe.
+    # Convergence is outside the installation transaction. Reconcile current
+    # AFTER it: the promoted generation and this relay's serving image are not
+    # necessarily what a fresh process will load when the receipt is composed.
     from local_operator.network import relay
 
     remaining = relay.slow_op_remaining_s()
@@ -1122,7 +1131,14 @@ def _execute_validated(
     )
     engaged, engage_note = reengage_displaced(root, snapshot, outcomes, budget=left)
     other = len(outcomes) - moved - kept
+    now_current = current_member_version()
+    serving = origin_target().get("version", "")
     reason = f"this device moved from {current or 'an unknown build'} to {target_version}"
+    if now_current != target_version:
+        reason = (
+            f"this pass promoted {target_version}; current is now "
+            f"{now_current or 'unconfirmed'}; serving relay is {serving or 'unconfirmed'}"
+        )
     if outcomes:
         reason += f"; {moved} session(s) retired for the new build, {kept} kept"
         if other > 0:
@@ -1137,7 +1153,10 @@ def _execute_validated(
         "code": "",
         "reason": reason,
         "method": method,
-        "version": target_version,
+        "version": now_current,
+        "promoted": target_version,
+        "now_current": now_current,
+        "serving": serving,
         "sessions": {"moved": moved, "kept": kept},
         "updated_at": time.time(),
     }

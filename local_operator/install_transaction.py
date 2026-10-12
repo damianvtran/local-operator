@@ -11,15 +11,17 @@ import errno
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from local_operator import procstate
 
@@ -66,10 +68,30 @@ def owner_alive(record: dict[str, Any]) -> bool | None:
 
 
 def read_record(path: Path) -> dict[str, Any] | None:
+    # Observation must not follow an unsafe lock/attempt name into unrelated
+    # bytes, nor block on a FIFO. No create/acquire/update is involved here.
+    descriptor: int | None = None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return None
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
+        sample = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(sample.st_mode)
+            or sample.st_nlink != 1
+            or (os.name == "posix" and sample.st_uid != os.getuid())
+        ):
+            return None
+        with os.fdopen(descriptor, encoding="utf-8") as stream:
+            descriptor = None
+            value = json.load(stream)
     except (OSError, ValueError):
         return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     return value if isinstance(value, dict) else None
 
 
@@ -79,6 +101,8 @@ class Transaction:
     descriptor: int
     pid: int
     thread: int
+    root_device: int
+    root_inode: int
 
     def validate(self, root: Path) -> None:
         if getattr(_LOCAL, "tokens", {}).get(self.root) is not self:
@@ -91,13 +115,42 @@ class Transaction:
             raise InstallTransactionError("install transaction belongs to another root or owner")
         try:
             held = os.fstat(self.descriptor)
-            named = (self.root / LOCK_NAME).stat()
+            named = (self.root / LOCK_NAME).lstat()
+            directory = self.root.lstat()
         except OSError as exc:
             raise InstallTransactionError(
                 "install transaction no longer holds its root inode"
             ) from exc
-        if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+        if (
+            not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != os.getuid()
+            or (directory.st_dev, directory.st_ino) != (self.root_device, self.root_inode)
+            or not stat.S_ISREG(named.st_mode)
+            or named.st_uid != os.getuid()
+            or named.st_nlink != 1
+            or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
+        ):
             raise InstallTransactionError("install lock inode was replaced; refusing mutation")
+
+
+def _validate_lock_identity(root: Path, root_fd: int, fd: int) -> None:
+    held = os.fstat(fd)
+    named = os.stat(LOCK_NAME, dir_fd=root_fd, follow_symlinks=False)
+    directory = os.fstat(root_fd)
+    visible = root.lstat()
+    if (
+        not stat.S_ISREG(held.st_mode)
+        or not stat.S_ISREG(named.st_mode)
+        or held.st_uid != os.getuid()
+        or held.st_nlink != 1
+        or held.st_mode & 0o022
+        or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
+        or not stat.S_ISDIR(visible.st_mode)
+        or (directory.st_dev, directory.st_ino) != (visible.st_dev, visible.st_ino)
+    ):
+        raise InstallTransactionError(
+            "unsafe or changed install lock/root identity; nothing was changed"
+        )
 
 
 @contextmanager
@@ -130,6 +183,7 @@ def transaction(
     if tokens is None:
         tokens = _LOCAL.tokens = {}
     fd: int | None = None
+    root_fd: int | None = None
     locked = False
     try:
         existing = tokens.get(root)
@@ -139,7 +193,21 @@ def transaction(
             yield existing
             return
         root.mkdir(parents=True, exist_ok=True)
-        fd = os.open(root / LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        # Anchor creation to the owned directory; never follow a lock symlink
+        # or truncate unrelated bytes merely because flock accepted its inode.
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        directory = os.fstat(root_fd)
+        if directory.st_uid != os.getuid() or not stat.S_ISDIR(directory.st_mode):
+            raise InstallTransactionError(
+                "install root is not an owned directory; nothing was changed"
+            )
+        fd = os.open(
+            LOCK_NAME,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600,
+            dir_fd=root_fd,
+        )
+        _validate_lock_identity(root, root_fd, fd)
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -156,6 +224,7 @@ def transaction(
                         "(lop install status shows observational details)"
                     ) from None
                 time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        _validate_lock_identity(root, root_fd, fd)
         payload = {
             **_identity(),
             "root": str(root),
@@ -164,7 +233,9 @@ def transaction(
         }
         os.ftruncate(fd, 0)
         os.write(fd, json.dumps(payload).encode())
-        token = Transaction(root, fd, os.getpid(), threading.get_ident())
+        token = Transaction(
+            root, fd, os.getpid(), threading.get_ident(), directory.st_dev, directory.st_ino
+        )
         tokens[root] = token
         try:
             token.validate(root)
@@ -178,6 +249,8 @@ def transaction(
             if locked:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+        if root_fd is not None:
+            os.close(root_fd)
         mutex.release()
 
 
@@ -241,6 +314,7 @@ def run_installer(
     env: dict[str, str] | None = None,
     executable: str | None = None,
     timeout: float = 1800.0,
+    on_output: Callable[[str], None] | None = None,
 ) -> int:
     """Bound and reap the exact child group, including cancellation and leaks.
 
@@ -251,10 +325,20 @@ def run_installer(
     from local_operator.tools import group_reaper
 
     process: subprocess.Popen[bytes] | None = None
+    # A file avoids both pipe backpressure and unbounded in-memory capture.
+    # Read only the bounded head used by mesh failure receipts, after reaping.
+    output = tempfile.TemporaryFile() if on_output is not None else None
     try:
         generation = Path(env["UV_TOOL_DIR"]).parent if env and "UV_TOOL_DIR" in env else None
         if generation is None:
-            process = subprocess.Popen(argv, env=env, executable=executable, start_new_session=True)
+            process = subprocess.Popen(
+                argv,
+                env=env,
+                executable=executable,
+                start_new_session=True,
+                stdout=output,
+                stderr=subprocess.STDOUT if output else None,
+            )
         else:
             with transaction(generation.parent.parent, operation="register candidate worker"):
                 path = generation / ATTEMPT_NAME
@@ -266,7 +350,12 @@ def run_installer(
                 record["worker_pending"] = True
                 path.write_text(json.dumps(record), encoding="utf-8")
                 process = subprocess.Popen(
-                    argv, env=env, executable=executable, start_new_session=True
+                    argv,
+                    env=env,
+                    executable=executable,
+                    start_new_session=True,
+                    stdout=output,
+                    stderr=subprocess.STDOUT if output else None,
                 )
                 record["worker"] = {
                     "pid": process.pid,
@@ -282,8 +371,17 @@ def run_installer(
             "retry the update"
         ) from exc
     finally:
-        if process is not None:
-            _reap_installer(process)
+        try:
+            if process is not None:
+                _reap_installer(process)
+        finally:
+            if output is not None:
+                try:
+                    output.seek(0)
+                    if on_output is not None:
+                        on_output(output.read(65536).decode("utf-8", "replace"))
+                finally:
+                    output.close()
 
 
 def _reap_installer(process: subprocess.Popen[bytes]) -> None:
@@ -320,7 +418,13 @@ def status(root: Path) -> dict[str, Any]:
     metadata = read_record(path)
     owners: list[int] | None = None
     try:
-        stat = path.stat()
+        sample = path.lstat()
+        if (
+            not stat.S_ISREG(sample.st_mode)
+            or sample.st_nlink != 1
+            or (os.name == "posix" and sample.st_uid != os.getuid())
+        ):
+            return {"root": str(root), "os_owners": None, "metadata": None, "metadata_alive": None}
     except FileNotFoundError:
         return {"root": str(root), "os_owners": [], "metadata": None, "metadata_alive": None}
     except OSError:
@@ -333,9 +437,9 @@ def status(root: Path) -> dict[str, Any]:
                 if len(fields) >= 6 and fields[1] == "FLOCK":
                     major, minor, inode = fields[5].split(":")
                     if (int(major, 16), int(minor, 16), int(inode)) == (
-                        os.major(stat.st_dev),
-                        os.minor(stat.st_dev),
-                        stat.st_ino,
+                        os.major(sample.st_dev),
+                        os.minor(sample.st_dev),
+                        sample.st_ino,
                     ):
                         owners.append(int(fields[4]))
         elif sys.platform == "darwin":

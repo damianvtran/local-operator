@@ -731,7 +731,7 @@ def test_a_failed_install_carries_the_installers_own_output(
 
     The generation route runs through ``_CapturedInstall`` when no test runner
     is injected; the classic arm's own capture is covered by its argv cell and
-    the label cell above. Pinned at the subprocess seam, never a real uv.
+    the label cell above. Pinned at the shared owned-runner seam, never a real uv.
     """
     from local_operator import update as update_mod
 
@@ -740,12 +740,13 @@ def test_a_failed_install_carries_the_installers_own_output(
     _concrete_member(monkeypatch, current="0.0.1")
     monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
 
-    class _Proc:
-        returncode = 1
-        stdout = ""
-        stderr = "error: No space left on device (os error 28)"
+    from local_operator import install_transaction
 
-    monkeypatch.setattr(meshupdate.subprocess, "run", lambda *a, **kw: _Proc())
+    def _captured_failure(argv: Any, *, on_output: Any, **kwargs: Any) -> int:
+        on_output("error: No space left on device (os error 28)")
+        return 1
+
+    monkeypatch.setattr(install_transaction, "run_installer", _captured_failure)
 
     def _fake_install(source: Any = None, version: str = "", runner: Any = None) -> None:
         assert runner is not None
