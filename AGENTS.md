@@ -1358,7 +1358,11 @@ it landed.
    reviewed fix, never regeneration in the publisher or an audit/eligibility
    waiver. `publish.yml` independently repeats these invariants unconditionally
    on the release tag or dispatched SHA before build/publication, with an event
-   SHA assertion to reject a moved tag. Dispatch remains rehearsal-only.
+   SHA assertion to reject a moved tag. Downstream source-consuming jobs pin
+   `github.sha` directly and verify HEAD before any build/upload, so a tag moved
+   after the gate cannot replace its validated bytes; extension change detection
+   uses that same verified commit. The release tag remains metadata, not a later
+   source resolver. Dispatch remains rehearsal-only.
 
 4. **Tag and publish** from the merge commit of that bump, then install and
    smoke (mechanics below). The release notes cover **every PR in the
