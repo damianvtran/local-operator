@@ -82,6 +82,14 @@ EFFORT_ORDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xh
 #: unaffected by the move.
 SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
 
+#: A chain's explicit ``auto`` is a reset, not a depth: leave the primary's
+#: override behind and use the TARGET's own default (including a router's auto).
+#: Keep it separate from the fixed vocabulary/ordinal ladder so cheapest-rung
+#: selection, effort cycling and existing fixed-level consumers do not rank it.
+#: Absence still means carry/clamp the primary choice; conflating the two would
+#: silently change every legacy selector and effort-less mapping in user config.
+FALLBACK_EFFORTS = SUPPORTED_EFFORTS | {"auto"}
+
 
 def is_effort_sentinel(level: str) -> bool:
     """Whether ``level`` is a sentinel rather than a rankable rung.
