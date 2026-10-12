@@ -36,7 +36,8 @@ class Policy:
     template_sha256: str = SCREENING_TEMPLATE_V1_SHA256
     default_model: str | None = "qa/default-model"
     admission_revision: str = "rev-1"
-    approved_serving_identities: tuple[str, ...] = ()
+    provider: str = "openai"
+    approved_serving_identities: tuple[str, ...] = ("qa/default-model",)
 
 
 class Runner:
@@ -734,3 +735,79 @@ def test_v2_store_migrates_additively_preserving_owner_and_tuple(tmp_path) -> No
     assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone() == (
         "4",
     )
+
+
+def test_allow_receipt_with_categories_is_corrupt_not_cached(tmp_path) -> None:
+    """R6 static-cache adjunct: an allow verdict carrying rejection
+    categories is DAMAGED metadata — consume refuses (proof_corrupt), no
+    silent coalescing to [] and no delivery on corrupted proof."""
+
+    import sqlite3 as _sqlite3
+
+    from local_operator.team_bridge.store import StoreRefused, _owner_key
+
+    store, owner = _setup(tmp_path)
+    epoch = store.publish_screening_policy(
+        owner,
+        version=SCREENING_VERSION_V1,
+        template_sha256=SCREENING_TEMPLATE_V1_SHA256,
+        default_model="qa/default-model",
+        revision="rev-1",
+    )
+    conn = _sqlite3.connect(state_db_path(tmp_path))
+    try:
+        conn.execute(
+            "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
+            "template_sha256, prompt_version, model, verdict, categories, "
+            "envelope_digest, admission_revision, policy_epoch, creator_generation, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                _owner_key(owner),
+                "bmsg_c",
+                "b" * 64,
+                SCREENING_TEMPLATE_V1_SHA256,
+                SCREENING_VERSION_V1,
+                "qa/default-model",
+                "allow",
+                '["prompt_injection"]',
+                "e" * 64,
+                "rev-1",
+                epoch,
+                owner.enrollment_generation,
+                0.0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    with pytest.raises(StoreRefused) as err:
+        store.consume_screening_receipt(
+            owner,
+            body_sha256="b" * 64,
+            template_sha256=SCREENING_TEMPLATE_V1_SHA256,
+            model="qa/default-model",
+            admission_revision="rev-1",
+            envelope_digest="e" * 64,
+        )
+    assert err.value.code == "proof_corrupt"
+
+
+def test_loop_lock_table_is_loop_owned_not_weak_key_retained(tmp_path) -> None:
+    """R6/Q15: the lock table lives ON the loop — the weak-key dictionary
+    path (whose value strongly references its own key, so a finished loop
+    can never be collected) is not taken for ordinary loops."""
+
+    import asyncio as _asyncio
+
+    from local_operator.team_bridge import screening as _screening
+
+    before = len(_screening._ACCOUNT_LOCKS)
+
+    async def use() -> None:
+        _screening._account_lock(tmp_path, _owner())
+        loop = _asyncio.get_running_loop()
+        assert getattr(loop, "_team_bridge_account_locks", None) is not None
+
+    _asyncio.run(use())
+    # No weak-key entry was created: nothing retains the finished loop.
+    assert len(_screening._ACCOUNT_LOCKS) == before

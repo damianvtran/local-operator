@@ -591,16 +591,33 @@ def _persist_hold(
 #: Cross-call/cross-process exclusion is the NATIVE account turn; this lock
 #: only serializes same-loop contenders so they queue rather than race the
 #: claim.
+#: Fallback lock table for loops that refuse attribute assignment (rare):
+#: kept OUT of the default path because a WeakKeyDictionary keyed by the
+#: loop can never collect — each value (dict -> asyncio.Lock -> waiter
+#: futures) holds a STRONG reference back to its own key (R6/Q15).
 _ACCOUNT_LOCKS: "_weakref.WeakKeyDictionary[Any, dict[tuple[str, str, str], asyncio.Lock]]"
 _ACCOUNT_LOCKS = _weakref.WeakKeyDictionary()
 
 
 def _account_lock(config_dir: Path, owner: OwnerSnapshot) -> asyncio.Lock:
+    """Per-(config, hub, account) dispatch lock, owned BY THE LOOP.
+
+    The table is attached to the running loop as an ordinary attribute, so
+    it is a plain object graph that becomes unreachable (and collectible)
+    when the loop does; contention safety and two-loop reuse are both
+    preserved (R6/Q15). No cross-loop lock object is ever shared.
+    """
     loop = asyncio.get_running_loop()
-    per_loop = _ACCOUNT_LOCKS.get(loop)
+    per_loop = getattr(loop, "_team_bridge_account_locks", None)
     if per_loop is None:
         per_loop = {}
-        _ACCOUNT_LOCKS[loop] = per_loop
+        try:
+            loop._team_bridge_account_locks = per_loop  # type: ignore[attr-defined]
+        except AttributeError:  # pragma: no cover — exotic loop classes only
+            per_loop = _ACCOUNT_LOCKS.get(loop)
+            if per_loop is None:
+                per_loop = {}
+                _ACCOUNT_LOCKS[loop] = per_loop
     key = (str(config_dir), owner.canonical_base_url, owner.account_id)
     lock = per_loop.get(key)
     if lock is None:
@@ -631,7 +648,26 @@ async def screen_message_async(
 
     from local_operator.team_bridge import scheduler as _scheduler
 
-    async with _account_lock(config_dir, owner):
+    async def _close_owned_once() -> None:
+        # Idempotent close of whatever THIS call owns (the runner): used on
+        # every early path so no prebuilt owned client survives a lock wait,
+        # a claim refusal or a cancelled wait (R6/Q10); the lazy production
+        # path has nothing built yet and this is a no-op.
+        _close = getattr(runner, "aclose", None)
+        if callable(_close):
+            _res = _close()
+            if inspect.isawaitable(_res):
+                await _res
+
+    _lock = _account_lock(config_dir, owner)
+    try:
+        await _lock.acquire()
+    except BaseException:
+        # Cancelled/failed while WAITING for the account lock: close what
+        # this call owns before propagating (R6/Q10).
+        await _close_owned_once()
+        raise
+    try:
         store = Store(config_dir)
         scope = f"{owner.canonical_base_url}|{owner.account_id}"
         existing = _scheduler.current_turn()
@@ -657,10 +693,12 @@ async def screen_message_async(
             except StoreRefused as failure:
                 # A damaged/unreadable schedule store fails CLOSED as a typed
                 # hold — never an uncaught refusal escaping the public entry.
+                await _close_owned_once()
                 return ScreenResult(
                     "hold", hold_code=_HOLD_FOR_SCHEMA.get(failure.code, "retry_later")
                 )
         if turn is None:
+            await _close_owned_once()
             return ScreenResult("hold", hold_code="retry_later")
         try:
             return await _screen_core(
@@ -673,16 +711,18 @@ async def screen_message_async(
                 turn=turn,
             )
         finally:
-            # Whole-ENTRY lifetime (R5): the runner's owned client/stream fn
-            # close on success, every hold, deadline, cancellation and a
-            # cancelled account-lock wait alike — one-shot by contract.
-            aclose = getattr(runner, "aclose", None)
-            if callable(aclose):
-                closed = aclose()
-                if inspect.isawaitable(closed):
-                    await closed
-            if not reuse:
-                store.release_screen_turn(owner, turn=turn)
+            # Whole-ENTRY lifetime (R5/R6): the runner's owned client/stream
+            # fn close on success, every hold, deadline and cancellation; the
+            # exact owned turn releases even if the close RAISES (release is
+            # the nested finally, never skipped).
+            try:
+                await _close_owned_once()
+            finally:
+                if not reuse:
+                    store.release_screen_turn(owner, turn=turn)
+
+    finally:
+        _lock.release()
 
 
 async def _screen_core(
@@ -902,6 +942,17 @@ async def _screen_core(
     #     logical row, every physical row and the finish/receipt binding.
     from local_operator.team_bridge.model_boundary import AdmissionJob
 
+    # Canonical provider (R6/Q3): the job must carry a REAL configured
+    # provider, never an empty string from a fixture snapshot. The trusted
+    # source is the same resolver the production factory uses — the
+    # operative config — with a snapshot override when the published
+    # authority supplies one. No caller-supplied strings certify here.
+    _canonical_provider = getattr(snapshot, "provider", None) or ""
+    if not _canonical_provider:
+        from local_operator.team_bridge.model_boundary import resolve_default_selection
+
+        _resolved = resolve_default_selection(config_dir)
+        _canonical_provider = _resolved.provider if _resolved is not None else ""
     job = AdmissionJob(
         owner_generation=owner.enrollment_generation,
         credential_id=owner.credential_id,
@@ -914,7 +965,7 @@ async def _screen_core(
         body_sha256=envelope.body_sha256,
         template_sha256=snapshot.template_sha256,
         template_version=snapshot.screening_version,
-        provider=getattr(snapshot, "provider", ""),
+        provider=_canonical_provider,
         model=snapshot.default_model or "",
         approved=tuple(sorted(snapshot.approved_serving_identities)),
         envelope_digest=envelope.envelope_digest,
@@ -956,6 +1007,14 @@ async def _screen_core(
     if rendered is None:
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "template_mismatch")
         return ScreenResult("hold", hold_code="template_mismatch")
+
+    # 10b. Ownership lifetime (R6/Q15): renew the exact account turn before
+    #      the dispatch; if the successor already holds it, ABORT — no
+    #      inference under a lost lease, and no release of someone else's.
+    if not store.renew_screen_turn(owner, turn=turn, now=_time.time(), ttl=120.0):
+        code = "owner_changed" if not store.current_generation_is_live(owner) else "retry_later"
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
+        return ScreenResult("hold", hold_code=code)
 
     # 11. ONE dispatch. Provider failures are typed holds AND advance the
     #     durable breaker; nothing of the exception's prose is kept.
@@ -1023,6 +1082,13 @@ async def _screen_core(
                 store, owner, message_id, attempt_id, fingerprint, epoch, "local_quarantine"
             )
             return ScreenResult("hold", hold_code="local_quarantine").set_private_reason(reason)
+    # 12b. Final admission fence (R6/Q15): the receipt may only be admitted
+    #      while THIS call still owns the account turn — a successor that
+    #      took over mid-callback must never inherit our outcome.
+    if not store.screen_turn_matches(owner, turn=turn, now=_time.time()):
+        code = "owner_changed" if not store.current_generation_is_live(owner) else "retry_later"
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
+        return ScreenResult("hold", hold_code=code)
     receipt = ScreeningReceipt(
         verdict="allow" if disposition == "deliver" else "reject",
         model=actual_model,
