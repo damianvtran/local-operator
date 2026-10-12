@@ -1877,6 +1877,8 @@ stale claim the model had no way to correct. `todo_fingerprint` is now
 "")`, and `session.py:_stamped_todo_fingerprint` filters `len == 4` in lockstep
 (design §5.3) — the same coupled edit, one element wider.
 
+*(Historical: the reason-rewrite re-arm, the parked-list re-arm on a fresh user turn, and the 17-test count in this paragraph were superseded by the identity-scoping round recorded further down — 2026-10-12.)*
+
 Evidence: `tests/unit/session/test_todo_guardrail.py` (17 tests — the
 blocked-only list firing a single reconciliation and releasing, the mixed
 pending+blocked text with each group's paragraph appearing only with its items,
@@ -1886,6 +1888,32 @@ phased-`open_todos` cases) and
 `tests/unit/session/test_todo_steering_e2e.py::test_blocking_an_item_earns_one_reconciliation_nudge`
 (5 requests through the real `Session`, `AgentLoop` and `todo` tool: the block,
 then the accounting turn that carries the reminder, then release).
+
+**Over-fire, fixed 2026-10-12: the reconciliation is bounded per IDENTITY, not
+per turn.** The latch was reset at the head of EVERY turn's pipeline
+(all turn kinds funnel through `_run_turn_pipeline`), and the fingerprint's
+reason element meant the model's own recheck bookkeeping (re-`block` with a
+corrected reason) counted as movement — so a session whose open work was ALL
+blocked (0 pending) was re-asserted on every turn, every peer wake and every
+quiet end. Measured across two operator sessions, both holding 5-6 blocked
+items and ZERO pending: ~97 of ~116 quiet-end attempts were overridden by
+continued model output. `_blocked_reminder_fingerprint` is now the blocked
+group's IDENTITY — `(phase, text, status)` per blocked item, WITHOUT the
+reason — and `_run_turn_pipeline` deliberately does not reset it: a parked set
+earns exactly ONE reconciliation per identity change, across turns (a new
+blocked item, an unblocked one or a resolved one → exactly one; an unchanged
+set → none). A reason-only rewrite no longer re-fires — bookkeeping, not a new
+ask — but still expires the stale rendered assertion, because the full
+fingerprint (reason included) rides the reminder's `details`. The pending
+branch keeps its per-turn re-arm; the latch is in-memory, so a process restart
+re-asks once per current set — the accepted limit. Evidence:
+`test_todo_guardrail.py` now 21 tests (the accounted parked list across two
+turns — 3 requests / 1 reminder, against the old 4 / 2 — a new blocked item
+earning one more, an unblock earning one more, reason churn not re-firing while
+the render still expires, and a resolved-then-re-parked set earning its pass) and `test_todo_steering_e2e.py` now 9 (the over-fire
+repro end to end: 6 requests / 2 reminders fixed, 7 / 3 measured on the
+pre-fix code; new pending work still firing after an accounted parked set, with
+the pending section only; a late steer still re-entering a quiet turn).
 
 ## Two review rounds' findings, and what they cost to miss (2026-08-17)
 
