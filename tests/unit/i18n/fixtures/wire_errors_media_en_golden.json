@@ -1,0 +1,154 @@
+{
+  "base": "23613202e3",
+  "samples": [
+    {
+      "key": "wire.errors.media.media_refusal",
+      "params": {
+        "error": "vendor's {raw} failure — café\nsecond line"
+      },
+      "text": "vendor's {raw} failure — café\nsecond line"
+    },
+    {
+      "key": "wire.errors.media.provider_model_pair",
+      "params": {},
+      "text": "provider and model must be provided together, or neither."
+    },
+    {
+      "key": "wire.errors.media.radient_key_missing",
+      "params": {},
+      "text": "Radient API key is not configured on the server."
+    },
+    {
+      "key": "wire.errors.media.save_audio_failed",
+      "params": {
+        "error": "vendor's {raw} failure — café\nsecond line"
+      },
+      "text": "Failed to save uploaded audio file: vendor's {raw} failure — café\nsecond line"
+    },
+    {
+      "key": "wire.errors.media.speech_generate_failed",
+      "params": {
+        "error": "vendor's {raw} failure — café\nsecond line"
+      },
+      "text": "Failed to generate speech: vendor's {raw} failure — café\nsecond line"
+    },
+    {
+      "key": "wire.errors.media.speech_no_credential",
+      "params": {},
+      "text": "Sign in to Radient in Settings to enable speaking aloud."
+    },
+    {
+      "key": "wire.errors.media.speech_radient_credit_low",
+      "params": {},
+      "text": "Your Radient credit balance is too low for speech. Add credits in the Radient Console to continue."
+    },
+    {
+      "key": "wire.errors.media.speech_radient_sign_in_failed",
+      "params": {},
+      "text": "Your Radient sign-in has stopped working. Sign in again in Settings."
+    },
+    {
+      "key": "wire.errors.media.speech_temporarily_unavailable",
+      "params": {},
+      "text": "Speech is temporarily unavailable. Try again in a moment."
+    },
+    {
+      "key": "wire.errors.media.speech_unavailable",
+      "params": {},
+      "text": "Speech is unavailable right now. Try again in a moment."
+    },
+    {
+      "key": "wire.errors.media.speech_unknown_agent",
+      "params": {},
+      "text": "This conversation's agent is no longer available."
+    },
+    {
+      "key": "wire.errors.media.speech_upstream_no_response",
+      "params": {
+        "error": "vendor's {raw} failure — café\nsecond line"
+      },
+      "text": "Speech generation failed upstream: No response from the upstream: vendor's {raw} failure — café\nsecond line"
+    },
+    {
+      "key": "wire.errors.media.speech_upstream_no_response",
+      "params": {
+        "error": "failure"
+      },
+      "text": "Speech generation failed upstream: No response from the upstream: failure"
+    },
+    {
+      "key": "wire.errors.media.speech_upstream_reported_error",
+      "params": {
+        "status": "200",
+        "error": "vendor's {raw} failure — café\nsecond line"
+      },
+      "text": "Speech generation failed upstream: Radient reported an error (HTTP 200): vendor's {raw} failure — café\nsecond line"
+    },
+    {
+      "key": "wire.errors.media.speech_upstream_reported_error",
+      "params": {
+        "status": "200",
+        "error": "failure"
+      },
+      "text": "Speech generation failed upstream: Radient reported an error (HTTP 200): failure"
+    },
+    {
+      "key": "wire.errors.media.speech_upstream_responded",
+      "params": {
+        "status": "502",
+        "error": "vendor's {raw} failure — café\nsecond line"
+      },
+      "text": "Speech generation failed upstream: Upstream responded 502: vendor's {raw} failure — café\nsecond line"
+    },
+    {
+      "key": "wire.errors.media.speech_upstream_responded",
+      "params": {
+        "status": "502",
+        "error": "failure"
+      },
+      "text": "Speech generation failed upstream: Upstream responded 502: failure"
+    },
+    {
+      "key": "wire.errors.media.speech_vendor_credit_low",
+      "params": {
+        "vendor": "ElevenLabs"
+      },
+      "text": "Your ElevenLabs credit balance is too low for speech. Add credits with ElevenLabs to continue."
+    },
+    {
+      "key": "wire.errors.media.speech_vendor_key_refused",
+      "params": {
+        "vendor": "ElevenLabs"
+      },
+      "text": "ElevenLabs refused your API key. Replace it."
+    },
+    {
+      "key": "wire.errors.media.temp_audio_missing",
+      "params": {},
+      "text": "Temporary audio file not found after saving."
+    },
+    {
+      "key": "wire.errors.media.transcription_unexpected",
+      "params": {
+        "error": "vendor's {raw} failure — café\nsecond line"
+      },
+      "text": "An unexpected error occurred during transcription: vendor's {raw} failure — café\nsecond line"
+    },
+    {
+      "key": "wire.errors.media.unknown_model",
+      "params": {
+        "provider": "openai",
+        "model": "missing",
+        "error": "vendor's {raw} failure — café\nsecond line"
+      },
+      "text": "Unknown model openai/missing: vendor's {raw} failure — café\nsecond line"
+    },
+    {
+      "key": "wire.errors.media.unknown_provider",
+      "params": {
+        "provider": "\"unknown's provider\""
+      },
+      "text": "Unknown provider \"unknown's provider\"."
+    }
+  ]
+}
