@@ -6704,8 +6704,8 @@ async def test_frontend_cutover_retires_old_delivery_but_keeps_active_suffix(
         old_unbinds = 0
         active_unbinds = 0
 
-        async def subscribe_frontend(self, callback: Any, **kwargs: Any) -> FrontendSubscription:
-            sub = self._frontend.subscribe(callback)
+        async def subscribe_frontend(self, on_update: Any, **kwargs: Any) -> FrontendSubscription:
+            sub = self._frontend.subscribe(on_update)
             self.old_store = self._frontend
             registered.set()
             await release.wait()
@@ -6731,6 +6731,15 @@ async def test_frontend_cutover_retires_old_delivery_but_keeps_active_suffix(
             return FrontendSubscription(sync=sub.sync, unsubscribe=unbind)
 
     handle = Handle()
+    native_bind = handle.subscribe_frontend
+
+    async def keyword_bind(on_update: Any, **kwargs: Any) -> FrontendSubscription:
+        # Pin the base's keyword contract, not only the positional call the
+        # runtime usually makes; a renamed override otherwise passes execution
+        # while violating substitutability at the whole-tree type gate.
+        return await native_bind(on_update=on_update, **kwargs)
+
+    monkeypatch.setattr(handle, "subscribe_frontend", keyword_bind)
     runtime = RuntimeServer(handle, kind="tui")
     original_delivery = runtime._relay_frontend_to_on_loop
 

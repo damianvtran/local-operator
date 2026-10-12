@@ -16,6 +16,7 @@ import signal
 import socket
 import sys
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,84 @@ async def _child_owner(sid: str) -> None:
         assert not path.exists()
 
 
+async def _finish_cutover_fixture(
+    body_error: BaseException | None,
+    stages: list[tuple[str, Callable[[], Awaitable[None]]]],
+) -> None:
+    # A child refusal/timeout must not leave later native resources alive or
+    # replace the assertion/cancellation that caused teardown. Run EVERY stage,
+    # then report failures without swallowing successful-body cleanup errors.
+    failures: list[BaseException] = []
+    for name, stage in stages:
+        try:
+            await stage()
+        except BaseException as error:
+            error.add_note(f"Cutover cleanup stage: {name}")
+            failures.append(error)
+            if body_error is not None:
+                body_error.add_note(f"Cleanup {name}: {type(error).__name__}: {error}")
+    if failures and body_error is None:
+        raise BaseExceptionGroup("Cutover fixture cleanup failed", failures)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_kind", ["assertion", "cancel", "success"])
+async def test_cutover_cleanup_finishes_all_stages_without_masking_body(body_kind: str) -> None:
+    seen: list[str] = []
+    original: BaseException = (
+        asyncio.CancelledError("body cancellation")
+        if body_kind == "cancel"
+        else AssertionError("original body assertion")
+    )
+
+    def stage(name: str) -> Callable[[], Awaitable[None]]:
+        async def run() -> None:
+            seen.append(name)
+            if name == "child":
+                raise TimeoutError("injected child cleanup timeout")
+            if name == "record":
+                raise AssertionError("injected residual record")
+
+        return run
+
+    names = ["child", "http", "listener", "runtime", "handle", "pipes", "record"]
+    started, parked = asyncio.Event(), asyncio.Event()
+
+    async def body() -> None:
+        nonlocal original
+        try:
+            if body_kind == "cancel":
+                started.set()
+                await parked.wait()
+            elif body_kind != "success":
+                raise original
+        finally:
+            body_exception = sys.exception()
+            if body_exception is not None:
+                original = body_exception
+            await _finish_cutover_fixture(body_exception, [(n, stage(n)) for n in names])
+
+    if body_kind == "success":
+        with pytest.raises(BaseExceptionGroup) as result:
+            await body()
+        assert len(result.value.exceptions) == 2
+    else:
+        if body_kind == "cancel":
+            task = asyncio.create_task(body())
+            await started.wait()
+            task.cancel("body cancellation")
+            with pytest.raises(asyncio.CancelledError) as result:
+                await task
+        else:
+            with pytest.raises(type(original)) as result:
+                await body()
+        assert result.value is original
+        assert any("child" in note for note in original.__notes__)
+        assert any("record" in note for note in original.__notes__)
+        assert result.value.__traceback__ is not None
+    assert seen == names
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("handoff", [False, True])
 async def test_native_fork_cutover_keeps_prompt_receipt_and_replay(
@@ -83,6 +162,7 @@ async def test_native_fork_cutover_keeps_prompt_receipt_and_replay(
     child: asyncio.subprocess.Process | None = None
     child_path: Path | None = None
     spawned: list[str] = []
+    owned_children: list[asyncio.subprocess.Process] = []
     native_sub = ServingSessionHandle.subscribe_frontend
     native_grace = RuntimeServer._bind_with_grace
     native_relay = RuntimeServer._relay_frontend_to_on_loop
@@ -162,6 +242,7 @@ async def test_native_fork_cutover_keeps_prompt_receipt_and_replay(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        owned_children.append(child)
         assert child.stdout is not None
         assert child.stdout is not None
         ready = json.loads(await asyncio.wait_for(child.stdout.readline(), 15))
@@ -244,13 +325,36 @@ async def test_native_fork_cutover_keeps_prompt_receipt_and_replay(
             print(f"Native cutover handoff={handoff}: HTTP200/replay, exact UUID row {request_id}")
     finally:
         release.set()
-        await stop_child()
-        server.should_exit = True
-        await asyncio.wait_for(serving, 15)
-        listener.close()
-        await runtime.aclose()
-        await handle.dispose()
-        assert not record_path.exists()
+
+        async def finish_http() -> None:
+            server.should_exit = True
+            await asyncio.wait_for(serving, 15)
+
+        async def finish_listener() -> None:
+            listener.close()
+
+        async def finish_pipes() -> None:
+            for process in owned_children:
+                for pipe in (process.stdout, process.stderr):
+                    transport = getattr(pipe, "_transport", None)
+                    if transport is not None:
+                        transport.close()
+
+        async def verify_record() -> None:
+            assert not record_path.exists(), "parent record survived teardown"
+
+        await _finish_cutover_fixture(
+            sys.exception(),
+            [
+                ("child", stop_child),
+                ("http", finish_http),
+                ("listener", finish_listener),
+                ("runtime", runtime.aclose),
+                ("handle", handle.dispose),
+                ("pipes", finish_pipes),
+                ("record", verify_record),
+            ],
+        )
 
 
 if __name__ == "__main__":
