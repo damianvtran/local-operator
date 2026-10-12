@@ -2215,10 +2215,19 @@ class TestABadPasteDoesNotEndTheLogin:
         for hook in ("on_warning", "on_input_rejected", "on_progress"):
             loop = asyncio.get_running_loop()
             flow = self._flow("http://localhost:54548/cb?error=access_denied", [])
-            flow.callbacks = cs.LoginCallbacks(
+            callbacks = cs.LoginCallbacks(
                 on_manual_code_input=lambda: ("http://localhost:54548/cb?error=access_denied"),
-                **{hook: _boom},
             )
+            # Reporting hooks are callable; capability flags are not. Explicit
+            # assignments keep this fixture typed as the callback contract grows.
+            assert callbacks.displays_warnings is False
+            if hook == "on_warning":
+                callbacks.on_warning = _boom
+            elif hook == "on_input_rejected":
+                callbacks.on_input_rejected = _boom
+            else:
+                callbacks.on_progress = _boom
+            flow.callbacks = callbacks
             flow._captured = loop.create_future()
             flow._capture_error = loop.create_future()
 
