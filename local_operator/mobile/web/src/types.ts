@@ -141,6 +141,10 @@ export interface TranscriptEntry {
 	    bytes): each is `{index, mime_type}`. The pixels are fetched lazily from
 	    the image endpoint — see `imageUrl` in api.ts. */
 	images?: TranscriptImageRef[];
+	/** Video artifact refs — the parallel family to `images`, its own index
+	    space; each is `{index, mime_type, duration_s?}`. Bytes come lazily
+	    from the attachment route (see `attachmentUrl` in api.ts). */
+	videos?: TranscriptVideoRef[];
 	/** Assistant rows stream: `final` flips true on message_end. */
 	final: boolean;
 }
@@ -151,6 +155,18 @@ export interface TranscriptEntry {
 export interface TranscriptImageRef {
 	index: number;
 	mime_type: string;
+}
+
+/** A reference to one video artifact on a tool row — the parallel family to
+    `TranscriptImageRef`, with its OWN index space (a video artifact never
+    shifts an image index and vice versa). The bytes live in the attachment
+    store and come lazily from the attachment route, which is Range-capable
+    because phone Safari will not play a <video> served as a full-body 200.
+    `duration_s` rides only when the artifact carried one. */
+export interface TranscriptVideoRef {
+	index: number;
+	mime_type: string;
+	duration_s?: number;
 }
 
 export interface TodoItem {
