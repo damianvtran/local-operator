@@ -32,28 +32,10 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from local_operator.i18n import catalogues, resolve
+from local_operator.i18n.http import etag_matches as _etag_matches
 from local_operator.server.models.schemas import CRUDResponse
 
 router = APIRouter(tags=["I18n"])
-
-
-def _etag_matches(header: str, sha: str) -> bool:
-    """RFC 9110 §13.1.2 weak comparison for ``If-None-Match``.
-
-    A client may send the tag weak (``W/"…"``) or as a list, and ``*``
-    matches any current representation; only an exact string compare would
-    re-fetch everything such a client sends (round-1 n5). The strong form we
-    EMIT is unchanged — this only reads how a client echoes it.
-    """
-    for raw in header.split(","):
-        tag = raw.strip()
-        if tag == "*":
-            return True
-        if tag.startswith("W/"):
-            tag = tag[2:].strip()
-        if len(tag) >= 2 and tag.startswith('"') and tag.endswith('"') and tag[1:-1] == sha:
-            return True
-    return False
 
 
 @router.get("/v1/i18n/catalogues/{locale}/{namespace}", response_model=CRUDResponse)

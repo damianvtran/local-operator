@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from local_operator.i18n import catalogues
+from local_operator.i18n import catalogues, resolve
 from local_operator.i18n.messages import render
 from local_operator.mobile import daemon
 from scripts.i18n.login import check_login_source
@@ -89,6 +89,10 @@ def test_single_backend_locale_live_resolution_and_escaping(monkeypatch, tmp_pat
         source[key] = '<img src=x onerror="alert(1)"> & __SUBMIT__'
     (target / "relay.login.json").write_text(json.dumps(source))
     monkeypatch.setattr(catalogues, "catalogue_root", lambda: tmp_path)
+    # The production runtime now gates every explicit render locale through
+    # shared eligibility. Make only this synthetic control eligible so it
+    # exercises escaping/RTL rather than a forbidden held-catalogue preview.
+    monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en", "ur"))
     calls = []
     monkeypatch.setattr(daemon, "resolve_language", lambda: calls.append("ur") or "ur")
     rendered = daemon._render_login_html(error=True)
