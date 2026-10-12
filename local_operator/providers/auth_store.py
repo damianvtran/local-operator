@@ -1682,15 +1682,19 @@ class AuthStore:
                     return
                 metadata = row.data
                 self._conn.execute("SAVEPOINT muse_logout")
-                compensation_allowed = True
+                reservation_ready = True
+                owned_ref = metadata.get("access_secret_ref")
 
                 def still_recorded() -> bool:
+                    # Never read ownership, much less restore, without the
+                    # reservation. Mutable account metadata is not key identity.
+                    if not reservation_ready or not self._conn.in_transaction:
+                        return False
                     current = self.get_credential(credential_id)
                     return (
-                        compensation_allowed
-                        and self._conn.in_transaction
-                        and current is not None
-                        and current.data == metadata
+                        current is not None
+                        and current.provider == "meta-muse"
+                        and current.data.get("access_secret_ref") == owned_ref
                     )
 
                 with reversible_key_deletion(
@@ -1706,18 +1710,33 @@ class AuthStore:
                         )
                         self._conn.commit()
                     except BaseException:
-                        # Undo the logout statements without releasing BEGIN
-                        # IMMEDIATE: another connection must not delete the
-                        # retained row between ownership recheck and key restore.
-                        # The outer transaction releases the reservation only
-                        # AFTER the secret compensation has completed.
-                        if self._conn.in_transaction:
-                            self._conn.execute("ROLLBACK TO SAVEPOINT muse_logout")
-                        else:
-                            # A commit can complete before an observer reports
-                            # failure. That logout is already durable; never
-                            # resurrect its key, even if another writer runs.
-                            compensation_allowed = False
+                        reservation_ready = False
+                        try:
+                            if self._conn.in_transaction:
+                                try:
+                                    # Statement-only errors keep the original
+                                    # reservation through compensation.
+                                    self._conn.execute("ROLLBACK TO SAVEPOINT muse_logout")
+                                except sqlite3.Error:
+                                    # A lost/unusable savepoint needs the same
+                                    # protected ownership check as a lost txn.
+                                    self._conn.rollback()
+                                    self._conn.execute("BEGIN IMMEDIATE")
+                            else:
+                                # SQLITE_INTERRUPT/RAISE(ROLLBACK) and a durable
+                                # commit can BOTH clear in_transaction. Reacquire
+                                # before ANY row read; provider+ref ownership,
+                                # not that flag, distinguishes restore vs skip.
+                                self._conn.execute("BEGIN IMMEDIATE")
+                            reservation_ready = True
+                        except Exception as recovery_error:
+                            raise AuthStoreError(
+                                "Muse logout compensation incomplete: metadata write "
+                                "reservation could not be recovered. Sign in again to repair "
+                                "the account; no unlocked key restoration was attempted."
+                            ) from recovery_error
+                        # The outer transaction releases its reservation only
+                        # after the sealed-key ownership check/restore finishes.
                         raise
             return
         self._conn.execute(

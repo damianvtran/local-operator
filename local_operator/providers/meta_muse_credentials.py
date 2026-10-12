@@ -69,7 +69,7 @@ def reversible_key_deletion(
     promise of crash-atomic transactions across two independent WAL databases.
     """
     from local_operator.secrets.access import open_store, session_id
-    from local_operator.secrets.errors import SecretNotFound
+    from local_operator.secrets.errors import SecretNotFound, SecretStoreError
     from local_operator.secrets.store import provider_secret_name
 
     ref = credential.get(REF_FIELD)
@@ -90,19 +90,27 @@ def reversible_key_deletion(
         store.delete(name, role="provider", session_id=session_id())
         yield
     except BaseException:
-        if restore_if():
-            try:
-                store.describe(name, role="provider")
-            except SecretNotFound:
-                store.set(
-                    name,
-                    value,
-                    description=record.description,
-                    kind=record.kind,
-                    role="provider",
-                    session_id=session_id(),
-                    origin=record.origin,
-                )
+        try:
+            if restore_if():
+                try:
+                    store.describe(name, role="provider")
+                except SecretNotFound:
+                    store.set(
+                        name,
+                        value,
+                        description=record.description,
+                        kind=record.kind,
+                        role="provider",
+                        session_id=session_id(),
+                        origin=record.origin,
+                    )
+        except Exception as recovery_error:
+            # Both stores can fail independently. Never present failed restore
+            # as a compensated logout, or copy the key to a plaintext fallback.
+            raise SecretStoreError(
+                "Muse logout compensation incomplete: sealed key ownership or "
+                "restoration failed. Sign in again to repair the account."
+            ) from recovery_error
         raise
 
 
