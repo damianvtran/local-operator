@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from local_operator.i18n import catalogues
+from local_operator.i18n import catalogues, resolve
 from local_operator.i18n.http import etag_matches
 from local_operator.mobile.daemon import MobileDaemon, build_app
 
@@ -109,10 +109,17 @@ def test_ineligible_bytes_never_reach_hash_or_conditional_response(
     (root / locale).mkdir(parents=True)
     (root / locale / "wire.held.json").write_text('{"wire.held.label": "Held fixture copy"}')
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+    monkeypatch.delenv("LOP_I18N", raising=False)
     if disabled:
+        # Make this fixture explicitly otherwise eligible, independently of
+        # the evolving committed ship set. A 200 control proves the later 404
+        # tests the operational switch rather than ordinary locale rejection.
+        monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en", "fr"))
+        control = client.get(f"/api/i18n/catalogues/{locale}/wire.held")
+        assert control.status_code == 200
+        assert control.json()["result"]["messages"] == {"wire.held.label": "Held fixture copy"}
+        assert "etag" in control.headers
         monkeypatch.setenv("LOP_I18N", "0")
-    else:
-        monkeypatch.delenv("LOP_I18N", raising=False)
 
     def forbidden_hash(*args, **kwargs):
         raise AssertionError("ineligible bytes reached hashing")
