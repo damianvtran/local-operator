@@ -134,6 +134,10 @@ class Transaction:
 
 
 def _validate_lock_identity(root: Path, root_fd: int, fd: int) -> None:
+    # Callers already refuse unsupported locking, but this helper states its
+    # own precondition: os.getuid is absent off POSIX, including on Windows.
+    if os.name != "posix":
+        raise LockUnsupported("install lock identity requires POSIX; nothing was changed")
     held = os.fstat(fd)
     named = os.stat(LOCK_NAME, dir_fd=root_fd, follow_symlinks=False)
     directory = os.fstat(root_fd)
