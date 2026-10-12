@@ -424,11 +424,29 @@ def _file_for(directory: Path) -> Path | None:
     return None
 
 
-def discover_context_files(cwd: str | Path) -> list[Path]:
-    """Ancestor guidance files, farthest-first. Empty when disabled or none."""
+def discover_context_files(cwd: str | Path, *, boundary: Path | None = None) -> list[Path]:
+    """Ancestor guidance files, farthest-first. Empty when disabled or none.
+
+    ``boundary`` is the world boundary a bounded caller validated (the
+    benchmark's SDK world — see ``SessionSpec.world_root``). When set, files
+    at or below the boundary are this world's project scope and files ABOVE
+    it are not: a world planted inside controller state must not inherit the
+    controller tree's — or, through an unresolved ancestor, the operator's —
+    instruction files (measured: an isolated ``HOME`` alone does not stop the
+    ancestor walk). ``None`` is every ordinary call, unchanged.
+    """
     if os.environ.get("LOCAL_OPERATOR_CONTEXT_FILES", "1").strip() in ("0", "false", "no"):
         return []
     start = Path(cwd).resolve()
+    if boundary is not None:
+        world = Path(boundary).expanduser().resolve()
+        if not (start == world or start.is_relative_to(world)):
+            raise ValueError(
+                f"cwd {start} is not inside the boundary {world}; a world boundary "
+                "only clips a walk that starts inside it"
+            )
+    else:
+        world = None
     # Resolved because the walk visits resolved directories: an unresolved
     # symlinked home never matched one, and a no-git walk ran on past it.
     home = _resolved_home()
@@ -440,6 +458,10 @@ def discover_context_files(cwd: str | Path) -> list[Path]:
     found: list[Path] = []
     seen_digests: set[str] = set()
     for directory in (start, *start.parents):
+        if world is not None and not (directory == world or directory.is_relative_to(world)):
+            # Above the boundary is outside this world: the walk stops rather
+            # than reading the controller's or operator's instruction files.
+            break
         if nested and directory == home:
             break
         found_here = _file_for(directory)
@@ -740,6 +762,6 @@ def render_context_files(files: list[Path], cwd: str | Path) -> str:
     )
 
 
-def load_repo_guidance(cwd: str | Path) -> str:
+def load_repo_guidance(cwd: str | Path, *, boundary: Path | None = None) -> str:
     """One call: discover + render. ``""`` when there is nothing to inject."""
-    return render_context_files(discover_context_files(cwd), cwd)
+    return render_context_files(discover_context_files(cwd, boundary=boundary), cwd)

@@ -820,6 +820,21 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.speech_description()),
     ),
+    # Agent messages (Team Bridge, RFC §5): the local half of a feature whose
+    # eligibility, consent and endpoint state are SERVER state. LIVE because
+    # every consumer reads these keys per call — the desktop routes read the
+    # manager they hold and the connector is built per use — so an edit lands
+    # on the next surface open with no relaunch. Its own section rather than
+    # rows under an existing one for the §2 terminology reason: "agent
+    # messages" is the feature noun, and grouping it under ``agents`` (starter
+    # roles) or ``network`` (transport) would hide which of the three local
+    # "team" senses this feature is not.
+    Section(
+        "team_bridge",
+        _t(_ws.team_bridge_title()),
+        Scope.LIVE,
+        _t(_ws.team_bridge_description()),
+    ),
     Section(
         "retired",
         _t(_ws.retired_title()),
@@ -5096,6 +5111,48 @@ SETTINGS: tuple[Setting, ...] = (
             'transitions, like "raha hoon" -> "rahoon" or "je m\'appelle" -> "jm\'appelle".'
         ),
         help=_t(_ws.speech_voice_instructions_help()),
+    ),
+    # -- team bridge (agent messages, RFC §5) ---------------------------------
+    # Defaults are LITERALS here, not imports: this module stays off the import
+    # path of the package that reads these keys (it is loaded on every CLI
+    # start), and `_consumer_defaults()` in tests/unit/test_settings_io.py
+    # imports DEFAULT_TEAM_BRIDGE_* from ``local_operator.team_bridge.settings``
+    # to pin that the two cannot drift. Every path is a genuinely NESTED tuple;
+    # the fail-closed normalisation of each value lives with the consumer, so a
+    # hand-edited value reads as the shipped default rather than crashing a
+    # surface.
+    #
+    # TWO ROWS, DELIBERATELY. ``team_bridge.onboarding`` is internal UI
+    # bookkeeping (the one-time dialog's shown-flag) and is NOT registered: a
+    # public row would dress session-format state as a knob. Screening is not
+    # registered AND not a key: it is the admission gate (§8, §13.9), an
+    # invariant no write may disable (the status route's receipt states it; a
+    # test pins that no registered setting can turn it off). The allowlist's
+    # default state and cues are server truth (§9), surfaced as data by
+    # ``team_bridge.client.allowlist_view`` — never restated here, where an edit
+    # would drift from the server silently.
+    Setting(
+        key="team_bridge.enabled",
+        path=("team_bridge", "enabled"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_enabled_label()),
+        kind=Kind.BOOL,
+        default=False,
+        help=_t(_ws.team_bridge_enabled_help()),
+    ),
+    Setting(
+        key="team_bridge.session",
+        path=("team_bridge", "session"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_session_label()),
+        kind=Kind.TEXT,
+        default="",
+        # ONE session id: the designation §5.6 makes the wake consent. Deliberately
+        # not a LIST — a list would imply multiple wake destinations, which the
+        # connector contract does not have in v1. Empty clears back to "none
+        # designated" (badge only).
+        empty_unsets=True,
+        help=_t(_ws.team_bridge_session_help()),
     ),
 )
 

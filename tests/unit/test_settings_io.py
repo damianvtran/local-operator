@@ -363,6 +363,7 @@ def _consumer_defaults() -> dict[str, object]:
     consumers.update(_classification_consumer_defaults())
     consumers.update(_monitor_consumer_defaults())
     consumers.update(_supplements_consumer_defaults())
+    consumers.update(_team_bridge_consumer_defaults())
     # The Aida keys, asked of the package that reads them. The registry rows
     # above carry literals on purpose (``settings_io`` must stay off the aida
     # package's import path — it is loaded on every CLI start), and this block
@@ -527,6 +528,31 @@ def _monitor_consumer_defaults() -> dict[str, object]:
         "monitor.maxConsecutiveFailures": monitor_settings.DEFAULT_MAX_CONSECUTIVE_FAILURES,
         "monitor.maxDeliveriesPerHour": monitor_settings.DEFAULT_MAX_DELIVERIES_PER_HOUR,
         "monitor.normalizeTimestamps": monitor_settings.DEFAULT_NORMALIZE_TIMESTAMPS,
+    }
+
+
+def _team_bridge_consumer_defaults() -> dict[str, object]:
+    """The registry's ``team_bridge.*`` rows, asked of the module that reads them.
+
+    The agent-messages feature's readers live in
+    ``local_operator.team_bridge.settings`` (stdlib-only precisely so this test
+    can import it cheaply), and the registry rows carry literals because
+    ``settings_io`` stays off the package's import path. This block is what
+    turns a drifted literal into a red test rather than a page that advertises
+    a state the feature will not honour — the rule every consumer block above
+    follows. Only the REGISTERED rows appear here: ``onboarding`` is internal
+    state (no row), and the allowlist's defaults are server truth surfaced as
+    data by ``team_bridge.client.allowlist_view``, not config.
+    """
+
+    from local_operator.team_bridge.settings import (
+        DEFAULT_TEAM_BRIDGE_ENABLED,
+        DEFAULT_TEAM_BRIDGE_SESSION,
+    )
+
+    return {
+        "team_bridge.enabled": DEFAULT_TEAM_BRIDGE_ENABLED,
+        "team_bridge.session": DEFAULT_TEAM_BRIDGE_SESSION,
     }
 
 

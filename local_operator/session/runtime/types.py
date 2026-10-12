@@ -36,6 +36,11 @@ from local_operator.session.retention import SESSIONS_DIRNAME
 if TYPE_CHECKING:
     from pathlib import Path
 
+# One opt-in spelling across owner and viewer. Publication/frame sequence is
+# not this coordinate; this capability only carries journal-index authority.
+JOURNAL_ORDER_CAPABILITY = "journal-order-v1"
+JOURNAL_ORDER_EVENT = "journal_order_ready"
+
 #: Bumped on any breaking change to control frames or web payloads. The
 #: runtime and daemon always ship together; the phone UI learns the
 #: version in its bootstrap payload and can warn on a stale cached bundle.

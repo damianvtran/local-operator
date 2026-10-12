@@ -31,7 +31,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
-from local_operator.i18n import catalogues
+from local_operator.i18n import catalogues, resolve
 from local_operator.i18n.http import etag_matches as _etag_matches
 from local_operator.server.models.schemas import CRUDResponse
 
@@ -41,6 +41,11 @@ router = APIRouter(tags=["I18n"])
 @router.get("/v1/i18n/catalogues/{locale}/{namespace}", response_model=CRUDResponse)
 async def get_catalogue(locale: str, namespace: str, request: Request) -> Response:
     """One catalogue: messages + hash, with ETag revalidation."""
+    # Eligibility precedes all disk/validator work: a 304 would activate a
+    # client's held bytes just as surely as serving a new representation.
+    if not resolve.is_shipped(locale) or resolve.eligible_locale(locale) != locale:
+        detail = f"No catalogue for {locale}/{namespace}."  # i18n: ignore wire.errors slice owns it
+        raise HTTPException(status_code=404, detail=detail)
     try:
         sha = catalogues.catalogue_sha256(locale, namespace)
         messages = catalogues.load_catalogue(locale, namespace)

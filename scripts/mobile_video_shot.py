@@ -29,6 +29,16 @@ of which that module already got right, and a second copy here would be a
 second thing to keep right. The taps are the REAL gesture for the same reason
 the sibling rigs give: the app owns its routes, and a click is what a thumb
 does.
+
+THE PLAYER'S EVIDENCE IS ITS OWN TRAFFIC. On the two player rows the capture
+holds the clip's request at the Fetch domain so the RESOLVING state is
+photographed while genuinely unresolved, then releases it and lets the
+browser's media stack fetch the bytes its own way — recording every
+attachment request's Range header beside the status and Content-Range it got
+back (206s are the point: phone Safari will not play a full-body 200). The
+ready frame is taken only once ``readyState`` says metadata decoded and
+``play()`` advanced the clock; the missing row is photographed only after
+the element reported its error.
 """
 
 from __future__ import annotations
@@ -44,6 +54,32 @@ from pathlib import Path
 from typing import Any
 
 from scripts.mobile_overflow_capture import Chrome, Page
+
+
+class EventPage(Page):
+    """The overflow rig's Page, with the CDP event stream KEPT.
+
+    ``Page.send`` drains the websocket until the matching reply and discards
+    everything else; for the player the EVENTS are the data — the browser's
+    own media requests and the status each got — so this subclass stashes
+    event messages instead of dropping them. Nothing else differs.
+    """
+
+    def __init__(self, ws_url: str) -> None:
+        self.events: list[dict[str, Any]] = []
+        super().__init__(ws_url)
+
+    def send(self, method: str, **params: Any) -> dict[str, Any]:
+        self.n += 1
+        self.ws.send(json.dumps({"id": self.n, "method": method, "params": params}))
+        while True:
+            msg = json.loads(self.ws.recv())
+            if msg.get("id") == self.n:
+                if "error" in msg:
+                    raise RuntimeError(f"{method}: {msg['error']}")
+                return msg.get("result", {})
+            self.events.append(msg)
+
 
 #: Both widths the card is judged at — the glance rig's own pair.
 VIEWPORTS = ((390, 844), (360, 780))
@@ -64,6 +100,8 @@ TAP_SESSIONS: dict[str, str] = {
     "Video gen failed": "failed",
     "Video gen already finished": "finished",
     "Video gen receipt": "receipt",
+    "Video gen player": "player",
+    "Video gen player missing": "player-missing",
 }
 
 #: The live sessions that would carry a cancel control if this were an image
@@ -116,7 +154,24 @@ GEOMETRY_JS = r"""
     hold: box(hold),
     stateLines,
     receipt,
-    // MUST be false in v1: the player is the designed follow-up, frozen §5.4.
+    // The player (the bounded follow-up, §3.2): null where no mount exists;
+    // on the player rows the `data-state` attribute is the still's own
+    // reading of resolving/ready/error, and readyState/currentTime are the
+    // browser's own evidence that the clip DECODED and ADVANCED — the
+    // bytes came through the real route, rung by rung.
+    player: (() => {
+      const el = document.querySelector('[data-testid="attachment-video"]');
+      const vid = el ? el.querySelector('video') : null;
+      return el
+        ? {
+            box: box(el),
+            state: el.getAttribute('data-state'),
+            readyState: vid ? vid.readyState : null,
+            currentTime: vid ? Math.round((vid.currentTime || 0) * 100) / 100 : null,
+            src: vid ? vid.getAttribute('src') : null,
+          }
+        : null;
+    })(),
     hasPlayer: document.querySelector('video') !== null,
     imageCount: card ? card.querySelectorAll('img').length : 0,
     scroller: box(scroller),
@@ -164,6 +219,158 @@ def _click_button_js(label: str) -> str:
     )
 
 
+def _wait_for_event(
+    page: "EventPage", method: str, start: int, seconds: float = 10.0
+) -> dict[str, Any] | None:
+    """The first ``method`` event seen since index ``start``, consumed."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        for i in range(start, len(page.events)):
+            event = page.events[i]
+            if event.get("method") == method:
+                page.events.pop(i)
+                return event
+        time.sleep(0.15)
+    return None
+
+
+def _response_header(headers: dict[str, Any], name: str) -> Any:
+    """One response header's value, looked up case-insensitively.
+
+    HTTP header names are case-insensitive by definition, and CDP preserves
+    whatever case reached the wire — a fixed-case lookup reads a MISS as an
+    absent header (round-1 review, N2: ``accept-ranges`` read as null on a
+    206 that demonstrably carried it). The raw dict also rides the artifact
+    so the question is answerable from the JSON rather than re-derived.
+    """
+    wanted = name.lower()
+    for key, value in (headers or {}).items():
+        if key.lower() == wanted:
+            return value
+    return None
+
+
+def _attachment_requests(page: "EventPage", start: int) -> list[dict[str, Any]]:
+    """The browser's OWN attachment requests and the status each got back.
+
+    The player's whole point on a phone is Safari's byte-Range requirement,
+    so the evidence is the media element's own traffic: each request's Range
+    header beside the response's status and Content-Range. A 200-only
+    reading would be the failure this rig exists to catch.
+    """
+    requests: dict[str, dict[str, Any]] = {}
+    for event in page.events[start:]:
+        method = event.get("method")
+        params = event.get("params") or {}
+        if method == "Network.requestWillBeSent":
+            url = (params.get("request") or {}).get("url") or ""
+            if "/attachment?" in url:
+                requests[params.get("requestId") or url] = {
+                    "url": url,
+                    "range": ((params.get("request") or {}).get("headers") or {}).get("Range"),
+                }
+        elif method == "Network.responseReceived":
+            url = (params.get("response") or {}).get("url") or ""
+            if "/attachment?" in url:
+                entry = requests.setdefault(params.get("requestId") or url, {"url": url})
+                response = params.get("response") or {}
+                headers = response.get("headers") or {}
+                entry["status"] = response.get("status")
+                entry["content_range"] = _response_header(headers, "Content-Range")
+                entry["accept_ranges"] = _response_header(headers, "Accept-Ranges")
+                entry["headers"] = headers
+    return list(requests.values())
+
+
+def _capture_player(
+    page: "EventPage", outdir: Path, label: str, frame: str, *, missing: bool
+) -> dict[str, Any]:
+    """The player's states, captured through the real relay.
+
+    READY: the clip's request is HELD at the Fetch domain, so the resolving
+    frame (reserved box, no spinner) is genuinely unresolved when taken;
+    releasing it lets the browser's media stack fetch the bytes its own way
+    (the Range requests recorded below), and the ready frame waits for
+    ``readyState`` to decode metadata and ``play()`` to advance.
+
+    MISSING: nothing is seeded behind the ref, so the route's 404 must land
+    as the designed ``video unavailable`` state — photographed only after
+    the element reports its error.
+    """
+    start = len(page.events)
+    if missing:
+        entry: dict[str, Any] = {"tap": json.loads(page.js(_tap_js(label)))}
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            state = page.js(
+                "(() => { const el = document.querySelector('[data-testid=\"attachment-video\"]');"
+                " return el ? el.getAttribute('data-state') : null; })()"
+            )
+            if state == "error":
+                break
+            time.sleep(0.25)
+        entry.update(json.loads(page.js(GEOMETRY_JS)))
+        page.shot(outdir / f"{frame}.png")
+        entry["media"] = _attachment_requests(page, start)
+        return entry
+
+    page.send("Fetch.enable", patterns=[{"urlPattern": "*kind=video*", "requestStage": "Request"}])
+    entry = {"tap": json.loads(page.js(_tap_js(label)))}
+    paused = _wait_for_event(page, "Fetch.requestPaused", start, seconds=12)
+    time.sleep(0.4)
+    entry.update(json.loads(page.js(GEOMETRY_JS)))
+    entry["resolving_state"] = (entry.get("player") or {}).get("state")
+    page.shot(outdir / f"{frame}.png")
+    if paused is not None:
+        page.send("Fetch.continueRequest", requestId=paused["params"]["requestId"])
+    page.send("Fetch.disable")
+
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        ready = page.js(
+            "(() => { const v = document.querySelector('video');"
+            " return !!(v && v.readyState >= 1); })()"
+        )
+        if ready:
+            break
+        time.sleep(0.3)
+    page.js(
+        "(() => { const v = document.querySelector('video');"
+        " if (v) { const p = v.play(); if (p && p.catch) p.catch(() => {}); } return true; })()"
+    )
+    time.sleep(1.2)
+    entry["ready"] = json.loads(page.js(GEOMETRY_JS))
+    page.shot(outdir / f"{frame}-ready.png")
+    # PLAY IT WITH A HAND, not a scripted call: a synthetic click at the
+    # element is REAL user activation, so the unmuted play the product ships
+    # is exactly what starts — an autoplay-policy rejection of the JS play()
+    # above is not the app failing, and the frame must not pretend otherwise.
+    ready_box = ((entry.get("ready") or {}).get("player") or {}).get("box")
+    if ready_box:
+        cx = ready_box["left"] + ready_box["width"] / 2
+        cy = ready_box["top"] + ready_box["height"] / 2
+        page.send(
+            "Input.dispatchMouseEvent",
+            type="mousePressed",
+            x=cx,
+            y=cy,
+            button="left",
+            clickCount=1,
+        )
+        page.send(
+            "Input.dispatchMouseEvent",
+            type="mouseReleased",
+            x=cx,
+            y=cy,
+            button="left",
+            clickCount=1,
+        )
+    time.sleep(0.7)
+    entry["playing"] = json.loads(page.js(GEOMETRY_JS))
+    entry["media"] = _attachment_requests(page, start)
+    return entry
+
+
 def main() -> None:
     outdir = Path(sys.argv[1])
     outdir.mkdir(parents=True, exist_ok=True)
@@ -196,7 +403,7 @@ def main() -> None:
         else:
             raise RuntimeError("fixture never served /login")
 
-        page = Page(chrome.target_ws())
+        page = EventPage(chrome.target_ws())
         page.metrics(*VIEWPORTS[0])
         page.goto(f"{base}/login")
         page.js(
@@ -204,12 +411,23 @@ def main() -> None:
             f" f.password.value = {password!r}; f.submit(); return true; }})()"
         )
         time.sleep(2.0)
+        # The media evidence is network traffic, so the event stream must be on
+        # before the first player row renders.
+        page.send("Network.enable")
         for vw, vh in VIEWPORTS:
             page.metrics(vw, vh)
             page.goto(f"{base}/#/")
             time.sleep(1.5)
             for label, prefix in TAP_SESSIONS.items():
                 frame = f"{prefix}-{vw}x{vh}"
+                if prefix in ("player", "player-missing"):
+                    report[frame] = _capture_player(
+                        page, outdir, label, frame, missing=prefix == "player-missing"
+                    )
+                    print(f"{frame}: {json.dumps(report[frame], indent=1)}", flush=True)
+                    page.goto(f"{base}/#/")
+                    time.sleep(1.5)
+                    continue
                 report[frame] = {"tap": json.loads(page.js(_tap_js(label)))}
                 time.sleep(2.0)
                 report[frame].update(json.loads(page.js(GEOMETRY_JS)))

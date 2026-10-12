@@ -1387,28 +1387,82 @@ class ActionBridge:
 # ---------------------------------------------------------------------------
 
 
+#: The tool surface an episode session runs. THE BENCHMARK CALLER'S POLICY,
+#: stated once here so nothing reconstructs it by memory: the ordinary local
+#: working set a task needs (``read``/``write``/``edit``/``glob``/``grep``/
+#: ``bash``), delegation and tracking (``task``/``hub``/``todo`` — plus
+#: ``jobs``/``wait``, because child work is a BACKGROUND job: a parent that
+#: cannot wait cannot collect its children), the packaged-agent and
+#: isolated-team surfaces (``agent``/``team``; guides and skills ride the
+#: knowledge block, not tools), plus the ONE session-scoped action tool the
+#: episode exports. Everything else in the shipped inventory is a CONTROLLER
+#: capability reachable in-process — ``secret``, ``list_variables``/
+#: ``read_variable``, ``setting``, ``network``, ``send``/``sessions``,
+#: ``monitor``/``wake``, ``code_requests``, ``eval``, ``web_*``/``browser``,
+#: ``project``/``team_delete`` — and a filesystem boundary does not sandbox
+#: an in-process API, so they are named out here rather than hoped about.
+#: The enforcement is the EXISTING inventory mechanism (``SessionSpec.tools``
+#: + ``ApprovalPolicy.declared`` -> ``Session.set_tool_inventory``); this
+#: tuple is only WHICH names, and ``validate_episode_session_spec`` pins
+#: membership.
+EPISODE_TOOL_SURFACE: tuple[str, ...] = (
+    "read",
+    "write",
+    "edit",
+    "glob",
+    "grep",
+    "bash",
+    "task",
+    "hub",
+    "todo",
+    "jobs",
+    "wait",
+    "agent",
+    "team",
+    create_mcp_tool_name(SERVER_NAME, ACTION_TOOL_NAME),
+)
+
+
 def validate_episode_session_spec(
     *,
     spec: SessionSpec,
 ) -> SessionSpec:
     """The session spec an episode runs under, from the run's own spec.
 
-    Pinned here rather than at the call site so a comparison between arms
-    cannot quietly differ: the full tool surface (``tools=None``), the
-    unattended approval posture, and the caller's model/team/profile choices;
-    nothing else. The episode's identity rides into the harness as the
-    conversation name when the caller left one unset.
+    THE CONTRACT (world-boundary slice): an episode session is refused unless
+    it carries (a) an explicit ``world_root`` — the model's tools and
+    discovery clipped to the world, with the store roots controller-side (see
+    ``sdk._resolve_world_root``) — and (b) the pinned tool surface it
+    declares, approved by that same declaration. The previous posture ("full
+    tool surface, ``ApprovalPolicy.auto()``") handed an unattended model
+    every controller-backed capability in the shipped inventory; it is
+    refused here, at the arm's single seam, so no future caller can quietly
+    run a different reach than the one that was measured.
     """
 
-    if spec.tools is not None:
+    if spec.world_root is None:
         raise SessionArmError(
-            "the session arm runs the FULL tool surface; tools= restricts the reach "
-            "and would silently change what the arm measures"
+            "an episode session requires an explicit world_root: without one the "
+            "model's tools and discovery reach the controller's own tree"
         )
-    if spec.approvals.mode != "auto":
+    if spec.tools is None:
         raise SessionArmError(
-            "the session arm's approvals are fixed at ApprovalPolicy.auto() (exec --yolo "
-            "parity); a different policy is a different arm"
+            "an episode session must DECLARE its tool surface (SessionSpec.tools); "
+            "the undeclared shipped surface is a controller capability set, not a "
+            "task surface"
+        )
+    declared = set(spec.tools)
+    if declared != set(EPISODE_TOOL_SURFACE):
+        missing = sorted(set(EPISODE_TOOL_SURFACE) - declared)
+        extra = sorted(declared - set(EPISODE_TOOL_SURFACE))
+        raise SessionArmError(
+            "the episode tool surface is pinned; a different set is a different arm "
+            f"(missing={missing}, extra={extra})"
+        )
+    if spec.approvals.mode != "declared" or set(spec.approvals.tools) != declared:
+        raise SessionArmError(
+            "the episode's approvals must be ApprovalPolicy.declared(EPISODE_TOOL_SURFACE): "
+            "the declaration is the run's approval for exactly the tools it names"
         )
     return spec
 

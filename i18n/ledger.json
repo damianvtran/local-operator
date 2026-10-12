@@ -118,21 +118,21 @@
     {
       "locale": "es",
       "namespace": "wire.settings",
-      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
+      "source_sha256": "01a17628b72419d9e8f2809fd8c2317dc960eab698046ac55048ebcdd58ac2fe",
       "translator": {
         "agent": "i18n-translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11"
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "Delta pass: 8-key S3b switch delta vs en 9377f848; backticks byte-exact; es==en key sets/order (+8/-0); 0 B/M; accepted 1 MINOR (40-cell label vs the 29-cell TUI budget, as 57 existing es labels) + 2 NITs (roll→propagación, mesh→malla, member→miembro recorded); runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+      "note": "Team Bridge H1 six-key delta; independent audit (session 796a7bef253a) passed 0 findings, delta-scoped. Prior 8-key acceptance (0 B/M; 1 MINOR + 2 NITs) carried at base 23613202e3. Translator session 31b7f522b4e5; both runs openai/gpt-6.1-sol (announced Anthropic fallback)."
     },
     {
       "locale": "es",
@@ -308,21 +308,21 @@
     {
       "locale": "fr",
       "namespace": "wire.settings",
-      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
+      "source_sha256": "01a17628b72419d9e8f2809fd8c2317dc960eab698046ac55048ebcdd58ac2fe",
       "translator": {
         "agent": "i18n-translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11"
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "Delta re-audit passed: 8-key S3b switch delta vs en 9377f848; backticks byte-exact; 0 B/M; accepted 2 MINOR + 1 fit NIT ('Propager le maillage' object; 'avec son nom' phrasing); 2nd independent pass concurred; runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+      "note": "Team Bridge H1 six-key delta; independent audit (session 96bebfbe2580, different agent from translator 3c7e2716c95c) passed 0 findings, delta-scoped. Prior 8-key re-audit (0 B/M; 2 MINOR + 1 fit NIT) carried at base 23613202e3."
     },
     {
       "locale": "fr",
@@ -726,40 +726,40 @@
     {
       "locale": "ru",
       "namespace": "wire.settings",
-      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
+      "source_sha256": "01a17628b72419d9e8f2809fd8c2317dc960eab698046ac55048ebcdd58ac2fe",
       "translator": {
         "agent": "i18n-translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11"
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "Round-2 recheck passed: 10/10 round-1 findings resolved; 14 keys verified vs en; pre-fix reconstruction (033dbdba) diff = exactly those 14 lines; valns OK 747 keys; sha 1d33292d; regression scan clean — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet). Rebase-delta: +8 keys (mesh_updates.*, network_rollout_on_update.*) at en positions; 747 priors byte-identical; delta re-audited passed; sha b226a4f5."
+      "note": "Team Bridge H1 six-key delta; independent audit (session ec513a4bad79) passed 0 findings, delta-scoped. Prior round-2 recheck (10/10 resolved; 14 keys verified vs en) carried at base 23613202e3. Translator session 94ac534777ac."
     },
     {
       "locale": "vi",
       "namespace": "wire.settings",
-      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
+      "source_sha256": "01a17628b72419d9e8f2809fd8c2317dc960eab698046ac55048ebcdd58ac2fe",
       "translator": {
         "agent": "i18n-translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11"
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "Round-1 fixes rechecked and verified: 43/43 claimed keys byte-verified (F1 … ×4; F2 tắt/bật/hỏi trước; orthography sweep 28→0 open forms, closed kept; host ×2; Trần ×4; 3 NITs); valns OK; NFC clean; no new issues. Ran deepseek-flash (anthropic fallback from pinned sonnet). Rebase-delta: +8 keys at en positions; 747 priors byte-identical; delta re-audited passed (2 NITs recorded); sha 6a4875b6."
+      "note": "Team Bridge H1 six-key delta; round-1 MAJOR (self-wake vs connector wake) fixed to passive 'duoc danh thuc', re-audited PASS by session 400497cd6ac8; 0 unresolved. Prior 43/43 verified carried at base 23613202e3. Translator abd0ea96824e; attribution corrected in provenance."
     }
   ]
 }

@@ -36,6 +36,37 @@ TOKEN = "desktop-contract-test-token"
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _reset_bridge_availability():
+    """The agent-messages section's §5.6 visibility is PROCESS-global state.
+
+    Cleared around every test so one test's observation cannot decide whether
+    another's projection carries the section. The three census tests below
+    record a visible observation themselves, because they assert about the
+    projection of a FULLY-visible registry; the gate's own behaviour is pinned
+    in ``test_server_settings_visibility.py``.
+    """
+
+    from local_operator.team_bridge import availability
+
+    availability.clear()
+    yield
+    availability.clear()
+
+
+def _show_dynamic_sections(app: Any) -> None:
+    """Make dynamically-gated sections render for a census assertion."""
+
+    from local_operator.team_bridge import availability
+
+    availability.record(
+        app.state.config_manager.config_dir,
+        visible=True,
+        state="ready",
+        checked_at=1.0,
+    )
+
+
 @pytest_asyncio.fixture
 async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
@@ -603,6 +634,7 @@ async def test_the_cors_echo_follows_the_admitted_set(tmp_path: Path, monkeypatc
 
 async def test_settings_census_typed_writes_reset_and_secret_exclusion(desktop):
     client, app = desktop
+    _show_dynamic_sections(app)
     manager = app.state.config_manager
     manager.set_config_value("private_secret", "never-serialize-me")
     data = (await client.get("/v1/settings")).json()["result"]
@@ -737,6 +769,7 @@ async def test_settings_projection_serves_the_registry_authored_annotations(desk
     cannot grow a second opinion about a key's consequence).
     """
     client, _app = desktop
+    _show_dynamic_sections(_app)
     rows = {
         row["key"]: row for row in (await client.get("/v1/settings")).json()["result"]["settings"]
     }
@@ -771,6 +804,7 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
     actually present so the assertion cannot pass on all-empties.
     """
     client, _app = desktop
+    _show_dynamic_sections(_app)
     rows = {
         row["key"]: row for row in (await client.get("/v1/settings")).json()["result"]["settings"]
     }
@@ -1319,7 +1353,13 @@ async def test_a_rejected_key_is_refused_and_not_stored(desktop, monkeypatch):
     client, app = desktop
     response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-bad-key"})
     assert response.status_code == 422
-    assert response.json()["detail"] == "DeepSeek rejected this API key. Check it and try again."
+    # The envelope is additive for released readers; pin the complete verdict
+    # and opaque params so a migration cannot weaken this no-write regression.
+    assert response.json()["detail"] == {
+        "code": "wire.errors.auth.provider_refusal",
+        "params": {"error": "DeepSeek rejected this API key. Check it and try again."},
+        "text": "DeepSeek rejected this API key. Check it and try again.",
+    }
     assert "sk-bad-key" not in response.text
     assert not app.state.desktop_auth.store.list_credentials("deepseek")
     # No defaults either: nothing usable was connected.
@@ -1697,7 +1737,11 @@ async def test_a_pasted_key_in_a_login_operation_is_checked_like_a_saved_one(des
         json={"value": "sk-bad", "prompt_id": awaiting["prompt_id"]},
     )
     assert refused.status_code == 422
-    assert refused.json()["detail"] == "OpenRouter rejected this API key."
+    assert refused.json()["detail"] == {
+        "code": "wire.errors.auth.provider_refusal",
+        "params": {"error": "OpenRouter rejected this API key."},
+        "text": "OpenRouter rejected this API key.",
+    }
     assert "sk-bad" not in refused.text
     assert not app.state.desktop_auth.store.list_credentials("openrouter")
     still = (await client.get(f"/v1/auth/operations/{operation_id}")).json()["result"]
@@ -2006,7 +2050,11 @@ async def test_a_start_after_close_answers_503(desktop):
     await host.close()
     refused = await client.post("/v1/auth/login", json={"provider": "radient"})
     assert refused.status_code == 503, refused.text
-    assert "shuts down" in refused.json()["detail"]
+    assert refused.json()["detail"] == {
+        "code": "wire.errors.auth.auth_refusal",
+        "params": {"error": "Sign-in is unavailable while the server shuts down."},
+        "text": "Sign-in is unavailable while the server shuts down.",
+    }
     # An unknown provider is still the caller's mistake: 422, unchanged.
     app.state.desktop_auth = None
     unknown = await client.post("/v1/auth/login", json={"provider": "no-such-provider"})

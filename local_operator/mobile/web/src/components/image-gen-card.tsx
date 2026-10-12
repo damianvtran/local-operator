@@ -84,6 +84,7 @@ import { useEffect, useState } from "react";
 import { sendCommand } from "../api";
 import { imageGenView } from "../lib/image-gen";
 import { AttachmentImage } from "./attachment-image";
+import { AttachmentVideo } from "./attachment-video";
 import { ToolRow } from "./tool-row";
 import type { TranscriptEntry } from "../types";
 
@@ -328,14 +329,25 @@ export function ImageGenCard({
 				) : view.state === "done" ? (
 					<div className="flex flex-col gap-1.5 pt-0.5 pb-1.5 pl-6">
 						{/* The finished artifact renders through the transcript's
-						    EXISTING attachment path (the same component a user
-						    turn's images use), fetched lazily from the existing
-						    image route — the frozen attachment contract's
-						    requirement, and the reason that component now
-						    lives in its own module. Absent refs (the emitter
-						    lane has not landed, or the artifact never was)
-						    render the state line alone rather than a broken
-						    frame. */}
+						    EXISTING attachment paths — one component per family, never
+						    a copy here (the frozen attachment contract's requirement).
+						    Videos mount their player (fetched lazily from the
+						    Range-capable attachment route); images keep the image
+						    route. Absent refs (the emitter has not landed, or the
+						    artifact never was) render the state line alone rather than
+						    a broken frame. */}
+						{view.videos.length > 0 ? (
+							<div className="flex flex-wrap gap-1.5">
+								{view.videos.map((video) => (
+									<AttachmentVideo
+										key={video.index}
+										pid={pid}
+										entryId={entry.id}
+										index={video.index}
+									/>
+								))}
+							</div>
+						) : null}
 						{view.images.length > 0 ? (
 							<div className="flex flex-wrap gap-1.5">
 								{view.images.map((img) => (

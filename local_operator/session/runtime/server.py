@@ -62,6 +62,11 @@ from typing import (
     cast,
 )
 
+from local_operator.session.runtime.types import (
+    JOURNAL_ORDER_CAPABILITY,
+    JOURNAL_ORDER_EVENT,
+)
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -1648,6 +1653,7 @@ class _ClientConn:
     #: frame; see ``DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY`` for what emitting it
     #: to a viewer that did not negotiate would do.
     entry_times: bool = False
+    journal_order: bool = False
     #: Whether this viewer negotiated the input-metadata carriage
     #: (``input-mode-v1``). While False, every message-bearing frame this
     #: connection receives sheds ``input_mode``/``input_path`` — the three page
@@ -2196,6 +2202,11 @@ class RuntimeServer:
                 # paint as an unknown kind. No handle implements the op in the
                 # contract lane (C0), so no owner advertises it yet.
                 + ([SUPPLEMENTS_CAPABILITY] if hasattr(handle, SUPPLEMENTS_READ_OP) else [])
+                + (
+                    [JOURNAL_ORDER_CAPABILITY]
+                    if getattr(handle, "journal_order_supported", False)
+                    else []
+                )
                 # INPUT-MODE CARRIAGE, gated on the handle that would HONOUR it
                 # rather than advertised unconditionally: the reader of this
                 # string (the mobile stream) must never send the fields to an
@@ -3793,6 +3804,9 @@ class RuntimeServer:
             # field its page model would reject.
             conn.entry_times = bool(frame.get("display_history_entry_times")) and (
                 "display-history-entry-times-v1" in self._record.capabilities
+            )
+            conn.journal_order = bool(frame.get("journal_order")) and (
+                JOURNAL_ORDER_CAPABILITY in self._record.capabilities
             )
             # The input-metadata twin of the line above: a viewer built before
             # the carriage cannot name ``input_mode``, and one that does not
@@ -8240,6 +8254,7 @@ class RuntimeServer:
             and conn.events_ready
             and not (conn.events_muted and event_type in EVENT_MUTE_DROP_TYPES)
             and not (supplement_event and not conn.supplements)
+            and not (event_type == JOURNAL_ORDER_EVENT and not conn.journal_order)
         ]
         if not recipients:
             return

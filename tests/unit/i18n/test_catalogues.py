@@ -38,6 +38,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.errors.agents",
+        "wire.errors.auth",
         "wire.errors.desktop",
         "wire.errors.media",
         "wire.errors.settings",

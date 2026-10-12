@@ -6804,12 +6804,23 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
     # Recorded as the PAIR each call carried: the route builds the subscription
     # from both additive flags, and a spy that watched only ``frontend_replace``
     # would let the supplements half be dropped without a failure.
-    negotiated: list[tuple[bool, bool]] = []
+    negotiated: list[tuple[bool, bool, bool]] = []
     real_subscribe = module.DesktopSessionBridge.subscribe
 
-    def spy(self, *, frontend_replace: bool = False, supplements: bool = False):  # noqa: ANN001
-        negotiated.append((frontend_replace, supplements))
-        return real_subscribe(self, frontend_replace=frontend_replace, supplements=supplements)
+    def spy(
+        self,
+        *,
+        frontend_replace: bool = False,
+        supplements: bool = False,
+        journal_order: bool = False,
+    ):  # noqa: ANN001
+        negotiated.append((frontend_replace, supplements, journal_order))
+        return real_subscribe(
+            self,
+            frontend_replace=frontend_replace,
+            supplements=supplements,
+            journal_order=journal_order,
+        )
 
     async def no_frames(*args, **kwargs):  # noqa: ANN002, ANN003
         # An async generator with nothing to yield: the response completes
@@ -6824,12 +6835,14 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         legacy = await client.get(url)
         assert legacy.status_code == 409, legacy.text
         assert "Update the desktop app" in legacy.json()["detail"]
-        assert negotiated == [(False, False)], "the legacy mount did not present itself as legacy"
+        assert negotiated == [
+            (False, False, False)
+        ], "the legacy mount did not present itself as legacy"
         admitted = await client.get(url, params={"frontend_replace": 1})
         assert admitted.status_code == 200, admitted.text
         assert negotiated == [
-            (False, False),
-            (True, False),
+            (False, False, False),
+            (True, False, False),
         ], "the route dropped the negotiated flag"
         bridge.move_in_progress = False
         # The supplements declaration is the same hand-off on its own parameter
@@ -6838,10 +6851,14 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         declared = await client.get(url, params={"supplements": 1})
         assert declared.status_code == 200, declared.text
         assert negotiated == [
-            (False, False),
-            (True, False),
-            (False, True),
+            (False, False, False),
+            (True, False, False),
+            (False, True, False),
         ], "the route dropped the supplements declaration"
+
+        ordered = await client.get(url, params={"journal_order": 1})
+        assert ordered.status_code == 200, ordered.text
+        assert negotiated[-1] == (False, False, True), "source order opt-in was dropped"
 
 
 @pytest.mark.asyncio

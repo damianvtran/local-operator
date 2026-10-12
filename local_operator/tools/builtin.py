@@ -4061,7 +4061,13 @@ async def execute_bash(
         temp = confinement.temp_dir()
         injections["TMPDIR"] = str(temp)
         injections["TMP"] = str(temp)
-    env = shell_env.child_environment(injections=injections)
+    env = shell_env.child_environment(
+        # A confined session runs STRICT (see ``shell_env.policy_for_confinement``):
+        # the model's own command must not read ambient credentials out of its
+        # environment. Ordinary sessions keep the process's configured policy.
+        shell_env.policy_for_confinement(None if confinement is None else confinement.root),
+        injections=injections,
+    )
 
     # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
     # mode, which rejects process substitution and other bashisms at parse
