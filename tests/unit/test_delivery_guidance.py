@@ -25,7 +25,9 @@ BUDGETS = {
 
 @pytest.mark.parametrize("name,budget", BUDGETS.items())
 def test_loaded_role_routes_to_bounded_delivery_authority(name, budget):
-    body = load_seed(name).instructions
+    profile = load_seed(name)
+    assert profile is not None
+    body = profile.instructions
     raw = (ROOT / f"local_operator/agent_seeds/{name}.md").read_text()
     # A loader-clipped prompt must not pass a budget check on its clipped view.
     assert body == raw.split("---", 2)[2].strip()
