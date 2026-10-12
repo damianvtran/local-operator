@@ -8,12 +8,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from local_operator.harness.types import StreamModelEvent, StreamTextDelta
 from local_operator.model.configure import build_model_spec
 from local_operator.providers.failover import ProviderError
 from local_operator.team_bridge.model_boundary import (
     DefaultSelection,
     ScreeningWireGuard,
     ScreenModelRunner,
+    _ScreeningStreamRefused,
 )
 from local_operator.team_bridge.store import OwnerReceipt, Store
 from local_operator.team_bridge.types import OwnerSnapshot
@@ -57,9 +59,9 @@ class FakeStreamFn:
 
 def test_runner_builds_one_fresh_isolated_user_request(tmp_path) -> None:
     events = [
-        SimpleNamespace(type="model", model=SimpleNamespace(model_id="qa/default")),
+        StreamModelEvent(model=build_model_spec("openai", "qa-default")),
         SimpleNamespace(type="reasoning_delta", text="thinking"),
-        SimpleNamespace(type="stream_text_delta", text="VERDICT: deliver\nREASON: ok."),
+        StreamTextDelta(delta="VERDICT: deliver\nREASON: ok."),
     ]
     fn = FakeStreamFn(events)
     selection = DefaultSelection(
@@ -71,7 +73,7 @@ def test_runner_builds_one_fresh_isolated_user_request(tmp_path) -> None:
     runner = ScreenModelRunner(fn, selection)
     reply, actual = runner("PROMPT", default_model="qa/default")
     assert reply == "VERDICT: deliver\nREASON: ok."
-    assert actual == "qa/default"
+    assert actual == "qa-default"  # the spec's own model id is the serving evidence
     request = fn.requests[0]
     assert request.isolated is True
     assert request.tools == [] and request.tool_choice == "none"
@@ -81,14 +83,14 @@ def test_runner_builds_one_fresh_isolated_user_request(tmp_path) -> None:
 
 
 def test_runner_refuses_tools_and_unevidenced_identity(tmp_path) -> None:
-    tool_events = [SimpleNamespace(type="stream_tool_call_delta", tool_call=None)]
+    tool_events = [SimpleNamespace(type="tool_call_delta", tool_call=None)]
     selection = DefaultSelection(
         provider="qa",
         model_id="qa/default",
         spec=build_model_spec("openai", "qa-default"),
         approved_identities=frozenset({"qa/default"}),
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(_ScreeningStreamRefused):
         ScreenModelRunner(FakeStreamFn(tool_events), selection)("p", default_model="qa/default")
     # A default the runner was not built for is unevidenced -> hold signal.
     assert ScreenModelRunner(FakeStreamFn([]), selection)("p", default_model="qa/other") == (

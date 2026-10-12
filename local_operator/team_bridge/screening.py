@@ -41,7 +41,9 @@ physical requests (auth re-resolve + fast resend); the wire decorator
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import inspect
 import json
 import re
 import secrets
@@ -420,6 +422,10 @@ def validate_envelope(
     digest_payload = json.dumps(
         {
             "sender": sender_account,
+            # RENDERED identity is part of the admission digest (A6): a
+            # display-name change must miss the cache, not ride another
+            # context's verdict.
+            "sender_display": sender_display,
             "organization": organization,
             "type": message_type,
             "request": request_canonical,
@@ -575,7 +581,7 @@ def _persist_hold(
         pass
 
 
-def screen_message(
+async def screen_message_async(
     owner: OwnerSnapshot,
     item: Mapping[str, Any],
     *,
@@ -637,12 +643,15 @@ def screen_message(
     # 3. Envelope validation before any store write or spend (H3-Q9).
     envelope, bad_code = validate_envelope(owner, item)
     if envelope is None:
-        _persist_hold(
-            store,
-            owner,
-            str(item.get("message", {}).get("id", "")),
-            bad_code or "envelope_malformed",
-        )
+        # A None/str message block must reach persist_hold as a TYPED hold
+        # with a bounded placeholder id — never an AttributeError (R6/Q9).
+        message_block = item.get("message")
+        held_id = "unparsed"
+        if isinstance(message_block, Mapping):
+            candidate_id = message_block.get("id")
+            if isinstance(candidate_id, str) and candidate_id:
+                held_id = candidate_id
+        _persist_hold(store, owner, held_id, bad_code or "envelope_malformed")
         return ScreenResult("hold", hold_code=bad_code or "envelope_malformed")
     message_id = envelope.message_id
 
@@ -654,13 +663,23 @@ def screen_message(
     try:
         current = store.current_screening_policy(owner)
         if current is None:
-            epoch = store.publish_screening_policy(
-                owner,
-                version=snapshot.screening_version,
-                template_sha256=snapshot.template_sha256,
-                default_model=snapshot.default_model,
-                revision=snapshot.admission_revision,
-            )
+            try:
+                epoch = store.publish_screening_policy(
+                    owner,
+                    version=snapshot.screening_version,
+                    template_sha256=snapshot.template_sha256,
+                    default_model=snapshot.default_model,
+                    revision=snapshot.admission_revision,
+                    create_only=True,
+                )
+            except StoreRefused as race:
+                if race.code != "policy_exists":
+                    raise
+                current = store.current_screening_policy(owner)
+                if current is None or not _policy_row_matches(current, snapshot):
+                    _persist_hold(store, owner, message_id, "policy_stale")
+                    return ScreenResult("hold", hold_code="policy_stale")
+                epoch = int(current["epoch"])
         else:
             if not _policy_row_matches(current, snapshot):
                 _persist_hold(store, owner, message_id, "policy_stale")
@@ -689,9 +708,15 @@ def screen_message(
     #    (body + template + model + revision + envelope digest). A changed
     #    sender/type/request/revision misses and re-screens; a reject is
     #    reused as the same bounce rather than silently re-billed (H3-Q2).
-    fingerprint = f"{snapshot.admission_revision}|{envelope.envelope_digest}"
+    fingerprint = (
+        f"{snapshot.admission_revision}|{envelope.envelope_digest}"
+        f"|{_identities_digest(snapshot.approved_serving_identities)}"
+    )
     if snapshot.default_model is not None:
-        cached = store.find_screening_receipt(
+        # ONE atomic native consumption (A2/A3): owner generation, current
+        # published policy, receipt epoch and creator generation all verified
+        # inside a single transaction; the live object is re-read LAST.
+        cached = store.consume_screening_receipt(
             owner,
             body_sha256=envelope.body_sha256,
             template_sha256=snapshot.template_sha256,
@@ -699,32 +724,17 @@ def screen_message(
             admission_revision=snapshot.admission_revision,
             envelope_digest=envelope.envelope_digest,
         )
+        if cached is not None and not snapshot.matches_live(policy):
+            _persist_hold(store, owner, message_id, "policy_stale")
+            return ScreenResult("hold", hold_code="policy_stale")
+        if cached is not None and cached["verdict"] == "reject":
+            # A cached reject must respect the SAME historical-read rule as
+            # a fresh one (A3): with a confirmed upstream read this stays a
+            # LOCAL hold, never a bounce replay.
+            if store.find_intent_state(owner, message_id, "read") == "confirmed":
+                _persist_hold(store, owner, message_id, "local_quarantine")
+                return ScreenResult("hold", hold_code="local_quarantine")
         if cached is not None:
-            # FINAL native fence (H3-Q2): a cache hit is never continuing
-            # authority. Re-resolve the live owner, require the published
-            # policy to still equal the snapshot (and the receipt's own
-            # epoch/generation to still be current), then re-read the live
-            # object LAST — any drift refuses the cached disposition.
-            live = store.resolve_owner(
-                credential_id=owner.credential_id,
-                account_id=owner.account_id,
-                tenant_id=owner.tenant_id,
-                endpoint_id=owner.endpoint_id,
-                canonical_base_url=owner.canonical_base_url,
-            )
-            if live != owner:
-                _persist_hold(store, owner, message_id, "owner_changed")
-                return ScreenResult("hold", hold_code="owner_changed")
-            cached_current = store.current_screening_policy(owner)
-            if (
-                cached_current is None
-                or not _policy_row_matches(cached_current, snapshot)
-                or int(cached_current["epoch"]) != int(cached.get("policy_epoch") or -1)
-                or int(cached.get("creator_generation") or -1) != owner.enrollment_generation
-                or not snapshot.matches_live(policy)
-            ):
-                _persist_hold(store, owner, message_id, "policy_stale")
-                return ScreenResult("hold", hold_code="policy_stale")
             receipt = ScreeningReceipt(
                 verdict=cached["verdict"],
                 model=cached["model"],
@@ -796,7 +806,9 @@ def screen_message(
     # 11. ONE dispatch. Provider failures are typed holds AND advance the
     #     durable breaker; nothing of the exception's prose is kept.
     try:
-        reply, actual_model = runner(rendered.private_text(), default_model=snapshot.default_model)
+        reply, actual_model = await _maybe_await(
+            runner(rendered.private_text(), default_model=snapshot.default_model)
+        )
     except Exception:  # noqa: BLE001 - sanitized hold; never prose
         retry_at = _record_failure(store, owner)
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "provider_error")
@@ -934,3 +946,54 @@ def _commit_hold(
         )
     except StoreRefused:
         _persist_hold(store, owner, message_id, hold_code)
+
+
+async def _maybe_await(value: Any) -> Any:
+    """Await the runner's result when it is awaitable; pass through otherwise."""
+
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _identities_digest(identities: frozenset[str]) -> str:
+    """Bounded digest of the approved serving identities (fingerprint input)."""
+
+    payload = ",".join(sorted(identities))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def screen_message(
+    owner: OwnerSnapshot,
+    item: Mapping[str, Any],
+    *,
+    config_dir: Path,
+    policy: ScreeningPolicy,
+    runner: ScreenRunner | None = None,
+    nonce: str | None = None,
+) -> ScreenResult:
+    """Synchronous facade over :func:`screen_message_async`.
+
+    It runs the async core on a PRIVATE loop only when this thread has none
+    (never nested, never a thread workaround); inside an active loop it
+    refuses — the caller should await :func:`screen_message_async`.
+    """
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError(
+            "screen_message cannot run inside an active event loop; "
+            "await screen_message_async instead"
+        )
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(
+            screen_message_async(
+                owner, item, config_dir=config_dir, policy=policy, runner=runner, nonce=nonce
+            )
+        )
+    finally:
+        loop.close()

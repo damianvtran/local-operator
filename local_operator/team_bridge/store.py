@@ -1158,6 +1158,7 @@ class Store:
         default_model: str | None,
         revision: str,
         expected_epoch: int | None = None,
+        create_only: bool = False,
     ) -> int:
         """Publish the current accepted policy; return its durable epoch.
 
@@ -1187,6 +1188,10 @@ class Store:
                 "FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
+            if row is not None and create_only:
+                # FIRST-PUBLICATION CAS: a bootstrap must never race another
+                # writer into owning the row (the caller re-reads and matches).
+                raise StoreRefused("policy_exists", "bootstrap lost the first-publication race")
             if row is None:
                 conn.execute(
                     "INSERT INTO screening_policy "
@@ -1292,6 +1297,72 @@ class Store:
         except (sqlite3.Error, json.JSONDecodeError):
             # An unreadable cache row is a MISS (fresh screening may re-bill
             # under normal accounting); it can never silently certify.
+            return None
+
+    def consume_screening_receipt(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        body_sha256: str,
+        template_sha256: str,
+        model: str,
+        admission_revision: str,
+        envelope_digest: str,
+    ) -> dict[str, Any] | None:
+        """ONE native consumption point for a cached verdict (A2/A3).
+
+        In a single transaction: the live committed owner must still be the
+        caller's exact generation; the receipt must match the full
+        fingerprint; the PUBLISHED policy must still equal the receipt's own
+        template/model/revision AND the receipt's epoch and creator
+        generation must still be current. Anything else returns ``None`` —
+        the cache can never outlive the authority that minted it.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                key = _owner_key(owner)
+                if self._live_generation(conn, owner) != owner.enrollment_generation:
+                    return None
+                policy = conn.execute(
+                    "SELECT version, template_sha256, default_model, revision, epoch "
+                    "FROM screening_policy WHERE owner_key = ?",
+                    (key,),
+                ).fetchone()
+                if policy is None:
+                    return None
+                row = conn.execute(
+                    "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
+                    "categories, envelope_digest, admission_revision, policy_epoch, "
+                    "creator_generation FROM screening_receipts "
+                    "WHERE owner_key = ? AND body_sha256 = ? AND template_sha256 = ? "
+                    "AND model = ? AND admission_revision = ? AND envelope_digest = ?",
+                    (key, body_sha256, template_sha256, model, admission_revision, envelope_digest),
+                ).fetchone()
+                if row is None:
+                    return None
+                if (
+                    policy["template_sha256"] != row["template_sha256"]
+                    or policy["default_model"] != row["model"]
+                    or policy["revision"] != row["admission_revision"]
+                    or int(policy["epoch"]) != int(row["policy_epoch"])
+                    or int(row["creator_generation"]) != owner.enrollment_generation
+                ):
+                    return None
+                return {
+                    "verdict": row["verdict"],
+                    "model": row["model"],
+                    "prompt_version": row["prompt_version"],
+                    "template_sha256": row["template_sha256"],
+                    "body_sha256": row["body_sha256"],
+                    "categories": list(row["categories"] or []),
+                    "envelope_digest": row["envelope_digest"],
+                    "admission_revision": row["admission_revision"],
+                    "policy_epoch": row["policy_epoch"],
+                    "creator_generation": row["creator_generation"],
+                }
+        except (StoreRefused, sqlite3.Error):
             return None
 
     def finish_screening(
