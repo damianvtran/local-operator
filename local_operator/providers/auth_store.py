@@ -1035,6 +1035,11 @@ class _SerializedConnection:
         with self._lock:
             self._conn.commit()
 
+    @property
+    def in_transaction(self) -> bool:
+        with self._lock:
+            return self._conn.in_transaction
+
     def rollback(self) -> None:
         # Muse seals first, then writes metadata. A failed metadata statement
         # must leave this connection clean before its sealed key is discarded.
@@ -1676,10 +1681,17 @@ class AuthStore:
                     self._conn.commit()
                     return
                 metadata = row.data
+                self._conn.execute("SAVEPOINT muse_logout")
+                compensation_allowed = True
 
                 def still_recorded() -> bool:
                     current = self.get_credential(credential_id)
-                    return current is not None and current.data == metadata
+                    return (
+                        compensation_allowed
+                        and self._conn.in_transaction
+                        and current is not None
+                        and current.data == metadata
+                    )
 
                 with reversible_key_deletion(
                     metadata, self._config_dir or self._db_path.parent, restore_if=still_recorded
@@ -1694,10 +1706,18 @@ class AuthStore:
                         )
                         self._conn.commit()
                     except BaseException:
-                        # Roll back BEFORE compensating the sealed key. If a
-                        # commit actually succeeded before reporting failure,
-                        # absent metadata must not resurrect an orphan secret.
-                        self._conn.rollback()
+                        # Undo the logout statements without releasing BEGIN
+                        # IMMEDIATE: another connection must not delete the
+                        # retained row between ownership recheck and key restore.
+                        # The outer transaction releases the reservation only
+                        # AFTER the secret compensation has completed.
+                        if self._conn.in_transaction:
+                            self._conn.execute("ROLLBACK TO SAVEPOINT muse_logout")
+                        else:
+                            # A commit can complete before an observer reports
+                            # failure. That logout is already durable; never
+                            # resurrect its key, even if another writer runs.
+                            compensation_allowed = False
                         raise
             return
         self._conn.execute(
