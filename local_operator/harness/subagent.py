@@ -1053,6 +1053,7 @@ def run_subagent(
     resume_dir: "Path | None" = None,
     agent: str = "task",
     effort: str | None = None,
+    model_selector: str | None = None,
     restricted: bool = False,
     inherited_model: ModelSpec | None = None,
     target: LaunchTarget | None = None,
@@ -1161,6 +1162,16 @@ def run_subagent(
         # was accepted" are different facts about who spent the money. The
         # runner never rewrites this one (see ``AsyncJob.owns_model``).
         job.owns_model = model_spec is not None
+        job.model_selector = model_selector
+        job.model_selection_source = (
+            "explicit_inherit"
+            if model_selector == "inherit"
+            else (
+                "explicit_model"
+                if model_selector is not None
+                else "effort" if effort else "role" if model_spec is not None else "parent"
+            )
+        )
         # And WHICH model the pin asked for, on the same registration-time rule
         # and as the mirror of that attribution: ``model_label`` above is
         # overwritten once the child is built (and again by every route edge),
@@ -1186,6 +1197,8 @@ def run_subagent(
             launch_message_id=launch_message_id,
             agent_role=agent,
             effort=effort or "",
+            model_selector=model_selector,
+            model_selection_source=job.model_selection_source if job is not None else "",
             team_name=str(getattr(target.team, "name", "") or ""),
             team_lineage=target.team_lineage,
             depth=target.depth,

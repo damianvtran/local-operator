@@ -280,7 +280,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # 673 -> 677 (round 1 remediation, D2/D4): the verb became mechanism-neutral
     # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
     # paused child is halted-and-resumable, not stopped. Re-measured.
-    "hub": 650,
+    "hub": 725,
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.
@@ -308,7 +308,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # wire (the description keeps one sentence); re-measured via this test's
     # own print, and it is the ONLY count this change moved.
     "setting": 191,
-    "task": 484,
+    "task": 620,
     "team": 489,
     "team_delete": 90,
     "todo": 540,
@@ -335,7 +335,7 @@ MEASURED_TOKENS: dict[str, int] = {
 #: intent-description cut as the canonical table above.
 #: 639 -> 635 (and `task` 488 -> 484 above): the sentence the depth gate added to
 #: the model_choice note is gone again (revert of the nested tier-choice gate).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 815, "task": 635}
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 815, "task": 768}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
