@@ -231,7 +231,7 @@ async def run_openai_sub(
     account_id: str | None,
     num_images: int,
     image_size: str,
-    source_url: str | None,
+    source_urls: list[str] | None,
     seed: int | None,
     model: str | None,
     emit: ProgressFn | None,
@@ -250,7 +250,7 @@ async def run_openai_sub(
     # avoid. Aligns with google/xai/openrouter; a no-op without a signal.
     if pause is not None:
         await pause(0.0)
-    if source_url is not None:
+    if source_urls:
         raise RungSkipped(
             "The subscription rung has no image-to-image route in v1.",
             reason_class="unsupported",

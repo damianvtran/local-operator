@@ -253,7 +253,12 @@ MEASURED_TOKENS: dict[str, int] = {
     #: edit + its drift caveat) is documented. Doc-only: the wire description
     #: and schema are untouched, so ``bench_context_budget.py``'s arms are
     #: unmoved by this change.
-    "generate_image": 838,
+    # 838 -> 918 (2026-10-11, multi-source edit lane): the source clause now
+    # names the plural fields and the 16-source ceiling.
+    # 918 -> 935 (2026-10-11, round-1 remediation F2): the cost sentence no
+    # longer lumps OpenAI with the never-reporting rungs — an OpenAI edit
+    # shows an estimated figure when the response carries usage.
+    "generate_image": 935,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries

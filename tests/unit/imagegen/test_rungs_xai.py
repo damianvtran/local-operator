@@ -71,7 +71,7 @@ async def _run(recorder: _Recorder, **kwargs: Any):
         key="xk-1",
         num_images=1,
         image_size="square_hd",
-        source_url=None,
+        source_urls=None,
         seed=None,
         model=None,
         emit=None,
@@ -201,17 +201,36 @@ async def test_an_edit_uses_the_single_image_shape_and_keeps_reported_ticks() ->
     recorder = _Recorder()
     http = _client(recorder.handler(_ok_response()))
 
-    result = await _run(recorder, source_url=f"data:image/png;base64,{PNG_B64}", client=http)
+    result = await _run(recorder, source_urls=[f"data:image/png;base64,{PNG_B64}"], client=http)
 
     assert recorder.requests[0].url.path == "/v1/images/edits"
     body = recorder.bodies[0]
     assert body["image"] == {"url": f"data:image/png;base64,{PNG_B64}", "type": "image_url"}
+    assert "images" not in body, "the vendor documents the two fields as mutually exclusive"
     assert "n" not in body, "n is a generations-only parameter on this endpoint"
     assert body["response_format"] == "b64_json"
     # Edits bill input AND output (pricing page); the REPORTED ticks stay the
     # only figure, and the generations flat rate is never reused.
     assert result.cost_usd == pytest.approx(4.0)
     assert result.cost_source == "reported"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_source_edit_rides_the_images_array_shape() -> None:
+    recorder = _Recorder()
+    http = _client(recorder.handler(_ok_response()))
+
+    first = f"data:image/png;base64,{PNG_B64}"
+    second = "data:image/jpeg;base64,QUJD"
+    await _run(recorder, source_urls=[first, second], client=http)
+
+    assert recorder.requests[0].url.path == "/v1/images/edits"
+    body = recorder.bodies[0]
+    assert body["images"] == [
+        {"url": first, "type": "image_url"},
+        {"url": second, "type": "image_url"},
+    ], "one object per source, in order (docs fetched 2026-10-11)"
+    assert "image" not in body, "the vendor documents the two fields as mutually exclusive"
 
 
 @pytest.mark.asyncio
@@ -225,7 +244,7 @@ async def test_a_multi_image_edit_is_a_recorded_skip() -> None:
         await _run(
             recorder,
             num_images=2,
-            source_url=f"data:image/png;base64,{PNG_B64}",
+            source_urls=[f"data:image/png;base64,{PNG_B64}"],
             client=http,
         )
 

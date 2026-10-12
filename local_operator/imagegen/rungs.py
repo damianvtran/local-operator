@@ -42,7 +42,7 @@ import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from pydantic import SecretStr
@@ -286,6 +286,22 @@ async def _read_json(response: httpx.Response, *, label: str) -> dict[str, Any]:
     return payload
 
 
+#: APIError codes and HTTP statuses a bounded retry may cover. The codes are
+#: transport-level (the request never landed or the wait timed out); the
+#: statuses are the retryable-server class (throttle + the gateway family).
+#: Anything else — a refusal, an unreadable 2xx — is the upstream's ANSWER
+#: and must reach the walk unchanged.
+_TRANSIENT_API_CODES = frozenset({"timeout", "network"})
+_TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def _is_transient_api_error(exc: APIError) -> bool:
+    """Whether a failed attempt is the kind one bounded retry may replay."""
+    if isinstance(exc.code, str) and exc.code in _TRANSIENT_API_CODES:
+        return True
+    return exc.status_code in _TRANSIENT_STATUS_CODES
+
+
 async def _request_json(
     client: httpx.AsyncClient,
     method: str,
@@ -294,6 +310,7 @@ async def _request_json(
     label: str,
     timeout_s: float,
     secrets: tuple[str, ...] = (),
+    transient_retries: int = 0,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """One bounded JSON request, with this package's error shape on failure.
@@ -302,21 +319,42 @@ async def _request_json(
     attempt records can say "timeout" vs "network" without text-matching; a
     >=400 response goes through the shared httpx mapper (which keeps the
     upstream's own sentence, scrubbed).
+
+    ``transient_retries`` is how many EXTRA attempts an IDEMPOTENT read may
+    make after a transient failure (:func:`_is_transient_api_error`): a poll
+    blip must not orphan a billed job. It defaults to zero, and only the free
+    GET call sites opt in — a blind re-POST can double-queue and double-bill
+    (D9: submits are never retried; failover is their remedy).
     """
-    try:
-        response = await client.request(method, url, timeout=httpx.Timeout(timeout_s), **kwargs)
-    except httpx.TimeoutException as exc:
-        raise APIError(
-            f"{label} timed out after {timeout_s:.0f}s.", status_code=None, code="timeout"
-        ) from exc
-    except httpx.HTTPError as exc:
-        # A transport failure never reached the upstream: no status, no body.
-        raise APIError(f"{label} request failed: {exc}", status_code=None, code="network") from exc
-    if response.status_code >= 400:
-        raise api_error_from_httpx_response(
-            response, fallback_message=f"{label} refused the request", secrets=secrets
-        )
-    return await _read_json(response, label=label)
+    attempt = 0
+    while True:
+        try:
+            try:
+                response = await client.request(
+                    method, url, timeout=httpx.Timeout(timeout_s), **kwargs
+                )
+            except httpx.TimeoutException as exc:
+                raise APIError(
+                    f"{label} timed out after {timeout_s:.0f}s.", status_code=None, code="timeout"
+                ) from exc
+            except httpx.HTTPError as exc:
+                # A transport failure never reached the upstream: no status, no body.
+                raise APIError(
+                    f"{label} request failed: {exc}", status_code=None, code="network"
+                ) from exc
+            if response.status_code >= 400:
+                raise api_error_from_httpx_response(
+                    response, fallback_message=f"{label} refused the request", secrets=secrets
+                )
+            return await _read_json(response, label=label)
+        except APIError as exc:
+            if attempt >= transient_retries or not _is_transient_api_error(exc):
+                raise
+            # Linear back-off inside the call's own bound (one retry today:
+            # 0.75 s — long enough to clear a single blip, short enough not
+            # to eat the rung's budget).
+            attempt += 1
+            await asyncio.sleep(0.75 * attempt)
 
 
 def _as_float(value: Any) -> float | None:
@@ -428,12 +466,14 @@ RADIENT_ERROR_TYPES = frozenset(
     {"media_rejected", "media_failed", "media_rate_limited", "media_unavailable"}
 )
 
-# Radient's EDIT wire (hub media slice, live 2026-10-10): a source rides the
-# canonical ``image_url`` — a data URI or an https URL — and ``source_url``
-# plus every alias is REFUSED hub-side (400, fail-closed before any vendor
-# call, never a silent billed text-to-image), so the pre-slice key is deleted
-# rather than kept as a fallback. Three constraints the hub's pins impose and
-# this wire honours, each measured live (prod validation on radient PR #111):
+# Radient's EDIT wire (hub media slice, live 2026-10-10; multi-source wire
+# added 2026-10-11): one source rides the canonical ``image_url`` and several
+# ride ``image_urls`` — each a data URI or an https URL, mapped per pin —
+# while ``source_url`` plus every alias is REFUSED hub-side (400,
+# fail-closed before any vendor call, never a silent billed text-to-image),
+# so the pre-slice key is deleted rather than kept as a fallback. Three
+# constraints the hub's pins impose and this wire honours, each measured
+# live (prod validation on radient PR #111):
 # - a ``prompt`` ALWAYS rides an edit: the vendor queues prompt-less submits
 #   but fails them at execution (unbilled; the failure surfaces as a 503 from
 #   the hub's result read);
@@ -441,8 +481,9 @@ RADIENT_ERROR_TYPES = frozenset(
 #   flux-2-max/pro edit pins refuse an absent or ``auto`` size at quote time;
 # - per-pin SOURCE ceilings (gpt-2.5 16 / grok 3 / seedream 10) are live
 #   listing facts (``sources``/``max_sources``/``mask`` on every row), never
-#   constants here — v1 sends a SINGLE source, and a multi-source wire must
-#   read the ceiling off the row it is about to send to.
+#   constants here — the multi-source wire reads the ceiling off the row it
+#   is about to send to (``_radient_pin_max_sources``) and sends anything
+#   unreadable anyway: the hub's refusal is the fail-closed authority (D2).
 
 
 def _bearer_headers(credential: str) -> dict[str, str]:
@@ -512,6 +553,58 @@ def _pick_radient_model(
         status_code=None,
         code="invalid_response",
     )
+
+
+def _hub_reason_error(exc: APIError) -> APIError:
+    """``exc`` with the hub's additive ``details.reason`` appended, else ``exc``.
+
+    The media-rejection server change carries a parameter-level REASON in
+    ``details.reason`` on a refused submit; appending it keeps the typed
+    fields intact (same status/code/details/body) and upgrades the message
+    from "refused" to "refused because X". Optional by design: an older hub,
+    a reasonless refusal, or a reason already present in the message returns
+    the exception unchanged — the field is consumed additively only, never
+    required.
+    """
+    reason = exc.details.get("reason")
+    if isinstance(reason, str) and reason and reason not in str(exc):
+        return APIError(
+            f"{exc} ({reason})",
+            status_code=exc.status_code,
+            code=exc.code,
+            details=exc.details,
+            body=exc.body,
+        )
+    return exc
+
+
+def _radient_pin_max_sources(payload: dict[str, Any], model_id: str) -> int | None:
+    """The listed source ceiling for ``model_id``; ``None`` when unreadable.
+
+    Mirrors ``_radient_unit_price``'s tolerant read (the same dual
+    ``models``/``data`` lookup, the same id-field spellings), and only a
+    positive ``max_sources`` counts as a cap. An absent or unreadable cap
+    returns ``None`` and the caller SENDS anyway: the hub is the fail-closed
+    authority and its refusal is pre-vendor and free, while blocking on a
+    stale listing would refuse valid calls (D2). Used only for a multi-source
+    edit, to fail forward with the pin's own ceiling instead of a hub
+    round-trip.
+    """
+    rows = payload.get("models")
+    if not isinstance(rows, list):
+        nested = payload.get("data")
+        rows = nested if isinstance(nested, list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        model_name = row.get("id") or row.get("model") or row.get("name")
+        if model_name != model_id:
+            continue
+        cap = row.get("max_sources")
+        if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+            return cap
+        return None
+    return None
 
 
 def _radient_failure(payload: dict[str, Any], *, status: str = "") -> APIError | None:
@@ -628,7 +721,7 @@ async def run_radient(
     image_size: str,
     seed: int | None,
     strength: float | None,
-    source_url: str | None,
+    source_urls: list[str] | None,
     model: str | None,
     handle: CancelHandle,
     emit: ProgressFn | None,
@@ -638,9 +731,11 @@ async def run_radient(
     """Rung 1: the Radient hub's media tools. See the module docstring.
 
     ``credential`` is the bearer the cascade resolved (``SecretStr`` unwrapped
-    at the boundary); ``source_url`` is the img2img source — an EDIT request —
-    mapped to the hub's canonical ``image_url`` (the pre-slice key, refused
-    hub-side, was deleted with the skip path it existed for). A ``prompt``
+    at the boundary); ``source_urls`` is the img2img source list — an EDIT
+    request — mapped to the hub's canonical ``image_url`` (one source) /
+    ``image_urls`` (several; the hub maps them per pin — the pre-slice key,
+    refused hub-side, was deleted with the skip path it existed for). A
+    ``prompt``
     always rides an edit and ``image_size`` is always explicit: both are
     pin-level hub requirements, not defaults (see the edit-wire notes above
     the error vocabulary). The walk: live model list → affordability
@@ -657,8 +752,25 @@ async def run_radient(
             timeout_s=RADIENT_MODELS_TIMEOUT_S,
             secrets=(credential,),
             headers=_bearer_headers(credential),
+            # An idempotent read: one bounded retry is safe (D9).
+            transient_retries=1,
         )
-        model_id = _pick_radient_model(models_payload, model, editing=source_url is not None)
+        editing = bool(source_urls)
+        source_count = len(source_urls) if source_urls else 0
+        model_id = _pick_radient_model(models_payload, model, editing=editing)
+        if editing and source_count > 1:
+            # Fail forward with the PIN's own ceiling where the listing
+            # carries it, instead of a hub round-trip: advisory only — an
+            # unreadable cap still sends (the hub's refusal is pre-vendor
+            # and free; a stale listing must not refuse a valid call, D2).
+            cap = _radient_pin_max_sources(models_payload, model_id)
+            if cap is not None and source_count > cap:
+                raise RungSkipped(
+                    f"Radient edit pin {model_id} accepts up to {cap} sources; "
+                    f"{source_count} requested — pin a higher-ceiling model or reduce "
+                    "the sources.",
+                    reason_class="unsupported",
+                )
         unit_price = _radient_unit_price(models_payload, model_id)
 
         affordable = await _radient_affordable(
@@ -681,21 +793,33 @@ async def run_radient(
             body["seed"] = seed
         if strength is not None:
             body["strength"] = strength
-        if source_url is not None:
-            # Canonical single-source field: the hub maps it per pin and
-            # refuses ``source_url`` and aliases (never a silent billed T2I).
-            body["image_url"] = source_url
+        if source_urls:
+            # Canonical source fields: the hub maps them per pin and refuses
+            # ``source_url`` and aliases (never a silent billed T2I). One
+            # source keeps the original ``image_url`` spelling; several ride
+            # ``image_urls`` (D1) — byte-compat where it already worked, the
+            # canonical list where it did not.
+            if len(source_urls) == 1:
+                body["image_url"] = source_urls[0]
+            else:
+                body["image_urls"] = list(source_urls)
 
-        generate = await _request_json(
-            http,
-            "POST",
-            f"{base}{RADIENT_MEDIA_GENERATE_PATH}",
-            label="Radient",
-            timeout_s=HTTP_TIMEOUT_SUBMIT_S,
-            secrets=(credential,),
-            headers=_bearer_headers(credential),
-            json=body,
-        )
+        try:
+            generate = await _request_json(
+                http,
+                "POST",
+                f"{base}{RADIENT_MEDIA_GENERATE_PATH}",
+                label="Radient",
+                timeout_s=HTTP_TIMEOUT_SUBMIT_S,
+                secrets=(credential,),
+                headers=_bearer_headers(credential),
+                json=body,
+            )
+        except APIError as exc:
+            # Consume the hub's additive ``details.reason`` (media-rejection
+            # server change) so the refusal's parameter-level sentence rides
+            # the message; optional and a no-op without it (see the helper).
+            raise _hub_reason_error(exc) from exc
         request_id = generate.get("request_id")
         if not isinstance(request_id, str) or not request_id:
             raise APIError(
@@ -737,6 +861,8 @@ async def run_radient(
                 label="Radient",
                 timeout_s=HTTP_TIMEOUT_POLL_S,
                 secrets=(credential,),
+                # An idempotent read: one bounded retry is safe (D9).
+                transient_retries=1,
                 headers=_bearer_headers(credential),
                 # request_id ONLY: no model param, and an unknown/foreign id
                 # answers an identical 404 (non-disclosure; manager freeze
@@ -806,6 +932,8 @@ async def run_radient(
             label="Radient",
             timeout_s=HTTP_TIMEOUT_RESULT_S,
             secrets=(credential,),
+            # An idempotent read: one bounded retry is safe (D9).
+            transient_retries=1,
             headers=_bearer_headers(credential),
             # request_id only — same freeze note as the status read above.
             params={"request_id": request_id},
@@ -846,21 +974,33 @@ async def run_radient(
 #: FAL's queue host, mirroring the legacy client's default.
 FAL_QUEUE_BASE_URL = "https://queue.fal.run"
 
+#: One FAL edit route: the app path, the field its source(s) ride, and the
+#: app's documented reference ceiling (``None`` = shape known, count not).
+FalEditRoute = NamedTuple(
+    "FalEditRoute", [("app", str), ("field", str), ("max_sources", int | None)]
+)
+
 #: FAL edit routes, keyed by the model id a caller pins. FAL serves an edit as
 #: a SEPARATE app with its own request schema (both pages fetched 2026-10-10),
 #: so the endpoint and the field the source rides cannot be derived from the
 #: model path: the flux-class i2i apps take a single ``image_url``, while the
-#: newer multi-reference editors take an ``image_urls`` LIST. Values: (app
-#: path, source field).
-FAL_EDIT_MODELS: dict[str, tuple[str, str]] = {
+#: newer multi-reference editors take an ``image_urls`` LIST (1..10 refs).
+FAL_EDIT_MODELS: dict[str, FalEditRoute] = {
     # The default model's editor: documented at
     # fal.ai/models/fal-ai/flux/dev/image-to-image (image_url required,
     # strength default 0.95).
-    FAL_DEFAULT_MODEL: ("fal-ai/flux/dev/image-to-image", "image_url"),
-    # A pinned edit-native app: references as a list (1..10), no strength or
-    # number parameter in its schema.
-    "blackforestlabs/flux-3/edit-image": ("blackforestlabs/flux-3/edit-image", "image_urls"),
+    FAL_DEFAULT_MODEL: FalEditRoute("fal-ai/flux/dev/image-to-image", "image_url", 1),
+    # The registered multi-reference editor: references as a list (1..10), no
+    # strength or number parameter in its schema.
+    "blackforestlabs/flux-3/edit-image": FalEditRoute(
+        "blackforestlabs/flux-3/edit-image", "image_urls", 10
+    ),
 }
+
+#: The registered multi-reference editor an unpinned multi-source edit runs
+#: on (D3): ``run_fal`` resolves it and ``_fal_edit_route``'s skip sentences
+#: name it as the remedy.
+FAL_MULTI_EDIT_DEFAULT = FAL_EDIT_MODELS["blackforestlabs/flux-3/edit-image"]
 
 
 def _fal_fallback_urls(base: str, model_path: str, request_id: str) -> tuple[str, str, str]:
@@ -880,8 +1020,8 @@ def _fal_fallback_urls(base: str, model_path: str, request_id: str) -> tuple[str
     return f"{root}/status", root, f"{root}/cancel"
 
 
-def _fal_edit_route(model_path: str) -> tuple[str, str]:
-    """(edit app path, source field) for an edit against ``model_path``.
+def _fal_edit_route(model_path: str, *, source_count: int) -> FalEditRoute:
+    """The edit route for an edit against ``model_path`` and a source count.
 
     Resolution order, and why:
 
@@ -895,16 +1035,46 @@ def _fal_edit_route(model_path: str) -> tuple[str, str]:
     4. anything else keeps the flux-class append as the DEGRADED fallback —
        an unmapped family fails at the provider and fails FORWARD, where
        guessing an endpoint for it would be a silent wrong-model call.
+
+    ``source_count`` gates the multi case (D3): a caller PIN is intent, so a
+    request for more references than the resolved app accepts SKIPS (naming
+    the registered multi-reference editor as the remedy) rather than
+    swapping the model silently; an app whose multi-reference shape is not
+    registered (3/4) skips the same way. ``reason_class`` is "unsupported"
+    throughout — a capability mismatch, the class the walk pre-records.
     """
     mapped = FAL_EDIT_MODELS.get(model_path)
-    if mapped is not None:
-        return mapped
-    for app, field in FAL_EDIT_MODELS.values():
-        if model_path == app:
-            return app, field
-    if model_path.endswith(("/edit", "/edit-image")):
-        return model_path, "image_urls"
-    return f"{model_path}/image-to-image", "image_url"
+    if mapped is None:
+        for entry in FAL_EDIT_MODELS.values():
+            if model_path == entry.app:
+                mapped = entry
+                break
+    if mapped is None:
+        if model_path.endswith(("/edit", "/edit-image")):
+            if source_count > 1:
+                raise RungSkipped(
+                    f"FAL app {model_path} is not a registered multi-reference "
+                    f"editor; pin {FAL_MULTI_EDIT_DEFAULT.app} or omit `model`.",
+                    reason_class="unsupported",
+                )
+            return FalEditRoute(model_path, "image_urls", None)
+        fallback = FalEditRoute(f"{model_path}/image-to-image", "image_url", 1)
+        if source_count > 1:
+            raise RungSkipped(
+                f"FAL's pinned model {fallback.app} accepts 1 reference(s); "
+                f"{source_count} requested — multi-source edits run on "
+                f"{FAL_MULTI_EDIT_DEFAULT.app} (pin it or omit `model`).",
+                reason_class="unsupported",
+            )
+        return fallback
+    if source_count > 1 and mapped.max_sources is not None and source_count > mapped.max_sources:
+        raise RungSkipped(
+            f"FAL's pinned model {mapped.app} accepts {mapped.max_sources} "
+            f"reference(s); {source_count} requested — multi-source edits run "
+            f"on {FAL_MULTI_EDIT_DEFAULT.app} (pin it or omit `model`).",
+            reason_class="unsupported",
+        )
+    return mapped
 
 
 async def run_fal(
@@ -915,7 +1085,7 @@ async def run_fal(
     image_size: str,
     seed: int | None,
     strength: float | None,
-    source_url: str | None,
+    source_urls: list[str] | None,
     model: str | None,
     handle: CancelHandle,
     emit: ProgressFn | None,
@@ -942,15 +1112,25 @@ async def run_fal(
     caption note), never a silent one (review round 1, D2/R1).
     """
     base = base_url.rstrip("/")
-    model_path = (model or FAL_DEFAULT_MODEL).strip().strip("/")
+    editing = bool(source_urls)
+    source_count = len(source_urls) if source_urls else 0
+    if editing and source_count > 1 and model is None:
+        # An unpinned multi-source edit resolves to the registered
+        # multi-reference editor instead of the single-reference flux-class
+        # default (D3/D4 — declaration and wire land together; the drift
+        # tests enforce it). A caller PIN is intent and is never swapped.
+        model_path = FAL_MULTI_EDIT_DEFAULT.app
+    else:
+        model_path = (model or FAL_DEFAULT_MODEL).strip().strip("/")
     headers = {"Authorization": f"Key {key}", "Content-Type": "application/json"}
     strength_ignored = False
     async with _client_scope(client) as http:
         body: dict[str, Any] = {"prompt": prompt, "num_images": num_images, "sync_mode": False}
-        if source_url is not None:
-            model_path, source_field = _fal_edit_route(model_path)
-            if source_field == "image_urls":
-                body["image_urls"] = [source_url]
+        if source_urls:
+            route = _fal_edit_route(model_path, source_count=len(source_urls))
+            model_path = route.app
+            if route.field == "image_urls":
+                body["image_urls"] = list(source_urls)
                 if num_images > 1:
                     raise RungSkipped(
                         f"FAL's edit app {model_path} documents no image count; "
@@ -963,7 +1143,7 @@ async def run_fal(
                 # sending an unverified key (review round 1, D2/R1).
                 strength_ignored = strength is not None
             else:
-                body["image_url"] = source_url
+                body["image_url"] = source_urls[0]
                 if strength is not None:
                     body["strength"] = strength
         else:
@@ -1014,6 +1194,8 @@ async def run_fal(
                 label="FAL",
                 timeout_s=HTTP_TIMEOUT_POLL_S,
                 secrets=(key,),
+                # An idempotent read: one bounded retry is safe (D9).
+                transient_retries=1,
                 headers=headers,
             )
             status = str(status_payload.get("status") or "").strip().upper()
@@ -1064,6 +1246,8 @@ async def run_fal(
             label="FAL",
             timeout_s=HTTP_TIMEOUT_RESULT_S,
             secrets=(key,),
+            # An idempotent read: one bounded retry is safe (D9).
+            transient_retries=1,
             headers=headers,
         )
         # Terminal: nothing for a cancel to do (see the Radient rung's note).
@@ -1166,7 +1350,7 @@ async def _openai_edit_request(
     http: httpx.AsyncClient,
     *,
     key: str,
-    source_url: str,
+    sources: list[str],
     prompt: str,
     model_id: str,
     num_images: int,
@@ -1176,30 +1360,40 @@ async def _openai_edit_request(
     """POST ``/images/edits`` as multipart; returns the parsed JSON payload.
 
     Multipart IS the endpoint's documented transport (``image[]`` file parts
-    beside ``model``/``prompt``/``n``/``size``). The shared
-    :func:`_request_json` carries it unchanged — its ``**kwargs`` reach
-    httpx's ``data=``/``files=``, verified against ``httpx.MockTransport``
-    (multipart/form-data with the boundary httpx supplies), which is why no
-    second transport helper exists. ``Content-Type`` is deliberately NOT set
+    beside ``model``/``prompt``/``n``/``size``), and a multi-source edit is
+    that same ``image[]`` repeated once per source — "for GPT image models,
+    you can provide up to 16 images" (API reference, fetched 2026-10-10).
+    The shared :func:`_request_json` carries it unchanged — its ``**kwargs``
+    reach httpx's ``data=``/``files=``, verified against
+    ``httpx.MockTransport`` (multipart/form-data with the boundary httpx
+    supplies), which is why no second transport helper exists. Each part's
+    filename is ``source.{ext}`` for the single-source wire (byte-identical
+    to the pre-multi wire) and ``source-{i}.{ext}`` for a multi request, so
+    the parts stay distinguishable. ``Content-Type`` is deliberately NOT set
     here: httpx adds the multipart one with its boundary.
     """
-    parts = _data_uri_parts(source_url)
-    if parts is None:
-        raise APIError(
-            "OpenAI edits require a base64 data-URI source.",
-            status_code=None,
-            code="invalid_response",
-        )
-    mime, data_b64 = parts
-    try:
-        raw = base64.b64decode(data_b64, validate=False)
-    except (ValueError, TypeError) as exc:
-        raise APIError(
-            "OpenAI edit source is not valid base64.",
-            status_code=None,
-            code="invalid_response",
-        ) from exc
-    suffix = mime.rsplit("/", 1)[-1] or "png"
+    multi = len(sources) > 1
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    for index, source in enumerate(sources, start=1):
+        parts = _data_uri_parts(source)
+        if parts is None:
+            raise APIError(
+                "OpenAI edits require a base64 data-URI source.",
+                status_code=None,
+                code="invalid_response",
+            )
+        mime, data_b64 = parts
+        try:
+            raw = base64.b64decode(data_b64, validate=False)
+        except (ValueError, TypeError) as exc:
+            raise APIError(
+                "OpenAI edit source is not valid base64.",
+                status_code=None,
+                code="invalid_response",
+            ) from exc
+        suffix = mime.rsplit("/", 1)[-1] or "png"
+        name = f"source-{index}.{suffix}" if multi else f"source.{suffix}"
+        files.append(("image[]", (name, raw, mime)))
     return await _request_json(
         http,
         "POST",
@@ -1214,7 +1408,7 @@ async def _openai_edit_request(
             "n": num_images,
             "size": openai_size(image_size, model_id),
         },
-        files=[("image[]", (f"source.{suffix}", raw, mime))],
+        files=files,
     )
 
 
@@ -1248,7 +1442,7 @@ async def run_openai(
     key: str,
     num_images: int,
     image_size: str,
-    source_url: str | None,
+    source_urls: list[str] | None,
     model: str | None,
     emit: ProgressFn | None,
     pause: PauseFn | None,
@@ -1286,11 +1480,21 @@ async def run_openai(
     }
     async with _client_scope(client) as http:
         started = time.monotonic()
-        if source_url is not None:
+        if source_urls:
+            if len(source_urls) > 1 and model_id.startswith("dall-e"):
+                # "up to 16 images" is a gpt-image-model fact (D6); a dall-e
+                # pin cannot carry a multi request, and a pin is caller
+                # intent — skip rather than silently swap the model.
+                raise RungSkipped(
+                    f"OpenAI's dall-e models accept a single source image; "
+                    f"{len(source_urls)} requested — pin a gpt-image model or reduce "
+                    "the sources.",
+                    reason_class="unsupported",
+                )
             payload = await _openai_edit_request(
                 http,
                 key=key,
-                source_url=source_url,
+                sources=list(source_urls),
                 prompt=prompt,
                 model_id=model_id,
                 num_images=num_images,
@@ -1360,7 +1564,7 @@ async def run_openai(
         cost_source: CostSource | None = None
         cost_basis: BillingBasis | None = None
         cost_provenance: str | None = None
-        if source_url is not None:
+        if source_urls:
             cost_usd, cost_provenance = _openai_edit_usage_cost(model_id, payload.get("usage"))
             if cost_usd is not None:
                 # Provider-reported token counts × published rates: a

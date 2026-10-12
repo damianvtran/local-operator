@@ -30,7 +30,7 @@ EXCEPT:
 When every rung fails, :class:`ImageGenerationUnavailable` carries the full
 attempt list; the tool renders it as the error note.
 
-On an EDIT request (``source_url`` set) a capability filter runs first: only
+On an EDIT request (``sources`` set) a capability filter runs first: only
 rungs whose specs declare edit support are walkable; every other available
 rung is pre-recorded as a ``skipped``/``unsupported`` attempt in its cascade
 position and never called, and a request with no capable rung left raises the
@@ -159,11 +159,12 @@ RUNG_SPECS: dict[str, RungSpec] = {
         capabilities=frozenset({"t2i", "i2i"}),
         cancel_support=CancelSupport.SIGNAL,
         cost="rate_table",
-        # The flux-class i2i app takes one source (``image_url``); FAL's
-        # multi-reference editors exist but the single-source v1 wire sends
-        # one — ``max_sources`` documents the ceiling a multi wire will use.
-        sources=SourceSupport.SINGLE,
-        max_sources=1,
+        # Multi rides ``blackforestlabs/flux-3/edit-image`` (``image_urls``,
+        # 1..10 refs) in ``rungs.run_fal``; single keeps the flux-class
+        # ``image_url``. The flip lands in the same change as the wire (D4 —
+        # declaration and wiring move together; the drift tests enforce it).
+        sources=SourceSupport.MULTI,
+        max_sources=10,
     ),
     ImageRoute.OPENAI: RungSpec(
         route=ImageRoute.OPENAI,
@@ -480,7 +481,7 @@ async def _run_route(
     config_dir: Path | None,
     radient_base: str,
     store: AuthStore,
-    source_url: str | None,
+    sources: list[str] | None,
     strength: float | None,
     image_size: str,
     num_images: int,
@@ -520,7 +521,7 @@ async def _run_route(
             account_id=access.org_id or access.account_id,
             num_images=num_images,
             image_size=image_size,
-            source_url=source_url,
+            source_urls=sources,
             seed=seed,
             model=model,
             emit=emit,
@@ -542,7 +543,7 @@ async def _run_route(
             credential_kind=credential[1],
             num_images=num_images,
             image_size=image_size,
-            source_url=source_url,
+            source_urls=sources,
             seed=seed,
             model=model,
             emit=emit,
@@ -559,7 +560,7 @@ async def _run_route(
             image_size=image_size,
             seed=seed,
             strength=strength,
-            source_url=source_url,
+            source_urls=sources,
             model=model,
             handle=handle,
             emit=emit,
@@ -574,7 +575,7 @@ async def _run_route(
             image_size=image_size,
             seed=seed,
             strength=strength,
-            source_url=source_url,
+            source_urls=sources,
             model=model,
             handle=handle,
             emit=emit,
@@ -587,7 +588,7 @@ async def _run_route(
             key=key,
             num_images=num_images,
             image_size=image_size,
-            source_url=source_url,
+            source_urls=sources,
             seed=seed,
             model=model,
             emit=emit,
@@ -600,7 +601,7 @@ async def _run_route(
             key=key,
             num_images=num_images,
             image_size=image_size,
-            source_url=source_url,
+            source_urls=sources,
             seed=seed,
             model=model,
             emit=emit,
@@ -612,7 +613,7 @@ async def _run_route(
         key=key,
         num_images=num_images,
         image_size=image_size,
-        source_url=source_url,
+        source_urls=sources,
         model=model,
         emit=emit,
         pause=pause,
@@ -630,13 +631,28 @@ async def _run_route(
 # ``action`` parameter).
 
 
-def _no_edit_capable_message() -> str:
+def _no_edit_capable_message(sources_count: int) -> str:
     """The zero-capable edit refusal — the sentence IS the remedy list.
 
     Every edit-capable route by label, so a user with no capable
     credential learns exactly what to sign in or add a key for; the caller
     never falls back to a text-to-image run on an edit request (audit §C.ii).
+    A multi-source request names only the routes whose declared ceiling
+    covers that count — a remedy naming a rung the request would skip is not
+    a remedy — while the one-source wording stays byte-identical to the
+    single-source engine's.
     """
+    if sources_count > 1:
+        capable = ", ".join(
+            RUNG_SPECS[route].label
+            for route in IMAGE_RUNG_ORDER
+            if RUNG_SPECS[route].sources is not SourceSupport.NONE
+            and RUNG_SPECS[route].max_sources >= sources_count
+        )
+        return (
+            f"No available provider can edit with {sources_count} sources "
+            f"(capable of {sources_count}: {capable} — sign in or add a key)"
+        )
     capable = ", ".join(
         RUNG_SPECS[route].label
         for route in IMAGE_RUNG_ORDER
@@ -645,15 +661,19 @@ def _no_edit_capable_message() -> str:
     return f"No available provider can edit images (capable: {capable} — sign in or add a key)"
 
 
-def _edit_skip_message(route: str) -> str:
+def _edit_skip_message(route: str, sources_count: int) -> str:
     """The pre-recorded skip's sentence for an available rung that cannot edit.
 
-    One generic sentence: Radient's rung-specific text left with its skip path
-    when the hub media slice wired its edit route (``sources`` MULTI beside
-    ``rungs.run_radient``'s ``image_url`` wire), so the rungs this table can
-    still pre-record today use the generic wording.
+    One generic sentence for a rung whose edit path is not wired (spec
+    ``NONE``); a rung that CAN edit but not with this request's count names
+    its own ceiling instead — the two need different remedies ("this rung
+    cannot edit" vs "this rung cannot take n sources"), and the count
+    sentence is what makes the pre-record honest about why.
     """
-    return f"{RUNG_SPECS[route].label} cannot edit images."
+    spec = RUNG_SPECS[route]
+    if spec.sources is SourceSupport.NONE:
+        return f"{spec.label} cannot edit images."
+    return f"{spec.label} cannot edit with {sources_count} sources (supports {spec.max_sources})."
 
 
 async def run_image_cascade(
@@ -662,7 +682,7 @@ async def run_image_cascade(
     config_dir: Path | None = None,
     base_url: str | None = None,
     store: AuthStore | None = None,
-    source_url: str | None = None,
+    sources: list[str] | None = None,
     strength: float | None = None,
     image_size: str = "square_hd",
     num_images: int = 1,
@@ -681,28 +701,35 @@ async def run_image_cascade(
     labels, the budgets, and a dispatch closure wired to THIS module's
     ``_run_route`` so the pinned monkeypatch seam keeps intercepting.
 
-    An EDIT request (``source_url`` set) first applies the capability filter:
-    only rungs whose specs declare ``sources != NONE`` are walkable; every
-    other available rung is pre-recorded (skipped/unsupported) in its
-    cascade position and never called, and zero capable rungs raise the
-    capable-providers remedy — a text-to-image run is never a fallback.
+    An EDIT request (``sources`` set) first applies the capability filter:
+    only rungs whose specs declare source support AND a ceiling covering the
+    request's source count are walkable; every other available rung is
+    pre-recorded (skipped/unsupported) in its cascade position and never
+    called, and zero capable rungs raise the capable-providers remedy — a
+    text-to-image run is never a fallback.
     """
     resolution = await resolve_image_route(config_dir, base_url=base_url, store=store)
     available = [rung.route for rung in resolution.rungs if rung.available]
-    editing = source_url is not None
+    editing = bool(sources)
+    source_count = len(sources) if sources else 0
     pre_attempts: dict[str, JobAttempt] = {}
     if editing:
         capable = [
-            route for route in available if RUNG_SPECS[route].sources is not SourceSupport.NONE
+            route
+            for route in available
+            if RUNG_SPECS[route].sources is not SourceSupport.NONE
+            and RUNG_SPECS[route].max_sources >= source_count
         ]
         if not capable:
-            raise ImageGenerationUnavailable(_no_edit_capable_message(), resolution=resolution)
+            raise ImageGenerationUnavailable(
+                _no_edit_capable_message(source_count), resolution=resolution
+            )
         pre_attempts = {
             route: JobAttempt(
                 route=route,
                 outcome="skipped",
                 reason_class="unsupported",
-                message=_edit_skip_message(route),
+                message=_edit_skip_message(route, source_count),
             )
             for route in available
             if route not in capable
@@ -732,7 +759,7 @@ async def run_image_cascade(
             config_dir=config_dir,
             radient_base=radient_base,
             store=store,
-            source_url=source_url,
+            sources=sources,
             strength=strength,
             image_size=image_size,
             num_images=num_images,

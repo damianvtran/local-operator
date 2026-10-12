@@ -2,10 +2,11 @@
 
 **Why ONE tool** (design D1): the footprint ladder says a new core surface is
 the last rung, and a second tool (img2img) would duplicate the whole schema.
-``source_image_path`` or ``source_attachment`` present ⇒ image-to-image;
-absent ⇒ text-to-image. The legacy tree shipped two tools; their params
-collapse cleanly into one model, and the modern surface precedent is one
-params model per capability.
+``source_image_path``/``source_image_paths`` or
+``source_attachment``/``source_attachments`` present ⇒ image-to-image
+(a synonym for an edit here); absent ⇒ text-to-image. The legacy tree
+shipped two tools; their params collapse cleanly into one model, and the
+modern surface precedent is one params model per capability.
 
 **Why this tool exists at all** (rather than a skill + bash): generation needs
 structured params (size enum, count cap, seed), a live progress row and a
@@ -115,11 +116,13 @@ IMAGE_SIZE_VALUES = (
 # (pydantic), and the context-budget ratchet bills every character of this
 # schema on every request — so it stays ONE line and the constraints live
 # where they are read on demand (``read tool://generate_image``, the image
-# guide), plus comments here. v1 takes a SINGLE source per call: at most one
-# of ``source_image_path`` or ``source_attachment``; the multi-source wire
-# (an additive ``source_attachments`` list) ships only alongside the request
-# shapes that can validate it — the rung specs' ``max_sources`` already
-# gate it.
+# guide), plus comments here. The multi-source wire is LIVE (2026-10-11): a
+# call fills any of the four source fields and the engine fuses them in a
+# deterministic order (paths then attachments, each list in order) into ONE
+# source list, 2..16 sources — 16 being the hub's highest per-pin ceiling
+# and this tool's per-call maximum. Per-rung ceilings gate what actually
+# runs (``imagegen/cascade.py``'s specs, read by the filter and the
+# describer); the guide carries the per-provider numbers.
 class GenerateImageParams(BaseModel):
     """Arguments for the ``generate_image`` tool."""
 
@@ -133,6 +136,14 @@ class GenerateImageParams(BaseModel):
     source_attachment: str | None = Field(
         default=None,
         description="Session image digest to edit (from a result caption).",
+    )
+    source_image_paths: list[str] | None = Field(
+        default=None,
+        description="Local images to edit, in order.",
+    )
+    source_attachments: list[str] | None = Field(
+        default=None,
+        description="Session image digests to edit, in order.",
     )
     strength: float | None = Field(
         default=None,
@@ -190,15 +201,16 @@ def build_generate_image_tool(context: ToolContext) -> AgentTool | None:
     )
 
 
-def _preferred_route_label(*, editing: bool = False) -> str:
+def _preferred_route_label(*, editing: bool = False, sources_count: int = 1) -> str:
     """The cascade's first available route, as a human label for the prompt.
 
     A read of the same sync probes the gate uses; "the configured provider"
     when nothing answers (the tool would not have been built, but a describer
     must never fail a call — it is read by the approval renderer). On an EDIT
-    request (``editing``) the rungs whose specs declare no source support are
-    SKIPPED, so the prompt never names a provider that cannot run the edit —
-    the same filter ``run_image_cascade`` applies before dispatch.
+    request (``editing``) the rungs whose specs cannot take the request's
+    count are SKIPPED — no declared source support, or a ceiling under
+    ``sources_count`` — so the prompt never names a provider that would skip
+    the call; the same filter ``run_image_cascade`` applies before dispatch.
     """
     from local_operator.paths import config_dir
 
@@ -216,7 +228,10 @@ def _preferred_route_label(*, editing: bool = False) -> str:
         for route, available in probes:
             if not available:
                 continue
-            if editing and RUNG_SPECS[route].sources is SourceSupport.NONE:
+            if editing and (
+                RUNG_SPECS[route].sources is SourceSupport.NONE
+                or RUNG_SPECS[route].max_sources < sources_count
+            ):
                 continue
             return RUNG_LABELS[route]
     except Exception:  # noqa: BLE001 - a describer must never fail a call
@@ -262,17 +277,35 @@ def _describe_generate_image_approval(args: dict[str, Any], cwd: str) -> str:
     num = num if isinstance(num, int) and not isinstance(num, bool) and num > 0 else 1
     size = args.get("image_size")
     size = size if isinstance(size, str) and size else "square_hd"
-    path = args.get("source_image_path")
-    digest = args.get("source_attachment")
-    if isinstance(path, str) and path:
-        source_label: str | None = path
-    elif isinstance(digest, str) and digest:
-        # The digest is abbreviated for the card: four hex chars plus an
-        # ellipsis identify it without making the consent line unreadable.
-        source_label = f"attachment {digest[:4]}…"
+    # The SAME fusion the executor applies (paths then attachments, no
+    # dedupe) — read on the RAW args, because this describer renders before
+    # validation, so every read stays tolerant: a malformed entry contributes
+    # nothing rather than failing the consent card.
+    paths: list[str] = []
+    singular_path = args.get("source_image_path")
+    if isinstance(singular_path, str) and singular_path:
+        paths.append(singular_path)
+    plural_paths = args.get("source_image_paths")
+    if isinstance(plural_paths, list):
+        paths.extend(entry for entry in plural_paths if isinstance(entry, str) and entry)
+    digests: list[str] = []
+    singular_digest = args.get("source_attachment")
+    if isinstance(singular_digest, str) and singular_digest:
+        digests.append(singular_digest)
+    plural_digests = args.get("source_attachments")
+    if isinstance(plural_digests, list):
+        digests.extend(entry for entry in plural_digests if isinstance(entry, str) and entry)
+    total = len(paths) + len(digests)
+    if total == 1:
+        # One source keeps the label the single-source card always showed:
+        # the path, or the abbreviated digest (four hex chars plus an
+        # ellipsis identify it without making the consent line unreadable).
+        source_label: str | None = paths[0] if paths else f"attachment {digests[0][:4]}…"
+    elif total > 1:
+        source_label = f"{total} sources"
     else:
         source_label = None
-    provider = _preferred_route_label(editing=source_label is not None)
+    provider = _preferred_route_label(editing=total > 0, sources_count=max(total, 1))
     what = (
         f"Edit {num} image{'s' if num != 1 else ''} ({source_label})"
         if source_label is not None
@@ -468,6 +501,22 @@ def _load_source_attachment(digest: str) -> str:
     return _as_data_uri(raw, info.mime_type)
 
 
+def _source_lists(params: GenerateImageParams) -> tuple[list[str], list[str]]:
+    """The fused ``(paths, digests)`` a params object asks for, in order.
+
+    Singular first, then plural, each in the caller's order; the combined
+    send order is paths then attachments, and kinds mix freely. Shared by the
+    executor (loads every entry) and the result shaper (details + caption),
+    so what was sent and what is reported cannot disagree. No dedupe: a
+    duplicate is intentional and is sent twice exactly as asked.
+    """
+    paths = [params.source_image_path] if params.source_image_path else []
+    paths.extend(params.source_image_paths or [])
+    digests = [params.source_attachment] if params.source_attachment else []
+    digests.extend(params.source_attachments or [])
+    return paths, digests
+
+
 def _artifact_name(model: str, content_type: str, index: int) -> str:
     """A short human handle ("flux-dev-01.png"); NEVER a filesystem path."""
     slug = "".join(ch if ch.isalnum() else "-" for ch in (model or "image"))
@@ -513,23 +562,35 @@ async def execute_generate_image(
         params = GenerateImageParams.model_validate(args)
     except ValidationError as exc:
         raise InvalidToolArgumentsError(str(exc)) from exc
-    if params.source_image_path and params.source_attachment:
-        raise InvalidToolArgumentsError(
-            "Pass exactly one of source_image_path or source_attachment."
-        )
-    if (
-        params.strength is not None
-        and params.source_image_path is None
-        and params.source_attachment is None
-    ):
-        raise InvalidToolArgumentsError("strength requires source_image_path or source_attachment.")
+    if params.source_image_path is not None and params.source_image_paths is not None:
+        raise InvalidToolArgumentsError("Pass source_image_path or source_image_paths, not both.")
+    if params.source_attachment is not None and params.source_attachments is not None:
+        raise InvalidToolArgumentsError("Pass source_attachment or source_attachments, not both.")
+    if params.source_image_paths == []:
+        raise InvalidToolArgumentsError("source_image_paths must not be empty.")
+    if params.source_attachments == []:
+        raise InvalidToolArgumentsError("source_attachments must not be empty.")
+    paths, digests = _source_lists(params)
+    total = len(paths) + len(digests)
+    if total > 16:
+        # 16 is the hub's highest per-pin ceiling (``cascade.py``'s
+        # ``max_sources``) and this tool's per-call maximum; deeper
+        # per-rung ceilings stay capability concerns (skip/failover), so a
+        # request the model can correct fails HERE as an argument fault.
+        raise InvalidToolArgumentsError(f"At most 16 sources per call (got {total}).")
+    if params.strength is not None and total == 0:
+        raise InvalidToolArgumentsError("strength requires at least one source.")
 
     cwd = (context.cwd if context is not None else None) or "."
-    source_url: str | None = None
-    if params.source_image_path:
-        source_url = _load_source_image(params.source_image_path, cwd)
-    elif params.source_attachment:
-        source_url = _load_source_attachment(params.source_attachment)
+    # The fused source list, in the documented order: every path first (the
+    # singular, then the plural, each in the caller's order), then every
+    # attachment — no dedupe, so an intentional duplicate is sent twice
+    # exactly as asked. Built ONE entry at a time so a single bad file or
+    # digest refuses the whole call as an argument fault (model-correctable)
+    # before anything billable could run.
+    sources = [_load_source_image(raw, cwd) for raw in paths] + [
+        _load_source_attachment(digest) for digest in digests
+    ]
 
     from local_operator.paths import config_dir
 
@@ -539,7 +600,7 @@ async def execute_generate_image(
         outcome = await run_image_cascade(
             prompt=params.prompt,
             config_dir=config_dir(),
-            source_url=source_url,
+            sources=sources or None,
             strength=params.strength,
             image_size=params.image_size,
             num_images=params.num_images,
@@ -649,9 +710,7 @@ async def execute_generate_image(
         )
 
     if progress is not None:
-        edit_verb = (
-            "Edit" if (params.source_image_path or params.source_attachment) else "Generation"
-        )
+        edit_verb = "Edit" if sources else "Generation"
         progress(
             f"{edit_verb} complete — {len(outcome.assets)} image(s) via "
             f"{RUNG_LABELS.get(outcome.route, str(outcome.route))} ({outcome.model}).",
@@ -677,6 +736,15 @@ async def execute_generate_image(
         cost_source=getattr(outcome, "cost_source", None),
         billing_basis=getattr(outcome, "billing_basis", None),
         cost_provenance=getattr(outcome, "cost_provenance", None),
+        # A provider reporting no per-call figure still bills at its
+        # published rates: the row says that in words instead of a guessed
+        # amount. ``amount=None`` keeps the basis ``not_tracked`` — no new
+        # basis value, so the ledger's UI vocabulary does not ripple.
+        detail=(
+            "no per-call figure was reported by the provider; billing is at its published rates"
+            if outcome.cost_usd is None
+            else ""
+        ),
         status="ok",
         request_id=str(outcome.generation_id or ""),
     )
@@ -817,7 +885,16 @@ def _generated_result(
         details["usage_record_id"] = outcome.usage_record_id
     if params.source_attachment:
         details["source_attachment"] = params.source_attachment
-    editing = bool(params.source_image_path or params.source_attachment)
+    if params.source_image_paths is not None:
+        # The plural field's own list, exactly as given: every source
+        # represented exactly once, in the field that introduced it (the
+        # singular keys above stay single-only, as they were).
+        details["source_image_paths"] = list(params.source_image_paths)
+    if params.source_attachments is not None:
+        details["source_attachments"] = list(params.source_attachments)
+    source_paths, source_digests = _source_lists(params)
+    source_total = len(source_paths) + len(source_digests)
+    editing = source_total > 0
     strength_ignored = False
     if editing and params.strength is not None:
         details["strength"] = params.strength
@@ -860,10 +937,18 @@ def _generated_result(
         if strength_ignored
         else ""
     )
-    cost_text = f" Cost ${outcome.cost_usd:g}." if outcome.cost_usd is not None else ""
+    if outcome.cost_usd is not None:
+        cost_text = f" Cost ${outcome.cost_usd:g}."
+    else:
+        # FAL and Google report no per-call figure, and so does the OpenAI
+        # path except when an edit estimates one from the response's usable
+        # usage; saying so beats an absent sentence a reader could take for
+        # an omitted charge.
+        cost_text = " No per-call cost was reported (this provider bills at its published rates)."
+    sources_text = f", from {source_total} sources" if source_total > 1 else ""
     caption = (
         f"{'Edited' if editing else 'Generated'} {len(blocks)} {noun} with {label} "
-        f"({outcome.model}), "
+        f"({outcome.model}){sources_text}, "
         f"{_dimensions_text(outcome.assets, params.image_size)}{seed_text} — "
         f"attached to the session (digest {', '.join(digests)}).{cost_text}{strength_text}"
     )
