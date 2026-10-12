@@ -46,6 +46,7 @@ from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 # host-free module (see its docstring).
 from local_operator.harness.rows import visible_transcript_rows  # noqa: F401
 from local_operator.harness.types import ModelSpec, SupplementProgressEvent
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.resume import (
     ORIGIN_AGENT_CONFIG,
     ORIGIN_SUBAGENT,
@@ -977,7 +978,7 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
             return None
         except OSError as error:
             raise HTTPException(
-                409, f"cannot read the session's working-directory marker: {error}"
+                409, _wd.cwd_marker_read_failed(error=str(error)).envelope()
             ) from None
 
     def restore_marker(previous_bytes: bytes | None) -> None:
@@ -1024,7 +1025,9 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
         # the route's ``errors()`` ladder: that ladder's ``OSError`` arm claims
         # ONLY the disk-full errnos (ENOSPC/EDQUOT) and re-raises the rest, so
         # this one would reach the user as a 500 rather than as the path it is.
-        raise HTTPException(409, f"cannot move to {requested}: {error}") from None
+        raise HTTPException(
+            409, _wd.move_failed(requested=requested, error=str(error)).envelope()
+        ) from None
 
     resolved = str(directory)
     if _same_directory(resolved, previous):
@@ -1110,9 +1113,7 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
         # actionable fact is that the marker could not be written. It is
         # deliberately NOT ``MoveIndeterminate`` either — nothing reached an
         # owner and no state is in doubt.
-        raise HTTPException(
-            409, f"cannot write the session's working-directory marker: {error}"
-        ) from None
+        raise HTTPException(409, _wd.cwd_marker_write_failed(error=str(error)).envelope()) from None
     bridge.cwd = resolved
     try:
         # The receipt's ``outcome`` IS this call's return vocabulary: the facade

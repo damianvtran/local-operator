@@ -44,6 +44,7 @@ from typing import Any, Sequence
 
 from fastapi import APIRouter, HTTPException, Request
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.server.desktop import accept_claim
 from local_operator.server.models.schemas import CRUDResponse
 
@@ -72,16 +73,16 @@ async def _declared_origins(request: Request) -> Sequence[object]:
     try:
         body = json.loads(raw)
     except ValueError:
-        raise HTTPException(400, "The claim body must be a JSON object.") from None
+        raise HTTPException(400, _wd.claim_body_not_object().envelope()) from None
     if body is None:  # a literal JSON `null` is an absent body
         return ()
     if not isinstance(body, dict):
-        raise HTTPException(400, "The claim body must be a JSON object.")
+        raise HTTPException(400, _wd.claim_body_not_object().envelope())
     declared = body.get("origins", [])
     if declared is None:
         return ()
     if not isinstance(declared, list):
-        raise HTTPException(400, "The claim body's 'origins' must be a list.")
+        raise HTTPException(400, _wd.claim_origins_not_list().envelope())
     return declared
 
 

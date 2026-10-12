@@ -64,9 +64,23 @@ class Msg:
     code: str
     params: Mapping[str, Any] = field(default_factory=dict)
 
-    def envelope(self, *, locale: str | None = None) -> dict[str, Any]:
-        """This message as ``{code, params, text}`` (see :func:`envelope`)."""
-        return envelope(self.code, dict(self.params), locale=locale)
+    def envelope(self, *, code: str | None = None, locale: str | None = None) -> dict[str, Any]:
+        """This message as ``{code, params, text}`` (see :func:`envelope`).
+
+        ``code`` overrides the id ON THE WIRE while ``params``/``text`` still
+        come from THIS message. It exists for refusals whose wire code is a
+        MACHINE category that an existing client switches on by equality —
+        the desktop plane's vocabulary (``runtime_busy``, ``project_not_found``,
+        ``session_is_remote``, read as ``error.code`` by the UI's
+        ``RUNTIME_BUSY_CODE`` checks). Renaming those to message ids would
+        break every released client build, so the token rides VERBATIM and
+        only the sentence is catalogued; every other call site keeps the
+        message id as the code (the default here).
+        """
+        body = envelope(self.code, dict(self.params), locale=locale)
+        if code is not None:
+            body["code"] = code
+        return body
 
 
 def msg(code: str, **params: Any) -> Msg:

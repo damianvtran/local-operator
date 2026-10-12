@@ -223,18 +223,20 @@ async def test_a_lock_held_for_the_whole_wait_refuses_with_the_tuis_sentence(
                 reply = refused[word]
                 assert reply.status_code == 409, reply.text
                 # ``detail`` is compared WHOLE: the code is what the client
-                # classifies on and the message is what it renders.
+                # classifies on and the sentence (now on the envelope's `text`)
+                # is what it renders.
                 assert reply.json()["detail"] == {
                     "code": "aida_store_busy",
-                    "message": notices[0],
+                    "params": {"error": notices[0]},
+                    "text": notices[0],
                 }, (word, reply.json(), notices)
         finally:
             peer.release()
 
-    sentence = refused["resume"].json()["detail"]["message"]
+    sentence = refused["resume"].json()["detail"]["text"]
     assert sentence.startswith("could not resume Aida: "), sentence
     assert "Try again in a moment" in sentence, sentence
-    assert refused["pause"].json()["detail"]["message"].startswith("could not pause Aida: ")
+    assert refused["pause"].json()["detail"]["text"].startswith("could not pause Aida: ")
 
 
 @pytest.mark.asyncio

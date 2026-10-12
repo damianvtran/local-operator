@@ -279,11 +279,12 @@ async def test_a_refused_fork_is_the_refusal_not_an_owner_outage(
         )
 
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] == {
-        "code": "fork_refused",
-        "message": str(refusal),
-        "reason": refusal.reason,
-    }
+    # E2a: the refusal is the message envelope; `reason` and the machine code are
+    # unchanged, and the sentence rides `text` (which older readers unwrap).
+    detail = response.json()["detail"]
+    assert detail["code"] == "fork_refused"
+    assert detail["text"] == str(refusal)
+    assert detail["reason"] == refusal.reason
     # The owner was reached and answered: the refusal ran the routed slash, and
     # the receipt's replay machinery is what the route still rounds through.
     assert remote.slashes == [("fork", json.dumps({"entry_id": "f" * 32}))]
@@ -307,9 +308,10 @@ async def test_a_failure_this_seam_does_not_know_keeps_the_owner_outage_path(
         )
 
     assert response.status_code == 503, response.text
-    assert response.json()["detail"] == {
-        "code": RUNTIME_UNREACHABLE,
-        "message": RUNTIME_UNREACHABLE_MESSAGE,
-    }
+    # E2a: the refusal is the message envelope now; the vetted sentence (never
+    # the owner's own words) rides `text`, and the machine code is unchanged.
+    body = response.json()["detail"]
+    assert body["code"] == RUNTIME_UNREACHABLE
+    assert body["text"] == RUNTIME_UNREACHABLE_MESSAGE
     # The owner's own words are never echoed: the vetted sentence stands in.
     assert "the owner's own words" not in response.text
