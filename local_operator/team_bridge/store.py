@@ -57,6 +57,85 @@ __all__ = [
 
 SCHEMA_VERSION = 3
 
+#: Every table a stamped-V3 database must carry. A stamped store missing any
+#: of these is DAMAGED and refuses: re-running DDL is NOT repair — it
+#: silently recreates an empty ``screening_attempts`` and resets known spend
+#: (H3-Q4's fail-open quota reproduction). The refusal happens pre-DDL.
+_V3_TABLES = frozenset(
+    {
+        "schema_meta",
+        "enrollments",
+        "ack_intents",
+        "claims",
+        "deliveries",
+        "feed_refs",
+        "sync",
+        "screening_attempts",
+        "screening_receipts",
+        "screening_holds",
+        "screening_policy",
+        "screening_breaker",
+    }
+)
+#: A V2 (H2-era) store migrates ADDITIVELY: only the screening tables are
+#: created and the stamp advances; every existing row survives.
+_V2_ADDED = frozenset(
+    {
+        "screening_attempts",
+        "screening_receipts",
+        "screening_holds",
+        "screening_policy",
+        "screening_breaker",
+    }
+)
+#: Column floors for the screening tables: an earlier unreleased V3 (no
+#: binding/policy columns) is indistinguishable from damage — both refuse.
+_V3_COLUMNS = {
+    "screening_attempts": frozenset(
+        {
+            "attempt_id",
+            "kind",
+            "account_scope",
+            "owner_key",
+            "message_id",
+            "fingerprint",
+            "at",
+            "committed_message_id",
+        }
+    ),
+    "screening_receipts": frozenset(
+        {
+            "owner_key",
+            "message_id",
+            "body_sha256",
+            "template_sha256",
+            "prompt_version",
+            "model",
+            "verdict",
+            "categories",
+            "envelope_digest",
+            "admission_revision",
+            "policy_epoch",
+            "created_at",
+        }
+    ),
+    "screening_holds": frozenset(
+        {"owner_key", "message_id", "hold_code", "retry_at", "created_at"}
+    ),
+    "screening_policy": frozenset(
+        {
+            "owner_key",
+            "version",
+            "template_sha256",
+            "default_model",
+            "revision",
+            "epoch",
+            "accepted_at",
+        }
+    ),
+    "screening_breaker": frozenset({"account_scope", "failures", "open_until", "updated_at"}),
+}
+
 #: Ack intent lifecycle: exactly one of these states, no others.
 ACK_PENDING = "pending"
 ACK_CONFIRMED = "confirmed"
@@ -82,7 +161,7 @@ def state_db_path(config_dir: Path) -> Path:
     return Path(config_dir) / "team_bridge" / "state.sqlite3"
 
 
-_SCHEMA = """
+_CORE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -152,35 +231,6 @@ CREATE TABLE IF NOT EXISTS ack_intents (
     created_at REAL NOT NULL,
     UNIQUE (owner_key, message_id, target)
 );
-CREATE TABLE IF NOT EXISTS screening_attempts (
-    attempt_id TEXT PRIMARY KEY,
-    account_scope TEXT NOT NULL,
-    owner_key TEXT NOT NULL,
-    at REAL NOT NULL,
-    state TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_screening_attempts_scope_at
-    ON screening_attempts (account_scope, at);
-CREATE TABLE IF NOT EXISTS screening_receipts (
-    owner_key TEXT NOT NULL,
-    message_id TEXT NOT NULL,
-    body_sha256 TEXT NOT NULL,
-    template_sha256 TEXT NOT NULL,
-    prompt_version TEXT NOT NULL,
-    model TEXT NOT NULL,
-    verdict TEXT NOT NULL,
-    categories TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    PRIMARY KEY (owner_key, message_id)
-);
-CREATE TABLE IF NOT EXISTS screening_holds (
-    owner_key TEXT NOT NULL,
-    message_id TEXT NOT NULL,
-    hold_code TEXT NOT NULL,
-    retry_at REAL,
-    created_at REAL NOT NULL,
-    PRIMARY KEY (owner_key, message_id)
-);
 CREATE TABLE IF NOT EXISTS feed_refs (
     owner_key TEXT NOT NULL,
     ref TEXT NOT NULL,
@@ -198,6 +248,71 @@ CREATE TABLE IF NOT EXISTS claims (
     PRIMARY KEY (owner_key, message_id)
 );
 """
+_SCREENING_SCHEMA = """
+-- -- H3 screening: budget ledger, receipts, holds, policy epoch, breaker ----
+-- The attempts ledger counts TWO independent buckets per account ('logical'
+-- screenings and actual 'http' inference dispatches, 40/hour each): the
+-- conservative physical counter exists because one logical screening can
+-- reach up to three wire attempts (auth re-resolve + fast resend), and both
+-- must be reserved durably BEFORE their I/O.
+CREATE TABLE IF NOT EXISTS screening_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    account_scope TEXT NOT NULL,
+    owner_key TEXT NOT NULL,
+    message_id TEXT,
+    fingerprint TEXT,
+    at REAL NOT NULL,
+    committed_message_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_screening_attempts_scope_kind_at
+    ON screening_attempts (account_scope, kind, at);
+CREATE TABLE IF NOT EXISTS screening_receipts (
+    owner_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    template_sha256 TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    model TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    categories TEXT NOT NULL,
+    envelope_digest TEXT NOT NULL,
+    admission_revision TEXT NOT NULL,
+    policy_epoch INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (owner_key, message_id)
+);
+CREATE TABLE IF NOT EXISTS screening_holds (
+    owner_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    hold_code TEXT NOT NULL,
+    retry_at REAL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (owner_key, message_id)
+);
+CREATE TABLE IF NOT EXISTS screening_policy (
+    owner_key TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    template_sha256 TEXT NOT NULL,
+    default_model TEXT,
+    revision TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    accepted_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS screening_breaker (
+    account_scope TEXT PRIMARY KEY,
+    failures INTEGER NOT NULL,
+    open_until REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+"""
+_SCHEMA = _CORE_SCHEMA + _SCREENING_SCHEMA
+
+
+def _fingerprint_revision(fingerprint: str) -> str:
+    """The admission revision embedded in a policy fingerprint string."""
+
+    return fingerprint.split("|", 1)[0]
 
 
 def _owner_key(owner: OwnerSnapshot) -> str:
@@ -281,37 +396,83 @@ class Store:
             conn.close()
 
     def _init(self, conn: sqlite3.Connection) -> None:
-        # Read the PRE-EXISTING tables before the script runs: a database that
-        # already carried this store's tables but no schema_version row is an
-        # UNKNOWN state, not a fresh one — silently restamping it would bless
-        # whatever authority rows it holds (QA H2-Q5). Only a genuinely empty
-        # file is initialized fresh.
-        pre_existing = {
-            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
+        """Validate BEFORE any DDL; refuse damage instead of repairing it.
+
+        Order is the safety property (H3-Q4): read what the file IS, decide,
+        and only then write. A stamped store missing required structures
+        refuses loudly — never re-create a screening counter table empty,
+        which would reset known spend to zero and fail open. Only a genuinely
+        empty file gets the full schema; a known V2 (H2-era) store migrates
+        ADDITIVELY, preserving every row; anything unknown refuses.
+        """
+
         try:
-            conn.executescript(_SCHEMA)
+            pre_existing = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            version = None
+            if "schema_meta" in pre_existing:
+                row = conn.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()
+                version = row["value"] if row is not None else None
         except sqlite3.Error as error:
             raise StoreRefused("state_unreadable", str(error)) from error
-        row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-        if row is None:
+
+        if version is None:
             if pre_existing - {"schema_meta"}:
                 raise StoreRefused(
                     "schema_unversioned",
                     "nonempty state.sqlite3 without a schema_version row; refusing authority",
                 )
+            try:
+                conn.executescript(_SCHEMA)
+            except sqlite3.Error as error:
+                raise StoreRefused("state_unreadable", str(error)) from error
             conn.execute(
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
             return
-        if row["value"] != str(SCHEMA_VERSION):
-            # Unsupported schema is NO AUTHORITY, not a migration: nothing in
-            # H2 may guess at a future/unknown layout's semantics.
-            raise StoreRefused(
-                "schema_unsupported",
-                f"state.sqlite3 schema {row['value']!r} != {SCHEMA_VERSION}",
+
+        if version == "2":
+            # Known H2-era layout: additive migration only. Every V2 table
+            # must be present as V2 promised, then the screening tables are
+            # added and the stamp advances. No existing row is touched, so
+            # the H2 owner/generation/claims/ACK tuple/ref/state survive
+            # byte-for-byte; a damaged V2 store refuses like a V3 one.
+            missing = (_V3_TABLES - _V2_ADDED) - pre_existing
+            if missing:
+                raise StoreRefused("schema_damaged", f"v2 store missing {sorted(missing)}")
+            try:
+                conn.executescript(_SCREENING_SCHEMA)
+            except sqlite3.Error as error:
+                raise StoreRefused("state_unreadable", str(error)) from error
+            conn.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION),),
             )
+            return
+
+        if version == str(SCHEMA_VERSION):
+            # Stamped V3: VERIFY, never re-create. Missing tables or missing
+            # binding/policy columns mean damage — refuse, no DDL at all.
+            missing = _V3_TABLES - pre_existing
+            if missing:
+                raise StoreRefused("schema_damaged", f"stamped-v3 store missing {sorted(missing)}")
+            for table, required in _V3_COLUMNS.items():
+                columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+                if not required <= columns:
+                    raise StoreRefused(
+                        "schema_damaged", f"{table} lacks {sorted(required - columns)}"
+                    )
+            return
+
+        raise StoreRefused(
+            "schema_unsupported",
+            f"state.sqlite3 schema {version!r} != {SCHEMA_VERSION}",
+        )
 
     def _live_generation(self, conn: sqlite3.Connection, owner: OwnerSnapshot) -> int | None:
         """The committed generation for this EXACT owner, or None."""
@@ -879,11 +1040,15 @@ class Store:
                 (state, error_code, retry_after, _owner_key(owner), intent_id),
             )
 
-    # -- H3 screening: budget, receipts, holds -------------------------------
+    # -- H3 screening: budget ledger, receipts, policy, holds, breaker -----
 
-    #: The frozen §8 budget: 40 actual model attempts per rolling hour per
-    #: Radient ACCOUNT, aggregated across every tenant/endpoint/credential/
-    #: generation namespace for that account in the hub.
+    #: The frozen §8 budget, PER INDEPENDENT BUCKET: 40 logical screenings
+    #: and (separately, conservatively) 40 actual inference HTTP dispatches,
+    #: per rolling hour per Radient ACCOUNT, aggregated across every
+    #: tenant/endpoint/credential/generation namespace for that account in
+    #: the hub. Two buckets because one isolated logical screening can reach
+    #: up to three wire attempts (auth re-resolve + fast-mode resend), and
+    #: the physical cap must count those even when the logical one allows it.
     SCREENING_BUDGET_PER_HOUR = 40
 
     @staticmethod
@@ -892,14 +1057,22 @@ class Store:
         # namespace: a new endpoint or a re-enrollment must not reset spend.
         return f"{owner.canonical_base_url}|{owner.account_id}"
 
-    def reserve_screening_attempt(self, owner: OwnerSnapshot) -> str:
-        """Durably charge ONE actual inference attempt BEFORE the wire call.
+    def _reserve_bucket(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        kind: str,
+        message_id: str | None,
+        fingerprint: str | None,
+    ) -> str:
+        """Durably charge ONE attempt of ``kind`` BEFORE its I/O.
 
-        Reservation IS spend: an uncertain send keeps its row (never refunded),
-        the rolling window is counted from each row's own timestamp, so a
-        clock rollback cannot erase reservations (a rolled-back clock makes
-        the window MORE inclusive, which fails closed). Missing/corrupt
-        schema or contention surfaces as a refusal — never a reset to 40.
+        Reservation IS spend: an uncertain send keeps its row (never
+        refunded), the rolling window is counted from each row's own
+        timestamp, so a clock rollback cannot erase reservations (a
+        rolled-back clock makes the window MORE inclusive, which fails
+        closed). Missing/corrupt schema or contention surfaces as a refusal
+        — never a reset to 40.
         """
 
         now = time.time()
@@ -910,17 +1083,126 @@ class Store:
             self._require_live(conn, owner)
             scope = self._account_scope(owner)
             spent = conn.execute(
-                "SELECT COUNT(*) FROM screening_attempts WHERE account_scope = ? AND at > ?",
-                (scope, now - 3600.0),
+                "SELECT COUNT(*) FROM screening_attempts "
+                "WHERE account_scope = ? AND kind = ? AND at > ?",
+                (scope, kind, now - 3600.0),
             ).fetchone()[0]
             if int(spent) >= self.SCREENING_BUDGET_PER_HOUR:
-                raise StoreRefused("budget_exhausted", "40 attempts/hour/account exhausted")
+                raise StoreRefused("budget_exhausted", f"{kind} attempts/hour/account exhausted")
             conn.execute(
-                "INSERT INTO screening_attempts (attempt_id, account_scope, owner_key, at, state) "
-                "VALUES (?,?,?,?, 'spent')",
-                (attempt_id, scope, _owner_key(owner), now),
+                "INSERT INTO screening_attempts "
+                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (attempt_id, kind, scope, _owner_key(owner), message_id, fingerprint, now),
             )
             return attempt_id
+
+    def reserve_screening_attempt(
+        self, owner: OwnerSnapshot, *, message_id: str | None = None, fingerprint: str | None = None
+    ) -> str:
+        """The LOGICAL screening charge, optionally bound to message + tuple.
+
+        The pipeline ALWAYS binds (message + full policy fingerprint); the
+        unbound form exists for budget accounting talk (QA probes, breaker
+        bookkeeping) and still charges the same bucket.
+        """
+
+        return self._reserve_bucket(
+            owner, kind="logical", message_id=message_id, fingerprint=fingerprint
+        )
+
+    def reserve_http_attempt(
+        self, owner: OwnerSnapshot, *, message_id: str | None, fingerprint: str | None = None
+    ) -> str:
+        """The PHYSICAL charge for ONE actual inference HTTP dispatch.
+
+        The wire decorator calls this immediately before every nested request
+        (primary, auth re-resolve, fast-mode resend): the logical bucket's
+        allowance does not waive the physical cap, and a refusal is raised
+        at the wire so no request leaves.
+        """
+
+        return self._reserve_bucket(
+            owner, kind="http", message_id=message_id, fingerprint=fingerprint
+        )
+
+    def publish_screening_policy(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        version: str,
+        template_sha256: str,
+        default_model: str | None,
+        revision: str,
+    ) -> int:
+        """Publish the current accepted policy; return its durable epoch.
+
+        The epoch is the TRUSTED clock for admission: the pipeline captures
+        it before dispatch and ``finish_screening`` re-reads it inside the
+        receipt-writing transaction, so a policy published mid-run makes the
+        old epoch stale and the commit refuses (H3-Q3). Monotonic: the epoch
+        only advances, and a template FLOOR is enforced — once a template
+        hash is accepted, a different one may only arrive as a later
+        explicitly-known version (today only byte-equal bridge-screen-v1 is
+        accepted upstream; the floor row is what a future version bumps).
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            key = _owner_key(owner)
+            row = conn.execute(
+                "SELECT version, template_sha256, default_model, revision, epoch "
+                "FROM screening_policy WHERE owner_key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO screening_policy "
+                    "(owner_key, version, template_sha256, default_model, revision, epoch, "
+                    "accepted_at) VALUES (?,?,?,?,?,1,?)",
+                    (key, version, template_sha256, default_model, revision, time.time()),
+                )
+                return 1
+            unchanged = (
+                row["version"] == version
+                and row["template_sha256"] == template_sha256
+                and row["default_model"] == default_model
+                and row["revision"] == revision
+            )
+            if unchanged:
+                return int(row["epoch"])
+            conn.execute(
+                "UPDATE screening_policy SET version = ?, template_sha256 = ?, "
+                "default_model = ?, revision = ?, epoch = ?, accepted_at = ? "
+                "WHERE owner_key = ?",
+                (
+                    version,
+                    template_sha256,
+                    default_model,
+                    revision,
+                    int(row["epoch"]) + 1,
+                    time.time(),
+                    key,
+                ),
+            )
+            return int(row["epoch"]) + 1
+
+    def current_screening_policy(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
+        """The currently published policy row (contentless policy metadata)."""
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                row = conn.execute(
+                    "SELECT version, template_sha256, default_model, revision, epoch "
+                    "FROM screening_policy WHERE owner_key = ?",
+                    (_owner_key(owner),),
+                ).fetchone()
+                return dict(row) if row is not None else None
+        except sqlite3.Error:
+            return None
 
     def find_screening_receipt(
         self,
@@ -929,34 +1211,49 @@ class Store:
         body_sha256: str,
         template_sha256: str,
         model: str,
+        admission_revision: str,
+        envelope_digest: str,
     ) -> dict[str, Any] | None:
-        """Reuse cache, keyed by the EXACT fingerprint. Metadata only.
+        """Reuse cache, keyed by the EXACT full admission fingerprint.
 
-        A changed body/template/model misses (never replays a stale allow);
-        the cache holds no body, reason or reply text — only the closed
-        receipt fields and the hashes that identify them.
+        A changed body, template, model, revision OR envelope digest misses
+        (never replays a stale allow/reject); the cache holds no body, reason
+        or reply text — only the closed receipt fields and the hashes.
         """
 
         try:
             with self._connect() as conn:
                 self._init(conn)
                 row = conn.execute(
-                    "SELECT * FROM screening_receipts WHERE owner_key = ? "
-                    "AND body_sha256 = ? AND template_sha256 = ? AND model = ?",
-                    (_owner_key(owner), body_sha256, template_sha256, model),
+                    "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
+                    "categories, envelope_digest, admission_revision, policy_epoch "
+                    "FROM screening_receipts WHERE owner_key = ? AND body_sha256 = ? "
+                    "AND template_sha256 = ? AND model = ? AND admission_revision = ? "
+                    "AND envelope_digest = ?",
+                    (
+                        _owner_key(owner),
+                        body_sha256,
+                        template_sha256,
+                        model,
+                        admission_revision,
+                        envelope_digest,
+                    ),
                 ).fetchone()
                 if row is None:
                     return None
                 return {
-                    "message_id": row["message_id"],
-                    "body_sha256": row["body_sha256"],
-                    "template_sha256": row["template_sha256"],
-                    "prompt_version": row["prompt_version"],
-                    "model": row["model"],
                     "verdict": row["verdict"],
+                    "model": row["model"],
+                    "prompt_version": row["prompt_version"],
+                    "template_sha256": row["template_sha256"],
+                    "body_sha256": row["body_sha256"],
                     "categories": json.loads(row["categories"]),
+                    "envelope_digest": row["envelope_digest"],
+                    "admission_revision": row["admission_revision"],
                 }
-        except sqlite3.Error:
+        except (sqlite3.Error, json.JSONDecodeError):
+            # An unreadable cache row is a MISS (fresh screening may re-bill
+            # under normal accounting); it can never silently certify.
             return None
 
     def finish_screening(
@@ -965,16 +1262,24 @@ class Store:
         message_id: str,
         *,
         attempt_id: str,
+        fingerprint: str,
+        expected_epoch: int,
         receipt: ScreeningReceipt | None = None,
+        envelope_digest: str | None = None,
         hold_code: str | None = None,
+        retry_at: float | None = None,
     ) -> None:
-        """Record THIS outcome, atomically under the live authority fence.
+        """Commit ONE logical outcome, fenced on every binding that matters.
 
-        Exactly one of ``receipt``/``hold_code`` is recorded. A receipt is
-        validated (full immutable tuple) before persistence; a hold records
-        its closed code durably so a refreshed inbox projection cannot erase
-        it. Nothing here can race an invalidation: check and write share the
-        transaction, exactly like the ack path.
+        Inside ONE write transaction: live-owner/generation (native fence,
+        H2 discipline), the attempt belongs to THIS owner AND message AND
+        policy fingerprint AND is of the logical kind, the published policy
+        epoch is still the one captured before dispatch, and the write is
+        WRITE-ONCE per message: an existing receipt may only be replayed
+        identically (idempotent recovery) — never overwritten with another
+        verdict, never used to commit a second message (H3-Q6). A receipt
+        persists only after full tuple validation; a hold records its closed
+        code durably so a refreshed inbox projection cannot erase it.
         """
 
         if (receipt is None) == (hold_code is None):
@@ -984,45 +1289,139 @@ class Store:
                 receipt.validated()
             except TeamBridgeTypeError as error:
                 raise StoreRefused("invalid_receipt", str(error)) from error
+            if envelope_digest is None:
+                raise StoreRefused("invalid_outcome", "receipt outcome needs the envelope digest")
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
-            spent = conn.execute(
-                "SELECT 1 FROM screening_attempts WHERE attempt_id = ? AND owner_key = ?",
-                (attempt_id, _owner_key(owner)),
+            key = _owner_key(owner)
+            attempt = conn.execute(
+                "SELECT kind, message_id, fingerprint FROM screening_attempts "
+                "WHERE attempt_id = ? AND owner_key = ?",
+                (attempt_id, key),
             ).fetchone()
-            if spent is None:
+            if attempt is None:
                 # An outcome for an attempt this owner never reserved would
                 # fabricate spend evidence; refuse instead.
                 raise StoreRefused("unknown_attempt", attempt_id)
+            if (
+                attempt["kind"] != "logical"
+                or attempt["message_id"] != message_id
+                or attempt["fingerprint"] != fingerprint
+            ):
+                # One reserved ID is bound to ONE message/policy tuple; it
+                # cannot commit another message or a differently-fingerprinted
+                # outcome.
+                raise StoreRefused("attempt_mismatch", attempt_id)
+            policy_row = conn.execute(
+                "SELECT epoch FROM screening_policy WHERE owner_key = ?", (key,)
+            ).fetchone()
+            if policy_row is None or int(policy_row["epoch"]) != expected_epoch:
+                # A policy published after dispatch invalidates this proof.
+                raise StoreRefused("policy_stale", "accepted policy changed during the run")
             if receipt is not None:
+                existing = conn.execute(
+                    "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
+                    "categories, envelope_digest, admission_revision "
+                    "FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                ).fetchone()
+                if existing is not None:
+                    same = (
+                        existing["verdict"] == receipt.verdict
+                        and existing["model"] == receipt.model
+                        and existing["prompt_version"] == receipt.prompt_version
+                        and existing["template_sha256"] == receipt.template_sha256
+                        and existing["body_sha256"] == receipt.body_sha256
+                        and tuple(sorted(json.loads(existing["categories"])))
+                        == tuple(sorted(receipt.categories))
+                        and existing["envelope_digest"] == envelope_digest
+                    )
+                    if not same:
+                        # Write-once: a committed allow is never replaced by a
+                        # reject (or any rewrite) through this path.
+                        raise StoreRefused("write_once_conflict", message_id)
+                else:
+                    conn.execute(
+                        "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
+                        "template_sha256, prompt_version, model, verdict, categories, "
+                        "envelope_digest, admission_revision, policy_epoch, created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            key,
+                            message_id,
+                            receipt.body_sha256,
+                            receipt.template_sha256,
+                            receipt.prompt_version,
+                            receipt.model,
+                            receipt.verdict,
+                            json.dumps(sorted(receipt.categories)),
+                            envelope_digest,
+                            _fingerprint_revision(fingerprint),
+                            expected_epoch,
+                            time.time(),
+                        ),
+                    )
                 conn.execute(
-                    "INSERT OR REPLACE INTO screening_receipts (owner_key, message_id, "
-                    "body_sha256, template_sha256, prompt_version, model, verdict, "
-                    "categories, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (
-                        _owner_key(owner),
-                        message_id,
-                        receipt.body_sha256,
-                        receipt.template_sha256,
-                        receipt.prompt_version,
-                        receipt.model,
-                        receipt.verdict,
-                        json.dumps(sorted(receipt.categories)),
-                        time.time(),
-                    ),
+                    "UPDATE screening_attempts SET committed_message_id = ? "
+                    "WHERE attempt_id = ?",
+                    (message_id, attempt_id),
                 )
                 conn.execute(
                     "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
-                    (_owner_key(owner), message_id),
+                    (key, message_id),
                 )
             else:
                 conn.execute(
                     "INSERT OR REPLACE INTO screening_holds (owner_key, message_id, "
                     "hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
-                    (_owner_key(owner), message_id, hold_code, None, time.time()),
+                    (key, message_id, hold_code, retry_at, time.time()),
                 )
+
+    def schema_problem(self) -> str | None:
+        """The refusal code of the CURRENT schema/state, or None when sound.
+
+        ``resolve_owner`` (H2 discipline) reports a damaged or unknown store
+        as NO AUTHORITY (None) rather than an error; callers that must name
+        WHY nothing resolved (a durable hold reason, H3-Q8) ask this next.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+            return None
+        except StoreRefused as failure:
+            return failure.code
+        except sqlite3.Error:
+            return "state_unreadable"
+
+    def persist_hold(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        hold_code: str,
+        *,
+        retry_at: float | None = None,
+    ) -> None:
+        """Durably quarantine a VALID-LIVE-OWNER early refusal (H3-Q8).
+
+        Early holds (no usable default, template floor mismatch, budget
+        exhaustion) happen before any attempt row exists; their per-item
+        reason must still survive an inbox refresh instead of disappearing.
+        An invalid owner gets no fresh writes at all (this method refuses —
+        a non-resolving namespace must not accumulate state).
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_holds (owner_key, message_id, hold_code, "
+                "retry_at, created_at) VALUES (?,?,?,?,?)",
+                (_owner_key(owner), message_id, hold_code, retry_at, time.time()),
+            )
 
     def screening_hold(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
         """The durable hold row, if any (H4 surfaces it; H3 only writes it)."""
@@ -1042,6 +1441,66 @@ class Store:
                     "retry_at": row["retry_at"],
                     "created_at": row["created_at"],
                 }
+        except sqlite3.Error:
+            return None
+
+    #: Consecutive provider failures that open the account breaker, and the
+    #: fixed finite backoff ladder (seconds) it walks per further failure.
+    BREAKER_THRESHOLD = 3
+    BREAKER_BACKOFF_S = (60.0, 120.0, 240.0, 480.0, 900.0)
+
+    def record_screening_failure(self, owner: OwnerSnapshot) -> float:
+        """One provider failure; open/advance the breaker, return ``retry_at``.
+
+        Persisted so a restart cannot forget an open breaker, and FINITE so
+        a broken route cannot park an account forever: the ladder stops at
+        its last rung until a success resets it.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            scope = self._account_scope(owner)
+            row = conn.execute(
+                "SELECT failures FROM screening_breaker WHERE account_scope = ?", (scope,)
+            ).fetchone()
+            failures = (int(row["failures"]) if row is not None else 0) + 1
+            open_until = 0.0
+            if failures >= self.BREAKER_THRESHOLD:
+                rung = min(failures - self.BREAKER_THRESHOLD, len(self.BREAKER_BACKOFF_S) - 1)
+                open_until = time.time() + self.BREAKER_BACKOFF_S[rung]
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_breaker "
+                "(account_scope, failures, open_until, updated_at) VALUES (?,?,?,?)",
+                (scope, failures, open_until, time.time()),
+            )
+            return open_until
+
+    def record_screening_success(self, owner: OwnerSnapshot) -> None:
+        """A provider success clears the account breaker."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            conn.execute(
+                "DELETE FROM screening_breaker WHERE account_scope = ?",
+                (self._account_scope(owner),),
+            )
+
+    def screening_breaker_state(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
+        """Current breaker row (contentless: counts + timestamps only)."""
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                row = conn.execute(
+                    "SELECT failures, open_until, updated_at FROM screening_breaker "
+                    "WHERE account_scope = ?",
+                    (self._account_scope(owner),),
+                ).fetchone()
+                return dict(row) if row is not None else None
         except sqlite3.Error:
             return None
 
