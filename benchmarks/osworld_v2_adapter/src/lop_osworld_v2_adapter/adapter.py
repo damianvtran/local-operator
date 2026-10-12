@@ -52,7 +52,10 @@ from lop_osworld_v2_adapter import diagnostics, provisioning
 from lop_osworld_v2_adapter import requirements as requirements_mod
 from lop_osworld_v2_adapter import scoring, taskfile, vendor_bridge
 from lop_osworld_v2_adapter.observation import ObservationBuilder
-from lop_osworld_v2_adapter.providers.base import EnvironmentProvider
+from lop_osworld_v2_adapter.providers.base import (
+    EnvironmentProvider,
+    InstructionUnavailable,
+)
 
 from local_operator.evaluation.adapters.api import (
     ADAPTER_SCHEMA_VERSION,
@@ -426,7 +429,10 @@ class OSWorldV2Adapter:
         if self._task is None:
             baseline = taskfile.TaskDescriptor(
                 task_id="unknown",
-                instruction="",
+                # None, not "": the pre-task baseline states no instruction,
+                # the same way a deferred descriptor does. An empty string
+                # would be a fabricated value wearing a real one's shape.
+                instruction=None,
                 source_sha256="0" * 64,
             )
             return RequirementsResult(
@@ -648,6 +654,24 @@ class OSWorldV2Adapter:
             episode_id=params.episode_id,
             sequence=0,
         )
+        # THE INITIAL-TEXT GATE (why it is a refusal and not a fallback): the
+        # first observation's text is the ENTIRE task the model will ever be
+        # given -- later frames carry text=None by design -- so a reset whose
+        # observation holds no text cannot be run honestly, and must not
+        # start a model request trying. The AWS provider refuses earlier at
+        # the accessor seam (its own read, once, post-setup); this gate is the
+        # provider-agnostic net over the BUILT observation, so no backend can
+        # start a session whose task text is absent or blank. It must never
+        # fall back to the static descriptor: for a deferred instruction that
+        # text does not exist, and for a static one it is not necessarily
+        # what the environment reset into. Removing this gate (or turning it
+        # into a default) silently re-opens both paths.
+        if not (self._current_observation.text or "").strip():
+            raise InstructionUnavailable(
+                f"task {params.task_id!r} produced a reset observation with no "
+                "instruction text; refusing before any model request (an "
+                "episode without its task text cannot be scored honestly)"
+            )
         return AckResult()
 
     def _load_task_source(self, task_id: str) -> bytes:
