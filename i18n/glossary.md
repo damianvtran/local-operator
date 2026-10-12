@@ -122,3 +122,47 @@ with its reason — the glossary row stays the default. A change here is a
 repo-artifact change: it does not need regenerating (it is not generated), but
 the translation ledger's freshness rule treats it as style-guide scope — a wave
 re-audits the terms it cites when either changes.
+
+## 5. Wave-3 audit binding and unfinished backfill
+
+These records distinguish complete semantic coverage from a clean remediation
+sample. A passed delta cannot fill an unreadable row in a required first pass.
+The ledger records namespace/source freshness; this note binds the narrower
+high-visibility coverage and the model that actually performed each round.
+
+- Hindi visibility: independent auditor `c96e3e71494b` (resumed
+  `5d81a4d40810`), `deepseek/deepseek-flash`, 2026-10-11, read all 30 welcome
+  and all 12 settings-error values, and scanned all 755 settings values.
+  Independent polish auditor `26037f4e1f23`, same model/date, passed the
+  9-value delta (welcome 1/settings 8); unchanged bytes identical per its
+  report. No unreadable semantic row was reported. The original pinned
+  `anthropic/claude-sonnet-5-5` was a fallback origin, not the audit model.
+- Chinese visibility: independent auditor `c3516b7d9054`,
+  `openai/gpt-6.1-sol`, 2026-10-12, read all 30 welcome values, read 11/12
+  settings-error values, and scanned 755 settings values with deep samples.
+  The ordinary read masked `inline_credentials`; that value was **not**
+  semantically rereviewed in this second pass. Its unchanged content retains
+  only the initial ordinary full-12 pass by `4af46d845e1c`,
+  `deepseek/deepseek-flash`, 2026-10-11. Two MAJOR findings (credential key
+  name, runtime temporal window) were fixed; independent `2e5edde0be0b`,
+  `openai/gpt-6.1-sol`, 2026-10-12, passed the two-value delta with zero
+  findings. This is not a new whole-file signoff.
+- Populated exec: translators Hindi `4323561a8d6d`/Chinese `75db6d1a9aa2`
+  and independent auditors Hindi `046b8b75715a`/Chinese `5eaf7eec1303` all
+  ran `openai/gpt-6.1-sol`, 2026-10-12. Both audits covered all 17 values;
+  runtime render samples passed. Chinese's MINOR `profile`/配置档 ambiguity
+  is accepted without changing the translation. Superseded empty-source
+  approvals remain historical notes in the ledger, not current approvals.
+- Chinese slash remains **failed**: required first-pass coverage is 50/51.
+  `wire.slash.credential` is masked on the normal read; the independently
+  passing 9-value remediation does not complete that required coverage. No
+  bypass or reconstruction was attempted.
+- `tui.analytics` and `wire.errors.desktop` were absent from the original
+  ten-namespace snapshot. Their Hindi/Chinese backfill remains unfinished;
+  exclusion is intentional and means English per-namespace fallback, not
+  translated coverage. Chinese shipping remains blocked on slash coverage;
+  this wave does not claim immediate release eligibility.
+
+Source: named independent audit reports retained by the wave-3 coordinator;
+provider fallbacks are disclosed in those reports. Runtime samples above do
+not establish full CLI/lifecycle or rendered-frame coverage.

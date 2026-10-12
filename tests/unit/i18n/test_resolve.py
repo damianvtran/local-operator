@@ -163,11 +163,12 @@ def test_unshipped_locale_falls_back_to_en() -> None:
 
 def test_os_is_consulted_last_and_filtered() -> None:
     assert resolve.resolve_language("auto", environ={}, system="Linux") == "en"
-    # The OS locale is consulted last AND filtered by the shipped set: hi and
-    # zh-CN now ship with wave 3; ur still waits for the final RTL wave.
+    # The shipped filter retains earlier waves and admits hi's complete audit.
+    # Chinese's required slash audit is incomplete, so even its OS tag falls
+    # back to en rather than treating available catalogue files as approval.
     assert resolve.resolve_language("auto", environ={"LANG": "ru_RU.UTF-8"}, system="Linux") == "ru"
     assert resolve.resolve_language("auto", environ={"LANG": "hi_IN.UTF-8"}, system="Linux") == "hi"
-    assert resolve.resolve_language("auto", environ={"LANG": "zh_CN.UTF-8"}, system="Linux") == "zh-CN"
+    assert resolve.resolve_language("auto", environ={"LANG": "zh_CN.UTF-8"}, system="Linux") == "en"
     assert resolve.resolve_language("auto", environ={"LANG": "ur_PK.UTF-8"}, system="Linux") == "en"
 
 
@@ -223,9 +224,10 @@ def test_kill_switch_forces_en_over_config_and_env() -> None:
 
 
 def test_shipped_locales_reads_generated_set() -> None:
-    # Waves 1-3 shipped es/fr, ru/vi, then hi/zh-CN: the generated set reads
-    # from data/shipped.json in the canonical SUPPORTED_LOCALES order.
-    assert resolve.shipped_locales() == ("en", "fr", "es", "zh-CN", "ru", "vi", "hi")
+    # Available catalogues are not the ship set: zh-CN's incomplete slash
+    # audit fails closed; old exec ledger-only records do not unship the
+    # earlier waves because those locales no longer carry exec files.
+    assert resolve.shipped_locales() == ("en", "fr", "es", "ru", "vi", "hi")
 
 
 def test_language_options_lead_with_auto() -> None:
