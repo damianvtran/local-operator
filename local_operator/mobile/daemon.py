@@ -4580,9 +4580,56 @@ def build_app(daemon: MobileDaemon):
             "unread": daemon.table.unread_block(),
             "capabilities": {
                 "features": _feature_flags(),
+                "i18n": {"catalogues": 1},
                 "stt": await stt_availability(),
             },
         }
+
+    async def api_i18n_catalogue(request: Request) -> Response:
+        """Public negotiation data, never session/user content or a core proxy.
+
+        The relay advertises this adapter separately from features.i18n: that
+        feature describes core's contract, not this app's routing table. Only
+        backend-owned wire namespaces may cross this seam; relay copy bundles
+        with its own client. Existing catalogue loaders own path validation.
+        """
+        from local_operator.i18n import catalogues
+        from local_operator.i18n.http import etag_matches
+
+        locale = request.path_params["locale"]
+        namespace = request.path_params["namespace"]
+        if not namespace.startswith("wire."):
+            return JSONResponse(
+                {"detail": "Catalogue not found."}, status_code=404
+            )  # i18n: ignore protocol diagnostic
+
+        def load() -> tuple[str, dict[str, str]]:
+            return (
+                catalogues.catalogue_sha256(locale, namespace),
+                catalogues.load_catalogue(locale, namespace),
+            )
+
+        try:
+            sha, messages = await asyncio.to_thread(load)
+        except catalogues.CatalogueNotFound:
+            return JSONResponse(
+                {"detail": "Catalogue not found."}, status_code=404
+            )  # i18n: ignore protocol diagnostic
+        except catalogues.CatalogueInvalid as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=500)
+        headers = {"ETag": f'"{sha}"', "Cache-Control": "no-cache"}
+        if etag_matches(request.headers.get("if-none-match", ""), sha):
+            return Response(status_code=304, headers=headers)
+        # Same three-field CRUD envelope as core, without importing its
+        # Pydantic/FastAPI models into the independent Starlette daemon.
+        return JSONResponse(
+            {
+                "status": 200,
+                "message": "Catalogue retrieved.",  # i18n: ignore protocol diagnostic
+                "result": {"messages": messages, "content_sha256": sha},
+            },
+            headers=headers,
+        )
 
     async def api_sessions(request: Request) -> Response:
         denied = gate(request)
@@ -7168,6 +7215,7 @@ def build_app(daemon: MobileDaemon):
         Route("/login", login_submit, methods=["POST"]),
         Route("/logout", logout),
         Route("/api/sessions", api_sessions),
+        Route("/api/i18n/catalogues/{locale:str}/{namespace:str}", api_i18n_catalogue),
         # The badge read (push/ack-sync S1): the same aggregate the list payload
         # carries as its top-level ``unread`` block, served on its own so a
         # client can refresh the number without pulling the rows.
