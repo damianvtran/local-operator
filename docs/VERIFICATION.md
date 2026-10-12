@@ -1887,6 +1887,32 @@ phased-`open_todos` cases) and
 (5 requests through the real `Session`, `AgentLoop` and `todo` tool: the block,
 then the accounting turn that carries the reminder, then release).
 
+**Over-fire, fixed 2026-10-12: the reconciliation is bounded per IDENTITY, not
+per turn.** The latch was reset at the head of EVERY turn's pipeline
+(all turn kinds funnel through `_run_turn_pipeline`), and the fingerprint's
+reason element meant the model's own recheck bookkeeping (re-`block` with a
+corrected reason) counted as movement — so a session whose open work was ALL
+blocked (0 pending) was re-asserted on every turn, every peer wake and every
+quiet end. Measured across two operator sessions, both holding 5-6 blocked
+items and ZERO pending: ~97 of ~116 quiet-end attempts were overridden by
+continued model output. `_blocked_reminder_fingerprint` is now the blocked
+group's IDENTITY — `(phase, text, status)` per blocked item, WITHOUT the
+reason — and `_run_turn_pipeline` deliberately does not reset it: a parked set
+earns exactly ONE reconciliation per identity change, across turns (a new
+blocked item, an unblocked one or a resolved one → exactly one; an unchanged
+set → none). A reason-only rewrite no longer re-fires — bookkeeping, not a new
+ask — but still expires the stale rendered assertion, because the full
+fingerprint (reason included) rides the reminder's `details`. The pending
+branch keeps its per-turn re-arm; the latch is in-memory, so a process restart
+re-asks once per current set — the accepted limit. Evidence:
+`test_todo_guardrail.py` now 20 tests (the accounted parked list across two
+turns — 3 requests / 1 reminder, against the old 4 / 2 — a new blocked item
+earning one more, an unblock earning one more, reason churn not re-firing while
+the render still expires) and `test_todo_steering_e2e.py` now 9 (the over-fire
+repro end to end: 6 requests / 2 reminders fixed, 7 / 3 measured on the
+pre-fix code; new pending work still firing after an accounted parked set, with
+the pending section only; a late steer still re-entering a quiet turn).
+
 ## Two review rounds' findings, and what they cost to miss (2026-08-17)
 
 Both round-1 reviews requested changes on defects the 4177-test suite was green
