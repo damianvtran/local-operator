@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, SecretStr
 
 from local_operator.config import ConfigManager
+from local_operator.i18n.keys import wire_errors_auth as w
 from local_operator.model.defaults import SuggestedModel, suggested_model_for
 from local_operator.providers import key_check
 from local_operator.providers.auth_store import AuthStore, credential_identity
@@ -32,6 +33,10 @@ from local_operator.server.utils.desktop_auth import (
     apply_desktop_login_defaults,
 )
 
+# Only route-owned error constructors are catalogued here. Lower-layer reasons
+# remain opaque params: parsing or rewording them could alter provider verdicts
+# or undo their existing redaction. The released desktop reader takes envelope
+# text first; English sentences and admission/status decisions stay unchanged.
 router = APIRouter(tags=["Authentication"], dependencies=[Depends(require_desktop)])
 
 logger = logging.getLogger(__name__)
@@ -111,14 +116,14 @@ def _reply(result: Any, message: str = "Provider controls retrieved.") -> CRUDRe
 def _operation(host: DesktopAuth, operation_id: str) -> LoginOperation:
     op = host.operations.get(operation_id)
     if op is None:
-        raise HTTPException(404, "This sign-in is no longer available. Start again.")
+        raise HTTPException(404, w.sign_in_missing().envelope())
     return op
 
 
 def _secret(body: SecretInput) -> str:
     value = body.value.get_secret_value().strip()
     if not value or len(value) > 32768:
-        raise HTTPException(422, "Enter a non-empty value of at most 32768 characters.")
+        raise HTTPException(422, w.input_invalid().envelope())
     return value
 
 
@@ -141,7 +146,7 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
             # should report.
             raise HTTPException(
                 503,
-                "The credential store could not be read — the provider census needs it.",
+                w.store_unreadable().envelope(),
             )
         rows = []
         for view_row in view:
@@ -318,7 +323,7 @@ async def account_status(host: DesktopAuth = Depends(get_desktop_auth)):
 async def remove_account(account_id: int, host: DesktopAuth = Depends(get_desktop_auth)):
     row = host.store.get_credential(account_id)
     if row is None or get_provider_definition(row.provider) is None:
-        raise HTTPException(404, "Provider account not found")
+        raise HTTPException(404, w.account_not_found().envelope())
     host.store.delete_credential(account_id)
     from local_operator.providers.auth_cli import _invalidate_cached_listing
 
@@ -347,9 +352,9 @@ async def login(body: LoginRequest, host: DesktopAuth = Depends(get_desktop_auth
         # The renderer classifies 503 as "backend not answering"
         # (``isServerUnreachable``), which is exactly this state; nothing in the
         # desktop client branches on a 422 from this route.
-        raise HTTPException(503, str(error)) from None
+        raise HTTPException(503, w.auth_refusal(error=str(error)).envelope()) from None
     except ValueError as error:
-        raise HTTPException(422, str(error)) from None
+        raise HTTPException(422, w.auth_refusal(error=str(error)).envelope()) from None
     try:
         await asyncio.wait_for(op.ready.wait(), timeout=LOGIN_READY_TIMEOUT_S)
     except TimeoutError:
@@ -388,17 +393,24 @@ async def operation_input(
     op = _operation(host, operation_id)
     pending = op.pending_input
     if pending is None or pending.done() or body.prompt_id != op.prompt_id:
-        raise HTTPException(409, "This sign-in is not waiting for input.")
+        raise HTTPException(409, w.sign_in_not_waiting().envelope())
     value = _secret(body)
     definition = get_provider_definition(op.provider)
     if definition is not None and definition.paste_is_api_key:
         verdict = await key_check.check_api_key(op.provider, value)
         if verdict.valid is False:
-            raise HTTPException(422, verdict.reason or "The provider rejected this API key.")
+            raise HTTPException(
+                422,
+                (
+                    w.provider_refusal(error=verdict.reason).envelope()
+                    if verdict.reason
+                    else w.key_rejected().envelope()
+                ),
+            )
         # The check awaited: the flow may have been cancelled or superseded
         # meanwhile, and a resolved future cannot take a second result.
         if pending.done() or op.pending_input is not pending:
-            raise HTTPException(409, "This sign-in is not waiting for input.")
+            raise HTTPException(409, w.sign_in_not_waiting().envelope())
     pending.set_result(value)
     return _reply(op.snapshot(), "Response submitted.")
 
@@ -443,11 +455,18 @@ async def save_key(
     storage_id = credential_provider_id(provider_id)
     definition = get_provider_definition(storage_id)
     if definition is None or not definition.accepts_api_key:
-        raise HTTPException(422, "This provider does not accept an API key.")
+        raise HTTPException(422, w.key_not_accepted().envelope())
     secret = _secret(body)
     verdict = await key_check.check_api_key(storage_id, secret)
     if verdict.valid is False:
-        raise HTTPException(422, verdict.reason or "The provider rejected this API key.")
+        raise HTTPException(
+            422,
+            (
+                w.provider_refusal(error=verdict.reason).envelope()
+                if verdict.reason
+                else w.key_rejected().envelope()
+            ),
+        )
     # AuthStore owns alias translation and source precedence. Use the same
     # login tier as the terminal; do not create a renderer-owned secret store.
     host.store.upsert_credential(storage_id, {"type": "api_key", "source": "login", "key": secret})
@@ -504,10 +523,10 @@ async def probe_provider(provider_id: str, host: DesktopAuth = Depends(get_deskt
 
     definition = get_provider_definition(credential_provider_id(provider_id))
     if definition is None or not definition.allows_missing_api_key:
-        raise HTTPException(422, "Only a local provider's server can be tested.")
+        raise HTTPException(422, w.local_server_only().envelope())
     base_url = definition.base_url
     if not base_url:
-        raise HTTPException(422, "This provider has no server address to test.")
+        raise HTTPException(422, w.server_address_missing().envelope())
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(base_url.rstrip("/") + "/models")
@@ -533,7 +552,7 @@ async def logout(provider_id: str, host: DesktopAuth = Depends(get_desktop_auth)
     try:
         await controller.logout(provider_id)
     except ValueError:
-        raise HTTPException(422, "No stored credentials were found for this provider.")
+        raise HTTPException(422, w.credentials_missing().envelope())
     finally:
         controller.close()
     return _reply({}, "Stored credentials removed. Environment credentials are unchanged.")
