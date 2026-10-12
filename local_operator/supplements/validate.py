@@ -692,9 +692,25 @@ def _check_scan(blob: str) -> list[str]:
     errors: list[str] = [
         f"rejected string {needle!r}" for needle in _BANNED if needle.lower() in lowered
     ]
+    # CSP intentionally cannot fetch dependencies. Fail honestly before storing a
+    # frame that could only render half a document; data images remain self-contained.
+    resources = re.finditer(r"\b(src|href)\s*=\s*([\"'])(.*?)\2", body, re.I | re.S)
+    for resource in resources:
+        value = resource.group(3).strip().casefold()
+        if not value.startswith(("#", "data:image/")):
+            errors.append("resource references must be inline data images or local fragment links")
+    if re.search(r"<script\b[^>]*\bsrc\s*=", body, re.I):
+        errors.append("script dependencies are unavailable in an inline preview")
+    if re.search(
+        r"@import\b|\bimport\s*(?:\(|[\"'\{*])|\bexport\s+.*?\bfrom\s*[\"']", body, re.I | re.S
+    ):
+        errors.append("module and CSS imports are unavailable in an inline preview")
+    for match in re.finditer(r"url\s*\(\s*([\"']?)(.*?)\1\s*\)", body, re.I | re.S):
+        if not match.group(2).strip().casefold().startswith("data:image/"):
+            errors.append("CSS resource URLs must be inline data images")
     # The banned-string pass above reads the RAW body (attributes and all); this scan reads
     # the walked text -- §4.2's viewBox/style carve-out widened to the structural table.
-    scannable = _blank_structural(body)
+    scannable = _blank_structural(re.sub(r"<style\b.*?</style\s*>", "", body, flags=re.I | re.S))
     match = _INLINE_NUMBER_RE.search(scannable)
     if match is not None:
         errors.append(

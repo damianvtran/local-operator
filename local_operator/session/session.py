@@ -14754,7 +14754,17 @@ class Session:
                     # results in place.
                     try:
                         snapped = snapshot_messages(
-                            new_messages, text_budget=self._turn_text_budget
+                            new_messages,
+                            text_budget=self._turn_text_budget,
+                            max_prepared=max(
+                                0,
+                                3
+                                - sum(
+                                    bool(call.prepared_html)
+                                    for item in self._turn_items
+                                    for call in item.tool_calls
+                                ),
+                            ),
                         )
                         self._turn_text_budget -= items_text_size(snapped)
                         self._turn_items.extend(snapped)

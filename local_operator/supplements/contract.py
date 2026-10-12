@@ -145,6 +145,8 @@ class SupplementDetails(TypedDict):
     decision: NotRequired[SupplementDecision]
     instruction: NotRequired[str]
     model: NotRequired[str]
+    model_source: NotRequired[str]
+    attempts: NotRequired[list[str]]
     turns: NotRequired[int]
     tokens_in: NotRequired[int]
     tokens_out: NotRequired[int]

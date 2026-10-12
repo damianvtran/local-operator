@@ -2637,6 +2637,10 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     elapsed_s: float = 0.0
     files: list[dict[str, Any]] = Field(default_factory=list)
     components: list[dict[str, Any]] = Field(default_factory=list)
+    model: str = ""
+    model_source: str = ""
+    attempts: list[str] = Field(default_factory=list)
+    detail: list[str] = Field(default_factory=list)
     error: str = ""
     error_type: str = ""
 

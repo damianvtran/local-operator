@@ -541,6 +541,33 @@ class SupplementRunner:
         )
         if pre.skipped:
             return
+        if pre.prepared and want_graphics:
+            # An explicit authored document is already the user's deliverable, not an
+            # unsolicited chart decision. Publish it locally even with vendors offline.
+            from local_operator.supplements.prepared import promote
+
+            components: list[Component] = []
+            detail: list[str] = []
+            for candidate, content in pre.prepared:
+                result, refusal = promote(content, candidate.path, pre.evidence.datasets)
+                if result is not None:
+                    components.extend(result.components)
+                if refusal:
+                    detail.append(refusal)
+            await self._write(
+                answer.id,
+                Decision(
+                    featured=(
+                        tuple(candidate for candidate, _content in pre.prepared)
+                        if want_files
+                        else ()
+                    ),
+                    vendor="prepared",
+                ),
+                components=components,
+                detail=detail,
+            )
+            return
         service = self._seam() if self._seam is not None else None
         decision = await decide_supplement(
             service,
@@ -575,16 +602,24 @@ class SupplementRunner:
             return
         await self._write(answer.id, decision)
 
-    async def _write(self, anchor: str, decision: Decision) -> None:
+    async def _write(
+        self,
+        anchor: str,
+        decision: Decision,
+        *,
+        components: Sequence[Component] = (),
+        detail: Sequence[str] = (),
+    ) -> None:
         """Journal the decision. A decision with nothing to show writes NOTHING.
 
         An empty ``done`` row would render as nothing anyway (``reader_disposition``) while
         costing a journal line per turn the vendor declined; the spam-rate measurement reads
         the DEBUG line and the golden set, not the journal.
         """
-        if decision.empty and not decision.more:
+        if decision.empty and not decision.more and not components:
             return
         job = new_job_id()
+        stored = await self._store(components)
         self._live_jobs.add(job)
         try:
             # Files-only: no generator is coming, so the first row is TERMINAL. A ``decided``
@@ -594,11 +629,16 @@ class SupplementRunner:
             # assumed to be 1 -- a re-used anchor must not collide with rows it already has.
             def build_done(base: Mapping[str, Any] | None) -> Mapping[str, Any]:
                 version = int(base.get("version", 0) or 0) + 1 if base is not None else 1
-                return dict(
+                final = dict(
                     build_details(
                         anchor=anchor, job=job, version=version, state="done", decision=decision
                     )
                 )
+                if stored:
+                    final["components"] = stored
+                if detail:
+                    final["detail"] = list(detail)
+                return final
 
             final = await self._commit_row(anchor=anchor, build=build_done)
             if final is not None:
@@ -752,7 +792,7 @@ class SupplementRunner:
                 max_output_tokens=settings.max_output_tokens,
                 max_cost_usd=settings.max_cost_usd,
                 timeout_s=settings.timeout_s,
-                price=lambda usage: self._price(usage, resolved),
+                model_price=self._price,
                 on_progress=lambda stage, elapsed: self._progress(
                     details, "running", stage=stage, elapsed_s=elapsed
                 ),
@@ -772,6 +812,8 @@ class SupplementRunner:
                 final: dict[str, Any] = dict(next_version(base, state=state, error=error))
                 final["components"] = components
                 final["model"] = outcome.model
+                final["model_source"] = outcome.model_source
+                final["attempts"] = list(outcome.attempts)
                 final["turns"] = outcome.turns
                 final["tokens_in"] = outcome.tokens_in
                 final["tokens_out"] = outcome.tokens_out
@@ -900,11 +942,18 @@ class SupplementRunner:
 
         parts: list[str] = []
         usage: Any = None
-        async for event in self._session._stream_fn(request, None):
-            if isinstance(event, StreamTextDelta):
-                parts.append(event.delta)
-            elif isinstance(event, StreamUsageEvent):
-                usage = event.usage
+        try:
+            async for event in self._session._stream_fn(request, None):
+                if isinstance(event, StreamTextDelta):
+                    parts.append(event.delta)
+                elif isinstance(event, StreamUsageEvent):
+                    usage = event.usage
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A usage event can precede a provider stream error. Preserve that spend
+            # across the transport boundary before deciding whether recovery is affordable.
+            raise generator.CompletionFailure(exc, usage) from exc
         return "".join(parts), usage
 
     def _price(self, usage: Any, resolved: Any) -> float:
@@ -1001,6 +1050,12 @@ class SupplementRunner:
                     if state == "done"
                     else []
                 ),
+                model=str(details.get("model", "") or ""),
+                model_source=str(details.get("model_source", "") or ""),
+                attempts=[str(item) for item in (details.get("attempts") or [])][
+                    : self._settings.max_turns
+                ],
+                detail=[str(item)[:480] for item in (details.get("detail") or [])][:8],
                 error=str(details.get("error", "") or ""),
             )
             await await_emit(event)
