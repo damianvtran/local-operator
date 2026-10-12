@@ -1,15 +1,19 @@
 # OpenAI cache affinity and efficiency audit
 
-This change adds **`session-id` and `thread-id` affinity headers to the built-in
-ChatGPT OAuth Responses route**. The existing request body, account scope,
-`store:false`, full-history replay, reasoning policy and error handling remain
-unchanged. It also corrects and instruments the existing OAuth cache benchmark.
-It does **not** implement the newer public API caching protocol or Codex Lite.
+The OAuth cache-affinity implementation adds **`session-id` and `thread-id`
+headers to the built-in ChatGPT Responses route**. The October follow-up preserves
+optional tool arguments with explicit non-strict function declarations, fixes
+`eval` forwarding of tool payloads containing `name`, and omits incompatible
+legacy retention on documented modern public OpenAI model families. Account
+scope, `store:false`, full-history/native reasoning replay, sampling, affinity
+and tool availability remain unchanged. This does **not** implement explicit
+cache breakpoints, append-only tool updates, WebSockets or Codex Lite.
 
 ## Sources and boundaries
 
-Audit baseline: Local Operator `e0c27ea94e918b831bc2429ebfb7804a447a502a`.
-Codex source: [`459a79eb85400af759e9220c7bafb4429ae07516`](https://github.com/openai/codex/commit/459a79eb85400af759e9220c7bafb4429ae07516).
+Historical affinity audit baseline: Local Operator
+`e0c27ea94e918b831bc2429ebfb7804a447a502a`. Its Codex source:
+[`459a79eb85400af759e9220c7bafb4429ae07516`](https://github.com/openai/codex/commit/459a79eb85400af759e9220c7bafb4429ae07516).
 The relevant immutable files are:
 
 - [`codex-api/src/requests/headers.rs`](https://github.com/openai/codex/blob/459a79eb85400af759e9220c7bafb4429ae07516/codex-rs/codex-api/src/requests/headers.rs#L5-L13): canonical session/thread pair, not model-gated.
@@ -32,6 +36,76 @@ Public API docs describe GPT-5.6+ explicit breakpoints, implicit end-only cachin
 endpoint accepts the same fields.** Live OAuth probes rejected options and
 breakpoints, including breakpoints under the Lite header. No public API key was
 available for this audit, so public endpoint compatibility remains unvalidated.
+
+## October 12 follow-up: preserve semantics before chasing cache hits
+
+The deployed baseline was `v0.70.0` (`23613202e312697a1d4efdfa538cbcaab4185c0d`).
+Current upstream source was inspected at immutable Codex
+[`a9b0815167c27ab13719dd12d13b63e02b70d221`](https://github.com/openai/codex/commit/a9b0815167c27ab13719dd12d13b63e02b70d221):
+
+- [`requests/headers.rs`](https://github.com/openai/codex/blob/a9b0815167c27ab13719dd12d13b63e02b70d221/codex-rs/codex-api/src/requests/headers.rs#L5-L13) still builds canonical session/thread headers.
+- [`common.rs`](https://github.com/openai/codex/blob/a9b0815167c27ab13719dd12d13b63e02b70d221/codex-rs/codex-api/src/common.rs) defines the serialized Responses request, cache key and optional WebSocket continuation. Source availability is not proof our OAuth endpoint accepts every public API feature.
+- [`core/client.rs`](https://github.com/openai/codex/blob/a9b0815167c27ab13719dd12d13b63e02b70d221/codex-rs/core/src/client.rs#L886-L1082) selects Lite input/tool shaping, reasoning context, encrypted reasoning include and request cache key. None of those native/reasoning policies are changed here.
+
+Current public docs were fetched October 12, 2026: [prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching), [function calling / strict mode](https://developers.openai.com/api/docs/guides/function-calling#strict-mode). For GPT-5.6+ and GPT-6 they document implicit/explicit caching, a 30-minute default/minimum TTL and model-specific cache-write/read rates. The new default implicit mode does not require keys for routing; keeping a key does not promise a hit. GPT-6.1 Sol cache reads are priced at 0.05× uncached input and cache writes at 1.25×. These are published public list-rate multipliers, **not OAuth subscription charges**; do not apply the earlier benchmark's 0.1× read estimate to Sol. Misses are not writes: use reported `input_tokens_details.cache_write_tokens`; absent counters mean unknown write accounting.
+
+### Optional arguments: independently reproduced on actual OAuth Responses
+
+Omitting `strict` lets Responses normalize compatible schemas to strict mode,
+including requiring originally optional properties. On a synthetic tool with
+required `op` and optional `name`/`prompt`, three matched pairs through the
+installed real adapter on GPT-6.1 Sol returned:
+
+| Declaration | Emitted arguments (all three calls) |
+|---|---|
+| `strict` omitted | `op:show`, `name:""`, `prompt:""` |
+| `strict:false` | `op:show` only |
+
+The prompt explicitly prohibited the spawn-only optional fields in both arms.
+An independent four-POST probe confirmed the provider-returned normalized schema
+changed `required:[op]` to all three fields with omission, and preserved it with
+false. Its free-form wrapper control preserved nested arguments on **both** arms: reported empty parallel-tool parameters were not reproduced and must not be
+attributed to strict normalization. All calls used isolated HOME/config,
+unexpired OAuth loaded read-only without refresh, synthetic text, bounded
+timeouts and no external tool execution or retry loop.
+
+Real isolated sessions validation accepts `{op:list}` but correctly rejects
+`{op:list,prompt:""}` as a spawn/resume-only field. The fix is explicitly
+`strict:false` on flat Responses function declarations, not weakening op
+validation. Chat Completions remains unchanged (non-strict by default); free-form
+MCP parameters, inventories, role restrictions and approval checks stay intact.
+
+### Public retention: documentation-backed, not live API-key validation
+
+The exact canonical `https://api.openai.com/v1/responses` route with provider
+`openai` and anchored GPT-5 minor >= 6 or GPT-6 model IDs now omits legacy
+`prompt_cache_retention:"24h"` and relies on documented implicit/30m defaults.
+No new options or markers are sent. Older models, custom gateways, other
+providers and unknown future major families keep existing policy. Codex continues
+to strip retention for every family; affinity, native replay and request
+parameters are unchanged. Real-builder transport tests cover the public wire,
+model suffix/snapshot boundaries and exclusions. **No public API-key inference
+was run for this omission, and no latency/cache-savings result is claimed.**
+
+### Eval bridge: stop a failure before dispatch
+
+The deployed real worker accepts `tool('project', op='show')` but
+`tool('project', op='show', name='synthetic-project')` raised
+`TypeError: _call_tool() got multiple values for argument 'name'` before any
+bridge request. Making the routing name positional-only preserves arbitrary
+tool payload names without weakening validation. Real worker regression tests
+cover project/agent/secret-shaped payloads and preserve per-call dispatch.
+
+### Deliberately deferred endpoint-specific features
+
+Public `additional_tools` developer items, `configuration_update` effort
+changes, explicit `prompt_cache_options`/breakpoints, tool search and stateful
+WebSocket continuation need separate endpoint-support and fidelity evidence.
+The earlier OAuth rejection of options/markers below remains historical evidence,
+not proof of permanent incompatibility. This patch neither enables those fields
+nor removes skills, teams, lazy MCP discovery, tools or encrypted reasoning to
+reduce token counts. A cache-hit ratio alone is not a total-cost or performance
+metric; no measured percentage savings is asserted.
 
 ## Why this identity and this scope
 

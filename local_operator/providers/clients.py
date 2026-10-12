@@ -2301,14 +2301,38 @@ def _tools_to_openai(tools: Sequence[AgentTool]) -> list[dict[str, Any]]:
     ]
 
 
+def _modern_public_cache_defaults(model: ModelSpec, endpoint: str) -> bool:
+    """Restrict the new cache contract to its documented API family.
+
+    Endpoint recognition is deliberately exact: an OpenAI-shaped body or model
+    label does not prove a custom gateway implements the same retention policy.
+    Likewise a future major is not a capability promise. Decimal versions and
+    published suffix/snapshot spellings stay in their anchored GPT family.
+    """
+    if model.provider != "openai" or endpoint != "https://api.openai.com/v1/responses":
+        return False
+    match = re.match(r"^gpt-(5|6)(?:\.(\d+))?(?:-|$)", model.model_id)
+    if match is None:
+        return False
+    return match[1] == "6" or (match[2] is not None and int(match[2]) >= 6)
+
+
 def _tools_to_openai_responses(tools: Sequence[AgentTool]) -> list[dict[str, Any]]:
-    """Responses tools are flat; chat-completions nests fields under ``function``."""
+    """Responses tools are flat; chat-completions nests fields under ``function``.
+
+    Responses attempts strict normalization when this flag is omitted. That
+    turns optional op-specific fields into required ones and makes the model
+    send defaults our validation correctly rejects on the wrong operation.
+    Preserve the harness schema as authored, including free-form MCP arguments;
+    normal validation and approval still happen at dispatch.
+    """
     return [
         {
             "type": "function",
             "name": tool.name,
             "description": tool.description,
             "parameters": tool.parameters or {"type": "object", "properties": {}},
+            "strict": False,
         }
         for tool in tools
     ]
@@ -3022,11 +3046,16 @@ class OpenAICompatClient:
             # body above: the Responses API spells `service_tier` identically.
             body["service_tier"] = fast.value
         if request.model.supports_prompt_cache and request.prompt_cache_key:
-            # Preserve the existing public request policy here; modern public
-            # TTL compatibility needs separate API-key validation. The Codex
-            # builder below removes retention, but keeps the routing key.
             body["prompt_cache_key"] = request.prompt_cache_key
-            body["prompt_cache_retention"] = "24h"
+            # GPT-5.6+ and GPT-6 public Responses use the documented implicit
+            # cache/30m default, not the legacy 24h retention contract. Omit the
+            # incompatible field only on this exact public route: compatible
+            # gateways, older models and unknown future families keep their
+            # existing policy. Codex removes retention separately below.
+            if not _modern_public_cache_defaults(
+                request.model, endpoint or f"{self._base_url}/responses"
+            ):
+                body["prompt_cache_retention"] = "24h"
         return body
 
     def _build_codex_responses_body(
