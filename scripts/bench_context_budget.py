@@ -1487,7 +1487,13 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: ``tool_inventory`` (785), ``environment`` (81) and ``knowledge`` (854)
 #: are byte-identical to base on both arms. Ceiling = head + the 55-token
 #: band.
-BUDGET_BILLED_TOKENS = 28_818
+#: Per-run subagent model selectors (base 23613202e3): measured with isolated
+#: HOME/config, top 79,962 -> 80,508 chars (+546), ~28,763 -> ~28,960
+#: billed. The child arm moves by the identical +546 chars (71,745 -> 72,291,
+#: ~25,808 -> ~26,004). The additive task/batch/hub model field is required
+#: to express inherit without erasing a role; no profiles/defaults were changed.
+#: Preserve the existing 55-token headroom band on both measured arms.
+BUDGET_BILLED_TOKENS = 29_015
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1588,7 +1594,7 @@ BUDGET_BILLED_TOKENS = 28_818
 #:   delta                             +249 chars = ~+90
 #:
 #: Ceiling = head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 25_863
+BUDGET_CHILD_BILLED_TOKENS = 26_059
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
