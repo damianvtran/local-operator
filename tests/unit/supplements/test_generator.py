@@ -99,7 +99,7 @@ async def _run(
         max_cost_usd=max_cost_usd,
         max_components=max_components,
         timeout_s=timeout_s,
-        price=price,
+        price=price or (lambda usage: 0.0),
         started=started,
     )
     return outcome, recorder

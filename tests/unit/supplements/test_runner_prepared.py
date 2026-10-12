@@ -14,7 +14,10 @@ from tests.unit.supplements.test_runner_generator import _handle, _make_session,
 
 
 @pytest.mark.asyncio
-async def test_prepared_document_reaches_durable_attachment_and_live_event(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_prepared_document_reaches_durable_attachment_and_live_event(
+    tmp_path: Path, mixed: bool
+) -> None:
     target = tmp_path / "workflow.html"
     target.write_text(DOC)
     session = _make_session(tmp_path / "session", tmp_path)
@@ -36,8 +39,20 @@ async def test_prepared_document_reaches_durable_attachment_and_live_event(tmp_p
                 content=[TextContent(text="written")],
             ),
             answer,
-        ]
+        ],
+        prepared_writes={str(target): DOC},
     )
+    if mixed:
+        report = tmp_path / "notes.md"
+        report.write_text("Supporting report")
+        items[1:1] = snapshot_messages(
+            [
+                Message.assistant(
+                    tool_calls=[ToolCall(id="edit", name="edit", arguments={"path": str(report)})]
+                ),
+                Message(role="tool", tool_call_id="edit", tool_name="edit"),
+            ]
+        )
     try:
         await session.transcript.append_message(answer)
         await handle._supplements._job(
@@ -47,6 +62,9 @@ async def test_prepared_document_reaches_durable_attachment_and_live_event(tmp_p
         rows = _rows(session.transcript)
         assert len(rows) == 1 and rows[0]["state"] == "done"
         assert rows[0]["files"] and rows[0]["components"]
+        assert {item["path"] for item in rows[0]["files"]} == (
+            {"workflow.html", "notes.md"} if mixed else {"workflow.html"}
+        )
         component = rows[0]["components"][0]
         blob = AttachmentStore().get_bytes(component["attachment"])
         assert blob is not None

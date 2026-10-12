@@ -2980,6 +2980,8 @@ class Session:
         #: NEVER in ``_flush_held_end`` -- that method clears ``_logical_generation``
         #: BEFORE the ``_emit`` that freezes this record, and mirroring that neighbouring
         #: clear would freeze an empty accumulator (memo round-2 R2-5).
+        self._prepared_capture_enabled = False
+        self._prepared_writes: dict[str, str] = {}
         self._turn_items: list[TurnItem] = []
         self._turn_text_budget: int = TURN_TEXT_BUDGET
         self._last_run_provenance: RunProvenance | None = None
@@ -14243,6 +14245,7 @@ class Session:
         self._run_last_trigger = None
         self._run_user_text = ""
         self._turn_items = []
+        self._prepared_writes = {}
         self._turn_text_budget = TURN_TEXT_BUDGET
         for message in initial:
             self._note_run_input(message)
@@ -14649,6 +14652,9 @@ class Session:
                 return witness()
 
             config = LoopConfig(
+                capture_prepared_write=(
+                    self._capture_prepared_write if self._prepared_capture_enabled else None
+                ),
                 model=self._model,
                 # Re-read per provider call, so a ``set_model`` landing while
                 # this turn is running reaches its NEXT call instead of
@@ -14756,6 +14762,8 @@ class Session:
                         snapped = snapshot_messages(
                             new_messages,
                             text_budget=self._turn_text_budget,
+                            prepared_writes=self._prepared_writes,
+                            cwd=self._cwd,
                             max_prepared=max(
                                 0,
                                 3
@@ -15866,6 +15874,36 @@ class Session:
             # which the spec cannot reconstruct (see ``run_subagent``).
             effort=effort,
         )
+
+    def _capture_prepared_write(self, call: ToolCall, result: ToolResult) -> None:
+        """Private exact executed bytes; never persisted or passed to a provider.
+
+        Any subsequent successful mutation invalidates an older capture. Only a
+        successful bounded write can replace it, without rereading arbitrary files.
+        """
+        if result.is_error or call.name not in {"write", "edit", "bash", "eval"}:
+            return
+        path = call.arguments.get("path")
+        if call.name in {"bash", "eval"}:
+            # Shell/code can mutate any path; exactness cannot be proved after it.
+            self._prepared_writes.clear()
+            return
+        if not isinstance(path, str):
+            return
+        absolute = os.path.abspath(os.path.join(self._cwd, os.path.expanduser(path)))
+        self._prepared_writes.pop(absolute, None)
+        content = call.arguments.get("content")
+        if (
+            call.name == "write"
+            and path.casefold().endswith((".html", ".htm"))
+            and isinstance(content, str)
+        ):
+            if (
+                len(content) <= 48 * 1024
+                and len(content.encode("utf-8")) <= 48 * 1024
+                and len(self._prepared_writes) < 3
+            ):
+                self._prepared_writes[absolute] = content
 
     def _resolve_subagent_model(
         self, agent: str, effort: str | None, *, strict: bool = False

@@ -2644,6 +2644,17 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     error: str = ""
     error_type: str = ""
 
+    @model_serializer(mode="wrap")
+    def _serialize_optional_diagnostics(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        """Old event fixtures remain byte-identical when no new facts were observed."""
+        value = handler(self)
+        for key in ("model", "model_source", "attempts", "detail"):
+            if not value.get(key):
+                value.pop(key, None)
+        return value
+
 
 EventHandler = Callable[[AgentEvent], Awaitable[None] | None]
 
@@ -2814,6 +2825,7 @@ class LoopConfig(BaseModel):
     #: ``put_nowait`` at ~0.0018 ms/call, which is the budget an implementer
     #: should hold to; anything that touches disk, a lock or a socket belongs on
     #: the far side of a queue, not here.
+    capture_prepared_write: Callable[[ToolCall, ToolResult], None] | None = None
     record_tool_call: Callable[[str, str, str, float], None] | None = Field(
         default=None, exclude=True
     )

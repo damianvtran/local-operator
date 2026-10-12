@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.providers.failover import ProviderError
+from local_operator.providers.failover import ProviderError, ProviderErrorKind
 from local_operator.supplements import generator
 from tests.unit.supplements.test_generator import (
     DATASETS,
@@ -50,14 +50,21 @@ def test_unknown_ladder_ids_are_never_guessed() -> None:
     "kind,status",
     [("auth", 401), ("quota", 429), ("transient", 503), ("timeout", 504), ("request", 404)],
 )
-async def test_typed_failure_uses_one_distinct_isolated_alternate(kind: str, status: int) -> None:
+async def test_typed_failure_uses_one_distinct_isolated_alternate(
+    kind: ProviderErrorKind, status: int
+) -> None:
     requests = []
 
     async def complete(request: Any):
         requests.append(request)
         if len(requests) == 1:
-            raise ProviderError(
-                status, "model unavailable" if status == 404 else "provider unavailable", kind=kind
+            raise generator.CompletionFailure(
+                ProviderError(
+                    status,
+                    "model unavailable" if status == 404 else "provider unavailable",
+                    kind=kind,
+                ),
+                _Usage(10),
             )
         return HONEST_BLOCK, _Usage(10)
 
@@ -70,6 +77,7 @@ async def test_typed_failure_uses_one_distinct_isolated_alternate(kind: str, sta
         max_turns=2,
         max_output_tokens=6000,
         max_cost_usd=1,
+        price=lambda usage: 0.0,
     )
     assert len(requests) == 2 and outcome.components and not outcome.error
     assert requests[0].model.provider == "anthropic"
@@ -103,6 +111,7 @@ async def test_explicit_pin_never_substitutes(configured: str) -> None:
         max_turns=3,
         max_output_tokens=6000,
         max_cost_usd=1,
+        price=lambda usage: 0.0,
     )
     assert len(calls) == 1 and outcome.error
 
@@ -139,8 +148,12 @@ async def test_recovery_never_becomes_a_retry_walk(case: str) -> None:
         requests.append(request)
         if case == "unknown":
             raise RuntimeError("not a provider failure")
-        raise ProviderError(
-            400 if case == "request" else 429, "invalid argument" if case == "request" else "quota"
+        raise generator.CompletionFailure(
+            ProviderError(
+                400 if case == "request" else 429,
+                "invalid argument" if case == "request" else "quota",
+            ),
+            _Usage(10),
         )
 
     outcome = await generator.generate(
@@ -152,6 +165,7 @@ async def test_recovery_never_becomes_a_retry_walk(case: str) -> None:
         max_turns=1 if case == "turn_cap" else 4,
         max_output_tokens=6000,
         max_cost_usd=1,
+        price=lambda usage: 0.0,
         timeout_s=0 if case == "deadline" else None,
     )
     assert len(requests) == (2 if case == "second_failure" else 1)
@@ -182,4 +196,5 @@ async def test_cancel_is_not_a_fallback_signal() -> None:
             max_turns=2,
             max_output_tokens=6000,
             max_cost_usd=1,
+            price=lambda usage: 0.0,
         )

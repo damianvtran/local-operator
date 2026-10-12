@@ -62,7 +62,7 @@ def test_capture_is_exact_success_bounded_and_not_a_classifier_argument(tmp_path
     success = Message(
         role="tool", tool_call_id="w", tool_name="write", content=[TextContent(text="written")]
     )
-    items = snapshot_messages([assistant, success])
+    items = snapshot_messages([assistant, success], prepared_writes={str(target): DOC})
     call = items[0].tool_calls[0]
     assert call.prepared_html == DOC and "content" not in call.args
     pre = prefilter(items, f"[Preview]({target})", cwd=str(tmp_path), home=str(tmp_path.parent))

@@ -213,6 +213,11 @@ class SupplementRunner:
         #: never raises -- the ``read_monitor_settings`` posture (``Session.__init__``
         #: reads ``values.monitor`` the same way, on the same kind of build path).
         self._settings = self._read_settings()
+        # The generic harness hook defaults off; only this graphics-enabled owner
+        # requests bounded private bytes. Nothing changes durable/model history.
+        self._session._prepared_capture_enabled = bool(
+            policy.enabled() and self._settings.active and self._settings.graphics
+        )
         self._task: asyncio.Task[None] | None = None
         #: The detached maintenance pass (sweep.py): its own slot, deliberately NOT
         #: ``_task`` -- every control op gates its cut on ``_task``/``_running`` being
@@ -541,34 +546,20 @@ class SupplementRunner:
         )
         if pre.skipped:
             return
+        components: list[Component] = []
+        prepared_detail: list[str] = []
         if pre.prepared and want_graphics:
-            # An explicit authored document is already the user's deliverable, not an
-            # unsolicited chart decision. Publish it locally even with vendors offline.
             from local_operator.supplements.prepared import promote
 
-            components: list[Component] = []
-            detail: list[str] = []
             for candidate, content in pre.prepared:
                 result, refusal = promote(content, candidate.path, pre.evidence.datasets)
                 if result is not None:
                     components.extend(result.components)
                 if refusal:
-                    detail.append(refusal)
-            await self._write(
-                answer.id,
-                Decision(
-                    featured=(
-                        tuple(candidate for candidate, _content in pre.prepared)
-                        if want_files
-                        else ()
-                    ),
-                    vendor="prepared",
-                ),
-                components=components,
-                detail=detail,
-            )
-            return
-        service = self._seam() if self._seam is not None else None
+                    prepared_detail.append(refusal)
+        # Explicit prepared work must not wait for a decoration vendor. The same
+        # decision function applies its deterministic file rules and bounds locally.
+        service = self._seam() if self._seam is not None and not pre.prepared else None
         decision = await decide_supplement(
             service,
             user_text=provenance.user_text,
@@ -587,6 +578,18 @@ class SupplementRunner:
             decision.graphics,
             (time.perf_counter() - started) * 1000.0,
         )
+        if pre.prepared:
+            # The preview is local, but every ordinary deliverable still participates
+            # in the same file bounds/selection. A vendor outage cannot hide them.
+            if want_files and not decision.featured and not decision.more:
+                deliverables = tuple(item for item in pre.candidates if item.deliverable)
+                decision = Decision(
+                    featured=deliverables[: settings.max_featured],
+                    more=deliverables[settings.max_featured :],
+                    vendor="prepared",
+                )
+            await self._write(answer.id, decision, components=components, detail=prepared_detail)
+            return
         if decision.graphics and want_graphics:
             # Files AND graphics: the generator half runs on its own task so a steer can cut
             # it without touching the decision's work, and so a slow model can never delay
@@ -817,7 +820,11 @@ class SupplementRunner:
                 final["turns"] = outcome.turns
                 final["tokens_in"] = outcome.tokens_in
                 final["tokens_out"] = outcome.tokens_out
-                final["cost_usd"] = round(outcome.cost_usd, 6)
+                final["cost_known"] = outcome.cost_known
+                if outcome.cost_known:
+                    final["cost_usd"] = round(outcome.cost_usd, 6)
+                else:
+                    final.pop("cost_usd", None)
                 if outcome.instruction:
                     final["instruction"] = outcome.instruction[:MAX_INSTRUCTION_CHARS]
                 if outcome.detail:
@@ -956,15 +963,23 @@ class SupplementRunner:
             raise generator.CompletionFailure(exc, usage) from exc
         return "".join(parts), usage
 
-    def _price(self, usage: Any, resolved: Any) -> float:
+    def _price(self, usage: Any, resolved: Any) -> float | None:
         """What one fork turn cost, through THE money computation (``cost_for_usage``).
 
         The same function the status band and the ledger writer use, so the cap cannot
-        disagree with ``/usage`` about what a job has spent. Never raises: a pricing failure
-        must not end a job (the ledger still prices it on its own background thread).
+        disagree with ``/usage`` about what a job has spent. ``None`` means unknown
+        affordability, not free: the generator keeps completed work but cannot buy
+        another paid invocation. Explicit receipts and known local-free calls differ.
         """
-        if usage is None:
+        from local_operator.model.configure import _usage_cost
+
+        receipt = _usage_cost(usage)
+        if receipt is not None:
+            return receipt
+        if resolved.spec.provider in {"test", "ollama", "lmstudio", "vllm"}:
             return 0.0
+        if usage is None:
+            return None
         try:
             from local_operator.model.configure import (
                 cost_for_usage,
@@ -973,10 +988,12 @@ class SupplementRunner:
 
             spec = resolved.spec
             info = resolve_model_info(spec.provider, spec.model_id)
-            return float(cost_for_usage(spec.provider, info, usage) or 0.0)
+            if info.id == "unknown" or info.input_price == 0 or info.output_price == 0:
+                return None
+            return float(cost_for_usage(spec.provider, info, usage))
         except Exception:  # noqa: BLE001 -- an unpriceable turn is not a failed job
             logger.debug("supplement turn could not be priced", exc_info=True)
-            return 0.0
+            return None
 
     async def _store(self, components: Sequence[Component]) -> list[dict[str, Any]]:
         """Store each accepted component as a blob and build the row's ``components[]``.
