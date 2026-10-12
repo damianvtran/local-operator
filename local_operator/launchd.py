@@ -587,11 +587,20 @@ def _loaded_no_restart(body: str, target: str, pid: int) -> bool | None:
             elif depth != sections[-1] + 1:
                 return None
             else:
-                if " = " not in content and " => " not in content:
+                # Env uses => with an OPAQUE string value: a suffix " = {"
+                # inside that value is not a map opener. Other supported map
+                # sections use =; only its entire value { opens a child. Bind
+                # the delimiter to section context, never skip arbitrary =>
+                # text in a coalition/trigger or interpret payload substrings.
+                environment = section_key in {
+                    "environment",
+                    "inherited environment",
+                    "default environment",
+                }
+                key, delimiter, value = content.partition(" => " if environment else " = ")
+                if not delimiter or not key.strip() or (" = " if environment else " => ") in key:
                     return None
-                if not content.split(" = ", 1)[0].split(" => ", 1)[0].strip():
-                    return None
-                if content.endswith(" = {"):
+                if not environment and value == "{":
                     sections.append(depth)
             continue
         if not line.startswith("\t") or line.startswith("\t\t"):

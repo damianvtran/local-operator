@@ -289,6 +289,84 @@ def test_section_grammar_preserves_optional_maps_and_opaque_argument_braces(tmp_
     assert observed.loaded_no_restart is True
 
 
+@pytest.mark.parametrize("section", ["environment", "inherited environment", "default environment"])
+@pytest.mark.parametrize(
+    "value",
+    ["name = {", "literal => name = {", "{", "}", "=>", "true", "value = { => }", "{opaque}"],
+)
+def test_environment_delimiter_keeps_entire_value_opaque(tmp_path, monkeypatch, section, value):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "opaque-leaf"
+    target = f"{launchd.job_domain()}/{label}"
+    fields = {
+        "active count": "1",
+        "path": "/fixture",
+        "type": "LaunchAgent",
+        "state": "running",
+        "program": "/fixture",
+        "arguments": "{\n\t\targ = {\n\t}",
+        "environment": "{\n\t}",
+        "domain": "gui/fixture",
+        "runs": "1",
+        "pid": "12345",
+        "spawn type": "daemon (3)",
+        "properties": "runatload | inferred program",
+    }
+    fields[section] = "{\n\t\tOPAQUE => " + value + "\n\t}"
+    body = target + " = {\n" + "\n".join(f"\t{k} = {v}" for k, v in fields.items()) + "\n}\n"
+
+    def run(*args):
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    observation = launchd.observe_job(
+        label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+    )
+    assert observation.loaded_no_restart is True
+    # The same opaque arrow spelling is NOT a map entry in a coalition.
+    body = body.replace(f"\t{section} = {{", "\tresource coalition = {", 1)
+    if section == "environment":
+        body = body.replace(
+            "\tresource coalition = {", "\tenvironment = {\n\t}\n\tresource coalition = {", 1
+        )
+    assert (
+        launchd.observe_job(
+            label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+        ).loaded_no_restart
+        is None
+    )
+
+
+def test_keyed_nested_trigger_map_remains_structural_not_opaque(tmp_path, monkeypatch):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "nested-trigger"
+    target = f"{launchd.job_domain()}/{label}"
+    body = (
+        target + " = {\n"
+        "\tactive count = 1\n\tpath = /fixture\n\ttype = LaunchAgent\n\tstate = running\n"
+        "\tprogram = /fixture\n\targuments = {\n\t\targ\n\t}\n\tenvironment = {\n\t}\n"
+        "\tdomain = gui/fixture\n\truns = 1\n\tpid = 12345\n\tspawn type = daemon (3)\n"
+        "\tevent triggers = {\n\t\tchild = {\n\t\t\tname = value => literal = {\n\t\t}\n\t}\n"
+        "\tproperties = runatload | inferred program\n}\n"
+    )
+
+    def run(*args):
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    assert (
+        launchd.observe_job(
+            label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+        ).loaded_no_restart
+        is False
+    )
+    body = body.replace("\t\t}\n", "", 1)
+    assert (
+        launchd.observe_job(
+            label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+        ).loaded_no_restart
+        is None
+    )
+
+
 def test_unaddressable_job_stays_unknown_without_calling_supervisor(tmp_path, monkeypatch):
     monkeypatch.setattr(launchd, "real_home", lambda: tmp_path / "real")
 
