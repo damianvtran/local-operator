@@ -128,10 +128,13 @@ from bisect import bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 from uuid import uuid4
 
 from local_operator.session.runtime.engagement import TRANSCRIPT_FILENAME
+
+if TYPE_CHECKING:
+    from local_operator.session.transcript import TranscriptPage
 
 logger = logging.getLogger(__name__)
 
@@ -563,6 +566,27 @@ class TranscriptIndex:
     #: the scan already paid for those views; page readers do indexed lookups.
     journal_rows: dict[str, int] = field(default_factory=dict)
     version: int = TRANSCRIPT_INDEX_VERSION
+
+
+def journal_coordinates_for_page(
+    index: TranscriptIndex, page: "TranscriptPage"
+) -> tuple[str, dict[str, int]] | None:
+    """Coordinates only when the payload and index share one verified source.
+
+    Feature support does not imply readiness. A stale/building index, raced
+    page, unknown domain or missing id has no authority; never fabricate a
+    coordinate for it or attach a fresh generation to an old page's payload.
+    This is a bounded lookup over the page, with no filesystem/journal scan.
+    """
+    source = page.source_signature
+    indexed = (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime"))
+    if not index.journal_generation or source is None or source != indexed:
+        return None
+    if any(entry.id not in index.journal_rows for entry in page.entries):
+        return None
+    return index.journal_generation, {
+        entry.id: index.journal_rows[entry.id] for entry in page.entries
+    }
 
 
 def _index_dir(config_dir: str | Path) -> Path:
