@@ -64,7 +64,7 @@ from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
-from local_operator.model.effort import EFFORT_ORDER, SUPPORTED_EFFORTS
+from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
@@ -5518,11 +5518,11 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
                     # user who typed it, at the command that caused it.
                     raw_effort = hop.get("effort")
                     if raw_effort is not None and str(raw_effort).strip().lower() not in (
-                        SUPPORTED_EFFORTS
+                        FALLBACK_EFFORTS
                     ):
                         return (
                             f"chain {key!r}: effort {raw_effort!r} is not one of "
-                            f"{', '.join(sorted(SUPPORTED_EFFORTS))}"
+                            f"{', '.join(sorted(FALLBACK_EFFORTS))}"
                         )
         return None
     return None
