@@ -3468,23 +3468,6 @@ class DesktopSessionBridge:
             or any(not isinstance(id_, str) or not 1 <= len(id_) <= 128 for id_ in order_ids)
         ):
             raise ValueError("order_ids must contain at most 512 entry ids of 1..128 characters")
-        if self.remote_row is not None and journal_order:
-            # The receiver's journal/index can never order the peer's rows.
-            # Until the owner transport negotiates this field, state unsupported.
-            answer = await self.history(
-                before_id=before_id,
-                through_id=through_id,
-                around_id=around_id,
-                before=before,
-                after=after,
-                limit=limit,
-                entry_times=entry_times,
-                open_frame=open_frame,
-                deadline=deadline,
-            )
-            if answer.get("journal_generation"):
-                return answer
-            return {**answer, "journal_order_state": "unsupported"}
         if open_frame:
             # A PEER'S FRAME IS BUILT BY ITS OWNER, AND THE FLAG NOW TRAVELS WITH
             # THE REQUEST (docs/DESKTOP_API.md §"The open frame"): the stored
@@ -3512,12 +3495,14 @@ class DesktopSessionBridge:
                         "runs": [],
                         "runs_state": "unsupported",
                         "head_cut": False,
+                        **({"journal_order_state": "unsupported"} if journal_order else {}),
                     }
                 return await self._remote_history(
                     before_id=before_id,
                     through_id=through_id,
                     limit=limit,
                     entry_times=entry_times,
+                    **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                     open_frame=True,
                 )
             # A LOCAL ID WITH NO FACADE YET (a draft, an id whose runtime never
@@ -3577,12 +3562,14 @@ class DesktopSessionBridge:
                     "has_more": False,
                     "cursor_missing": True,
                     "has_newer": None,
+                    **({"journal_order_state": "unsupported"} if journal_order else {}),
                 }
             return await self._remote_history(
                 before_id=before_id,
                 through_id=through_id,
                 limit=limit,
                 entry_times=entry_times,
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
             )
         try:
             page = await load_transcript_page(
@@ -3951,25 +3938,9 @@ class DesktopSessionBridge:
     def _apply_journal_order(
         self, answer: dict[str, Any], source: tuple[int, int, float] | None, ids: list[str]
     ) -> bool:
-        from local_operator.session import transcript_index
+        from local_operator.session.transcript_index import apply_journal_order
 
-        index = transcript_index.fresh_resident(self.root, self.session_id)
-        if index is None or not index.journal_generation or source is None:
-            return False
-        if source != (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime")):
-            return False
-        if any(row["id"] not in index.journal_rows for row in answer["entries"]):
-            return False
-        answer["entries"] = [
-            {**row, "journal_seq": index.journal_rows[row["id"]]} for row in answer["entries"]
-        ]
-        answer["journal_order_state"] = "ready"
-        answer["journal_generation"] = index.journal_generation
-        answer["journal_ordinals"] = {
-            id_: index.journal_rows[id_] for id_ in ids if id_ in index.journal_rows
-        }
-        answer["journal_missing_ids"] = [id_ for id_ in ids if id_ not in index.journal_rows]
-        return True
+        return apply_journal_order(self.root, self.session_id, answer, source, ids)
 
     def _journal_page(
         self, answer: dict[str, Any], pages: list[Any], ids: list[str]
@@ -4065,6 +4036,8 @@ class DesktopSessionBridge:
         limit: int,
         entry_times: bool = False,
         open_frame: bool = False,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """One page of a PEER's transcript: the wire when it can answer, the
         owner's stored journal when it cannot.
@@ -4170,7 +4143,11 @@ class DesktopSessionBridge:
                     "a.remote.branch", session=self.session_id, source="stored", facade=False
                 )
             return await self._peer_stored_history(
-                before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
+                before_id=before_id,
+                through_id=through_id,
+                limit=limit,
+                open_frame=open_frame,
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
             )
         if remote.is_cold:
             attach_at = time.monotonic()
@@ -4215,8 +4192,28 @@ class DesktopSessionBridge:
             )
         if rows is None or (cold and not rows):
             return await self._peer_stored_history(
-                before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
+                before_id=before_id,
+                through_id=through_id,
+                limit=limit,
+                open_frame=open_frame,
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
             )
+        if journal_order:
+            # A cold ready page installs the owner's domain in the renderer.
+            # Once the facade hydrates, its uncoordinated wire window cannot
+            # answer off-page repair IDs: prefer the SAME witnessed stored read
+            # even while warm. Only ready owner truth may replace this window;
+            # old/building/unservable owners keep the exact legacy wire page.
+            ordered = await self._peer_stored_history(
+                before_id=before_id,
+                through_id=through_id,
+                limit=limit,
+                open_frame=open_frame,
+                journal_order=True,
+                order_ids=order_ids,
+            )
+            if ordered.get("journal_order_state") == "ready" and ordered.get("journal_generation"):
+                return ordered
         page, has_more = _remote_page(rows, limit=limit)
         if not has_more and remote.history_before_token:
             # ONE OLDER PAGE PER CALL, not a drain: a reader that scrolls asks
@@ -4293,6 +4290,8 @@ class DesktopSessionBridge:
             answer["runs"] = []
             answer["runs_state"] = "unsupported"
             answer["head_cut"] = False
+        if journal_order:
+            answer.setdefault("journal_order_state", "unsupported")
         return answer
 
     def _remote_rows(
@@ -4331,7 +4330,14 @@ class DesktopSessionBridge:
         return rows
 
     async def _peer_stored_history(
-        self, *, before_id: str | None, through_id: str | None, limit: int, open_frame: bool = False
+        self,
+        *,
+        before_id: str | None,
+        through_id: str | None,
+        limit: int,
+        open_frame: bool = False,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """A page of the OWNER'S STORED JOURNAL, or an unservable answer.
 
@@ -4376,6 +4382,7 @@ class DesktopSessionBridge:
                 before_id=before_id,
                 limit=limit,
                 open_frame=open_frame,
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
             )
             if open_trace.enabled():
                 # THE MESH ASK, END TO END: control-socket dial, this device's
@@ -4416,6 +4423,8 @@ class DesktopSessionBridge:
                     answer.setdefault("runs", [])
                     answer.setdefault("runs_state", "unsupported")
                     answer.setdefault("head_cut", False)
+                if journal_order:
+                    answer.setdefault("journal_order_state", "unsupported")
                 return answer
         answer = {
             "entries": [],
@@ -4430,6 +4439,8 @@ class DesktopSessionBridge:
             answer["runs"] = []
             answer["runs_state"] = "unsupported"
             answer["head_cut"] = False
+        if journal_order:
+            answer.setdefault("journal_order_state", "unsupported")
         return answer
 
     @staticmethod

@@ -3154,6 +3154,30 @@ def validate_open_frame(raw: Any) -> bool:
     )
 
 
+def validate_journal_order(raw: Any, ids: Any) -> tuple[bool, list[str] | None]:
+    """One bounded opt-in decision at BOTH stored-history trust boundaries.
+
+    Reject malformed IDs even when the flag is absent: silently dropping or
+    truncating a lookup can falsely settle the renderer's source-order debt.
+    Absent fields retain the old request and reply bytes.
+    """
+    if raw is None:
+        enabled = False
+    elif raw is True or (isinstance(raw, int) and not isinstance(raw, bool) and raw == 1):
+        enabled = True
+    else:
+        raise MeshRefusal("protocol_error", "journal_order must be 1 (true) when present")
+    if ids is not None and (
+        not isinstance(ids, list)
+        or len(ids) > 512
+        or any(not isinstance(id_, str) or not 1 <= len(id_) <= 128 for id_ in ids)
+    ):
+        raise MeshRefusal(
+            "protocol_error", "order_ids must be a list of at most 512 ids of 1..128 characters"
+        )
+    return enabled, ids
+
+
 def session_history_reply_bytes(req: Any, detail: dict[str, Any]) -> int:
     """The byte length of the reply frame ``wire.LinkCrypto.seal`` will serialize.
 
@@ -3187,7 +3211,11 @@ def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any
         return detail
     entries = list(detail.get("entries") or [])
     if not entries:
-        return detail
+        # Metadata is part of the same sealed record. Refuse an oversized empty
+        # page rather than truncate coordinates or tear down the whole link.
+        raise MeshRefusal(
+            "page_too_large", "this page's metadata is too large to serve over the mesh"
+        )
     # Trimming means older rows are being left behind, and ``has_more`` must say
     # so rather than let the reader believe it reached the end of the window.
     bounded = {**detail, "has_more": True}
@@ -7446,6 +7474,9 @@ class RelayServer:
         raw_before = frame.get("before_id")
         before_id = str(raw_before) if raw_before else None
         limit = validate_history_limit(frame.get("limit"))
+        journal_order, order_ids = validate_journal_order(
+            frame.get("journal_order"), frame.get("order_ids")
+        )
         # ``open_frame`` IS BUILT HERE NOW (the facts half of ``DESKTOP_API.md``
         # §"The open frame"; #2109 carried the flag across the stored-page seam
         # and named this call site). With the flag the same rows this op already
@@ -7460,7 +7491,11 @@ class RelayServer:
         if validate_open_frame(frame.get("open_frame")):
             detail_at = time.monotonic()
             detail = self._open_frame_detail(
-                directory, session_id=session_id, before_id=before_id, limit=limit
+                directory,
+                session_id=session_id,
+                before_id=before_id,
+                limit=limit,
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
             )
             if open_trace.enabled():
                 open_trace.mark(
@@ -7492,21 +7527,17 @@ class RelayServer:
                 "has_more": False,
                 "cursor_missing": bool(before_id),
                 "has_newer": None,
+                **({"journal_order_state": "unsupported"} if journal_order else {}),
             }
-        return fit_session_history_reply(
-            frame.get("req"),
-            {
-                "entries": visible_transcript_rows(
-                    [json.loads(row.to_json()) for row in page.entries]
-                ),
-                "has_more": page.has_more,
-                # ``reconciled`` is the reader's word for "the cursor was not found,
-                # so this page is the tail rather than a continuation" — the same
-                # field the local envelope maps to ``cursor_missing``.
-                "cursor_missing": page.reconciled,
-                "has_newer": page.has_newer,
-            },
-        )
+        detail = {
+            "entries": visible_transcript_rows([json.loads(row.to_json()) for row in page.entries]),
+            "has_more": page.has_more,
+            "cursor_missing": page.reconciled,
+            "has_newer": page.has_newer,
+        }
+        if journal_order:
+            self._stored_journal_order(detail, session_id, page.source_signature, order_ids or [])
+        return fit_session_history_reply(frame.get("req"), detail)
 
     def _frame_memo_key(
         self, session_id: str, before_id: str | None, limit: int
@@ -7535,6 +7566,8 @@ class RelayServer:
         session_id: str,
         before_id: str | None,
         limit: int,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """The owner-side build of the open frame, over the rows this op already reads.
 
@@ -7581,7 +7614,10 @@ class RelayServer:
         # rows it had already read. The check is one stat plus a dict lookup
         # under its own lock, taken before any read; a miss falls through to the
         # build unchanged.
-        memo_key = self._frame_memo_key(session_id, before_id, limit)
+        # Legacy memo entries have no page-read witness. Ordered reads must
+        # verify the actual pages, not a stat taken before their construction;
+        # bypass the existing memo rather than create another ordering cache.
+        memo_key = None if journal_order else self._frame_memo_key(session_id, before_id, limit)
         cached: dict[str, Any] | None = None
         if memo_key is not None:
             with self._frame_memo_lock:
@@ -7594,6 +7630,7 @@ class RelayServer:
             return cached
 
         collected: list[dict[str, Any]] = []
+        sources: list[tuple[int, int, float] | None] = []
         has_more = False
         cursor_missing = False
         cursor = before_id
@@ -7640,7 +7677,9 @@ class RelayServer:
                     "runs": [],
                     "runs_state": "unsupported",
                     "head_cut": False,
+                    **({"journal_order_state": "unsupported"} if journal_order else {}),
                 }
+            sources.append(page.source_signature)
             if open_trace.enabled():
                 # PER-ATTEMPT PAGE READ, in milliseconds plus the reader's own
                 # facts: ``entries`` is what the page carried BEFORE this loop's
@@ -7762,6 +7801,9 @@ class RelayServer:
         # may then have dropped the oldest rows — the page's user row first — so
         # a page could report ``head_cut: false`` while its oldest run WAS cut.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
+        if journal_order:
+            source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+            self._stored_journal_order(answer, session_id, source, order_ids or [])
         if memo_key is not None and answer["runs_state"] == "ready":
             # ONLY A FRAME WITH ITS FACTS COMPLETE IS MEMOIZED. A ``building``
             # answer (cold index: ``_stored_frame_index`` answered None) is the
@@ -7787,6 +7829,27 @@ class RelayServer:
                 runs=len(result.runs),
             )
         return answer
+
+    def _stored_journal_order(
+        self,
+        answer: dict[str, Any],
+        session_id: str,
+        source: tuple[int, int, float] | None,
+        ids: list[str],
+    ) -> None:
+        """Owner truth plus explicit viewer opt-in; no receiver-side authority.
+
+        Peer readiness/correction forwarding is a later slice. Unlike a local
+        bridge, this path MUST NOT advertise building: the installed UI treats
+        it as journalMode and could hold debt with no wake to settle it. Start
+        only the existing index refresh, and preserve legacy unsupported until
+        a subsequent read can prove page/index equality. No runtime is started.
+        """
+        from local_operator.session.transcript_index import apply_journal_order
+
+        self._stored_frame_index(session_id)
+        if not apply_journal_order(self.root, session_id, answer, source, list(dict.fromkeys(ids))):
+            answer["journal_order_state"] = "unsupported"
 
     def _stored_frame_index(self, session_id: str) -> Any:
         """The transcript-index facts for one open-frame page, or ``None`` (cold).
@@ -11063,6 +11126,9 @@ class RelayServer:
         """
         limit = validate_history_limit(frame.get("limit"))
         open_frame = validate_open_frame(frame.get("open_frame"))
+        journal_order, order_ids = validate_journal_order(
+            frame.get("journal_order"), frame.get("order_ids")
+        )
         return self._local_peer_call(
             "net_session_history",
             str(frame.get("peer") or ""),
@@ -11081,6 +11147,7 @@ class RelayServer:
             # page differently once its own read can; nothing on this side acts
             # on it.
             **({"open_frame": True} if open_frame else {}),
+            **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
         )
 
     def _ctl_peer_facts(self, frame: dict[str, Any]) -> dict[str, Any]:
