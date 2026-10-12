@@ -59,6 +59,8 @@ from local_operator.agent_profiles import (
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
+from local_operator.i18n.keys import wire_exec as _wd
+from local_operator.i18n.text import tr
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
 from local_operator.paths import config_dir
@@ -125,6 +127,10 @@ CLI_DESCRIPTION = """
     Configure your preferred model and hosting platform via command line arguments. Your
     configuration file is located at ~/.local-operator/config.yml and can be edited directly.
 """
+
+#: RFC §3.1 render point for this slice's copy (the exec verb's help text and
+#: the exec refusals this module prints).
+_t = tr("wire.exec")
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -1981,31 +1987,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     exec_parser = subparsers.add_parser(
         "exec",
-        help="Execute a task or goal loop in a persisted session without starting the TUI",
+        help=_t(_wd.exec_help()),
         parents=[parent_parser],
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  lop exec 'Review the change' --team release --background\n"
-            "  printf 'Inspect this report' | lop exec --profile reviewer\n"
-            "  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n"
-            "  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n"
-            "  lop exec --status JOB_ID\n\n"
-            "Resume restores the transcript, team, profile, goal and name first; explicit\n"
-            "startup flags override their own slots. Team and profile may coexist. A loop\n"
-            "runs after the optional initial prompt; --loop N counts continuations only.\n"
-            "Saved loop progress is visible on resume, but iterations never replay automatically.\n"
-            "A goal alone does not run a model. Prompts are literal, not slash commands.\n"
-            "--goal only SETS the objective; unlike the TUI's /goal it does not also\n"
-            "send that text as a message, because the prompt is exec's message channel.\n"
-            "--agent/--agent-id select legacy agent data and are mutually exclusive.\n"
-            "Default non-TTY approvals deny. --control may wait for a supervisor; --yolo\n"
-            "is an explicit override, never implied by --background or --team.\n"
-            "--tools bounds what the run can reach: excluded tools are unreachable.\n"
-            "Foreground events/text use stdout; receipts use stderr. Detached runs log\n"
-            "both streams and print distinct job/session IDs. Use lop --resume SESSION_ID\n"
-            "to view a live run or resume a finished one; exec refuses a live owner."
-        ),
+        epilog=_t(_wd.exec_epilog()),
     )
     exec_parser.add_argument(
         "command",
@@ -14995,9 +14980,15 @@ def main() -> int:
                     # siblings all use, which it was alone in omitting.
                     from local_operator.exec_mode import JOBS_FILE, logs_dir
 
+                    no_job = _t(
+                        _wd.no_exec_job(
+                            job_id=repr(args.status),
+                            jobs_path=str(logs_dir() / JOBS_FILE),
+                        )
+                    )
                     print(
-                        f"exec failed: No exec job {args.status!r}; job IDs are printed "
-                        f"by --background and recorded in {logs_dir() / JOBS_FILE}",
+                        # i18n: ignore stable prefix; payload rendered from wire.exec
+                        f"exec failed: {no_job}",
                         file=sys.stderr,
                     )
                     return 1
@@ -15020,7 +15011,11 @@ def main() -> int:
             # (docs/EXEC.md) — deliberately not named to the model in the text.
             refusal = exec_session_refusal()
             if refusal is not None:
-                print(f"exec failed: {refusal}", file=sys.stderr)
+                print(
+                    # i18n: ignore stable prefix + dynamic payload
+                    f"exec failed: {refusal}",
+                    file=sys.stderr,
+                )
                 return 1
             # ``--output-schema`` is absolutised HERE, before the optional
             # ``--background`` process boundary, because the detached worker

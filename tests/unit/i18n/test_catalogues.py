@@ -17,7 +17,6 @@ from local_operator.i18n import catalogues
 #: below stays the part that must never change.
 _PENDING_EXTRACTION = (
     "wire.errors",
-    "wire.exec",
     "wire.incidents",
     "wire.notices",
 )
@@ -28,11 +27,11 @@ def test_shipped_wire_namespaces_exist() -> None:
     # exist so later slices populate them. `wire.slash` was populated by the S2
     # extraction slice, `wire.settings` by S1, and `wire.errors.settings` (a
     # CHILD of `wire.errors`, RFC §2.2) by the E1 slice; E2 added
-    # `wire.errors.desktop` (also a child of `wire.errors`) the same way. The
-    # rest stay empty until their own slices land. The TUI wave writes `tui.*`
-    # files instead — the first (`tui.welcome`, T1) is checked by PRESENCE here
-    # and by content in its own slice test, so this list does not churn per TUI
-    # slice.
+    # `wire.errors.desktop` (also a child of `wire.errors`) the same way, and
+    # `wire.exec` by E2b. The rest stay empty
+    # until their own slices land. The TUI wave writes `tui.*` files instead —
+    # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
+    # in its own slice test, so this list does not churn per TUI slice.
     # Waves 1-2: es/fr then ru/vi trees ship with their waves.
     assert catalogues.locales() == ("en", "es", "fr", "ru", "vi")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
@@ -48,6 +47,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
     assert catalogues.load_catalogue("en", "wire.errors.settings") != {}
+    assert catalogues.load_catalogue("en", "wire.exec") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     assert "tui.welcome" in catalogues.namespaces("en")
