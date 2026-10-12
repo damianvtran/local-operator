@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +14,6 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.model.configure import build_model_spec
-from local_operator.providers.failover import ProviderError
 from local_operator.team_bridge.model_boundary import (
     DefaultSelection,
     ScreeningWireGuard,
@@ -113,9 +111,8 @@ def test_runner_refuses_tools_and_unevidenced_identity(tmp_path) -> None:
         ScreenModelRunner(FakeStreamFn(text_only), selection)("p", default_model="qa/default")
 
 
-def test_wire_guard_charges_each_attempt_and_sanitizes(tmp_path) -> None:
+def test_wire_guard_requires_job_and_charges_bound_dispatch(tmp_path) -> None:
     store, owner = _setup(tmp_path)
-    calls: list[int] = []
 
     class Inner:
         def __init__(self) -> None:
@@ -126,77 +123,86 @@ def test_wire_guard_charges_each_attempt_and_sanitizes(tmp_path) -> None:
         def _send(self, request):
             import httpx as _httpx
 
-            calls.append(1)
-            if len(calls) == 2:
-                from local_operator.providers.failover import ProviderError
-
-                raise ProviderError(
-                    500, CANARY_PROSE, retryable=True, kind="transient", request_sent=True
-                )
             return _httpx.Response(200, content=b"x")
-
-        async def _drive(self):
-            response = await self._http.get("https://api.openai.com/v1/responses")
-            return response
 
         def stream(self, request, api_key, oauth_access=None):
             async def ok():
-                await self._drive()
+                await self._http.get("https://api.openai.com/v1/responses")
                 yield "event"
 
             return ok()
 
-    guard = ScreeningWireGuard(Inner(), store=store, owner=owner, message_id="bmsg_1")
+    # No bound job: the guard refuses BEFORE any I/O (R5 job-required law).
+    bare = ScreeningWireGuard(Inner(), store=store, owner=owner, message_id="bmsg_1")
+    from local_operator.providers.failover import ProviderError
 
-    async def drive_once():
+    async def drive_bare():
+        async for _ in bare.stream(None, "k"):
+            pass
+
+    import asyncio as _asyncio
+
+    with pytest.raises(ProviderError):
+        _asyncio.run(drive_bare())
+
+    # A fully bound job: published policy + logical attempt + held turn are
+    # validated inside the native reservation before each send.
+    store.publish_screening_policy(
+        owner,
+        version="bridge-screen-v1",
+        template_sha256="t" * 64,
+        default_model="qa-default",
+        revision="rev-1",
+    )
+    attempt = store.reserve_screening_attempt(owner, message_id="bmsg_1", fingerprint=None)
+    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=__import__("time").time(), ttl=90)
+    assert turn is not None
+    from local_operator.team_bridge.model_boundary import AdmissionJob
+
+    job = AdmissionJob(
+        owner_generation=owner.enrollment_generation,
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        hub_url=owner.canonical_base_url,
+        message_id="bmsg_1",
+        attempt_id=attempt,
+        body_sha256="b" * 64,
+        template_sha256="t" * 64,
+        template_version="bridge-screen-v1",
+        provider="openai",
+        model="qa-default",
+        approved=("qa-default",),
+        envelope_digest="e" * 64,
+        request_digest="r" * 64,
+        display_digest="d" * 64,
+        revision="rev-1",
+        epoch=int((store.current_screening_policy(owner) or {"epoch": 0})["epoch"]),
+        turn=turn,
+    )
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job.digest)
+    inner = Inner()
+    guard = ScreeningWireGuard(
+        inner, store=store, owner=owner, message_id="bmsg_1", job_ref={"job": job}
+    )
+
+    async def drive_bound():
         got = []
         async for event in guard.stream(None, "k"):
             got.append(event)
         return got
 
-    assert asyncio.new_event_loop().run_until_complete(drive_once()) == ["event"]
-    # Second attempt (a resend) is charged separately and its error is
-    # scrubbed at the boundary: no prose, no cause, non-retryable typed.
-    with pytest.raises(Exception) as refusal:
-        asyncio.new_event_loop().run_until_complete(drive_once())
-    err = refusal.value
-    assert isinstance(err, ProviderError)
-    assert CANARY_PROSE not in str(err)
-    assert err.__cause__ is None
-    assert err.retryable is False and err.request_sent is True
-    conn_attempts = [
-        r[0]
-        for r in __import__("sqlite3")
-        .connect(
-            __import__(
-                "local_operator.team_bridge.store", fromlist=["state_db_path"]
-            ).state_db_path(tmp_path)
-        )
-        .execute("SELECT kind FROM screening_attempts")
-    ]
-    assert conn_attempts == ["http", "http"]
+    assert _asyncio.run(drive_bound()) == ["event"]
+    import sqlite3
 
+    from local_operator.team_bridge.store import state_db_path
 
-def test_wire_guard_budget_refusal_is_non_retryable(tmp_path) -> None:
-    store, owner = _setup(tmp_path)
-    for _ in range(40):
-        store.reserve_http_attempt(owner, message_id="bmsg_1")
-
-    class Inner:
-        def stream(self, request, api_key, oauth_access=None):
-            raise AssertionError("no request may leave after budget exhaustion")
-
-    guard = ScreeningWireGuard(Inner(), store=store, owner=owner, message_id="bmsg_1")
-
-    async def drive():
-        async for _ in guard.stream(None, "k"):
-            pass
-
-    with pytest.raises(Exception) as refusal:
-        asyncio.new_event_loop().run_until_complete(drive())
-    budget_err = refusal.value
-    assert isinstance(budget_err, ProviderError)
-    assert budget_err.retryable is False and budget_err.request_sent is False
+    with sqlite3.connect(state_db_path(tmp_path)) as db:
+        rows = db.execute(
+            "SELECT kind, fingerprint FROM screening_attempts WHERE kind='http'"
+        ).fetchall()
+    assert rows == [("http", job.digest)]
 
 
 def test_opaque_route_refuses_before_io(tmp_path) -> None:

@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Mapping
 
 __all__ = [
@@ -30,6 +32,29 @@ __all__ = [
     "canonical_type",
     "select_next_screening_target",
 ]
+
+
+#: The turn token currently held by the CALLING context (set by the cycle,
+#: read by the public screening entry): dispatch inside a claimed cycle must
+#: reuse that exact token instead of claiming a second, competing turn.
+_CURRENT_TURN: ContextVar[tuple[str, str] | None] = ContextVar("team_bridge_turn", default=None)
+
+
+def current_turn() -> tuple[str, str] | None:
+    """(account_scope, token) of the turn this context already holds."""
+
+    return _CURRENT_TURN.get()
+
+
+@contextmanager
+def turn_binding(scope: str, token: str):
+    """Bind an already-claimed native turn for the enclosed dispatch."""
+
+    reset = _CURRENT_TURN.set((scope, token))
+    try:
+        yield
+    finally:
+        _CURRENT_TURN.reset(reset)
 
 
 def _message_block(item: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -94,19 +119,19 @@ def select_next_screening_target(
 
 
 class AccountScreeningCycle:
-    """One account's serialized screening turn.
+    """One account's serialized screening turn (THIN — no daemon, no poll).
 
-    ``run_once`` claims the account's native lease (conditional update, one
-    transaction — two racing processes can never both win), selects the ONE
-    next target with the persisted cursor, ADVANCES the cursor before dispatch
-    (so a crash cannot starve the same sender), awaits the public async
-    screener and releases the lease in ``finally`` on success, failure AND
-    cancellation. Eligibility (breaker/budget/held retry) is decided by the
-    caller before items reach here — this class never invents quotas and never
-    bypasses a hold.
+    ``run_once`` claims the account's native lease (conditional update in one
+    transaction; the minted UNFORGEABLE token, not a reusable holder label,
+    identifies this turn), selects the ONE next target with the durable
+    cursor, advances the cursor before dispatch, binds the turn for the
+    enclosed dispatch (so the public entry reuses IT rather than claiming a
+    second competing turn) and releases in ``finally`` on success, failure
+    AND cancellation. Eligibility (breaker/budget/held retry) is decided by
+    the caller before items arrive — no invented quotas, no bypass.
     """
 
-    def __init__(self, *, store: Any, owner: Any, holder: str, ttl: float = 30.0) -> None:
+    def __init__(self, *, store: Any, owner: Any, holder: str, ttl: float = 90.0) -> None:
         self._store = store
         self._owner = owner
         self._holder = holder
@@ -119,9 +144,10 @@ class AccountScreeningCycle:
     ) -> Any:
         """One serialized turn; None when the lease is held or nothing is due."""
 
-        if not self._store.claim_screen_turn(
-            self._owner, holder=self._holder, now=time.time(), ttl=self._ttl
-        ):
+        turn = self._store.claim_screen_turn(
+            self._owner, holder_prefix=self._holder, now=time.time(), ttl=self._ttl
+        )
+        if turn is None:
             return None
         try:
             schedule = self._store.screen_schedule(self._owner) or {}
@@ -129,6 +155,7 @@ class AccountScreeningCycle:
             if target is None:
                 return None
             self._store.set_screen_cursor(self._owner, canonical_sender(target))
-            return await screen(target)
+            with turn_binding(self._store._account_scope(self._owner), turn):
+                return await screen(target)
         finally:
-            self._store.release_screen_turn(self._owner, holder=self._holder)
+            self._store.release_screen_turn(self._owner, turn=turn)

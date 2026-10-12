@@ -55,7 +55,7 @@ __all__ = [
     "state_db_path",
 ]
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: Every table a stamped-V3 database must carry. A stamped store missing any
 #: of these is DAMAGED and refuses: re-running DDL is NOT repair — it
@@ -77,6 +77,19 @@ _V3_TABLES = frozenset(
         "screening_breaker",
     }
 )
+#: The closed screening-category set (mirrors screening.SCREENING_CATEGORIES;
+#: duplicated here so the store validates persisted receipts without an
+#: import cycle). Unknown strings are damaged proof, never re-emitted.
+_CLOSED_CATEGORIES = frozenset(
+    {"prompt_injection", "social_engineering", "harassment", "malicious_link", "spam"}
+)
+
+#: The V4 addition: the schedule table is NEW in V4 — a stamped-V3 store
+#: legitimately lacks it (R5: an own R4-era V3 backup was declared sound and
+#: then raised OperationalError on the first cycle), so V3 upgrades
+#: additively and only V4+ requires it.
+_V4_ADDED = frozenset({"screening_schedule"})
+
 #: A V2 (H2-era) store migrates ADDITIVELY: only the screening tables are
 #: created and the stamp advances; every existing row survives.
 _V2_ADDED = frozenset(
@@ -470,10 +483,34 @@ class Store:
             )
             return
 
-        if version == str(SCHEMA_VERSION):
-            # Stamped V3: VERIFY, never re-create. Missing tables or missing
-            # binding/policy columns mean damage — refuse, no DDL at all.
+        if version == "3":
+            # Known V3 (R4-era) layout: ADDITIVE upgrade only. Every V3 table
+            # must be present exactly as V3 promised; the new schedule table
+            # is created (IF NOT EXISTS, so an already-carrying store is
+            # untouched) and the stamp advances. No existing row is touched —
+            # receipts, policies, attempts and the H2 enrollment/claim/ACK
+            # history survive byte-for-byte.
             missing = _V3_TABLES - pre_existing
+            if missing:
+                raise StoreRefused("schema_damaged", f"stamped-v3 store missing {sorted(missing)}")
+            try:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS screening_schedule ("
+                    "owner_key TEXT PRIMARY KEY, last_sender TEXT, "
+                    "lease_holder TEXT, lease_expires REAL)"
+                )
+            except sqlite3.Error as error:
+                raise StoreRefused("state_unreadable", str(error)) from error
+            conn.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
+            return
+
+        if version == str(SCHEMA_VERSION):
+            # Stamped V4: VERIFY, never re-create. Missing tables or missing
+            # binding/policy columns mean damage — refuse, no DDL at all.
+            missing = (_V3_TABLES | _V4_ADDED) - pre_existing
             if missing:
                 raise StoreRefused("schema_damaged", f"stamped-v3 store missing {sorted(missing)}")
             for table, required in _V3_COLUMNS.items():
@@ -482,6 +519,13 @@ class Store:
                     raise StoreRefused(
                         "schema_damaged", f"{table} lacks {sorted(required - columns)}"
                     )
+            # Current-version integrity floor includes the V4 schedule table.
+            schedule_columns = {r[1] for r in conn.execute("PRAGMA table_info(screening_schedule)")}
+            if (
+                not {"owner_key", "last_sender", "lease_holder", "lease_expires"}
+                <= schedule_columns
+            ):
+                raise StoreRefused("schema_damaged", "screening_schedule lacks required columns")
             return
 
         raise StoreRefused(
@@ -1087,6 +1131,12 @@ class Store:
     #: the physical cap must count those even when the logical one allows it.
     SCREENING_BUDGET_PER_HOUR = 40
 
+    #: Floor for an account turn lease: the screening wall deadline is 45 s,
+    #: so a lease SHORTER than this could expire under a live dispatch and
+    #: admit a second worker mid-call. Short supplied TTLs are raised to
+    #: safety (fail closed), never honoured as an unsafe parameter.
+    _MIN_TURN_TTL = 60.0
+
     @staticmethod
     def _account_scope(owner: OwnerSnapshot) -> str:
         # The budget key is the ACCOUNT within its hub, deliberately NOT the
@@ -1316,6 +1366,101 @@ class Store:
             # under normal accounting); it can never silently certify.
             return None
 
+    def bind_attempt_fingerprint(
+        self, owner: OwnerSnapshot, *, attempt_id: str, fingerprint: str
+    ) -> None:
+        """Bind a reserved LOGICAL attempt to the immutable job digest.
+
+        The attempt is reserved before the job exists (the job carries its
+        attempt id); this narrow update records the canonical digest so the
+        physical reservation can REQUIRE exact logical-job equality inside
+        its own transaction.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            cursor = conn.execute(
+                "UPDATE screening_attempts SET fingerprint = ? "
+                "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
+                (fingerprint, attempt_id, _owner_key(owner)),
+            )
+            if cursor.rowcount != 1:
+                raise StoreRefused("unknown_attempt", attempt_id)
+
+    def reserve_screening_dispatch(
+        self, owner: OwnerSnapshot, *, message_id: str, job: Any, turn: str
+    ) -> str:
+        """The PHYSICAL charge for one admitted dispatch — job-REQUIRED.
+
+        ONE conditional transaction (no gap between verification and the
+        charge): the live owner generation must match the job's, the CURRENT
+        published policy must still equal the job's revision/template/
+        default/epoch (a trusted publisher moving it refuses before any
+        I/O), the LOGICAL attempt row must exist carrying the SAME canonical
+        digest under the same message, and the account turn token must still
+        hold this account's lease. Anything missing/stale refuses with NO
+        physical row, so no handler can ever run behind a stale authority.
+        """
+
+        now = time.time()
+        attempt_id = str(uuid.uuid4())
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            if self._live_generation(conn, owner) != job.owner_generation:
+                raise StoreRefused("owner_changed", "job owner generation is stale")
+            policy = conn.execute(
+                "SELECT version, template_sha256, default_model, revision, epoch "
+                "FROM screening_policy WHERE owner_key = ?",
+                (_owner_key(owner),),
+            ).fetchone()
+            if policy is None:
+                raise StoreRefused("policy_stale", "no published policy for this job")
+            if (
+                policy["revision"] != job.revision
+                or policy["template_sha256"] != job.template_sha256
+                or policy["default_model"] != job.model
+                or int(policy["epoch"]) != int(job.epoch)
+            ):
+                raise StoreRefused("policy_stale", "published policy moved after job mint")
+            logical = conn.execute(
+                "SELECT fingerprint, message_id FROM screening_attempts "
+                "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
+                (job.attempt_id, _owner_key(owner)),
+            ).fetchone()
+            if logical is None or logical["fingerprint"] != job.digest:
+                raise StoreRefused("unknown_attempt", "logical job binding missing")
+            if logical["message_id"] != message_id:
+                raise StoreRefused("attempt_mismatch", "job message mismatch")
+            schedule = conn.execute(
+                "SELECT lease_holder, lease_expires FROM screening_schedule WHERE owner_key = ?",
+                (self._account_scope(owner),),
+            ).fetchone()
+            if (
+                schedule is None
+                or schedule["lease_holder"] != turn
+                or float(schedule["lease_expires"] or 0.0) <= now
+            ):
+                raise StoreRefused("retry_later", "account turn not held by this job")
+            scope = self._account_scope(owner)
+            spent = conn.execute(
+                "SELECT COUNT(*) FROM screening_attempts "
+                "WHERE account_scope = ? AND kind = 'http' AND at > ?",
+                (scope, now - 3600.0),
+            ).fetchone()[0]
+            if int(spent) >= self.SCREENING_BUDGET_PER_HOUR:
+                raise StoreRefused("budget_exhausted", "http attempts/hour/account exhausted")
+            conn.execute(
+                "INSERT INTO screening_attempts "
+                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (attempt_id, "http", scope, _owner_key(owner), message_id, job.digest, now),
+            )
+            return attempt_id
+
     def consume_screening_receipt(
         self,
         owner: OwnerSnapshot,
@@ -1377,14 +1522,20 @@ class Store:
                     return None
                 try:
                     decoded = json.loads(row["categories"] or "[]")
-                except (TypeError, ValueError):
-                    return None
-                if not isinstance(decoded, list) or not all(
-                    isinstance(item, str) for item in decoded
+                except (TypeError, ValueError) as error:
+                    # A MATCHED row whose metadata cannot be decoded is
+                    # DAMAGED authority, not an absent proof: refusing (hold)
+                    # keeps the caller from re-screening and DOUBLE-BILLING
+                    # behind a corrupted receipt.
+                    raise StoreRefused("proof_corrupt", str(error)) from None
+                if (
+                    not isinstance(decoded, list)
+                    or not all(isinstance(item, str) for item in decoded)
+                    or not set(decoded) <= _CLOSED_CATEGORIES
                 ):
-                    # Corrupted metadata fails CLOSED — never char-exploded
-                    # into the immutable category tuple (QA: list('[".."]')).
-                    return None
+                    # Unknown category strings (or wrong shapes) can never be
+                    # handed to a receipt: typed uncertainty, zero spend.
+                    raise StoreRefused("proof_corrupt", "categories failed validation")
                 return {
                     "verdict": row["verdict"],
                     "model": row["model"],
@@ -1419,6 +1570,7 @@ class Store:
         hold_code: str | None = None,
         retry_at: float | None = None,
         verify: Any = None,
+        admission_revision: str | None = None,
     ) -> None:
         """Commit ONE logical outcome, fenced on every binding that matters.
 
@@ -1515,7 +1667,13 @@ class Store:
                             receipt.verdict,
                             json.dumps(sorted(receipt.categories)),
                             envelope_digest,
-                            _fingerprint_revision(fingerprint),
+                            # The revision is an explicit parameter now: the
+                            # canonical job digest is no longer a packed
+                            # "revision|digest" string the old helper could
+                            # parse (R5), and a receipt must store the
+                            # snapshot's own revision so cache consumption
+                            # matches on it.
+                            admission_revision or _fingerprint_revision(fingerprint),
                             expected_epoch,
                             owner.enrollment_generation,
                             time.time(),
@@ -1545,14 +1703,20 @@ class Store:
                 )
 
     def screen_schedule(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
-        """The durable scheduling row (cursor + lease), or None when absent."""
+        """The durable scheduling row (cursor + lease), or None when absent.
+
+        Keyed by the ACCOUNT SCOPE (hub URL + account id) — the same key the
+        aggregate budget uses. A credential, tenant or endpoint change must
+        not create a second rotation/lease for the same Radient account
+        (QA: two valid namespaces both owned a turn).
+        """
 
         with self._connect() as conn:
             self._init(conn)
             row = conn.execute(
                 "SELECT last_sender, lease_holder, lease_expires FROM screening_schedule "
                 "WHERE owner_key = ?",
-                (_owner_key(owner),),
+                (self._account_scope(owner),),
             ).fetchone()
             return dict(row) if row is not None else None
 
@@ -1566,57 +1730,94 @@ class Store:
             conn.execute(
                 "INSERT INTO screening_schedule (owner_key, last_sender) VALUES (?, ?) "
                 "ON CONFLICT(owner_key) DO UPDATE SET last_sender = excluded.last_sender",
-                (_owner_key(owner), last_sender),
+                (self._account_scope(owner), last_sender),
             )
 
     def claim_screen_turn(
-        self, owner: OwnerSnapshot, *, holder: str, now: float, ttl: float
-    ) -> bool:
-        """Conditional one-at-a-time lease (CAS) for the account's screening turn.
+        self, owner: OwnerSnapshot, *, holder_prefix: str, now: float, ttl: float
+    ) -> str | None:
+        """Conditional one-at-a-time lease (CAS); returns an UNFORGEABLE token.
 
-        True only when the row has no live lease (expired leases are
-        reclaimable) or the SAME holder already owns it; every competing
-        worker gets False until release/expiry. One transaction, so two
-        processes racing this can never both win.
+        The minted token (never a reusable holder label) is what identifies
+        THIS turn: release/renew compare the exact token, so a previous
+        holder — even one sharing a process/worker label after re-enrollment
+        or a nested acquisition — can never clear a successor's lease. The
+        TTL is floored at ``_MIN_TURN_TTL`` so an admitted dispatch (bounded
+        by the screening wall time) cannot outlive its own lease and let a
+        second worker in mid-call; short TTLs fail CLOSED, not open.
         """
 
+        ttl = max(ttl, self._MIN_TURN_TTL)
+        token = f"{holder_prefix}:{uuid.uuid4()}"
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
             row = conn.execute(
                 "SELECT lease_holder, lease_expires FROM screening_schedule WHERE owner_key = ?",
-                (_owner_key(owner),),
+                (self._account_scope(owner),),
             ).fetchone()
             if row is not None:
                 held_by = row["lease_holder"]
                 expires = float(row["lease_expires"] or 0.0)
-                if held_by and held_by != holder and expires > now:
-                    return False
+                if held_by and expires > now:
+                    return None
             conn.execute(
                 "INSERT INTO screening_schedule (owner_key, lease_holder, lease_expires) "
                 "VALUES (?, ?, ?) ON CONFLICT(owner_key) DO UPDATE SET "
                 "lease_holder = excluded.lease_holder, lease_expires = excluded.lease_expires",
-                (_owner_key(owner), holder, now + ttl),
+                (self._account_scope(owner), token, now + ttl),
             )
-            return True
+            return token
 
-    def release_screen_turn(self, owner: OwnerSnapshot, *, holder: str) -> bool:
-        """Conditional release: only the CURRENT holder can clear its lease."""
+    def screen_turn_matches(self, owner: OwnerSnapshot, *, turn: str, now: float) -> bool:
+        """Whether ``turn`` still holds this account's live lease."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT lease_holder, lease_expires FROM screening_schedule WHERE owner_key = ?",
+                (self._account_scope(owner),),
+            ).fetchone()
+            if row is None or row["lease_holder"] != turn:
+                return False
+            return float(row["lease_expires"] or 0.0) > now
+
+    def release_screen_turn(self, owner: OwnerSnapshot, *, turn: str) -> bool:
+        """Conditional release: only the EXACT live token can clear the lease."""
 
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             row = conn.execute(
                 "SELECT lease_holder FROM screening_schedule WHERE owner_key = ?",
-                (_owner_key(owner),),
+                (self._account_scope(owner),),
             ).fetchone()
-            if row is None or row["lease_holder"] != holder:
+            if row is None or row["lease_holder"] != turn:
                 return False
             conn.execute(
                 "UPDATE screening_schedule SET lease_holder = NULL, lease_expires = NULL "
                 "WHERE owner_key = ?",
-                (_owner_key(owner),),
+                (self._account_scope(owner),),
+            )
+            return True
+
+    def renew_screen_turn(self, owner: OwnerSnapshot, *, turn: str, now: float, ttl: float) -> bool:
+        """Extend the SAME turn's lease (never a different holder's)."""
+
+        ttl = max(ttl, self._MIN_TURN_TTL)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            row = conn.execute(
+                "SELECT lease_holder FROM screening_schedule WHERE owner_key = ?",
+                (self._account_scope(owner),),
+            ).fetchone()
+            if row is None or row["lease_holder"] != turn:
+                return False
+            conn.execute(
+                "UPDATE screening_schedule SET lease_expires = ? WHERE owner_key = ?",
+                (now + ttl, self._account_scope(owner)),
             )
             return True
 
