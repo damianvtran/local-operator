@@ -1,8 +1,13 @@
 """Drive the real styled OperatorApp projection and existing group tracker."""
 
+import base64
+import struct
+import zlib
+from typing import Any
+
 import pytest
 
-from local_operator.harness.types import CustomMessage, Message
+from local_operator.harness.types import CustomMessage, ImageContent, Message
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.tool_card import ToolCard
@@ -431,7 +436,7 @@ async def test_ordered_repair_with_bars_on_both_sides_converges_with_the_control
             _marked_receipt("qa_p4", "four"),
         ]
 
-    async def painted(repaired: bool) -> dict:
+    async def painted(repaired: bool) -> dict[str, Any]:
         app = OperatorApp(lambda: _factory(FakeSession()))
         async with app.run_test(size=(100, 30)) as pilot:
             await _settle_for_session(pilot, app)
@@ -497,7 +502,7 @@ async def test_ordered_repair_keeps_the_untouched_live_tail_connected() -> None:
         card.mark_done()
         return card
 
-    async def painted(repaired: bool) -> dict:
+    async def painted(repaired: bool) -> dict[str, Any]:
         app = OperatorApp(lambda: _factory(FakeSession()))
         async with app.run_test(size=(100, 30)) as pilot:
             await _settle_for_session(pilot, app)
@@ -624,3 +629,97 @@ async def test_omitted_pictures_keep_their_citation_labels() -> None:
         assert len(images) == 2
         assert [(b.navigation_anchor_part, b._label) for b in images] == [(1, "#1"), (2, "#2")]
         assert len([b for b in view.blocks() if isinstance(b, HubMessageBlock)]) == 1
+
+
+def _healthy_png() -> str:
+    """A real 2x2 RGB PNG as ``ImageContent`` carries it, base64-encoded.
+
+    Built here rather than imported: the acceptance cases below exist to prove
+    that a picture with genuinely decodable bytes is hidden with the receipt
+    that owns it, so a stand-in that decodes would weaken the case (review
+    round 6, R6-1).
+    """
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    raw = b"".join(b"\x00" + bytes(row) + bytes(row) for row in ((62, 122, 214), (214, 69, 65)))
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    return base64.b64encode(png).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_seated_picture_joins_its_owner_group_membership() -> None:
+    """R6-1 / Q-R7-1 direct acceptance: a picture seated at its source part is a
+    MEMBER of its owner's bar, so a collapsed bar hides it and reopening shows
+    it again — for the full-initial row and for a late same-ID adoption alike,
+    with a real user boundary, a final row and an untouched tail bar on hand."""
+
+    def receipt(receipt_id: str, *, picture: bool = False) -> Message:
+        message = _marked_receipt(receipt_id, "picture body")
+        if picture:
+            message.content.append(ImageContent(data=_healthy_png(), mime_type="image/png"))
+        return message
+
+    async def painted(late: bool) -> dict[str, Any]:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            view = app.query_one(TranscriptView)
+            app._project_settled_rows([receipt("qa_h1", picture=not late)])
+            await pilot.pause()
+            app._project_settled_rows([receipt("qa_h2")])
+            await pilot.pause()
+            if late:
+                app._project_settled_rows([receipt("qa_h1", picture=True)])
+                await pilot.pause()
+            bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
+            assert len(bars) == 1
+            bar = bars[0]
+            picture = next(block for block in view.blocks() if isinstance(block, ImageBlock))
+            states: dict[str, Any] = {
+                "member": picture in bar._members,
+                "collapsed": picture.display,
+                "count": bar.group.count,
+                "order": _source_order(view),
+            }
+            bar.toggle_expanded()
+            await pilot.pause()
+            states["open"] = picture.display
+            bar.toggle_expanded()
+            await pilot.pause()
+            states["reclosed"] = picture.display
+            # A real human boundary, a final row and an untouched tail pair:
+            # no group may form beyond the source bounds.
+            app._project_settled_rows([Message.user("audit the ingest path", id="qa_u")])
+            await pilot.pause()
+            app._project_settled_rows([receipt("qa_t1"), receipt("qa_t2")])
+            await pilot.pause()
+            app._project_settled_rows([Message.assistant("done")])
+            await pilot.pause()
+            states["bars"] = [
+                block.group.count for block in view.blocks() if isinstance(block, QuietGroupBlock)
+            ]
+            states["open_users"] = len(
+                [block for block in view.blocks() if isinstance(block, UserBlock) and block.display]
+            )
+            return states
+
+    for late in (False, True):
+        states = await painted(late)
+        assert states["member"] is True, states
+        assert states["collapsed"] is False, states
+        assert states["open"] is True and states["reclosed"] is False, states
+        assert states["count"] == 2, states
+        assert states["bars"] == [2, 2], states
+        assert states["open_users"] == 1, states
