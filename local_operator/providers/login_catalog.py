@@ -74,6 +74,7 @@ GROUP_ORDER: tuple[str, ...] = (
 #: ``tests/unit/providers/test_login_catalog.py`` fails if any shipped row
 #: needs the fallback, so a new provider cannot land wordless.
 DESCRIPTIONS: dict[str, str] = {
+    "meta-muse": "Muse Code subscription; unofficial Meta device sign-in",
     "radient": "Browser sign-in or new account; many models, phone relay included",
     "radient-key": "Paste a Radient Pass key",
     "openai": "Sign in with your ChatGPT Plus/Pro plan",
@@ -136,6 +137,7 @@ class LoginRow:
 #: Budget: ≤ 36 cells, so the widest of these still fits the picker's description
 #: column at an 80-column terminal alongside the widest name.
 PICKER_DESCRIPTIONS: dict[str, str] = {
+    "meta-muse": "Unofficial Muse Code subscription",
     # Short on purpose: this row also carries `` — recommended`` (14 cells), and
     # the WHOLE string must fit the budget below. "Browser sign-in; no key
     # needed" was 30 and lost its tag to an ellipsis on the first row of the
@@ -189,6 +191,7 @@ PICKER_DESCRIPTIONS: dict[str, str] = {
 PICKER_LABELS: dict[str, str] = {
     "radient": "Radient",
     "radient-key": "Radient Pass",
+    "meta-muse": "Muse Code",
     "openai": "ChatGPT plan",
     "openai-device": "ChatGPT code",
     "openai-api-key": "OpenAI API key",
