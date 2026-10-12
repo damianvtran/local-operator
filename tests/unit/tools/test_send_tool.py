@@ -140,8 +140,9 @@ async def test_nine_same_turn_sends_make_one_real_peer_row_and_wake(tmp_path, mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("single_batch", [False, True])
 async def test_real_sender_attention_turn_reuses_receipts_but_next_turn_delivers(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, single_batch
 ):
     from local_operator.harness.types import (
         StreamEndEvent,
@@ -152,10 +153,10 @@ async def test_real_sender_attention_turn_reuses_receipts_but_next_turn_delivers
     from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
     from tests.unit.session.test_session_peer import _peer_rows
 
-    def call(i) -> list[StreamEvent]:
+    def call(i, index=0) -> list[StreamEvent]:
         return [
             StreamToolCallDelta(
-                index=0,
+                index=index,
                 id=f"call-{i}",
                 name="send",
                 argument_delta=json.dumps({"target": "peer-target", "message": "same host note"}),
@@ -164,7 +165,12 @@ async def test_real_sender_attention_turn_reuses_receipts_but_next_turn_delivers
         ]
 
     finish: list[StreamEvent] = [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]
-    sender_stream = ScriptedStream([call(i) for i in range(9)] + [finish, call(9), finish])
+    scripts = [call(i) for i in range(9)]
+    if single_batch:
+        scripts = [
+            [*[call(i, index=i)[0] for i in range(9)], StreamEndEvent(stop_reason="toolUse")]
+        ]
+    sender_stream = ScriptedStream(scripts + [finish, call(9), finish])
     receiver_stream = ScriptedStream([finish, finish])
     tool = build_send_tool(_context())
     assert tool is not None
@@ -176,9 +182,9 @@ async def test_real_sender_attention_turn_reuses_receipts_but_next_turn_delivers
         await sender.prompt("deliver the note")
         await wait_for(lambda: not receiver._background_tasks and not receiver.is_streaming)
         assert len(_peer_rows(receiver)) == len(receiver_stream.requests) == 1
-        assert len(sender_stream.requests) == 10
+        assert len(sender_stream.requests) == len(scripts) + 1
         assert (
-            sum("duplicate suppressed" in m.text for m in sender_stream.requests[9].messages) == 8
+            sum("duplicate suppressed" in m.text for m in sender_stream.requests[-1].messages) == 8
         )
         await sender.prompt("deliver the same note in this new turn")
         await wait_for(lambda: not receiver._background_tasks and not receiver.is_streaming)
@@ -401,6 +407,41 @@ async def test_mesh_uncertainty_and_model_control_are_never_suppressed(monkeypat
             context,
         )
     assert len(switches) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["unknown-sender", "oversized-entry", "capacity"])
+async def test_confirmed_receipt_cache_bounds_fail_open(monkeypatch, kind):
+    registrant, _alias, handle = await _start_peer()
+    context = _context(
+        send_turn_id="bounded-turn", session_id="" if kind == "unknown-sender" else "sender"
+    )
+    monkeypatch.setattr(
+        "local_operator.tools.builtin._CONFIRMED_SEND_CACHE_MAX_ENTRIES", 2, raising=False
+    )
+    body = "x" * 16384 if kind == "oversized-entry" else "note"
+    try:
+        if kind == "capacity":
+            for i in range(3):
+                result = await execute_send(
+                    str(i), {"target": "peer-target", "message": f"note-{i}"}, None, None, context
+                )
+                assert not result.is_error
+            assert len(context.confirmed_send_receipts) == 2
+            result = await execute_send(
+                "again", {"target": "peer-target", "message": "note-2"}, None, None, context
+            )
+            assert not result.is_error and len(handle.calls) == 4
+        else:
+            for i in range(2):
+                result = await execute_send(
+                    str(i), {"target": "peer-target", "message": body}, None, None, context
+                )
+                assert not result.is_error
+            assert not context.confirmed_send_receipts
+            assert len(handle.calls) == 2
+    finally:
+        registrant.close()
 
 
 async def _last_peer_call(handle: _DetailHandle) -> dict[str, Any]:
