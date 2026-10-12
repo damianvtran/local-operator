@@ -422,6 +422,68 @@ async def test_idle_kernel_budget_accounts_for_live_work(context, monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_eval_tool_bridge_preserves_named_tool_arguments(context) -> None:
+    """The tool selector must not consume a project's own name keyword."""
+    seen = []
+
+    async def dispatch(tool_name, arguments):
+        seen.append((tool_name, arguments))
+        return {"is_error": False, "text": "updated"}
+
+    context.dispatch_tool = dispatch
+    result = await _call(
+        context, "tool('project', op='update', name='synthetic-board', progress='checked')['text']"
+    )
+    assert not result.is_error, result.text
+    assert "updated" in result.text
+    assert seen == [("project", {"op": "update", "name": "synthetic-board", "progress": "checked"})]
+    # Ordinary calls and aliases retained by the persistent namespace still
+    # share the same bridge and forward arbitrary argument names unchanged.
+    aliased = await _call(context, "bridge = tool\nbridge('read', path='fixture')['text']")
+    assert not aliased.is_error, aliased.text
+    assert seen[-1] == ("read", {"path": "fixture"})
+
+
+@pytest.mark.asyncio
+async def test_eval_project_update_persists_progress_without_replacing_milestones(context) -> None:
+    from local_operator.projects import ProjectRegistry
+    from local_operator.tools.project_tool import execute_project
+
+    root = Path(context.cwd) / "isolated-project-registry"
+    context.project_registry = ProjectRegistry(root)
+    created = await execute_project(
+        "seed",
+        {
+            "op": "create",
+            "name": "synthetic-board",
+            "description": "Isolated probe",
+            "milestones": [{"name": "keep-first"}, {"name": "keep-second"}],
+        },
+        None,
+        None,
+        context,
+    )
+    assert not created.is_error, created.text
+
+    async def dispatch(tool_name, arguments):
+        assert tool_name == "project"
+        result = await execute_project("bridged", arguments, None, None, context)
+        return result.model_dump(mode="json")
+
+    context.dispatch_tool = dispatch
+    result = await _call(
+        context,
+        "tool('project', op='update', name='synthetic-board', progress='checked')['is_error']",
+    )
+    assert not result.is_error, result.text
+    assert "False" in result.text
+    stored = ProjectRegistry(root).get_project_by_name("synthetic-board")
+    assert stored is not None
+    assert stored.progress == "checked"
+    assert [m.name for m in stored.milestones] == ["keep-first", "keep-second"]
+
+
+@pytest.mark.asyncio
 async def test_eval_tool_bridge_uses_this_calls_dispatch(context) -> None:
     seen = []
 
