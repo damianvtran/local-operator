@@ -155,11 +155,13 @@ from local_operator.harness.types import (
     Message,
     MessageEndEvent,
     TextContent,
+    ToolExecutionEndEvent,
 )
 from local_operator.headless_print import printable_event
 from local_operator.incidents import classify_incident, render_cut_off_reason
 from local_operator.mcp.config import load_all_mcp_configs
 from local_operator.mcp.tool_bridge import create_mcp_tool_name
+from local_operator.session.request_observation import RequestFinalObservation
 from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
 
 #: The engagement mode's identifier in the run script, and in every record this
@@ -691,6 +693,24 @@ ExecuteBatch = Callable[[ActionBatch], Awaitable[Any]]
 RecoverObservation = Callable[[], Awaitable[Observation]]
 
 
+def _ask_delivery_sentence(answer: str | None) -> str:
+    """The ask exchange's report, as the model reads it on the tool result.
+
+    Written to be honest in BOTH directions: an empty/declined exchange says so
+    explicitly (never an invented answer, never silence), and a real answer is
+    quoted verbatim -- the answer text is the exchange's product and the whole
+    point of carrying it into the next root request.
+    """
+
+    if answer is None:
+        return (
+            "The simulated user did not provide an answer for this ask (declined "
+            "or empty); continue with what you know and do not repeat the same "
+            "question."
+        )
+    return f"The simulated user answered: {answer}"
+
+
 @dataclass
 class ActionBridge:
     """One episode's action bridge: token, budget, execution, refusals.
@@ -782,6 +802,14 @@ class ActionBridge:
         #: ``call``, so the event stream is the only place the bridge can see
         #: it (see ``prose_completion_challenge``).
         self._last_assistant_message: Message | None = None
+        #: The ask answer's delivery, staged by ``call`` for THIS call only and
+        #: consumed by whichever result path answers it (the normal return, a
+        #: recovered read-back, or the wedge end): the adapter's answer text
+        #: and exchange receipt must ride the NATIVE tool result -- the content
+        #: the next root request re-reads -- instead of being discarded at the
+        #: ask call (the QA bridge matrix's ask-sentinel defect).
+        self._pending_ask_delivery: list[Any] = []
+        self._pending_ask_receipt: dict[str, Any] | None = None
         #: The most recent observation, for the prose challenge's frame
         #: re-attachment. `arm` holds observation zero; every executed batch
         #: replaces it, so it is the observation ``_last_shown`` was rendered
@@ -1034,11 +1062,33 @@ class ActionBridge:
             except OSError:
                 pass
 
+    def _consume_output_epoch(self, kind: str) -> None:
+        """Consume ONE external output epoch at ADMISSION (blueprint §3).
+
+        WHY AT ADMISSION, NOT ON SUCCESS. The official clock charges one
+        ``agent.predict`` OUTPUT GROUP per epoch: the epoch is spent the moment
+        a decision is admitted, whether the group ends in executed actions, a
+        finish proposal, an ask exchange or a committed read-back loss.
+        Advancing ``_steps`` only on the post-success path left finish
+        proposals, challenge re-asks, ask exchanges and lost read-backs
+        uncharged -- the QA bridge matrix measured finish=0 and readback=0 --
+        so ``max_steps`` bounded the wrong quantity. Refusals BEFORE admission
+        (schema, stale binding, second batch) charge compute/wall only: they
+        never reached a decision. The record row keeps the epoch and its
+        reason durable in the SAME RecordSink ledger -- not a second counter.
+        """
+
+        self._steps += 1
+        if self.record is not None:
+            self.record("output_epoch", {"kind": kind, "steps": self._steps})
+
     async def call(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         """One model call, decided exactly as the loop-driven tool decides it."""
 
         async with self._lock:
             call_id = f"step-{self._steps}-{uuid.uuid4().hex[:6]}"
+            self._pending_ask_delivery = []
+            self._pending_ask_receipt = None
             token = self._token
             pending = token.pending if token is not None else None
             if token is None or pending is None or token.terminal:
@@ -1115,14 +1165,18 @@ class ActionBridge:
                     # refused once and re-asked, and every later finish -- the
                     # same declaration or a corrected one -- is accepted, so the
                     # gate can never drive an episode into a challenge loop.
-                    # NOTHING MOVES: the token stays armed and unspent, no
-                    # ``action_batch`` is written, and no step is counted -- the
-                    # claim is a decision about the screen the model already has,
-                    # exactly as the runner's challenge is. A ``failed`` claim is
+                    # NOTHING MOVES: the token stays armed and unspent and no
+                    # ``action_batch`` is written -- but the claim ITSELF is an
+                    # admitted output decision and consumes one external output
+                    # epoch (blueprint §3), exactly as the runner's challenge
+                    # does at the official clock. A ``failed`` claim is
                     # NOT challenged (there is no completion to confirm; the
                     # runner's rule), and a claim is only ever challenged if the
                     # shared text can name the task back, which is why the
                     # instruction rides on the bridge.
+                    # The proposal is ADMITTED here: one epoch, consumed
+                    # before the challenge is built and recorded (blueprint §3).
+                    self._consume_output_epoch("finish-challenged")
                     self._completion_fired += 1
                     challenge = build_completion_challenge(
                         claim=claim,
@@ -1152,10 +1206,15 @@ class ActionBridge:
                     }
                 # Mirrors the runner: a finish batch is recorded and ends the
                 # episode; it is never sent to the adapter (no action in it
-                # mutates the environment). The record carries the CLAIM -- its
+                # mutates the environment). A valid finish PROPOSAL is an
+                # admitted output decision and consumes ONE external output
+                # epoch (blueprint §3) -- the challenged first claim consumed
+                # its own above, so the official clock charges each proposal
+                # exactly once. The record carries the CLAIM -- its
                 # status and reason -- because that is what the challenge (and
                 # any reader grading a finish) reasons about; an action count
                 # alone cannot answer "what did it claim".
+                self._consume_output_epoch("finish")
                 token.mark_terminal()
                 self.end_requested = "finish"
                 if self.record is not None:
@@ -1187,7 +1246,28 @@ class ActionBridge:
                         "is_error": True,
                         "details": {"rejection_class": "ask_user-unsupported"},
                     }
-                await self.ask(batch)
+                self._consume_output_epoch("ask_user")
+                answer = await self.ask(batch)
+                # The exchange's THIRD consumer: the answer text and the
+                # receipt ride the native result (staged here; attached to
+                # whichever path answers this call). The ask-sentinel defect
+                # was this value being dropped on the floor while the refresh
+                # execute below still ran -- the model asked, the user
+                # answered, and the next root request could not see it.
+                self._pending_ask_delivery = [TextContent(text=_ask_delivery_sentence(answer))]
+                self._pending_ask_receipt = {
+                    "answered": answer is not None,
+                    "answer": answer,
+                }
+            else:
+                # The batch is ADMITTED here: ONE external output epoch,
+                # consumed BEFORE the guest-execution await. The old increment
+                # on the post-success path made finish proposals, ask
+                # exchanges and committed read-back losses invisible to the
+                # official clock (all measured zero-epoch by the QA bridge
+                # matrix); refusals ABOVE this point still charge compute
+                # only, and resum/re-bind below never charges a second one.
+                self._consume_output_epoch("batch")
 
             observation = token.consume_pending()
             if observation is None:  # pragma: no cover - the lock makes this unreachable
@@ -1205,7 +1285,9 @@ class ActionBridge:
                 # -- including a finish -- and the episode spun to an
                 # ``agent_stop``. The re-bind (or the legible end) is below.
                 return await self._after_failed_execute(error=error)
-            self._steps += 1
+            # NOTE: the epoch was consumed at ADMISSION (above); the old
+            # post-success increment that lived here is what made the
+            # non-execute output forms uncharged. Do not reintroduce it.
             token.record_in_flight(result.observation)
             if self.record is not None:
                 self.record("batch", {"batch": batch, "result": result})
@@ -1227,10 +1309,13 @@ class ActionBridge:
                 # the next observation's message).
                 rendered = [TextContent(text=note), *rendered]
             self._last_observation = result.observation
+            details: dict[str, Any] = {"receipt": result.receipt.model_dump(mode="json")}
+            if self._pending_ask_receipt is not None:
+                details["ask"] = self._pending_ask_receipt
             return {
-                "content": rendered,
+                "content": [*self._pending_ask_delivery, *rendered],
                 "is_error": False,
-                "details": {"receipt": result.receipt.model_dump(mode="json")},
+                "details": details,
             }
 
     async def _after_failed_execute(self, *, error: Exception) -> dict[str, Any]:
@@ -1310,7 +1395,10 @@ class ActionBridge:
         if token is not None:
             token.record_in_flight(recovered)
         shown_before = self._last_observation
-        content: list[Any] = [TextContent(text=RECOVERY_AFTER_READBACK_LOSS)]
+        content: list[Any] = [
+            *self._pending_ask_delivery,
+            TextContent(text=RECOVERY_AFTER_READBACK_LOSS),
+        ]
         if shown_before is None or shown_before.observation_id != recovered.observation_id:
             rendered = self.render(recovered)
             self._last_shown = (recovered.observation_id, rendered)
@@ -1321,14 +1409,21 @@ class ActionBridge:
                 "recovered",
                 {
                     "steps": self._steps,
+                    "attempted_epoch": True,
                     "transport_error": _bounded_cause(error, limit=500),
                     "observation_id": recovered.observation_id,
                 },
             )
+        details: dict[str, Any] = {
+            "recovered": True,
+            "observation_id": recovered.observation_id,
+        }
+        if self._pending_ask_receipt is not None:
+            details["ask"] = self._pending_ask_receipt
         return {
             "content": content,
             "is_error": True,
-            "details": {"recovered": True, "observation_id": recovered.observation_id},
+            "details": details,
         }
 
     def _end_wedged(
@@ -1366,6 +1461,13 @@ class ActionBridge:
                 "bridge_wedged",
                 {
                     "steps": self._steps,
+                    # ``attempted_epoch``: the failed execute's epoch was
+                    # consumed at admission and stays counted under the
+                    # declared attempted-output convention -- this receipt is
+                    # what keeps it apart from the upstream-crash comparison,
+                    # where no completed episode exists at all (blueprint §3).
+                    # No score below pretends the reach happened.
+                    "attempted_epoch": True,
                     "transport_error": _bounded_cause(error, limit=500),
                     "recovery_attempted": recovery_attempted,
                     "recover_error": (
@@ -1375,10 +1477,13 @@ class ActionBridge:
                     ),
                 },
             )
+        details: dict[str, Any] = {"terminal": BRIDGE_WEDGED_TERMINAL}
+        if self._pending_ask_receipt is not None:
+            details["ask"] = self._pending_ask_receipt
         return {
-            "content": [TextContent(text=sentence)],
+            "content": [*self._pending_ask_delivery, TextContent(text=sentence)],
             "is_error": True,
-            "details": {"terminal": BRIDGE_WEDGED_TERMINAL},
+            "details": details,
         }
 
 
@@ -1475,6 +1580,20 @@ class EpisodeSession:
     roots: SessionRoots
     _context: Any = field(repr=False)
     _unsubscribe: Callable[[], None] | None = field(default=None, repr=False)
+    #: The request observer's unsubscribe. Detached in ``aclose`` AFTER the
+    #: SDK context exits -- deliberately NOT with the event sink above:
+    #: request-final records keep arriving through cancellation/shutdown (the
+    #: whole point of subscribing for accounting), and an early detach would
+    #: lose exactly the rows the caller's totals need.
+    _request_unsubscribe: Callable[[], None] | None = field(default=None, repr=False)
+    #: Deduplicated request-final rows (scalars and the detached usage dump
+    #: only; no prompts, arguments or credentials) plus the usage OBJECTS
+    #: behind them for the one canonical pricing projection. The observer
+    #: callback only appends here; serialization and pricing happen once at
+    #: close-out (the callback contract forbids doing that work on the model
+    #: loop).
+    request_rows: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    request_usages: list[Any] = field(default_factory=list, repr=False)
 
     @property
     def tool_names(self) -> tuple[str, ...]:
@@ -1491,12 +1610,22 @@ class EpisodeSession:
         return session_tool_names(self.session)
 
     async def aclose(self) -> None:
-        """Detach the sink, then exit the SDK's open context."""
+        """Detach the sink, exit the SDK's open context, then the observer.
+
+        The ORDER is the point: the event sink detaches first (its delivery
+        is the running turn's), the SDK context exit runs the canonical
+        disposal, and only THEN is the request observer detached -- finals
+        for cancellation/shutdown land during that close, and a subscription
+        dropped earlier would miss them.
+        """
 
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
         await self._context.__aexit__(None, None, None)
+        if self._request_unsubscribe is not None:
+            self._request_unsubscribe()
+            self._request_unsubscribe = None
 
 
 async def open_episode_session(
@@ -1535,12 +1664,70 @@ async def open_episode_session(
     if confinement_root is not None:
         session.set_tool_confinement(confinement_root)
     unsubscribe = session.subscribe(on_event) if on_event is not None else None
-    return EpisodeSession(
+    handle = EpisodeSession(
         session=session,
         roots=roots,
         _context=context,
         _unsubscribe=unsubscribe,
     )
+    # REQUEST OBSERVATION, attached immediately after open and BEFORE the
+    # first prompt (records are not replayed): the episode's cost/actor
+    # accounting must see every provider request of the ORIGINAL owning root
+    # tree -- parent turns, compaction/naming helpers, delegated children and
+    # grandchildren -- and must keep seeing them through cancellation and
+    # shutdown, which is why the subscription outlives the event sink in
+    # ``EpisodeSession.aclose``. The callback itself only deduplicates and
+    # queues (contract: synchronous, no I/O, no pricing); serialization and
+    # pricing happen once at close-out in ``_flush_request_observation``.
+    _subscribe_request_observation(handle)
+    return handle
+
+
+def _subscribe_request_observation(handle: EpisodeSession) -> None:
+    """Attach the episode's request observer to the owning session tree.
+
+    ``request_id`` is the ONE deduplication key (provider/model/cache keys are
+    not unique per request; the protocol says so where it defines them). A
+    record without an id is refused rather than queued -- an unkeyed row could
+    never be proven distinct. The handler appends and returns: no awaiting, no
+    serialization, no pricing on the model loop.
+    """
+
+    seen: set[str] = set()
+
+    def _observe(observation: RequestFinalObservation) -> None:
+        request_id = observation.request_id
+        if not request_id or request_id in seen:
+            return
+        seen.add(request_id)
+        handle.request_rows.append(
+            {
+                "request_id": request_id,
+                "tree_id": observation.tree_id,
+                "session_id": observation.session_id,
+                "parent_session_id": observation.parent_session_id,
+                "job_id": observation.job_id,
+                "actor_role": observation.actor_role,
+                "purpose": observation.purpose,
+                "requested_provider": observation.requested_provider,
+                "requested_model_id": observation.requested_model_id,
+                "served_provider": observation.served_provider,
+                "served_model_id": observation.served_model_id,
+                "served_identity_source": observation.served_identity_source,
+                "upstream_host": observation.upstream_host,
+                "usage_coverage": observation.usage_coverage,
+                "outcome": observation.outcome,
+                "usage": (
+                    observation.usage.model_dump(mode="json")
+                    if observation.usage is not None
+                    else None
+                ),
+            }
+        )
+        if observation.usage is not None:
+            handle.request_usages.append(observation.usage)
+
+    handle._request_unsubscribe = handle.session.subscribe_requests(_observe)
 
 
 def session_tool_names(session: Any) -> tuple[str, ...]:
@@ -1991,6 +2178,11 @@ async def run_session_episode(
         #: The wedge stop: sent once, when the bridge ends the episode because
         #: its observation binding could not be re-established (see ``_sink``).
         wedge_stop_sent = False
+        #: The budget stop: sent once, when the tool result that consumed the
+        #: Nth admitted output epoch has been PAIRED into the transcript (see
+        #: ``_sink``). Closes guest admission AT the budget instead of one
+        #: decision later, via the loop's own graceful boundary.
+        budget_stop_sent = False
         #: Whether the wall bound fired (``_on_wall`` below). The driver's own
         #: fact -- the abort reason never rides the end event -- and the
         #: terminal-reason classifier reads it after the turn.
@@ -2003,6 +2195,10 @@ async def run_session_episode(
         #: (a wedge can only be set by a call, which only happens after the
         #: session is prompting, i.e. after this assignment).
         handle: EpisodeSession | None = None
+        #: The owned-work shutdown's receipt (``OwnedShutdownResult``), bound by
+        #: the close-out below and read by the score gate: ``complete=False``
+        #: refuses the score. ``None`` means no receipt was produced at all.
+        shutdown_result: Any = None
 
         def _sink(event: AgentEvent) -> None:
             # The sink sits on the engine's own dispatch path, where handler
@@ -2012,7 +2208,7 @@ async def run_session_episode(
             # event-fold error, a write after close) -- captured here, reported
             # in the outcome, and the run continues: a torn record stays
             # visible, and a paid episode is not lost to a logging fault.
-            nonlocal wedge_stop_sent, last_turn_end
+            nonlocal wedge_stop_sent, budget_stop_sent, last_turn_end
             try:
                 _on_event(record, bridge, event)
             except BaseException as error:  # noqa: BLE001 - see above
@@ -2045,6 +2241,31 @@ async def run_session_episode(
                     handle.session.request_graceful_cancel(
                         bridge.end_diagnostic or "action bridge wedged"
                     )
+            # CLOSE GUEST ADMISSION AT THE BUDGET, not one decision later
+            # (blueprint §3): the moment the tool result that consumed the Nth
+            # admitted output epoch is PAIRED into the transcript, request the
+            # loop's own graceful boundary -- the current group's remaining
+            # calls finish and pair, and the next root request is never
+            # spent. The bridge's own budget refusal stays the fail-closed
+            # fallback for any call that still arrives. ``end_requested``
+            # excludes the finish/wedge terminals, which already end the
+            # episode; the check is a state test, never a tool-call-name
+            # heuristic (the declaration names the ONE action tool the arm
+            # installed itself).
+            if (
+                not budget_stop_sent
+                and handle is not None
+                and isinstance(event, ToolExecutionEndEvent)
+                and event.tool_name == declaration.tool_name
+                and bridge.end_requested is None
+                and bridge.steps >= config.max_steps
+            ):
+                budget_stop_sent = True
+                record.write(
+                    "budget_stop",
+                    {"steps": bridge.steps, "surface": declaration.tool_name},
+                )
+                handle.session.request_graceful_cancel("episode step budget reached")
 
         handle = await open_episode_session(
             spec=episode_session,
@@ -2108,7 +2329,35 @@ async def run_session_episode(
                 if wall_timer is not None:
                     wall_timer.cancel()
         finally:
+            # EXPLICIT OWNED-WORK SHUTDOWN, bounded, BEFORE any score
+            # (blueprint §3). The caller owns its tree, so it says so here:
+            # delegation admission closes, the turn aborts, and the canonical
+            # disposal joins every child/grandchild job -- the same retained
+            # task ordinary dispose joins, so a race with an already-running
+            # disposal waits for THAT cleanup rather than starting a second
+            # one. The request observer deliberately outlives this call (see
+            # ``EpisodeSession.aclose``), because cancellation-finals for the
+            # joining work arrive DURING it. A truthful receipt is recorded:
+            # ``complete=False`` keeps pending ids and errors attached, and
+            # the score below is refused rather than certifying unjoined
+            # work. Sessions WITHOUT the owning surface (scripted doubles on
+            # the older contract) get no receipt, and the same refusal
+            # applies: unproven is not complete.
+            try:
+                shutdown_result = await handle.session.shutdown_owned_work(
+                    "episode-turn-complete", timeout_s=config.cleanup_timeout
+                )
+            except Exception as error:  # noqa: BLE001 - the close-out must still reach aclose
+                record.write(
+                    "error",
+                    {"scope": "shutdown", "diagnostic": f"{type(error).__name__}: {error}"},
+                )
             await handle.aclose()
+            try:
+                _flush_request_observation(record, handle)
+            except BaseException as error:  # noqa: BLE001 - a close-out must complete
+                if not record_errors:
+                    record_errors.append(error)
 
         steps = bridge.steps
         terminal_reason = bridge.end_requested
@@ -2140,42 +2389,84 @@ async def run_session_episode(
                 challenges=bridge.completion_challenges_fired,
             )
 
+        # THE OWNED-WORK GATE (blueprint §3): the score certifies the state
+        # the episode reached, and it may only be taken once every piece of
+        # owned work is joined. An incomplete or absent receipt is UNVERIFIED
+        # -- a score over it would read as a finished episode while children
+        # it owns might still touch the world. No score, no readiness claim;
+        # the WORKER cleanup below still runs so nothing leaks.
+        owned_complete = bool(shutdown_result is not None and shutdown_result.complete)
+        if shutdown_result is not None:
+            record.write(
+                "shutdown",
+                {
+                    "complete": shutdown_result.complete,
+                    "reason": shutdown_result.reason,
+                    "elapsed_ms": shutdown_result.elapsed_ms,
+                    "pending_job_ids": list(shutdown_result.pending_job_ids),
+                    "errors": list(shutdown_result.errors),
+                    "observer_callback_errors": shutdown_result.observer_callback_errors,
+                    "descendant_requests_in_flight": (
+                        shutdown_result.descendant_requests_in_flight
+                    ),
+                },
+            )
+        if not owned_complete:
+            status = "failed"
+            if shutdown_result is None:
+                incomplete_detail = "shutdown_owned_work returned no receipt"
+            elif shutdown_result.errors:
+                incomplete_detail = "; ".join(shutdown_result.errors)
+            else:
+                incomplete_detail = shutdown_result.reason
+            stop_diagnostic = (
+                f"owned-work shutdown did not complete before scoring: {incomplete_detail}"
+            )
         # --- score, then cleanup, then close (mirrors _close_out) -----------
         score: Any = None
         score_error: BaseException | None = None
-        try:
-            score = (
-                await adapter_session.score(
-                    ScoreParams(
-                        operation_id=f"score-{spec.episode_id}",
-                        episode_id=spec.episode_id,
-                    ),
-                    timeout=config.score_timeout,
-                )
-            ).score
-            try:
-                # Through the sink's seal path, which spends the reserve when
-                # the volume is full. Its failure is a RECORD failure, not a
-                # score failure: the object above still reaches the outcome, so
-                # the paid score is never orphaned by the disk (measured: the
-                # voided runs' ``score.json`` survived while the outcome that
-                # would have linked it said ``score: null``).
-                record.seal_write(
-                    record_root / "score.json",
-                    json.dumps(score.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
-                )
-            except RecordSinkError as error:
-                record_errors.append(error)
-        except BaseException as error:
-            # ADAPTER CONTRACT: score() returns a SCORED artifact or raises,
-            # and a raise is not a reason to skip cleanup -- the worker is
-            # still holding the resource. The failure is recorded here and
-            # turned into the outcome by the handler below.
-            score_error = error
+        if not owned_complete:
+            # A REFUSAL, not a failure: nothing is scored, nothing is raised;
+            # the record and the outcome's diagnostic both say why.
             record.write(
-                "error",
-                {"scope": "score", "diagnostic": f"{type(error).__name__}: {error}"},
+                "score_refused",
+                {"reason": "owned-work shutdown incomplete before scoring"},
             )
+        else:
+            try:
+                score = (
+                    await adapter_session.score(
+                        ScoreParams(
+                            operation_id=f"score-{spec.episode_id}",
+                            episode_id=spec.episode_id,
+                        ),
+                        timeout=config.score_timeout,
+                    )
+                ).score
+                try:
+                    # Through the sink's seal path, which spends the reserve when
+                    # the volume is full. Its failure is a RECORD failure, not a
+                    # score failure: the object above still reaches the outcome, so
+                    # the paid score is never orphaned by the disk (measured: the
+                    # voided runs' ``score.json`` survived while the outcome that
+                    # would have linked it said ``score: null``).
+                    record.seal_write(
+                        record_root / "score.json",
+                        json.dumps(score.model_dump(mode="json"), indent=2, sort_keys=True)
+                        + "\n",
+                    )
+                except RecordSinkError as error:
+                    record_errors.append(error)
+            except BaseException as error:
+                # ADAPTER CONTRACT: score() returns a SCORED artifact or raises,
+                # and a raise is not a reason to skip cleanup -- the worker is
+                # still holding the resource. The failure is recorded here and
+                # turned into the outcome by the handler below.
+                score_error = error
+                record.write(
+                    "error",
+                    {"scope": "score", "diagnostic": f"{type(error).__name__}: {error}"},
+                )
         receipts: tuple[Any, ...] = ()
         try:
             receipts = await adapter_session.cleanup(
@@ -2401,6 +2692,51 @@ def _cleanup_forces_rescue(plan: CleanupPlan, receipts: Sequence[Any]) -> bool:
         return bool(aggregate_cleanup(plan, tuple(receipts)).rescue_required)
     except ValueError:
         return True
+
+
+def _flush_request_observation(record: RecordSink, handle: EpisodeSession) -> None:
+    """Serialize the queued request-final rows and price them ONCE.
+
+    THE TWO MONEY FIGURES, kept separate (blueprint §2; ``cost_summary`` is
+    the ONE canonical pricer -- no second ledger): ``recorded_usd`` is the
+    receipts actually stamped, i.e. known charged money; ``estimated_usd``
+    is the same canonical table projection for rows without a stamp, so a
+    direct-route run keeps an estimate even though ``recorded_only`` alone
+    would lose it. ``missing_usage_request_ids`` names rows where NO usage
+    frame arrived: unknown, NEVER a priced zero -- and because retry/fallback
+    sub-streams can be entirely unreported by a logical final, the recorded
+    figure is a LOWER BOUND and is labelled as such. Cache read/write and
+    reasoning ride inside the usage buckets the canonical pricer already
+    separates; nothing here re-adds them to input/output.
+    """
+
+    from local_operator.model.costs import cost_summary
+
+    rows = handle.request_rows
+    usages = handle.request_usages
+    recorded_usd, recorded_unknown = cost_summary(usages, recorded_only=True)
+    estimated_usd, estimated_unknown = cost_summary(usages, recorded_only=False)
+    purposes: dict[str, int] = {}
+    missing_usage_request_ids: list[str] = []
+    for row in rows:
+        purpose = str(row.get("purpose") or "unknown")
+        purposes[purpose] = purposes.get(purpose, 0) + 1
+        if row.get("usage") is None:
+            missing_usage_request_ids.append(str(row.get("request_id") or ""))
+    record.write(
+        "requests",
+        {
+            "count": len(rows),
+            "purpose_counts": purposes,
+            "rows": rows,
+            "missing_usage_request_ids": missing_usage_request_ids,
+            "recorded_usd": recorded_usd,
+            "recorded_unknown": recorded_unknown,
+            "recorded_is_lower_bound": bool(recorded_unknown or missing_usage_request_ids),
+            "estimated_usd": estimated_usd,
+            "estimated_unknown": estimated_unknown,
+        },
+    )
 
 
 def _on_event(record: RecordSink, bridge: ActionBridge, event: AgentEvent) -> None:

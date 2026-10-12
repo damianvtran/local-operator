@@ -450,7 +450,10 @@ class TestBridgeDiscipline:
 
         after = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
         assert after["is_error"] is True
-        assert bridge.steps == 0
+        # Each admitted output form -- the challenged claim and the accepted
+        # finish -- consumed ONE epoch apiece (blueprint §3); the refused
+        # post-terminal call consumed none.
+        assert bridge.steps == 2
 
     @pytest.mark.asyncio
     async def test_the_step_budget_ends_the_episode_without_executing(self, tmp_path: Path) -> None:
@@ -559,10 +562,13 @@ class TestCompletionGate:
         assert "the task as stated" in text
         assert bridge.terminal is False
         assert bridge.end_requested is None
-        assert bridge.steps == 0
-        assert [kind for kind, _ in events] == ["completion_challenged"]
-        assert events[0][1]["reason"] == "filled the form"
-        assert events[0][1]["observation_id"] == obs.observation_id
+        # The challenged proposal is an admitted output decision: ONE epoch
+        # (blueprint §3), recorded before the challenge row.
+        assert bridge.steps == 1
+        assert [kind for kind, _ in events] == ["output_epoch", "completion_challenged"]
+        assert events[0][1] == {"kind": "finish-challenged", "steps": 1}
+        assert events[1][1]["reason"] == "filled the form"
+        assert events[1][1]["observation_id"] == obs.observation_id
 
     @pytest.mark.asyncio
     async def test_the_second_done_claim_ends_the_episode(self, tmp_path: Path) -> None:
@@ -591,7 +597,8 @@ class TestCompletionGate:
         await bridge.call({"actions": [{"kind": "finish", "status": "done", "reason": "early"}]})
         executed = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
         assert executed["is_error"] is False
-        assert bridge.steps == 1
+        # The challenged propose took epoch 1; the executed batch took 2.
+        assert bridge.steps == 2
         # The executed batch consumed the turn's token; the turn boundary is
         # what re-arms it (`fold`), exactly as the live loop delivers it.
         bridge.fold(TurnEndEvent())
@@ -612,7 +619,9 @@ class TestCompletionGate:
             {"actions": [{"kind": "finish", "status": "failed", "reason": "cannot finish"}]}
         )
         assert reply["details"]["terminal"] == "finish"
-        assert [kind for kind, _ in events] == ["finish"]
+        # The failed claim is still a valid finish PROPOSAL: one admitted
+        # epoch, then the finish row.
+        assert [kind for kind, _ in events] == ["output_epoch", "finish"]
 
     @pytest.mark.asyncio
     async def test_the_gate_can_be_disabled_for_a_control_arm(self, tmp_path: Path) -> None:
@@ -1006,6 +1015,22 @@ def _confinement_fake_opener(installed: list[Any]) -> Any:
         def subscribe(self, sink: Any) -> Any:
             del sink
             return lambda: None
+
+        def subscribe_requests(self, handler: Any) -> Any:
+            del handler
+            return lambda: None
+
+        async def shutdown_owned_work(self, reason: str, *, timeout_s: float = 30.0) -> Any:
+            del timeout_s
+            return SimpleNamespace(
+                complete=True,
+                reason=reason,
+                elapsed_ms=0.0,
+                pending_job_ids=(),
+                errors=(),
+                observer_callback_errors=0,
+                descendant_requests_in_flight=False,
+            )
 
     class _FakeContext:
         async def __aenter__(self) -> Any:
@@ -1405,7 +1430,10 @@ class TestFailedExecuteRecovery:
         assert first["content"][0].text == RECOVERY_AFTER_READBACK_LOSS
         assert len(executed) == 1 and len(re_reads) == 1
         assert bridge.end_requested is None
-        assert bridge.steps == 0  # the failed batch never ran as a step
+        # The failed batch still consumed its epoch at admission (declared
+        # attempted-output convention): the loss is the read-back, not the
+        # decision, so the official clock charges it once.
+        assert bridge.steps == 1
 
         # Held in flight, exactly like a batch result: the same turn cannot
         # bind a second batch, and the turn boundary arms the recovered screen.
@@ -1415,7 +1443,8 @@ class TestFailedExecuteRecovery:
 
         after = await bridge.call(wait)
         assert after["is_error"] is False
-        assert bridge.steps == 1
+        # Epoch 1 was the failed batch (attempted), epoch 2 this executed one.
+        assert bridge.steps == 2
         assert len(executed) == 2
         assert len(re_reads) == 1  # one re-bind per failed batch, not a loop
 
@@ -1545,12 +1574,15 @@ class TestFailedExecuteRecovery:
         assert finish["is_error"] is True
         assert finish["details"]["rejection_class"] == "second-batch"
         assert len(executed) == 1
-        assert bridge.steps == 0
+        # The failed execute's epoch was consumed at ADMISSION and stays
+        # counted (declared attempted-output convention); the refused finish
+        # consumed none.
+        assert bridge.steps == 1
 
         # Both endings are journalled, so a bundle can tell a degraded
         # environment from a clean run.
-        assert [kind for kind, _ in recorded] == ["bridge_wedged"]
-        payload = recorded[0][1]
+        assert [kind for kind, _ in recorded] == ["output_epoch", "bridge_wedged"]
+        payload = recorded[1][1]
         assert payload["recovery_attempted"] is True
         assert payload["transport_error"].startswith("RpcRemoteError")
         assert payload["recover_error"].startswith("RpcRemoteError")
@@ -1575,9 +1607,9 @@ class TestFailedExecuteRecovery:
             record=lambda kind, payload: recorded.append((kind, payload)),
         )
         await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
-        assert [kind for kind, _ in recorded] == ["recovered"]
-        assert recorded[0][1]["observation_id"] == obs0.observation_id
-        assert recorded[0][1]["transport_error"].startswith("RpcRemoteError")
+        assert [kind for kind, _ in recorded] == ["output_epoch", "recovered"]
+        assert recorded[1][1]["observation_id"] == obs0.observation_id
+        assert recorded[1][1]["transport_error"].startswith("RpcRemoteError")
 
 
 # ---------------------------------------------------------------------------
@@ -1638,6 +1670,28 @@ class _ScriptedSession:
     def subscribe(self, sink: Any) -> Any:
         self._sinks.append(sink)
         return lambda: None
+
+    def subscribe_requests(self, handler: Any) -> Any:
+        # The owning contract's observer surface; the scripted session makes
+        # no provider requests, so the registration is inert and its
+        # unsubscribe a no-op (the real episode composes it for accounting).
+        del handler
+        return lambda: None
+
+    async def shutdown_owned_work(self, reason: str, *, timeout_s: float = 30.0) -> Any:
+        # The owning contract's explicit join: scripted runs own no child work,
+        # so the receipt is honestly COMPLETE (the arm's score gate requires
+        # it; an incomplete receipt would refuse scoring by design).
+        del timeout_s
+        return SimpleNamespace(
+            complete=True,
+            reason=reason,
+            elapsed_ms=0.0,
+            pending_job_ids=(),
+            errors=(),
+            observer_callback_errors=0,
+            descendant_requests_in_flight=False,
+        )
 
     def set_tool_confinement(self, root: Any) -> None:
         del root
@@ -1870,7 +1924,9 @@ class TestBridgeWedgeOutcome:
         # batches and not a lost episode.
         assert adapter.executes == 5  # 4 failing + the next wait batch
         assert adapter.observes == 2  # reset's read + the recovery's
-        assert outcome.steps == 1
+        # Epochs: the recovered first batch (attempted), the executed wait, the
+        # challenged finish and the accepted finish -- one apiece at admission.
+        assert outcome.steps == 4
         # The record carries the recovery ("the environment degraded and the
         # harness bridged it"), not a suspiciously clean run.
         events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
