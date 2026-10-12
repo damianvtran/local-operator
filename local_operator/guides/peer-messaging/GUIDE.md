@@ -56,6 +56,8 @@ Parameters:
 - `repeat` (default **false**) — bypass same-turn confirmed local receipt reuse
   only when the user explicitly requested a deliberate repeat. An unchanged
   resend normally returns its original receipt without another delivery/wake/wait.
+  Reuse requires known sender/target IDs and a bounded cache (64 entries, at most
+  16KiB body + serialized receipt each); overflow fails open to actual delivery.
   New turns, changed intent, errors/uncertainty, model switches and mesh sends
   remain real attempts; this is not a session-lifetime or fuzzy-message filter.
 - `wake` (default **true**) — mailbox mode: wake an idle peer so it responds

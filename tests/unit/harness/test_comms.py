@@ -355,6 +355,41 @@ def assistant(text: str, *, tool_calls: list[ToolCall] | None = None) -> Message
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "paused", "failed", "running"])
+async def test_hub_send_receipt_names_actual_child_state_without_resuming(tmp_path, status):
+    jobs = FakeJobs()
+    jobs.add("latest-job", status=status)
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    comms.record_launch("latest-job", "worker")
+    child = FakeChild()
+    comms.attach("latest-job", child, tmp_path / "worker-history")
+    comms._aliases["previous-job"] = "latest-job"
+    result = await execute_hub(
+        "handoff",
+        {"op": "send", "to": "previous-job", "message": "continue"},
+        None,
+        None,
+        ToolContext(subagent_comms=comms),
+    )
+    assert not result.is_error
+    assert len(child.asides) == 1
+    assert jobs.jobs["latest-job"].status == status
+    assert list(jobs.jobs) == ["latest-job"]
+    if status == "running":
+        assert "injected" in body(result)
+        assert "queued for next resume" not in body(result)
+    else:
+        assert f"child is {status}" in body(result)
+        assert "queued for next resume" in body(result)
+        assert "not running" in body(result)
+        assert "hub op='resume' to='latest-job'" in body(result)
+        assert result.details is not None
+        assert result.details["delivery_states"] == [
+            {"job_id": "latest-job", "status": status, "resume_required": True}
+        ]
+
+
 def test_lineage_queries_are_recursive_cycle_safe_and_snapshot_durable(tmp_path) -> None:
     jobs = FakeJobs()
     comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
