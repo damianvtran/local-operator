@@ -64,6 +64,7 @@ if str(REPO) not in sys.path:
 
 from local_operator.i18n import catalogues  # noqa: E402
 from local_operator.i18n import runtime as msg_runtime  # noqa: E402
+from scripts.i18n.login import check_login  # noqa: E402
 
 PRODUCT_TREE = "local_operator"
 #: The scanned corpus, repo-relative. `scripts/i18n/` is scanned because it is
@@ -672,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(line)
         else:
             advisories.append(f"advisory: {line}")
-    problems = check_catalogues()
+    problems = check_catalogues() + check_login(REPO)
     for line in advisories + failures + problems:
         print(line)
     if failures or problems:
