@@ -420,13 +420,21 @@ class Team(BaseModel):
             "a short human-readable `title` and a markdown `description`, and keep "
             "its progress current; keep the todo list updated the same way."
         )
-        # Operator's reporting + heavy-run rule (2026-10-06): stated here because
-        # a custom manager role never reads ``agent_seeds/manager.md``.
+        # Custom manager roles do not read the manager seed. Keep the portable
+        # allocation/coverage boundary here; detailed procedure is on demand.
         parts.append(
             "Derive it, or say where it came from: every number and status you "
             "report is one you derived here or one whose source you name. Iterate "
-            "on targeted tests and lints — the full suite belongs to the terminal "
-            "pass or CI, and only a terminal step waits on CI."
+            "with affected tests/lints; full coverage once terminally. When CI runs "
+            "the same suite, do not duplicate it locally; independent real-path QA "
+            "still applies. Bound/serialize heavy runs; read CI asynchronously."
+        )
+        parts.append(
+            "Own routine bounded allocations within authorization; escalate genuine "
+            "access/security/destructive/preferences/material scope only. One stable "
+            "session ID owner and durable receipt; status on material deltas. Collect "
+            "initial review streams before one remediation commit. Read "
+            "guide://delivery for preflight and convergence detail."
         )
         parts.append(
             "Delegate with task(agent='<role>') using the roster below. "

@@ -19,7 +19,8 @@ scope, not the depth of validation or the operator's approval requirements.
   material scope changes. Authorization to fix is not authorization to delete.
 - Give each slice one owner identified by stable session ID, scope, acceptance
   criteria and a durable receipt (project record or linked task/PR). Address the
-  owner directly; do not broadcast a status hunt. Update only material deltas;
+  owner directly; do not broadcast a status hunt. One confirmed durable ACK
+  means no unchanged resend or repeated approval request. Update only material deltas;
   verify completion from primary evidence, not an agent's assertion.
 - Prefer metadata and narrow indexes before reading logs or artifacts. Follow
   a surprising first read one step further; cite the source of relayed results.
@@ -28,13 +29,17 @@ scope, not the depth of validation or the operator's approval requirements.
 
 ## Preflight before expensive dispatch
 
+Inventory the actual loaded briefs and source winners first; measure raw and
+loaded prompt budgets so clipping cannot masquerade as compliance.
 Write one test plan before handing work to native, browser or hardware lanes:
 changed surfaces and direct neighbors, commands, dependencies, source/binary
 identity, isolation, expected outputs and at least one negative control. Confirm
 that the compiled artifact contains the changed source and that the harness can
 observe success AND failure. A source-only test is not native execution proof.
 A setup failure stops costly dispatch: report the failed prerequisite and its
-bounded repair, rather than sending reviewers to a broken rig. Use the harness
+bounded repair, rather than sending reviewers to a broken rig. Repeat a costly
+probe only for a material delta or new discriminating hypothesis; retire obsolete
+probes. Use the harness
 browser, never install a second browser stack; obey the isolated HOME/config,
 CMUX stripping and exact-process-group teardown rules in `AGENTS.md`.
 
@@ -65,6 +70,8 @@ A moved base is NOT a blind re-pin: prove patch compatibility with
 `old-head..new-head` convergence round for semantic conflicts in files upstream
 also changed. If that proof fails, review and test the affected content. Follow
 `AGENTS.md`'s SHA-freshness rules and the standing PR comment/remediation format.
+A genuine late BLOCKER/MAJOR with a demonstrated code path stays admissible;
+delta scope never waives correctness, security or regression risk.
 Always fix real BLOCKER/MAJOR findings before merge; MINOR/NIT findings do not
 force another gate round and must be answered with a reason if not fixed.
 

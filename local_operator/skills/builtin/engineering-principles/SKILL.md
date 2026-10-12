@@ -23,6 +23,15 @@ Judgement for building changes. One rule per line; the third column is what brea
 | Experience first | The user-visible result decides; internal elegance is a cost, not a product. | Refactors with no observable change |
 | Delete dead weight | Unused, unreachable, and commented-out code is a claim nobody checks. | "We might need it"; version control remembers |
 
+## Costly evidence preflight
+
+Before expensive integration/native/browser/hardware dispatch, write one plan
+and cheaply verify dependencies, compiled-source identity and harness negative
+controls. Stop failed setup; source-only checks are not native execution proof.
+Repeat a costly probe only for a material delta or new discriminating hypothesis;
+retire obsolete probes. Minimal root recovery is separate from cross-repository
+hardening. See `guide://delivery` for bounded allocation and coverage.
+
 ## How to apply
 
 - Name the rule you are applying and to what. Tension between rules is normal; say which one wins and why.
