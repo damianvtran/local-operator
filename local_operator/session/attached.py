@@ -134,6 +134,10 @@ from local_operator.session.replay_cache import (
     publish_replay,
     replay_key,
 )
+from local_operator.session.request_observation import (
+    OwnedShutdownResult,
+    RequestObserver,
+)
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
 from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
 from local_operator.session.runtime.types import drain_phrase_for_frame
@@ -8806,6 +8810,37 @@ class AttachedSession:
         ``set_takeover_callback``), so this object never has to answer True.
         """
         return False
+
+    # -- Owning-only surface, refused clearly instead of faked -----------------
+    #
+    # ``SessionProtocol`` carries ``subscribe_requests`` and
+    # ``shutdown_owned_work`` because every front end's TYPE is that protocol;
+    # a viewer genuinely cannot implement either -- the requests are executed
+    # by a runtime in another process, and its jobs/transcript/lease belong to
+    # that process. The contract is a CLEAR refusal with the owning-runtime
+    # remedy: an inert subscriber that silently observes nothing, or a
+    # shutdown receipt that pretends someone else's cleanup ran, would be
+    # worse than an error (the caller cannot tell "nothing to show" from
+    # "not this kind of session", the same reason ``ViewerSessionProtocol``
+    # exists).
+
+    def subscribe_requests(self, handler: RequestObserver) -> Callable[[], None]:
+        """Refuse: request observation lives with the owning runtime."""
+        raise RuntimeError(
+            "request observation belongs to the session's OWNING runtime, and this "
+            "is a viewer attached to it; open the session from the process that runs "
+            "its turn loop (lop exec, the server host, a subagent host) to subscribe"
+        )
+
+    async def shutdown_owned_work(
+        self, reason: str, *, timeout_s: float = 30.0
+    ) -> OwnedShutdownResult:
+        """Refuse: a viewer cannot join another process's owned work."""
+        raise RuntimeError(
+            "owned-work shutdown belongs to the session's OWNING runtime, and this "
+            "is a viewer attached to it; ask the owner to shut the session down, or "
+            "close the host that runs it"
+        )
 
     @property
     def outcome_is_synchronous(self) -> bool:

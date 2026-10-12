@@ -274,6 +274,15 @@ from local_operator.session.protocol import (
     unanswered_tail_call_ids,
 )
 
+# The request-observation types and the owning shutdown receipt. Imported at
+# runtime (not under TYPE_CHECKING) because ``shutdown_owned_work`` BUILDS the
+# receipt and the refusal paths raise with the same message the types
+# document; the module is import-light by design (no session/runtime deps).
+from local_operator.session.request_observation import (
+    OwnedShutdownResult,
+    RequestObserver,
+)
+
 # The roster-row resolution shared with the cold viewer. Imported here so the
 # OWNER path (this module's `_load_subagent_roster`) and the viewer path
 # (`AttachedSession._restore_cold_subagents`) cannot drift into two opinions
@@ -3953,6 +3962,19 @@ class Session:
         self._turn_tool_calls = 0
 
         self._disposed = False
+        # -- Explicit owned-work shutdown (``shutdown_owned_work``).
+        #
+        # ``_owned_work_closing`` is the ADMISSION latch: set synchronously by
+        # ``shutdown_owned_work`` BEFORE its first await, so a task/grandchild
+        # launch racing the shutdown fails fast instead of escaping the
+        # teardown snapshot (see ``_launch_subagent``). ``_owned_shutdown_task``
+        # RETAINS the unbounded cleanup coroutine across a timed-out call --
+        # the shutdown still lands; it is never cancelled to make the wrapper
+        # look finished. ``_owned_shutdown_result`` caches a COMPLETE result so
+        # repeat calls are the same receipt, not a second shutdown.
+        self._owned_work_closing = False
+        self._owned_shutdown_task: "asyncio.Task[None] | None" = None
+        self._owned_shutdown_result: "OwnedShutdownResult | None" = None
         self._subagent_roster_generation = 0
         self._subagent_roster_written_generation = 0
         self._subagent_roster_writer: asyncio.Task[None] | None = None
@@ -15843,6 +15865,17 @@ class Session:
         child still means "inherit the parent", which is the ordinary case
         and must keep working with no config at all.
         """
+        # FAIL FAST when the session is shutting down. ``_disposed`` is set
+        # synchronously by ``dispose``; ``_owned_work_closing`` is set by
+        # ``shutdown_owned_work`` BEFORE its first await. Together they close
+        # delegation admission for the whole teardown, so a late ``task``
+        # launch cannot register a child that would outlive the snapshot the
+        # shutdown is joining. (The ``dispose`` gate alone leaves the window
+        # between the wrapper's entry and dispose's first line.)
+        if self._disposed or self._owned_work_closing:
+            raise RuntimeError(
+                "this session is shutting down; no new delegated work can be admitted"
+            )
         # The target first: a ``team:pod`` launch runs as pod's MANAGER, so the
         # tier is the manager role's, and a launch that cannot run (unknown
         # team, cycle, depth cap) raises here before any model is priced or
@@ -24782,6 +24815,119 @@ class Session:
                     comms.abandon_stop(stamp)
         except Exception:  # noqa: BLE001 — teardown must not fail over evidence
             logger.warning("could not roll back teardown attribution", exc_info=True)
+
+    def subscribe_requests(self, handler: RequestObserver) -> Callable[[], None]:
+        """Observe this session tree's request-final records.
+
+        The record carries identity, provenance and accounting for one
+        finished PROVIDER request -- parent turns, tool-loop continuations,
+        compaction/naming helpers, and every delegated child/grandchild call
+        -- and nothing else (no prompt, no tool arguments, no credentials).
+
+        Semantics the caller must know:
+
+        * Effective for requests BEGUN while subscribed. Install it BEFORE the
+          work you want observed (``prompt``); requests that finished earlier
+          are not replayed and must not be reported as observed.
+        * Handlers run synchronously on the model loop as each request
+          finishes; they must append or enqueue and return -- no I/O, no
+          pricing, no heavy serialization.
+        * The subscription belongs to the SESSION TREE: it covers child and
+          grandchild requests too, including children forked before this call.
+        * Keep the subscription until shutdown settles to capture
+          cancellation-final usage. The returned unsubscribe is idempotent.
+        """
+        subscribe = getattr(self._stream_fn, "subscribe_requests", None)
+        if not callable(subscribe):
+            raise RuntimeError(
+                "this session's stream does not support request observation; "
+                "subscribe on a session opened against a provider stream"
+            )
+        # ``getattr`` hands back ``object``; the callable check above proves the
+        # shape, and the cast restores it for the type checker.
+        return cast("Callable[[], None]", subscribe(handler))
+
+    async def shutdown_owned_work(
+        self, reason: str, *, timeout_s: float = 30.0
+    ) -> OwnedShutdownResult:
+        """Stop and JOIN every piece of owned work, and say truthfully how far that got.
+
+        The explicit terminal for an owning caller (a benchmark run, a
+        one-shot host): close delegation admission, abort this session's
+        turn, then run the existing disposal path -- which cancels and awaits
+        every owned job, and each child's finalization joins its own disposal
+        recursively, so grandchildren and their process groups are reached
+        through the same chain ``dispose`` already owns. ``dispose`` is
+        idempotent, so a later SDK context exit is a no-op.
+
+        NOT a change to :meth:`abort` or :meth:`cancel_subagents`: the
+        keyboard's first-Esc semantics stay exactly as they are (children keep
+        working), and no other session's jobs are touched.
+
+        ``complete=True`` requires ALL of: the cleanup joined inside
+        ``timeout_s``, every owned job settled, no descendant provider stream
+        in flight, and no cleanup error. Anything less is ``complete=False``
+        with the pending ids and reasons attached -- a timeout is UNVERIFIED,
+        not success, and no caller may score or delete while it holds. The
+        cleanup task is RETAINED on a timeout (never cancelled), because
+        Python cannot forcibly stop cancellation-resistant code; the bound on
+        a truly stuck run belongs to the supervising process group outside
+        this session, and pretending it happened here is the failure this
+        result type exists to prevent.
+
+        Idempotent: the first call creates the cleanup; later calls await the
+        same task and a COMPLETE result is returned as the same receipt.
+        """
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        started = time.monotonic()
+        cached = self._owned_shutdown_result
+        if cached is not None:
+            return cached
+        task = self._owned_shutdown_task
+        if task is None:
+            # Close admission BEFORE the first await (see the latch comment in
+            # __init__); abort then dispose, exactly the existing chain.
+            self._owned_work_closing = True
+            self.abort(reason)
+            task = asyncio.ensure_future(self.dispose())
+            self._owned_shutdown_task = task
+        done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+        errors: list[str] = []
+        complete = False
+        if task in done:
+            try:
+                failure = task.exception()
+            except asyncio.CancelledError:
+                failure = None
+                errors.append("cleanup task was cancelled; owned work state unverified")
+            if failure is not None:
+                errors.append(f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}")
+            else:
+                complete = True
+        else:
+            errors.append(f"timeout after {timeout_s:g}s: owned cleanup still running (unverified)")
+        pending_jobs = tuple(job.id for job in self.jobs.list() if job.status == "running")
+        in_flight = bool(getattr(self._stream_fn, "child_model_requests_in_flight", False))
+        if complete and pending_jobs:
+            complete = False
+            errors.append(f"{len(pending_jobs)} owned job(s) still running after cleanup")
+        if complete and in_flight:
+            complete = False
+            errors.append("a descendant provider stream was still in flight after cleanup")
+        holder = getattr(self._stream_fn, "_request_observers", None)
+        result = OwnedShutdownResult(
+            complete=complete,
+            reason=reason,
+            elapsed_ms=(time.monotonic() - started) * 1000,
+            pending_job_ids=pending_jobs,
+            errors=tuple(errors),
+            observer_callback_errors=(holder.callback_errors if holder is not None else 0),
+            descendant_requests_in_flight=in_flight,
+        )
+        if complete:
+            self._owned_shutdown_result = result
+        return result
 
     async def dispose(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel

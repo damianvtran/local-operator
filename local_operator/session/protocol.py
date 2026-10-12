@@ -48,6 +48,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # hands the driver beside the wire shape.
     from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState
 
+    # The owning observation/shutdown surface (``subscribe_requests`` /
+    # ``shutdown_owned_work``). Declared here on the protocol every front end
+    # talks to; the runtime implements them, a viewer refuses them — both
+    # signatures name these types, and importing them at runtime here would
+    # pull the session package into the protocol module for no reader's gain.
+    from local_operator.session.request_observation import (
+        OwnedShutdownResult,
+        RequestObserver,
+    )
+
 
 def unanswered_tail_call_ids(messages: Sequence[Any]) -> set[str]:
     """Calls in the CURRENT turn's latest group that have no result yet.
@@ -509,6 +519,37 @@ class SessionProtocol(Protocol):
         """
         ...
 
+    def subscribe_requests(self, handler: RequestObserver) -> Callable[[], None]:
+        """Observe every request-final record of this session's TREE.
+
+        One typed record per finished provider request — parent turns, helper
+        calls (compaction/naming), and every delegated child/grandchild call —
+        carrying identity, provenance and accounting only (no prompt, tool
+        arguments, credentials or payloads). Effective for requests BEGUN
+        while subscribed: install before ``prompt``; earlier requests are not
+        replayed. Handlers run synchronously on the model loop and must return
+        promptly. Returns an idempotent unsubscribe. A viewer facade refuses
+        this clearly rather than installing an inert subscriber.
+        """
+        ...
+
+    async def shutdown_owned_work(
+        self, reason: str, *, timeout_s: float = 30.0
+    ) -> OwnedShutdownResult:
+        """Stop and JOIN every piece of owned work; report truthfully.
+
+        Closes delegation admission, aborts this session's turn, then runs
+        the existing disposal chain (all owned jobs cancelled and awaited,
+        child finalization joining each child's disposal recursively).
+        ``complete=True`` only when the join finished inside ``timeout_s``
+        with every job settled and no descendant request in flight; a timeout
+        is ``complete=False``/unverified with the cleanup task RETAINED, never
+        a pretend kill. Idempotent, and NOT a change to :meth:`abort` or
+        :meth:`cancel_subagents` (first-Esc child-continuation semantics
+        unchanged).
+        """
+        ...
+
     def running_subagents(self) -> int:
         """How many subagents :meth:`cancel_subagents` would stop right now.
 
@@ -635,7 +676,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 146 public members and a POSITIVE
+    than stylistic. This protocol carries 148 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -705,7 +746,13 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     (``supplement_cancel``/``supplement_steer``/``supplement_restart``), one rung
     adding four because they are one contract's surface: a facade that could be
     read for rows but not act on them would answer the command with a probe miss
-    on this class alone), so recompute it
+    on this class alone), 148 once the OWNING observation/shutdown surface
+    joined the shared contract — ``subscribe_requests`` (register a
+    request-final observer for the tree) and ``shutdown_owned_work`` (the
+    explicit terminal close; a facade genuinely cannot do either, so BOTH
+    members are reached through the same owning-runtime refusal rather than an
+    inert stub), one rung adding two because they are one contract's owning
+    surface), so recompute it
     rather
     than adjusting it by the size of your own change.
 
