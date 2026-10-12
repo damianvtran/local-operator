@@ -371,6 +371,19 @@ def test_launchd_roundtrip_identity_and_scoped_cleanup(durable_root: Path) -> No
     )
 
 
+def test_infra_ref_reuses_secret_name_contract_without_echoing_values() -> None:
+    """Malformed references must refuse before managed argv is persisted."""
+    from scripts import run_episode
+
+    refs = run_episode._parse_infra_refs(["INPUT=SEALED_INPUT"], "benchmark_compute")
+    assert refs[0].value == "SEALED_INPUT"
+    with pytest.raises(ValueError) as caught:
+        run_episode._parse_infra_refs(
+            ["INPUT=synthetic-invalid-reference-canary"], "benchmark_compute"
+        )
+    assert "synthetic-invalid-reference-canary" not in str(caught.value)
+
+
 def test_supervisor_timeout_is_unknown_not_dead(monkeypatch: pytest.MonkeyPatch) -> None:
     """Missing best-effort telemetry must not certify owner death."""
     from types import SimpleNamespace

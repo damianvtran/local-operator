@@ -1405,6 +1405,26 @@ def _owned_host_refusal(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _parse_infra_refs(values: Sequence[str], purpose: str) -> tuple[ScopedInfraValue, ...]:
+    """Name-only refs, validated BEFORE argv can become a durable artifact.
+
+    ScopedInfraValue accepts arbitrary values because ordinary infra inputs
+    need them; a STORE_REF is different. Reuse SecretRef's existing NAME
+    contract rather than let a malformed value reach a managed plist and
+    discover the error only when the owner resolves it. No heuristic or
+    credential lookup is involved, and refusal never echoes the raw value.
+    """
+    refs = _parse_infra(values, purpose)
+    try:
+        for ref in refs:
+            SecretRef(name=ref.value)
+    except ValueError:
+        raise ValueError(
+            "--infra-ref requires a valid uppercase STORE_REF name; values omitted"
+        ) from None
+    return refs
+
+
 def _owner_relaunch_argv(raw: list[str]) -> list[str]:
     """The owner's relaunch argv: the caller's own flags MINUS the internal ones.
 
@@ -1509,6 +1529,11 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
         )
         return EXIT_PREFLIGHT
 
+    try:
+        _parse_infra_refs(args.infra_ref, args.infra_purpose)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_PREFLIGHT
     raw = _owner_relaunch_argv(list(getattr(args, "_raw_argv", [])))
     if not raw:
         print("internal error: the frontend has no raw argv to relaunch", file=sys.stderr)
@@ -1800,7 +1825,7 @@ async def run(args: argparse.Namespace) -> int:
     if owner_status is not None:
         owner_status.phase("admitted", detail="managed owner verified before prepare")
     try:
-        infra_refs = _parse_infra(args.infra_ref, args.infra_purpose)
+        infra_refs = _parse_infra_refs(args.infra_ref, args.infra_purpose)
         if infra_refs:
             if args.no_store:
                 raise ValueError("--infra-ref requires the sealed credential store")
