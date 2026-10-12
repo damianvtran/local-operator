@@ -935,21 +935,21 @@
     {
       "locale": "hi",
       "namespace": "wire.settings",
-      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
+      "source_sha256": "01a17628b72419d9e8f2809fd8c2317dc960eab698046ac55048ebcdd58ac2fe",
       "translator": {
         "agent": "i18n-translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11"
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "755/755; 1MAJOR/3MINOR/5NIT fixed: backoff बढ़ता, ख़ुद nukta ×6, shell subject, hours, वॉर्म, टर्न के दौरान, vendor; remediation-1 passed (8add9bae). SP polish independently rechecked passed (c6d9f003); child now उप-एजेंट; translator/auditor deepseek/deepseek-flash fallback."
+      "note": "755/755; 1MAJOR/3MINOR/5NIT fixed: backoff बढ़ता, ख़ुद nukta ×6, shell subject, hours, वॉर्म, टर्न के दौरान, vendor; remediation-1 passed (8add9bae). SP polish independently rechecked passed (c6d9f003); child now उप-एजेंट; translator/auditor deepseek/deepseek-flash fallback. Prior full-755 source 9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387, independently passed by DeepSeek on 2026-10-11, is carried byte-identically. Team Bridge six-key delta only: translator job 1e8fad4b20bd/session 74c555b4be0d and distinct auditor job 62b93155aa6e/session 2b65e3dacb4f, actual openai/gpt-6.1-sol on 2026-10-12; 6/6 semantic PASS, 0 findings, candidate SHA256 8a5e9ecfaad558d2aaad926b1c5f293018a8152bf377779b69681ae6d78065af bound to current source. All old 755 raw entry lines unchanged; this is not a new whole-761 semantic audit. Labels 13/7 cells fit the 29-cell row budget; no authored help-width limit or UI certification is inferred."
     }
   ]
 }
