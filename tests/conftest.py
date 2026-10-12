@@ -47,6 +47,10 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The open-frame trace names a real output file, read once at import.
+    # Inheriting it could append test timings to the operator's trace; tests
+    # that exercise tracing must opt in with their own isolated output path.
+    "LOP_OPEN_TRACE",
     # The click ladder's launch rung looks for `local-operator-ui` on PATH,
     # which on a machine that has the app installed FINDS IT. A test that drives
     # `open_session` without doubling the rung therefore starts the operator's
