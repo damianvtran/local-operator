@@ -21,7 +21,7 @@ import { followScrollTop } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory } from "../api";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
-import { hubReceiptLabel, quietGroupLabel, quietGroupsOf, type QuietGroup } from "../lib/quiet-groups";
+import { hubReceiptLabel, isHubReceipt, quietGroupLabel, quietGroupsOf, type QuietGroup } from "../lib/quiet-groups";
 import { beatLive, type SupplementBeat } from "../lib/supplement";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
@@ -166,6 +166,15 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			);
 		case "parent_message":
 		case "subagent_message": {
+			// Media belongs to the entry, not its fold eligibility or group anchor.
+			const media = (entry.images ?? []).map(img => <AttachmentImage key={img.index} pid={pid} entryId={entry.id} index={img.index} />);
+			// The child launch/user task also uses this kind during loading/error.
+			// Without producer facts it is a visible request boundary, not hub traffic.
+			if (!isHubReceipt(entry)) return entry.kind === "parent_message" ? (
+				<div className="flex min-w-0 justify-end"><div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5"><span className="block text-meta text-ink-dim">Parent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div></div>
+			) : (
+				<div className="min-w-0 rounded-sm border-l-2 border-l-hairline pl-3"><span className="block text-meta text-ink-dim">Subagent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div>
+			);
 			// A receipt is internal traffic, not a right-aligned human turn. Reuse
 			// the existing disclosure so the full body remains reachable on demand.
 			const label = hubReceiptLabel(entry);
@@ -174,7 +183,7 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 				<div className="flex flex-col gap-2 pl-3">
 					<p className="text-meta text-ink-muted">{label}{entry.details?.direction ? ` · ${entry.details.direction}` : ""}{entry.details?.job_id && entry.details?.label ? ` · Job ${entry.details.job_id}` : ""}</p>
 					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{typeof entry.details?.body === "string" ? entry.details.body : entry.text}</p>
-					{(entry.images ?? []).map(img => <AttachmentImage key={img.index} pid={pid} entryId={entry.id} index={img.index} />)}
+					{media}
 				</div>
 			</Disclosure>;
 		}
