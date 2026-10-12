@@ -2773,3 +2773,59 @@ path).
 it is deliberately a NEW key rather than a bump of `subagent_transcript`, whose
 reader gate asks with no minimum version: a bump would leave an older backend
 passing that gate while the live half does not exist.
+
+
+## Journal source order (opt-in `journal_order=1`)
+
+`features.journal_order: 1` states that the build supports journal-index order,
+not that every row or owner is ready. A viewer declares `journal_order=1` on
+history, snapshot and events. Without that declaration the new keys/events are
+absent (including JSON null defaults), preserving older strict DTOs. Older
+backends omit the vocabulary: clients retain an explicit legacy fallback, not
+a fabricated journal coordinate.
+
+A verified page carries `journal_order_state: ready`, `journal_generation`,
+and each entry's `journal_seq`. This is the 0-based complete-line ordinal from
+the existing transcript index, including rows omitted from search/rail views.
+It is **not** the bridge/frame publication `seq`, a message timestamp, or an
+arrival counter. Times remain presentation data. The page payload and index
+must share the reader's verified inode/size/mtime view; raced pages, cold or
+stale indexes omit authority and say `building`/`unavailable`. A peer with no
+owner-provided domain says `unsupported`; the receiver never assigns ordinals
+from its own disk. Missing information does not erase previously proven facts.
+
+`order_ids` is an optional, bounded lookup on these existing requests: at most
+512 entry IDs, each 1..128 characters. It has no effect without the declaration.
+The same-session index returns `journal_ordinals` for found IDs and explicitly
+names `journal_missing_ids`; it never truncates and pretends all were ranked.
+This handles an already-loaded optimistic send whose durable row aged out of
+the page before the viewer subscribed. Invalid query shapes return 422. The
+lookup shares the page's verified source/generation; it is not another journal
+scan or a global cross-session ID service.
+
+Generation is opaque **equality only**. Appends retain it; a rewrite/full
+rebuild/cache loss remints it and invalidates old ordinals. Clients capture a
+conversation order revision at request dispatch and commit for all snapshot,
+history, anchored and jump reads. An unmatched non-authoritative domain asks
+for one coalesced authoritative snapshot rather than switching generations;
+late old-revision responses cannot undo the installed domain. No UUID ordering
+or timestamp comparison can replace that fence.
+
+The owner advertises `journal-order-v1` only with an all-row post-fsync observer;
+the attach viewer declares `journal_order: true`. After a successful durable
+batch, background existing-index singleflight emits `journal_order_ready` with
+`journal_generation` and bounded `rows` descriptors (`id`, `journal_seq`, role,
+tool-call identity and supplement anchor where applicable). This corrects an
+already-streamed row even if the history-delta filter excluded it, without a
+later token/page. A streamed settle before fsync remains provisional. No scan
+runs per token or synchronously in the bridge event relay. Desktop subscribers
+also opt in, for live and replay alike. Cold page indexes issue the same late
+metadata correction; a raced/unavailable source requests authoritative reconcile.
+
+Consumers use one transitive ordering policy: confirmed same-domain source
+positions are distinct from explicit provisional admission/anchor blocks.
+Do not compare by ordinal for one pair and by time for another (that creates
+cycles). Tools/supplements retain their owning message/call and their own entry
+ordinal separately; row identity owns attachments, sender and payload. Metadata
+updates must change order even when payload bytes did not change, and omitted
+metadata on a live update cannot clear a known coordinate.

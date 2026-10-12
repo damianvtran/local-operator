@@ -1848,6 +1848,10 @@ class Transcript:
         # transcript whose model-facing window may also have been compacted.
         self._admitted_command_ids: set[str] = set()
         self._admission_handlers: list[Callable[[str], None]] = []
+        # Notify all row kinds only after fsync, never token-time settlement.
+        self._commit_handlers: list[
+            Callable[[tuple[TranscriptEntry, ...], tuple[int, int, float]], None]
+        ] = []
         #: Shared content-addressed media store. Write path: image payloads
         #: are externalized to it on append. Read path: references are
         #: resolved back to inline base64 on replay, so anything downstream
@@ -2081,21 +2085,21 @@ class Transcript:
         """
         async with self._lock:
 
-            def write() -> list[TranscriptEntry]:
+            def write() -> tuple[list[TranscriptEntry], tuple[int, int, float]]:
                 rows = build()
-                self._write_entries(rows, preserve_mtime=preserve_mtime)
-                return rows
+                source = self._write_entries(rows, preserve_mtime=preserve_mtime)
+                return rows, source
 
             worker = asyncio.create_task(asyncio.to_thread(write))
             cancelled = False
             while True:
                 try:
-                    rows = await asyncio.shield(worker)
+                    rows, source = await asyncio.shield(worker)
                     break
                 except asyncio.CancelledError:
                     cancelled = True
                     if worker.done():
-                        rows = worker.result()
+                        rows, source = worker.result()
                         break
             for entry in rows:
                 self._entries.append(entry)
@@ -2108,6 +2112,12 @@ class Transcript:
                             handler(command_id)
                         except Exception:  # noqa: BLE001 - observers cannot undo durability
                             logger.exception("transcript admission handler failed")
+            if rows and source is not None:
+                for handler in list(self._commit_handlers):
+                    try:
+                        handler(tuple(rows), source)
+                    except Exception:  # noqa: BLE001 - observers cannot undo durability
+                        logger.exception("transcript commit handler failed")
             if cancelled:
                 raise asyncio.CancelledError
             return rows
@@ -2284,7 +2294,7 @@ class Transcript:
 
     def _write_entries(
         self, entries: list[TranscriptEntry], *, preserve_mtime: bool = False
-    ) -> None:
+    ) -> tuple[int, int, float]:
         """Worker-only durable write; no in-memory index changes before fsync.
 
         A vanished file must be rebuilt from committed memory, even when its
@@ -2329,6 +2339,7 @@ class Transcript:
         exists so a second front end attaches to the live runtime rather than
         opening a second writer.
         """
+        written: os.stat_result | None = None
         rebuild = not self.path.exists()
         if self._created_at is None and not rebuild:
             # Another runtime may have materialized a speculative transcript
@@ -2354,6 +2365,7 @@ class Transcript:
                             handle.write(entry.to_json() + "\n")
                         handle.flush()
                         os.fsync(handle.fileno())
+                        written = os.fstat(handle.fileno())
                 except FileNotFoundError:
                     rebuild = True
                 except BaseException:
@@ -2385,12 +2397,23 @@ class Transcript:
                         handle.write(row.to_json() + "\n")
                     handle.flush()
                     os.fsync(handle.fileno())
+                    written = os.fstat(handle.fileno())
             except BaseException:
                 try:
                     self.path.unlink()
                 except FileNotFoundError:
                     pass
                 raise
+        assert written is not None
+        # Keep the writer descriptor's identity. Adopt a bookkeeping-restored
+        # mtime only for that same inode/size, never a replacement file's stamp.
+        try:
+            current = self.path.stat()
+        except OSError:
+            current = written
+        if (current.st_ino, current.st_size) == (written.st_ino, written.st_size):
+            written = current
+        return _page_source_signature(written)
 
     def _restore_mtime(self, previous_mtime: float | None) -> None:
         """Put a bookkeeping append's pre-write mtime back, best-effort.
@@ -2436,6 +2459,25 @@ class Transcript:
     def has_admitted_command(self, command_id: str) -> bool:
         """Return whether an append-only user row already owns ``command_id``."""
         return command_id in self._admitted_command_ids
+
+    def subscribe_commits(
+        self, handler: Callable[[tuple[TranscriptEntry, ...], tuple[int, int, float]], None]
+    ) -> Callable[[], None]:
+        """Observe all durable rows with the actual writer-source identity.
+
+        Callbacks run on the owner loop and must only enqueue bounded work;
+        they must not mutate these row references or scan the journal inline.
+        The writer source lets a late correction reject a replaced journal.
+        """
+        self._commit_handlers.append(handler)
+
+        def unsubscribe() -> None:
+            try:
+                self._commit_handlers.remove(handler)
+            except ValueError:
+                pass
+
+        return unsubscribe
 
     def subscribe_admitted_commands(self, handler: Callable[[str], None]) -> Callable[[], None]:
         """Observe user command IDs after their durable append boundary."""
