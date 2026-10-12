@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.i18n import catalogues
+from local_operator.i18n import catalogues, runtime
 
 #: The `wire.*` namespaces still awaiting their extraction slice: stub files
 #: that M0 shipped and no slice has populated yet (RFC §5: later slices
@@ -32,7 +32,8 @@ def test_shipped_wire_namespaces_exist() -> None:
     # until their own slices land. The TUI wave writes `tui.*` files instead —
     # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
     # in its own slice test, so this list does not churn per TUI slice.
-    # Waves 1-3: es/fr, ru/vi, then hi/zh-CN trees ship with their waves.
+    # Catalogue presence includes the held Chinese snapshot; the generated
+    # shipped set, not this file-list assertion, enforces audit eligibility.
     assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "vi", "zh-CN")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
@@ -55,10 +56,11 @@ def test_shipped_wire_namespaces_exist() -> None:
 
 
 @pytest.mark.parametrize("locale", ("hi", "zh-CN"))
-def test_wave3_carries_its_audited_namespace_snapshot(locale: str) -> None:
-    # Pin the ten namespaces this wave audited, not the moving en namespace
-    # set: later extraction namespaces legitimately use per-namespace fallback.
-    assert catalogues.namespaces(locale) == (
+def test_wave3_carries_its_namespace_snapshot_with_parity(locale: str) -> None:
+    # Pin the original ten, including Chinese's failed semantic-audit slash
+    # namespace. Mechanical parity must remain checked even when a locale is
+    # not eligible to ship; later namespaces intentionally use en fallback.
+    namespaces = (
         "tui.status",
         "tui.transcript",
         "tui.welcome",
@@ -70,6 +72,15 @@ def test_wave3_carries_its_audited_namespace_snapshot(locale: str) -> None:
         "wire.settings",
         "wire.slash",
     )
+    assert catalogues.namespaces(locale) == namespaces
+    for namespace in namespaces:
+        source = catalogues.load_catalogue("en", namespace)
+        translated = catalogues.load_catalogue(locale, namespace)
+        assert translated.keys() == source.keys(), (locale, namespace)
+        for key in source:
+            assert runtime.message_arguments(translated[key]) == runtime.message_arguments(
+                source[key]
+            ), (locale, namespace, key)
 
 
 def test_hash_is_over_file_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

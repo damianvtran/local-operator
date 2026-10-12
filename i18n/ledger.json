@@ -878,21 +878,21 @@
     {
       "locale": "hi",
       "namespace": "wire.exec",
-      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "source_sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
       "translator": {
         "agent": "i18n-translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11"
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
         "result": "passed",
         "findings": 0
       },
-      "status": "stale",
-      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content — run ran deepseek-flash (anthropic-credentials fallback from pinned sonnet). Original empty-source carry provenance retained at snapshot 56d7a2cf3a; auditor passed only the 3-byte empty source recorded above. Current en source is populated (3274 bytes; sha256 041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94). Translation and independent audit of that new source are pending; no approval for new content."
+      "status": "passed",
+      "note": "Independent audit 17/17 passed0; runtime error/receipt/advisory sample passed. Translator and independent auditor openai/gpt-6.1-sol, 2026-10-12; target sha256 701bccb7e567594bf9f72254e24fa11831d85b532a52259b6d2dd9d7258e2cb7 verified locally. Supersedes old empty-source approval at snapshot 56d7a2cf3a: source ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356, 3 bytes {}+LF, passed0/no message content, translator deepseek/deepseek-flash, auditor deepseek/deepseek-flash, 2026-10-11 (fallback disclosed). New approval covers populated source; runtime samples are not full CLI/lifecycle E2E."
     },
     {
       "locale": "hi",
@@ -1019,13 +1019,13 @@
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11",
-        "result": "failed",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
+        "result": "passed",
         "findings": 0
       },
-      "status": "failed",
-      "note": "Independent audit (2nd pass): 12/12; {error} byte-exact x7; order+punct mirror en; 凭据/内嵌/未注册 endorsed; endpoint Latin; valns+check clean. Tool-output [redacted] masks are display-layer, not file content (sha verified). auditor deepseek-flash (fallback; pinned sonnet quota). Prior passed verdict and attribution above apply to the earlier catalogue bytes only. Manager reports one-value semantic remediation in this namespace by translator openai/gpt-6.1-sol on 2026-10-12; independent delta/SP recheck is running read-only. Current whole-namespace approval is pending; failed status is fail-closed, not a claim of a known unresolved meaning defect."
+      "status": "passed",
+      "note": "Initial ordinary full12 audit 4af46d845e1c, deepseek/deepseek-flash, 2026-10-11, passed0 stands for unchanged inline_credentials. SP c3516b7d9054, openai/gpt-6.1-sol, 2026-10-12 read 11/12: inline_credentials unreadable on ordinary read, NOT semantically rereviewed; found 1 MAJOR credential key name vs secret. Independent 2-value delta recheck 2e5edde0be0b, openai/gpt-6.1-sol, 2026-10-12 passed0: credential key-name fix; target sha256 315a6d60c19c99f5bb1b065b902e3510a22ee22e316017e0d988ccf381b12948 verified locally. Both rounds retained; all unchanged bytes identical to backed-up predecessor per recheck report; no new whole-file signoff."
     },
     {
       "locale": "zh-CN",
@@ -1039,12 +1039,12 @@
       "auditor": {
         "agent": "i18n-auditor",
         "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-11",
-        "result": "failed",
+        "date": "2026-10-12",
+        "result": "passed",
         "findings": 0
       },
-      "status": "failed",
-      "note": "Initial translator/auditor deepseek/deepseek-flash: 3MAJOR/2MINOR/3NIT. Unified 13-value fix; final translator/auditor openai/gpt-6.1-sol; independent recheck passed0 (96a10cfc). Both rounds 2026-10-11; source current. Prior passed verdict and attribution above apply to the earlier catalogue bytes only. Manager reports one-value semantic remediation in this namespace by translator openai/gpt-6.1-sol on 2026-10-12; independent delta/SP recheck is running read-only. Current whole-namespace approval is pending; failed status is fail-closed, not a claim of a known unresolved meaning defect."
+      "status": "passed",
+      "note": "Initial full755 translator deepseek/deepseek-flash and auditor openai/gpt-6.1-sol, 2026-10-11; 3MAJOR/5MINOR/2NIT fixed; remediation-1 passed0 (fd86b1ff). SP c3516b7d9054, openai/gpt-6.1-sol, 2026-10-12 scanned755 and deep-sampled safety/fork/mesh/network/retry/default-model; found 1 MAJOR runtime temporal window vs graphical drawing. Independent 2-value delta recheck 2e5edde0be0b, openai/gpt-6.1-sol, 2026-10-12 passed0: runtime temporal-window fix; target sha256 00627af3a353a9a6371a626e90e0b18fb8aa8b2dd57c2cb62d78ae3c0eb43d01 verified locally. Both rounds retained; all unchanged bytes identical to backed-up predecessor per recheck report; no new whole-file signoff."
     },
     {
       "locale": "zh-CN",
@@ -1068,21 +1068,21 @@
     {
       "locale": "zh-CN",
       "namespace": "wire.exec",
-      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "source_sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
       "translator": {
         "agent": "i18n-translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-11"
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
       },
       "auditor": {
         "agent": "i18n-auditor",
         "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-11",
+        "date": "2026-10-12",
         "result": "passed",
         "findings": 0
       },
-      "status": "stale",
-      "note": "Independent carry audit passed0; empty namespace byte-identical to en (3 bytes, {}+LF; ca3d163b). Translator deepseek/deepseek-flash; auditor openai/gpt-6.1-sol. Original empty-source carry provenance retained at snapshot 56d7a2cf3a; auditor passed only the 3-byte empty source recorded above. Current en source is populated (3274 bytes; sha256 041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94). Translation and independent audit of that new source are pending; no approval for new content."
+      "status": "passed",
+      "note": "Independent audit 17/17 passed0 BLOCKER/MAJOR; 1 MINOR profile 配置档 ambiguity accepted, no translation change; 13-key/15-case visibility render sample passed. Translator and independent auditor openai/gpt-6.1-sol, 2026-10-12; target sha256 afe5a5d81a9f60309d6d9575f3da6d09858e3041f1c7833da613f8e44997c238 verified locally. Supersedes old empty-source approval at snapshot 56d7a2cf3a: source ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356, 3 bytes {}+LF, passed0/no message content, translator deepseek/deepseek-flash, auditor openai/gpt-6.1-sol, 2026-10-11 (fallback disclosed). New approval covers populated source; runtime samples are not full CLI/lifecycle E2E."
     },
     {
       "locale": "zh-CN",

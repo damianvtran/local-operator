@@ -1,7 +1,8 @@
 """The i18n catalogue route, and the capability + language that advertise it.
 
-Waves 1-3 ship `en`, `es`, `fr`, `ru`, `vi`, `hi` and `zh-CN`; the shipped-tree assertions are
-about shape (map, hash, ETag, 304, 404s) rather than about translated content;
+Catalogue files include the held `zh-CN` snapshot, but only passed locales
+are advertised by language resolution. Route assertions cover shape (map,
+hash, ETag, 304, 404s), not semantic approval or a full CLI/server lifecycle;
 the fixture test proves a populated catalogue traverses the same path.
 """
 
@@ -36,6 +37,25 @@ async def test_a_wave1_locale_is_served_once_translated(test_app_client) -> None
     assert response.status_code == 200
     raw = (Path(catalogues.__file__).parent / "catalogues" / "fr" / "wire.errors.json").read_bytes()
     assert response.json()["result"]["content_sha256"] == hashlib.sha256(raw).hexdigest()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ("hi", "zh-CN"))
+async def test_wave3_exec_catalogue_and_conditional_request(test_app_client, locale: str) -> None:
+    # Assets remain readable while Chinese's semantic audit holds shipping.
+    # Pin populated exec through the route rather than only package loading.
+    path = f"/v1/i18n/catalogues/{locale}/wire.exec"
+    response = await test_app_client.get(path)
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["messages"] == catalogues.load_catalogue(locale, "wire.exec")
+    assert len(result["messages"]) == 17
+    sha = catalogues.catalogue_sha256(locale, "wire.exec")
+    assert result["content_sha256"] == sha
+    assert response.headers["etag"] == f'"{sha}"'
+    cached = await test_app_client.get(path, headers={"If-None-Match": response.headers["etag"]})
+    assert cached.status_code == 304
+    assert not cached.content
 
 
 @pytest.mark.asyncio
