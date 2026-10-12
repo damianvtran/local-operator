@@ -3721,19 +3721,50 @@ class QuietGroupBlock(ExpandableActionBlock):
         return False
 
 
+def _source_owner_of(block: TranscriptBlock) -> tuple[str, int] | None:
+    """The source coordinate a row's OWN provenance names, or ``None``.
+
+    Read from the projection anchor every projected row carries
+    (``navigation_anchor_id`` plus the part the source itself assigned), so
+    "the same owner" is a fact about the SOURCE — never a guess from a row's
+    text, its type, or its neighbours' types (review round 7, R6-1/Q-R8-1).
+    A row with no anchor returns ``None``, which breaks any ownership chain:
+    live rows the projection has not stamped cannot claim a neighbour's owner.
+    """
+    anchor = str(getattr(block, "navigation_anchor_id", "") or "")
+    if not anchor:
+        return None
+    part = getattr(block, "navigation_anchor_part", None)
+    if not isinstance(part, int):
+        return None
+    return (anchor, part)
+
+
 def quiet_group_record_of(
-    block: TranscriptBlock, *, prev_kind: str | None = None
+    block: TranscriptBlock,
+    *,
+    prev_kind: str | None = None,
+    prev_owner: tuple[str, int] | None = None,
 ) -> QuietGroupRecord:
     """Map ONE mounted block onto the group derivation's record vocabulary.
 
     The TUI half of the mapping ``tui/quiet_groups.py`` documents; the
-    derivation itself never sees a widget. ``prev_kind`` is the kind of the
-    row BEFORE this one in append order, and only one rule reads it:
+    derivation itself never sees a widget. Two parameters describe the row
+    BEFORE this one in source order, and only one rule reads them:
 
-    - an :class:`ImageBlock` is ``inside`` when the row before it is a tool
-      row — it is that call's output, so it folds WITH the call — and a
-      splitter otherwise (a picture a reader must be able to see stays
-      visible; a user prompt's images follow their own splitting row).
+    - an :class:`ImageBlock` is ``inside`` on either of two POSITIVE facts:
+      the row before it is a tool or hub row — it is that call's or that
+      receipt's output, so it folds WITH it — or its own source coordinate
+      continues the SAME owner's part chain (``prev_owner`` is the anchor id
+      plus the previous part: body 0, then the pictures at 1, 2, 3 ...).
+      Without the owner arm a receipt carrying several pictures kept only the
+      first one: the first picture read as interior and the second, whose
+      predecessor was now interior, read as a splitter — splitting the very
+      run it belonged to (review round 7, R6-1/Q-R8-1). Everything else keeps
+      the conservative reading: a picture a reader must be able to see stays
+      visible, a different owner's picture is never absorbed into an earlier
+      run, and a row that breaks the chain (a human or final boundary, a row
+      with no coordinate) ends it.
 
     Everything else classifies by type; the id rides ``navigation_anchor_id``
     (set for every projected row) with an object-identity fallback for live
@@ -3794,7 +3825,14 @@ def quiet_group_record_of(
             return QuietGroupRecord(kind="other", id=record_id)
         return QuietGroupRecord(kind="assistant", id=record_id, text=text)
     if isinstance(block, ImageBlock):
-        kind = "inside" if prev_kind in ("tool", "hub") else "image"
+        owner = _source_owner_of(block)
+        continues_owner = (
+            owner is not None
+            and prev_owner is not None
+            and owner[0] == prev_owner[0]
+            and owner[1] == prev_owner[1] + 1
+        )
+        kind = "inside" if prev_kind in ("tool", "hub") or continues_owner else "image"
         return QuietGroupRecord(kind=kind, id=record_id)
     return QuietGroupRecord(kind="other", id=record_id)
 
@@ -3808,17 +3846,23 @@ def _records_of_blocks(blocks: Sequence[TranscriptBlock]) -> list[QuietGroupReco
     row that has since settled or failed — so a formation or a restate reads
     the CURRENT truth instead of the append-time snapshot.
 
-    ``prev_kind`` chains from the span's first block. That is faithful
-    because a span never begins with the one context-sensitive row: an image
-    classified ``inside`` implies the tool row it belongs to is in the span
-    too (a tool row never splits), so the chain cannot disagree with the
-    stream's own reading of the first block.
+    Two things chain from the span's first block: the previous row's KIND and
+    its source-owner coordinate. The kind is faithful because a span never
+    begins with the one context-sensitive row: an image classified ``inside``
+    implies the tool row it belongs to is in the span too (a tool row never
+    splits), so the chain cannot disagree with the stream's own reading of
+    the first block. The owner coordinate is what lets a CONTIGUOUS chain of
+    one owner's parts (body 0, pictures 1, 2, 3 ...) stay interior throughout
+    — the same walk the live tracker, the offscreen replay and the ordered
+    reconciliation all perform, so all three agree by construction.
     """
     records: list[QuietGroupRecord] = []
     prev_kind: str | None = None
+    prev_owner: tuple[str, int] | None = None
     for block in blocks:
-        record = quiet_group_record_of(block, prev_kind=prev_kind)
+        record = quiet_group_record_of(block, prev_kind=prev_kind, prev_owner=prev_owner)
         prev_kind = record.kind
+        prev_owner = _source_owner_of(block)
         records.append(record)
     return records
 
@@ -3841,7 +3885,12 @@ class PlannedQuietGroup(NamedTuple):
     span_head_loaded: bool
 
 
-def _quiet_fold_boundary(block: TranscriptBlock, *, prev_kind: str | None = None) -> bool:
+def _quiet_fold_boundary(
+    block: TranscriptBlock,
+    *,
+    prev_kind: str | None = None,
+    prev_owner: tuple[str, int] | None = None,
+) -> bool:
     """Whether ``block`` is a boundary a span may fold against.
 
     A splitter is; another group's BAR is not: the bar stands for rows that are
@@ -3853,7 +3902,9 @@ def _quiet_fold_boundary(block: TranscriptBlock, *, prev_kind: str | None = None
     """
     if isinstance(block, QuietGroupBlock):
         return False
-    return group_splitter_of(quiet_group_record_of(block, prev_kind=prev_kind))
+    return group_splitter_of(
+        quiet_group_record_of(block, prev_kind=prev_kind, prev_owner=prev_owner)
+    )
 
 
 def quiet_group_plan(
@@ -4017,6 +4068,12 @@ class QuietGroupTracker:
         self._open: QuietGroupBlock | None = None
         self._trailing: _QuietTrailingSpan | None = None
         self._last_record: QuietGroupRecord | None = None
+        #: The source-owner coordinate of the last source row this fold saw,
+        #: carried beside the record so the ownership arm of
+        #: ``quiet_group_record_of`` keeps working across separate appends
+        #: (a receipt, then its pictures one row at a time). Cleared wherever
+        #: ``_last_record`` is re-derived from the actual tail.
+        self._last_owner: tuple[str, int] | None = None
         #: The transcript's head-cut verdict (the caller's; see `resync`).
         self._head_cut = False
 
@@ -4032,8 +4089,9 @@ class QuietGroupTracker:
             # safe reading is to leave it alone.
             return
         prev_kind = self._last_record.kind if self._last_record is not None else None
-        record = quiet_group_record_of(block, prev_kind=prev_kind)
+        record = quiet_group_record_of(block, prev_kind=prev_kind, prev_owner=self._last_owner)
         self._last_record = record
+        self._last_owner = _source_owner_of(block)
         if quiet_family_of(record) is not None:
             self._receipt(block)
         elif not group_splitter_of(record):
@@ -4195,7 +4253,7 @@ class QuietGroupTracker:
             partial = self._head_cut
         else:
             previous = source[start - 1]
-            if not _quiet_fold_boundary(previous) and not getattr(
+            if not group_splitter_of(records[start - 1]) and not getattr(
                 previous, "QUIET_GROUP_HEAD_CUT", False
             ):
                 # On-hand source rows above the span that the boundary
@@ -4259,6 +4317,7 @@ class QuietGroupTracker:
         records = _records_of_blocks(source)
         if records:
             self._last_record = records[-1]
+        self._last_owner = _source_owner_of(source[-1]) if source else None
         last_splitter = _last_splitter_index(records)
         stretch = source[last_splitter + 1 :]
         stretch_records = records[last_splitter + 1 :]
@@ -4435,6 +4494,7 @@ class QuietGroupTracker:
         stretch_records = records[last_splitter + 1 :]
         if stretch_records:
             self._last_record = stretch_records[-1]
+        self._last_owner = _source_owner_of(stretch[-1]) if stretch else None
         if stretch and isinstance(stretch[0], QuietGroupBlock):
             # The tail already carries a bar: adopt it as the open group, its
             # facts as they stand (the bar authored them; growth re-states).
