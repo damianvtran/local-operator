@@ -1639,6 +1639,7 @@ def parse_decision(
     compaction: CompactionRecord | None = None,
     action_surface: ActionSurface = LEGACY_ACTION_SURFACE,
     action_binding: str = LEGACY_ACTION_BINDING,
+    channel_arguments: bool = False,
 ) -> ModelDecision:
     """Parse the reply's ACTIONS strictly and bind them to the current observation.
 
@@ -1662,9 +1663,20 @@ def parse_decision(
     observation binding, two action arrays that could each be the one meant, a
     reply that states no action at all, and material a reply carried after the
     one thing this decoder read.
+
+    ``channel_arguments`` says what the PAYLOAD is: the argument text of a
+    dedicated reply-channel call (``harness/reply_channel``), whose arguments
+    ARE the reply. It widens exactly one reading -- a sole key of any name is
+    read structurally there (``public_reply._exactly_one_decision``) -- and no
+    other: every named carrier, declared key, sequence, binding check and
+    validation is the same one a prose reply crosses, and prose never gets the
+    structural reading at all. The client sets it only where the bytes
+    provably came off that channel (``EpisodeModelClient.decide``).
     """
 
-    decoded, trailing, leading_framing_bytes = _decode_leading_json(payload)
+    decoded, trailing, leading_framing_bytes = _decode_leading_json(
+        payload, channel_arguments=channel_arguments
+    )
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
     trailing_read_as_sequence = False
@@ -1683,15 +1695,23 @@ def parse_decision(
             trailing_read_as_sequence = True
         else:
             actions, note, tolerated_fields = normalise_public_reply(
-                decoded, action_binding=action_binding, at_end=False
+                decoded,
+                action_binding=action_binding,
+                at_end=False,
+                channel_arguments=channel_arguments,
             )
     else:
         actions, note, tolerated_fields = normalise_public_reply(
-            decoded, action_binding=action_binding
+            decoded, action_binding=action_binding, channel_arguments=channel_arguments
         )
     if action_binding == COMPACT_ACTION_BINDING:
         try:
-            actions = bind_compact_actions(decoded, actions, observation.observation_id)
+            actions = bind_compact_actions(
+                decoded,
+                actions,
+                observation.observation_id,
+                channel_arguments=channel_arguments,
+            )
         except ValueError as error:
             raise ActionBatchRefused(
                 "decision does not bind to the current observation_id",
@@ -1817,6 +1837,10 @@ def parse_decision(
     return ModelDecision(
         action_batch=batch,
         public_reply=public_reply,
+        # The structural-reading fact rides the decision because MANY readers
+        # decode these bytes again (episode recording is one); a reader without
+        # it reads a different reply. See ``ModelDecision.channel_arguments``.
+        channel_arguments=channel_arguments,
         route=route,
         usage=usage or ModelUsage(),
         cost_micros=cost_micros,
@@ -2773,6 +2797,12 @@ class ProviderModelClient:
                 compaction=compaction,
                 action_surface=action_surface,
                 action_binding=self._action_binding,
+                # Whether the bytes just judged came off the reply channel.
+                # ``channel_reply`` truthy is exactly the condition that
+                # replaced the prose with the call's own arguments a few lines
+                # up; a falsy channel reply leaves the prose in place, and
+                # prose keeps the closed carrier list -- see ``parse_decision``.
+                channel_arguments=bool(channel_reply),
                 # Was hardcoded to 0 while the runner sent no tools and read no
                 # call. Now that the reply channel exists, the bundle records
                 # how the model actually answered — which is the measurement
