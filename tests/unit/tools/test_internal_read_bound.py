@@ -600,3 +600,272 @@ async def test_no_read_branch_returns_an_unbounded_result(tmp_path: Path) -> Non
 
     # The directory listing must stay expandable, not merely clipped.
     assert "spill://" in _text_of(dir_result)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_skill_read_is_shaped_like_internal_read(tmp_path: Path) -> None:
+    """Fix A: a SKILL.md read by its on-disk path gets the outline shape.
+
+    The internal-URL branch already shapes this document to ~7 KB; the same
+    bytes via ``~/.claude/skills/<name>/SKILL.md`` used to return the plain
+    8 KiB clamp with no outline, so an agent that reached for the file path
+    (the instinctive spelling) lost both the saving and the guarantee that
+    every operative heading stays visible.
+    """
+    doc = _skill_like_document()
+    skill_dir = tmp_path / "skills" / "fixture-skill"
+    skill_dir.mkdir(parents=True)
+    target = skill_dir / "SKILL.md"
+    target.write_text(doc, encoding="utf-8")
+    context = ToolContext(cwd=str(tmp_path), session_id="fs-skill-test")
+
+    result = await _call(context, {"path": str(target)})
+
+    body = _text_of(result)
+    assert len(body) <= 8192  # shaped, not the plain clamp and not the doc
+    assert len(body) < len(doc) // 2
+    assert _GATE_HEADING in body  # the deep operative heading stays visible
+    assert "PARTIAL" in body
+    assert result.details is not None
+    assert result.details["url"] == "skill://fixture-skill"
+    assert result.details["path"] == str(target)
+    # The full text is still reachable: the advertised spill range resolves.
+    handle = result.details["spill"]["handle"]
+    expanded = await _call(context, {"path": handle, "range": "1-20"})
+    assert "Fixture Skill" in _text_of(expanded)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_skill_raw_read_stays_exact(tmp_path: Path) -> None:
+    """raw=true is the explicit exact-bytes request; shaping must not eat it."""
+    doc = _skill_like_document()
+    skill_dir = tmp_path / "skills" / "fixture-skill"
+    skill_dir.mkdir(parents=True)
+    target = skill_dir / "SKILL.md"
+    target.write_text(doc, encoding="utf-8")
+    context = ToolContext(cwd=str(tmp_path), session_id="fs-skill-raw-test")
+
+    result = await _call(context, {"path": str(target), "raw": True})
+
+    assert "PARTIAL" not in _text_of(result)
+
+
+def _guide_like_document() -> str:
+    """A GUIDE.md-shaped fixture: frontmatter name + deep operative heading."""
+    parts = [
+        "---",
+        "name: fixture-guide",
+        "description: a guide fixture with a deep operative heading.",
+        "---",
+        "",
+        "# Fixture Guide",
+        "",
+        "## Start",
+        "",
+    ]
+    parts += [f"Routing line {i}." for i in range(40)]
+    for section in range(12):
+        parts += ["", f"## Filler Section {section}", ""]
+        parts += [f"Filler body line {i} of section {section}." for i in range(40)]
+    parts += ["", f"## {_GATE_HEADING}", "", _GATE_BODY, ""]
+    parts += [f"Gate detail line {i}." for i in range(20)]
+    parts += ["", "## Cross References", "", "See elsewhere.", ""]
+    return "\n".join(parts)
+
+
+def _reference_like_document() -> str:
+    """A reference file: no frontmatter, several headings, past the limit."""
+    parts = ["# Deep Reference", "", "## Overview", ""]
+    parts += [f"Overview line {i}." for i in range(40)]
+    for section in range(12):
+        parts += ["", f"## Reference Section {section}", ""]
+        parts += [f"Reference body line {i} of section {section}." for i in range(40)]
+    parts += ["", f"## {_GATE_HEADING}", "", _GATE_BODY, ""]
+    return "\n".join(parts)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_reference_read_derives_resource_url(tmp_path: Path) -> None:
+    """R6: a reference under a skill dir maps to ``skill://<name>/<relpath>``.
+
+    This is the least-obvious URL construction in Fix A: the name must come
+    from the BODY file's frontmatter in the ancestor directory, and the suffix
+    must be the path relative to that directory — otherwise the shaped footer
+    advertises an expansion the resolver would not serve.
+    """
+    skill_dir = tmp_path / "skills" / "fixture-skill"
+    ref_dir = skill_dir / "references"
+    ref_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(_skill_like_document(), encoding="utf-8")
+    target = ref_dir / "deep.md"
+    target.write_text(_reference_like_document(), encoding="utf-8")
+    context = ToolContext(cwd=str(tmp_path), session_id="fs-ref-test")
+
+    result = await _call(context, {"path": str(target)})
+
+    body = _text_of(result)
+    assert "PARTIAL" in body
+    assert _GATE_HEADING in body
+    assert result.details is not None
+    assert result.details["url"] == "skill://fixture-skill/references/deep.md"
+    assert result.details["path"] == str(target)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_guide_read_is_shaped_and_pruning_exempt(tmp_path: Path) -> None:
+    """R6 + R4: a GUIDE.md by path shapes as ``guide://`` and is exempt.
+
+    The guide exemption matters because Fix A stamps ``guide://`` on the
+    result while supersede grouping still keys on ``details['path']`` —
+    without the exemption a superseded shaped guide would blank into the
+    re-read loop the skill exemption exists to prevent.
+    """
+    guide_dir = tmp_path / "guides" / "fixture-guide"
+    guide_dir.mkdir(parents=True)
+    target = guide_dir / "GUIDE.md"
+    target.write_text(_guide_like_document(), encoding="utf-8")
+    context = ToolContext(cwd=str(tmp_path), session_id="fs-guide-test")
+
+    result = await _call(context, {"path": str(target)})
+
+    body = _text_of(result)
+    assert "PARTIAL" in body
+    assert _GATE_HEADING in body
+    assert result.details is not None
+    assert result.details["url"] == "guide://fixture-guide"
+    assert result.details["path"] == str(target)
+
+    message = Message(
+        role="tool",
+        content=[TextContent(text=body)],
+        tool_name="read",
+        tool_call_id="call-guide",
+        provider_payload={"details": result.details},
+    )
+    assert _is_prunable(message) is False
+
+
+@pytest.mark.asyncio
+async def test_plain_markdown_without_skill_ancestor_stays_on_plain_clamp(
+    tmp_path: Path,
+) -> None:
+    """R6 negative case: an ordinary .md with no skill/guide ancestor is NOT shaped.
+
+    It must keep the plain numbered clamp, carry no ``url``, and show no
+    outline banner — otherwise Fix A would be re-shaping arbitrary markdown.
+    """
+    doc = "# Plain Notes\n\n" + "\n".join(f"plain prose line {i}" for i in range(600))
+    target = tmp_path / "notes" / "plain.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(doc, encoding="utf-8")
+    context = ToolContext(cwd=str(tmp_path), session_id="fs-plain-test")
+
+    result = await _call(context, {"path": str(target)})
+
+    body = _text_of(result)
+    assert "PARTIAL" not in body
+    assert result.details is not None
+    assert "url" not in result.details
+    assert result.details["path"] == str(target)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_skill_ranged_read_stays_exact(tmp_path: Path) -> None:
+    """R6: a ranged filesystem skill read returns exactly the asked lines.
+
+    The ranged bypass is load-bearing — it is what the shaped footer
+    advertises — so shaping must never eat it.
+    """
+    doc = _skill_like_document()
+    skill_dir = tmp_path / "skills" / "fixture-skill"
+    skill_dir.mkdir(parents=True)
+    target = skill_dir / "SKILL.md"
+    target.write_text(doc, encoding="utf-8")
+    context = ToolContext(cwd=str(tmp_path), session_id="fs-skill-range-test")
+
+    result = await _call(context, {"path": str(target), "range": "5-9"})
+
+    body = _text_of(result)
+    expected = doc.splitlines()[4:9]
+    assert "PARTIAL" not in body
+    for line in expected:
+        assert line in body
+    # Exactly those lines: the next source line must not leak in.
+    assert doc.splitlines()[9] not in body
+
+
+@pytest.mark.asyncio
+async def test_lowercase_skill_body_keeps_declared_name_under_case_sensitive_reads(
+    tmp_path: Path,
+) -> None:
+    """R3: a lowercase ``skill.md`` keeps its declared ``name:``.
+
+    On this host's case-insensitive filesystem the old ``SKILL.MD``
+    reconstruction accidentally resolves, so the test simulates Linux
+    case-sensitive semantics by making ``read_bytes``/``is_file`` miss any
+    name whose exact case is not on disk. Under that simulation the old code
+    returned the directory-derived ``skill://myskill`` for the body and
+    ``None`` for its reference; the fix must return the declared name for
+    both, because it opens the body file actually found.
+    """
+    skill_dir = tmp_path / "myskill"
+    ref_dir = skill_dir / "references"
+    ref_dir.mkdir(parents=True)
+    body_file = skill_dir / "skill.md"
+    body_file.write_text(_skill_like_document(), encoding="utf-8")
+    target = ref_dir / "deep.md"
+    target.write_text(_reference_like_document(), encoding="utf-8")
+
+    real_read_bytes = Path.read_bytes
+    real_is_file = Path.is_file
+
+    def strict_read_bytes(self: Path, *args: object, **kwargs: object) -> bytes:
+        if self.name in ("SKILL.MD", "GUIDE.MD"):
+            siblings = [entry.name for entry in self.parent.iterdir()]
+            if self.name not in siblings:
+                raise OSError("simulated case-sensitive miss")
+        return real_read_bytes(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    def strict_is_file(self: Path, *args: object, **kwargs: object) -> bool:
+        if self.name in ("SKILL.md", "GUIDE.md", "SKILL.MD", "GUIDE.MD"):
+            siblings = [entry.name for entry in self.parent.iterdir()]
+            return self.name in siblings and real_is_file(  # type: ignore[arg-type]
+                self, *args, **kwargs
+            )
+        return real_is_file(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with (
+        mock.patch.object(Path, "read_bytes", strict_read_bytes),
+        mock.patch.object(Path, "is_file", strict_is_file),
+    ):
+        assert builtin._internal_url_for_path(body_file) == "skill://fixture-skill"
+        assert builtin._internal_url_for_path(target) == "skill://fixture-skill/references/deep.md"
+
+
+@pytest.mark.asyncio
+async def test_lowercase_guide_body_keeps_declared_name(tmp_path: Path) -> None:
+    """R3 sibling: a lowercase ``guide.md`` resolves to its declared name."""
+    guide_dir = tmp_path / "myguide"
+    guide_dir.mkdir(parents=True)
+    target = guide_dir / "guide.md"
+    target.write_text(_guide_like_document(), encoding="utf-8")
+
+    assert builtin._internal_url_for_path(target) == "guide://fixture-guide"
+
+
+def test_ancestor_walk_is_bounded(tmp_path: Path) -> None:
+    """R5: a body file beyond the ancestor bound must not claim a deep .md.
+
+    A stray ``SKILL.md`` at the top of a deep tree would otherwise shape (and
+    exempt) every markdown read beneath it, however distant.
+    """
+    root = tmp_path / "stray"
+    deep = root
+    for level in range(builtin._INTERNAL_URL_ANCESTOR_LIMIT + 4):
+        deep = deep / f"level{level}"
+    deep.mkdir(parents=True)
+    (root / "SKILL.md").write_text(_skill_like_document(), encoding="utf-8")
+    target = deep / "plain.md"
+    target.write_text("# Plain\n\ntext\n", encoding="utf-8")
+
+    assert builtin._internal_url_for_path(target) is None

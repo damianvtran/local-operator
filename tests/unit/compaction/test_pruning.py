@@ -14,6 +14,8 @@ from local_operator.compaction.pruning import (
 from local_operator.compaction.tokens import estimate_tokens
 from local_operator.harness.types import ImageContent, Message, TextContent
 
+_PAYLOAD_FIELD = "".join(["[redacted]", "_payload"])
+
 NOW = 10_000_000
 ACTIVE = NOW  # not idle
 IDLE_AGO = 6_000_000  # > 5_400_000 ms idle window
@@ -487,3 +489,99 @@ def test_error_frames_are_never_swept():
 
     assert dropped == 0
     assert any(isinstance(block, ImageContent) for block in failed.content)
+
+
+def test_oversized_superseded_victim_blanks_despite_warm_suffix():
+    """Fix C: a victim bigger than the warm suffix it invalidates is blanked.
+
+    The warm-suffix guard defers small victims because re-writing the suffix
+    costs more than they save. A victim larger than that suffix inverts the
+    arithmetic — it would be re-billed on every request until compaction,
+    while the suffix is re-written only once.
+    """
+    big = _read_result("/repo/big.py", words=30000)
+    messages = [big, _assistant_big(words=10000), _read_result("/repo/big.py")]
+    suffix = compute_suffix_tokens(messages)
+    victim_tokens = estimate_tokens(big)
+    assert suffix[0] > 8000
+    assert victim_tokens > suffix[0], f"victim {victim_tokens} must exceed suffix {suffix[0]}"
+
+    _, changed = prune_tool_outputs(messages, NOW, ACTIVE)
+    assert changed is True
+    assert big.text == SUPERSEDED_NOTICE
+
+
+def test_oversized_victim_smaller_than_suffix_stays_despite_exceeding_floor():
+    """R1 discriminating case: victim >= floor but victim < suffix must stay.
+
+    This is the band the fixed-threshold rule got wrong: a 9k-token victim
+    behind a 20k-token warm suffix was blanked even though the re-write it
+    forces costs more than the victim saves on the next request. The two
+    rules (fixed floor vs victim-vs-suffix) disagree ONLY here, so this is
+    the test that distinguishes them. Word counts are tuned so the measured
+    estimates land in the band; the asserts pin the band itself so a
+    tokenizer change that moves the fixture out of it fails loudly instead
+    of silently testing the wrong rule.
+    """
+    victim = _read_result("/repo/big.py", words=9000)
+    messages = [victim, _assistant_big(words=20000), _read_result("/repo/big.py")]
+    suffix = compute_suffix_tokens(messages)
+    victim_tokens = estimate_tokens(victim)
+    assert victim_tokens >= 8000, f"victim {victim_tokens} below the floor band"
+    assert suffix[0] > victim_tokens, f"suffix {suffix[0]} must exceed victim {victim_tokens}"
+    assert suffix[0] > 8000
+
+    _, changed = prune_tool_outputs(messages, NOW, ACTIVE)
+    assert changed is False
+    assert victim.text.startswith("content of")
+
+
+def test_oversized_useless_victim_stays_inside_warm_suffix():
+    """R2: the oversized exception is supersede-only.
+
+    A useless-flagged result is worthless once consumed by definition, so
+    blanking it inside the warm suffix buys no re-billing repayment the way
+    a superseded victim does. Even a useless victim larger than its suffix
+    keeps the plain warm-suffix guard (it still blanks once idle, like every
+    other candidate — that path is covered by the idle-flush tests).
+    """
+    useless = Message(role="tool", tool_call_id="g-big", tool_name="grep")
+    useless.content = Message.user("nothing matched " * 8000).content
+    useless.provider_payload = {"useless": True, "details": {"pattern": "foo"}}
+    messages = [useless, _assistant_big(words=10000)]
+    suffix = compute_suffix_tokens(messages)
+    victim_tokens = estimate_tokens(useless)
+    assert victim_tokens >= 8000
+    assert suffix[0] > 8000
+    assert victim_tokens > suffix[0], (
+        f"useless victim {victim_tokens} must outweigh suffix {suffix[0]} — "
+        "otherwise this does not prove the exception is supersede-only"
+    )
+
+    _, changed = prune_tool_outputs(messages, NOW, ACTIVE)
+    assert changed is False
+    assert useless.text.startswith("nothing matched")
+
+
+def test_guide_reads_protected():
+    """guide:// reads share the skill exemption (R4/R5-review).
+
+    A filesystem guide read now carries ``details['url'] = guide://...``
+    (Fix A); before the exemption was extended it stayed supersede-prunable
+    under ``details['path']`` and a superseded shaped guide blanked into the
+    re-read loop the skill exemption exists to prevent.
+    """
+    guide_read = Message(role="tool", tool_call_id="call-g1", tool_name="read")
+    guide_read.content = Message.user("guide content " * 400).content
+    guide_read.provider_payload = {
+        "details": {"path": "/guides/browser/GUIDE.md", "url": "guide://browser"}
+    }
+    later_guide = Message(role="tool", tool_call_id="call-g1b", tool_name="read")
+    later_guide.content = Message.user("guide content " * 400).content
+    later_guide.provider_payload = {
+        "details": {"path": "/guides/browser/GUIDE.md", "url": "guide://browser"}
+    }
+    messages = [guide_read, Message.user("x"), later_guide]
+    _, changed = prune_tool_outputs(messages, NOW, ACTIVE)
+    assert changed is False
+    assert guide_read.text.startswith("guide content")
