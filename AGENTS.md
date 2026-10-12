@@ -3368,6 +3368,14 @@ against a hang rather than a stall, that is the file to read.
   a comment that restates the code is noise, and a change with a non-obvious
   reason needs the reason recorded.
 
+## Localized product copy
+
+For message extraction, generated key functions, locale/audit eligibility and
+backend-owned language settings, read [the i18n contributor HOWTO](docs/I18N.md)
+and `guide://i18n` before editing. The contract remains
+[docs/design/i18n.md](docs/design/i18n.md); its rollout plan is not completion.
+Keep technical/model-facing docs English and key rendered product copy.
+
 ## Adding a configuration key
 
 **Every new configuration key must also be added to the `/settings` registry
