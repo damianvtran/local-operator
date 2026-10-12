@@ -18,6 +18,7 @@ from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     AskResponseBlock,
+    HubMessageBlock,
     PeerMessageBlock,
     QuietGroupBlock,
     UserBlock,
@@ -256,3 +257,73 @@ def test_a_picture_continues_only_its_own_owners_contiguous_chain() -> None:
     assert quiet_group_record_of(picture("t", 1), prev_kind="tool").kind == "inside"
     assert quiet_group_record_of(picture("h", 1), prev_kind="hub").kind == "inside"
     assert _source_owner_of(picture(None, None)) is None
+
+
+def _hub(owner: str, part: int) -> HubMessageBlock:
+    block = HubMessageBlock(
+        "picture body",
+        {"direction": "to_child", "body": "picture body", "steer": True},
+    )
+    block.navigation_anchor_id = owner
+    block.navigation_anchor_part = part
+    return block
+
+
+def _owned_image(owner: str | None, part: int | None) -> ImageBlock:
+    block = ImageBlock(None, "image/png")
+    if owner is not None:
+        block.navigation_anchor_id = owner
+    if part is not None:
+        block.navigation_anchor_part = part
+    return block
+
+
+def test_the_image_decision_table_has_no_or_loophole() -> None:
+    """R8-1 / Q-R9-A1: the explicit grid — five predecessor families by five
+    ownership shapes. Interior only for an allowed family (tool/hub/inside)
+    with the SAME owner's NEXT part, or the unknown-provenance tool/hub legacy
+    arm; a KNOWN contradiction splits even behind a hub or tool row, and a
+    human or assistant predecessor ends the chain however the parts line up."""
+    shapes = {
+        "same-next": ("h1", 1, True),
+        "same-gap": ("h1", 3, True),
+        "other-owner": ("h2", 1, True),
+        "image-unknown": (None, None, True),
+        "prev-unknown": ("h1", 1, False),
+    }
+    allowed = {"hub", "tool", "inside"}
+    for family in ("hub", "tool", "inside", "other", "assistant"):
+        for shape, (owner, part, prev_known) in shapes.items():
+            image = _owned_image(owner, part)
+            prev_owner = ("h1", 0) if prev_known else None
+            got = quiet_group_record_of(image, prev_kind=family, prev_owner=prev_owner).kind
+            if owner is not None and part is not None and prev_known:
+                want = "inside" if family in allowed and shape == "same-next" else "image"
+            else:
+                want = "inside" if family in ("tool", "hub") else "image"
+            assert got == want, (family, shape, got, want)
+
+
+def test_the_planner_refuses_a_fragment_whose_next_row_is_the_same_owners_next_part() -> None:
+    """R8-2 / Q-R9-A2: the shared planner's bottom edge reads the last KEPT
+    row's owner, so an off-page picture continuing the same owner's chain is
+    not a boundary — every loaded cut refuses while it is on hand, and only a
+    real boundary (or a next row that is NOT the owner's next part) closes."""
+    h0, h1 = _hub("h0", 0), _hub("h1", 0)
+    img1, img2 = _owned_image("h1", 1), _owned_image("h1", 2)
+
+    assert quiet_group_plan([h0, h1], next_block=img1) == []
+    assert quiet_group_plan([h0, h1, img1], next_block=img2) == []
+
+    (planned,) = quiet_group_plan([h0, h1, img1, img2])
+    assert planned.span == (0, 3)
+
+    # A genuine boundary closes the partial run; so do a different owner and a
+    # part gap, which are known contradictions and stay splitters.
+    for closing in (
+        UserBlock("audit the ingest path"),
+        _owned_image("h9", 1),
+        _owned_image("h1", 3),
+    ):
+        (closed,) = quiet_group_plan([h0, h1, img1], next_block=closing)
+        assert closed.span == (0, 2)

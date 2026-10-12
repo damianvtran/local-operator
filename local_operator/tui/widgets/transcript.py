@@ -3721,6 +3721,13 @@ class QuietGroupBlock(ExpandableActionBlock):
         return False
 
 
+#: The predecessor families an owned auxiliary chain may pass through: the
+#: tool/hub rows a picture is the output of, plus the chain's own interior
+#: rows. A human (``other``) or assistant predecessor ends the chain however
+#: its coordinates line up (review round 8, R8-1/Q-R9-A1).
+_IMAGE_INTERIOR_FAMILIES = frozenset({"tool", "hub", "inside"})
+
+
 def _source_owner_of(block: TranscriptBlock) -> tuple[str, int] | None:
     """The source coordinate a row's OWN provenance names, or ``None``.
 
@@ -3825,14 +3832,34 @@ def quiet_group_record_of(
             return QuietGroupRecord(kind="other", id=record_id)
         return QuietGroupRecord(kind="assistant", id=record_id, text=text)
     if isinstance(block, ImageBlock):
+        # THE DECISION TABLE for a picture's fold role (review round 8,
+        # R8-1/Q-R9-A1). Written out as cases instead of an OR chain: an OR
+        # let the legacy adjacency arm answer questions that known source
+        # facts had already settled, so a picture behind a hub row read as
+        # interior even when its owner differed or its part skipped one, and
+        # a human's or an answer's OWN photo could seed an interior chain.
+        #
+        #   1. BOTH coordinates known: the source decides. Interior only
+        #      behind an allowed predecessor family (tool / hub / inside) with
+        #      the SAME owner and the NEXT part. A known contradiction — a
+        #      different owner, or a gap in the chain — splits even behind a
+        #      tool or hub row.
+        #   2. Otherwise (one or both coordinates unknown): the legacy
+        #      adjacency contract, conservatively - a picture behind a tool
+        #      or hub row is that row's output. This can never override case
+        #      1, because case 1 is exactly the both-known shape.
+        # Human (``other``) and assistant predecessors end the chain in both
+        # cases: their own pictures stay visible, and an answer never carries
+        # an aux chain. Nothing here reads text, ids or bodies — only the
+        # two coordinates the projection stamped.
         owner = _source_owner_of(block)
-        continues_owner = (
-            owner is not None
-            and prev_owner is not None
-            and owner[0] == prev_owner[0]
-            and owner[1] == prev_owner[1] + 1
-        )
-        kind = "inside" if prev_kind in ("tool", "hub") or continues_owner else "image"
+        if owner is not None and prev_owner is not None:
+            same_owner = owner[0] == prev_owner[0]
+            next_part = owner[1] == prev_owner[1] + 1
+            interior = prev_kind in _IMAGE_INTERIOR_FAMILIES and same_owner and next_part
+        else:
+            interior = prev_kind in ("tool", "hub")
+        kind = "inside" if interior else "image"
         return QuietGroupRecord(kind=kind, id=record_id)
     return QuietGroupRecord(kind="other", id=record_id)
 
@@ -3913,6 +3940,7 @@ def quiet_group_plan(
     prev_block: TranscriptBlock | None = None,
     next_block: TranscriptBlock | None = None,
     head_cut: bool = False,
+    prev_owner: tuple[str, int] | None = None,
 ) -> list[PlannedQuietGroup]:
     """The quiet groups a run of blocks contains, as plans to fold.
 
@@ -3937,6 +3965,15 @@ def quiet_group_plan(
     boundaries, the same exemption ``_anchor_before`` makes — and the spans
     this returns are indices into the ORIGINAL ``blocks`` list (transients
     included), so a caller slicing members by a span gets the members.
+
+    Both edge checks feed the boundary predicate the SAME ownership context
+    the record walk uses (review round 8, R8-2/Q-R9-A2): the bottom edge
+    passes the last KEPT row's source owner (the kept predecessor of
+    ``next_block``), and the top edge takes ``prev_owner`` — the source owner
+    of the kept row ABOVE ``prev_block`` — from the caller that can see it.
+    Without that, an off-page picture continuing the same owner's chain read
+    as a boundary and the planner froze a partial run; with it, the fragment
+    is refused, exactly as the owner-aware record walk already said.
     """
     origin: list[int] = []
     kept: list[TranscriptBlock] = []
@@ -3951,7 +3988,7 @@ def quiet_group_plan(
         span_head_loaded = True
         if span_from == 0:
             if prev_block is not None:
-                if not _quiet_fold_boundary(prev_block):
+                if not _quiet_fold_boundary(prev_block, prev_owner=prev_owner):
                     continue  # fragment: the span continues into rows on hand
                 if getattr(prev_block, "QUIET_GROUP_HEAD_CUT", False):
                     span_head_loaded = False  # the same "at least N" marker
@@ -3960,7 +3997,11 @@ def quiet_group_plan(
         open_below = True
         if span_to == len(records) - 1:
             if next_block is not None:
-                if not _quiet_fold_boundary(next_block, prev_kind=records[-1].kind):
+                if not _quiet_fold_boundary(
+                    next_block,
+                    prev_kind=records[-1].kind,
+                    prev_owner=_source_owner_of(kept[-1]) if kept else None,
+                ):
                     continue  # fragment: the span continues into rows below
                 open_below = False
         else:
@@ -3985,6 +4026,7 @@ def fold_quiet_group_list(
     next_block: TranscriptBlock | None = None,
     head_cut: bool = False,
     fold_width: int = 0,
+    prev_owner: tuple[str, int] | None = None,
 ) -> list[TranscriptBlock]:
     """Fold a run of NOT-YET-MOUNTED blocks: the list form of the fold.
 
@@ -3998,7 +4040,13 @@ def fold_quiet_group_list(
     is not restated per seam.
     """
     run = list(blocks)
-    plan = quiet_group_plan(run, prev_block=prev_block, next_block=next_block, head_cut=head_cut)
+    plan = quiet_group_plan(
+        run,
+        prev_block=prev_block,
+        next_block=next_block,
+        head_cut=head_cut,
+        prev_owner=prev_owner,
+    )
     for planned in reversed(plan):
         members = run[planned.span[0] : planned.span[1] + 1]
         bar = QuietGroupBlock(
@@ -6825,13 +6873,35 @@ class TranscriptView(ScrollableContainer):
         ``display`` is switched off there, which the mount then honours). The
         returned list is what the caller mounts — nothing else is touched.
         """
+        prev_index = self._quiet_neighbour_index(at_index - 1, -1)
+        prev_block = self._blocks[prev_index] if prev_index is not None else None
+        above = self._quiet_neighbour_index(prev_index - 1, -1) if prev_index is not None else None
         return fold_quiet_group_list(
             blocks,
-            prev_block=self._quiet_neighbour(at_index - 1, -1),
+            prev_block=prev_block,
+            # The kept row ABOVE the page's top edge: the chain that decides
+            # whether the edge row itself continues a run (R8-2).
+            prev_owner=_source_owner_of(self._blocks[above]) if above is not None else None,
             next_block=self._quiet_neighbour(at_index, +1),
             head_cut=head_cut,
             fold_width=self.scrollable_content_region.width,
         )
+
+    def _quiet_neighbour_index(self, index: int, step: int) -> int | None:
+        """The index of the nearest non-transient block at or after ``index``,
+        walking in ``step``'s direction, or ``None`` past the end.
+
+        Split out from :meth:`_quiet_neighbour` because a boundary check has
+        to look at TWO neighbours at once — the edge row and the row above it,
+        whose source owner is the chain context that decides whether the edge
+        row continues a run (review round 8, R8-2).
+        """
+        candidate = index
+        while 0 <= candidate < len(self._blocks):
+            if not self._blocks[candidate].SPACING_TRANSIENT:
+                return candidate
+            candidate += step
+        return None
 
     def _quiet_neighbour(self, index: int, step: int) -> TranscriptBlock | None:
         """The nearest non-transient block at or after ``index``, walking in
@@ -6839,13 +6909,8 @@ class TranscriptView(ScrollableContainer):
         Transients are invisible to spacing (:meth:`_anchor_before`), so they
         are invisible to a span's boundary too.
         """
-        candidate = index
-        while 0 <= candidate < len(self._blocks):
-            block = self._blocks[candidate]
-            if not block.SPACING_TRANSIENT:
-                return block
-            candidate += step
-        return None
+        found = self._quiet_neighbour_index(index, step)
+        return self._blocks[found] if found is not None else None
 
     def clear_blocks(self) -> None:
         """Remove every block (the ``/clear`` command)."""
