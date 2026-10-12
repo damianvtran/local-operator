@@ -1877,6 +1877,8 @@ stale claim the model had no way to correct. `todo_fingerprint` is now
 "")`, and `session.py:_stamped_todo_fingerprint` filters `len == 4` in lockstep
 (design §5.3) — the same coupled edit, one element wider.
 
+*(Historical: the reason-rewrite re-arm and the 17-test count in this paragraph were superseded by the identity-scoping round recorded further down — 2026-10-12.)*
+
 Evidence: `tests/unit/session/test_todo_guardrail.py` (17 tests — the
 blocked-only list firing a single reconciliation and releasing, the mixed
 pending+blocked text with each group's paragraph appearing only with its items,

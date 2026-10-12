@@ -506,6 +506,41 @@ async def test_reason_churn_does_not_re_fire_the_blocked_reconciliation(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_a_re_parked_set_earns_a_new_reconciliation(tmp_path) -> None:
+    """Round-1 F1. The empty identity is never asked ABOUT (there is nothing to
+    reconcile when nothing is parked), but it must still be RECORDED: a set that
+    resolves to EMPTY and is later re-blocked with a byte-identical (phase,
+    text, status) is a NEW identity, not "still accounted" — without the
+    silent-path write it would stay silent permanently."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {"text": "deploy", "status": "blocked", "reason": "waiting on legal"}
+    ]
+    stream = ScriptedStream(prose_turns(2))
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")  # the initial park earns its single pass
+    assert len(reminders(session._context.messages)) == 1
+    assert await session._todo_continuation() == []
+
+    # Resolve it to EMPTY: nothing to ask about, but the ledger must move.
+    builtin.TODO_STORE[SESSION_ID][0]["status"] = "done"
+    builtin.TODO_STORE[SESSION_ID][0].pop("reason", None)
+    assert await session._todo_continuation() == []
+    assert session._blocked_reminder_fingerprint == ()
+
+    # Re-block the SAME text: identical (phase, text, status) to the first park,
+    # and a new identity against the recorded empty set — so it earns its pass.
+    builtin.TODO_STORE[SESSION_ID][0]["status"] = "blocked"
+    builtin.TODO_STORE[SESSION_ID][0]["reason"] = "legal review reopened it"
+    nudges = await session._todo_continuation()
+    assert len(nudges) == 1, "a re-parked set is a new identity and earns its pass"
+    nudge = nudges[0]
+    assert isinstance(nudge, CustomMessage)
+    assert "deploy" in nudge.details["text"]
+    assert await session._todo_continuation() == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_unstamped_reminder_expires(tmp_path) -> None:
     """No stamp means the claim cannot be checked, and an unverifiable nudge is
     worth less than one turn without it."""

@@ -3961,10 +3961,12 @@ class Session:
         #: WITHOUT the reason. Deliberately NOT reset per turn (see
         #: ``_run_turn_pipeline``): a parked set earns exactly ONE reconciliation per
         #: identity change, across turns, so an unchanged parked set is not re-asserted
-        #: on every wake or quiet end. A reason-only rewrite is bookkeeping, not a new
-        #: ask — it refreshes the rendered assertion's expiry (the full fingerprint
-        #: rides ``details``) but never re-fires one. In-memory on purpose: a process
-        #: restart re-asks once per current set, which is the accepted limit.
+        #: on every wake or quiet end. An empty identity is a change too: it is recorded
+        #: on the silent returns, so an identical re-park is a new identity that earns
+        #: its pass. A reason-only rewrite is bookkeeping, not a new ask — it refreshes
+        #: the rendered assertion's expiry (the full fingerprint rides ``details``) but
+        #: never re-fires one. In-memory on purpose: a process restart re-asks once per
+        #: current set, which is the accepted limit.
         self._blocked_reminder_fingerprint: tuple[tuple[str, str, str], ...] | None = None
         # The todo fingerprint that was last WRITTEN to the transcript, so the
         # post-turn snapshot only appends when the list actually moved. Seeded
@@ -18103,20 +18105,31 @@ class Session:
         pending = open_todos(self._session_id)
         blocked = blocked_todos(self._session_id)
         if not pending and not blocked:
+            # Nothing parked means the blocked identity IS the empty tuple, and
+            # THAT is still a fact to record: an identity change with nothing to
+            # ask about must still move the ledger, or a set that resolved to
+            # EMPTY and is re-parked identically later would read as "still
+            # accounted" and stay silent forever (round-1 F1).
+            self._blocked_reminder_fingerprint = ()
             return []
         fingerprint = todo_fingerprint(self._session_id)
         # The blocked group's IDENTITY — (phase, text, status), no reason — see the
         # field comment beside `self._blocked_reminder_fingerprint`.
         blocked_identity = tuple(x[:3] for x in fingerprint if x[2] == "blocked")
+        blocked_changed = blocked_identity != self._blocked_reminder_fingerprint
         pending_fires = bool(pending) and fingerprint != self._todo_reminder_fingerprint
-        blocked_fires = (
-            bool(blocked_identity) and blocked_identity != self._blocked_reminder_fingerprint
-        )
+        blocked_fires = bool(blocked_identity) and blocked_changed
         if not (pending_fires or blocked_fires):
+            # An identity change with nothing to ask about — the set resolved to
+            # EMPTY — is still a change: record it here, or an identical set
+            # re-parked later would read as "still accounted" and stay silent
+            # forever (round-1 F1). A non-empty change fires above; the no-work
+            # return records the fully-empty case.
+            if blocked_changed:
+                self._blocked_reminder_fingerprint = blocked_identity
             return []
         self._todo_reminder_fingerprint = fingerprint
-        if blocked_fires:
-            self._blocked_reminder_fingerprint = blocked_identity
+        self._blocked_reminder_fingerprint = blocked_identity
         return [
             CustomMessage(
                 custom_type=TODO_REMINDER_MESSAGE_TYPE,
