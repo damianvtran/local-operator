@@ -13,7 +13,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from local_operator.i18n.keys import wire_exec as _wd
+from local_operator.i18n.text import tr
+
 logger = logging.getLogger(__name__)
+
+#: RFC §3.1 render point for this slice's copy.
+_t = tr("wire.exec")
 
 #: Startup selectors that survive the ``exec --background`` process boundary.
 #: Order is the order :func:`local_operator.exec_mode.build_worker_argv` emits
@@ -123,9 +129,7 @@ def report_unresolved_declared_tools(session: Any, args: Any) -> None:
         return
     reachable = _name_tuple(getattr(session, "tool_inventory", None)) or ()
     print(
-        "Warning: --tools names no tool this run could reach: "
-        + ", ".join(unreached)
-        + f". The session reached {len(reachable)} tool(s).",
+        _t(_wd.tools_unreachable(names=", ".join(unreached), count=str(len(reachable)))),
         file=sys.stderr,
     )
 
