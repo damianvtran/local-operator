@@ -9635,7 +9635,11 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("could not publish the subagent counts", exc_info=True)
 
     # -- turn-supplement control ops (lane C1b; memo §2.7) --------------------------------
+    # The runtime socket owns another thread even for daemon/exec. Lazy reads
+    # and controls must hop before touching the runner or journal; an on-loop
+    # test cannot detect an omitted hop, so real threaded RPC pins all five.
 
+    @_on_session_loop
     async def supplement_cancel(self, anchor: str, job: str) -> str:
         """Cancel a running generator job. Idempotent; a settled job answers neutrally.
 
@@ -9646,21 +9650,25 @@ class ServingSessionHandle(SessionHandle):
         self._check_loop_thread()
         return await self._supplements.cancel_job(anchor, job)
 
+    @_on_session_loop
     async def supplement_steer(self, anchor: str, job: str, text: str) -> str:
         """Cut the in-flight attempt and start version + 1 with the user's instruction."""
         self._check_loop_thread()
         return await self._supplements.steer_job(anchor, job, text)
 
+    @_on_session_loop
     async def supplement_restart(self, anchor: str, job: str) -> str:
         """Version + 1 with the previous instruction (or none): the Retry affordance."""
         self._check_loop_thread()
         return await self._supplements.restart_job(anchor, job)
 
+    @_on_session_loop
     async def supplement_dismiss(self, anchor: str) -> str:
         """Hide the row for good and count it as a spam signal (memo §2.7, §5.2)."""
         self._check_loop_thread()
         return await self._supplements.dismiss(anchor)
 
+    @_on_session_loop
     async def supplements_for(self, anchors: list[str]) -> dict[str, dict[str, Any]]:
         """``{anchor: newest row}`` for the given anchors (memo §2.7's lazy read op).
 

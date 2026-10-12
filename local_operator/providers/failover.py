@@ -826,6 +826,7 @@ class ProviderError(RenderedStreamError):
         retry_after_ms: int | None = None,
         auth_error: bool = False,
         kind: ProviderErrorKind | None = None,
+        request_sent: bool = True,
         transport: bool = False,
         transport_cause: BaseException | None = None,
         fail_closed: bool = False,
@@ -843,6 +844,9 @@ class ProviderError(RenderedStreamError):
         text = provider_text or _describe_bare_status(status)
         super().__init__(text)
         self.status = status
+        # Only pre-dispatch constructors may state False; absent usage elsewhere
+        # is unknown spend, never proof that the request was free.
+        self.request_sent = request_sent
         self.message = text
         self.retryable = retryable
         # Non-retryable normally still permits another fallback target. Local
@@ -5501,6 +5505,7 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
         ),
         retryable=True,
         kind="quota",
+        request_sent=False,
     )
 
 
