@@ -1877,7 +1877,7 @@ stale claim the model had no way to correct. `todo_fingerprint` is now
 "")`, and `session.py:_stamped_todo_fingerprint` filters `len == 4` in lockstep
 (design §5.3) — the same coupled edit, one element wider.
 
-*(Historical: the reason-rewrite re-arm and the 17-test count in this paragraph were superseded by the identity-scoping round recorded further down — 2026-10-12.)*
+*(Historical: the reason-rewrite re-arm, the parked-list re-arm on a fresh user turn, and the 17-test count in this paragraph were superseded by the identity-scoping round recorded further down — 2026-10-12.)*
 
 Evidence: `tests/unit/session/test_todo_guardrail.py` (17 tests — the
 blocked-only list firing a single reconciliation and releasing, the mixed
@@ -1907,10 +1907,10 @@ ask — but still expires the stale rendered assertion, because the full
 fingerprint (reason included) rides the reminder's `details`. The pending
 branch keeps its per-turn re-arm; the latch is in-memory, so a process restart
 re-asks once per current set — the accepted limit. Evidence:
-`test_todo_guardrail.py` now 20 tests (the accounted parked list across two
+`test_todo_guardrail.py` now 21 tests (the accounted parked list across two
 turns — 3 requests / 1 reminder, against the old 4 / 2 — a new blocked item
 earning one more, an unblock earning one more, reason churn not re-firing while
-the render still expires) and `test_todo_steering_e2e.py` now 9 (the over-fire
+the render still expires, and a resolved-then-re-parked set earning its pass) and `test_todo_steering_e2e.py` now 9 (the over-fire
 repro end to end: 6 requests / 2 reminders fixed, 7 / 3 measured on the
 pre-fix code; new pending work still firing after an accounted parked set, with
 the pending section only; a late steer still re-entering a quiet turn).
