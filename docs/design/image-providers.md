@@ -86,21 +86,22 @@ status* settles both. Everything else in the matrix is **Contract**.
   [docs](https://openrouter.ai/docs/guides/overview/multimodal/image-generation)
   (fetched 2026-10-09).
 
-## Edit lane (media wave-2 image-to-image, 2026-10-10)
+## Edit lane (media wave-2 image-to-image, 2026-10-10; multi-source wires 2026-10-11)
 
 Edit paths were wired per rung; the capability declaration
 (``RUNG_SPECS[*].sources``) is declared in the SAME change as the wiring, and a
 test walks every rung to fail either drift direction. Wire facts below were
-fetched 2026-10-10 (no live call — same operator decision as above).
+fetched 2026-10-10 (no live call — same operator decision as above); the
+multi-source wires were added 2026-10-11 (xAI page fetched that day).
 
 | Rung | Edit wire | Source shape | Notes |
 |---|---|---|---|
-| FAL | per-model edit app (documented pages) | `image_url` for the flux-class apps; `image_urls` LIST for the multi-reference editors | default model's app `fal-ai/flux/dev/image-to-image` (image_url required, strength default 0.95); `blackforestlabs/flux-3/edit-image` takes `image_urls` (1–10 refs), no strength/count in its schema |
-| OpenAI | `POST /v1/images/edits`, multipart | `image[]` file part decoded from the source's data URI | "For GPT image models, you can provide up to 16 images" (API reference); mask documented (alpha PNG) — the single-source wire sends one image, no mask |
-| Google | image content blocks in `input` | `{"type":"image","data":<b64>,"mime_type":…}` | up to 14; no API mask (prompt-driven "semantic masking") |
-| xAI | `POST /v1/images/edits` | `"image": {"url": <data URI>, "type": "image_url"}` | single-image shape wired; multi-image (≤5 refs) page read, its field shape waits for the multi-source wire; edits bill input + output |
-| OpenRouter | `input_references` | `[{"type":"image_url","image_url":{"url": …}}]` | sent only after `GET /api/v1/images/models` confirms `architecture.input_modalities` includes `"image"`; deterministic negative → recorded skip, models read that cannot answer → rung failure (its real class) |
-| Radient | `POST /v1/tools/media/generate` — canonical `image_url` (string; data URI or https URL); `image_urls` list also live | single-source wired (`image_url`); the hub accepts `image_urls` lists too — the harness multi-source wire is a named residual | hub media slice LIVE 2026-10-10 (radient PR #111, deploy `c24615b9`): listing carries per-pin `sources`/`max_sources`/`mask`/`edit_default` (26/26 rows); `source_url` and every alias REFUSED (400 before any vendor call, no charge); blank model + source auto-resolves to the edit default (`openai/gpt-image-2.5/sunburst/edit`, named in the response; REQUIRES an explicit `image_size` — absent/`auto` refused at quote); a `prompt` must ride an edit (prompt-less submits queue then fail vendor-side, unbilled); 16 MiB media body cap. The harness resolves the listing's `edit_default` row itself for an un-pinned edit so the unit-price/affordability read keeps its row |
+| FAL | per-model edit app (documented pages) | `image_url` for the flux-class apps; `image_urls` LIST for the multi-reference editors | default model's app `fal-ai/flux/dev/image-to-image` (image_url required, strength default 0.95); `blackforestlabs/flux-3/edit-image` takes `image_urls` (1–10 refs), no strength/count in its schema. N>1 with no pin runs the flux-3 editor; N>10 and a pinned single-reference app under N>1 are recorded SKIPs (never a silent swap) |
+| OpenAI | `POST /v1/images/edits`, multipart | `image[]` file part decoded from each source's data URI — one part per source | "For GPT image models, you can provide up to 16 images" (API reference); the multi wire repeats `image[]`; a `dall-e` pin under N>1 is a recorded SKIP (multi is a GPT-image fact); mask documented (alpha PNG) — nothing sends a mask |
+| Google | image content blocks in `input` | `{"type":"image","data":<b64>,"mime_type":…}`, one block per source | up to 14; no API mask (prompt-driven "semantic masking") |
+| xAI | `POST /v1/images/edits` | `"image": {"url": <data URI>, "type": "image_url"}` for one, `"images": [{"url": …, "type": "image_url"}, …]` (≤5 refs) for several — the vendor documents the two fields as mutually exclusive | multi-image wire 2026-10-11 (docs fetched; no live call). Follow-up: the reference lists `n` under edits while the wired schema sends no count — probe before any count wiring (doc drift recorded 2026-10-11) |
+| OpenRouter | `input_references` | `[{"type":"image_url","image_url":{"url": …}}]` | sent only after `GET /api/v1/images/models` confirms `architecture.input_modalities` includes `"image"`; deterministic negative → recorded skip, models read that cannot answer → rung failure (its real class); N>1 is an in-rung SKIP (one reference in this version) and the cascade filter pre-skips it |
+| Radient | `POST /v1/tools/media/generate` — canonical `image_url` (one source) / `image_urls` (several; the hub maps them per pin) | both WIRED (2026-10-11 — the multi-source residual is cleared); each entry a data URI or https URL | hub media slice LIVE 2026-10-10 (radient PR #111, deploy `c24615b9`): listing carries per-pin `sources`/`max_sources`/`mask`/`edit_default` (26/26 rows); `source_url` and every alias REFUSED (400 before any vendor call, no charge); blank model + source auto-resolves to the edit default (`openai/gpt-image-2.5/sunburst/edit`, named in the response; REQUIRES an explicit `image_size` — absent/`auto` refused at quote); a `prompt` must ride an edit (prompt-less submits queue then fail vendor-side, unbilled); 16 MiB media body cap. The harness resolves the listing's `edit_default` row itself for an un-pinned edit so the unit-price/affordability read keeps its row; N>1 reads the pin's live ceiling pre-send and only skips above it (an unreadable cap still sends — the hub is the fail-closed authority) |
 | openai-sub | — (skips) | — | unchanged; the planned Codex probe settles acceptance |
 
 ### Edit cost posture

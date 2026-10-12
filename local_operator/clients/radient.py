@@ -1645,6 +1645,7 @@ class RadientClient:
         provider: Optional[str] = None,
         max_wait_time: int = 60,
         poll_interval: int = 2,
+        source_urls: Optional[List[str]] = None,
     ) -> RadientImageGenerationResponse:
         """Generate an image using the Radient API.
 
@@ -1664,13 +1665,24 @@ class RadientClient:
             max_wait_time (int, optional): Maximum time to wait for image generation in seconds.
                 Defaults to 60.
             poll_interval (int, optional): Time between status checks in seconds. Defaults to 2.
+            source_urls (Optional[List[str]], optional): URLs of the images to edit, in
+                order (multi-source). Mutually exclusive with ``source_url``. Defaults
+                to None.
 
         Returns:
             RadientImageGenerationResponse: The generated image information with complete image data
 
         Raises:
-            RuntimeError: If the API request fails or times out
+            ValueError: If both ``source_url`` and ``source_urls`` are given (they
+                spell the same edit request).
+            RuntimeError: If the API request fails or times out (typed: upstream
+                failures raise APIError, a RuntimeError subclass).
         """
+        if source_url is not None and source_urls is not None:
+            # Both spell the same edit request; combining them would have to
+            # guess an order the canonical wire fields cannot express.
+            raise ValueError("Pass source_url or source_urls, not both.")
+
         url = f"{self.base_url}/tools/images/generate"
         headers = self._get_headers()
 
@@ -1682,8 +1694,17 @@ class RadientClient:
             "sync_mode": sync_mode,
         }
 
-        if source_url:
-            payload["source_url"] = source_url
+        if source_urls:
+            # Canonical source fields, the same rule as the engine's rung:
+            # one source is ``image_url``, several are ``image_urls`` (the hub
+            # maps them per pin). The legacy ``source_url`` payload key is
+            # REFUSED by the hub today, so both spellings cross canonically.
+            if len(source_urls) == 1:
+                payload["image_url"] = source_urls[0]
+            else:
+                payload["image_urls"] = list(source_urls)
+        elif source_url:
+            payload["image_url"] = source_url
 
         if strength is not None:
             payload["strength"] = strength
@@ -1718,24 +1739,28 @@ class RadientClient:
 
                 # If the status is failed, raise an error
                 if status_response.status.upper() == "FAILED":
-                    raise RuntimeError(f"Radient API image generation failed: {request_id}")
+                    raise APIError(
+                        f"Radient API image generation failed: {request_id}", status_code=None
+                    )
 
                 # Wait before polling again
                 time.sleep(poll_interval)
 
             # If we get here, the request timed out
-            raise RuntimeError(
+            raise APIError(
                 f"Radient API image generation timed out after {max_wait_time} seconds: "
-                f"{request_id}"
+                f"{request_id}",
+                status_code=None,
             )
 
         except requests.exceptions.RequestException as e:
-            error_body = self._surfaceable_body(response_body(e))
-            raise RuntimeError(
-                f"Failed to generate image: {str(e)}, Response Body: {error_body}"
+            raise api_error_from_exception(
+                e,
+                prefix="Failed to generate image",
+                secrets=self._credential_values(),
             ) from e
         except Exception as e:
-            raise RuntimeError(f"Failed to generate image: {str(e)}") from e
+            raise APIError(f"Failed to generate image: {str(e)}", status_code=None) from e
 
     def get_image_generation_status(
         self, request_id: str, provider: Optional[str] = None
@@ -1766,12 +1791,15 @@ class RadientClient:
             data = response.json()
             return RadientImageGenerationResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = self._surfaceable_body(response_body(e))
-            raise RuntimeError(
-                f"Failed to get image generation status: {str(e)}, Response Body: {error_body}"
+            raise api_error_from_exception(
+                e,
+                prefix="Failed to get image generation status",
+                secrets=self._credential_values(),
             ) from e
         except Exception as e:
-            raise RuntimeError(f"Failed to get image generation status: {str(e)}") from e
+            raise APIError(
+                f"Failed to get image generation status: {str(e)}", status_code=None
+            ) from e
 
     def list_image_generation_providers(self) -> RadientImageGenerationProvidersResponse:
         """List available image generation providers.
