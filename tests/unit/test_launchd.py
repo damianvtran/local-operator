@@ -199,6 +199,96 @@ def test_loaded_policy_is_complete_top_level_same_target_snapshot(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "section",
+    [
+        "arguments",
+        "environment",
+        "inherited environment",
+        "default environment",
+        "resource coalition",
+        "jetsam coalition",
+        "event triggers",
+        "event channels",
+    ],
+)
+@pytest.mark.parametrize(
+    "mutation", ["scalar", "missing_close", "wrong_indent", "nested_missing_close", "unkeyed_map"]
+)
+def test_recognized_sections_require_values_and_balanced_grammar(
+    tmp_path, monkeypatch, section, mutation
+):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "section-grammar"
+    target = f"{launchd.job_domain()}/{label}"
+    required = {
+        "active count": "1",
+        "path": "/fixture",
+        "type": "LaunchAgent",
+        "state": "running",
+        "program": "/fixture",
+        "arguments": "{\n\t\targ\n\t}",
+        "environment": "{\n\t\tNAME => data\n\t}",
+        "domain": "gui/fixture",
+        "runs": "1",
+        "pid": "12345",
+        "spawn type": "daemon (3)",
+        "properties": "runatload | inferred program",
+    }
+    if mutation == "scalar":
+        value = "unsupported-scalar"
+    elif mutation == "missing_close":
+        value = "{\n\t\tkey = value"
+    elif mutation == "wrong_indent":
+        value = "{\n\t\tkey = value\n\t\t}"
+    elif mutation == "nested_missing_close":
+        value = "{\n\t\tchild = {\n\t\t\tkey = value\n\t}"
+    else:
+        value = "{\n\t\tunkeyed unsupported text\n\t}"
+    # Arguments are opaque leaves, not maps: unkeyed text is legitimate there.
+    if section == "arguments" and mutation == "unkeyed_map":
+        expected = True
+    else:
+        expected = None
+    required[section] = value
+    body = target + " = {\n" + "\n".join(f"\t{k} = {v}" for k, v in required.items()) + "\n}\n"
+
+    def run(*args):
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    observed = launchd.observe_job(
+        label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+    )
+    assert observed.state is launchd.JobState.LIVE
+    assert observed.loaded_no_restart is expected
+
+
+def test_section_grammar_preserves_optional_maps_and_opaque_argument_braces(tmp_path, monkeypatch):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "valid-section-grammar"
+    target = f"{launchd.job_domain()}/{label}"
+    body = (
+        target + " = {\n"
+        "\tactive count = 1\n\tpath = /fixture\n\ttype = LaunchAgent\n\tstate = running\n"
+        "\tprogram = /fixture\n\targuments = {\n\t\t}\n\t\t{\n\t\tname = {\n\t}\n"
+        "\tenvironment = {\n\t\tVALUE => {opaque}\n\t}\n"
+        "\tinherited environment = {\n\t\tNAME => value\n\t}\n"
+        "\tdefault environment = {\n\t\tPATH => /fixture\n\t}\n"
+        "\tresource coalition = {\n\t\tID = 7\n\t}\n"
+        "\tjetsam coalition = {\n\t\tID = 8\n\t}\n"
+        "\tdomain = gui/fixture\n\truns = 1\n\tpid = 12345\n"
+        "\tspawn type = daemon (3)\n\tproperties = runatload | inferred program\n}\n"
+    )
+
+    def run(*args):
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    observed = launchd.observe_job(
+        label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+    )
+    assert observed.loaded_no_restart is True
+
+
 def test_unaddressable_job_stays_unknown_without_calling_supervisor(tmp_path, monkeypatch):
     monkeypatch.setattr(launchd, "real_home", lambda: tmp_path / "real")
 

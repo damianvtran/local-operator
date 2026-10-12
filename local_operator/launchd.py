@@ -554,13 +554,45 @@ def _loaded_no_restart(body: str, target: str, pid: int) -> bool | None:
     if len(lines) < 3 or lines[0] != f"{target} = {{" or lines[-1] != "}":
         return None
     fields: dict[str, str] = {}
-    section = False
+    structured = {
+        "arguments",
+        "environment",
+        "inherited environment",
+        "default environment",
+        "resource coalition",
+        "jetsam coalition",
+        "event triggers",
+        "event channels",
+    }
+    sections: list[int] = []
+    section_key = ""
     for line in lines[1:-1]:
-        if section:
-            if line == "\t}":
-                section = False
-            elif not line.startswith("\t\t"):
+        if sections:
+            # Recognizing a field NAME cannot certify its VALUE grammar:
+            # scalar arguments/environment previously became positive proof.
+            # Track every nested closure at its exact indentation. Arguments
+            # are opaque leaf strings (including embedded braces), never map
+            # headers; map sections use the supervisor's keyed grammar.
+            depth = len(line) - len(line.lstrip("\t"))
+            content = line[depth:]
+            if section_key == "arguments":
+                if line == "\t}":
+                    sections.pop()
+                elif depth != 2:
+                    return None
+            elif content == "}":
+                if depth != sections[-1]:
+                    return None
+                sections.pop()
+            elif depth != sections[-1] + 1:
                 return None
+            else:
+                if " = " not in content and " => " not in content:
+                    return None
+                if not content.split(" = ", 1)[0].split(" => ", 1)[0].strip():
+                    return None
+                if content.endswith(" = {"):
+                    sections.append(depth)
             continue
         if not line.startswith("\t") or line.startswith("\t\t"):
             return None
@@ -568,9 +600,13 @@ def _loaded_no_restart(body: str, target: str, pid: int) -> bool | None:
         if len(entry) != 2 or not entry[0] or entry[0] in fields:
             return None
         key, value = entry
+        if (key in structured) != (value == "{"):
+            return None
         fields[key] = value
-        section = value == "{"
-    if section or fields.get("pid") != str(pid) or fields.get("state") != "running":
+        if key in structured:
+            section_key = key
+            sections.append(1)
+    if sections or fields.get("pid") != str(pid) or fields.get("state") != "running":
         return None
     properties = fields.get("properties")
     if properties is None:
