@@ -1,0 +1,150 @@
+# The native session caller (OSWorld v2.1): what is declared, observed and refused
+
+Companion to [`README.md`](README.md) (the apparatus/methods for the v2.0
+release). This file covers ONLY what changed for the native session caller
+against the v2.1 release, and it is **not a readiness claim**: the fixed
+cohort below has not been run, no paid episode backs any statement here, and
+"declared" means declared-and-testable, not measured-at-scale.
+
+## The official pin
+
+| What | Value |
+| --- | --- |
+| Official release | `osworld-v2.1` |
+| Official code commit | `3d778a3c9a34a079316f70df023b166700445792` |
+| Official runner entry | `lib_run_single.run_single_example` (`run_multienv_claude.py:638` calls it) |
+| Official predictor | `mm_agents/anthropic/main.py` (`AnthropicAgent.predict`) |
+| Official guide | `docs/PUBLIC_EVALUATION_GUIDELINE_v2.1.md` |
+| Offline population | 82 unique IDs (`evaluation_examples/test_v2*.json` at the commit above); list sha256 `a14975fe0972530993d634d380ba574ecbd19b730d14716a392efe02faa62257` |
+
+The v2.1 tag is a **new pin**: v2.0-era bundles remain readable, but no
+number from one release may be compared with the other, and the runner
+scripts (`scripts/run_episode.py`, `scripts/launch_episode_21.sh` wrappers)
+must name the release they ran.
+
+## Four clocks — never equated
+
+| Clock | What it charges | Honest claim |
+| --- | --- | --- |
+| Official external epoch | ONE `agent.predict` output group, or one ASK_USER exchange (all returned actions execute under one epoch; `lib_run_single.py:1529–1533`, increment at `:1616`) | The selected official horizon. Internal predict retries do NOT add epochs (`mm_agents/anthropic/main.py:844–845, :894–896`). |
+| `ActionBridge._steps` (native output epochs) | ONE per ADMITTED output decision: executed batch, finish proposal (incl. the challenged one), ask exchange, committed read-back loss | The native mapping of the official epoch. Consumed at admission, BEFORE the guest await; pre-admission refusals charge compute/wall only. |
+| Root model-request cap | Unique root `purpose=turn` request-final records (incl. native format/recovery re-asks; excludes children/compaction/naming) | A conservative native-generation safety cap — NOT the official 500, because upstream can retry inside one predict. |
+| Whole-system all-actor compute | Root + child/grandchild/helper requests, observed and reported | Reported, not capped: final-row callbacks alone cannot bound concurrent child calls. Any optional bound is declared separately. |
+
+The episode's Nth-epoch stop is enforced by the arm itself: when the tool
+result that consumed the Nth admitted epoch is paired, the caller requests
+the loop's existing graceful boundary — the current group's calls finish and
+pair, and no further root request is admitted. The bridge's own budget
+refusal remains the fail-closed fallback, so guest admission closes AT the
+budget, never one decision later.
+
+## Model policy (preflight requirement, not a proved admission mechanism)
+
+- Hosting/route: `deepseek` / `deepseek-flash` **direct** (the registry
+  declares 1M context, vision and tools for this route). The prior OpenRouter
+  route is not used.
+- Subagent tiers `lo`/`med`/`hi`: the EXISTING default inherit sentinel (the
+  root model), `model_choice=operator`; fresh shipped roles only — no custom
+  role/team pins are copied into the episode root, and no team is provisioned
+  (the per-turn `team` tool remains available; a runtime team scaffold is NOT
+  invented).
+- Fallback: `retry.modelFallback=False` set in the BENCHMARK config only —
+  never in the operator's live configuration.
+- **Stated gap**: explicit role/team model pins can still override tiers, so
+  the initial configuration is not an all-actor admission guarantee. Actual
+  requested/served identities are reported per request (the observer's
+  `requested_*`/`served_*` fields); mixed or unknown serving is disclosed,
+  never silently averaged. The same-substrate claim requires verifying every
+  actor's actual served route — not made here.
+
+## What the caller observes, and how
+
+`run_session_episode` subscribes the request observer immediately after the
+session opens and BEFORE the first prompt (records are not replayed). The
+handler deduplicates by `request_id` and queues; the ONE flush at close-out
+serializes scalars plus the detached usage dump into the record's `requests`
+row. Money is kept as separate figures through the canonical
+`costs.cost_summary` (no second ledger):
+
+- `recorded_usd`: receipts actually stamped — known charged money;
+- `estimated_usd`: the same canonical table projection where only an
+  estimate exists (direct DeepSeek rows do not carry `estimated_usd_cost`, so
+  `recorded_only` alone would lose them);
+- `missing_usage_request_ids`: rows with no usage frame at all — unknown,
+  NEVER a priced zero;
+- `recorded_is_lower_bound`: set whenever any row is unknown — retry/fallback
+  sub-streams can be entirely unreported by a logical final, so the recorded
+  total is a lower bound until the invoice is reconciled.
+
+Cache read/write and reasoning ride inside the usage buckets the shared
+pricer already separates; nothing re-adds them to input/output.
+
+## Shutdown and the score gate
+
+The close-out calls `shutdown_owned_work(reason, timeout_s=…)` explicitly:
+delegation admission closes, the turn aborts, and the canonical disposal
+joins every child/grandchild job. The subscription outlives the event sink
+and detaches only AFTER the SDK context exits, so cancellation-final usage is
+captured. Scoring is REFUSED unless the shutdown receipt is
+`complete=True`; an incomplete receipt keeps its pending job ids and errors
+attached (`complete=False` is unverified, never a pretend kill), the outcome
+says why, and worker cleanup still runs so nothing leaks. Ordinary abort
+semantics are unchanged: first-Esc child continuation, TUI cancellation and
+the wall kill switch behave exactly as before; the explicit shutdown is the
+OWNING CALLER's terminal, not a keybinding.
+
+## The selector's core-source pin
+
+The arm's correctness lives in the core tree, so the selector now carries
+`core_source` (`CoreSourcePin`): the checkout commit plus sha256 per pinned
+module (`sdk`, `session`, `session_arm`, `loop`, `configure`, `subagent`,
+`action_tool`). `scripts/run_episode.py --engagement session` verifies the pin
+against the RUNNING interpreter before launch/allocation and REFUSES a
+selector without one — a selector built before this composition fails
+clearly instead of launching against a tree nobody identified. The module
+set is exact: a partial or over-broad pin is refused, not read as a pass.
+Build a pin for a tree with:
+
+```sh
+.venv/bin/python -m local_operator.evaluation.source_pin
+```
+
+and copy `commit` + `module_hashes` into the selector JSON. A wheel install
+without `.git` records `commit_source="unavailable"` — the hashes are then
+the artifact identity, and the run says so rather than substituting a
+version string.
+
+## AWS / VM references
+
+The adapter README
+([`benchmarks/osworld_v2_adapter/README.md`](../../../benchmarks/osworld_v2_adapter/README.md))
+remains the authority for the workspace build, the release manifest and the
+provider (`AWS_REGION`, `AWS_SUBNET_ID`, AMI and TTL infra values). The
+episode's VM allocation happens at adapter `prepare`/`reset` — strictly
+AFTER this document's preflights (secret resolution and the source pin), and
+teardown/rescue semantics are unchanged (see README §5).
+
+## Unknowns that must ride every report
+
+- Whether the maintainers accept the native system's internal epoch
+  allocation for ranking; JSONL report format itself is permitted
+  (guide 357–359), but that is a format allowance, not a protocol sign-off.
+- Exact upstream-equivalence of the native epoch mapping is UNVERIFIED until
+  the neutral fixture runs and a maintainer reads it.
+- Multi-agent rank acceptance is unspecified in the public sources.
+- Per-run route/capability provenance is what the observer records; the
+  configuration is not its own proof.
+
+## The frozen cohort (candidate, not launch authorization)
+
+[`offline20-v21-candidate.json`](offline20-v21-candidate.json) records the
+PROSPECTIVE 20-task cohort: tasks
+`002,021,026,029,031,042,043,048,054,056,058,063,065,072,077,080,082,092,104,106`
+in the archived seeded run order, `selection_manifest_digest`
+`ee5f560d416961df1259caf5eecb25b456724fea97292ba96cc7a7c9eabc369e`
+(verify by removing that field and sha256-ing sorted-key compact JSON).
+Status: `candidate_not_launch_authorization` — ONE generation, no reroll, no
+post-outcome substitution; historical readiness flags (task_026 user
+simulator/GitLab dependencies, 029 setup timing, 043 parser) are leads for a
+separate preflight, not results. Blocked cases are held and reported, never
+silently dropped or replaced.
