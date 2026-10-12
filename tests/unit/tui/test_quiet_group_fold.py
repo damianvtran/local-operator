@@ -327,3 +327,42 @@ def test_the_planner_refuses_a_fragment_whose_next_row_is_the_same_owners_next_p
     ):
         (closed,) = quiet_group_plan([h0, h1, img1], next_block=closing)
         assert closed.span == (0, 2)
+
+
+def test_the_planner_top_edge_needs_the_predecessor_family_not_only_its_owner() -> None:
+    """R8-2 / Q-R10-1: the TOP edge gates on the row ABOVE the edge row's
+    FAMILY as well as its coordinate. Owner-only context reads every owned
+    picture edge as a splitter and freezes a page-local fragment; the derived
+    family refuses it. Human/answer families, a part gap and a different
+    owner are known bounds and still close."""
+    page = [_hub("h2", 0), _hub("h3", 0)]
+
+    # A prefix of a hub receipt plus 1..3 of its pictures: the family above
+    # the page's edge row is the hub itself for one picture and the chain's
+    # own interior beyond — exactly what the source walk derives.
+    for parts, family in ((1, "hub"), (2, "inside"), (3, "inside")):
+        pictures = [_owned_image("h1", part) for part in range(1, parts + 1)]
+        edge, above_owner = pictures[-1], ("h1", parts - 1)
+        assert (
+            quiet_group_plan(page, prev_block=edge, prev_kind=family, prev_owner=above_owner) == []
+        ), (parts, family)
+        # Without the family the same edge reads as a splitter: the bug twin.
+        assert quiet_group_plan(page, prev_block=edge, prev_owner=above_owner) != []
+
+    # Known bounds close: a human's or an answer's own picture (their family
+    # ends the chain), a part gap and a different owner.
+    for edge, family, above_owner in (
+        (_owned_image("u0", 1), "other", ("u0", 0)),
+        (_owned_image("a0", 1), "assistant", ("a0", 0)),
+        (_owned_image("h1", 3), "inside", ("h1", 1)),
+        (_owned_image("h9", 1), "inside", ("h1", 1)),
+    ):
+        (planned,) = quiet_group_plan(
+            page, prev_block=edge, prev_kind=family, prev_owner=above_owner
+        )
+        assert planned.span == (0, 1)
+
+    # An unknown prefix (head cut) keeps the minimum-marker reading: a plan
+    # is made, but never claimed complete.
+    (cut,) = quiet_group_plan(page, head_cut=True)
+    assert cut.span == (0, 1) and cut.span_head_loaded is False
