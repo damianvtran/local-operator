@@ -495,13 +495,13 @@ async def test_reason_churn_does_not_re_fire_the_blocked_reconciliation(tmp_path
 
     builtin.TODO_STORE[SESSION_ID][0]["reason"] = "legal cleared it; waiting on finance"
 
-    assert await session._todo_continuation() == [], (
-        "a reason-only rewrite is bookkeeping, not a new ask"
-    )
+    assert (
+        await session._todo_continuation() == []
+    ), "a reason-only rewrite is bookkeeping, not a new ask"
     rendered = session._render_history(session._context.messages)
-    assert not any("<system-reminder>" in message.text for message in rendered), (
-        "the stale assertion still expires against the full fingerprint"
-    )
+    assert not any(
+        "<system-reminder>" in message.text for message in rendered
+    ), "the stale assertion still expires against the full fingerprint"
     await session.dispose()
 
 
