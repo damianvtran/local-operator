@@ -3037,6 +3037,175 @@ def test_the_owner_open_frame_without_a_journal_is_empty_and_unsupported(
     assert cursored["runs_state"] == "unsupported", cursored
 
 
+def test_the_owner_open_frame_memo_serves_a_settled_repeat_without_touching_the_journal(
+    peer_pair: Devices,
+) -> None:
+    """A repeat open of a settled conversation BUILDS nothing: one stat, one dict.
+
+    THE STRUCTURAL INVARIANT, not a timing bound (AGENTS.md, "Timing, flakes,
+    and how to assert that something is fast"): the second read must not call
+    the page reader at all, and its answer must be the first's byte for byte. A
+    memo hit is a fact about what the code did; a millisecond budget would be a
+    bet on this host's load.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=3, per_turn_tools=2))
+    _warm_frame_index(server_b.root, SESSION)
+
+    reads: list[str | None] = []
+    original = server_b._stored_page_read  # noqa: SLF001 — the reader under the memo
+
+    def _counting_read(directory: Path, *, before_id: str | None, limit: int) -> Any:
+        reads.append(before_id)
+        return original(directory, before_id=before_id, limit=limit)
+
+    server_b._stored_page_read = _counting_read  # type: ignore[method-assign]
+
+    first = _owner_frame(server_b, limit=50)
+    assert first["runs_state"] == "ready", first
+    builds = len(reads)
+    assert builds >= 1, "the first read must build from the journal"
+
+    second = _owner_frame(server_b, limit=50)
+    assert second == first
+    assert len(reads) == builds, "a memo hit must not touch the page reader"
+
+    # A DIFFERENT WINDOW IS A DIFFERENT KEY: the memo must not answer a read it
+    # was not built for.
+    _owner_frame(server_b, limit=6)
+    assert len(reads) > builds, "a different limit must build its own frame"
+
+
+def test_the_owner_open_frame_memo_invalidates_the_moment_the_journal_moves(
+    peer_pair: Devices,
+) -> None:
+    """The key is the journal's own stat triple, so an append must rebuild.
+
+    Same invalidation ``transcript_index._sig_matches`` uses — (inode, size,
+    mtime) — adopted so a frame can never disagree with the facts it carries:
+    an append moves size and mtime, and ``compact_file``'s ``os.replace`` mints
+    a new inode.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=3, per_turn_tools=2))
+    _warm_frame_index(server_b.root, SESSION)
+
+    before = _owner_frame(server_b, limit=50)
+    ids_before = [entry["id"] for entry in before["entries"]]
+
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=4, per_turn_tools=2))
+    _warm_frame_index(server_b.root, SESSION)
+
+    after = _owner_frame(server_b, limit=50)
+    ids_after = [entry["id"] for entry in after["entries"]]
+    assert ids_after != ids_before, "a moved journal must not be answered from the memo"
+    assert any(rid.startswith("user03") for rid in ids_after), ids_after
+
+
+def test_the_owner_open_frame_memo_never_pins_a_building_frame(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``runs_state: building`` is not memoizable: the next read is the follow-up.
+
+    The contract's own follow-up is that the next read carries the facts, so a
+    cached ``building`` frame would break the only promise a cold-index read
+    makes. The index is forced cold here; both reads must go to the pages.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation())
+    monkeypatch.setattr(server_b, "_stored_frame_index", lambda session_id: None)
+
+    reads: list[str | None] = []
+    original = server_b._stored_page_read  # noqa: SLF001 — the reader under the memo
+
+    def _counting_read(directory: Path, *, before_id: str | None, limit: int) -> Any:
+        reads.append(before_id)
+        return original(directory, before_id=before_id, limit=limit)
+
+    server_b._stored_page_read = _counting_read  # type: ignore[method-assign]
+
+    first = _owner_frame(server_b, limit=50)
+    assert first["runs_state"] == "building", first
+    builds = len(reads)
+    second = _owner_frame(server_b, limit=50)
+    assert second["runs_state"] == "building", second
+    assert len(reads) > builds, "a building frame must not be memoized"
+
+
+def test_the_relay_warms_the_open_frame_strip_calls_at_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The strip's two lazy chains are paid by the warm, not by the first open.
+
+    Measured on the S3 fixture: the first open that reached a user row paid
+    110-449 ms of imports on the link reader thread; the isolated probe put the
+    pipeline's first call at 448.7 ms against 0.8 ms warm. This cell pins the
+    warm's EXACT calls (the two predicates ``strip_entry`` makes) without
+    asserting an import's absence — other tests in one process confound that.
+    """
+    from local_operator.harness import rows as rows_mod
+
+    calls: list[str] = []
+
+    def _record_injection(row: Any) -> bool:
+        calls.append("injection")
+        return False
+
+    def _record_chrome(text: str) -> bool:
+        calls.append("chrome")
+        return False
+
+    monkeypatch.setattr(rows_mod, "is_harness_injection", _record_injection)
+    monkeypatch.setattr(rows_mod, "is_harness_chrome", _record_chrome)
+
+    relay.warm_open_frame_strip_now()
+
+    assert calls == ["injection", "chrome"], calls
+
+
+def test_relay_start_runs_the_open_frame_prewarm_once(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the real startup hookup, not just the standalone warm body.
+
+    The event is a completion signal, not a performance assertion: removing
+    start()'s prewarm call must fail this cell even when the body test passes.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    warmed = threading.Event()
+    calls: list[int] = []
+
+    def _warm() -> None:
+        calls.append(threading.get_ident())
+        warmed.set()
+
+    monkeypatch.setattr(relay, "warm_open_frame_strip_now", _warm)
+    startup_thread = threading.get_ident()
+    try:
+        server_b.start()
+        assert warmed.wait(10), "relay startup never scheduled the strip warm"
+        assert len(calls) == 1, calls
+        assert calls[0] != startup_thread, "startup must not pay the warm inline"
+    finally:
+        server_b.stop()
+
+
+def test_open_frame_prewarm_thread_exhaustion_defers_only_the_warm(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Thread creation can fail before the warm body's failure guard is reached."""
+    _server_a, server_b, _h, _p = peer_pair
+
+    def _cannot_start(_thread: threading.Thread) -> None:
+        raise RuntimeError("synthetic thread exhaustion")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", _cannot_start)
+        with caplog.at_level(logging.DEBUG, logger=relay.__name__):
+            server_b._warm_open_frame_strip()  # noqa: SLF001 — startup's optional hook
+    assert "open-frame strip warm could not start" in caplog.text
+
+
 def test_the_owner_open_frame_sizes_the_reply_with_its_runs_included(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:

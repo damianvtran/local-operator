@@ -98,6 +98,7 @@ from local_operator.server.utils.store_failures import (
     sqlite_store_failure,
     store_failure,
 )
+from local_operator.session import open_trace
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import (
     SUPERSEDED_TOKEN_CODE,
@@ -5415,7 +5416,17 @@ async def events(
             ) as frames:
                 try:
                     async for frame in frames:
-                        yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                        ser_at = time.monotonic() if open_trace.enabled() else 0.0
+                        text = "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                        if ser_at:
+                            open_trace.mark(
+                                "a.wire.frame",
+                                (time.monotonic() - ser_at) * 1000,
+                                session=session_id,
+                                kind=frame.get("type") if isinstance(frame, dict) else "",
+                                chars=len(text),
+                            )
+                        yield text
                 finally:
                     # STAMPED BEFORE THE GENERATOR IS CLOSED, AND THE ORDER IS
                     # LOAD-BEARING RATHER THAN TIDY (F-B). Closing it arms the
