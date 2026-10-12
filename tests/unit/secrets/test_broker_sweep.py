@@ -563,6 +563,87 @@ def test_a_broker_a_test_started_is_dead_once_that_test_has_torn_down(tmp_path: 
         _kill_pid(pid)
 
 
+#: The inner test for the fixture-mediated shape: ``tmp_path`` reaches the test
+#: ONLY through a fixture resolved by NAME at run time, so pytest never puts it
+#: in the item's ``funcargs``. That is the network fixtures' house idiom
+#: (``request.getfixturevalue("devices")`` and everything built on it), and it
+#: is the shape whose broker the per-test sweep could not see (#2078/#2033):
+#: the candidate list collapsed to the single default-config entry and the
+#: daemon outlived its test.
+_INNER_STARTS_A_BROKER_UNDER_A_DYNAMIC_ROOT = '''
+import os
+from pathlib import Path
+
+import pytest
+
+from local_operator.secrets import client
+
+
+@pytest.fixture
+def store_root(tmp_path):
+    """The real root, one level below ``tmp_path`` — the depth a leak uses."""
+    return tmp_path / "store"
+
+
+@pytest.fixture
+def dynamic_root(request):
+    """Reaches ``store_root`` by NAME, the way the network fixtures do."""
+    return request.getfixturevalue("store_root")
+
+
+def test_starts_a_broker_under_a_dynamic_root(dynamic_root, request):
+    dynamic_root.mkdir()
+    assert client.ensure_broker(dynamic_root), "the broker never came up"
+    pid = (client.broker_status(dynamic_root) or {}).get("pid")
+    assert isinstance(pid, int), "no pid to hand to the outer test"
+    in_funcargs = "tmp_path" in request.node.funcargs
+    Path(os.environ["LO958_RECORD"]).write_text(
+        f"{pid}\\n{dynamic_root}\\n{in_funcargs}"
+    )
+'''
+
+
+def test_a_broker_under_a_fixture_mediated_root_is_dead_once_that_test_has_torn_down(
+    tmp_path: Path,
+) -> None:
+    """The fixture-mediated half of the per-test reap's end-to-end guard.
+
+    The cell above drives a root the test NAMES itself (``tmp_path`` as a
+    parameter), which pytest fills into ``funcargs``. The network fixtures
+    reach theirs by NAME at run time (``request.getfixturevalue`` — ``devices``
+    and everything built on it), and a fixture resolved that way never lands in
+    ``funcargs``: measured on this head, ``_temp_roots`` walked 0 roots, the
+    candidate list collapsed to the single default-config entry, and a broker
+    under the resolved root survived its test — the fixture-mediated leak of
+    #2078/#2033 (9 live key-holding daemons from one ``-n0`` run). The
+    ``_resolved_tmp_path`` fallback in ``tests/conftest.py`` reads the resolved
+    value off the request tree's shared fixture map, and this cell is its
+    falsifier: without the fallback the broker outlives its test.
+
+    The inner test also records whether ``tmp_path`` was in its ``funcargs``
+    (the cell's PREMISE: False = the blind shape). If a pytest upgrade ever
+    starts naming dynamically-resolved fixtures there, the premise assert fails
+    with its note rather than this cell silently proving nothing.
+    """
+    result = _run_nested_pytest(tmp_path, _INNER_STARTS_A_BROKER_UNDER_A_DYNAMIC_ROOT)
+    assert result.returncode == 0, f"the inner run failed:\n{result.stdout}\n{result.stderr}"
+
+    record = (tmp_path / "record.txt").read_text().splitlines()
+    pid, base = int(record[0]), Path(record[1])
+    try:
+        assert record[2] == "False", (
+            "the cell's premise broke: the inner test's funcargs now name tmp_path "
+            f"({record[2]}) — the fixture-mediated shape is no longer reproduced; "
+            "re-derive what _resolved_tmp_path covers"
+        )
+        assert _wait_gone(pid), (
+            f"broker {pid} for {base} outlived the test that started it — the sweep "
+            "saw no candidate naming a fixture-mediated root (#2078/#2033)"
+        )
+    finally:
+        _kill_pid(pid)
+
+
 #: The inner test for the session-end net: a MODULE-SCOPED fixture starts a
 #: broker in its teardown, under a directory from ``tmp_path_factory``. That
 #: directory is in no test's ``tmp_path``, so no per-test record can name it and
