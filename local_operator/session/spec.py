@@ -446,12 +446,17 @@ class SessionSpec:
     output_schema: OutputSchemaValue = None
     #: Max retries after a rejected final response (0-5; default 2).
     output_retries: int | None = None
-    #: The model's WORLD ROOT when a caller needs a hard boundary between the
-    #: model's own reach and the controller that opened it — the benchmark
-    #: episode caller is the first such caller (its scratch tree carries
-    #: controller credentials a model must never read). ``None`` (default)
-    #: leaves ordinary exec/TUI/mobile/server sessions byte-identical: no
-    #: extra scan, no extra prompt, nothing to normalize.
+    #: The model's WORLD ROOT: an opt-in world/discovery/config scope for
+    #: the model's reach, separated from the controller that opened the
+    #: session — the benchmark episode caller is the first such caller (its
+    #: scratch tree carries controller credentials a model must never read).
+    #: It scopes PATHS and discovery, not capabilities: it is neither an
+    #: in-process capability policy nor an OS/API sandbox, and it cannot make
+    #: hostile code safe. An unrestricted inventory still accepts controller
+    #: APIs, so callers must choose an appropriate tool/operation policy of
+    #: their own. ``None`` (default) leaves ordinary exec/TUI/mobile/server
+    #: sessions byte-identical: no extra scan, no extra prompt, nothing to
+    #: normalize.
     #:
     #: When set, the SDK normalizes and validates the boundary ONCE, before
     #: any construction: ``roots.cwd`` must lie inside ``world_root`` and the

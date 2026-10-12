@@ -1390,22 +1390,6 @@ class ActionBridge:
 #: The tool surface an episode session runs. THE BENCHMARK CALLER'S POLICY,
 #: stated once here so nothing reconstructs it by memory: the ordinary local
 #: working set a task needs (``read``/``write``/``edit``/``glob``/``grep``/
-#: ``bash``), delegation and tracking (``task``/``hub``/``todo``), the
-#: packaged-agent and isolated-team surfaces (``agent``/``team``; guides and
-#: skills ride the knowledge block, not tools), plus the ONE session-scoped
-#: action tool the episode exports. Everything else in the shipped inventory
-#: is a CONTROLLER capability reachable in-process — ``secret``,
-#: ``list_variables``/``read_variable``, ``setting``, ``network``, ``send``/
-#: ``sessions``, ``monitor``/``wake``, ``jobs``, ``code_requests``, ``eval``,
-#: ``web_*``/``browser``, ``project``/``team_delete`` — and a filesystem
-#: boundary does not sandbox an in-process API, so they are named out here
-#: rather than hoped about. The enforcement is the EXISTING inventory
-#: mechanism (``SessionSpec.tools`` + ``ApprovalPolicy.declared`` ->
-#: ``Session.set_tool_inventory``); this tuple is only WHICH names, and
-#: ``validate_episode_session_spec`` pins membership.
-#: The tool surface an episode session runs. THE BENCHMARK CALLER'S POLICY,
-#: stated once here so nothing reconstructs it by memory: the ordinary local
-#: working set a task needs (``read``/``write``/``edit``/``glob``/``grep``/
 #: ``bash``), delegation and tracking (``task``/``hub``/``todo`` — plus
 #: ``jobs``/``wait``, because child work is a BACKGROUND job: a parent that
 #: cannot wait cannot collect its children), the packaged-agent and
