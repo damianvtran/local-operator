@@ -4598,7 +4598,10 @@ def build_app(daemon: MobileDaemon):
 
         locale = request.path_params["locale"]
         namespace = request.path_params["namespace"]
-        if not namespace.startswith("wire."):
+        # File presence is not production eligibility. The shared resolver
+        # applies both the shipped set and LOP_I18N=0; exact comparison also
+        # prevents aliases/fallback English from masquerading as this locale.
+        if resolve_language(config=locale) != locale or not namespace.startswith("wire."):
             return JSONResponse(
                 {"detail": "Catalogue not found."}, status_code=404
             )  # i18n: ignore protocol diagnostic

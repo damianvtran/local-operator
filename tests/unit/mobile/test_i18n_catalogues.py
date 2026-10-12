@@ -100,6 +100,32 @@ def test_malformed_catalogue_fails_loudly(client, monkeypatch, tmp_path) -> None
     assert client.get("/api/i18n/catalogues/en/wire.invalid").status_code == 500
 
 
+@pytest.mark.parametrize("disabled", [False, True])
+def test_ineligible_bytes_never_reach_hash_or_conditional_response(
+    client, monkeypatch, tmp_path, disabled: bool
+) -> None:
+    root = tmp_path / "catalogues"
+    locale = "fr" if disabled else "zh-CN"
+    (root / locale).mkdir(parents=True)
+    (root / locale / "wire.held.json").write_text('{"wire.held.label": "Held fixture copy"}')
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+    if disabled:
+        monkeypatch.setenv("LOP_I18N", "0")
+    else:
+        monkeypatch.delenv("LOP_I18N", raising=False)
+
+    def forbidden_hash(*args, **kwargs):
+        raise AssertionError("ineligible bytes reached hashing")
+
+    monkeypatch.setattr(catalogues, "catalogue_sha256", forbidden_hash)
+    for validator in [None, "*"]:
+        headers = {} if validator is None else {"if-none-match": validator}
+        response = client.get(f"/api/i18n/catalogues/{locale}/wire.held", headers=headers)
+        assert response.status_code == 404
+        assert "etag" not in response.headers
+        assert "Held fixture copy" not in response.text
+
+
 def test_adapter_does_not_import_core_route_models() -> None:
     source = Path(__file__).resolve().parents[3] / "local_operator/mobile/daemon.py"
     text = source.read_text()
