@@ -223,7 +223,8 @@ async def test_milestone_routes_report_derived_status_and_refuse_unknowns(api) -
 
     missing = await client.delete(f"/v1/desktop/projects/{project_id}/milestones/ghost")
     assert missing.status_code == 422
-    assert "no milestone named 'ghost'" in missing.json()["detail"]["message"]
+    # E2a: the sentence rides `text` on the message envelope.
+    assert "no milestone named 'ghost'" in missing.json()["detail"]["text"]
 
 
 async def test_links_round_trip_and_the_view_counts_live_sessions(api) -> None:
@@ -306,7 +307,7 @@ async def test_a_row_from_a_newer_build_is_readable_but_refuses_mutation(api) ->
     write = await client.patch(f"/v1/desktop/projects/{project_id}", json={"description": "x"})
     assert write.status_code == 409
     assert write.json()["detail"]["code"] == "project_schema_newer"
-    assert "update this build" in write.json()["detail"]["message"]
+    assert "update this build" in write.json()["detail"]["text"]
 
     # EVERY mutating route answers the same way. These three used to fall
     # through to `errors()`'s generic RuntimeError arm — the guard subclasses
@@ -324,7 +325,7 @@ async def test_a_row_from_a_newer_build_is_readable_but_refuses_mutation(api) ->
         assert response.status_code == 409, response.text
         detail = response.json()["detail"]
         assert detail["code"] == "project_schema_newer", detail
-        assert "update this build" in detail["message"]
+        assert "update this build" in detail["text"]
 
     # ... and none of them wrote: the row still exists, still at the newer schema.
     still_there = json.loads(path.read_text())
@@ -652,11 +653,11 @@ async def test_done_over_open_milestones_is_the_dedicated_422(api) -> None:
 
     assert refused.status_code == 422
     # The machine code, the byte-identical sentence, and the names to list.
-    assert refused.json()["detail"] == {
-        "code": "project_done_incomplete",
-        "message": OPEN_MILESTONE_SENTENCE,
-        "incomplete": ["open ms"],
-    }
+    # E2a: the sentence rides `text` on the message envelope.
+    body = refused.json()["detail"]
+    assert body["code"] == "project_done_incomplete"
+    assert body["text"] == OPEN_MILESTONE_SENTENCE
+    assert body["incomplete"] == ["open ms"]
     # Refused means refused: nothing was written.
     row = json.loads((root / "projects" / f"{project_id}.json").read_text())
     assert row["status"] == "active" and row["completed_at"] is None

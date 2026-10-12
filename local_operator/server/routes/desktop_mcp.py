@@ -23,6 +23,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.mcp.catalog import LiveFacts, live_facts_from_snapshot
 from local_operator.mcp.config import MCPConfigWriteError
 from local_operator.mcp.credentials import MCPCredentials
@@ -76,7 +77,9 @@ def _cwd_or_422(raw: str | None) -> str:
     try:
         return resolve_cwd(raw)
     except ValueError as error:
-        raise HTTPException(422, {"code": "invalid_cwd", "message": str(error)}) from None
+        raise HTTPException(
+            422, _wd.desktop_refusal(error=str(error)).envelope(code="invalid_cwd")
+        ) from None
 
 
 def _refused(error: Exception) -> HTTPException:
@@ -87,7 +90,7 @@ def _refuse_if_retiring(request: Request) -> None:
     """A latched daemon starts no new work, the same rule the session door keeps."""
     if retiring(request.app):
         error = DaemonRetiring(RETIRING_MESSAGE)
-        raise HTTPException(503, {"code": error.code, "message": str(error)})
+        raise HTTPException(503, _wd.desktop_refusal(error=str(error)).envelope(code=error.code))
 
 
 def _same_folder(left: str, right: str) -> bool:

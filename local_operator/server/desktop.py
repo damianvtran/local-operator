@@ -82,6 +82,8 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
+
 #: The environment variable the desktop app injects into a backend it spawned.
 #: Read HERE and nowhere else — see the module docstring, and the source-grep
 #: test that keeps a future caller from growing a private second opinion.
@@ -190,7 +192,12 @@ def _require_allowed_origin(request: Request, allowed: frozenset[str]) -> None:
     origin = request.headers.get("origin")
     if origin is not None:
         if origin not in allowed:
-            raise HTTPException(403, "This origin cannot access desktop controls.")
+            raise HTTPException(
+                # i18n: ignore pairing refusal; client classifies by status,
+                # never the body
+                403,
+                "This origin cannot access desktop controls.",
+            )
     elif allowed and not _is_non_browser_caller(request):
         # An ABSENT Origin used to skip the check entirely, so a caller that
         # simply omitted the header bypassed the allowlist (code review 4).
@@ -206,7 +213,12 @@ def _require_allowed_origin(request: Request, allowed: frozenset[str]) -> None:
         # request carrying it is browser-originated and must present an
         # allowed Origin; one without it is a native client, which the bearer
         # below still authenticates.
-        raise HTTPException(403, "This origin cannot access desktop controls.")
+        raise HTTPException(
+            # i18n: ignore pairing refusal; client classifies by status, never
+            # the body
+            403,
+            "This origin cannot access desktop controls.",
+        )
 
 
 def require_desktop(request: Request) -> None:
@@ -220,12 +232,22 @@ def require_desktop(request: Request) -> None:
     """
     posture = desktop_posture()
     if not posture.enabled:
-        raise HTTPException(503, "Desktop controls require a backend started by the desktop app.")
+        raise HTTPException(
+            # i18n: ignore pairing refusal; client classifies by status, never
+            # the body
+            503,
+            "Desktop controls require a backend started by the desktop app.",
+        )
     _require_allowed_origin(request, posture.origins)
     supplied = request.headers.get("authorization", "")
     expected = f"Bearer {posture.token}".encode("utf-8")
     if not secrets.compare_digest(supplied.encode("utf-8"), expected):
-        raise HTTPException(401, "Desktop authorization is required.")
+        raise HTTPException(
+            # i18n: ignore pairing refusal; client classifies by status, never
+            # the body
+            401,
+            "Desktop authorization is required.",
+        )
 
 
 def _claim_origin(request: Request) -> str | None:
@@ -254,13 +276,23 @@ def _claim_origin(request: Request) -> str | None:
       deliberate narrowing by whoever started the daemon.
     """
     if not _is_non_browser_caller(request):
-        raise HTTPException(403, "This origin cannot access desktop controls.")
+        raise HTTPException(
+            # i18n: ignore pairing refusal; client classifies by status, never
+            # the body
+            403,
+            "This origin cannot access desktop controls.",
+        )
     origin = request.headers.get("origin")
     if origin is None:
         return None
     allowed = desktop_posture().origins
     if origin == "null" or (allowed and origin not in allowed):
-        raise HTTPException(403, "This origin cannot access desktop controls.")
+        raise HTTPException(
+            # i18n: ignore pairing refusal; client classifies by status, never
+            # the body
+            403,
+            "This origin cannot access desktop controls.",
+        )
     return origin
 
 
@@ -298,22 +330,20 @@ def parse_claim_origins(declared: Sequence[object]) -> frozenset[str]:
     parsed: set[str] = set()
     for item in declared:
         if not isinstance(item, str):
-            raise HTTPException(400, "Claim origins must be strings.")
+            raise HTTPException(400, _wd.claim_origin_not_string().envelope())
         if item == "null":
-            raise HTTPException(400, "An opaque ('null') origin cannot be claimed.")
+            raise HTTPException(400, _wd.claim_origin_null().envelope())
         if item == "*":
-            raise HTTPException(400, "A wildcard origin cannot be claimed.")
+            raise HTTPException(400, _wd.claim_origin_wildcard().envelope())
         parts = urlsplit(item)
         if parts.scheme not in {"http", "https"} or not parts.netloc:
-            raise HTTPException(400, "Claim origins must be absolute http(s) origins.")
+            raise HTTPException(400, _wd.claim_origin_not_absolute().envelope())
         if parts.path not in {"", "/"} or parts.query or parts.fragment:
-            raise HTTPException(
-                400, "Claim origins must be plain origins, without a path, query or fragment."
-            )
+            raise HTTPException(400, _wd.claim_origin_not_plain().envelope())
         if allowed and item not in allowed:
             raise HTTPException(
                 403,
-                "A claim cannot install an origin outside the configured desktop origins.",
+                _wd.claim_origin_outside_configured().envelope(),
             )
         parsed.add(item)
     return frozenset(parsed)
@@ -366,13 +396,13 @@ def accept_claim(
     origin = _claim_origin(request)
     declared = parse_claim_origins(declared_origins)
     if desktop_posture().enabled:
-        raise HTTPException(409, "This desktop plane is already controlled.")
+        raise HTTPException(409, _wd.plane_already_controlled().envelope())
     if not published_key:
-        raise HTTPException(503, "This backend published no desktop claim key.")
+        raise HTTPException(503, _wd.claim_key_unpublished().envelope())
     supplied = request.headers.get("authorization", "")
     expected = f"Bearer {published_key}".encode("utf-8")
     if not secrets.compare_digest(supplied.encode("utf-8"), expected):
-        raise HTTPException(401, "Desktop claim authorization is required.")
+        raise HTTPException(401, _wd.claim_authorization_required().envelope())
     # The caller's own Origin joins the allowlist — the literal "null" and an
     # origin off a configured list never get this far — as do whatever origins
     # the body declared for its renderer. A native caller (Electron main) sends

@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field, StrictBool, model_validator
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.providers.auth_store import (
     DEFAULT_BLOCK_MS,
     AuthStore,
@@ -597,7 +598,9 @@ def _failure(status: int, code: str, message: str, **details: Any) -> HTTPExcept
     an outage ("this page has no viewer state to show"). ``details`` holds no
     prose — anything a human reads lives in ``message``.
     """
-    return HTTPException(status, {"code": code, "message": message, "details": details})
+    return HTTPException(
+        status, _wd.desktop_refusal(error=message).envelope(code=code) | {"details": details}
+    )
 
 
 def _upstream_refusal(status: int, **details: Any) -> HTTPException:
