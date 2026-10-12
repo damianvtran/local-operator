@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "note": "Exact literal+sink multisets freeze existing copy in activated mechanism paths; new/replaced/deleted fingerprints require reviewed extraction, never a file exemption. Other app paths remain scanned advisory until C activates them.",
+  "enforced": [
+    "src/i18n/runtime.ts",
+    "src/i18n/wire-cache.ts",
+    "src/store.ts",
+    "src/main.tsx"
+  ],
+  "nontranslatable": [
+    {
+      "path": "src/i18n/wire-cache.ts",
+      "sink": "new:Error",
+      "text": "catalogue response limit",
+      "reason": "Internal payload bound caught by loader; never surfaced as user copy."
+    }
+  ],
+  "legacy": {
+    "src/i18n/runtime.ts": {},
+    "src/i18n/wire-cache.ts": {},
+    "src/store.ts": {},
+    "src/main.tsx": {}
+  }
+}
