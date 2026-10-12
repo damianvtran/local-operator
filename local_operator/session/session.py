@@ -15920,12 +15920,12 @@ class Session:
                 raise ValueError("pass either model or effort, not both")
             if model == "inherit":
                 return None
-            from local_operator.mobile.peer_model import validate_peer_selection
+            from local_operator.mobile.peer_model import validate_subagent_selection
 
             provider, separator, model_id = model.partition("/")
             if not separator or not provider or not model_id or any(c.isspace() for c in model):
                 raise ValueError("model must be 'inherit' or <provider>/<model-id>")
-            return validate_peer_selection(provider, model_id)
+            return validate_subagent_selection(provider, model_id)
         wanted = effort
         if wanted is None and agent and agent != "task":
             from local_operator.agent_profiles import resolve_profile

@@ -26111,7 +26111,11 @@ async def execute_task(
             options: dict[str, Any] = {"agent": item.agent, "effort": item.effort}
             if item.model is not None:
                 options["model"] = item.model
-            job_id = launcher(item.label, _full_prompt(item), **options)
+            from local_operator.mobile.peer_model import prepared_subagent_selections
+
+            selectors = [item.model] if item.model is not None and item.model != "inherit" else []
+            async with prepared_subagent_selections(selectors):
+                job_id = launcher(item.label, _full_prompt(item), **options)
         except Exception as exc:  # noqa: BLE001 — engine failure surfaces as an error result
             # An unavailable tier is the one launch failure the model is
             # tempted to "fix" by retrying at another tier, which is how a
@@ -27917,7 +27921,7 @@ async def _execute_hub_parent(
             # (resumed-from id, new job id, error)
             (
                 job_id,
-                *comms.resume(
+                *await comms.resume_async(
                     job_id, message, **({"model": params.model} if params.model is not None else {})
                 ),
             )
