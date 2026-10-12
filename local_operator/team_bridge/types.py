@@ -34,6 +34,7 @@ __all__ = [
     "TeamBridgeTypeError",
     "feed_seq",
     "inbox_cursor",
+    "project_events_batch",
     "project_inbox_page",
     "project_message_ref",
 ]
@@ -45,8 +46,20 @@ ACK_TARGETS = ("read", "blocked")
 AckTarget = Literal["read", "blocked"]
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+_CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)$")
+#: The frozen server DTO's closed event-type set (bridge.go BridgeEventItem).
+_EVENT_TYPES = (
+    "message_available",
+    "state_changed",
+    "request_decided",
+    "request_revoked",
+    "request_expired",
+)
+#: The only subject-ref kinds a feed event may carry (bridge.go BridgeEventIDs).
+_EVENT_ID_KINDS = ("message_id", "request_id", "thread_id")
+DELIVERY_STATES = ("unread", "read", "working", "done", "blocked")
 _VERDICTS = ("allow", "reject")
-_DELIVERY_STATES = ("unread", "read", "working", "done", "blocked")
+DELIVERY_STATES = ("unread", "read", "working", "done", "blocked")
 
 
 class TeamBridgeTypeError(ValueError):
@@ -114,12 +127,25 @@ def inbox_cursor(value: Any) -> InboxCursor:
     return InboxCursor(value)
 
 
-def feed_seq(value: Any) -> FeedSeq:
-    """Mint a ``FeedSeq``; refuse bools (ints in Python) and negatives."""
+def feed_seq(value: int | str) -> FeedSeq:
+    """Mint a FeedSeq from either canonical wire form, normalized to int.
 
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise TeamBridgeTypeError("feed seq must be a non-negative int")
-    return FeedSeq(value)
+    The frozen server answers the events `cursor` as a decimal STRING
+    (bridge.go BridgeEventsResponse: `Cursor string json:"cursor" example:"42"`)
+    while the store orders on an INTEGER; both canonical forms are accepted
+    here and anything else — a bool, a negative, a leading-zero form, an
+    opaque page cursor — is refused, so the two cursor species can never
+    silently interchange.
+    """
+
+    if isinstance(value, bool):
+        raise TeamBridgeTypeError("FeedSeq must be an int or canonical decimal string")
+    if isinstance(value, int):
+        if value >= 0:
+            return FeedSeq(value)
+    elif isinstance(value, str) and _CANONICAL_DECIMAL.match(value):
+        return FeedSeq(int(value))
+    raise TeamBridgeTypeError(f"FeedSeq {value!r} is not a non-negative integer or decimal string")
 
 
 # ---------------------------------------------------------------------------
@@ -230,9 +256,9 @@ class MessageRef:
     request_ref: str | None = None
 
     def validated(self) -> "MessageRef":
-        if self.delivery_state not in _DELIVERY_STATES:
+        if self.delivery_state not in DELIVERY_STATES:
             raise TeamBridgeTypeError(
-                f"delivery state {self.delivery_state!r} not in {_DELIVERY_STATES}"
+                f"delivery state {self.delivery_state!r} not in {DELIVERY_STATES}"
             )
         if self.body_hash is not None and not _SHA256_HEX.match(self.body_hash):
             raise TeamBridgeTypeError("body_hash must be a lowercase sha256 hex when present")
@@ -258,13 +284,31 @@ def _project_item(item: Mapping[str, Any]) -> MessageRef:
     """
 
     message = _require_mapping(item.get("message"), "item.message")
-    delivery = _require_mapping(item.get("delivery", {}), "item.delivery")
+    raw_delivery = item.get("delivery")
+    if raw_delivery is None:
+        # A sender reading their own message gets delivery:null (bridge_read.go
+        # BridgeMessageItem). That is NOT a recipient view and carries no
+        # delivery state, so H2 refuses it rather than filing a phantom row.
+        raise TeamBridgeTypeError("item.delivery is null: not a recipient view")
+    delivery = _require_mapping(raw_delivery, "item.delivery")
+    raw_thread = item.get("thread")
+    thread: Mapping[str, Any] = raw_thread if isinstance(raw_thread, Mapping) else {}
     message_id = _require_id(message.get("id") or message.get("_id"), "item.message.id")
-    thread_id = _require_id(message.get("thread_id") or message.get("threadId"), "thread_id")
-    tenant_id = _require_id(message.get("tenant_id") or message.get("tenantId"), "tenant_id")
+    # The frozen server DTO has NO tenant_id on the message: the tenant rides
+    # the thread block (bridge_read.go: BridgeThreadDetail.TenantID), so the
+    # verified thread value is the normalization source — never an invented
+    # field on the message.
+    thread_id = _require_id(
+        message.get("thread_id") or message.get("threadId") or thread.get("id"),
+        "thread_id",
+    )
+    tenant_id = _require_id(
+        message.get("tenant_id") or message.get("tenantId") or thread.get("tenant_id"),
+        "tenant_id",
+    )
     state = delivery.get("state")
-    if not isinstance(state, str) or state not in _DELIVERY_STATES:
-        raise TeamBridgeTypeError(f"item.delivery.state {state!r} not in {_DELIVERY_STATES}")
+    if not isinstance(state, str) or state not in DELIVERY_STATES:
+        raise TeamBridgeTypeError(f"item.delivery.state {state!r} not in {DELIVERY_STATES}")
     raw_sender = item.get("sender")
     sender: Mapping[str, Any] = raw_sender if isinstance(raw_sender, Mapping) else {}
     raw_recipient = message.get("recipient")
@@ -321,8 +365,22 @@ def project_inbox_page(result: Mapping[str, Any]) -> InboxPage:
     items = result.get("items")
     if not isinstance(items, list):
         raise TeamBridgeTypeError("inbox result.items must be a list")
-    next_cursor = result.get("next_cursor")
-    cursor = inbox_cursor(next_cursor) if isinstance(next_cursor, str) and next_cursor else None
+    if not all(isinstance(entry, Mapping) for entry in items):
+        # One malformed entry refuses the WHOLE page: adopting the valid
+        # subset while recording a checkpoint either loses backlog (claimed
+        # complete) or poisons the cursor. Nothing is persisted before this
+        # projection returns, so refusal means zero rows and zero checkpoint
+        # movement (H2-Q3).
+        raise TeamBridgeTypeError("inbox result.items entries must all be mappings")
+    raw_cursor = result.get("next_cursor")
+    if raw_cursor is None:
+        cursor = None
+    elif isinstance(raw_cursor, str) and raw_cursor:
+        cursor = inbox_cursor(raw_cursor)
+    else:
+        # A present-but-invalid cursor must refuse: silently reading it as
+        # "terminal" is exactly the backlog-loss bug (H2-Q3).
+        raise TeamBridgeTypeError("inbox result.next_cursor must be null or an opaque string")
     counts = result.get("counts")
     clean_counts: dict[str, int] | None = None
     if isinstance(counts, Mapping):
@@ -332,7 +390,7 @@ def project_inbox_page(result: Mapping[str, Any]) -> InboxPage:
             if isinstance(value, int) and not isinstance(value, bool)
         }
     return InboxPage(
-        items=tuple(_project_item(item) for item in items if isinstance(item, Mapping)),
+        items=tuple(_project_item(item) for item in items),
         next_cursor=cursor,
         counts=clean_counts,
     )
@@ -342,3 +400,55 @@ def project_message_ref(result: Mapping[str, Any]) -> MessageRef:
     """The single-message read: the same nested shape as ONE inbox item."""
 
     return _project_item(_require_mapping(result, "message result"))
+
+
+def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str, ...], bool]:
+    """The §6.7 events answer → (cursor, refs, resync flag). Strict, refs-only.
+
+    The frozen DTO answers `cursor` as a canonical decimal STRING and
+    `events` as `{type, ids{message_id?,request_id?,thread_id?}, at}`
+    objects that "carry refs only — never message text" (bridge.go). This
+    projection keeps that promise client-side: each event becomes ONE
+    canonical ref string built ONLY from whitelisted scalar ids, the type is
+    checked against the closed set, and every other key (a future server
+    addition, or a garbled payload) is never read, stringified or persisted.
+    An empty event list is the resync signal.
+    """
+
+    result = _require_mapping(result, "events result")
+    events = result.get("events")
+    if not isinstance(events, list):
+        raise TeamBridgeTypeError("events result.events must be a list")
+    refs: list[str] = []
+    for index, raw in enumerate(events):
+        if not isinstance(raw, Mapping):
+            raise TeamBridgeTypeError(f"events[{index}] must be a mapping")
+        event_type = raw.get("type")
+        if not isinstance(event_type, str) or event_type not in _EVENT_TYPES:
+            raise TeamBridgeTypeError(
+                f"events[{index}].type {event_type!r} is not in the closed set"
+            )
+        ids = raw.get("ids")
+        if not isinstance(ids, Mapping):
+            raise TeamBridgeTypeError(f"events[{index}].ids must be a mapping")
+        subject_kind: str | None = None
+        subject: str | None = None
+        for kind in _EVENT_ID_KINDS:
+            value = ids.get(kind)
+            if value is None or value == "":
+                continue
+            if not isinstance(value, str):
+                raise TeamBridgeTypeError(f"events[{index}].ids.{kind} must be a string")
+            if subject is None:
+                subject_kind, subject = kind, value
+        if subject is None:
+            raise TeamBridgeTypeError(f"events[{index}].ids carries no subject ref")
+        at = raw.get("at")
+        if not isinstance(at, str) or not at:
+            raise TeamBridgeTypeError(f"events[{index}].at must be a non-empty string")
+        refs.append(f"{event_type}:{subject_kind}={subject}")
+    raw_cursor = result.get("cursor")
+    if raw_cursor is None:
+        raise TeamBridgeTypeError("events result.cursor is required on a 200 answer")
+    cursor = feed_seq(raw_cursor)
+    return cursor, tuple(refs), not refs
