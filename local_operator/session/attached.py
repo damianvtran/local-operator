@@ -214,6 +214,24 @@ COLD_FALLBACK_S = 8.0
 #: a stalled one does not, and the read does not care.
 READ_ATTACH_BUDGET_S = 2.0
 
+#: How long a READ-mode attach trusts a peer's "no owner" answer — a locate that
+#: came back ``(None, None)`` — before dialling the peer's registry again.
+#:
+#: THE DIAL THIS REMOVES IS PER SIBLING-READ, NOT PER BOOT. One conversation
+#: open fires several reads at once (the app's own burst), and each used to ask
+#: the peer for an owner record — a mesh round trip apiece — while
+#: ``_remote_history``'s own retry asked AGAIN inside the same open, immediately
+#: after the acquire's attempt had just answered. 2.0 s is
+#: ``READ_ATTACH_BUDGET_S``'s own number: long enough that one burst or a
+#: same-second reopen shares a single answer, short enough that a runtime engaged
+#: elsewhere — a spawn takes seconds — is dialled by the first open after the
+#: window. Inside the window a read serves the STORED page without asking, by
+#: design: the page is the durable complete answer either way, and the window is
+#: shorter than an engage's own spawn latency, so what it can delay is the LIVE
+#: cue, never content. Only the ``(None, None)`` arm is memoized: ``(None, pid)``
+#: is the bind loop's retry state and keeps dialling.
+NO_OWNER_MEMO_S = 2.0
+
 #: How long a desktop READ route waits for its (background) attach before it
 #: answers from the durable facade.
 #:
@@ -1206,6 +1224,14 @@ class AttachedSession:
         #: :attr:`cold_reason` defaults the token for a cold facade, so a
         #: renderer that knew only the ``cold`` boolean is unaffected.
         self._read_cold_reason: str | None = None
+        #: A READ-MODE negative memo: a monotonic deadline until which the last
+        #: "this owner answered no record" (the locate's ``(None, None)``) is
+        #: trusted instead of re-asking the peer. Armed by
+        #: :meth:`attach_existing`'s no-record arm; cleared the moment a locate
+        #: SEES a record (a control-mode attach discovering a runtime, or an
+        #: expired window's own ask), so the next read dials. See
+        #: ``NO_OWNER_MEMO_S`` — including what a read inside the window trades.
+        self._no_owner_until: float = 0.0
         #: When this viewer last had a ROUND TRIP TO THE OWNER ANSWERED, as
         #: ``time.time()``, or ``None`` for a facade that has never had one. The
         #: evidence a status frame is allowed to publish "live" on; see
@@ -3012,6 +3038,14 @@ class AttachedSession:
                 return False
             if not self.is_cold:
                 return True
+            if budget is not None and time.monotonic() < self._no_owner_until:
+                # THE NO-OWNER MEMO, READ MODE ONLY (``NO_OWNER_MEMO_S``): the
+                # peer's registry was asked inside this window and answered "no
+                # record". The read is served cold exactly as it would be after
+                # dialling again — only without the mesh round trip. Control
+                # callers (``budget is None``) keep dialling: they need the live
+                # arm or the typed refusal, never a read's fallback.
+                return False
             # RISK 2 of the design: an unsynced RETAINED dial is not a reason to
             # dial again. ``is_cold`` stays true for the whole of the wait below,
             # so gating a redial on it made a warm/lease-warm arriving in that
@@ -3084,7 +3118,22 @@ class AttachedSession:
             if record is None or self._disposed:
                 if budget is not None:
                     self._note_read_cold_reason(record, owner)
+                    if record is None and owner is None and not self._disposed:
+                        # ARM THE MEMO: the peer itself answered "no record"
+                        # (``locate``'s ``(None, None)``; a relay that could not
+                        # be asked degrades to the same pair and is accepted
+                        # here — the stored read behind this answer goes through
+                        # the same relay and reports its own failure).
+                        self._no_owner_until = time.monotonic() + NO_OWNER_MEMO_S
                 return False
+            # A RECORD EXISTS: whatever armed the memo, it is stale the moment
+            # a read SEES a record — a ``/messages`` send (control mode, which
+            # never consults the memo) can discover the runtime a burst's reads
+            # were told did not exist, and the next READ must not serve the old
+            # window over it. (A read INSIDE the window does not ask at all, by
+            # design: the window is the trust boundary ``NO_OWNER_MEMO_S``
+            # prices, and it is shorter than an engage's own spawn latency.)
+            self._no_owner_until = 0.0
             if budget is not None:
                 # CLASSIFIED BEFORE THE DIAL, not only after it. The desktop read
                 # no longer waits for this attempt (it answers after
