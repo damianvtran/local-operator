@@ -1,0 +1,12 @@
+{
+  "tui.transcript.ask.key_name": "{keys} (कुंजी का नाम)",
+  "tui.transcript.ask.not_answered": "कोई उत्तर नहीं",
+  "tui.transcript.ask.not_provided": "प्रदान नहीं किया गया",
+  "tui.transcript.attach.receipt": "↑ {count, plural, one {# छवि} other {# छवियाँ}} संलग्न",
+  "tui.transcript.catchup.headline": "कैच-अप — {label}",
+  "tui.transcript.catchup.missed": "{count, plural, one {# छूटी जागृति} other {# छूटी जागृतियाँ}}",
+  "tui.transcript.queued.newest": "· अगले रनटाइम के लिए कतार में — esc इसे वापस लेता है",
+  "tui.transcript.queued.older": "· अगले रनटाइम के लिए कतार में",
+  "tui.transcript.sender.pid": "pid {pid}",
+  "tui.transcript.sender.unknown": "अन्य सत्र"
+}
