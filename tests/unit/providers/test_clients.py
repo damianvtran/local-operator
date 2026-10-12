@@ -1138,6 +1138,97 @@ async def test_output_envelope_legal_space_token_and_mixed_wire_deltas(mixed: bo
             assert any(isinstance(e, StreamEndEvent) for e in events)
 
 
+@pytest.mark.parametrize("codex", [False, True])
+@pytest.mark.parametrize(
+    "channel", ["response.reasoning_text.delta", "response.reasoning_summary_text.delta"]
+)
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_responses_reasoning_is_charged_before_opaque_skip(
+    codex: bool, channel: str, mixed: bool
+) -> None:
+    from local_operator.providers.clients import StreamOutputEnvelopeExceeded
+
+    payloads: list[dict[str, Any]] = (
+        [
+            {"type": "response.output_text.delta", "delta": "x" * 128},
+            {"type": channel, "delta": "y"},
+        ]
+        if mixed
+        else [{"type": channel, "delta": "x" * 129}]
+    )
+    payloads.append({"type": "response.completed", "response": {"output": []}})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=_sse(payloads), headers={"content-type": "text/event-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        with pytest.raises(StreamOutputEnvelopeExceeded):
+            await _collect(
+                client.stream(
+                    ChatRequest(
+                        model=ModelSpec(
+                            provider="openai", model_id="test", supports_responses_api=True
+                        ),
+                        max_tokens=1,
+                    ),
+                    "test-token",
+                    oauth_access=(
+                        OAuthAccess(
+                            "test-token", credential_id=1, org_id="test-account", kind="oauth"
+                        )
+                        if codex
+                        else None
+                    ),
+                )
+            )
+
+
+@pytest.mark.parametrize("codex", [False, True])
+@pytest.mark.parametrize("item_done", [False, True])
+async def test_responses_refusal_snapshot_is_bounded_before_retention(
+    codex: bool, item_done: bool
+) -> None:
+    from local_operator.providers.clients import StreamOutputEnvelopeExceeded
+
+    item = {"type": "message", "content": [{"type": "refusal", "refusal": "x" * 129}]}
+    payloads = (
+        [{"type": "response.output_item.done", "output_index": 0, "item": item}]
+        if item_done
+        else []
+    )
+    payloads.append({"type": "response.completed", "response": {"output": [item]}})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=_sse(payloads), headers={"content-type": "text/event-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        with pytest.raises(StreamOutputEnvelopeExceeded):
+            await _collect(
+                client.stream(
+                    ChatRequest(
+                        model=ModelSpec(
+                            provider="openai", model_id="test", supports_responses_api=True
+                        ),
+                        max_tokens=1,
+                    ),
+                    "test-token",
+                    oauth_access=(
+                        OAuthAccess(
+                            "test-token", credential_id=1, org_id="test-account", kind="oauth"
+                        )
+                        if codex
+                        else None
+                    ),
+                )
+            )
+
+
 async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
     captured: dict[str, Any] = {}
 
