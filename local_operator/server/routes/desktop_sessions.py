@@ -130,7 +130,10 @@ from local_operator.slash_commands import (
     slash_command_for,
     whole_draft_command,
 )
-from local_operator.supplements.contract import STEER_TEXT_MAX_CHARS
+from local_operator.supplements.contract import (
+    STEER_TEXT_MAX_CHARS,
+    supplement_read_options,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3139,6 +3142,7 @@ async def snapshot(
     request: Request,
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    supplements: int = Query(default=0, ge=0),
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3187,7 +3191,13 @@ async def snapshot(
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.snapshot(entry_times=bool(entry_ts), open_frame=bool(open_frame)))
+        return reply(
+            await bridge.snapshot(
+                entry_times=bool(entry_ts),
+                open_frame=bool(open_frame),
+                **supplement_read_options(bool(supplements)),
+            )
+        )
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -3239,6 +3249,7 @@ async def history(
     limit: int = Query(default=100, ge=1, le=500),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    supplements: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3280,6 +3291,7 @@ async def history(
                 limit=limit,
                 entry_times=bool(entry_ts),
                 open_frame=bool(open_frame),
+                **supplement_read_options(bool(supplements)),
             )
         )
 

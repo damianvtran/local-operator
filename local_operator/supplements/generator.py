@@ -114,6 +114,17 @@ class DesignModel:
     #: "config" | "ladder" | "tier" | "session"
     source: str
     label: str
+    #: One errand-local alternative, never a foreground route change. Explicit pins have none.
+    alternate: DesignModel | None = None
+
+
+class CompletionFailure(Exception):
+    """Carry usage already received before a stream failed, so recovery cannot hide spend."""
+
+    def __init__(self, cause: Exception, usage: Any) -> None:
+        super().__init__(type(cause).__name__)
+        self.cause = cause
+        self.usage = usage
 
 
 @dataclass(frozen=True)
@@ -128,12 +139,14 @@ class GenerationOutcome:
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    cost_known: bool = True
     error: str = ""
     #: True when the fork answered the single word ``NONE``: a legitimate "no figure helps".
     none: bool = False
     #: The steer instruction this version was generated with, echoed for the row.
     instruction: str = ""
     detail: tuple[str, ...] = field(default=())
+    attempts: tuple[str, ...] = ()
 
 
 def resolve_design_model(
@@ -163,20 +176,32 @@ def resolve_design_model(
         if configured.lower() == "session":
             return DesignModel(session_spec, "session", _labelled(session_spec))
         provider, _, model_id = configured.partition("/")
-        if provider and model_id and (usable is None or provider in usable):
-            return DesignModel(_build(provider, model_id), "config", configured)
-        logger.debug("supplements: configured model %r is not reachable", configured)
+        if not provider or not model_id:
+            raise ValueError("supplements.model must be session, auto, or provider/model")
+        # A pin is the operator's decision even if its account is temporarily blocked.
+        # Silently replacing it would make an explicit provider/spend choice dishonest.
+        return DesignModel(_build(provider, model_id), "config", configured)
+    ladder: list[DesignModel] = []
     for provider, ids in DESIGN_MODEL_LADDER:
         if usable is not None and provider not in usable:
             continue
         known = static_models(provider) or {}
         for model_id in ids:
-            if known and model_id not in known:
-                continue
-            return DesignModel(_build(provider, model_id), "ladder", f"{provider}/{model_id}")
-    if tier_spec is not None:
-        return DesignModel(tier_spec, "tier", _labelled(tier_spec))
-    return DesignModel(session_spec, "session", _labelled(session_spec))
+            if model_id in known:
+                ladder.append(
+                    DesignModel(_build(provider, model_id), "ladder", f"{provider}/{model_id}")
+                )
+                break
+    session = DesignModel(session_spec, "session", _labelled(session_spec))
+    primary = (
+        DesignModel(tier_spec, "tier", _labelled(tier_spec))
+        if tier_spec is not None
+        else (ladder[0] if ladder else session)
+    )
+    # Credential presence is not quota eligibility. Prefer the already-serving route
+    # as the ONE recovery candidate; a second ladder provider is only the last resort.
+    alternate = next((item for item in [session, *ladder] if item.label != primary.label), None)
+    return DesignModel(primary.spec, primary.source, primary.label, alternate)
 
 
 def _build(provider: str, model_id: str) -> Any:
@@ -274,6 +299,7 @@ async def generate(
     validate: ValidateFn | None = None,
     price: Callable[[Any], float] | None = None,
     on_progress: ProgressFn | None = None,
+    model_price: Callable[[Any, DesignModel], float | None] | None = None,
     started: float | None = None,
     accepted_sink: list[Component] | None = None,
 ) -> GenerationOutcome:
@@ -312,7 +338,34 @@ async def generate(
     turns = 0
     tokens_in = tokens_out = 0
     cost = 0.0
+    cost_known = True
     detail: list[str] = []
+    attempts: list[str] = []
+    alternate = model.alternate
+
+    def account(usage: Any) -> None:
+        nonlocal tokens_in, tokens_out, cost, cost_known
+        tokens_in += int(getattr(usage, "input_tokens", 0) or 0)
+        tokens_out += int(getattr(usage, "output_tokens", 0) or 0)
+        try:
+            measured = (
+                model_price(usage, model)
+                if model_price
+                else (price(usage) if price and usage is not None else None)
+            )
+        except Exception:
+            measured = None
+        import math
+
+        try:
+            value = float(measured) if measured is not None else None
+        except (TypeError, ValueError):
+            value = None
+        if value is None or not math.isfinite(value) or value < 0:
+            cost_known = False
+        else:
+            cost += value
+
     prompt = evidence_block(
         datasets, user_text=user_text, answer_text=answer_text, instruction=instruction
     )
@@ -324,18 +377,44 @@ async def generate(
         request = _fork_request(
             model.spec, prompt, max_output_tokens=max_output_tokens, purpose=policy.PURPOSE_RENDER
         )
+        attempts.append(model.label)
         try:
             text, usage = await complete(request)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 -- fail open: the worst case is no figure
-            logger.debug("supplements: generator turn failed", exc_info=True)
-            error = f"generator:{type(exc).__name__}"
-            break
-        tokens_in += int(getattr(usage, "input_tokens", 0) or 0)
-        tokens_out += int(getattr(usage, "output_tokens", 0) or 0)
-        if price is not None and usage is not None:
-            cost += float(price(usage) or 0.0)
+            cause = exc.cause if isinstance(exc, CompletionFailure) else exc
+            from local_operator.providers.failover import ProviderError
+
+            if not (
+                isinstance(cause, ProviderError)
+                and cause.request_sent is False
+                and (not isinstance(exc, CompletionFailure) or exc.usage is None)
+            ):
+                account(exc.usage if isinstance(exc, CompletionFailure) else None)
+            diagnosis = failure_detail(cause)
+            detail.append(f"turn {turns}: {diagnosis}")
+            logger.warning("supplements: generator %s failed: %s", model.label, diagnosis)
+            error = f"generator:{type(cause).__name__}"
+            if alternate is None or not permits_fallback(cause):
+                break
+            if turns >= max(1, max_turns):
+                detail.append(f"bound:{BOUND_TURNS} no turn remains for fallback")
+                break
+            if not cost_known or (cost >= max_cost_usd and max_cost_usd >= 0):
+                detail.append(
+                    f"bound:{BOUND_COST} reached or affordability unavailable before fallback"
+                )
+                error = f"bound:{BOUND_COST}"
+                break
+            if timeout_s is not None and clock() - start >= timeout_s:
+                detail.append(f"bound:{BOUND_TIME} reached before fallback")
+                error = f"bound:{BOUND_TIME}"
+                break
+            model, alternate = alternate, None
+            error = ""
+            continue
+        account(usage)
         if (
             max_output_tokens > 0
             and usage is not None
@@ -387,7 +466,7 @@ async def generate(
         # expiry between turns returns NORMALLY -- the blocks that passed come back through
         # the ordinary tail and are kept -- while the runner's ``wait_for`` remains the hard
         # guard for a turn that hangs mid-flight.
-        if cost >= max_cost_usd and max_cost_usd >= 0:
+        if not cost_known or (cost >= max_cost_usd and max_cost_usd >= 0):
             detail.append(
                 f"bound:{BOUND_COST} cap: ${cost:.4f} of ${max_cost_usd:.2f} reached before repair"
             )
@@ -410,11 +489,48 @@ async def generate(
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         cost_usd=cost,
+        cost_known=cost_known,
         error=error,
         none=none,
         instruction=instruction,
         detail=tuple(detail),
+        attempts=tuple(attempts),
     )
+
+
+def permits_fallback(exc: Exception) -> bool:
+    """Only a typed availability failure warrants spending the one alternate call."""
+    from local_operator.providers.failover import ProviderError
+
+    if not isinstance(exc, ProviderError):
+        return False
+    if exc.kind in {"auth", "quota", "transient", "timeout"}:
+        return True
+    text = exc.message.casefold()
+    return (
+        exc.status in {400, 404}
+        and "model" in text
+        and any(
+            marker in text
+            for marker in ("unavailable", "not found", "not supported", "does not exist")
+        )
+    )
+
+
+def failure_detail(exc: Exception) -> str:
+    """Only typed allowlisted facts persist; provider prose may echo secrets or URLs."""
+    from local_operator.providers.failover import ProviderError
+
+    if not isinstance(exc, ProviderError):
+        return "generation unavailable"
+    kind = (
+        exc.kind
+        if exc.kind
+        in {"auth", "quota", "transient", "timeout", "request", "content", "context", "unknown"}
+        else "unknown"
+    )
+    status = exc.status if isinstance(exc.status, int) and 100 <= exc.status <= 599 else None
+    return f"ProviderError status={status} kind={kind}"
 
 
 def _fork_request(spec: Any, prompt: str, *, max_output_tokens: int, purpose: str) -> Any:
