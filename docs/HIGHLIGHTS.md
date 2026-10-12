@@ -36,7 +36,7 @@ executed write content is captured privately before history argument redaction (
 also inside the turn's aggregate text budget). Nothing rereads arbitrary existing
 files or sends their contents to a vendor. Written/resolved root boundaries,
 scratch/generated-tree exclusion, sensitive denylist and operator `denyPrefixes`
-all apply before promotion. Later successful edits/uncaptured overwrites invalidate the earlier preview; shell/eval conservatively invalidate pending snapshots. Raw bytes never enter model history, diagnostic events or vendor requests. The original file action remains alongside the preview,
+all apply before promotion. Later successful edits/uncaptured overwrites invalidate every spelling of the resolved document identity, including symlink aliases; shell/eval conservatively invalidate pending snapshots. Raw bytes never enter model history, diagnostic events or vendor requests. Accessible title/source metadata separately uses the authoritative secret scrubber and descriptive fallbacks; private authored body bytes are not rewritten. The original file action remains alongside the preview,
 even when the answer explicitly links the newly prepared HTML.
 
 Supported documents have `<!doctype html>`, an optional `lang` on `<html>`, one
@@ -65,3 +65,6 @@ remain ordinary tool/diff rows. Relative final-answer deliverable references are
 recognized, but already-linked files normally remain deduplicated. Prepared HTML
 is the narrow exception above. No recursive directory scan or indiscriminate
 read-call harvesting is performed.
+
+
+Desktop cold/older-page and SSE-open snapshots declare `supplements=1` alongside `open_frame=1`. Only a capable reader and that specific viewer receive bounded `supplement_v1` metadata; unknown custom types and errand prompts remain excluded. Component bodies remain authorized digest-addressed attachments, never embedded in paintable history. Older viewers omitting the declaration retain their prior page.

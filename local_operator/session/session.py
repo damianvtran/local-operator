@@ -15890,7 +15890,9 @@ class Session:
             return
         if not isinstance(path, str):
             return
-        absolute = os.path.abspath(os.path.join(self._cwd, os.path.expanduser(path)))
+        absolute = os.path.realpath(
+            os.path.abspath(os.path.join(self._cwd, os.path.expanduser(path)))
+        )
         self._prepared_writes.pop(absolute, None)
         content = call.arguments.get("content")
         if (
