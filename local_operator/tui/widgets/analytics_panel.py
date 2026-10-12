@@ -70,6 +70,8 @@ from local_operator.analytics.model import (
     build_session_forest,
     session_table_labels,
 )
+from local_operator.i18n.keys import tui_analytics
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.costs import (
     MoneyFigure,
@@ -82,6 +84,13 @@ from local_operator.tui.costs import (
 )
 from local_operator.tui.widgets.report_view import ReportView
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+#: The panel's one resolver. Every catalogued string below resolves at CALL
+#: time (``tr`` reads the tree and the active locale per call), so a locale
+#: move reaches a repainted frame with no per-constant bookkeeping — which is
+#: why the two former module constants (``COST_LEGEND``, ``MODEL_RATE_LEGEND``)
+#: are resolver calls at their use sites now.
+_t = tr("tui.analytics")
 
 
 class _CostLike(Protocol):
@@ -212,7 +221,7 @@ def rate_legend(aggregate: "UsageAggregate") -> str:
     """
     if not scope_needs_rate_legend(aggregate):
         return ""
-    return f"decode rate over {aggregate.decode_calls:,} of {aggregate.calls:,} calls"
+    return _t(tui_analytics.rate_legend(shown=aggregate.decode_calls, total=aggregate.calls))
 
 
 def format_cost(aggregate: "_CostLike") -> str:
@@ -387,14 +396,17 @@ def _counted_kinds(snapshot: SearchSpendSnapshot) -> str:
     same ladder it renders (round-3 MAJOR-2).
     """
     if snapshot.searches:
-        word = "search" if snapshot.searches == 1 else "searches"
-        counted = f"{snapshot.searches} {word}"
+        counted = _t(
+            tui_analytics.search_counted_search(
+                count=snapshot.searches, shown=str(snapshot.searches)
+            )
+        )
         if snapshot.reads:
-            read_word = "read" if snapshot.reads == 1 else "reads"
-            counted = f"{counted} · {snapshot.reads} {read_word}"
+            counted = f"{counted} · " + _t(
+                tui_analytics.search_counted_read(count=snapshot.reads, shown=str(snapshot.reads))
+            )
         return counted
-    word = "read" if snapshot.reads == 1 else "reads"
-    return f"{snapshot.reads} {word}"
+    return _t(tui_analytics.search_counted_read(count=snapshot.reads, shown=str(snapshot.reads)))
 
 
 def search_component_text(snapshot: SearchSpendSnapshot | None) -> str:
@@ -414,14 +426,18 @@ def search_component_text(snapshot: SearchSpendSnapshot | None) -> str:
     # a page read was described as having searched, while the block below kept the
     # two apart -- which is the whole reason reads are recorded as ``<p>``:read.
     reads_only = bool(snapshot.reads) and not snapshot.searches
-    noun, plural = ("read", "reads") if reads_only else ("search", "searches")
     if snapshot.usd > 0:
         # ``format_cost(snapshot)``, not a bare ``MoneyFigure``: the snapshot
         # carries the search money's own honesty marks, so a session with any
         # unpriced operation renders ``$0.0069+`` here as well as in the block
         # below -- passing a plain figure dropped the ``+`` and let the headline
         # state a total the block two rows down contradicts (round-3 MAJOR-3).
-        return f"incl. {format_cost(snapshot)} {noun}"
+        key = (
+            tui_analytics.search_incl_money_read
+            if reads_only
+            else tui_analytics.search_incl_money_search
+        )
+        return _t(key(money=format_cost(snapshot)))
     # Branch on the COUNTERS, never on the money (round-2 review R2-MAJOR-1):
     # ``usd`` is zero for an unpriced operation too, so a money test called
     # unpriced searches "free" -- the same render-time inference the ledger's
@@ -434,13 +450,19 @@ def search_component_text(snapshot: SearchSpendSnapshot | None) -> str:
         unpriced_reads = max(0, snapshot.unpriced_reads)
         unpriced_searches = max(0, snapshot.unpriced_searches - unpriced_reads)
         if unpriced_searches:
-            n, word = unpriced_searches, ("search" if unpriced_searches == 1 else "searches")
-        else:
-            n, word = unpriced_reads, ("read" if unpriced_reads == 1 else "reads")
-        return f"incl. {n} unpriced {word}"
+            return _t(
+                tui_analytics.search_incl_unpriced_search(
+                    count=unpriced_searches, shown=str(unpriced_searches)
+                )
+            )
+        return _t(
+            tui_analytics.search_incl_unpriced_read(count=unpriced_reads, shown=str(unpriced_reads))
+        )
     count = snapshot.reads if reads_only else snapshot.searches
-    word = noun if count == 1 else plural
-    return f"incl. {count} free {word}"
+    key = (
+        tui_analytics.search_incl_free_read if reads_only else tui_analytics.search_incl_free_search
+    )
+    return _t(key(count=count, shown=str(count)))
 
 
 def search_spend_section(
@@ -596,21 +618,33 @@ def search_spend_section(
         # plural of this word is not its singular with an s on the end -- and a
         # READ says read, because a row recorded under ``<provider>:read`` exists
         # precisely to keep reads out of the search count.
-        singular, plural = ("read", "reads") if kind == "read" else ("search", "searches")
-        word = singular if n == 1 else plural
+        counted = (
+            tui_analytics.search_counted_read
+            if kind == "read"
+            else tui_analytics.search_counted_search
+        )
         if not unpriced:
-            return (f"{n} {word}",)
+            return (_t(counted(count=n, shown=str(n))),)
+        full = (
+            tui_analytics.search_note_read_full
+            if kind == "read"
+            else tui_analytics.search_note_search_full
+        )
+        short = (
+            tui_analytics.search_note_read_unpriced
+            if kind == "read"
+            else tui_analytics.search_note_search_unpriced
+        )
         if unpriced == n:
-            return (
-                f"{n} {word} · no published price",
-                f"{n} {word} · unpriced",
-            )
-        # No nounless rung: ``5 · 1 unpriced`` reads as a fragment, and the
-        # wrap-and-continuation path already covers the widths that used to need
-        # it (the continuation line takes the widest rung that fits there).
+            return (_t(full(count=n, shown=str(n))), _t(short(count=n, shown=str(n))))
+        partial = (
+            tui_analytics.search_note_read_partial
+            if kind == "read"
+            else tui_analytics.search_note_search_partial
+        )
         return (
-            f"{n} {word} · {unpriced} unpriced",
-            f"{n} {word} · unpriced",
+            _t(partial(count=n, shown=str(n), unpriced=str(unpriced))),
+            _t(short(count=n, shown=str(n))),
         )
 
     def total_notes() -> tuple[str, ...]:
@@ -630,7 +664,9 @@ def search_spend_section(
         # with a read's missing price put "no published price" on a search that
         # has one, next to a row below saying the opposite about the read.
         read_note = search_notes(snapshot.reads, snapshot.unpriced_reads, kind="read")[0]
-        return tuple(f"{note} · {read_note}" for note in base)
+        return tuple(
+            _t(tui_analytics.search_note_join(note=note, read_note=read_note)) for note in base
+        )
 
     def session_notes(scope: SearchSpendSnapshot) -> tuple[str, ...]:
         """This session's own counts and its share of the process total.
@@ -646,13 +682,13 @@ def search_spend_section(
         )
         counted = _counted_kinds(scope)
         return (
-            f"{counted} · {share} of search spend",
+            _t(tui_analytics.search_share_spend(counted=counted, share=share)),
             # The compact rung keeps a referent: a bare ``· 100%`` says a
             # proportion of nothing, which is the failure the denominator
             # rule above already calls out. ``of search`` is shorter than
             # ``of search spend`` and still names what the share is OF.
-            f"{counted} · {share} of search",
-            f"{counted} · {share} share",
+            _t(tui_analytics.search_share_short(counted=counted, share=share)),
+            _t(tui_analytics.search_share_bare(counted=counted, share=share)),
             counted,
         )
 
@@ -680,12 +716,12 @@ def search_spend_section(
 
     lines.append(
         section_header(
-            "Search spend",
+            _t(tui_analytics.search_title()),
             # Advertised only when a bar is actually drawn (round-2 design D10):
             # below the threshold the clause orphaned a line on /session and
             # cropped mid-word on /analytics, naming a display the rows did not
             # have.
-            f"{meta} · bars: operations" if bar_cells else meta,
+            _t(tui_analytics.search_meta_bars(meta=meta)) if bar_cells else meta,
         )
     )
     total_operations = max(snapshot.count, 1)
@@ -693,17 +729,17 @@ def search_spend_section(
     # bar is measured against, so a full bar says only "100% of itself", and the
     # provider bars below it -- each rounded independently -- could sum PAST its
     # eight cells, which undercuts the share reading the bar exists to give.
-    row("Total spend", snapshot, total_notes())
+    row(_t(tui_analytics.search_row_total()), snapshot, total_notes())
     # ``count``, not ``searches``: a conversation whose only retrieval spend is
     # reads has a share worth showing, and the guard dropped the row for it.
     if session is not None and session.count:
-        row("This session", session, session_notes(session))
+        row(_t(tui_analytics.search_row_session()), session, session_notes(session))
     # A dim sub-label rather than a section header: the rows under it PARTITION
     # the total above, which is the same relationship the Totals block's tree
     # rows (`` ├ Fresh (uncached)``) already express with one level less chrome.
     if snapshot.rows:
         label = Text()
-        label.append("  By provider", style=semantic_style("dim"))
+        label.append("  " + _t(tui_analytics.search_by_provider()), style=semantic_style("dim"))
         label.truncate(width, overflow="crop")
         lines.append(label)
         for index, entry in enumerate(snapshot.rows):
@@ -718,14 +754,15 @@ def search_spend_section(
     # since six free searches and no searches at all both total $0.0000. A
     # ladder, widest first, and every rung keeps both counts -- dropping one
     # would make the line answer a different question than the row above it.
-    free_word = "free"
     if snapshot.free_operations or snapshot.paid_operations:
         # Round-1 MINOR-1: without the unpriced clause this line did not add up
         # against "N searches · M unpriced" on the row above it -- three numbers
         # that look like a breakdown have to BE one, or the reader is left
         # recomputing by hand to find the missing operation.
         unpriced_clause = (
-            f" · {snapshot.unpriced_searches} unpriced" if snapshot.unpriced_searches else ""
+            " " + _t(tui_analytics.search_unpriced_clause(count=str(snapshot.unpriced_searches)))
+            if snapshot.unpriced_searches
+            else ""
         )
         # ``N of M priced free`` (design review D5): the old form made the reader
         # add the two numbers to answer "how much of this was free", printed a
@@ -737,22 +774,36 @@ def search_spend_section(
         money = format_cost(MoneyFigure(cost_usd=snapshot.paid_usd))
         if snapshot.free_operations and snapshot.paid_operations:
             summary = (
-                f"{snapshot.free_operations} of {priced} priced free · {money} paid"
-                f"{unpriced_clause}",
-                f"{snapshot.free_operations}/{priced} free · {money} paid",
+                _t(
+                    tui_analytics.search_summary_free_paid(
+                        free=str(snapshot.free_operations), priced=str(priced), money=money
+                    )
+                )
+                + unpriced_clause,
+                _t(
+                    tui_analytics.search_summary_free_paid_short(
+                        free=str(snapshot.free_operations), priced=str(priced), money=money
+                    )
+                ),
             )
         elif snapshot.paid_operations:
             summary = (
-                f"{snapshot.paid_operations} paid ({money}){unpriced_clause}",
-                f"{snapshot.paid_operations} paid",
+                _t(
+                    tui_analytics.search_summary_paid(
+                        count=str(snapshot.paid_operations), money=money
+                    )
+                )
+                + unpriced_clause,
+                _t(tui_analytics.search_summary_paid_short(count=str(snapshot.paid_operations))),
             )
         else:
             summary = (
                 # No ``· $0.0000`` (round-2 review NIT-4): it is structurally
                 # always zero on this rung, which is the argument D5 removed it
                 # from the both-halves case.
-                f"{snapshot.free_operations} {free_word}{unpriced_clause}",
-                f"{snapshot.free_operations} {free_word}",
+                _t(tui_analytics.search_summary_free(count=str(snapshot.free_operations)))
+                + unpriced_clause,
+                _t(tui_analytics.search_summary_free(count=str(snapshot.free_operations))),
             )
         budget = width - 2
         chosen = next((candidate for candidate in summary if len(candidate) <= budget), summary[-1])
@@ -954,7 +1005,7 @@ def _metric_meta(metric: str, *, prefix: str = "") -> str:
     """
     active = "cost" if metric == METRIC_COST else "tokens"
     other = "tokens" if metric == METRIC_COST else "cost"
-    clause = f"{active} · t → {other}"
+    clause = _t(tui_analytics.chart_metric_clause(active=active, other=other))
     return f"{prefix} · {clause}" if prefix else clause
 
 
@@ -1127,13 +1178,9 @@ def build_report(
         search_spend_section(
             search_spend,
             width,
-            meta="process-wide · live",
+            meta=_t(tui_analytics.search_meta_live()),
             session=session_search_spend,
-            note=(
-                "Read from this process's live search ledger, not from disk. A resumed "
-                "conversation restores its recorded searches into it; sessions that are "
-                "not open here are not counted."
-            ),
+            note=_t(tui_analytics.search_note()),
         )
         if search_spend is not None
         else []
@@ -1141,13 +1188,13 @@ def build_report(
 
     if aggregate.calls == 0:
         line = Text()
-        line.append("No usage recorded yet.", style=fg)
+        line.append(_t(tui_analytics.empty_title()), style=fg)
         lines.append(line)
         hint = Text()
         # ``dim`` not ``faint``: this is the one line telling a first-time user
         # how the screen fills, so it must be legible, not decorative (D2).
         hint.append(
-            "Analytics accrue as sessions make provider calls. Come back after a few turns.",
+            _t(tui_analytics.empty_hint()),
             style=dim,
         )
         lines.append(hint)
@@ -1157,12 +1204,14 @@ def build_report(
         return lines
 
     # -- headline totals -----------------------------------------------------
-    calls_meta = f"{aggregate.calls} calls"
+    calls_meta = _t(tui_analytics.totals_calls_meta(count=str(aggregate.calls)))
     if aggregate.ok_calls != aggregate.calls:
         # Failed-call count is real information, not chrome — keep it in the meta.
-        calls_meta += f" ({aggregate.calls - aggregate.ok_calls} failed)"
-    calls_meta += " · measured"
-    lines.append(section_header("Totals", calls_meta))
+        calls_meta += " " + _t(
+            tui_analytics.totals_calls_failed(count=str(aggregate.calls - aggregate.ok_calls))
+        )
+    calls_meta += " " + _t(tui_analytics.totals_calls_measured())
+    lines.append(section_header(_t(tui_analytics.totals_title()), calls_meta))
 
     # Value cells share a gutter so notes line up even when compact figures
     # differ in width (``3M`` vs ``387k``). 11 cells matches the existing
@@ -1182,10 +1231,14 @@ def build_report(
 
     lines.append(
         kv(
-            "Total billed",
-            format_tokens(aggregate.total_tokens) + " tokens",
-            f"{format_tokens(aggregate.context_tokens)} in · "
-            f"{format_tokens(aggregate.output_tokens)} out",
+            _t(tui_analytics.totals_row_billed()),
+            _t(tui_analytics.table_tokens(value=format_tokens(aggregate.total_tokens))),
+            _t(
+                tui_analytics.totals_billed_note(
+                    context=format_tokens(aggregate.context_tokens),
+                    output=format_tokens(aggregate.output_tokens),
+                )
+            ),
         )
     )
     # NESTED input breakdown. The old flat "Input NNN" row read as "total input"
@@ -1211,47 +1264,55 @@ def build_report(
     cache_write = aggregate.cache_write_tokens
     lines.append(
         kv(
-            "Context read",
+            _t(tui_analytics.totals_context_read()),
             format_tokens(aggregate.context_tokens),
-            f"{format_tokens(fresh)} fresh · "
-            f"{format_tokens(cache_read)} cached · "
-            f"{format_tokens(cache_write)} written",
+            _t(
+                tui_analytics.totals_context_note(
+                    fresh=format_tokens(fresh),
+                    cached=format_tokens(cache_read),
+                    written=format_tokens(cache_write),
+                )
+            ),
         )
     )
     lines.append(
         kv(
-            " ├ Fresh (uncached)",
+            " ├ " + _t(tui_analytics.totals_fresh()),
             format_tokens(fresh),
-            "new input, billed at full rate",
+            _t(tui_analytics.totals_fresh_note()),
         )
     )
     lines.append(
         kv(
-            " ├ Cache read",
+            " ├ " + _t(tui_analytics.totals_cache_read()),
             format_tokens(cache_read),
-            "input served from cache",
+            _t(tui_analytics.totals_cache_read_note()),
         )
     )
     lines.append(
         kv(
-            " └ Cache write",
+            " └ " + _t(tui_analytics.totals_cache_write()),
             format_tokens(cache_write),
-            "new input written to cache",
+            _t(tui_analytics.totals_cache_write_note()),
         )
     )
     lines.append(
         kv(
-            "Output",
+            _t(tui_analytics.totals_output()),
             format_tokens(aggregate.output_tokens),
-            f"{format_tokens(aggregate.generation_tokens)} generation, "
-            f"{format_tokens(aggregate.reasoning_tokens)} thinking",
+            _t(
+                tui_analytics.totals_output_note(
+                    generation=format_tokens(aggregate.generation_tokens),
+                    thinking=format_tokens(aggregate.reasoning_tokens),
+                )
+            ),
         )
     )
     lines.append(
         kv(
-            "Cache hit rate",
+            _t(tui_analytics.totals_cache_hit()),
             format_percent(aggregate.cache_hit_rate),
-            "of context served from cache",
+            _t(tui_analytics.totals_cache_hit_note()),
         )
     )
     # The measured decode rate rides the headline figures because it is one: how
@@ -1262,9 +1323,9 @@ def build_report(
     # never ``0 tok/s``, which would claim every call decoded instantly.
     lines.append(
         kv(
-            "Decode rate",
-            f"{format_tps(aggregate.decode_tps)} tok/s",
-            "measured decode speed",
+            _t(tui_analytics.totals_decode()),
+            _t(tui_analytics.table_tok_s(value=format_tps(aggregate.decode_tps))),
+            _t(tui_analytics.totals_decode_note()),
         )
     )
     # Cost rides the TOTALS block because it is a headline figure, but it is an
@@ -1340,10 +1401,11 @@ def build_report(
         # span and misstated sparse usage (review D3). Singular "day" for one
         # (review D4). The empty case keeps a static title (no count to state).
         if daily:
-            n = len(daily)
-            day_title = f"{n} day{'s' if n != 1 else ''} with usage"
+            day_title = _t(
+                tui_analytics.totals_days_with_usage(count=len(daily), shown=str(len(daily)))
+            )
         else:
-            day_title = "Days with usage"
+            day_title = _t(tui_analytics.totals_days_empty())
         # The window's grand total rides the section meta ahead of the metric
         # clause (review C2 — this is where ``series_totals`` surfaces): the
         # daily bars show the per-day shape, and this states what they sum to
@@ -1351,7 +1413,9 @@ def build_report(
         # back to just the metric clause when no window total was supplied.
         if window_totals is not None and daily:
             if metric == METRIC_TOKENS:
-                window_summary = f"{format_tokens(window_totals.total_tokens)} tokens"
+                window_summary = _t(
+                    tui_analytics.table_tokens(value=format_tokens(window_totals.total_tokens))
+                )
             else:
                 window_summary = format_cost(window_totals)
             daily_meta = _metric_meta(metric, prefix=window_summary)
@@ -1364,22 +1428,22 @@ def build_report(
                 daily,
                 metric,
                 width,
-                empty_note="no daily usage recorded yet",
+                empty_note=_t(tui_analytics.chart_daily_empty()),
             )
         )
         lines.append(Text())
     if monthly is not None:
         lines.extend(
             _series_chart(
-                "Monthly",
+                _t(tui_analytics.chart_monthly_title()),
                 # Functional meta that ALSO self-describes the metric and toggle
                 # (reviews D5 + U2): the sibling chart must state $ vs tokens too,
                 # so a reader parked on Monthly is not left guessing.
-                _metric_meta(metric, prefix="by calendar month"),
+                _metric_meta(metric, prefix=_t(tui_analytics.chart_monthly_meta())),
                 monthly,
                 metric,
                 width,
-                empty_note="no monthly usage recorded yet",
+                empty_note=_t(tui_analytics.chart_monthly_empty()),
             )
         )
         lines.append(Text())
@@ -1389,12 +1453,12 @@ def build_report(
     # word "estimated" is why this section reads differently from Totals, and it
     # is ALSO carried at the data level — the ``≈`` mark and the ``~`` on every
     # percentage below — so the distinction survives the heading scrolling away.
-    lines.append(section_header("Where input went", "≈ estimated split of context tokens"))
+    lines.append(section_header(_t(tui_analytics.input_title()), _t(tui_analytics.input_meta())))
 
     rows = _component_rows(aggregate)
     if not rows:
         empty = Text()
-        empty.append("  no component data yet", style=dim)
+        empty.append("  " + _t(tui_analytics.input_empty()), style=dim)
         lines.append(empty)
     else:
         # One guaranteed space of gutter between the label and its bar (D5): the
@@ -1534,7 +1598,7 @@ def build_report(
     if aggregate.by_provider:
         lines.append(
             _group_section(
-                "By provider",
+                _t(tui_analytics.table_by_provider()),
                 aggregate.by_provider,
                 width,
                 name_col,
@@ -1553,7 +1617,7 @@ def build_report(
         # indented rows on screen and the rollup has still happened. Reading it
         # off the paint would drop the one sentence that explains why a root's
         # figure exceeds its own spend, precisely in the default state.
-        meta = "totals include subagents" if disclosure else ""
+        meta = _t(tui_analytics.totals_subagent_meta()) if disclosure else ""
         if layout is not None:
             # The header is the block's first line; row ``i`` is one line below
             # it. Counted from the blocks composed SO FAR, because ``_repaint``
@@ -1729,18 +1793,18 @@ def _row_overhead(
     if not groups:
         return 0
     # ``  {name}`` indent, then ``{tokens:>NN} tokens``.
-    overhead = 2 + _tokens_col(groups) + len(" tokens")
+    overhead = 2 + _tokens_col(groups) + cell_len(_t(tui_analytics.table_tokens(value="")))
     # ``   {tps:>NN} tok/s`` — the decode-rate column, immediately after the
     # tokens it is a rate OF, and sized to the widest rate in this table for the
     # same D11 reason as the calls column: ``format_tps`` returns 1 cell for an
     # unmeasured ledger and 3-4 for a fast one, so a pad sized by hand would be
     # right for one and overrun the box for the other.
-    overhead += 3 + _tps_col(groups) + len(" tok/s")
+    overhead += 3 + _tps_col(groups) + cell_len(_t(tui_analytics.table_tok_s(value="")))
     # ``   `` gap + the right-aligned cost cell, sized to the widest figure in
     # this table exactly as ``_group_section`` sizes it.
     overhead += 3 + max(len(format_cost(agg)) for _, agg in groups)
     # ``   {calls:>NN} calls`` — likewise sized to the widest count present.
-    overhead += 3 + _calls_col(groups) + len(" calls")
+    overhead += 3 + _calls_col(groups) + cell_len(_t(tui_analytics.table_calls(value="")))
     # ``   {pct:>4} cache`` — only when the frame is wide enough to keep it.
     # This 4 is the one literal that stays, because it is not an allowance: it
     # is the exact maximum :func:`format_percent` can return. That function is
@@ -1760,7 +1824,7 @@ def _row_overhead(
     if keep_cache is None:
         keep_cache = width >= _WIDE_TABLE_MIN
     if keep_cache:
-        overhead += 3 + 4 + len(" cache")
+        overhead += 3 + 4 + cell_len(_t(tui_analytics.table_cache(value="")))
     return overhead
 
 
@@ -2014,8 +2078,9 @@ def _row_suffix(row: SessionRow) -> str:
     """
     if not row.expandable:
         return ""
-    noun = "subagent" if row.descendants == 1 else "subagents"
-    return f" +{row.descendants} {noun}"
+    return " " + _t(
+        tui_analytics.table_subagent_suffix(count=row.descendants, shown=str(row.descendants))
+    )
 
 
 def _row_prefix(depth: int, marker: str = "") -> str:
@@ -2229,9 +2294,9 @@ def _session_section(
     plain-text callers and the scripts pass) just skips publishing.
     """
     dim = semantic_style("dim")
-    block = section_header("By session", meta)
+    block = section_header(_t(tui_analytics.table_by_session()), meta)
     if not rows:
-        block.append("\n  (none)", style=dim)
+        block.append("\n  " + _t(tui_analytics.table_empty()), style=dim)
         return block
 
     # Every column is a maximum over the WHOLE table, which is exactly why it is
@@ -2317,7 +2382,14 @@ def _session_row_line(
         line.append(pad)
     else:
         line.append(clipped + pad, style=accent if on_cursor else style)
-    line.append(f"{format_tokens(agg.total_tokens):>{layout.tokens_col}} tokens", style=style)
+    line.append(
+        _t(
+            tui_analytics.table_tokens(
+                value=f"{format_tokens(agg.total_tokens):>{layout.tokens_col}}"
+            )
+        ),
+        style=style,
+    )
     line.append("   ")
     # Immediately after the tokens it is a rate OF, and ``dim`` like ``calls``
     # and ``% cache``: it is derived from a measured window rather than billed
@@ -2327,12 +2399,20 @@ def _session_row_line(
     # ``dim`` on this card measures 3.43:1 against 11.30:1 for ``fg`` —
     # below AA for the one figure a reader came here for (design round 1 D4).
     # The columns beside it (calls, cache) stay dim: they are context.
-    line.append(f"{format_tps(agg.decode_tps):>{layout.tps_col}} tok/s", style=fg)
+    line.append(
+        _t(tui_analytics.table_tok_s(value=f"{format_tps(agg.decode_tps):>{layout.tps_col}}")),
+        style=fg,
+    )
     line.append("   ")
     append_cost(line, agg, layout.cost_col, style, dim)
-    line.append(f"   {agg.calls:>{layout.calls_col}} calls", style=dim)
+    line.append(
+        "   " + _t(tui_analytics.table_calls(value=f"{agg.calls:>{layout.calls_col}}")), style=dim
+    )
     if layout.show_cache:
-        line.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
+        line.append(
+            "   " + _t(tui_analytics.table_cache(value=f"{format_percent(agg.cache_hit_rate):>4}")),
+            style=dim,
+        )
     if on_hover:
         # A BACKGROUND laid over the finished row, never a re-styling of it:
         # `Text.stylize` adds a span, so every foreground the row already chose
@@ -2396,7 +2476,7 @@ def _group_section(
         reverse=True,
     )
     if not ordered:
-        block.append("\n  (none)", style=dim)
+        block.append("\n  " + _t(tui_analytics.table_empty()), style=dim)
         return block
 
     if show_cache is None:
@@ -2422,7 +2502,12 @@ def _group_section(
         # ``name_col``, so this is a backstop for the former and a no-op for the
         # latter; ``truncate_cells`` measures in CELLS, matching the pad.
         block.append(f"  {truncate_cells(name, name_col):<{name_col}}", style=fg)
-        block.append(f"{format_tokens(agg.total_tokens):>{tokens_col}} tokens", style=fg)
+        block.append(
+            _t(
+                tui_analytics.table_tokens(value=f"{format_tokens(agg.total_tokens):>{tokens_col}}")
+            ),
+            style=fg,
+        )
         # The decode rate sits immediately after the tokens it is a rate OF, and
         # ``dim`` like ``calls``/``% cache``: it is derived from a measured
         # window, not billed by the provider, so it must not carry the weight of
@@ -2432,15 +2517,24 @@ def _group_section(
         block.append("   ")
         # ``fg`` for the same D4 reason as the session painter above: the rate
         # is the headline figure, not chrome.
-        block.append(f"{format_tps(agg.decode_tps):>{tps_col}} tok/s", style=fg)
+        block.append(
+            _t(tui_analytics.table_tok_s(value=f"{format_tps(agg.decode_tps):>{tps_col}}")),
+            style=fg,
+        )
         # Cost sits next to tokens as the other headline number, in full-strength
         # ``fg`` — it is the answer this feature exists to give, not a footnote.
         # The lower-bound ``+`` is dimmed by ``append_cost`` (review D1).
         block.append("   ")
         append_cost(block, agg, cost_col, fg, dim)
-        block.append(f"   {agg.calls:>{calls_col}} calls", style=dim)
+        block.append(
+            "   " + _t(tui_analytics.table_calls(value=f"{agg.calls:>{calls_col}}")), style=dim
+        )
         if show_cache:
-            block.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
+            block.append(
+                "   "
+                + _t(tui_analytics.table_cache(value=f"{format_percent(agg.cache_hit_rate):>4}")),
+                style=dim,
+            )
     return block
 
 
@@ -2462,10 +2556,9 @@ MODEL_RATES_FAILED = "failed"
 #: read and by the section's disclosure.
 MODEL_RATES_LIMIT = 200
 
-#: What the two rate columns are, and why one of them can be a dash. Printed
-#: under the table whenever anything in it is unknown, because ``—`` and a
-#: number are only distinguishable if the screen says what the dash means.
-MODEL_RATE_LEGEND = "decode = measured · wall = whole call · — = no window"
+#: (The table's legend — the sentence naming both rate columns and the dash —
+#: lives in the catalogue as ``tui.analytics.model.legend`` now; it is resolved
+#: at its use site so a locale move reaches the next repaint.)
 
 
 def _model_rate_section(
@@ -2501,20 +2594,18 @@ def _model_rate_section(
     # terminal width the panel is used at, and the half that got cut was the
     # legend — i.e. exactly the explanation of the ``—`` marks. The legend is
     # drawn once, under the table, and only when something in it is unknown.
-    block = section_header("By model", meta="from the ledger · all time")
+    block = section_header(_t(tui_analytics.model_title()), meta=_t(tui_analytics.model_meta()))
     dim = semantic_style("dim")
     fg = semantic_style("fg")
     if model_rates == MODEL_RATES_FAILED:
-        block.append(
-            "\n  the per-model read failed — the rest of this report is unaffected", style=dim
-        )
+        block.append("\n  " + _t(tui_analytics.model_failed()), style=dim)
         return block
     if isinstance(model_rates, str):
-        block.append("\n  reading the ledger…", style=dim)
+        block.append("\n  " + _t(tui_analytics.model_pending()), style=dim)
         return block
     rows = list(model_rates)
     if not rows:
-        block.append("\n  (no per-model rows in this window)", style=dim)
+        block.append("\n  " + _t(tui_analytics.model_empty()), style=dim)
         return block
 
     # Column widths from the DATA, the same rule the group tables follow: a
@@ -2523,19 +2614,24 @@ def _model_rate_section(
     tokens_col = max(len(format_tokens(row.output_tokens)) for row in rows)
     decode_col = max(len(format_tps(row.decode_tps)) for row in rows)
     wall_col = max(len(format_tps(row.wall_tps)) for row in rows)
-    coverage_col = max(len(f"{row.decode_calls}/{row.calls} calls") for row in rows)
+    coverage_col = max(
+        cell_len(
+            _t(tui_analytics.table_coverage(covered=str(row.decode_calls), total=str(row.calls)))
+        )
+        for row in rows
+    )
     # Everything except the name, in cells, so the name takes what is left — and
     # is TRUNCATED to it rather than padded past it, which is what keeps the
     # numeric columns aligned on a narrow terminal.
     reserved = (
         tokens_col
-        + len(" tokens")
+        + cell_len(_t(tui_analytics.table_tokens(value="")))
         + 3
         + decode_col
-        + len(" tok/s")
+        + cell_len(_t(tui_analytics.table_tok_s(value="")))
         + 3
         + wall_col
-        + len(" tok/s")
+        + cell_len(_t(tui_analytics.table_tok_s(value="")))
         + 3
         + coverage_col
     )
@@ -2548,7 +2644,14 @@ def _model_rate_section(
         # keeps a space before the first figure: at 88 columns the ellipsis
         # otherwise abutted it (``…so…4.8k tokens``, design round 1 D5).
         block.append(f"  {truncate_cells(label, max(1, name_col - 1)):<{name_col}}", style=fg)
-        block.append(f"{format_tokens(row.output_tokens):>{tokens_col}} tokens", style=fg)
+        block.append(
+            _t(
+                tui_analytics.table_tokens(
+                    value=f"{format_tokens(row.output_tokens):>{tokens_col}}"
+                )
+            ),
+            style=fg,
+        )
         decode = format_tps(row.decode_tps)
         wall = format_tps(row.wall_tps)
         any_unknown = any_unknown or row.decode_tps is None or row.wall_tps is None
@@ -2557,26 +2660,32 @@ def _model_rate_section(
         # number was 11.30:1 there and 3.43:1 here, in the table that exists to
         # compare it ACROSS models). The wall rate beside it stays ``dim``: it is
         # the secondary measurement.
-        block.append(f"{decode:>{decode_col}} tok/s", style=fg)
+        block.append(_t(tui_analytics.table_tok_s(value=f"{decode:>{decode_col}}")), style=fg)
         block.append("   ")
-        block.append(f"{wall:>{wall_col}} tok/s", style=dim)
+        block.append(_t(tui_analytics.table_tok_s(value=f"{wall:>{wall_col}}")), style=dim)
         # Coverage as a fraction of CALLS rather than a percentage: the reader's
         # next question is "how many calls is that", and a fraction answers it
         # without a second number.
-        block.append(f"   {row.decode_calls}/{row.calls} calls", style=dim)
+        block.append(
+            "   "
+            + _t(tui_analytics.table_coverage(covered=str(row.decode_calls), total=str(row.calls))),
+            style=dim,
+        )
     # The legend is drawn whenever there IS a table, not only when a dash is
     # present: with full coverage an earlier revision showed two unlabelled
     # ``tok/s`` columns and the wall rate — about half the decode rate on the
     # same row — read as if it were the decode rate (design round 1 D3).
     if rows:
-        block.append("\n  " + MODEL_RATE_LEGEND, style=dim)
+        block.append("\n  " + _t(tui_analytics.model_legend()), style=dim)
     # A capped table must SAY it is capped. The read is bounded because an
     # operator with hundreds of models should not pay an unbounded render, but a
     # silently truncated list reads as "these are all your models" — the same
     # defect the model picker's ``model_catalogue_truncated`` exists to prevent
     # (QA round 1, O-2).
     if len(rows) >= MODEL_RATES_LIMIT:
-        block.append(f"\n  showing the top {MODEL_RATES_LIMIT} models by output tokens", style=dim)
+        block.append(
+            "\n  " + _t(tui_analytics.model_capped(limit=str(MODEL_RATES_LIMIT))), style=dim
+        )
     return block
 
 
@@ -2869,8 +2978,8 @@ class AnalyticsScreen(ModalScreen[None]):
         # eat into the fixed ``height: 3``. Cropping keeps the rule one line at
         # any width; the report rows already truncate per-row for the same reason.
         title = Text(no_wrap=True, overflow="crop")
-        title.append("Usage analytics", style=fg)
-        title.append("   all sessions", style=faint)
+        title.append(_t(tui_analytics.header_title()), style=fg)
+        title.append("   " + _t(tui_analytics.header_scope()), style=faint)
         # Carry the active chart metric in the PINNED title so ``t`` gives
         # on-screen feedback regardless of scroll position (reviews U1/U4): a
         # user parked past both charts still sees ``cost``↔``tokens`` flip up
@@ -2879,7 +2988,7 @@ class AnalyticsScreen(ModalScreen[None]):
         # metric, so the suffix would be noise.
         if self._has_charts():
             active = "cost" if self._metric == METRIC_COST else "tokens"
-            title.append(f"   bars: {active}", style=faint)
+            title.append("   " + _t(tui_analytics.header_metric(metric=active)), style=faint)
         title.append("\n")
         title.append("─" * max(1, self._card_width()), style=faint)
         return title
@@ -2934,8 +3043,8 @@ class AnalyticsScreen(ModalScreen[None]):
         # them — an abbreviation that drops the key name documents nothing.
         if expandable:
             candidates = [
-                "esc back · t cost/tokens · ↑↓ row · enter expand · e all",
-                "esc back · ↑↓ row · enter expand · e all",
+                _t(tui_analytics.hint_expand_full_metric()),
+                _t(tui_analytics.hint_expand_full()),
                 # ``esc back`` goes BEFORE ``expand`` is abbreviated away — the
                 # rule two lines up, which the ladder used to contradict at its
                 # own third rung (review D5). A 33-cell box took
@@ -2943,17 +3052,17 @@ class AnalyticsScreen(ModalScreen[None]):
                 # all`` to be read as two unexplained keys, while the 29-cell
                 # tier below keeps ``enter expand`` and fits every box in the
                 # 44-50 column band (measured: 33-39 cells).
-                "↑↓ row · enter expand · e all",
-                "↑↓ row · enter · e all",
-                "enter · e all",
+                _t(tui_analytics.hint_expand_compact()),
+                _t(tui_analytics.hint_expand_keys()),
+                _t(tui_analytics.hint_expand_keys_bare()),
             ]
             if not self._has_charts():
                 candidates = candidates[1:]
         elif rows:
             candidates = [
-                "esc back · t cost/tokens · ↑↓ row",
-                "esc back · ↑↓ row",
-                "↑↓ row",
+                _t(tui_analytics.hint_rows_full_metric()),
+                _t(tui_analytics.hint_rows_full()),
+                _t(tui_analytics.hint_rows_bare()),
             ]
             if not self._has_charts():
                 candidates = candidates[1:]
@@ -2961,16 +3070,19 @@ class AnalyticsScreen(ModalScreen[None]):
             # No rows at all (an empty or provider-only report): there is no
             # cursor to move, so the arrows only ever scroll and the hint says so.
             candidates = [
-                "esc back · t cost/tokens · ↑↓ scroll",
-                "esc back · ↑↓ scroll",
-                "↑↓ scroll",
+                _t(tui_analytics.hint_scroll_full_metric()),
+                _t(tui_analytics.hint_scroll_full()),
+                _t(tui_analytics.hint_scroll_bare()),
             ]
             if not self._has_charts():
                 candidates = candidates[1:]
         else:
-            candidates = ["esc back · t cost/tokens", "esc back"]
+            candidates = [
+                _t(tui_analytics.hint_none_full_metric()),
+                _t(tui_analytics.hint_none_full()),
+            ]
             if not self._has_charts():
-                candidates = ["esc back"]
+                candidates = [_t(tui_analytics.hint_none_full())]
 
         width = self._hint_width()
         # The narrowest tier is the floor: below it there is nothing left to shed
