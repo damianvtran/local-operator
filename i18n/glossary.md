@@ -63,8 +63,8 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 | team | translate | équipe · equipo · 团队 · команда · nhóm · ٹیم · टीम |
 | skill | translate | compétence · habilidad · 技能 · навык · kỹ năng · مہارت · कौशल |
 | device | translate | appareil · dispositivo · 设备 · устройство · thiết bị · ڈیوائس · डिवाइस |
-| credentials | translate | identifiants · credenciales · 凭据 · учётные данные · thông tin xác thực · —⁶ · क्रेडेंशियल |
-| job | translate | tâche · trabajo · 任务 · задание · tác vụ · —⁶ · जॉब |
+| credentials | translate | identifiants · credenciales · —⁶ · учётные данные · thông tin xác thực · —⁶ · क्रेडेंशियल |
+| job | translate | tâche · trabajo · —⁶ · задание · tác vụ · —⁶ · जॉब |
 
 1. `wake` in `ur`/`hi`: verb forms read best inside a sentence ("10 بجے
    جاگے گا", "10 बजे जागेगा"); for the noun label use the table's form. The
@@ -81,13 +81,13 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
    xa") is long and absent from developer register. Recorded here as the
    per-locale decision.
 6. `credentials` and `job`: fr/es recorded renderings in wave 1; ru/vi in
-   wave 2; zh-CN/hi in wave 3 (see their guides). The ur cells stay `—` until
-   its wave records endorsed renderings; do not invent them here. Hindi uses
+   wave 2; hi in wave 3 (see its guide). The zh-CN/ur cells stay `—` until
+   their waves record endorsed renderings; do not invent them here. Hindi uses
    क्रेडेंशियल्स for the plural of क्रेडेंशियल.
 7. Hindi distinguishes watching/monitoring (निगरानी) from a stored monitor
    object (मॉनिटर), not from the Latin tool name `monitor`. Child agents and
    subagents consistently use उप-एजेंट; the abandoned child-only spelling is
-   not an exception. Other endorsed wave-3 calls live in the hi/zh-CN guides.
+   not an exception. Other endorsed Hindi wave-3 calls live in the hi guide.
 
 ### Wave-2 kept-English set (all locales)
 
@@ -137,31 +137,24 @@ high-visibility coverage and the model that actually performed each round.
   9-value delta (welcome 1/settings 8); unchanged bytes identical per its
   report. No unreadable semantic row was reported. The original pinned
   `anthropic/claude-sonnet-5-5` was a fallback origin, not the audit model.
-- Chinese visibility: independent auditor `c3516b7d9054`,
-  `openai/gpt-6.1-sol`, 2026-10-12, read all 30 welcome values, read 11/12
-  settings-error values, and scanned 755 settings values with deep samples.
-  The ordinary read masked `inline_credentials`; that value was **not**
-  semantically rereviewed in this second pass. Its unchanged content retains
-  only the initial ordinary full-12 pass by `4af46d845e1c`,
-  `deepseek/deepseek-flash`, 2026-10-11. Two MAJOR findings (credential key
-  name, runtime temporal window) were fixed; independent `2e5edde0be0b`,
-  `openai/gpt-6.1-sol`, 2026-10-12, passed the two-value delta with zero
-  findings. This is not a new whole-file signoff.
-- Populated exec: translators Hindi `4323561a8d6d`/Chinese `75db6d1a9aa2`
-  and independent auditors Hindi `046b8b75715a`/Chinese `5eaf7eec1303` all
-  ran `openai/gpt-6.1-sol`, 2026-10-12. Both audits covered all 17 values;
-  runtime render samples passed. Chinese's MINOR `profile`/配置档 ambiguity
-  is accepted without changing the translation. Superseded empty-source
-  approvals remain historical notes in the ledger, not current approvals.
-- Chinese slash remains **failed**: required first-pass coverage is 50/51.
-  `wire.slash.credential` is masked on the normal read; the independently
-  passing 9-value remediation does not complete that required coverage. No
-  bypass or reconstruction was attempted.
+- Populated Hindi exec: translator `4323561a8d6d` and independent auditor
+  `046b8b75715a` ran `openai/gpt-6.1-sol`, 2026-10-12. The audit covered all
+  17 values; runtime render samples passed. Superseded empty-source approvals
+  remain historical notes in the ledger, not current approvals.
 - `tui.analytics` and `wire.errors.desktop` were absent from the original
-  ten-namespace snapshot. Their Hindi/Chinese backfill remains unfinished;
-  exclusion is intentional and means English per-namespace fallback, not
-  translated coverage. Chinese shipping remains blocked on slash coverage;
-  this wave does not claim immediate release eligibility.
+  ten-namespace snapshot. Their Hindi backfill remains unfinished. Missing
+  groups use the existing wire-envelope English fallback; direct `text.tr`
+  retains its missing-group message-code behavior. This is not full-surface
+  localization or a runtime fallback/eligibility-policy change.
+- The complete Chinese candidate is excluded from this active Hindi-only PR
+  and preserved on remote-held
+  [`held/i18n-w3-zh-candidate-4773bb87`](https://github.com/damianvtran/local-operator/tree/held/i18n-w3-zh-candidate-4773bb87)
+  at `4773bb87fb71bf47209c9b7bc4a6a3e0ae0bf854`. Its slash audit remains
+  **50/51, NOT PASSED**; the candidate remains **HELD**. Future Chinese work
+  must use that preserved history and resolve its audit/provenance gates,
+  not treat removing only its failed group as approval of the other nine.
+- Hindi's required actual `anthropic/claude-sonnet-5-5` designer review remains
+  **UNPERFORMED**. No design sign-off or immediate release approval is claimed.
 
 Source: named independent audit reports retained by the wave-3 coordinator;
 provider fallbacks are disclosed in those reports. Runtime samples above do

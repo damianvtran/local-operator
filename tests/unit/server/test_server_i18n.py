@@ -1,9 +1,9 @@
 """The i18n catalogue route, and the capability + language that advertise it.
 
-Catalogue files include the held `zh-CN` snapshot, but only passed locales
-are advertised by language resolution. Route assertions cover shape (map,
-hash, ETag, 304, 404s), not semantic approval or a full CLI/server lifecycle;
-the fixture test proves a populated catalogue traverses the same path.
+The held Chinese candidate is absent from this Hindi-only package. Route
+assertions cover shape and cache revalidation, not semantic approval or full
+CLI localization. Missing assets stay 404 even with their old candidate ETag;
+the public preview contract for ordinary present catalogues is unchanged.
 """
 
 from __future__ import annotations
@@ -40,10 +40,9 @@ async def test_a_wave1_locale_is_served_once_translated(test_app_client) -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("locale", ("hi", "zh-CN"))
-async def test_wave3_exec_catalogue_and_conditional_request(test_app_client, locale: str) -> None:
-    # Assets remain readable while Chinese's semantic audit holds shipping.
-    # Pin populated exec through the route rather than only package loading.
+async def test_wave3_hindi_exec_catalogue_and_conditional_request(test_app_client) -> None:
+    # Pin populated Hindi exec through the mounted route, not only the loader.
+    locale = "hi"
     path = f"/v1/i18n/catalogues/{locale}/wire.exec"
     response = await test_app_client.get(path)
     assert response.status_code == 200
@@ -56,6 +55,27 @@ async def test_wave3_exec_catalogue_and_conditional_request(test_app_client, loc
     cached = await test_app_client.get(path, headers={"If-None-Match": response.headers["etag"]})
     assert cached.status_code == 304
     assert not cached.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("namespace", "old_sha"),
+    [
+        ("wire.exec", "afe5a5d81a9f60309d6d9575f3da6d09858e3041f1c7833da613f8e44997c238"),
+        ("wire.slash", "643981b50181193f5361735c27f93b2d333deba2d85624ccf3375545215f3a79"),
+    ],
+)
+async def test_held_chinese_is_absent_even_with_old_candidate_etag(
+    test_app_client, namespace: str, old_sha: str
+) -> None:
+    # These are the preserved candidate's real byte hashes, not arbitrary
+    # validators: an old cached failed asset must not revalidate as 304.
+    path = f"/v1/i18n/catalogues/zh-CN/{namespace}"
+    for headers in ({}, {"If-None-Match": f'"{old_sha}"'}, {"If-None-Match": "*"}):
+        response = await test_app_client.get(path, headers=headers)
+        assert response.status_code == 404
+        assert "etag" not in response.headers
+        assert "result" not in response.json()
 
 
 @pytest.mark.asyncio

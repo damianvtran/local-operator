@@ -33,9 +33,10 @@ def test_shipped_wire_namespaces_exist() -> None:
     # until their own slices land. The TUI wave writes `tui.*` files instead —
     # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
     # in its own slice test, so this list does not churn per TUI slice.
-    # Catalogue presence includes the held Chinese snapshot; the generated
-    # shipped set, not this file-list assertion, enforces audit eligibility.
-    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "vi", "zh-CN")
+    # The held Chinese candidate lives on a separate remote ref, not in the
+    # releasable package. Pin the whole set so partial restoration cannot
+    # accidentally admit nine passed groups without its failed slash audit.
+    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "vi")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.errors.agents",
@@ -100,11 +101,10 @@ def test_exact_wire_namespace_contract_rejects_mutations(
                 test_shipped_wire_namespaces_exist()
 
 
-@pytest.mark.parametrize("locale", ("hi", "zh-CN"))
-def test_wave3_carries_its_namespace_snapshot_with_parity(locale: str) -> None:
-    # Pin the original ten, including Chinese's failed semantic-audit slash
-    # namespace. Mechanical parity must remain checked even when a locale is
-    # not eligible to ship; later namespaces intentionally use en fallback.
+def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
+    # Pin only the original ten Hindi groups. Analytics/desktop backfill is
+    # explicitly unfinished; mechanical parity is not full-surface coverage.
+    locale = "hi"
     namespaces = (
         "tui.status",
         "tui.transcript",
