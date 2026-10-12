@@ -42,6 +42,7 @@ from local_operator.team_bridge.types import (
     MessageRef,
     OwnerSnapshot,
     ScreeningReceipt,
+    TeamBridgeTypeError,
 )
 
 __all__ = [
@@ -54,7 +55,7 @@ __all__ = [
     "state_db_path",
 ]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: Ack intent lifecycle: exactly one of these states, no others.
 ACK_PENDING = "pending"
@@ -105,6 +106,7 @@ CREATE TABLE IF NOT EXISTS sync (
     pending_resync INTEGER NOT NULL DEFAULT 0,
     inbox_checkpoint TEXT,
     walk_generation INTEGER NOT NULL DEFAULT 0,
+    walk_terminal INTEGER NOT NULL DEFAULT 0,
     last_observed_at REAL
 );
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -229,12 +231,25 @@ class Store:
             conn.close()
 
     def _init(self, conn: sqlite3.Connection) -> None:
+        # Read the PRE-EXISTING tables before the script runs: a database that
+        # already carried this store's tables but no schema_version row is an
+        # UNKNOWN state, not a fresh one — silently restamping it would bless
+        # whatever authority rows it holds (QA H2-Q5). Only a genuinely empty
+        # file is initialized fresh.
+        pre_existing = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
         try:
             conn.executescript(_SCHEMA)
         except sqlite3.Error as error:
             raise StoreRefused("state_unreadable", str(error)) from error
         row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
         if row is None:
+            if pre_existing - {"schema_meta"}:
+                raise StoreRefused(
+                    "schema_unversioned",
+                    "nonempty state.sqlite3 without a schema_version row; refusing authority",
+                )
             conn.execute(
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -292,9 +307,62 @@ class Store:
                     " AND credential_id = ?" if credential_id is not None else ""
                 )
                 params = (credential_id,) if credential_id is not None else ()
-                row = conn.execute(query, params).fetchone()
-                if row is None:
+                rows = conn.execute(query, params).fetchall()
+                if len(rows) != 1:
+                    # Zero rows is "not enrolled". MORE than one for a partial
+                    # selector (the credential alone) is AMBIGUOUS: v1 commits
+                    # one endpoint, but a future multi-namespace store must
+                    # never be read through a guess — callers name the full
+                    # namespace via resolve_owner instead (QA H2-Q5).
                     return None
+                row = rows[0]
+                return OwnerSnapshot(
+                    credential_id=int(row["credential_id"]),
+                    account_id=row["account_id"],
+                    tenant_id=row["tenant_id"],
+                    endpoint_id=row["endpoint_id"],
+                    canonical_base_url=row["canonical_base_url"],
+                    enrollment_generation=int(row["enrollment_generation"]),
+                ).validated()
+        except StoreRefused:
+            return None
+        except sqlite3.Error:
+            return None
+
+    def resolve_owner(
+        self,
+        *,
+        credential_id: int,
+        account_id: str,
+        tenant_id: str,
+        endpoint_id: str,
+        canonical_base_url: str | None = None,
+    ) -> OwnerSnapshot | None:
+        """EXACT full-namespace resolution — the multi-org-safe selector.
+
+        Every field of the namespace is required (the base URL is compared
+        when given): a caller that can name the whole namespace gets exactly
+        the row it named, and partial-credential ambiguity stays with
+        :meth:`active_owner`'s refusal. Dispatch guards use THIS selector, so
+        a future multi-namespace store cannot dispatch through a lookup that
+        guessed between tenants; other namespaces' rows are retained, never
+        globalized away.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                rows = conn.execute(
+                    "SELECT * FROM enrollments WHERE state = 'committed' "
+                    "AND credential_id = ? AND account_id = ? AND tenant_id = ? "
+                    "AND endpoint_id = ?",
+                    (credential_id, account_id, tenant_id, endpoint_id),
+                ).fetchall()
+                if canonical_base_url is not None:
+                    rows = [r for r in rows if r["canonical_base_url"] == canonical_base_url]
+                if len(rows) != 1:
+                    return None
+                row = rows[0]
                 return OwnerSnapshot(
                     credential_id=int(row["credential_id"]),
                     account_id=row["account_id"],
@@ -327,6 +395,23 @@ class Store:
             raise StoreRefused("invalid_receipt", "consent receipt must name version + ref")
         with self._connect() as conn:
             self._init(conn)
+            existing = conn.execute(
+                "SELECT enrollment_generation, state FROM enrollments WHERE owner_key = ?",
+                (_owner_key(owner),),
+            ).fetchone()
+            if (
+                existing is not None
+                and existing["state"] == "committed"
+                and int(existing["enrollment_generation"]) >= owner.enrollment_generation
+            ):
+                # Monotonic fence: a re-commit at or below the live generation
+                # would silently roll authority backwards past invalidate()
+                # (QA H2-Q5 / reviewer R3). Going backwards needs a deliberate
+                # operator act outside this seam, not a stale caller.
+                raise StoreRefused(
+                    "stale_enrollment",
+                    "a commit must carry a strictly greater generation than the live one",
+                )
             conn.execute(
                 "INSERT OR REPLACE INTO enrollments (owner_key, credential_id, account_id, "
                 "tenant_id, endpoint_id, canonical_base_url, enrollment_generation, "
@@ -372,6 +457,23 @@ class Store:
 
     # -- sync / inbox --------------------------------------------------------
 
+    @staticmethod
+    def _check_binding(owner: OwnerSnapshot, ref: MessageRef) -> None:
+        """The item must be addressed to THIS owner before anything persists.
+
+        The recipient endpoint is mandatory and exact; the account is compared
+        when the server serves one. A missing or foreign binding refuses — an
+        item addressed elsewhere is not this owner's delivery however the
+        tenant reads (QA H2-Q1 / reviewer R4).
+        """
+
+        if ref.recipient_endpoint_id != owner.endpoint_id:
+            raise StoreRefused(
+                "wrong_recipient", "item recipient endpoint differs from (or is missing for) owner"
+            )
+        if ref.recipient_account_id is not None and ref.recipient_account_id != owner.account_id:
+            raise StoreRefused("wrong_recipient", "item recipient account differs from owner")
+
     def merge_page(
         self, owner: OwnerSnapshot, refs: Sequence[MessageRef], cursor: InboxCursor | None
     ) -> None:
@@ -380,8 +482,10 @@ class Store:
         ``cursor`` is the server's NEXT cursor (``None`` = last page). Refs
         were already projected (no content); this method stores the whitelist
         columns only. A page that arrives after an invalidation is refused by
-        the generation check — the sender may then retry under the new
-        enrollment explicitly.
+        the generation check. Each ref must bind to THIS owner (tenant,
+        recipient endpoint, and recipient account when served): a foreign or
+        unbound item refuses the whole page atomically — the caller may then
+        retry under the new enrollment explicitly.
         """
 
         with self._connect() as conn:
@@ -390,6 +494,7 @@ class Store:
             for ref in refs:
                 if ref.tenant_id != owner.tenant_id:
                     raise StoreRefused("wrong_tenant", "item tenant differs from owner")
+                self._check_binding(owner, ref)
                 conn.execute(
                     "INSERT OR REPLACE INTO deliveries (owner_key, message_id, thread_id, "
                     "tenant_id, seq, msg_type, origin, sender_account_id, sender_endpoint_id, "
@@ -416,9 +521,18 @@ class Store:
                         ref.request_ref,
                     ),
                 )
+            # walk_terminal records whether the LAST merged page was terminal:
+            # finish_resync's witness, so an unfinished walk cannot be marked
+            # complete (QA H2-Q3).
             conn.execute(
-                "UPDATE sync SET inbox_checkpoint = ?, last_observed_at = ? WHERE owner_key = ?",
-                (None if cursor is None else str(cursor), time.time(), _owner_key(owner)),
+                "UPDATE sync SET inbox_checkpoint = ?, walk_terminal = ?, "
+                "last_observed_at = ? WHERE owner_key = ?",
+                (
+                    None if cursor is None else str(cursor),
+                    1 if cursor is None else 0,
+                    time.time(),
+                    _owner_key(owner),
+                ),
             )
 
     def record_feed_batch(
@@ -448,7 +562,8 @@ class Store:
                 # resets on ttl/gap), so this is not a compare-max rule: once
                 # resync is pending, the walk owns the cursor until finished.
                 conn.execute(
-                    "UPDATE sync SET pending_resync = 1, feed_seq = ? WHERE owner_key = ?",
+                    "UPDATE sync SET pending_resync = 1, walk_terminal = 0, feed_seq = ? "
+                    "WHERE owner_key = ?",
                     (int(cursor), _owner_key(owner)),
                 )
             else:
@@ -458,11 +573,30 @@ class Store:
                 )
 
     def finish_resync(self, owner: OwnerSnapshot, snapshot_checkpoint: InboxCursor) -> None:
-        """Complete ONLY when every page was merged: clears the pending flag."""
+        """Complete ONLY when a walk actually reached a terminal page.
+
+        The witness: a resync is pending AND the LAST merged page was
+        terminal (``walk_terminal``). The walk itself is H4's (it drives the
+        pagination loop); H2 owns both the bookkeeping and this guard, so a
+        caller that calls finish early — QA's secondary probe deliberately
+        did — is REFUSED rather than silently recording an unfinished
+        checkpoint. The baseline ``snapshot_checkpoint`` (captured before the
+        walk) becomes the new resume point so arrivals during the walk are
+        not skipped.
+        """
 
         with self._connect() as conn:
             self._init(conn)
             self._require_live(conn, owner)
+            row = conn.execute(
+                "SELECT pending_resync, walk_terminal FROM sync WHERE owner_key = ?",
+                (_owner_key(owner),),
+            ).fetchone()
+            if row is None or not int(row["pending_resync"]) or not int(row["walk_terminal"]):
+                raise StoreRefused(
+                    "walk_incomplete",
+                    "resync may complete only after every page was merged through a terminal page",
+                )
             conn.execute(
                 "UPDATE sync SET pending_resync = 0, inbox_checkpoint = ?, "
                 "walk_generation = walk_generation + 1, last_observed_at = ? "
@@ -510,6 +644,15 @@ class Store:
             raise StoreRefused("invalid_target", f"ack target {target!r}")
         if receipt is None or receipt.verdict != ("allow" if target == "read" else "reject"):
             raise StoreRefused("receipt_required", f"{target} needs a matching screening receipt")
+        try:
+            # The FULL immutable tuple is validated before anything is
+            # persisted: a malformed hash/model/prompt is not "evidence with
+            # gaps", it is not evidence (QA H2-Q7).
+            receipt.validated()
+        except TeamBridgeTypeError as error:
+            raise StoreRefused("invalid_receipt", str(error)) from error
+        if not isinstance(client_ref, str) or not client_ref:
+            raise StoreRefused("invalid_client_ref", "client_ref must be a non-empty string")
         intent_id = str(uuid.uuid4())
         with self._connect() as conn:
             self._init(conn)
@@ -519,11 +662,22 @@ class Store:
                 (_owner_key(owner), message_id, target),
             ).fetchone()
             if existing is not None:
-                if (
-                    existing["body_sha256"] == receipt.body_sha256
-                    and existing["verdict"] == receipt.verdict
+                # The compared set is the WHOLE write-once tuple the server
+                # checks (bridge_ack_service.go): verdict, model,
+                # prompt_version, template_sha256, body_sha256, categories
+                # (order-irrelevant) — plus the intent's own idempotency ref.
+                # Comparing only a subset let a changed template/model reuse
+                # the old intent silently (QA H2-Q7 / reviewer R2).
+                same = (
+                    existing["verdict"] == receipt.verdict
+                    and existing["model"] == receipt.model
+                    and existing["prompt_version"] == receipt.prompt_version
+                    and existing["template_sha256"] == receipt.template_sha256
+                    and existing["body_sha256"] == receipt.body_sha256
                     and json.loads(existing["categories"]) == sorted(receipt.categories)
-                ):
+                    and existing["client_ref"] == client_ref
+                )
+                if same:
                     return str(existing["intent_id"])
                 raise StoreRefused("intent_conflict", "write-once intent tuple differs")
             conn.execute(
@@ -585,9 +739,15 @@ class Store:
             return None
 
     def mark_ack_result(
-        self, owner: OwnerSnapshot, intent_id: str, *, state: str, error_code: str | None
+        self,
+        owner: OwnerSnapshot,
+        intent_id: str,
+        *,
+        state: str,
+        error_code: str | None,
+        retry_after: float | None = None,
     ) -> None:
-        """Confirm or conflict ONE intent. Confirmed is terminal; pending stays."""
+        """Record ONE flush outcome. Confirmed is terminal; pending stays replayable."""
 
         if state not in (ACK_CONFIRMED, ACK_CONFLICT, ACK_PENDING):
             raise StoreRefused("invalid_state", state)
@@ -602,9 +762,9 @@ class Store:
             if row["state"] == ACK_CONFIRMED and state != ACK_CONFIRMED:
                 raise StoreRefused("already_confirmed", "confirmed intents are terminal")
             conn.execute(
-                "UPDATE ack_intents SET state = ?, error_code = ? WHERE owner_key = ? "
-                "AND intent_id = ?",
-                (state, error_code, _owner_key(owner), intent_id),
+                "UPDATE ack_intents SET state = ?, error_code = ?, retry_after = ? "
+                "WHERE owner_key = ? AND intent_id = ?",
+                (state, error_code, retry_after, _owner_key(owner), intent_id),
             )
 
     # -- claims (CAS lease) --------------------------------------------------
@@ -624,21 +784,33 @@ class Store:
         token — a stale token never releases or renews a successor.
         """
 
-        if expiry <= time.time():
+        now = time.time()
+        if expiry <= now:
             raise StoreRefused("expired_lease", "expiry must be in the future")
         with self._connect() as conn:
             self._init(conn)
+            try:
+                # BEGIN IMMEDIATE takes the write lock BEFORE the read: the
+                # SELECT-then-write window QA's scheduler interleaved across
+                # two connections (H2-Q6) cannot exist — the second contender
+                # waits on the lock, then reads the winner's committed row.
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as error:
+                raise StoreRefused("busy", str(error)) from error
             self._require_live(conn, owner)
             row = conn.execute(
                 "SELECT * FROM claims WHERE owner_key = ? AND message_id = ?",
                 (_owner_key(owner), message_id),
             ).fetchone()
-            if (
-                row is not None
-                and row["state"] == "held"
-                and float(row["expires_at"]) > time.time()
-            ):
+            if row is not None and row["state"] == "held" and float(row["expires_at"]) > now:
                 raise StoreRefused("claimed", "a live claim already holds this message")
+            if row is not None and row["token"] == lease_token:
+                # Reusing the predecessor's token would let a stale release
+                # (same token) hit the successor; a replacement MUST present a
+                # fresh token.
+                raise StoreRefused(
+                    "reused_claim_token", "an expired/released claim needs a NEW lease token"
+                )
             conn.execute(
                 "INSERT OR REPLACE INTO claims (owner_key, message_id, session_id, token, "
                 "generation, expires_at, state) VALUES (?,?,?,?,?,?,'held')",
@@ -655,32 +827,54 @@ class Store:
     def renew_claim(
         self, owner: OwnerSnapshot, message_id: str, lease_token: str, expiry: float
     ) -> None:
+        """Extend a LIVE claim only: expiry can never be resurrected.
+
+        Refused for a claim that already expired (renewal would turn a dead
+        lease back into authority — H2-Q6), for a token that is not the live
+        holder, and for a claim minted under a fenced generation.
+        """
+
+        now = time.time()
+        if expiry <= now:
+            raise StoreRefused("expired_lease", "expiry must be in the future")
         with self._connect() as conn:
             self._init(conn)
+            self._require_live(conn, owner)
             row = conn.execute(
                 "SELECT * FROM claims WHERE owner_key = ? AND message_id = ?",
                 (_owner_key(owner), message_id),
             ).fetchone()
             if row is None or row["token"] != lease_token or row["state"] != "held":
                 raise StoreRefused("not_holder", "renew refused: token is not the live holder")
+            if int(row["generation"]) != owner.enrollment_generation:
+                raise StoreRefused("stale_generation", "claim was minted under a fenced generation")
+            if float(row["expires_at"]) <= now:
+                raise StoreRefused("expired_claim", "an expired claim cannot be renewed")
             conn.execute(
                 "UPDATE claims SET expires_at = ? WHERE owner_key = ? AND message_id = ?",
                 (expiry, _owner_key(owner), message_id),
             )
 
     def release_claim(self, owner: OwnerSnapshot, message_id: str, lease_token: str) -> None:
-        """Conditional release: only the CURRENT token may release."""
+        """Conditional release: only the LIVE holder's exact token may release.
+
+        A fenced or already-released row is not the caller's to touch; a stale
+        token never releases a successor (H2-Q6).
+        """
 
         with self._connect() as conn:
             self._init(conn)
             row = conn.execute(
-                "SELECT token FROM claims WHERE owner_key = ? AND message_id = ?",
+                "SELECT token, state, generation FROM claims "
+                "WHERE owner_key = ? AND message_id = ?",
                 (_owner_key(owner), message_id),
             ).fetchone()
             if row is None:
                 return
-            if row["token"] != lease_token:
+            if row["token"] != lease_token or row["state"] != "held":
                 raise StoreRefused("not_holder", "release refused: token is not the live holder")
+            if int(row["generation"]) != owner.enrollment_generation:
+                raise StoreRefused("stale_generation", "claim was minted under a fenced generation")
             conn.execute(
                 "UPDATE claims SET state = 'released' WHERE owner_key = ? AND message_id = ?",
                 (_owner_key(owner), message_id),
@@ -703,7 +897,11 @@ class Store:
             return [row["ref"] for row in rows]
 
     def merge_refs(self, owner: OwnerSnapshot, refs: Sequence[MessageRef]) -> None:
-        """Persist refs WITHOUT touching the inbox checkpoint (single reads)."""
+        """Persist refs WITHOUT touching the inbox checkpoint (single reads).
+
+        The same tenant + recipient binding checks as :meth:`merge_page`: a
+        single-message read is not a loophole past the owner guard (QA H2-Q1).
+        """
 
         with self._connect() as conn:
             self._init(conn)
@@ -711,6 +909,7 @@ class Store:
             for ref in refs:
                 if ref.tenant_id != owner.tenant_id:
                     raise StoreRefused("wrong_tenant", "item tenant differs from owner")
+                self._check_binding(owner, ref)
                 conn.execute(
                     "INSERT OR REPLACE INTO deliveries (owner_key, message_id, thread_id, "
                     "tenant_id, seq, msg_type, origin, sender_account_id, sender_endpoint_id, "

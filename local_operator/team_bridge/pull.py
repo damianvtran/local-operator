@@ -5,13 +5,15 @@ supervisor import, no approval decision, no automatic state progression. Every
 function here is invoked explicitly by a caller (H3/H4 later) and performs AT
 MOST ONE wire request.
 
-THE THREE LAWS THIS MODULE ENFORCES, from the H2 handoff:
+THE FOUR LAWS THIS MODULE ENFORCES, from the H2 handoff:
 
-1. **Exact owner.** Every dispatch takes the pinned ``OAuthAccess`` and
-   compares it to the committed ``OwnerSnapshot`` (credential row, account,
-   tenant, endpoint) BEFORE the request. A mismatched or missing pinned
-   access refuses locally; there is no model-key fallback and no sibling
-   credential search — ever.
+1. **Exact owner AND destination.** Every dispatch takes the pinned
+   ``OAuthAccess`` and resolves the committed ``OwnerSnapshot`` by its FULL
+   namespace (hub base, account, tenant, endpoint) BEFORE the request, then
+   checks the concrete wire client's own base against the committed hub. A
+   mismatched or missing pinned access, or a client pointed elsewhere,
+   refuses locally; there is no model-key fallback and no sibling credential
+   search — ever.
 2. **Generation fencing on both sides of the await.** The owner's committed
    generation is checked before dispatch and re-checked after the await;
    a completion that returns after an invalidate is refused locally and
@@ -23,6 +25,11 @@ THE THREE LAWS THIS MODULE ENFORCES, from the H2 handoff:
    BEFORE the HTTP call, so a crash between intent and dispatch replays the
    identical request instead of re-screening. A lost response is retried by
    :func:`flush_ack` with the SAME tuple — never a replacement.
+4. **Ambiguity is not a verdict.** Only a definite HTTP 409 write-once
+   refusal (or a validated success carrying a real delivery state) may end an
+   intent; transport failures, 401/403/429/503 answers and malformed 200s
+   keep the intent PENDING and replayable, however many times it must be
+   flushed.
 """
 
 from __future__ import annotations
@@ -31,11 +38,19 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, cast
+from urllib.parse import urlsplit
 
 from local_operator.providers.auth_store import OAuthAccess
 from local_operator.team_bridge.client import TeamBridgeClient
-from local_operator.team_bridge.store import ACK_CONFIRMED, ACK_CONFLICT, Store
+from local_operator.team_bridge.store import (
+    ACK_CONFIRMED,
+    ACK_CONFLICT,
+    ACK_PENDING,
+    Store,
+    StoreRefused,
+)
 from local_operator.team_bridge.types import (
+    DELIVERY_STATES,
     AckTarget,
     FeedSeq,
     InboxCursor,
@@ -44,7 +59,7 @@ from local_operator.team_bridge.types import (
     OwnerSnapshot,
     ScreeningReceipt,
     TeamBridgeTypeError,
-    feed_seq,
+    project_events_batch,
     project_inbox_page,
     project_message_ref,
 )
@@ -106,28 +121,72 @@ class AckOutcome:
 def _guard_owner(store: Store, owner: OwnerSnapshot, access: OAuthAccess | None) -> None:
     """Refuse anything but the EXACT pinned identity of the committed owner.
 
-    This is the host-account bound from the handoff: the access record the
-    request will carry must be the committed credential row AND the same
-    account/tenant the namespace names. ``None`` access (the model-routing
-    cascade a generic caller would resolve) is refused here — H2 has no
-    fallback path, by design.
+    The access record the request carries must be the committed credential
+    row, the same account, and an OAuth row; the owner is resolved by the
+    FULL namespace (hub base, account, tenant, endpoint) through
+    :meth:`Store.resolve_owner`, so a future multi-namespace store cannot
+    dispatch through a credential-only guess (QA H2-Q5). ``None`` access —
+    the model-routing cascade a generic caller would resolve — is refused
+    here: H2 has no fallback path, by design.
     """
 
     if access is None:
         raise PullRefused("no_access", "a pinned OAuthAccess is required; no fallback exists")
-    committed = store.active_owner(credential_id=access.credential_id)
-    if committed is None:
-        raise PullRefused("not_enrolled", "no committed owner for this credential row")
-    if committed != owner:
-        raise PullRefused("owner_mismatch", "committed owner differs from the passed snapshot")
     if access.account_id != owner.account_id:
         raise PullRefused("owner_mismatch", "pinned access account differs from owner")
     if access.kind != "oauth":
         raise PullRefused("not_oauth", "the bridge requires the OAuth credential row")
+    committed = store.resolve_owner(
+        credential_id=access.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        canonical_base_url=owner.canonical_base_url,
+    )
+    if committed is None:
+        raise PullRefused(
+            "not_enrolled",
+            "no committed owner for this exact credential/hub/account/tenant/endpoint",
+        )
+    if committed != owner:
+        raise PullRefused("owner_mismatch", "committed owner differs from the passed snapshot")
+
+
+def _guard_destination(owner: OwnerSnapshot, wire: WireClient) -> None:
+    """The CONCRETE dispatch destination must match the committed hub.
+
+    ``owner.canonical_base_url`` was recorded at enrollment; the wire client's
+    own base is TRUSTED CONFIGURATION (env/config), never server payload, and
+    the shared origin is the trust boundary. An injected fake with no base is
+    test configuration and exempt; a REAL client pointed at another hub is
+    refused BEFORE any request (QA H2-Q1). When one side names no path the
+    other's path is accepted; when both name paths they must agree.
+    """
+
+    wire_base = getattr(wire, "base_url", None)
+    if not isinstance(wire_base, str) or not wire_base:
+        return
+    owner_url = urlsplit(owner.canonical_base_url)
+    wire_url = urlsplit(wire_base)
+    if (owner_url.scheme.lower(), owner_url.netloc.lower()) != (
+        wire_url.scheme.lower(),
+        wire_url.netloc.lower(),
+    ):
+        raise PullRefused("destination_mismatch", "wire base origin differs from the committed hub")
+    owner_path = owner_url.path.rstrip("/")
+    wire_path = wire_url.path.rstrip("/")
+    if owner_path and wire_path and owner_path != wire_path:
+        raise PullRefused("destination_mismatch", "wire base path differs from the committed hub")
 
 
 def _generation_intact(store: Store, owner: OwnerSnapshot) -> bool:
-    current = store.active_owner(credential_id=owner.credential_id)
+    current = store.resolve_owner(
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        canonical_base_url=owner.canonical_base_url,
+    )
     return current is not None and current.enrollment_generation == owner.enrollment_generation
 
 
@@ -164,9 +223,14 @@ async def inbox(
 ) -> InboxPage:
     """ONE inbox page, projected and merged (refs + checkpoint atomically).
 
-    The query names are the server's exact ones (§6.1). ``state`` filters the
-    DELIVERY state the caller asks about; nothing here derives admission from
-    a page — merging refs is metadata, not delivery.
+    The query names are the server's exact ones (§6.1), and ``tenant_id`` is
+    the caller's committed namespace — never a per-item guess. The query itself
+    is scoped by the committed tenant of the owner (:meth:`Store.resolve_owner`
+    already proved it). ``state`` filters the DELIVERY state the caller asks
+    about; nothing here derives admission from a page — merging refs is
+    metadata, not delivery. The whole page must project cleanly and every item
+    must bind to THIS owner before any row persists (QA H2-Q1/Q3); the store
+    transaction makes the adoption atomic.
     """
 
     store = Store(config_dir)
@@ -174,6 +238,7 @@ async def inbox(
     if limit is not None and (limit < 1 or limit > _MAX_PAGE):
         raise PullRefused("bad_limit", f"limit must be within 1..{_MAX_PAGE}")
     wire = _client_for(config_dir, client)
+    _guard_destination(owner, wire)
     result = await wire.inbox(
         tenant_id=owner.tenant_id,
         after=None if after is None else str(after),
@@ -184,12 +249,17 @@ async def inbox(
         access=access,
     )
     page = _project_or_refuse(result)
-    for ref in page.items:
-        if ref.recipient_endpoint_id and ref.recipient_endpoint_id != owner.endpoint_id:
-            raise PullRefused("wrong_endpoint", "item is addressed to a different endpoint")
     if not _generation_intact(store, owner):
         raise PullRefused("stale_generation", "owner changed while the page was in flight")
-    store.merge_page(owner, page.items, page.next_cursor)
+    try:
+        store.merge_page(owner, page.items, page.next_cursor)
+    except StoreRefused as failure:
+        # The store's own refusals (wrong_recipient / wrong_tenant) surface as
+        # this module's refusal type, one spelling for callers. Nothing was
+        # persisted: merge_page is one transaction and it rolled back.
+        if failure.code in ("wrong_recipient", "wrong_tenant"):
+            raise PullRefused(failure.code, str(failure)) from failure
+        raise
     return page
 
 
@@ -201,11 +271,17 @@ async def message(
     access: OAuthAccess | None,
     client: WireClient | None = None,
 ) -> MessageRef:
-    """ONE message read: the same projection + fencing as a page, refs only."""
+    """ONE message read: the same projection + fencing as a page, refs only.
+
+    The single-message envelope is the SAME item type as an inbox row
+    (bridge_read.go), so the identical binding rules apply: a foreign or
+    unbound recipient refuses before persistence.
+    """
 
     store = Store(config_dir)
     _guard_owner(store, owner, access)
     wire = _client_for(config_dir, client)
+    _guard_destination(owner, wire)
     result = await wire.message(message_id, tenant_id=owner.tenant_id, access=access)
     try:
         ref = project_message_ref(result)
@@ -217,7 +293,14 @@ async def message(
         raise PullRefused("wrong_tenant", "item tenant differs from owner")
     if not _generation_intact(store, owner):
         raise PullRefused("stale_generation", "owner changed while the read was in flight")
-    store.merge_refs(owner, [ref])
+    try:
+        store.merge_refs(owner, [ref])
+    except StoreRefused as failure:
+        # Same single spelling as inbox: the store's binding refusals become
+        # PullRefused and nothing was persisted (one rolled-back transaction).
+        if failure.code in ("wrong_recipient", "wrong_tenant"):
+            raise PullRefused(failure.code, str(failure)) from failure
+        raise
     return ref
 
 
@@ -234,11 +317,12 @@ async def ack(
 ) -> AckOutcome:
     """Record the intent, then make ONE ack request with the EXACT tuple.
 
-    Refusals map to the intent's lifecycle without ever overwriting a
-    write-once verdict: a 409-shaped refusal marks the intent ``conflict``
-    (code retained) and is NOT re-sent; a generation change after the await
-    leaves the intent ``pending`` for explicit reconciliation under the OLD
-    owner.
+    The intent is durable BEFORE dispatch; :func:`flush_ack` maps outcomes
+    without ever overwriting the write-once verdict: a definite 409 refusal
+    marks the intent ``conflict`` (terminal, not re-sent); every ambiguous
+    outcome — transport failure, sign-in refusal, 429, 503, malformed success
+    — leaves it ``pending`` for an exact replay; a generation change after the
+    await leaves it ``pending`` under the OLD owner.
     """
 
     store = Store(config_dir)
@@ -260,7 +344,8 @@ async def flush_ack(
 
     There is deliberately no variant that re-screens or replaces the tuple: a
     different verdict is a NEW write-once conflict (the server keeps the first
-    outcome), not a retry.
+    outcome), not a retry. Only a definite business refusal ends an intent;
+    every ambiguity keeps it pending and replayable with the SAME tuple+ref.
     """
 
     store = Store(config_dir)
@@ -279,6 +364,7 @@ async def flush_ack(
     if receipt is None:
         raise PullRefused("no_intent", "intent carries no screening tuple; hold")
     wire = _client_for(config_dir, client)
+    _guard_destination(owner, wire)
     try:
         result = await wire.ack(
             intent["message_id"],
@@ -288,8 +374,9 @@ async def flush_ack(
             client_ref=intent["client_ref"],
             access=access,
         )
-    except Exception as failure:  # noqa: BLE001 - mapped below; never re-sent blindly
+    except Exception as failure:  # noqa: BLE001 - classified below; never blindly re-sent
         code = getattr(failure, "code", None) or type(failure).__name__
+        http_status = getattr(failure, "http_status", None)
         retry_after = getattr(failure, "retry_after_seconds", None)
         if not _generation_intact(store, owner):
             # Stale completion: the intent stays PENDING under the old owner
@@ -298,8 +385,22 @@ async def flush_ack(
             raise PullRefused(
                 "stale_generation", "owner changed while the ack was in flight"
             ) from failure
-        store.mark_ack_result(owner, intent_id, state=ACK_CONFLICT, error_code=str(code))
-        return AckOutcome(intent_id, ACK_CONFLICT, None, str(code), retry_after)
+        if http_status == 409:
+            # The ONLY terminal arm: the server holds a differing write-once
+            # verdict; replaying this tuple can never converge.
+            store.mark_ack_result(owner, intent_id, state=ACK_CONFLICT, error_code=str(code))
+            return AckOutcome(intent_id, ACK_CONFLICT, None, str(code), retry_after)
+        # Everything else is AMBIGUITY, not a verdict: transport failure,
+        # sign-in refusal, 429/503 — keep the exact pending intent replayable,
+        # retaining the error code and retry hint.
+        store.mark_ack_result(
+            owner,
+            intent_id,
+            state=ACK_PENDING,
+            error_code=str(code),
+            retry_after=retry_after,
+        )
+        return AckOutcome(intent_id, ACK_PENDING, None, str(code), retry_after)
     delivery = result.get("delivery") if isinstance(result, Mapping) else None
     delivery_state = (
         delivery.get("state")
@@ -308,6 +409,12 @@ async def flush_ack(
     )
     if not _generation_intact(store, owner):
         raise PullRefused("stale_generation", "owner changed while the ack was in flight")
+    if delivery_state not in DELIVERY_STATES:
+        # A 200 without a valid delivery state cannot PROVE the transition
+        # (QA's `{}` case): keep the intent replayable rather than inventing
+        # a confirmation.
+        store.mark_ack_result(owner, intent_id, state=ACK_PENDING, error_code="malformed_ack")
+        return AckOutcome(intent_id, ACK_PENDING, None, "malformed_ack", None)
     store.mark_ack_result(owner, intent_id, state=ACK_CONFIRMED, error_code=None)
     return AckOutcome(intent_id, ACK_CONFIRMED, delivery_state, None, None)
 
@@ -322,6 +429,9 @@ async def events(
 ) -> dict[str, Any] | None:
     """ONE feed read. ``None`` = the server's 204 timeout (H4 owns lifetime).
 
+    The frozen DTO answers ``cursor`` as a canonical decimal STRING and each
+    event as a ``{type, ids, at}`` refs-only object; :func:`project_events_batch`
+    normalizes both strictly and never stringifies unknown keys (QA H2-Q2).
     A 200 with an empty ``events`` list and a fresh cursor is the RESYNC
     signal (§6.7) — recorded as such through :func:`record_feed_batch`, not
     inferred here.
@@ -330,26 +440,20 @@ async def events(
     store = Store(config_dir)
     _guard_owner(store, owner, access)
     wire = _client_for(config_dir, client)
+    _guard_destination(owner, wire)
     result = await wire.events(
         tenant_id=owner.tenant_id, after=None if after is None else int(after), access=access
     )
     if result is None:
         return None
-    refs = result.get("events")
-    cursor_raw = result.get("cursor")
-    refs_list = [str(ref) for ref in refs] if isinstance(refs, list) else []
-    resync = isinstance(refs, list) and not refs_list
-    cursor = (
-        feed_seq(cursor_raw)
-        if isinstance(cursor_raw, int) and not isinstance(cursor_raw, bool)
-        else None
-    )
-    if cursor is None:
-        raise PullRefused("malformed_events", "feed answer carried no integer cursor")
+    try:
+        cursor, refs, resync = project_events_batch(result)
+    except TeamBridgeTypeError as failure:
+        raise PullRefused("malformed_events", str(failure)) from failure
     if not _generation_intact(store, owner):
         raise PullRefused("stale_generation", "owner changed while the feed read was in flight")
-    store.record_feed_batch(owner, cursor, refs_list, resync_required=resync)
-    return {"cursor": int(cursor), "refs": refs_list, "resync": resync}
+    store.record_feed_batch(owner, cursor, refs, resync_required=resync)
+    return {"cursor": int(cursor), "refs": list(refs), "resync": resync}
 
 
 def drain_feed_refs(owner: OwnerSnapshot, *, config_dir: Path, upto_seq: int) -> list[str]:
@@ -359,6 +463,12 @@ def drain_feed_refs(owner: OwnerSnapshot, *, config_dir: Path, upto_seq: int) ->
 
 
 def finish_resync(owner: OwnerSnapshot, checkpoint: InboxCursor, *, config_dir: Path) -> None:
-    """Mark the walk complete ONLY when every page was merged (caller's law)."""
+    """Mark the walk complete — REFUSED unless every page was merged.
+
+    The walk itself is H4's (it drives the pagination loop and calls this);
+    H2 owns the witness (:meth:`Store.finish_resync` refuses a resync whose
+    last merged page was not terminal) so an early call cannot record an
+    unfinished checkpoint as complete.
+    """
 
     Store(config_dir).finish_resync(owner, checkpoint)
