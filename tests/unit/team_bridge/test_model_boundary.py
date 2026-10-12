@@ -8,7 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from local_operator.harness.types import StreamModelEvent, StreamTextDelta
+from local_operator.harness.types import (
+    StreamEndEvent,
+    StreamModelEvent,
+    StreamTextDelta,
+    Usage,
+)
 from local_operator.model.configure import build_model_spec
 from local_operator.providers.failover import ProviderError
 from local_operator.team_bridge.model_boundary import (
@@ -58,17 +63,21 @@ class FakeStreamFn:
 
 
 def test_runner_builds_one_fresh_isolated_user_request(tmp_path) -> None:
+    stamped = Usage(input_tokens=1, output_tokens=1).model_copy(
+        update={"provider": "openai", "model_id": "qa-default"}
+    )
     events = [
         StreamModelEvent(model=build_model_spec("openai", "qa-default")),
         SimpleNamespace(type="reasoning_delta", text="thinking"),
         StreamTextDelta(delta="VERDICT: deliver\nREASON: ok."),
+        StreamEndEvent(stop_reason="stop", usage=stamped),
     ]
     fn = FakeStreamFn(events)
     selection = DefaultSelection(
         provider="qa",
         model_id="qa/default",
         spec=build_model_spec("openai", "qa-default"),
-        approved_identities=frozenset({"qa/default"}),
+        approved_identities=frozenset({"qa-default"}),
     )
     runner = ScreenModelRunner(fn, selection)
     reply, actual = runner("PROMPT", default_model="qa/default")
@@ -84,6 +93,7 @@ def test_runner_builds_one_fresh_isolated_user_request(tmp_path) -> None:
 
 def test_runner_refuses_tools_and_unevidenced_identity(tmp_path) -> None:
     tool_events = [SimpleNamespace(type="tool_call_delta", tool_call=None)]
+    end_only = [StreamEndEvent(stop_reason="stop")]
     selection = DefaultSelection(
         provider="qa",
         model_id="qa/default",
@@ -93,10 +103,14 @@ def test_runner_refuses_tools_and_unevidenced_identity(tmp_path) -> None:
     with pytest.raises(_ScreeningStreamRefused):
         ScreenModelRunner(FakeStreamFn(tool_events), selection)("p", default_model="qa/default")
     # A default the runner was not built for is unevidenced -> hold signal.
-    assert ScreenModelRunner(FakeStreamFn([]), selection)("p", default_model="qa/other") == (
+    assert ScreenModelRunner(FakeStreamFn(end_only), selection)("p", default_model="qa/other") == (
         "",
         None,
     )
+    # Missing end (exhaustion is not completion) refuses even with clean text.
+    text_only = [StreamTextDelta(delta="VERDICT: deliver\nREASON: ok.")]
+    with pytest.raises(_ScreeningStreamRefused):
+        ScreenModelRunner(FakeStreamFn(text_only), selection)("p", default_model="qa/default")
 
 
 def test_wire_guard_charges_each_attempt_and_sanitizes(tmp_path) -> None:
@@ -104,16 +118,30 @@ def test_wire_guard_charges_each_attempt_and_sanitizes(tmp_path) -> None:
     calls: list[int] = []
 
     class Inner:
-        def stream(self, request, api_key, oauth_access=None):
-            from local_operator.providers.failover import ProviderError
+        def __init__(self) -> None:
+            import httpx as _httpx
+
+            self._http = _httpx.AsyncClient(transport=_httpx.MockTransport(self._send))
+
+        def _send(self, request):
+            import httpx as _httpx
 
             calls.append(1)
             if len(calls) == 2:
+                from local_operator.providers.failover import ProviderError
+
                 raise ProviderError(
                     500, CANARY_PROSE, retryable=True, kind="transient", request_sent=True
                 )
+            return _httpx.Response(200, content=b"x")
 
+        async def _drive(self):
+            response = await self._http.get("https://api.openai.com/v1/responses")
+            return response
+
+        def stream(self, request, api_key, oauth_access=None):
             async def ok():
+                await self._drive()
                 yield "event"
 
             return ok()
@@ -169,3 +197,23 @@ def test_wire_guard_budget_refusal_is_non_retryable(tmp_path) -> None:
     budget_err = refusal.value
     assert isinstance(budget_err, ProviderError)
     assert budget_err.retryable is False and budget_err.request_sent is False
+
+
+def test_opaque_route_refuses_before_io(tmp_path) -> None:
+    store, owner = _setup(tmp_path)
+
+    class Bare:
+        def stream(self, request, api_key, oauth_access=None):
+            raise AssertionError("must not be called")
+
+    guard = ScreeningWireGuard(Bare(), store=store, owner=owner, message_id="bmsg_op")
+    from local_operator.providers.failover import ProviderError
+
+    async def drive():
+        async for _ in guard.stream(None, "k"):
+            pass
+
+    with pytest.raises(ProviderError):
+        import asyncio as _asyncio
+
+        _asyncio.run(drive())

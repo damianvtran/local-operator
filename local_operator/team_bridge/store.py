@@ -292,6 +292,12 @@ CREATE TABLE IF NOT EXISTS screening_holds (
     created_at REAL NOT NULL,
     PRIMARY KEY (owner_key, message_id)
 );
+CREATE TABLE IF NOT EXISTS screening_schedule (
+    owner_key TEXT PRIMARY KEY,
+    last_sender TEXT,
+    lease_holder TEXT,
+    lease_expires REAL
+);
 CREATE TABLE IF NOT EXISTS screening_policy (
     owner_key TEXT PRIMARY KEY,
     version TEXT NOT NULL,
@@ -315,6 +321,13 @@ def _fingerprint_revision(fingerprint: str) -> str:
     """The admission revision embedded in a policy fingerprint string."""
 
     return fingerprint.split("|", 1)[0]
+
+
+def _version_rank(version: str) -> tuple[int, str]:
+    """Rank a template version for the monotonic floor: trailing digits first."""
+
+    digits = "".join(ch for ch in version if ch.isdigit())
+    return (int(digits) if digits else -1, version)
 
 
 def _owner_key(owner: OwnerSnapshot) -> str:
@@ -1192,6 +1205,10 @@ class Store:
                 # FIRST-PUBLICATION CAS: a bootstrap must never race another
                 # writer into owning the row (the caller re-reads and matches).
                 raise StoreRefused("policy_exists", "bootstrap lost the first-publication race")
+            if row is not None and _version_rank(version) < _version_rank(str(row["version"])):
+                # MONOTONIC TEMPLATE FLOOR: a publisher may advance the
+                # accepted template version, never rewind it.
+                raise StoreRefused("version_floor", "template version would move backwards")
             if row is None:
                 conn.execute(
                     "INSERT INTO screening_policy "
@@ -1322,6 +1339,14 @@ class Store:
         try:
             with self._connect() as conn:
                 self._init(conn)
+                # EXPLICIT bounded transaction: SQLite autocommits plain
+                # SELECTs, so without BEGIN IMMEDIATE an independent Store can
+                # invalidate the owner or advance the policy BETWEEN these
+                # reads (QA's actual two-connection race). IMMEDIATE takes the
+                # write lock so the whole consumption is one linearized
+                # snapshot: either the change happened strictly before (we
+                # see it and refuse) or it waits until we have returned.
+                self._begin_write(conn)
                 key = _owner_key(owner)
                 if self._live_generation(conn, owner) != owner.enrollment_generation:
                     return None
@@ -1350,20 +1375,36 @@ class Store:
                     or int(row["creator_generation"]) != owner.enrollment_generation
                 ):
                     return None
+                try:
+                    decoded = json.loads(row["categories"] or "[]")
+                except (TypeError, ValueError):
+                    return None
+                if not isinstance(decoded, list) or not all(
+                    isinstance(item, str) for item in decoded
+                ):
+                    # Corrupted metadata fails CLOSED — never char-exploded
+                    # into the immutable category tuple (QA: list('[".."]')).
+                    return None
                 return {
                     "verdict": row["verdict"],
                     "model": row["model"],
                     "prompt_version": row["prompt_version"],
                     "template_sha256": row["template_sha256"],
                     "body_sha256": row["body_sha256"],
-                    "categories": list(row["categories"] or []),
+                    "categories": decoded,
                     "envelope_digest": row["envelope_digest"],
                     "admission_revision": row["admission_revision"],
                     "policy_epoch": row["policy_epoch"],
                     "creator_generation": row["creator_generation"],
                 }
-        except (StoreRefused, sqlite3.Error):
-            return None
+        except sqlite3.Error as error:
+            # An interleaved writer that could not take the lock (or any
+            # engine-level failure) leaves the authority UNVERIFIED, which is
+            # a refusal — never a silent "no row" that lets a stale caller
+            # re-screen behind a concurrent authority change.
+            raise StoreRefused("state_busy", str(error)) from None
+        except StoreRefused:
+            raise
 
     def finish_screening(
         self,
@@ -1502,6 +1543,82 @@ class Store:
                     "hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
                     (key, message_id, hold_code, retry_at, time.time()),
                 )
+
+    def screen_schedule(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
+        """The durable scheduling row (cursor + lease), or None when absent."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT last_sender, lease_holder, lease_expires FROM screening_schedule "
+                "WHERE owner_key = ?",
+                (_owner_key(owner),),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def set_screen_cursor(self, owner: OwnerSnapshot, last_sender: str) -> None:
+        """Persist the rotation cursor (metadata only, never message content)."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            conn.execute(
+                "INSERT INTO screening_schedule (owner_key, last_sender) VALUES (?, ?) "
+                "ON CONFLICT(owner_key) DO UPDATE SET last_sender = excluded.last_sender",
+                (_owner_key(owner), last_sender),
+            )
+
+    def claim_screen_turn(
+        self, owner: OwnerSnapshot, *, holder: str, now: float, ttl: float
+    ) -> bool:
+        """Conditional one-at-a-time lease (CAS) for the account's screening turn.
+
+        True only when the row has no live lease (expired leases are
+        reclaimable) or the SAME holder already owns it; every competing
+        worker gets False until release/expiry. One transaction, so two
+        processes racing this can never both win.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            row = conn.execute(
+                "SELECT lease_holder, lease_expires FROM screening_schedule WHERE owner_key = ?",
+                (_owner_key(owner),),
+            ).fetchone()
+            if row is not None:
+                held_by = row["lease_holder"]
+                expires = float(row["lease_expires"] or 0.0)
+                if held_by and held_by != holder and expires > now:
+                    return False
+            conn.execute(
+                "INSERT INTO screening_schedule (owner_key, lease_holder, lease_expires) "
+                "VALUES (?, ?, ?) ON CONFLICT(owner_key) DO UPDATE SET "
+                "lease_holder = excluded.lease_holder, lease_expires = excluded.lease_expires",
+                (_owner_key(owner), holder, now + ttl),
+            )
+            return True
+
+    def release_screen_turn(self, owner: OwnerSnapshot, *, holder: str) -> bool:
+        """Conditional release: only the CURRENT holder can clear its lease."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            row = conn.execute(
+                "SELECT lease_holder FROM screening_schedule WHERE owner_key = ?",
+                (_owner_key(owner),),
+            ).fetchone()
+            if row is None or row["lease_holder"] != holder:
+                return False
+            conn.execute(
+                "UPDATE screening_schedule SET lease_holder = NULL, lease_expires = NULL "
+                "WHERE owner_key = ?",
+                (_owner_key(owner),),
+            )
+            return True
 
     def schema_problem(self) -> str | None:
         """The refusal code of the CURRENT schema/state, or None when sound.
