@@ -169,6 +169,10 @@ class DefaultSelection:
     model_id: str
     spec: Any  # a real ModelSpec; Any keeps this module import-light
     approved_identities: frozenset[str] = field(default_factory=frozenset)
+    #: The canonical (provider, model) TUPLES this selection approves: the
+    #: serving identity check compares tuples, so a foreign provider
+    #: offering the same model id is refused (R6/Q10).
+    approved_tuples: frozenset[tuple[str, str]] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         # A selection ALWAYS approves its own resolved identity: callers that
@@ -176,6 +180,15 @@ class DefaultSelection:
         # disable evidence matching by leaving the set empty.
         if not self.approved_identities:
             object.__setattr__(self, "approved_identities", frozenset({self.model_id}))
+        if not self.approved_tuples:
+            object.__setattr__(
+                self,
+                "approved_tuples",
+                frozenset(
+                    {(self.provider, mid) for mid in self.approved_identities}
+                    | {(self.provider, self.model_id)}
+                ),
+            )
 
     @property
     def default_model(self) -> str:
@@ -336,7 +349,10 @@ class ScreeningWireGuard:
         except Exception:  # noqa: BLE001 - an unreadable store pins NOTHING
             self._pinned_policy = None
         self._proxies: list[_ChargingAsyncTransport] = []
-        self._installed: list[tuple[Any, Any, _ChargingAsyncTransport]] = []
+        # (container, key, proxy, kind): kind 'attr' reads via getattr,
+        # 'item' via container.get(key) — a MOUNT dict is keyed by an
+        # httpx URLPattern, which getattr cannot address (R6/Q14).
+        self._installed: list[tuple[Any, Any, _ChargingAsyncTransport, str]] = []
         http = http_client if http_client is not None else getattr(client, "_http", None)
         if http is not None:
             patched_any = self._patch_transport(http, "_transport")
@@ -364,7 +380,7 @@ class ScreeningWireGuard:
         proxy = _ChargingAsyncTransport(transport, self._charge, owner_token=self._guard_token)
         setattr(http, attr, proxy)
         self._proxies.append(proxy)
-        self._installed.append((http, attr, proxy))
+        self._installed.append((http, attr, proxy, "attr"))
         return True
 
     def _patch_mount_transport(self, http: Any, pattern: Any) -> bool:
@@ -382,7 +398,7 @@ class ScreeningWireGuard:
         proxy = _ChargingAsyncTransport(transport, self._charge, owner_token=self._guard_token)
         mounts[pattern] = proxy
         self._proxies.append(proxy)
-        self._installed.append((mounts, pattern, proxy))
+        self._installed.append((mounts, pattern, proxy, "item"))
         return True
 
     def _all_proxies_current(self, http: Any) -> bool:
@@ -407,9 +423,9 @@ class ScreeningWireGuard:
     def _guard_current(self) -> bool:
         """Whether every recorded transport is still THIS guard's proxy."""
 
-        for entry in self._installed:
-            http, attr, proxy = entry
-            if getattr(http, attr, None) is not proxy:
+        for container, key, proxy, kind in self._installed:
+            current = getattr(container, key, None) if kind == "attr" else container.get(key)
+            if current is not proxy:
                 return False
         return True
 
@@ -501,6 +517,12 @@ class ScreeningWireGuard:
             opaque.__cause__ = None
             opaque.__context__ = None
             raise opaque
+        if not self._guard_current():
+            # The CURRENT selected route (primary or mount) is no longer the
+            # proxy THIS guard installed for THIS job — replaced, foreign or
+            # re-mounted after installation. A historical install flag is
+            # not evidence: refuse BEFORE any I/O (R6/Q14).
+            raise self._refuse("screening route changed after guard installation")
         pending: BaseException | None = None
         try:
             # The CALL itself sits inside the scrub: a client that raises at
@@ -508,7 +530,7 @@ class ScreeningWireGuard:
             inner = self._client.stream(request, api_key, oauth_access)
             async for event in inner:
                 yield event
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit):
             # Control flow, not a provider fault: unwind exactly as received
             # (a cancelled post-POST send must never be laundered into a
             # request_sent=False hold).
@@ -535,13 +557,15 @@ class ScreenModelRunner:
 
     def __init__(
         self,
-        stream_fn: Callable[..., AsyncIterator[Any]],
+        stream_fn: Any | None,
         selection: DefaultSelection,
         *,
         deadline_s: float = _SCREEN_WALL_DEADLINE_S,
         owned_http: Any | None = None,
         owned_stream_fn: Any | None = None,
         job_ref: dict[str, Any] | None = None,
+        ensure_fn: Any | None = None,
+        lazy_state: dict[str, Any] | None = None,
     ) -> None:
         self._stream_fn = stream_fn
         self._selection = selection
@@ -549,6 +573,10 @@ class ScreenModelRunner:
         self._owned_http = owned_http
         self._owned_stream_fn = owned_stream_fn
         self._job_ref = job_ref if job_ref is not None else {}
+        # Lazy production path (R6): the client/stream fn are built on first
+        # use; the state cell is what _close_owned tears down.
+        self._ensure_fn = ensure_fn
+        self._lazy_state = lazy_state
 
     def bind_job(self, job: AdmissionJob) -> None:
         """Bind the minted AdmissionJob for the enclosing dispatch (R5).
@@ -594,6 +622,20 @@ class ScreenModelRunner:
         await self._close_owned()
 
     async def _close_owned(self) -> None:
+        if self._lazy_state is not None:
+            stream_fn = self._lazy_state.pop("stream_fn", None)
+            client = self._lazy_state.pop("client", None)
+            if stream_fn is not None:
+                try:
+                    await stream_fn.close()
+                except Exception:  # noqa: BLE001 — teardown, never fatal
+                    pass
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception:  # noqa: BLE001 — teardown, never fatal
+                    pass
+            return
         if self._owned_stream_fn is not None:
             try:
                 await self._owned_stream_fn.close()
@@ -621,6 +663,15 @@ class ScreenModelRunner:
             purpose="team_bridge_screen",
             max_tokens=_SCREEN_MAX_TOKENS,
         )
+        stream_fn = self._stream_fn
+        if stream_fn is None and self._ensure_fn is not None:
+            # First use: build the dedicated client + stream fn NOW, where a
+            # construction failure can await the cleanup instead of
+            # abandoning a task (R6/Q10).
+            stream_fn = await self._ensure_fn()
+            self._stream_fn = stream_fn
+        if stream_fn is None:
+            return "", None
         parts: list[str] = []
         consumed = 0
         completed = False
@@ -638,7 +689,7 @@ class ScreenModelRunner:
             if isinstance(mid, str) and mid:
                 candidates.append((str(provider or ""), mid))
 
-        async for event in self._stream_fn(request, None):
+        async for event in stream_fn(request, None):
             etype = str(getattr(event, "type", "") or "")
             if etype == "model":
                 model = getattr(event, "model", None)
@@ -684,7 +735,12 @@ class ScreenModelRunner:
             # Conflicting request-local provenance can never be averaged.
             return "", None
         provider, mid = distinct.pop()
-        if mid != self._selection.model_id and mid not in self._selection.approved_identities:
+        # The TUPLE is the identity (R6/Q10): a foreign provider offering
+        # the same approved model id is NOT this selection's identity.
+        canonical = (self._selection.provider, self._selection.model_id)
+        if (provider, mid) != canonical and (provider, mid) not in getattr(
+            self._selection, "approved_tuples", set()
+        ):
             return "", None
         return "".join(parts), mid
 
@@ -714,17 +770,13 @@ def make_screening_runner(
     selection = resolve_default_selection(config_dir)
     if selection is None:
         return None
-    import httpx
-
-    from local_operator.model.configure import create_stream_fn
-
-    dedicated = httpx.AsyncClient(
-        transport=httpx.AsyncHTTPTransport(retries=0),
-        timeout=httpx.Timeout(_SCREEN_WALL_DEADLINE_S, connect=_SCREEN_CONNECT_TIMEOUT_S),
-        follow_redirects=False,
-    )
-
+    # LAZY construction (R6/Q10): the dedicated client and stream fn are
+    # built on FIRST USE, inside the async path, so a create_stream_fn
+    # failure can await the client's close and JOIN the cleanup — a sync
+    # constructor has no legal way to await (the old fire-and-forget task
+    # was abandoned) and a nested loop raises inside an active loop.
     job_state: dict[str, Any] = {}
+    lazy: dict[str, Any] = {"client": None, "stream_fn": None}
 
     def _guard(client: Any) -> Any:
         return ScreeningWireGuard(
@@ -733,36 +785,43 @@ def make_screening_runner(
             owner=owner,
             message_id=message_id,
             fingerprint=fingerprint,
-            http_client=dedicated,
+            http_client=lazy["client"],
             expected_epoch=expected_epoch,
             job_ref=job_state,
         )
 
-    try:
-        stream_fn = create_stream_fn(
-            auth_store,
-            settings,
-            session_id="team-bridge-screen",
-            wrap_client=_guard,
-            http_client=dedicated,
+    async def _ensure() -> Any:
+        if lazy["stream_fn"] is not None:
+            return lazy["stream_fn"]
+        import httpx
+
+        from local_operator.model.configure import create_stream_fn
+
+        dedicated = httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(retries=0),
+            timeout=httpx.Timeout(_SCREEN_WALL_DEADLINE_S, connect=_SCREEN_CONNECT_TIMEOUT_S),
+            follow_redirects=False,
         )
-    except BaseException:
-        # Cleanup must never nest a loop (a constructor failure inside an
-        # ACTIVE loop raised RuntimeError and left the client open): a
-        # running loop closes it as a task, a bare context closes it inline.
+        lazy["client"] = dedicated
         try:
-            running = asyncio.get_running_loop()
-        except RuntimeError:
-            running = None
-        if running is not None:
-            running.create_task(dedicated.aclose())
-        else:
-            asyncio.run(dedicated.aclose())
-        raise
+            stream_fn = create_stream_fn(
+                auth_store,
+                settings,
+                session_id="team-bridge-screen",
+                wrap_client=_guard,
+                http_client=dedicated,
+            )
+        except BaseException:
+            lazy["client"] = None
+            await dedicated.aclose()
+            raise
+        lazy["stream_fn"] = stream_fn
+        return stream_fn
+
     return ScreenModelRunner(
-        stream_fn,
+        None,
         selection,
-        owned_http=dedicated,
-        owned_stream_fn=stream_fn,
+        ensure_fn=_ensure,
+        lazy_state=lazy,
         job_ref=job_state,
     )

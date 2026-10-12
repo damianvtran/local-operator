@@ -533,6 +533,14 @@ class Store:
             f"state.sqlite3 schema {version!r} != {SCHEMA_VERSION}",
         )
 
+    def current_generation_is_live(self, owner: OwnerSnapshot) -> bool:
+        """Public fence probe (R6/Q15): is THIS snapshot's enrollment
+        generation still the live one? Used to pick the accurate typed hold
+        (owner_changed vs retry_later) at renew/final fences."""
+        with self._connect() as conn:
+            self._init(conn)
+            return self._live_generation(conn, owner) == owner.enrollment_generation
+
     def _live_generation(self, conn: sqlite3.Connection, owner: OwnerSnapshot) -> int | None:
         """The committed generation for this EXACT owner, or None."""
 
@@ -1381,13 +1389,29 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
-            cursor = conn.execute(
+            row = conn.execute(
+                "SELECT fingerprint, committed_message_id FROM screening_attempts "
+                "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
+                (attempt_id, _owner_key(owner)),
+            ).fetchone()
+            if row is None:
+                raise StoreRefused("unknown_attempt", attempt_id)
+            if row["committed_message_id"] is not None:
+                # WRITE-ONCE (R6/Q3): a committed attempt is sealed — no
+                # rebinding of any kind. The pre-commit `fingerprint` column
+                # holds the LOGICAL reservation fingerprint (written at
+                # attempt creation) and is overwritten once by the job
+                # digest at bind; a single column cannot distinguish those
+                # two writers, so the stricter "fingerprint changed" rule
+                # was REJECTED — the per-attempt turn token and the full
+                # job digest at reservation already fence cross-attempt
+                # rebinding, and the commit flag is the write-once fence.
+                raise StoreRefused("write_once_conflict", "attempt already committed")
+            conn.execute(
                 "UPDATE screening_attempts SET fingerprint = ? "
                 "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
                 (fingerprint, attempt_id, _owner_key(owner)),
             )
-            if cursor.rowcount != 1:
-                raise StoreRefused("unknown_attempt", attempt_id)
 
     def reserve_screening_dispatch(
         self, owner: OwnerSnapshot, *, message_id: str, job: Any, turn: str
@@ -1419,6 +1443,10 @@ class Store:
             ).fetchone()
             if policy is None:
                 raise StoreRefused("policy_stale", "no published policy for this job")
+            if not job.provider or not job.approved:
+                # The reservation must check what the job CLAIMS (R6/Q3): a
+                # job with no canonical provider/approvals is not authority.
+                raise StoreRefused("policy_stale", "job lacks canonical provider/approvals")
             if (
                 policy["revision"] != job.revision
                 or policy["template_sha256"] != job.template_sha256
@@ -1536,6 +1564,14 @@ class Store:
                     # Unknown category strings (or wrong shapes) can never be
                     # handed to a receipt: typed uncertainty, zero spend.
                     raise StoreRefused("proof_corrupt", "categories failed validation")
+                if row["verdict"] not in ("allow", "reject"):
+                    raise StoreRefused("proof_corrupt", "unknown verdict")
+                if row["verdict"] == "allow" and decoded:
+                    # An ALLOW with rejection categories is internally
+                    # inconsistent (injection is a reject): fail closed
+                    # rather than deliver on damaged metadata. A reject with
+                    # an empty tuple is NOT forbidden and stays valid.
+                    raise StoreRefused("proof_corrupt", "allow verdict with categories")
                 return {
                     "verdict": row["verdict"],
                     "model": row["model"],
@@ -1775,6 +1811,11 @@ class Store:
 
         with self._connect() as conn:
             self._init(conn)
+            # Generation fence (R6/Q15): an OLD owner snapshot that kept a
+            # successor's capability token must not be able to act on it —
+            # only a snapshot whose enrollment generation is still LIVE may.
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return False
             row = conn.execute(
                 "SELECT lease_holder, lease_expires FROM screening_schedule WHERE owner_key = ?",
                 (self._account_scope(owner),),
@@ -1789,6 +1830,8 @@ class Store:
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return False
             row = conn.execute(
                 "SELECT lease_holder FROM screening_schedule WHERE owner_key = ?",
                 (self._account_scope(owner),),
@@ -1809,6 +1852,8 @@ class Store:
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return False
             row = conn.execute(
                 "SELECT lease_holder FROM screening_schedule WHERE owner_key = ?",
                 (self._account_scope(owner),),

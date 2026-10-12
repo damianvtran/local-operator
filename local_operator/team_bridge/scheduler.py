@@ -20,11 +20,16 @@ Two pieces:
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Mapping, cast
+
+if TYPE_CHECKING:
+    from local_operator.team_bridge.screening import ScreeningPolicy
 
 __all__ = [
     "AccountScreeningCycle",
@@ -159,3 +164,130 @@ class AccountScreeningCycle:
                 return await screen(target)
         finally:
             self._store.release_screen_turn(self._owner, turn=turn)
+
+
+@dataclasses.dataclass(frozen=True)
+class _CyclePolicy:
+    """The thin composition's policy view (R6/Q3): values come from the
+    TRUSTED resolver + accepted-status constants, never from message data
+    or caller strings. Capture via PolicySnapshot reads these fields."""
+
+    screening_version: str
+    template_sha256: str
+    # Invariant with the protocol's attribute type: a narrower "str" is NOT
+    # assignable to the read-write "str | None" protocol member.
+    default_model: str | None
+    admission_revision: str
+    approved_serving_identities: tuple[str, ...]
+    provider: str
+
+
+async def run_screening_cycle(
+    *,
+    config_dir: "Path",
+    owner: Any,
+    items: "Sequence[Mapping[str, Any]]",
+    auth_store: Any,
+    settings: Any = None,
+    holder: str = "team-bridge-cycle",
+    ttl: float = 120.0,
+) -> Any:
+    """The SHIPPED THIN production composition (R6/Q3).
+
+    accepted-status/config-default PUBLISHER -> durable account cycle ->
+    lazy production factory -> PUBLIC screening core, as ONE ordinary
+    callable. This is the production caller a normal consumer uses; it is
+    not rig-only machinery and adds no daemon, poll, connector or UI. The
+    policy is published from the SAME trusted resolver the factory uses
+    (CAS against the current epoch: a stale publisher refuses rather than
+    rewinding current authority), and the cycle serializes the account.
+    Each item's runner is built fresh because the wire guard binds MESSAGE
+    identity; the cycle's turn is reused by the public entry via
+    ``turn_binding`` instead of claiming a second competing turn.
+    """
+
+    from local_operator.team_bridge.model_boundary import (
+        make_screening_runner,
+        resolve_default_selection,
+    )
+    from local_operator.team_bridge.screening import (
+        SCREENING_TEMPLATE_V1_SHA256,
+        SCREENING_VERSION_V1,
+        screen_message_async,
+    )
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    selection = resolve_default_selection(config_dir)
+    if selection is None:
+        return None
+    store = Store(config_dir)
+    revision = "accepted-status-v1"
+    current = store.current_screening_policy(owner)
+    expected = (
+        SCREENING_VERSION_V1,
+        SCREENING_TEMPLATE_V1_SHA256,
+        selection.model_id,
+        revision,
+    )
+    row = (
+        None
+        if current is None
+        else (
+            current["version"],
+            current["template_sha256"],
+            current["default_model"],
+            current["revision"],
+        )
+    )
+    if row != expected:
+        try:
+            store.publish_screening_policy(
+                owner,
+                version=SCREENING_VERSION_V1,
+                template_sha256=SCREENING_TEMPLATE_V1_SHA256,
+                default_model=selection.model_id,
+                revision=revision,
+                expected_epoch=None if current is None else int(current["epoch"]),
+                create_only=current is None,
+            )
+        except StoreRefused:
+            # A competing publisher moved authority; screen nothing rather
+            # than admit against a stale view (the cycle's own caller holds
+            # the eligibility decision).
+            return None
+    policy = _CyclePolicy(
+        screening_version=SCREENING_VERSION_V1,
+        template_sha256=SCREENING_TEMPLATE_V1_SHA256,
+        default_model=selection.model_id,
+        admission_revision=revision,
+        approved_serving_identities=tuple(sorted(selection.approved_identities)),
+        provider=selection.provider,
+    )
+    cycle = AccountScreeningCycle(store=store, owner=owner, holder=holder, ttl=ttl)
+
+    async def _screen(item: "Mapping[str, Any]") -> Any:
+        message_block = item.get("message")
+        message_id = str(message_block.get("id")) if isinstance(message_block, Mapping) else ""
+        runner = make_screening_runner(
+            config_dir=config_dir,
+            store=store,
+            owner=owner,
+            message_id=message_id,
+            auth_store=auth_store,
+            settings=settings,
+        )
+        if runner is None:
+            return None
+        return await screen_message_async(
+            owner,
+            item,
+            config_dir=config_dir,
+            # _CyclePolicy is READ-ONLY (frozen): the protocol's attribute
+            # members are writable, so the read-only side is cast rather
+            # than loosened — the pipeline only ever reads these fields and
+            # re-captures them into its own immutable snapshot.
+            policy=cast("ScreeningPolicy", policy),
+            runner=runner,
+        )
+
+    return await cycle.run_once(items, _screen)

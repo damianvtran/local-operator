@@ -11,7 +11,6 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamModelEvent,
     StreamTextDelta,
-    Usage,
 )
 from local_operator.model.configure import build_model_spec
 from local_operator.team_bridge.model_boundary import (
@@ -61,24 +60,21 @@ class FakeStreamFn:
 
 
 def test_runner_builds_one_fresh_isolated_user_request(tmp_path) -> None:
-    stamped = Usage(input_tokens=1, output_tokens=1).model_copy(
-        update={"provider": "openai", "model_id": "qa-default"}
-    )
     events = [
         StreamModelEvent(model=build_model_spec("openai", "qa-default")),
         SimpleNamespace(type="reasoning_delta", text="thinking"),
         StreamTextDelta(delta="VERDICT: deliver\nREASON: ok."),
-        StreamEndEvent(stop_reason="stop", usage=stamped),
+        StreamEndEvent(stop_reason="stop"),
     ]
     fn = FakeStreamFn(events)
     selection = DefaultSelection(
-        provider="qa",
-        model_id="qa/default",
+        provider="openai",
+        model_id="qa-default",
         spec=build_model_spec("openai", "qa-default"),
         approved_identities=frozenset({"qa-default"}),
     )
     runner = ScreenModelRunner(fn, selection)
-    reply, actual = runner("PROMPT", default_model="qa/default")
+    reply, actual = runner("PROMPT", default_model="qa-default")
     assert reply == "VERDICT: deliver\nREASON: ok."
     assert actual == "qa-default"  # the spec's own model id is the serving evidence
     request = fn.requests[0]
@@ -223,3 +219,66 @@ def test_opaque_route_refuses_before_io(tmp_path) -> None:
         import asyncio as _asyncio
 
         _asyncio.run(drive())
+
+
+def test_route_replacement_after_install_refuses_before_io(tmp_path) -> None:
+    """R6/Q14: a primary transport REPLACED after installation must refuse
+    BEFORE any I/O — the historical install flag is not evidence."""
+
+    store, owner = _setup(tmp_path)
+    hits: list[str] = []
+
+    class Inner:
+        def __init__(self) -> None:
+            import httpx as _httpx
+
+            self._http = _httpx.AsyncClient(transport=_httpx.MockTransport(self._send))
+
+        def _send(self, request):
+            import httpx as _httpx
+
+            hits.append("hit")
+            return _httpx.Response(200, content=b"x")
+
+        def stream(self, request, api_key, oauth_access=None):
+            async def ok():
+                await self._http.get("https://api.openai.com/v1/responses")
+                yield "event"
+
+            return ok()
+
+    inner = Inner()
+    guard = ScreeningWireGuard(inner, store=store, owner=owner, message_id="bmsg_rep")
+    # Replace the SELECTED route AFTER the guard installed its proxy.
+    import httpx as _httpx
+
+    from local_operator.providers.failover import ProviderError
+
+    inner._http._transport = _httpx.MockTransport(inner._send)
+
+    async def drive():
+        async for _ in guard.stream(None, "k"):
+            pass
+
+    import asyncio as _asyncio
+
+    with pytest.raises(ProviderError):
+        _asyncio.run(drive())
+    assert hits == []  # ZERO handler calls after replacement
+
+
+def test_successor_owner_snapshot_cannot_release_new_turn(tmp_path) -> None:
+    """R6/Q15: a stale owner SNAPSHOT presenting a successor's capability
+    token must not release/renew/match it — the fence is the live
+    generation, not the hub/account key alone."""
+
+    import time as _time
+
+    store, owner = _setup(tmp_path)
+    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    assert turn is not None
+    # The store moves to the successor generation: the OLD snapshot is stale.
+    Store(tmp_path).invalidate(owner)
+    assert store.release_screen_turn(owner, turn=turn) is False
+    assert store.renew_screen_turn(owner, turn=turn, now=_time.time(), ttl=90) is False
+    assert store.screen_turn_matches(owner, turn=turn, now=_time.time()) is False
