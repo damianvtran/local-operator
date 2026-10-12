@@ -620,7 +620,10 @@ class ReplayTarget(Protocol):
         source_id: str | None = None,
         source_indices: list[int] | None = None,
         source_total: int | None = None,
+        after: Any | None = None,
     ) -> list[ImageBlock]: ...
+
+    def _insert_after(self, anchor: Any, block: Any) -> None: ...
 
     def _replace_block(self, old: Any, block: Any) -> bool: ...
 
@@ -670,6 +673,7 @@ class PreparedReplay(ReplayState):
         source_id: str | None = None,
         source_indices: list[int] | None = None,
         source_total: int | None = None,
+        after: Any | None = None,
     ) -> list[ImageBlock]:
         # ``fold_width`` is accepted to satisfy ``ReplayTarget``: a prepared
         # replay is built OFFSCREEN, so there is no laid-out destination to
@@ -684,7 +688,28 @@ class PreparedReplay(ReplayState):
             source_id=source_id,
             source_indices=source_indices,
             source_total=source_total,
+            after=after,
         )
+
+    def _insert_after(self, anchor: Any, block: Any) -> None:
+        """Place ``block`` right after ``anchor`` in the collected run.
+
+        The collected list IS the mount order, so an adopted source-owned part
+        keeps its original source seat instead of landing at the tail (review
+        round 5, R3-3 placement). Recording mirrors ``_append_block``: the
+        block still declares its empty-state verdict, and an unstamped block
+        still takes the projection anchor/part, so only the POSITION differs.
+        """
+        block.ends_empty_state = True
+        if not block.navigation_anchor_id:
+            block.navigation_anchor_id = self._projection_message_id
+            block.navigation_anchor_part = self._projection_part
+        self._projection_part += 1
+        for index, candidate in enumerate(self.blocks):
+            if candidate is anchor:
+                self.blocks.insert(index + 1, block)
+                return
+        self.blocks.append(block)
 
     def _replace_block(self, old: Any, block: Any) -> bool:
         """Swap a seat in the offscreen run, keeping its position and coords.
@@ -1638,7 +1663,22 @@ def project_settled_rows(
                         if (ordinal + 1) not in owned_parts
                     ]
 
-                    def adopt_media() -> bool:
+                    def media_seat() -> Any | None:
+                        # The source's OWN segment: the last part already on hand
+                        # for this id (the receipt body or the picture placed
+                        # after it). Never the physical tail — a late picture
+                        # appended there lands past a reader-facing boundary the
+                        # source never crossed (review round 5, R3-3 placement).
+                        seat_block: Any | None = None
+                        for block in transcript.blocks():
+                            if (
+                                isinstance(block, (HubMessageBlock, ImageBlock))
+                                and block.navigation_anchor_id == receipt_id
+                            ):
+                                seat_block = block
+                        return seat_block
+
+                    def adopt_media(body_block: Any | None = None) -> bool:
                         adopted = False
                         if missing_media:
                             self._append_image_blocks(
@@ -1648,6 +1688,7 @@ def project_settled_rows(
                                 source_id=receipt_id or None,
                                 source_indices=[ordinal for ordinal, _ in missing_media],
                                 source_total=len(source_media),
+                                after=media_seat() or body_block,
                             )
                             adopted = True
                         # Labels converge on the same rule the seam applies at
@@ -1656,7 +1697,13 @@ def project_settled_rows(
                         # source's FULL sequence grows its label re-reads
                         # from that sequence — full-initial and progressive
                         # adoption agree on labels, not only on counts.
-                        if receipt_id:
+                        # Labels re-read from the AUTHORITATIVE source only:
+                        # an empty picture list is an OMISSION (a metadata
+                        # patch), not an instruction to forget a known
+                        # citation — erasing the labels of pictures that are
+                        # still on screen was the round-5 caption regression
+                        # (QA Q-R6-3).
+                        if receipt_id and source_media:
                             total = len(source_media)
                             for block in transcript.blocks():
                                 if not (
@@ -1673,7 +1720,7 @@ def project_settled_rows(
                         if existing.restate_receipt(body, facts):
                             transcript.restate_quiet_member(existing)
                             appended = True
-                        if adopt_media():
+                        if adopt_media(existing):
                             appended = True
                     else:
                         seat = source_seats.get(receipt_id) if receipt_id else None
@@ -1686,7 +1733,7 @@ def project_settled_rows(
                                 appended = True
                             if receipt_id:
                                 hub_receipts[receipt_id] = seat
-                            if adopt_media():
+                            if adopt_media(seat):
                                 appended = True
                         elif isinstance(seat, UserBlock):
                             # RICHER SAME-ID REPLAY: this row was painted as
@@ -1709,7 +1756,7 @@ def project_settled_rows(
                             if self._replace_block(seat, block):
                                 hub_receipts[receipt_id] = block
                                 appended = True
-                            if adopt_media():
+                            if adopt_media(block):
                                 appended = True
                         else:
                             block = HubMessageBlock(body, facts, fold_width=fold_width)
@@ -1719,7 +1766,7 @@ def project_settled_rows(
                             self._append_block(block)
                             if receipt_id:
                                 hub_receipts[receipt_id] = block
-                            adopt_media()
+                            adopt_media(block)
                             appended = True
                     continue
                 # The live path never paints harness chrome as a user row
@@ -2230,6 +2277,7 @@ def append_image_blocks(
     source_id: str | None = None,
     source_indices: list[int] | None = None,
     source_total: int | None = None,
+    after: Any | None = None,
 ) -> list[ImageBlock]:
     """Mount one :class:`ImageBlock` per image, in order.
 
@@ -2265,6 +2313,13 @@ def append_image_blocks(
     missing tail, so labels and ownership survive partial adoption; the
     display label still reads the source's own ``[Image #N]`` citation at
     that original position when the marker text carries citations.
+
+    ``after`` places each block immediately after the given block (and each
+    later one after the one just placed), which is how an ADOPTED part keeps
+    its original source seat: appending at the physical tail put a late
+    picture past a reader-facing human boundary its source never crossed
+    (review round 5, R3-3 placement; QA Q-R6-2). Without ``after`` the
+    behaviour is the plain append every existing caller keeps.
     """
     from local_operator.tui.app import logger
 
@@ -2287,6 +2342,10 @@ def append_image_blocks(
         if source_id is not None:
             block.navigation_anchor_id = source_id
             block.navigation_anchor_part = ordinal + 1
-        self._append_block(block)
+        if after is not None:
+            self._insert_after(after, block)
+            after = block
+        else:
+            self._append_block(block)
         mounted.append(block)
     return mounted

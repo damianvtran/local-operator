@@ -4136,25 +4136,34 @@ class QuietGroupTracker:
         are left alone, and descriptive correction stays ``restate_member``'s
         job (review round 4, R4-1/Q-R5-2).
         """
+        # THE ORDERED SOURCE WALK. Bars are view objects, not source records:
+        # their members stay mounted as siblings (the fold is a visibility
+        # switch), so the view's own order IS source order once bars are
+        # skipped. Expanding members AND then meeting the same physical rows
+        # again listed every member twice and left a synthetic bar standing as
+        # the "row above" the span, which refused the affected stretch and let
+        # the old bars survive the repair (review round 5, R1). Each source row
+        # is taken ONCE, by identity, with the bar that owns it recorded for the
+        # touched-bar reconciliation.
+        owner_of: dict[TranscriptBlock, QuietGroupBlock] = {}
+        for bar in self._view.blocks():
+            if isinstance(bar, QuietGroupBlock):
+                for member in bar._members:
+                    owner_of[member] = bar
         source: list[TranscriptBlock] = []
         owners: list[QuietGroupBlock | None] = []
         for block in self._view.blocks():
             if getattr(block, "SPACING_TRANSIENT", False):
                 continue
             if isinstance(block, QuietGroupBlock):
-                # A bar is synthetic: its hidden ACTUAL rows are the source,
-                # each contributing once, in original order.
-                for member in block._members:
-                    source.append(member)
-                    owners.append(block)
-            else:
-                source.append(block)
-                owners.append(None)
+                continue
+            source.append(block)
+            owners.append(owner_of.get(block))
         try:
             position = source.index(changed)
         except ValueError:
             # The row is not on hand (already removed): nothing to re-plan.
-            self.resync(head_cut=self._head_cut)
+            self._reconnect_tail()
             return
         records = _records_of_blocks(source)
         # The affected maximal stretch: the segment between the nearest real
@@ -4175,16 +4184,26 @@ class QuietGroupTracker:
         if _last_splitter_index(span_records) >= 0:
             # A member re-reads as a splitter (belt breach): never fold
             # across a row the reader must see; re-derive from the tail.
-            self.resync(head_cut=self._head_cut)
+            self._reconnect_tail()
             return
-        first_index = self._view_index(span[0])
-        if first_index is None or not self._span_head_bounded(first_index):
-            # The span's top edge is not a boundary (a page fragment or an
-            # on-hand in-span row above): the planner refuses the same
-            # sub-span, so keep the rows as they are.
-            self.resync(head_cut=self._head_cut)
-            return
-        partial = self._span_head_partial(first_index)
+        # Bounds are decided in SOURCE space, with the SAME vocabulary the walk
+        # used: the row above the span is a real source row (or the window
+        # edge), never a synthetic bar. The physical helper reads the bar
+        # whenever the span sits under an old one, which is precisely the
+        # refusal that let the stale bars stand (review round 5, R1).
+        if start == 0:
+            partial = self._head_cut
+        else:
+            previous = source[start - 1]
+            if not _quiet_fold_boundary(previous) and not getattr(
+                previous, "QUIET_GROUP_HEAD_CUT", False
+            ):
+                # On-hand source rows above the span that the boundary
+                # vocabulary does not call a boundary: a fragment, refused as
+                # the incremental fold refuses it.
+                self._reconnect_tail()
+                return
+            partial = bool(getattr(previous, "QUIET_GROUP_HEAD_CUT", False))
         touched: list[QuietGroupBlock] = []
         for owner in owners[start:end]:
             if owner is not None and owner not in touched:
@@ -4209,24 +4228,50 @@ class QuietGroupTracker:
             bar = self._open
             if bar is not None and reader_open and not bar._expanded:
                 bar.toggle_expanded()
-            # The tail state must be what an incremental formation would have
-            # left: `_last_record` is the true last source row's record (so
-            # the next append is judged from the ACTUAL tail, never from the
-            # obsolete pre-change chain), and the bar stays open ONLY when the
-            # re-formed run really is the tail. A real boundary after the run
-            # means a CLOSED historical group: it must latch, exactly as the
-            # increment's `_close` would have left it. `resync` cannot be used
-            # here — it reads a tail BAR as a record of its own, which would
-            # make every later real append read as a fresh splitter.
+        # Reconnect to the ACTUAL tail, formed or refused, touched or not:
+        # `_last_record` becomes the true last source row and an untouched live
+        # TAIL bar stays the open group, so a later append extends it instead of
+        # dying at a synthetic boundary (review round 5, R1: clearing the global
+        # open state left the untouched tail frozen at action0 while the control
+        # grew to action1).
+        self._reconnect_tail()
+
+    def _reconnect_tail(self) -> None:
+        """Re-attach the tracker to the ACTUAL view tail after a replan.
+
+        `resync` is the wrong tool for this job: it reads a tail BAR as a
+        record of its own — so every later real append then reads as a fresh
+        splitter — and it starts from a cleared state that drops the live tail
+        registration outright. This only READS the tail back: the stretch after
+        the last real splitter, the open bar when the stretch is one that is
+        still growing, and `_last_record` from the last actual source row.
+        Nothing is formed here (missing historical bars are the planner's job
+        in `reconcile_source_change`), and closed historical bars stay latched.
+        """
+        self._open = None
+        self._trailing = None
+        self._last_record = None
+        blocks = [
+            block for block in self._view.blocks() if not getattr(block, "SPACING_TRANSIENT", False)
+        ]
+        bars = [block for block in blocks if isinstance(block, QuietGroupBlock)]
+        source = [block for block in blocks if not isinstance(block, QuietGroupBlock)]
+        records = _records_of_blocks(source)
+        if records:
             self._last_record = records[-1]
-            if end < len(source):
-                self._open = None
-                self._trailing = None
+        last_splitter = _last_splitter_index(records)
+        stretch = source[last_splitter + 1 :]
+        stretch_records = records[last_splitter + 1 :]
+        if not stretch:
             return
-        # The planner produced no group (fewer than two triggers, or a
-        # refusal): the rows stay ordinary cards and the tracker re-derives
-        # from the actual tail.
-        self.resync(head_cut=self._head_cut)
+        bar = next((candidate for candidate in bars if stretch[0] in candidate._members), None)
+        if bar is not None and bar.group.open:
+            # The tail IS this bar and it is still growing.
+            self._open = bar
+            return
+        triggers = [record for record in stretch_records if quiet_family_of(record) is not None]
+        if len(triggers) == 1:
+            self._trailing = _QuietTrailingSpan(blocks=stretch)
 
     def _close(self) -> None:
         """A splitter landed: the latch. Facts from here on are frozen.
