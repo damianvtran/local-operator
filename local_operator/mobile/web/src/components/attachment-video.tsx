@@ -60,6 +60,7 @@ export function AttachmentVideo({
 		<span data-testid="attachment-video" data-state={state} className={frame}>
 			<video
 				src={attachmentUrl(pid, entryId, index, "video")}
+				aria-label="attachment"
 				controls
 				preload="metadata"
 				onLoadedMetadata={() => setState("ready")}

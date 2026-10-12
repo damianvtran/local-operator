@@ -184,7 +184,17 @@ def test_wire_bytes_are_unchanged_for_the_same_projection() -> None:
 #: boolean is deliberately additive (an older client reads a missing key as
 #: "no substitution", the historical behaviour), which is what makes a re-pin
 #: the honest record here rather than a format break.
-_EXPECTED_DEGRADED_FRAME_DIGEST = "7208e264fc305cb69efdf2aa220f136b934bd7545bf3c037d35d3812c463e446"
+#: Re-pinned again, for the video ref family (PR #2287 round-1
+#: remediation): every transcript row gained exactly one ``videos`` list —
+#: 40 keys across this fixture's rows, +560 bytes — verified the same way:
+#: dropping those 40 keys reproduces ``7208e264...`` byte for byte. The
+#: field is the deliberate parallel to ``images`` (video artifacts ride
+#: their own index space; see ``projection._video_refs`` and the endpoint
+#: it pairs with), so the delta is additive and symmetric — an older
+#: client reads a missing key as "no video refs", the historical
+#: behaviour — which is what makes a re-pin the honest record here rather
+#: than a format break.
+_EXPECTED_DEGRADED_FRAME_DIGEST = "4ae1f9c38d645170ba7bc948cbe9abebb490e43d12760900a2f0822f018cd8f7"
 
 
 # ---------------------------------------------------------------------------

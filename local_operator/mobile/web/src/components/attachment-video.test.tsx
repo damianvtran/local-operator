@@ -29,6 +29,9 @@ describe("attachment-video", () => {
 		);
 		expect(el.hasAttribute("controls")).toBe(true);
 		expect(el.getAttribute("preload")).toBe("metadata");
+		/* The sibling image path declares `alt="attachment"`; the player
+		   carries the equivalent accessible name (design round 1, D1). */
+		expect(el.getAttribute("aria-label")).toBe("attachment");
 	});
 
 	it("resolves without a spinner: the reserved box is the whole resolving state", () => {
