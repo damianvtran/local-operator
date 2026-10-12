@@ -63,7 +63,7 @@ import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, NamedTuple, Sequence, cast, get_args
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence, cast, get_args
 
 from local_operator.evaluation.adapters.api import (
     AdapterSelector,
@@ -106,6 +106,9 @@ from local_operator.evaluation.runner.secrets import (
 )
 from local_operator.launchd import JobObservation, JobState
 from local_operator.update import BuildStamp
+
+if TYPE_CHECKING:
+    from local_operator.owned_process import OwnershipGuarantee
 
 EXIT_OK = 0
 EXIT_EPISODE = 1
@@ -1366,7 +1369,11 @@ def _owned_host_status_channel(args: argparse.Namespace) -> Any:
     )
 
 
-def _owned_host_refusal(args: argparse.Namespace) -> str | None:
+def _owned_host_refusal(
+    args: argparse.Namespace,
+    *,
+    required_guarantee: OwnershipGuarantee | None = None,
+) -> str | None:
     """Refuse a ``--owned-host`` invocation that is not a VERIFIED owner.
 
     The flag is not an admission. The lease record the frontend wrote, this
@@ -1375,6 +1382,11 @@ def _owned_host_refusal(args: argparse.Namespace) -> str | None:
     the mismatch is returned -- BEFORE any store, selector or adapter work,
     so a forged or stale invocation allocates nothing. ``None`` means the
     invocation is this run's owner and the episode may proceed.
+
+    The default requirement is always production managed retention. Only the
+    explicitly Python-injected fixture factory passes the weaker generic
+    identity requirement; argv/env/lease/provider data never choose it. A
+    requested guarantee is not evidence: the central verifier derives facts.
     """
     from local_operator import owned_process
 
@@ -1397,7 +1409,11 @@ def _owned_host_refusal(args: argparse.Namespace) -> str | None:
             backend=backend,
             job_label=job_label,
             actual_source_pin=pin,
-            required_guarantee=owned_process.OwnershipGuarantee.MANAGED_RETENTION,
+            required_guarantee=(
+                owned_process.OwnershipGuarantee.MANAGED_RETENTION
+                if required_guarantee is None
+                else required_guarantee
+            ),
         )
     except owned_process.OwnedProcessRefused as error:
         return str(error)
@@ -1497,7 +1513,11 @@ def _owner_relaunch_argv(raw: list[str]) -> list[str]:
     return out
 
 
-async def _run_managed_frontend(args: argparse.Namespace) -> int:
+async def _run_managed_frontend(
+    args: argparse.Namespace,
+    *,
+    _test_owner_entry: tuple[str, ...] | None = None,
+) -> int:
     """Launch the episode's managed owner and report from OUTSIDE its loop.
 
     The standalone entry no longer runs a session episode in its own
@@ -1563,7 +1583,9 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
     if args.episode_id is None:
         host_argv += ["--episode-id", episode_id]
     spec = owned_process.OwnedProcessSpec(
-        argv=(sys.executable, str(Path(__file__).resolve()), *host_argv),
+        # Closed test composition must bind BOTH process entries. Production
+        # uses this script; no CLI/env/lease/provider datum selects an entry.
+        argv=(*(_test_owner_entry or (sys.executable, str(Path(__file__).resolve()))), *host_argv),
         cwd=Path.cwd(),
         env=_owner_env_from_self(),
         run_root=Path(args.run_root),
@@ -1807,7 +1829,12 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
     return EXIT_EPISODE
 
 
-async def run(args: argparse.Namespace) -> int:
+async def run(
+    args: argparse.Namespace,
+    *,
+    _test_owner_entry: tuple[str, ...] | None = None,
+    _test_owner_admission: Callable[[argparse.Namespace], str | None] | None = None,
+) -> int:
     try:
         _validate_ref_inputs(args)
     except (ValueError, argparse.ArgumentTypeError) as error:
@@ -1836,9 +1863,11 @@ async def run(args: argparse.Namespace) -> int:
         # The session arm's ONLY standalone path is the managed frontend: the
         # bare foreground loop is the lifetime defect (R2), and the rig's
         # in-process mode must say so explicitly.
-        return await _run_managed_frontend(args)
+        return await _run_managed_frontend(args, _test_owner_entry=_test_owner_entry)
     if args.owned_host:
-        refusal = _owned_host_refusal(args)
+        # Explicit Python fixture composition, not identity/argv/env inference.
+        # Production's default stays strong even for genuine detached leases.
+        refusal = (_test_owner_admission or _owned_host_refusal)(args)
         if refusal is not None:
             print(refusal, file=sys.stderr)
             return EXIT_PREFLIGHT
@@ -2086,20 +2115,32 @@ async def run(args: argparse.Namespace) -> int:
     return EXIT_OK if outcome.status == "completed" else EXIT_EPISODE
 
 
-def main(argv: Sequence[str] | None = None, *, internal_test_support: bool = False) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    internal_test_support: bool = False,
+    _test_owner_entry: tuple[str, ...] | None = None,
+    _test_owner_admission: Callable[[argparse.Namespace], str | None] | None = None,
+) -> int:
     """Parse argv and run one episode.
 
     ``internal_test_support`` is the INJECTED internal entry (R3-S2): offline
     rigs import this module and pass it to reach the in-process/detached
     compositions. Nothing reachable from a command line sets it.
     """
+    if not internal_test_support and (
+        _test_owner_entry is not None or _test_owner_admission is not None
+    ):
+        raise ValueError("test owner composition requires an injected internal entry")
     raw = list(sys.argv[1:] if argv is None else argv)
     args = build_parser(internal_test_support=internal_test_support).parse_args(raw)
     # The frontend relaunches THIS SAME invocation under a managed lease; the
     # raw argv is what makes "the same invocation" exact, including flags this
     # process resolved and flags it must not reinterpret.
     args._raw_argv = raw
-    result = asyncio.run(run(args))
+    result = asyncio.run(
+        run(args, _test_owner_entry=_test_owner_entry, _test_owner_admission=_test_owner_admission)
+    )
     sys.stdout.flush()
     sys.stderr.flush()
     if args.owned_host:

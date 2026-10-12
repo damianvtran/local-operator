@@ -598,6 +598,12 @@ def verify_owned_admission(
                 "not admit a process"
             )
         if required_guarantee is OwnershipGuarantee.MANAGED_RETENTION:
+            if observed.loaded_no_restart is not True:
+                # Disk bytes can be restored AFTER bootstrap without changing
+                # launchd's loaded KeepAlive/trigger policy. The one supervisor
+                # observation must independently certify no automatic restart;
+                # missing/unsupported policy is uncertainty, never admission.
+                raise OwnedProcessRefused("loaded supervisor no-restart policy is unverified")
             # Match the real owned registration to this lease/source; backend
             # tags and a requested guarantee are NOT evidence. The utility's
             # no-restart contract is KeepAlive=False with no trigger keys.

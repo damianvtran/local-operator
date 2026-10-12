@@ -536,6 +536,115 @@ class JobObservation:
     state: JobState
     pid: int | None
     reason: str
+    loaded_no_restart: bool | None = None
+
+
+def _loaded_no_restart(body: str, target: str, pid: int) -> bool | None:
+    """Loaded policy from a complete, supported job print, never disk bytes.
+
+    launchd caches a plist at bootstrap: restoring KeepAlive=False on disk
+    does NOT change the loaded job (review reproduced a real restart). Only
+    this SAME target/PID snapshot can prove policy. Parse top-level entries,
+    not substrings in arguments/environment/nested coalitions. Unsupported,
+    duplicate or truncated shapes are unknown, and strong admission refuses.
+    The supported neutral shape is the utility's actual full launchctl print;
+    future fields/flags are unknown rather than assumed non-triggering.
+    """
+    lines = [line for line in body.splitlines() if line.strip()]
+    if len(lines) < 3 or lines[0] != f"{target} = {{" or lines[-1] != "}":
+        return None
+    fields: dict[str, str] = {}
+    section = False
+    for line in lines[1:-1]:
+        if section:
+            if line == "\t}":
+                section = False
+            elif not line.startswith("\t\t"):
+                return None
+            continue
+        if not line.startswith("\t") or line.startswith("\t\t"):
+            return None
+        entry = line[1:].split(" = ", 1)
+        if len(entry) != 2 or not entry[0] or entry[0] in fields:
+            return None
+        key, value = entry
+        fields[key] = value
+        section = value == "{"
+    if section or fields.get("pid") != str(pid) or fields.get("state") != "running":
+        return None
+    properties = fields.get("properties")
+    if properties is None:
+        return None
+    flags = [part.strip() for part in properties.split("|")]
+    if any(not flag for flag in flags) or len(set(flags)) != len(flags):
+        return None
+    if "keepalive" in flags or any(
+        key in fields
+        for key in ("run interval", "event triggers", "event channels", "calendar interval")
+    ):
+        return False
+    if not set(flags) <= {"runatload", "inferred program"}:
+        return None
+    neutral = {
+        "active count",
+        "path",
+        "type",
+        "state",
+        "program",
+        "arguments",
+        "working directory",
+        "stdout path",
+        "stderr path",
+        "inherited environment",
+        "default environment",
+        "environment",
+        "domain",
+        "asid",
+        "minimum runtime",
+        "exit timeout",
+        "runs",
+        "pid",
+        "immediate reason",
+        "forks",
+        "execs",
+        "initialized",
+        "trampolined",
+        "started suspended",
+        "proxy started suspended",
+        "checked allocations",
+        "checked allocations reason",
+        "checked allocations flags",
+        "last exit code",
+        "last terminating signal",
+        "resource coalition",
+        "jetsam coalition",
+        "spawn type",
+        "jetsam priority",
+        "jetsam memory limit (active)",
+        "jetsam memory limit (inactive)",
+        "jetsamproperties category",
+        "jetsam thread limit",
+        "cpumon",
+        "sanitizer flags",
+        "properties",
+    }
+    required = {
+        "active count",
+        "path",
+        "type",
+        "state",
+        "program",
+        "arguments",
+        "environment",
+        "domain",
+        "runs",
+        "pid",
+        "spawn type",
+        "properties",
+    }
+    if not required <= fields.keys() or fields.get("type") != "LaunchAgent":
+        return None
+    return True if set(fields) <= neutral else None
 
 
 def observe_job(*, label: str, path: Path, run: Callable[..., object]) -> JobObservation:
@@ -561,7 +670,12 @@ def observe_job(*, label: str, path: Path, run: Callable[..., object]) -> JobObs
     body = _text(getattr(result, "stdout", ""))
     pid = _pid_from_print(body)
     if pid is not None and pid > 0:
-        return JobObservation(JobState.LIVE, pid, "supervisor reports a running PID")
+        return JobObservation(
+            JobState.LIVE,
+            pid,
+            "supervisor reports a running PID",
+            loaded_no_restart=_loaded_no_restart(body, f"{job_domain()}/{label}", pid),
+        )
     state = re.search(r"(?m)^\s*state\s*=\s*([^\r\n]+)$", body)
     if state is not None and state.group(1).strip() in ("not running", "exited"):
         return JobObservation(JobState.ABSENT, None, "supervisor reports a stopped job")

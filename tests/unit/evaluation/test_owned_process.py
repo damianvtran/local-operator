@@ -195,7 +195,14 @@ def test_managed_guarantee_derives_supervisor_and_no_restart_proof(
         return subprocess.CompletedProcess(
             args,
             124 if case == "unavailable" else 0,
-            f"state = running\npid = {pid + 1 if case == 'wrong_pid' else pid}\n",
+            (
+                f"{launchd.job_domain()}/{label} = {{\n"
+                "\tactive count = 1\n\tpath = /fixture\n\ttype = LaunchAgent\n"
+                "\tstate = running\n\tprogram = /fixture\n\targuments = {\n\t\tfixture\n\t}\n"
+                "\tenvironment = {\n\t}\n\tdomain = gui/fixture\n\truns = 1\n"
+                f"\tpid = {pid + 1 if case == 'wrong_pid' else pid}\n"
+                "\tspawn type = daemon (3)\n\tproperties = runatload | inferred program\n}\n"
+            ),
             "",
         )
 
@@ -535,6 +542,19 @@ def test_infra_ref_reuses_secret_name_contract_without_echoing_values() -> None:
             ["INPUT=synthetic-invalid-reference-canary"], "benchmark_compute"
         )
     assert "synthetic-invalid-reference-canary" not in str(caught.value)
+
+
+def test_fixture_composition_is_not_selectable_from_production_data() -> None:
+    from scripts import run_episode
+
+    with pytest.raises(ValueError, match="injected internal entry"):
+        run_episode.main(
+            [], _test_owner_entry=("fixture",), _test_owner_admission=lambda args: None
+        )
+    parser = run_episode.build_parser()
+    assert not any(
+        action.dest in ("_test_owner_entry", "_test_owner_admission") for action in parser._actions
+    )
 
 
 def test_supervisor_timeout_is_unknown_not_dead(monkeypatch: pytest.MonkeyPatch) -> None:

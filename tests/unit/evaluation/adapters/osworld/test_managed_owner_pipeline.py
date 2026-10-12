@@ -48,15 +48,14 @@ CANARY_KEY = "canary-key-owned1688"
 CANARY_SECRET = "canary-secret-owned1688"
 
 #: The frontend is spawned through the INJECTED INTERNAL ENTRY (R3-S2), not
-#: through a production flag: ``--owner-backend detached`` and
-#: ``--in-process-host`` exist only on the parser this entry builds, so no
-#: command line can select the unmanaged composition. The owner relaunch this
-#: entry performs still goes through the PRODUCTION parser.
+#: through a production flag. BOTH process entries are the closed Python
+#: fixture composition: merely selecting detached in the frontend and then
+#: relaunching production correctly refuses before any SDK/worker work. The
+#: injected fixture still verifies real source/PID/birth/lease identity; it
+#: never changes the production strong guarantee or infers trust from data.
 INTERNAL_ENTRY = (
-    "import sys;"
-    f"sys.path.insert(0, {str(SCRIPTS)!r});"
-    "import run_episode;"
-    "sys.exit(run_episode.main(sys.argv[1:], internal_test_support=True))"
+    "from tests.unit.evaluation.adapters.osworld.managed_owner_entry import main;"
+    "raise SystemExit(main())"
 )
 
 

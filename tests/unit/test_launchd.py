@@ -136,6 +136,69 @@ def test_observe_job_is_one_coherent_guarded_snapshot(tmp_path, monkeypatch, rc,
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "mutation,expected",
+    [
+        ("normal", True),
+        ("keepalive", False),
+        ("timer", False),
+        ("watch", False),
+        ("unknown_flag", None),
+        ("unknown_field", None),
+        ("truncated", None),
+        ("missing_properties", None),
+        ("duplicate", None),
+        ("wrong_target", None),
+        ("nested_properties", True),
+    ],
+)
+def test_loaded_policy_is_complete_top_level_same_target_snapshot(
+    tmp_path, monkeypatch, mutation, expected
+):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "synthetic-loaded-policy"
+    target = f"{launchd.job_domain()}/{label}"
+    body = (
+        f"{target} = {{\n"
+        "\tactive count = 1\n\tpath = /fixture\n\ttype = LaunchAgent\n"
+        "\tstate = running\n\tprogram = /fixture\n"
+        "\targuments = {\n\t\tproperties = keepalive\n\t}\n"
+        "\tenvironment = {\n\t}\n\tdomain = gui/fixture\n\truns = 1\n"
+        "\tpid = 12345\n\tspawn type = daemon (3)\n"
+        "\tproperties = runatload | inferred program\n}\n"
+    )
+    if mutation == "keepalive":
+        body = body.replace("properties = runatload", "properties = keepalive | runatload")
+    if mutation in ("timer", "watch", "unknown_field", "duplicate"):
+        extra = {
+            "timer": "run interval = 60 seconds",
+            "watch": "event triggers = {\n\t}",
+            "unknown_field": "future policy = yes",
+            "duplicate": "properties = runatload",
+        }[mutation]
+        body = body[:-2] + "\t" + extra + "\n}\n"
+    if mutation == "unknown_flag":
+        body = body.replace("properties = runatload", "properties = future-flag | runatload")
+    if mutation == "truncated":
+        body = body[:-2]
+    if mutation == "missing_properties":
+        body = body.replace("\tproperties = runatload | inferred program\n", "")
+    if mutation == "wrong_target":
+        body = body.replace(target + " = {", target + "-other = {")
+    calls = []
+
+    def run(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    result = launchd.observe_job(
+        label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+    )
+    assert result.state is launchd.JobState.LIVE
+    assert result.loaded_no_restart is expected
+    assert len(calls) == 1
+
+
 def test_unaddressable_job_stays_unknown_without_calling_supervisor(tmp_path, monkeypatch):
     monkeypatch.setattr(launchd, "real_home", lambda: tmp_path / "real")
 

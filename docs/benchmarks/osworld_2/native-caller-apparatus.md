@@ -148,6 +148,23 @@ to look like a valid uppercase NAME: valid syntax is solely an opaque ref, not
 proof the ref exists. Env-only/literal infrastructure transport remains
 unsupported by both production frontend and direct owning entry.
 
+Loaded policy is independently required by that SAME supervisor snapshot.
+Restoring a KeepAlive=False plist on disk after bootstrapping KeepAlive=True
+cannot certify retention: launchd keeps its loaded policy and can restart the
+job. The supported proof parses a complete target/PID-specific top-level
+`launchctl print` shape, explicit properties and absence of loaded timer/event
+triggers. Nested argv/environment text is not policy. Missing, duplicate,
+truncated, unfamiliar fields/flags are unknown and strong admission refuses;
+this deliberately fails closed on unsupported supervisor output, without OS
+version guesses. Disk/source/birth checks remain additional constraints.
+
+Cross-platform fixture-only detached composition binds both frontend and host
+through an explicit Python-injected entry/admission callable; it verifies the
+generic identity lease, then exercises the real SDK/MCP/verified worker. No
+production CLI/env/lease/provider/path datum selects that injection. Production
+always requires managed retention and refuses unsupported standalone lifetime.
+These fixture semantics are not a production detached-lifetime claim.
+
 Supervisor diagnostics project ONE typed `launchd.observe_job` reading plus
 exact owner process checks: live, positively absent, or unknown. Timeout or
 incomplete output is unknown, not death **or** positive life; the frontend
