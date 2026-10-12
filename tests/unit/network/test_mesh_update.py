@@ -1187,15 +1187,17 @@ def test_the_roll_starts_only_after_the_install_sweep_and_reengage(
     assert log == ["install", "sweep", "reengage", "roll"], log
 
 
-def test_the_tail_runs_under_the_pass_lock(
+def test_the_tail_releases_the_shared_install_transaction(
     devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
-    """m5: the lock covers the WHOLE pass — the sweep dials with the lock held.
+    """Service convergence must not monopolize root while newer builds prepare.
 
-    A second flock on a second descriptor fails while the pass holds its own,
-    so a revert to the install-scoped lock (tail unlocked) turns this red.
+    Candidate registration/promotion own the common root transaction; the mesh
+    tail is convergence, not another install, and runs after release.
     """
     import fcntl
+
+    from local_operator import update
 
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
@@ -1208,7 +1210,7 @@ def test_the_tail_runs_under_the_pass_lock(
         return meshupdate.METHOD_GENERATION
 
     monkeypatch.setattr(meshupdate, "install_build", _install)
-    lock_path = server_a.root / "network" / "update.lock"
+    lock_path = update.stable_root() / "install.lock"
     held: list[bool] = []
 
     def _sweep(root: Any, *, budget: Any = None) -> tuple[list[Any], str]:
@@ -1229,7 +1231,7 @@ def test_the_tail_runs_under_the_pass_lock(
     monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: None)
     detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
     assert detail["state"] == "done", detail
-    assert held == [True], held
+    assert held == [False], held
 
 
 def test_the_tail_degrades_when_the_slow_budget_is_nearly_spent(
