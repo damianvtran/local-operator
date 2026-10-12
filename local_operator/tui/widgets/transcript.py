@@ -3940,6 +3940,7 @@ def quiet_group_plan(
     prev_block: TranscriptBlock | None = None,
     next_block: TranscriptBlock | None = None,
     head_cut: bool = False,
+    prev_kind: str | None = None,
     prev_owner: tuple[str, int] | None = None,
 ) -> list[PlannedQuietGroup]:
     """The quiet groups a run of blocks contains, as plans to fold.
@@ -3967,13 +3968,16 @@ def quiet_group_plan(
     included), so a caller slicing members by a span gets the members.
 
     Both edge checks feed the boundary predicate the SAME ownership context
-    the record walk uses (review round 8, R8-2/Q-R9-A2): the bottom edge
-    passes the last KEPT row's source owner (the kept predecessor of
-    ``next_block``), and the top edge takes ``prev_owner`` — the source owner
-    of the kept row ABOVE ``prev_block`` — from the caller that can see it.
-    Without that, an off-page picture continuing the same owner's chain read
-    as a boundary and the planner froze a partial run; with it, the fragment
-    is refused, exactly as the owner-aware record walk already said.
+    the record walk uses (review round 8, R8-2/Q-R9-A2; round 9,
+    Q-R10-1). The bottom edge derives it on the spot: the last KEPT row's
+    kind and source owner. The top edge needs both fields from its caller —
+    ``prev_kind`` is the FAMILY of the kept row ABOVE ``prev_block`` (the row
+    whose chain decides whether ``prev_block`` itself is interior) and
+    ``prev_owner`` that row's source owner; the page fold derives the pair
+    from the loaded prefix (:meth:`TranscriptView._quiet_edge_context`).
+    Owner-only context is not enough: the decision table gates the interior
+    reading on the predecessor family, so a pair missing the family would
+    read every owned picture edge as a splitter and freeze a fragment.
     """
     origin: list[int] = []
     kept: list[TranscriptBlock] = []
@@ -3988,7 +3992,7 @@ def quiet_group_plan(
         span_head_loaded = True
         if span_from == 0:
             if prev_block is not None:
-                if not _quiet_fold_boundary(prev_block, prev_owner=prev_owner):
+                if not _quiet_fold_boundary(prev_block, prev_kind=prev_kind, prev_owner=prev_owner):
                     continue  # fragment: the span continues into rows on hand
                 if getattr(prev_block, "QUIET_GROUP_HEAD_CUT", False):
                     span_head_loaded = False  # the same "at least N" marker
@@ -4026,6 +4030,7 @@ def fold_quiet_group_list(
     next_block: TranscriptBlock | None = None,
     head_cut: bool = False,
     fold_width: int = 0,
+    prev_kind: str | None = None,
     prev_owner: tuple[str, int] | None = None,
 ) -> list[TranscriptBlock]:
     """Fold a run of NOT-YET-MOUNTED blocks: the list form of the fold.
@@ -4045,6 +4050,7 @@ def fold_quiet_group_list(
         prev_block=prev_block,
         next_block=next_block,
         head_cut=head_cut,
+        prev_kind=prev_kind,
         prev_owner=prev_owner,
     )
     for planned in reversed(plan):
@@ -4506,13 +4512,24 @@ class QuietGroupTracker:
     def _span_head_bounded(self, first_index: int) -> bool:
         """Whether the row above a span is a real boundary (or a window edge
         the minimum marker can carry), as opposed to an on-hand in-span row
-        that makes the span a fragment. False ⇒ refuse to fold."""
+        that makes the span a fragment. False ⇒ refuse to fold.
+
+        The same pair rule as the shared planner's top edge (review round 9,
+        Q-R10-1): the boundary predicate reads the row above with its FAMILY
+        and its coordinate, derived from the source walk — a call that hands
+        it neither is owner-blind here too.
+        """
         if first_index == 0:
             return True  # the window edge; partial-ness is `_span_head_partial`
-        previous = self._view._quiet_neighbour(first_index - 1, -1)
-        if previous is None or getattr(previous, "QUIET_GROUP_HEAD_CUT", False):
+        previous_index = self._view._quiet_neighbour_index(first_index - 1, -1)
+        if previous_index is None:
+            return True  # the window edge by exhaustion
+        previous = self._view._blocks[previous_index]
+        if getattr(previous, "QUIET_GROUP_HEAD_CUT", False):
             return True
-        return _quiet_fold_boundary(previous)
+        above = self._view._quiet_neighbour_index(previous_index - 1, -1)
+        prev_kind, prev_owner = self._view._quiet_edge_context(above)
+        return _quiet_fold_boundary(previous, prev_kind=prev_kind, prev_owner=prev_owner)
 
     def _view_index(self, block: TranscriptBlock) -> int | None:
         for index, candidate in enumerate(self._view._blocks):
@@ -6876,16 +6893,59 @@ class TranscriptView(ScrollableContainer):
         prev_index = self._quiet_neighbour_index(at_index - 1, -1)
         prev_block = self._blocks[prev_index] if prev_index is not None else None
         above = self._quiet_neighbour_index(prev_index - 1, -1) if prev_index is not None else None
+        # The complete pair for the kept row ABOVE the page's top edge: its
+        # family decides whether the edge row itself continues a run, and the
+        # decision table needs the family AND the coordinate (Q-R10-1).
+        prev_kind, prev_owner = self._quiet_edge_context(above)
         return fold_quiet_group_list(
             blocks,
             prev_block=prev_block,
-            # The kept row ABOVE the page's top edge: the chain that decides
-            # whether the edge row itself continues a run (R8-2).
-            prev_owner=_source_owner_of(self._blocks[above]) if above is not None else None,
+            prev_kind=prev_kind,
+            prev_owner=prev_owner,
             next_block=self._quiet_neighbour(at_index, +1),
             head_cut=head_cut,
             fold_width=self.scrollable_content_region.width,
         )
+
+    def _quiet_edge_context(self, index: int | None) -> tuple[str | None, tuple[str, int] | None]:
+        """The (family, owner) a boundary predicate needs for the row at
+        ``index`` — derived in SOURCE context, through the one record walk.
+
+        Callers hand the pair to :func:`_quiet_fold_boundary` for the row
+        BELOW ``index``: with both coordinates known the predicate gates the
+        interior reading on the predecessor FAMILY as well as its owner, and
+        a picture predecessor is interior only if the chain behind it says so
+        (review round 9, Q-R10-1). ``inside`` is never guessed from matching
+        ownership alone: the walk back over pictures — the only
+        context-sensitive kind — stops at the nearest non-transient row whose
+        own kind is context-free and derives the slice from there, so the
+        slice's first record is faithful and the chain flows forward
+        unchanged. Unknown edges (the window top, nothing but pictures above,
+        a view-owned bar) return unknowns and leave the predicate's
+        conservative reading in charge.
+        """
+        from local_operator.tui.widgets.image_block import ImageBlock
+
+        if index is None:
+            return None, None
+        start = index
+        while start >= 0:
+            block = self._blocks[start]
+            if getattr(block, "SPACING_TRANSIENT", False) or isinstance(block, ImageBlock):
+                start -= 1
+                continue
+            break
+        if start < 0 or isinstance(self._blocks[start], QuietGroupBlock):
+            return None, None
+        slice_blocks = [
+            block
+            for block in self._blocks[start : index + 1]
+            if not getattr(block, "SPACING_TRANSIENT", False)
+        ]
+        records = _records_of_blocks(slice_blocks)
+        if not records:
+            return None, None
+        return records[-1].kind, _source_owner_of(slice_blocks[-1])
 
     def _quiet_neighbour_index(self, index: int, step: int) -> int | None:
         """The index of the nearest non-transient block at or after ``index``,

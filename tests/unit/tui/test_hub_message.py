@@ -14,6 +14,7 @@ from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     HubMessageBlock,
     QuietGroupBlock,
+    QuietGroupTracker,
     TranscriptView,
     UserBlock,
 )
@@ -838,3 +839,103 @@ async def test_a_human_prefix_picture_stays_visible_and_the_receipt_run_folds() 
         bars[0].toggle_expanded()
         await pilot.pause()
         assert receipt_pic.display is False and human_pic.display is True
+
+
+@pytest.mark.asyncio
+async def test_the_page_fold_refuses_a_fragment_continuing_an_owned_picture_chain() -> None:
+    """R8-2 / Q-R10-1 actual page caller: the loaded prefix is a receipt with
+    TWO pictures; the page that follows continues the same source run, so the
+    page fold must not carve a page-local bar away from it. The control shows
+    a REAL top boundary — a human with its own picture — still closing."""
+    from local_operator.tui.session_presentation import PreparedReplay
+
+    def receipt_pics(receipt_id: str, count: int) -> Message:
+        message = _marked_receipt(receipt_id, "picture body")
+        for _ in range(count):
+            message.content.append(ImageContent(data=_healthy_png(), mime_type="image/png"))
+        return message
+
+    def page() -> list[Any]:
+        replay = PreparedReplay()
+        replay.prepare(
+            [
+                _marked_receipt("qa_h2", "picture body"),
+                _marked_receipt("qa_h3", "picture body"),
+            ],
+            fold_width=80,
+        )
+        return list(replay.blocks)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        view = app.query_one(TranscriptView)
+        app._project_settled_rows([receipt_pics("qa_h0", 2)])
+        await pilot.pause()
+        folded = view.fold_quiet_group_page(page(), len(view.blocks()))
+        assert not [
+            block for block in folded if isinstance(block, QuietGroupBlock)
+        ], "the page continues the on-hand run and must not fold locally"
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        view = app.query_one(TranscriptView)
+        human = Message.user("audit the ingest path", id="qa_human")
+        human.content.append(ImageContent(data=_healthy_png(), mime_type="image/png"))
+        app._project_settled_rows([human])
+        await pilot.pause()
+        folded = view.fold_quiet_group_page(page(), len(view.blocks()))
+        assert (
+            len([block for block in folded if isinstance(block, QuietGroupBlock)]) == 1
+        ), "a human boundary still closes the page"
+
+
+@pytest.mark.asyncio
+async def test_the_span_head_rule_reads_the_family_above_an_owned_picture() -> None:
+    """R8-2 / Q-R10-1 helper audit: the live tracker's span-head rule reads
+    the row above the span with the same (family, owner) pair, so an owned
+    picture above a span whose chain says interior makes it a fragment
+    (refused), while a real boundary keeps folding."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        view = app.query_one(TranscriptView)
+        human = UserBlock("audit the ingest path", fold_width=0)
+        human.navigation_anchor_id = "qa_human"
+        human.navigation_anchor_part = 0
+        human_pic = ImageBlock(None, "image/png")
+        human_pic.navigation_anchor_id = "qa_human"
+        human_pic.navigation_anchor_part = 1
+        h0 = _hub_block("qa_h0", 0)
+        i1 = _hub_image("qa_h0", 1)
+        i2 = _hub_image("qa_h0", 2)
+        h1 = _hub_block("qa_h1", 0)
+        # The helpers read the view's block list in order; these are the real
+        # widgets, staged the way the projection would have appended them.
+        view._blocks.extend([human, human_pic, h0, i1, i2, h1])
+        tracker = QuietGroupTracker(view)
+        # The span starting at h1 has i2 directly above it: an owned picture
+        # whose chain derives interior — not a boundary, so refuse.
+        assert tracker._span_head_bounded(5) is False
+        # The span starting at human_pic index 1 has the human above it: a
+        # real boundary, so fold.
+        assert tracker._span_head_bounded(1) is True
+        view._blocks.clear()
+
+
+def _hub_block(owner: str, part: int) -> HubMessageBlock:
+    block = HubMessageBlock(
+        "picture body",
+        {"direction": "to_child", "body": "picture body", "steer": True},
+    )
+    block.navigation_anchor_id = owner
+    block.navigation_anchor_part = part
+    return block
+
+
+def _hub_image(owner: str, part: int) -> ImageBlock:
+    block = ImageBlock(None, "image/png")
+    block.navigation_anchor_id = owner
+    block.navigation_anchor_part = part
+    return block
