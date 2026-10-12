@@ -40,13 +40,31 @@ def _key(config_dir: Path | str | None) -> str:
     return str(config_dir) if config_dir is not None else ""
 
 
-def record(config_dir: Path | str | None, *, visible: bool, state: str, checked_at: float) -> None:
-    """Remember the last status answer this process observed for ``config_dir``."""
+def record(
+    config_dir: Path | str | None,
+    *,
+    visible: bool,
+    state: str,
+    checked_at: float,
+    read_only: bool = False,
+    note: str | None = None,
+) -> None:
+    """Remember the last status answer this process observed for ``config_dir``.
+
+    ``read_only``/``note`` are the §5.6 F posture: the flow cannot resume, and
+    ``note`` is the contract's own sentence ("Plan ended — reading only" /
+    "Agent messages are turned off") that the drainers render instead of
+    pretending an edit resumes anything. They travel with the SAME record the
+    status boundary wrote — one answer, one posture — so a surface never
+    re-derives the sentence nor fetches around this module.
+    """
 
     _STATE[_key(config_dir)] = {
         "visible": bool(visible),
         "state": str(state),
         "checked_at": float(checked_at),
+        "read_only": bool(read_only),
+        "note": note if isinstance(note, str) else None,
     }
 
 

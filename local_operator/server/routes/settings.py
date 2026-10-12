@@ -81,6 +81,17 @@ class SettingView(BaseModel):
     warning: str = ""
     placeholder: str = ""
     gated_by: str | None = None
+    #: A live sentence about this row's CURRENT server-side posture, and
+    #: whether the row can change effective behaviour. Agent messages in
+    #: §5.6 F (plan lapse / confirmed kill): the local preference rows stay
+    #: visible for honesty, but the note is the contract's own sentence
+    #: ("Plan ended — reading only" / "Agent messages are turned off") and
+    #: the UI presents the controls view-only rather than implying an edit
+    #: resumes the flow (H1 review round 1, Q3/D3). Additive and optional,
+    #: like the three fields above: a client that ignores them sees the
+    #: response it saw before, and every other row carries the defaults.
+    state_note: str = ""
+    read_only: bool = False
     #: The value grammar of a HOTKEY row (``"app"`` / ``"desktop"``), DERIVED
     #: in ``settings_io``'s registry from ``keymap.KEY_ACTIONS`` — never
     #: authored twice, so the wire cannot disagree with what the writers
@@ -118,6 +129,18 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         if setting.kind is settings_io.Kind.CASCADE
         else settings_io.read_setting(manager, setting)
     )
+    state_note = ""
+    read_only = False
+    if setting.section == bridge_availability.BRIDGE_SECTION:
+        # The posture comes from the process-local record the status
+        # discipline writes (never a fetch here): §5.6 F renders its note and
+        # asks the UI to present the controls view-only (Q3/D3).
+        observed = bridge_availability.observed(manager.config_dir)
+        if observed is not None and observed.get("read_only"):
+            read_only = True
+            note = observed.get("note")
+            if isinstance(note, str):
+                state_note = note
     return SettingView(
         key=setting.key,
         section=setting.section,
@@ -141,6 +164,8 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         gated_by=setting.gated_by,
         hotkey_scope=setting.hotkey_scope,
         unit=setting.unit,
+        state_note=state_note,
+        read_only=read_only,
     )
 
 

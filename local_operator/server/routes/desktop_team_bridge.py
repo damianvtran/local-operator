@@ -50,7 +50,7 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Literal, Mapping, NoReturn
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -96,6 +96,14 @@ class TeamBridgeSettingsPut(_Strict):
     consent_version: str | None = Field(default=None, max_length=128)
     consented_via: Literal["dialog", "settings"] | None = None
     label: str | None = Field(default=None, max_length=64)
+    #: The account this write was CAPTURED for (H1 review round 1, R6/Q1).
+    #: REQUIRED on this plane: the body is ours on both ends, and without the
+    #: guard a dialog captured for account A could enroll account B after a
+    #: login switch — before any renderer could reject a response. The client
+    #: compares it to the EXACT pinned dispatch snapshot and refuses with
+    #: ``account_mismatch`` before the first byte leaves; it is never sent
+    #: upstream.
+    expected_account_id: str = Field(min_length=1, max_length=128)
 
 
 class AllowlistTargetIn(_Strict):
@@ -121,6 +129,10 @@ class TeamBridgeAllowlistPut(_Strict):
 
     tenant_id: str | None = Field(default=None, max_length=128)
     entries: list[AllowlistEntryIn] = Field(max_length=200)
+    #: The same captured-account guard the settings write carries (review
+    #: round 1, R6): a policy surface must not be the one mutation that
+    #: skipped the receipt.
+    expected_account_id: str = Field(min_length=1, max_length=128)
 
 
 def _iso(seconds: float | None) -> str | None:
@@ -183,6 +195,7 @@ async def status(
     from local_operator.team_bridge.client import (
         consent_for_display,
         get_status_discipline,
+        selected_tenant_id,
         surface_projection,
     )
     from local_operator.team_bridge.settings import TeamBridgeSettings
@@ -207,8 +220,15 @@ async def status(
         "fetched_at": _iso(check.fetched_at),
         "update_required": check.update_required,
         "account_id": check.account_id,
-        "tenant_id": _sole_tenant_id(check.payload),
+        # The §3.2 v1 selection, ONE row for every field below (review round
+        # 1, R2): the first eligible tenant in the server's own order, else
+        # the retained endpoint's row — never "several rows, so none".
+        "tenant_id": selected_tenant_id(check.payload),
         "surface_state": projection["surface_state"],
+        #: §5.6 F's sentence when this answer PROVES F ("Plan ended — reading
+        #: only" / "Agent messages are turned off"), else None (review round
+        #: 1, Q3 / design round 1, D3).
+        "state_note": check.state_note,
         "visibility": projection["visibility"],
         "read_only": projection["read_only"],
         "can_receive": projection["can_receive"],
@@ -223,6 +243,15 @@ async def status(
         # test pins the registry against it) — and the receipt lets a surface
         # state that plainly instead of implying a toggle exists.
         "screening": {"required": True},
+        #: Whether the captured-account guard is ENFORCED on the mutation
+        #: routes (review round 1, R6): the UI requires this receipt before an
+        #: Enable, and it is only true because the client compares the
+        #: captured account to the pinned dispatch snapshot. Capability stays
+        #: route presence; this receipt is the enforcement signal.
+        "consent_account_guard": True,
+        #: Served-text slots refused on this answer — a surface refreshes
+        #: rather than rendering refused or stale bytes (review round 1, R3).
+        "texts_rejected": sorted(check.rejected),
         "status": check.payload,
         "consent": (
             {"version": consent[0], "text": consent[1], "source": consent[2]}
@@ -232,25 +261,6 @@ async def status(
         "error": _refusal_detail(check.error) if check.error is not None else None,
     }
     return reply(result)
-
-
-def _sole_tenant_id(payload: Any) -> str | None:
-    """The single tenant this machine is about, or ``None``.
-
-    Multi-org routing (several eligible organizations) requires an explicit
-    ``tenant_id`` per request (§3.2) and lands with the surfaces that can ask
-    the user; until then a single row answers with its id and several rows
-    answer ``None`` rather than letting a renderer pick one silently.
-    """
-
-    tenants = payload.get("tenants") if isinstance(payload, Mapping) else None
-    if not isinstance(tenants, list):
-        return None
-    ids = [t.get("tenant_id") for t in tenants if isinstance(t, Mapping)]
-    ids = [value for value in ids if isinstance(value, str) and value]
-    if len(ids) == 1:
-        return ids[0]
-    return None
 
 
 @router.get("/v1/desktop/team-bridge/settings", response_model=CRUDResponse[Any])
@@ -304,6 +314,7 @@ async def put_settings(
             consent_version=body.consent_version,
             consented_via=body.consented_via,
             label=body.label,
+            expected_account_id=body.expected_account_id,
         )
     except BridgeSignInRequired as exc:
         # BEFORE the ValueError arm, deliberately: BridgeSignInRequired IS a
@@ -373,6 +384,7 @@ async def put_allowlist(
         payload = await client.put_allowlist(
             [entry.model_dump(exclude_none=True) for entry in body.entries],
             tenant_id=body.tenant_id,
+            expected_account_id=body.expected_account_id,
         )
     except BridgeSignInRequired as exc:
         # Before the ValueError arm — BridgeSignInRequired IS a ValueError.

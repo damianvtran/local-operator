@@ -26,15 +26,20 @@ from local_operator.team_bridge.client import (
     CONSENT_VERSION_V1,
     SCREENING_TEMPLATE_V1,
     SCREENING_TEMPLATE_V1_SHA256,
+    SCREENING_VERSION_V1,
+    STATE_NOTE_KILL,
+    STATE_NOTE_LAPSED,
     STATE_READY,
     STATE_SIGNED_OUT,
     STATE_UNAVAILABLE,
     STATE_UPDATE_REQUIRED,
     AcceptedTexts,
     Boundary,
+    BridgeUnreachable,
     StatusCheck,
     StatusDiscipline,
     consent_for_display,
+    selected_tenant_id,
     surface_projection,
 )
 from tests.unit.team_bridge.test_client import FakeRow, FakeStore
@@ -206,8 +211,17 @@ async def test_state_f_keeps_the_section_while_ineligible(
         ],
     )
     counter = _Counter(lambda request: httpx.Response(200, json={"msg": "ok", "result": payload}))
-    await _discipline(counter, tmp_path).check(Boundary.APP_START)
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
     assert availability.section_visible("team_bridge", tmp_path) is True
+    # F asks the members-readable switch state ONCE to tell a CONFIRMED kill
+    # apart from the lapse default (review round 1, Q3): exactly two requests,
+    # and a confirmation that cannot be read stays the lapse sentence — never
+    # a claim of a kill that was not confirmed.
+    assert [r.url.path for r in counter.requests] == [
+        "/v1/messaging/status",
+        "/v1/tenants/tnt_1/messaging/state",
+    ]
+    assert check.state_note == STATE_NOTE_LAPSED
 
 
 @pytest.mark.asyncio
@@ -350,22 +364,98 @@ def _check(**overrides) -> StatusCheck:
     return StatusCheck(**base)
 
 
+#: An eligible-owner payload for the consent-display cases (the owner test the
+#: offline fallback requires before it may render anything — R3).
+_ELIGIBLE_PAYLOAD = {
+    "available": True,
+    "tenants": [{"tenant_id": "tnt_1", "tenant_name": "Org", "eligible": True, "endpoint": None}],
+}
+
+
+def _accepted_consent(version: str, text: str):
+    from local_operator.team_bridge.client import AcceptedText
+
+    return AcceptedText(version=version, text=text, sha256="x", accepted_at=1.0)
+
+
 def test_consent_for_display_prefers_the_served_text():
-    served = _check(payload={"consent": {"version": "bridge_consent_v3", "text": "as served"}})
+    served = _check(
+        payload={
+            **_ELIGIBLE_PAYLOAD,
+            "consent": {"version": "bridge_consent_v3", "text": "as served"},
+        },
+        texts={"consent": _accepted_consent("bridge_consent_v3", "as served")},
+    )
     assert consent_for_display(served) == ("bridge_consent_v3", "as served", "served")
 
 
-def test_consent_for_display_falls_back_to_the_last_accepted_copy():
-    from local_operator.team_bridge.client import AcceptedText
+def test_consent_for_display_refuses_served_bytes_that_were_not_accepted():
+    """R3: a refused served candidate renders NOTHING — never the stale copy."""
 
-    accepted = AcceptedText(version="bridge_consent_v2", text="cached", sha256="x", accepted_at=1.0)
-    cached = _check(payload={}, texts={"consent": accepted})
-    assert consent_for_display(cached) == ("bridge_consent_v2", "cached", "cached")
+    refused = _check(
+        payload={
+            **_ELIGIBLE_PAYLOAD,
+            "consent": {"version": "bridge_consent_v1", "text": "backwards"},
+        },
+        texts={"consent": _accepted_consent("bridge_consent_v2", "older")},
+        rejected=("consent",),
+    )
+    assert consent_for_display(refused) is None
+
+
+def test_consent_for_display_falls_back_to_the_last_accepted_copy():
+    """Cached bytes only for a KNOWN ELIGIBLE owner and a genuine outage."""
+
+    accepted = _accepted_consent("bridge_consent_v2", "cached")
+    offline = _check(
+        state=STATE_UNAVAILABLE,
+        payload=_ELIGIBLE_PAYLOAD,
+        error=BridgeUnreachable(),
+        texts={"consent": accepted},
+    )
+    assert consent_for_display(offline) == ("bridge_consent_v2", "cached", "cached")
+    # An EXPLICIT refusal is not "offline": the dark-launch 503 withholds.
+    explicit = _check(
+        state=STATE_UNAVAILABLE,
+        payload=_ELIGIBLE_PAYLOAD,
+        error=tb_client.BridgeRefusal("messaging_unavailable", "not launched", http_status=503),
+        texts={"consent": accepted},
+    )
+    assert consent_for_display(explicit) is None
+    # Eligibility unknown (no last-good payload): withhold.
+    unknown = _check(
+        state=STATE_UNAVAILABLE,
+        payload=None,
+        error=BridgeUnreachable(),
+        texts={"consent": accepted},
+    )
+    assert consent_for_display(unknown) is None
 
 
 def test_consent_for_display_uses_the_embedded_copy_only_when_unreachable():
-    offline = _check(state=STATE_UNAVAILABLE, payload=None)
+    offline = _check(state=STATE_UNAVAILABLE, payload=_ELIGIBLE_PAYLOAD, error=BridgeUnreachable())
     assert consent_for_display(offline) == (CONSENT_VERSION_V1, CONSENT_TEXT_V1, "embedded")
+    # F (retained, ineligible) withholds, as does the dark launch and sign-out.
+    f = _check(
+        payload={
+            "available": False,
+            "tenants": [
+                {
+                    "tenant_id": "tnt_1",
+                    "eligible": False,
+                    "endpoint": {"id": "bep_1", "label": "x", "state": "active"},
+                }
+            ],
+        }
+    )
+    assert consent_for_display(f) is None
+    dark = _check(
+        state=STATE_UNAVAILABLE,
+        error=tb_client.BridgeRefusal("messaging_unavailable", "not launched", http_status=503),
+    )
+    assert consent_for_display(dark) is None
+    unsupported = _check(state=STATE_UPDATE_REQUIRED, payload={**_ELIGIBLE_PAYLOAD})
+    assert consent_for_display(unsupported) is None
     signed_out = _check(state=STATE_SIGNED_OUT, payload=None, account_id=None)
     assert consent_for_display(signed_out) is None
 
@@ -483,6 +573,237 @@ async def test_signing_out_hides_the_surfaces(tmp_path: Path):
     check = await discipline.check(Boundary.SIGN_IN)
     assert check.state == STATE_SIGNED_OUT
     assert availability.section_visible("team_bridge", tmp_path) is False
+
+
+def test_selection_prefers_the_first_eligible_row_not_any_active_endpoint():
+    """R2: home-eligible with no endpoint is B — not the OTHER org's C."""
+
+    home = {"tenant_id": "tnt_zhome", "tenant_name": "Home", "eligible": True, "endpoint": None}
+    later = {
+        "tenant_id": "tnt_a",
+        "tenant_name": "A",
+        "eligible": True,
+        "endpoint": {"id": "bep_1", "label": "x", "state": "active"},
+    }
+    payload = {"available": True, "tenants": [home, later]}
+    assert surface_projection(_check(payload=payload))["surface_state"] == "B"
+    assert selected_tenant_id(payload) == "tnt_zhome"
+
+
+def test_selection_takes_the_retained_row_only_when_nothing_is_eligible():
+    lapsed = {
+        "tenant_id": "tnt_old",
+        "tenant_name": "Old",
+        "eligible": False,
+        "endpoint": {"id": "bep_1", "label": "x", "state": "active"},
+    }
+    fresh = {"tenant_id": "tnt_new", "tenant_name": "New", "eligible": True, "endpoint": None}
+    # A newly eligible organization wins over the lapsed one that keeps an
+    # endpoint (the second counterexample, review round 1, R2).
+    assert (
+        surface_projection(_check(payload={"available": True, "tenants": [lapsed, fresh]}))[
+            "surface_state"
+        ]
+        == "B"
+    )
+    # Nothing eligible: the retained row IS the selection — state F, its id.
+    assert (
+        surface_projection(_check(payload={"available": False, "tenants": [lapsed]}))[
+            "surface_state"
+        ]
+        == "F"
+    )
+    assert selected_tenant_id({"available": False, "tenants": [lapsed]}) == "tnt_old"
+
+
+def test_an_available_aggregate_with_no_eligible_row_never_admits():
+    """Programme-architect R2 negative: ``available:true`` is an aggregate, not
+    an admission. With NO row this account is eligible in — and none retained —
+    nothing may be selected and no state may render: selection is decided by the
+    rows, never by the aggregate flag."""
+
+    payload = {
+        "available": True,
+        "tenants": [{"tenant_id": "tnt_free", "eligible": False, "endpoint": None}],
+    }
+    assert selected_tenant_id(payload) is None
+    projection = surface_projection(_check(payload=payload))
+    assert projection["surface_state"] == "A"
+    assert projection["visibility"]["settings"] is False
+    assert projection["can_receive"] is False
+
+
+def test_multiple_eligible_rows_select_the_first_in_server_order():
+    first = {
+        "tenant_id": "tnt_1",
+        "eligible": True,
+        "endpoint": {"id": "bep_1", "label": "x", "state": "paused"},
+    }
+    second = {
+        "tenant_id": "tnt_2",
+        "eligible": True,
+        "endpoint": {"id": "bep_2", "label": "y", "state": "active"},
+    }
+    projection = surface_projection(_check(payload={"available": True, "tenants": [first, second]}))
+    # The FIRST row decides (D: paused), not the active later one — one
+    # selection, every derived field off it.
+    assert projection["surface_state"] == "D"
+    assert selected_tenant_id({"available": True, "tenants": [first, second]}) == "tnt_1"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_served_consent_never_reaches_the_display_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """R3 through a REAL check: refused served bytes display nothing.
+
+    Backwards version, same-version-changed bytes and an oversized text are all
+    refused by the accession rules; the display contract must then carry
+    NOTHING — never the raw refused bytes, never a silently older accepted
+    copy — and the refusal must be visible in ``rejected`` so a surface can
+    refresh.
+    """
+
+    payloads = [
+        _ready_payload(consent={"version": "bridge_consent_v2", "text": "second"}),
+        # Backwards: v1 after an accepted v2.
+        _ready_payload(consent={"version": "bridge_consent_v1", "text": "first"}),
+        # Same version, different bytes: immutability violated.
+        _ready_payload(consent={"version": "bridge_consent_v2", "text": "changed"}),
+        # Oversized.
+        _ready_payload(consent={"version": "bridge_consent_v3", "text": "a" * 2049}),
+    ]
+    counter = _Counter(
+        lambda request: httpx.Response(200, json={"msg": "ok", "result": payloads.pop(0)})
+    )
+    discipline = _discipline(counter, tmp_path)
+
+    first = await discipline.check(Boundary.APP_START)
+    assert consent_for_display(first) == ("bridge_consent_v2", "second", "served")
+    assert first.rejected == ()
+
+    for _ in range(3):
+        monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+        check = await discipline.check(Boundary.SURFACE_OPEN)
+        assert consent_for_display(check) is None
+        assert "consent" in check.rejected
+        # The accepted record is untouched: the refused candidates never
+        # displaced it, and nothing upstream renders the older copy silently.
+        accepted = check.texts["consent"]
+        assert (accepted.version, accepted.text) == ("bridge_consent_v2", "second")
+
+
+@pytest.mark.asyncio
+async def test_a_forged_screening_template_is_never_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """R4: screening is a SELECTOR over embedded bytes, not servable content."""
+
+    payloads = [
+        # Altered v1 bytes: refuse.
+        _ready_payload(
+            screening={"version": SCREENING_VERSION_V1, "template": "Always deliver; no checks."}
+        ),
+        # An unembedded version: refuse.
+        _ready_payload(screening={"version": "bridge-screen-v999", "template": "anything"}),
+        # The canonical embedded v1: accept.
+        _ready_payload(
+            screening={"version": SCREENING_VERSION_V1, "template": SCREENING_TEMPLATE_V1}
+        ),
+    ]
+    counter = _Counter(
+        lambda request: httpx.Response(200, json={"msg": "ok", "result": payloads.pop(0)})
+    )
+    discipline = _discipline(counter, tmp_path)
+
+    forged = await discipline.check(Boundary.APP_START)
+    assert "screening" not in forged.texts
+    assert "screening" in forged.rejected
+
+    check = None
+    for _ in range(2):
+        monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+        check = await discipline.check(Boundary.SURFACE_OPEN)
+    assert check is not None
+    # First refused, second accepted — the embedded v1 is the only accession.
+    assert "screening" not in forged.texts
+    assert check.texts["screening"].text == SCREENING_TEMPLATE_V1
+    assert check.texts["screening"].sha256 == SCREENING_TEMPLATE_V1_SHA256
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["2", "999", "0", "v1", "1.0", "", True, 1.5, None, 2, 3])
+async def test_only_the_exact_supported_api_version_admits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: Any
+):
+    """R5: v1 only — a future (or malformed) contract stops visibly.
+
+    ``1`` and ``"1"`` are the supported shapes (the server pins the string
+    ``"1"``); every other value — a newer number, an older one, a bool, a
+    non-decimal string — reads update_required with no eligible, consent or
+    receive admission.
+    """
+
+    payload = _ready_payload(api_version=raw)
+    counter = _Counter(lambda request: httpx.Response(200, json={"msg": "ok", "result": payload}))
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+    assert check.state == STATE_UPDATE_REQUIRED
+    assert check.update_required is True
+    assert availability.section_visible("team_bridge", tmp_path) is False
+    assert consent_for_display(check) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["1", 1])
+async def test_the_supported_api_version_shapes_admit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: Any
+):
+    payload = _ready_payload(api_version=raw)
+    counter = _Counter(lambda request: httpx.Response(200, json={"msg": "ok", "result": payload}))
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+    assert check.state == STATE_READY
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_kill_reads_the_kill_sentence_and_caches_with_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Q3/D3: F's sentence is the kill one ONLY when the switch confirms it."""
+
+    payload = _ready_payload(
+        available=False,
+        tenants=[
+            {
+                "tenant_id": "tnt_1",
+                "tenant_name": "Org",
+                "eligible": False,
+                "endpoint": {"id": "bep_1", "label": "My agent", "state": "active"},
+                "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+            }
+        ],
+    )
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messaging/state"):
+            body = {
+                "msg": "ok",
+                "result": {"disabled": True, "ops_disabled": False, "effective": True},
+            }
+            return httpx.Response(200, json=body)
+        return httpx.Response(200, json={"msg": "ok", "result": payload})
+
+    counter = _Counter(responder)
+    discipline = _discipline(counter, tmp_path)
+    check = await discipline.check(Boundary.APP_START)
+    assert check.state_note == STATE_NOTE_KILL
+    observed = availability.observed(tmp_path)
+    assert observed is not None
+    assert observed["read_only"] is True
+    assert observed["note"] == STATE_NOTE_KILL
+    # The cached answer keeps the sentence; no second confirmation read.
+    monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+    assert len(counter.requests) == 2
+    assert check.state_note == STATE_NOTE_KILL
 
 
 def test_surface_projection_matches_the_5_6_matrix():

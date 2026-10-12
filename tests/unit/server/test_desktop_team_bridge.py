@@ -26,6 +26,7 @@ from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import (
     STATE_READY,
     STATE_SIGNED_OUT,
+    AcceptedText,
     BridgeRefusal,
     BridgeSignInRequired,
     StatusCheck,
@@ -60,13 +61,24 @@ class FakeClient:
         return self._answer("settings")
 
     async def put_settings(self, **kwargs: Any) -> dict[str, Any]:
+        FakeClient.behavior["last_put_kwargs"] = kwargs
         return self._answer("put_settings")
 
     async def allowlist(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         return self._answer("allowlist")
 
-    async def put_allowlist(self, entries: Any, *, tenant_id: str | None = None) -> dict[str, Any]:
+    async def put_allowlist(
+        self,
+        entries: Any,
+        *,
+        tenant_id: str | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
         FakeClient.behavior["last_entries"] = list(entries)
+        FakeClient.behavior["last_allowlist_kwargs"] = {
+            "tenant_id": tenant_id,
+            "expected_account_id": expected_account_id,
+        }
         return self._answer("put_allowlist")
 
 
@@ -109,7 +121,17 @@ def _status_check(**overrides: Any) -> StatusCheck:
         checked_at=1.0,
         error=None,
         account_id="acc_1",
-        texts={},
+        # The served consent is only displayable when it IS the accepted
+        # accession (review round 1, R3): the fixture's payload and its
+        # accepted record agree, as a real answer's do after acceptance.
+        texts={
+            "consent": AcceptedText(
+                version="bridge_consent_v1",
+                text="the served text",
+                sha256="x",
+                accepted_at=1.0,
+            )
+        },
     )
     base.update(overrides)
     return StatusCheck(**base)
@@ -164,6 +186,10 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     assert result["read_only"] is False
     assert result["can_receive"] is False
     assert result["can_decide"] is False
+    # The captured-account guard receipt (R6) and the refused-slot record (R3).
+    assert result["consent_account_guard"] is True
+    assert result["state_note"] is None
+    assert result["texts_rejected"] == []
     # The local keys the renderer composes its gate from.
     assert result["local"] == {"enabled": False, "onboarding": "", "session": ""}
     # The consent renders exactly as served, with its source named.
@@ -231,6 +257,63 @@ async def test_put_settings_requires_state_in_the_body(api):
     assert response.status_code == 422
 
 
+async def test_put_settings_requires_the_captured_account_guard(api):
+    """R6: an unguarded settings write is not a shape this plane accepts.
+
+    Without the captured account the dialog-replay guard is impossible to
+    enforce, so the desktop body REFUSES the request outright (422, empty
+    body semantics) and no bridge client is ever constructed.
+    """
+
+    client, _root, _discipline = api
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "paused"},
+    )
+    assert response.status_code == 422
+    assert FakeClient.instances == []
+
+
+async def test_put_allowlist_requires_the_captured_account_guard(api):
+    client, _root, _discipline = api
+    response = await client.put(
+        "/v1/desktop/team-bridge/allowlist",
+        json={"entries": []},
+    )
+    assert response.status_code == 422
+    assert FakeClient.instances == []
+
+
+async def test_a_stale_captured_account_maps_to_account_mismatch(api):
+    """R6/Q1: the client's guard refusal surfaces as a refresh-status signal."""
+
+    client, _root, discipline = api
+    FakeClient.behavior["put_settings"] = BridgeRefusal(
+        "account_mismatch", "prepared for a different account", http_status=409
+    )
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "paused", "expected_account_id": "acc_a"},
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "account_mismatch"
+    # The staleness signal: re-read status before the user tries again.
+    assert detail["refresh_status"] is True
+    assert discipline.invalidated == 1
+
+
+async def test_the_captured_account_reaches_the_client_verbatim(api):
+    client, _root, _discipline = api
+    FakeClient.behavior["put_settings"] = {"endpoint": None}
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "paused", "expected_account_id": "acc_7"},
+    )
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_put_kwargs"]["expected_account_id"] == "acc_7"
+
+
 async def test_put_settings_local_precondition_failures_are_422_client_bugs(api):
     client, _root, _discipline = api
     FakeClient.behavior["put_settings"] = ValueError(
@@ -238,7 +321,7 @@ async def test_put_settings_local_precondition_failures_are_422_client_bugs(api)
     )
     response = await client.put(
         "/v1/desktop/team-bridge/settings",
-        json={"state": "paused", "label": "My agent"},
+        json={"state": "paused", "label": "My agent", "expected_account_id": "acc_1"},
     )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "invalid_request"
@@ -251,7 +334,11 @@ async def test_put_settings_consent_conflict_flags_refresh_and_invalidates_the_c
     )
     response = await client.put(
         "/v1/desktop/team-bridge/settings",
-        json={"state": "active", "consent_version": "bridge_consent_v1"},
+        json={
+            "state": "active",
+            "consent_version": "bridge_consent_v1",
+            "expected_account_id": "acc_1",
+        },
     )
     assert response.status_code == 409
     detail = response.json()["detail"]
@@ -270,7 +357,10 @@ async def test_put_settings_refusal_carries_details_and_retry_after(api):
         details={"retry_after_seconds": 7},
         retry_after_seconds=7,
     )
-    response = await client.put("/v1/desktop/team-bridge/settings", json={"state": "paused"})
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "paused", "expected_account_id": "acc_1"},
+    )
     assert response.status_code == 429
     detail = response.json()["detail"]
     assert detail["retry_after_seconds"] == 7
@@ -305,7 +395,10 @@ async def test_put_allowlist_rejects_more_than_two_hundred_entries(api):
         {"direction": "send", "effect": "allow", "target": {"endpoint_id": f"bep_{i}"}}
         for i in range(201)
     ]
-    response = await client.put("/v1/desktop/team-bridge/allowlist", json={"entries": entries})
+    response = await client.put(
+        "/v1/desktop/team-bridge/allowlist",
+        json={"entries": entries, "expected_account_id": "acc_1"},
+    )
     assert response.status_code == 422
 
 
@@ -315,7 +408,7 @@ async def test_put_allowlist_forwards_the_replace_set(api):
     FakeClient.behavior["put_allowlist"] = {"allowlist": {"tenant_id": "tnt_1", "entries": [entry]}}
     response = await client.put(
         "/v1/desktop/team-bridge/allowlist",
-        json={"entries": [entry], "tenant_id": "tnt_1"},
+        json={"entries": [entry], "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
     )
     assert response.status_code == 200
     assert FakeClient.behavior["last_entries"] == [entry]

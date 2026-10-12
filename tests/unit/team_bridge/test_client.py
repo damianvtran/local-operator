@@ -598,3 +598,138 @@ def test_allowlist_view_empty_is_the_class_default():
     view = allowlist_view({"allowlist": {"tenant_id": "tnt_1", "entries": []}})
     assert view["directions"]["send"]["mode"] == "class_default"
     assert view["directions"]["receive"]["mode"] == "class_default"
+
+
+# ---------------------------------------------------------------------------
+# the ONE-snapshot owner binding and the captured-account guard (round 1)
+# ---------------------------------------------------------------------------
+
+
+class _LateSwitchStore(FakeStore):
+    """The reviewer's interleaving: a re-login lands AFTER the ensure snapshot.
+
+    ``ensure_oauth_fresh_or_raise`` returns the row's own data mapping — token
+    and identity from the SAME read. The switch below then replaces the stored
+    row, so any LATER metadata read would see account B. A client that pairs
+    the returned token with a later read (the pre-fix shape) would attribute
+    A's bearer to B; the one-snapshot client never re-reads.
+    """
+
+    async def ensure_oauth_fresh_or_raise(self, credential_id: int, *, force: bool = False):
+        data = await super().ensure_oauth_fresh_or_raise(credential_id, force=force)
+        self.rows = [FakeRow(credential_id, data={"access": "token-2", "account_id": "acc_b"})]
+        return data
+
+
+async def test_identity_and_token_come_from_one_snapshot():
+    """R1: the token and the identity are the SAME returned read."""
+
+    store = _LateSwitchStore()
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        return _ok({"available": True, "tenants": []})
+
+    client = _make_client(handler, store=store)
+    access = await client.current_access()
+
+    assert access.account_id == "acc_1"
+    assert access.access_token == "token-1"
+    # The status request carried the coherent snapshot's bearer.
+    await client.status(access=access)
+    assert seen == ["Bearer token-1"]
+
+
+async def test_a_row_without_an_owner_identity_fails_closed():
+    """R1: no readable account id — sign-in state, ZERO traffic."""
+
+    requests: list[httpx.Request] = []
+    store = FakeStore(rows=[FakeRow(1, data={"access": "token-1"})])
+    client = _make_client(lambda request: requests.append(request), store=store)
+
+    with pytest.raises(BridgeSignInRequired):
+        await client.status()
+    assert requests == []
+
+
+async def test_a_refresh_that_lost_the_expected_identity_fails_closed():
+    """R1: the refresh comparison is unconditional; a changed account stops."""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(401, json={"error": "expired", "code": "unauthorized"})
+
+    # The forced refresh rewrites the row to a DIFFERENT account: the retry
+    # must never leave — the terminal sign-in state is surfaced instead.
+    store = FakeStore(refresh={"access": "token-2", "account_id": "acc_2"})
+    client = _make_client(handler, store=store)
+
+    with pytest.raises(BridgeSignInRequired):
+        await client.status()
+    assert len(requests) == 1
+    # The initial resolve, then ONE forced refresh of the same row — and no
+    # third anything: the retry never left after the identity changed.
+    assert store.refresh_calls == [(1, False), (1, True)]
+
+
+async def test_a_captured_account_mismatch_refuses_with_zero_writes():
+    """R6: the guard compares against the pinned snapshot before any HTTP."""
+
+    requests: list[httpx.Request] = []
+    client = _make_client(lambda request: requests.append(request) or _ok({}))
+
+    with pytest.raises(BridgeRefusal) as info:
+        await client.put_settings(state="paused", expected_account_id="acc_b")
+
+    assert info.value.code == "account_mismatch"
+    assert info.value.http_status == 409
+    assert info.value.refreshes_status is True
+    assert requests == []
+
+
+async def test_the_captured_account_rides_the_same_snapshot_and_stays_local():
+    """R6: a matching guard dispatches under the pinned snapshot, guard stripped."""
+
+    sent: list[httpx.Request] = []
+    client = _make_client(lambda request: sent.append(request) or _ok({"endpoint": None}))
+
+    await client.put_settings(state="paused", expected_account_id="acc_1")
+
+    assert len(sent) == 1
+    assert sent[0].headers["authorization"] == "Bearer token-1"
+    assert json.loads(sent[0].content) == {"state": "paused"}
+
+
+async def test_the_allowlist_write_takes_the_same_guard():
+    """R6: a policy surface must not be the one mutation that skips the receipt."""
+
+    requests: list[httpx.Request] = []
+    client = _make_client(lambda request: requests.append(request) or _ok({"allowlist": {}}))
+
+    with pytest.raises(BridgeRefusal) as info:
+        await client.put_allowlist([], expected_account_id="acc_b")
+    assert info.value.code == "account_mismatch"
+    assert requests == []
+
+    await client.put_allowlist([], expected_account_id="acc_1")
+    assert len(requests) == 1
+    assert json.loads(requests[0].content) == {"entries": []}
+
+
+async def test_tenant_state_reads_the_frozen_route_with_the_pinned_bearer():
+    """The members-readable kill confirmation (§5.5, S-22) — one GET, no body."""
+
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers["authorization"]))
+        return _ok({"disabled": True, "ops_disabled": False, "effective": True})
+
+    client = _make_client(handler)
+    result = await client.tenant_state("tnt_1")
+
+    assert result["effective"] is True
+    assert seen == [("/v1/tenants/tnt_1/messaging/state", "Bearer token-1")]
