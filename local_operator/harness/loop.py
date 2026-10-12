@@ -1664,7 +1664,21 @@ class AgentLoop:
                         # state, so a sentence cut mid-word is continued rather
                         # than rewritten. That beats the alternative this
                         # replaces, which was ending the entire run.
-                        if connectivity_continuations < MAX_CONNECTIVITY_CONTINUATIONS:
+                        #
+                        # A STOP OUTRANKS THE RESUME (round-1 review R1 / QA
+                        # Q1): resuming would spend request N+1 on a turn the
+                        # caller already stopped at request N, and the notice
+                        # below would promise the remainder "is being fetched
+                        # on the next attempt" -- a promise this path then
+                        # breaks. Skipping the resume falls through to the
+                        # failure terminal below: the same bounded end the
+                        # spent-budget path takes, with the requested stop as
+                        # the verdict instead of a lone provider error.
+                        graceful_cut = _graceful_cancel_requested(config)
+                        if (
+                            connectivity_continuations < MAX_CONNECTIVITY_CONTINUATIONS
+                            and not graceful_cut
+                        ):
                             connectivity_continuations += 1
                             # TRUNCATED calls are dropped; COMPLETE ones are not.
                             # A call still being dictated when the socket died is
@@ -1917,6 +1931,15 @@ class AgentLoop:
                     new_messages.append(stored)
 
                     if stop_reason in ("error", "aborted", "refusal"):
+                        # A STOP OUTRANKS EVERY RESEND IN THIS SECTION (round-1
+                        # review R1 / QA Q2): the echo fill and the thinking-off
+                        # retreat would each spend request N+1 -- and mutate the
+                        # run's model -- on a turn the caller already stopped at
+                        # request N. Read ONCE here so both gates and the
+                        # terminal's verdict agree on a single reading; the
+                        # protected helper keeps a broken hook at no-cancel, and
+                        # the retries stay live whenever no stop is pending.
+                        graceful_error = _graceful_cancel_requested(config)
                         # FIRST recovery for a refused reasoning echo: re-send the
                         # SAME request with the echo filled.
                         #
@@ -1973,6 +1996,7 @@ class AgentLoop:
                             and turn_model is not None
                             and not turn_model.requires_reasoning_echo
                             and _is_reasoning_echo_rejection(stream_error)
+                            and not graceful_error
                         ):
                             reasoning_echo_fill_retries += 1
                             # The refused turn must not reach the retry's
@@ -2047,6 +2071,7 @@ class AgentLoop:
                             and not assistant.text.strip()
                             and not assistant.tool_calls
                             and _is_reasoning_echo_rejection(stream_error)
+                            and not graceful_error
                         ):
                             thinking_off = _thinking_off_effort(config.model)
                             if thinking_off is not None:
@@ -2096,7 +2121,17 @@ class AgentLoop:
                         # result. `aborted` is computed HERE rather than at the
                         # event below because the markers must agree with it:
                         # same verdict line, one reading.
-                        aborted = stop_reason == "aborted" or bool(signal and signal.aborted)
+                        # A requested stop is a verdict of its own kind even
+                        # when the stop is what SKIPPED the resends above: the
+                        # turn ends because the caller asked, not because the
+                        # provider failed (round-1 review R1 / QA Q1-Q2). The
+                        # fault markers below read this same line, so they
+                        # cannot disagree with it.
+                        aborted = (
+                            stop_reason == "aborted"
+                            or bool(signal and signal.aborted)
+                            or graceful_error
+                        )
                         # Q-1 (round 1): the terminal left by an exhausted
                         # continuation budget must name its own history. The
                         # notices streamed the budget being spent while the run
@@ -2249,7 +2284,7 @@ class AgentLoop:
                         # already claimed the retreat: WHICH rung the turn would
                         # have gone to is what the notice below reports, and it
                         # is the difference between "no cheaper setting exists"
-                        # (nothing was skipped) and "the step boundary was
+                        # (nothing was skipped) and "a stop was
                         # requested" (a rung existed and stayed unspent).
                         # Claiming a ladder cause that was never consulted is
                         # the false-cause class this family exists to remove.
@@ -2299,7 +2334,7 @@ class AgentLoop:
                                 # the boundary claimed the retreat, and that is
                                 # the only cause left to name -- a ladder claim
                                 # here would be false.
-                                cause = "the step boundary was requested"
+                                cause = "a stop was requested"
                             yield NoticeEvent(
                                 text=(
                                     "the model spent its whole output budget "

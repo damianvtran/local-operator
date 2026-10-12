@@ -28,6 +28,7 @@ from local_operator.harness.types import (
     Message,
     ModelSpec,
     NoticeEvent,
+    RenderedStreamError,
     StreamEndEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -285,7 +286,7 @@ async def test_empty_truncation_retreat_does_not_spend_a_request_after_the_cance
     assert ends and ends[-1].aborted is True
     assert config.model.reasoning_effort == "high", "the retreat must not be consumed"
     notices = [event.text for event in events if isinstance(event, NoticeEvent)]
-    assert any("step boundary was requested" in text for text in notices)
+    assert any("a stop was requested" in text for text in notices)
 
 
 @pytest.mark.asyncio
@@ -340,3 +341,174 @@ async def test_malformed_arguments_respect_the_boundary() -> None:
     assert any(
         "not valid JSON" in getattr(message, "text", "") for message in ends[-1].messages
     ), "the malformed call must leave its paired invalid-arguments record"
+
+
+# ---------------------------------------------------------------------------
+# Failure-response resends are next-model safe points too.
+#
+# The round-1 review (R1) and the QA matrix (Q1/Q2) reproduced the same leak
+# class at three more decisions: the connectivity continuation, the
+# reasoning-echo fill, and the thinking-off retreat each `continue`d before
+# the post-response boundary, spending request N+1 -- and, for the echo pair,
+# mutating the run's model -- after a stop had been requested at request N.
+# Each now reads the same protected hook and, when a stop is pending, falls
+# through to the failure terminal, which marks the stop as the verdict.
+# ---------------------------------------------------------------------------
+
+
+class _RenderedCut(RenderedStreamError):
+    """A mid-stream cut as the provider layer renders one: resumable."""
+
+    connectivity_loss = True
+
+
+class _CutThenText:
+    """A cut mid-answer on request 1; text on later ones."""
+
+    def __init__(self, *, cancel_on_cut: bool) -> None:
+        self.calls = 0
+        self.cancel_on_cut = cancel_on_cut
+        self.cancelled = False
+
+    async def __call__(self, request: Any, signal: Any) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamTextDelta(delta="partial network answer")
+            if self.cancel_on_cut:
+                self.cancelled = True
+            raise _RenderedCut("response stream cut mid-answer")
+        yield StreamTextDelta(delta="continued")
+        yield StreamEndEvent(stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_connectivity_resume_does_not_spend_a_request_after_the_cancel() -> None:
+    """A requested stop outranks the connectivity continuation (R1/Q1).
+
+    Resuming would spend request 2 on a turn the caller stopped at request 1,
+    and the resume notice would promise the remainder "is being fetched on the
+    next attempt" -- a promise the stop then breaks.
+    """
+    stream = _CutThenText(cancel_on_cut=True)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(stream, graceful_cancel_requested=lambda: stream.cancelled)
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 1, "no resume request may be spent after the cancel"
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and ends[-1].aborted is True, "the stop is the terminal verdict"
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert not any("resuming" in text for text in notices), "no fake resume claim"
+
+
+@pytest.mark.asyncio
+async def test_connectivity_resume_still_fires_without_a_cancel() -> None:
+    """Control: the continuation itself still works (R1 neighbouring case)."""
+    stream = _CutThenText(cancel_on_cut=False)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(stream, graceful_cancel_requested=lambda: stream.cancelled)
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 2, "the resume request must still be spent"
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert any("resuming the turn (1/3)" in text for text in notices)
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and not ends[-1].aborted
+
+
+class _EchoRefusalOnce:
+    """A reasoning-echo refusal on request 1; text on later ones."""
+
+    def __init__(self, *, cancel_on_refusal: bool) -> None:
+        self.calls = 0
+        self.cancel_on_refusal = cancel_on_refusal
+        self.cancelled = False
+
+    async def __call__(self, request: Any, signal: Any) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            if self.cancel_on_refusal:
+                self.cancelled = True
+            yield StreamEndEvent(stop_reason="error", error="reasoning_content must be passed back")
+            return
+        yield StreamTextDelta(delta="done")
+        yield StreamEndEvent(stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_echo_fill_resend_does_not_spend_a_request_after_the_cancel() -> None:
+    """A requested stop outranks the echo fill, with no model mutation."""
+    stream = _EchoRefusalOnce(cancel_on_refusal=True)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(stream, graceful_cancel_requested=lambda: stream.cancelled)
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 1, "no resend request may be spent after the cancel"
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and ends[-1].aborted is True
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert not any("retrying with the echo" in text for text in notices)
+    assert config.model.requires_reasoning_echo is False, "no wire mutation after the stop"
+
+
+@pytest.mark.asyncio
+async def test_echo_fill_resend_still_fires_without_a_cancel() -> None:
+    """Control: the fill itself still works, echo flag and all."""
+    stream = _EchoRefusalOnce(cancel_on_refusal=False)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(stream, graceful_cancel_requested=lambda: stream.cancelled)
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 2, "the resend request must still be spent"
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert any("retrying with the echo filled in" in text for text in notices)
+    assert config.model.requires_reasoning_echo is True
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and not ends[-1].aborted
+
+
+#: A model that already requires the echo AND has a ladder: the echo fill is
+#: inapplicable (the bit is set) and the retreat has a "none" rung to switch to.
+_ECHO_LADDER_MODEL = ModelSpec(
+    provider="test",
+    model_id="m",
+    reasoning_efforts=("none", "low", "medium", "high"),
+    reasoning_effort="high",
+    requires_reasoning_echo=True,
+)
+
+
+@pytest.mark.asyncio
+async def test_echo_retreat_does_not_spend_a_request_after_the_cancel() -> None:
+    """A requested stop outranks the thinking-off retreat (R1/Q2)."""
+    stream = _EchoRefusalOnce(cancel_on_refusal=True)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(
+        stream, model=_ECHO_LADDER_MODEL, graceful_cancel_requested=lambda: stream.cancelled
+    )
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 1, "no retreat request may be spent after the cancel"
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and ends[-1].aborted is True
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert not any("thinking disabled" in text for text in notices)
+    assert config.model.reasoning_effort == "high", "no effort mutation after the stop"
+
+
+@pytest.mark.asyncio
+async def test_echo_retreat_still_fires_without_a_cancel() -> None:
+    """Control: the retreat itself still works, one rung to thinking off."""
+    stream = _EchoRefusalOnce(cancel_on_refusal=False)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(
+        stream, model=_ECHO_LADDER_MODEL, graceful_cancel_requested=lambda: stream.cancelled
+    )
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 2, "the retreat request must still be spent"
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert any("retrying with thinking disabled" in text for text in notices)
+    assert config.model.reasoning_effort == "none"
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and not ends[-1].aborted
