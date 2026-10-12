@@ -5282,18 +5282,20 @@ _TRANSFORM_MIN_VALUE_LEN = 12
 #: characters), so it never qualifies on its own; twelve characters is two escapes
 #: at minimum, which is the shortest and weakest spelling this admits.
 #:
-#: **A bound is not a guarantee, and the collision it still admits is measured
-#: rather than reasoned away.** These are VALUE-SPECIFIC sequences, so a collision
-#: means ordinary output carrying THIS value's escaping — negligible above the
-#: bound, but measurable AT it (a two-character value, a 12-character spelling):
-#: against synthetic escaped-JSON documents, 0/2000 over a uniform CJK source and
-#: 96/2000 (4.80%) over a 64-character "common characters" source, with 0/2000 for
-#: a three-escape needle against either. It is reachable on the real path — a
-#: two-character registered value masked an unrelated escaped document, one marker
-#: where the unpatched base produced none. That is OVER-masking, never a release,
-#: and it is strictly narrower than what the same value already had: its verbatim
-#: spelling has no floor at all, so two adjacent characters of ordinary text were
-#: already being rewritten before this family existed.
+#: **A bound is not a guarantee, and the risk it leaves is real rather than a
+#: rounding-off.** These are VALUE-SPECIFIC sequences, so a collision means
+#: ordinary output that happens to carry THIS value's escaping. Whether that
+#: happens is a property of the corpus being read and of how short the needle is,
+#: so no zero-collision claim is made at any length, and the shortest spelling this
+#: bound admits is the one most likely to collide by construction. It is reachable
+#: on the real path — a two-character registered value masked an unrelated escaped
+#: document, one marker where the unpatched base produced none. The consequence is
+#: OVER-masking, never a release, and it is strictly narrower than what the same
+#: value already had: its verbatim spelling has no floor at all, so two adjacent
+#: characters of ordinary text were already being rewritten before this family
+#: existed. The sampled rates behind that reading are review evidence on the pull
+#: request, deliberately not restated here — a product comment quoting a
+#: simulation figure invites it to be read as a probability guarantee.
 #:
 #: The bound is on the SPELLING, not on the value, and the two are far apart: an
 #: eight-character CJK value escapes to forty-eight characters. The COVERAGE

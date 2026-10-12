@@ -978,16 +978,18 @@ over-masking is a defect, `redaction_shapes.py:58-70`):
 > `local_operator/redaction_shapes.py`.
 >
 > **And the residual of that change is not only coverage.** The escaping family
-> can also OVER-mask. A value whose escaping lands exactly ON the 12-character
-> bound — a two-character value — is short enough that an unrelated escaped
-> document can carry the same sequence: measured by review at 96/2000 over a
-> 64-character "common characters" source (0/2000 over a uniform CJK source, and
-> 0/2000 from a three-escape needle upward), and reproduced on the real read path
-> as one marker on a document the base left untouched. Over-masking is not a
-> release, and it is narrower than what such a value already had — its verbatim
-> spelling has no floor, so two adjacent characters of ordinary text were already
-> being rewritten — but it is why the bound is documented as a bound rather than
-> as a guarantee.
+> can also OVER-mask: its needles are value-specific, so a collision means an
+> unrelated document that happens to carry this value's escaping. Whether that
+> happens depends on the corpus being read and on how short the needle is — there
+> is no zero-collision guarantee at any length, and the shortest spelling the
+> bound admits (a two-character value) is the one most likely to collide by
+> construction. It is reachable on the real read path: such a value masked an
+> unrelated escaped document, one marker where the base left the document
+> untouched. Over-masking is not a release, and it is narrower than what such a
+> value already had — its verbatim spelling has no floor, so two adjacent
+> characters of ordinary text were already being rewritten — but it is why the
+> bound is documented as a bound rather than as a guarantee. The sampled rates
+> from that measurement are evidence on the pull request, not restated here.
 
 ### 5.3 Coordination with the open work, checked rather than assumed
 
