@@ -2,7 +2,10 @@
 
 All cooperating managed-install writers use `install_transaction.transaction`
 against the canonical stable install root, **not the session/config profile**.
-The permanent `install.lock` inode is never removed or replaced. A bounded
+The permanent `install.lock` inode is never removed or replaced. Opening is
+no-follow and directory-descriptor anchored; nonregular, foreign-owned,
+multiply-linked, writable-by-others or changed lock/root identities refuse
+before metadata writes. Unsafe observer names are not followed either. A bounded
 nonblocking POSIX flock and a process-local mutex protect pointer changes,
 launcher/shim changes, candidate registration/discard, migration/rollback and
 pruning. Nested primitives reuse and validate the actual held descriptor; they
@@ -17,7 +20,9 @@ This does not exclude older installers or other noncooperating processes.
    baseline current, process PID/birth token, phase and preparation deadline.
 2. Build outside the root transaction. Real installer children are bounded and
    their exact spawned process groups are reaped on success, failure and
-   cancellation. An installer-worker PID/birth identity protects a live child
+   cancellation, including the production mesh output-capture adapter (capture
+   uses a file and bounded diagnostic read, not raw subprocess execution).
+   An installer-worker PID/birth identity protects a live child
    even if the updater is hard-killed. Ambiguous spawn/identity state is retained.
 3. Outside the lock, verify the staged artifact and applicable signed macOS helper.
    PyPI routes require positive per-target publication metadata, a compatible
@@ -35,7 +40,12 @@ This does not exclude older installers or other noncooperating processes.
    refuse. Explicit snapshot downgrade/migration can act only against the exact
    baseline it was authorized to replace, never a later changed current.
 5. Publish marker/pointer/launchers/shim together and retire the owned attempt.
-   Release before service convergence and re-engagement. Prune retains registered
+   Release before service convergence and re-engagement. Mesh receipts sample
+   current again after those tails and distinguish the promoted version, fresh
+   current and executing relay's serving image; a superseded pass never reverts
+   the newer pointer. Identical exact targets no-op only with fresh matching
+   artifact/origin/signature proof and a completed marked current generation.
+   Prune retains registered
    live or unknown candidates even when a finished marker is already present.
 
 ## Admission is separate from mutual exclusion

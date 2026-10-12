@@ -2215,6 +2215,40 @@ def _verify_candidate_origin(generation: Path, built: PublicationEvidence) -> No
         )
 
 
+def _reuse_exact_current(built: PublicationEvidence | None) -> Path | None:
+    """An identical exact artifact can return current without another build.
+
+    Version alone is insufficient (same-version source snapshots differ). Reuse
+    only a finished owned generation whose retained wheel/origin and applicable
+    signature positively match fresh target evidence, then fence fresh current.
+    Failed identity proof means build normally, never a speculative no-op.
+    """
+    if built is None or built.mode != "exact":
+        return None
+    current = current_generation()
+    if current is None or generation_version(current) != built.target:
+        return None
+    if (current / install_transaction.ATTEMPT_NAME).exists() or not (
+        _generation_install_root(current) / ".lop-source"
+    ).is_file():
+        return None
+    try:
+        _verify_candidate_origin(current, built)
+        _verify_signed_candidate(current, built.mode)
+    except UpdateError:
+        return None
+    with install_transaction.transaction(stable_root(), operation="reuse exact artifact"):
+        _admit_install()
+        if (
+            current_generation() == current
+            and generation_version(current) == built.target
+            and time.monotonic() < built.fresh_until
+            and not (current / install_transaction.ATTEMPT_NAME).exists()
+        ):
+            return current
+    return None
+
+
 def _verify_signed_candidate(generation: Path, mode: str) -> None:
     if mode == "source" or not _HOST_IS_MACOS:
         return
@@ -3180,6 +3214,9 @@ def install_into_generation(
     token = commit[:12] or version or "pypi"
     mode = "source" if source is not None else target_mode
     built = _fresh_publication(version, mode)
+    reused = _reuse_exact_current(built)
+    if reused is not None:
+        return reused
     generation, nonce, baseline = _register_candidate(
         token, version, mode, commit or (str(source) if source is not None else "")
     )
