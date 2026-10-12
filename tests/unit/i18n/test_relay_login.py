@@ -105,6 +105,54 @@ def test_scanner_mutations_fail(mutation: str) -> None:
     assert findings and all("relay.login: hardcoded" in finding for finding in findings)
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        'const help = "https://example.invalid"; document.title = "Sign in now";',
+        'document.title = "Sign in // now";',
+        "document.title = `// Sign in now`;",
+        'document.title = "Sign in /* now */";',
+        r'document.title = "Sign in \"// now";',
+        r"document.title = 'Sign in \'// now';",
+        r"document.title = `Sign in \`// now`;",
+        '// comment with "quotes"\n document.title = "Sign in now";',
+        '/* comment with "quotes" */ document.title = "Sign in now";',
+    ],
+)
+def test_script_comment_escape_mutations_fail_normal_gate(
+    script: str, i18n_check, monkeypatch, tmp_path
+) -> None:
+    # Repr preserves JS backslashes through the outer Python HTML constant;
+    # an escaped quote must reach the lexer exactly as the browser receives it.
+    template = daemon._LOGIN_HTML.replace("</form>", f"<script>{script}</script></form>")
+    source = f"_LOGIN_HTML = {template!r}"
+    findings = check_login_source(source)
+    assert findings and all("hardcoded script literal" in finding for finding in findings)
+    path = tmp_path / "local_operator/mobile/daemon.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(source)
+    monkeypatch.setattr(i18n_check, "REPO", tmp_path)
+    assert i18n_check.main([]) == 1
+
+
+def test_script_comments_and_allowlisted_keys_still_pass_normal_gate(
+    i18n_check, monkeypatch, tmp_path
+) -> None:
+    script = (
+        '// "Developer comment"\n'
+        "/* `Another developer comment` */ "
+        'const keys = ["lo-mobile-command:", "lo-mobile-draft:"];'
+    )
+    template = daemon._LOGIN_HTML.replace("</form>", f"<script>{script}</script></form>")
+    source = f"_LOGIN_HTML = {template!r}"
+    assert check_login_source(source) == []
+    path = tmp_path / "local_operator/mobile/daemon.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(source)
+    monkeypatch.setattr(i18n_check, "REPO", tmp_path)
+    assert i18n_check.main([]) == 0
+
+
 def test_renderer_literal_mutation_fails() -> None:
     source = (ROOT / "local_operator/mobile/daemon.py").read_text()
     source = source.replace("text(relay_login.error_password())", '"Hardcoded refusal"')
