@@ -1,7 +1,37 @@
 """Hub display projection preserves facts without classifying the message body."""
 
 from local_operator.harness.comms import TO_CHILD_INSTRUCTIONS
-from local_operator.harness.hub_receipts import hub_receipt_fields
+from local_operator.harness.hub_receipts import hub_receipt_fields, hub_receipt_marker
+
+
+def test_marker_requires_the_namespace_mapping_and_a_real_body() -> None:
+    """Positive provenance only: a malformed or body-less marker is not a
+    receipt, so callers keep their ordinary user handling."""
+    from types import SimpleNamespace
+
+    good = {
+        "direction": "to_child",
+        "expects_reply": False,
+        "steer": True,
+        "body": "Focus on retries",
+    }
+    assert hub_receipt_marker(SimpleNamespace(provider_payload={"hub_receipt": good})) == good
+    for payload in (
+        None,
+        {},
+        {"hub_receipt": []},
+        {"hub_receipt": {}},
+        {"hub_receipt": {"body": ""}},
+        {"hub_receipt": {"body": "   "}},
+        {"hub_receipt": {"body": 3}},
+        {"hub_receipt": "to_child"},
+    ):
+        assert hub_receipt_marker(SimpleNamespace(provider_payload=payload)) is None
+    assert hub_receipt_marker(SimpleNamespace()) is None
+    # The child fold reads the ENCODED payload dict, not a Message object.
+    assert hub_receipt_marker({"provider_payload": {"hub_receipt": good}}) == good
+    assert hub_receipt_marker({"provider_payload": None}) is None
+    assert hub_receipt_marker({}) is None
 
 
 def test_structured_body_and_optional_facts_are_retained_verbatim() -> None:

@@ -1940,6 +1940,58 @@ def test_a_live_delivered_steer_never_renders_the_envelope() -> None:
     assert "<parent-message>" not in row.text
 
 
+def _marked_steer(body: str = "Focus on retries") -> Message:
+    """The producer's typed marker on a persisted hub steer row (``comms.py``)."""
+    message = Message.user(_steer_envelope(body), id="steer-marked-1")
+    message.provider_payload = {
+        "hub_receipt": {
+            "direction": "to_child",
+            "expects_reply": False,
+            "steer": True,
+            "body": body,
+        }
+    }
+    return message
+
+
+def test_marker_first_folds_keep_kind_body_and_typed_facts() -> None:
+    """A marked row classifies by positive provenance, not by re-reading the
+    envelope: both durable folds and the live rail keep the typed facts beside
+    the body, and the envelope never renders."""
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    entries = fold_messages_to_entries([_marked_steer()])
+    assert [(entry.kind, entry.text) for entry in entries] == [
+        ("parent_message", "Focus on retries")
+    ]
+    assert entries[0].details.get("steer") is True
+    assert entries[0].details.get("direction") == "to_child"
+
+    fold = make_fold()
+    fold.fold_history([_marked_steer()])
+    history_row = fold.projection.transcript[-1]
+    assert (history_row.kind, history_row.text) == ("parent_message", "Focus on retries")
+    assert history_row.details.get("steer") is True
+
+    live = make_fold()
+    assert live.absorb_user_event(_marked_steer()) is True
+    live_row = live.projection.transcript[-1]
+    assert (live_row.kind, live_row.text) == ("parent_message", "Focus on retries")
+    assert live_row.details.get("steer") is True
+    assert "<parent-message>" not in live_row.text
+
+
+def test_a_malformed_marker_keeps_the_rows_legacy_treatment() -> None:
+    """A marker with no real body is not a receipt; the row keeps the legacy
+    envelope classification rather than being dropped or reclassified."""
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    message = Message.user(_steer_envelope("Focus on retries"), id="steer-legacy-1")
+    message.provider_payload = {"hub_receipt": {"steer": True}}
+    entries = fold_messages_to_entries([message])
+    assert (entries[0].kind, entries[0].text) == ("parent_message", "Focus on retries")
+
+
 def test_a_phone_typed_envelope_reconciles_its_echo_instead_of_doubling() -> None:
     """A message the phone sent that happens to carry the envelope shape must
     reconcile against its optimistic echo, not append beside it.
