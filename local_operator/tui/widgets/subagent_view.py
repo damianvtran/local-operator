@@ -70,7 +70,11 @@ from local_operator.harness.comms import (
     HUB_COMMUNICATION_CUSTOM_TYPE,
     extract_parent_message,
 )
-from local_operator.harness.hub_receipts import hub_receipt_fields, hub_receipt_marker
+from local_operator.harness.hub_receipts import (
+    hub_receipt_fields,
+    hub_receipt_marker,
+    hub_receipt_stamped,
+)
 from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
 from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_notice_row
@@ -822,7 +826,14 @@ def fold_transcript_entries(
                         )
                     )
                 continue
-            parent_message = extract_parent_message(text)
+            # Stamped-but-INVALID markers stay human: the legacy wrapper
+            # compatibility below belongs to rows the modern producer never
+            # touched, and a malformed stamp is still a claim on the row
+            # (review round 3, R3-1 acceptance). An id-correlated typed fact
+            # would vouch for the row in its own entry above.
+            parent_message = (
+                None if hub_receipt_stamped(payload) else extract_parent_message(text)
+            )
             if parent_message is not None:
                 # A persisted hub steer: model-facing XML around the parent's
                 # own words. The human-facing fact row supersedes it — by id

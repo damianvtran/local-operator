@@ -33,7 +33,11 @@ from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import extract_parent_message
-from local_operator.harness.hub_receipts import hub_receipt_fields, hub_receipt_marker
+from local_operator.harness.hub_receipts import (
+    hub_receipt_fields,
+    hub_receipt_marker,
+    hub_receipt_stamped,
+)
 
 # ``job_result`` is declared beside the job manager that writes it, not with the
 # harness markers above — imported from its own home so this fold cannot drift
@@ -1590,7 +1594,16 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                     )
                 )
                 continue
-            parent_message = extract_parent_message(message.text)
+            # A modern producer's stamp that FAILED validation must not be
+            # re-guessed from the row's envelope: this legacy parse is
+            # compatibility for rows the modern producer never stamped, and a
+            # malformed stamp is still a claim on the row (review round 3,
+            # R3-1 acceptance). Stamped-but-invalid rows stay human; an
+            # id-correlated typed fact would vouch for the row in its own
+            # entry and is handled above.
+            parent_message = (
+                None if hub_receipt_stamped(message) else extract_parent_message(message.text)
+            )
             if parent_message is not None:
                 # Legacy rows written before the marker existed: model-facing
                 # XML around the parent's own words. The phone shows the body
@@ -2587,7 +2600,16 @@ class ProjectionFold:
         marker_facts: dict[str, Any] | None = None
         if marker is not None:
             marker_body, marker_facts = hub_receipt_fields({**marker, "text": text})
-        parent_message = extract_parent_message(text)
+        # Stamped-but-INVALID markers stay human, for the durable fold's
+        # reason (review round 3, R3-1 acceptance): the legacy envelope parse
+        # below only ever runs for rows the modern producer never touched.
+        # A VALID marker keeps this branch exactly as it was — only the
+        # malformed case is withheld from the body guess.
+        parent_message = (
+            None
+            if marker is None and hub_receipt_stamped(message)
+            else extract_parent_message(text)
+        )
         if entry is not None:
             # Adopt the persisted identity either way: the row was keyed by the
             # command id (or a synthetic one), and the message id is what later

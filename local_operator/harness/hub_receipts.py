@@ -82,6 +82,27 @@ def hub_receipt_marker(message: object) -> dict[str, Any] | None:
     return normalized
 
 
+def hub_receipt_stamped(message: object) -> bool:
+    """Whether the MODERN producer stamped ``message`` at all, valid or not.
+
+    The legacy envelope compatibility path (the exact wrapper parse for rows an
+    older build wrote) may only classify rows the modern producer never
+    touched: a present marker — including one whose direction or body failed
+    ``hub_receipt_marker``'s validation — is that producer's claim on the row,
+    and re-guessing the row from its body is exactly the inference the marker
+    programme removed. An explicitly stamped but invalid row therefore stays a
+    human row unless an id-correlated typed communication fact vouches for it
+    (review round 3, R3-1 acceptance).
+    """
+    if isinstance(message, Mapping):
+        payload = message.get("provider_payload")
+    else:
+        payload = getattr(message, "provider_payload", None)
+    if not isinstance(payload, Mapping):
+        return False
+    return HUB_RECEIPT_MARKER_KEY in payload
+
+
 def hub_receipt_fields(details: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     """Return full display bytes and retained optional facts, without guessing IDs.
 

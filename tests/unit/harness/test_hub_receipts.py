@@ -1,7 +1,11 @@
 """Hub display projection preserves facts without classifying the message body."""
 
 from local_operator.harness.comms import TO_CHILD_INSTRUCTIONS
-from local_operator.harness.hub_receipts import hub_receipt_fields, hub_receipt_marker
+from local_operator.harness.hub_receipts import (
+    hub_receipt_fields,
+    hub_receipt_marker,
+    hub_receipt_stamped,
+)
 
 
 def test_marker_requires_the_namespace_mapping_and_a_real_body() -> None:
@@ -32,6 +36,33 @@ def test_marker_requires_the_namespace_mapping_and_a_real_body() -> None:
     assert hub_receipt_marker({"provider_payload": {"hub_receipt": good}}) == good
     assert hub_receipt_marker({"provider_payload": None}) is None
     assert hub_receipt_marker({}) is None
+
+
+def test_a_present_marker_is_a_stamp_even_when_it_fails_validation() -> None:
+    """``hub_receipt_stamped`` separates "no modern provenance" — where the
+    legacy wrapper compatibility may still parse a row from its body — from
+    "stamped but invalid", where the row must not be re-guessed (review round
+    3, R3-1 acceptance)."""
+    from types import SimpleNamespace
+
+    assert hub_receipt_stamped(SimpleNamespace()) is False
+    assert hub_receipt_stamped(SimpleNamespace(provider_payload=None)) is False
+    assert hub_receipt_stamped(SimpleNamespace(provider_payload={})) is False
+    for marker in (
+        {"body": "Focus on retries"},
+        {"body": "Focus on retries", "direction": "sideways"},
+        {"body": "Focus on retries", "direction": None},
+        {"body": "Focus on retries", "direction": ["to_child"]},
+        "to_child",
+    ):
+        stamped = SimpleNamespace(provider_payload={"hub_receipt": marker})
+        assert hub_receipt_marker(stamped) is None
+        assert hub_receipt_stamped(stamped) is True
+    good = SimpleNamespace(
+        provider_payload={"hub_receipt": {"direction": "to_child", "body": "Focus"}}
+    )
+    assert hub_receipt_stamped(good) is True
+    assert hub_receipt_marker(good) is not None
 
 
 def test_marker_requires_a_known_direction_and_normalises_flags() -> None:

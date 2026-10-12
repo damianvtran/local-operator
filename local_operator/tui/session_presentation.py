@@ -1590,10 +1590,46 @@ def project_settled_rows(
                     details_dict.setdefault("text", text)
                     body, facts = hub_receipt_fields(details_dict)
                     receipt_id = str(getattr(message, "id", ""))
+                    # The row's own pictures ride exactly as they do on the
+                    # human arm below: the marker reclassifies the ROW, never
+                    # its attachments, and dropping them was losing visible
+                    # content (review round 3, R3-3). The ADOPTION is by
+                    # ANCHOR COUNT, not by path: an earlier pass may have
+                    # painted this row with no picture at all (the composer
+                    # lets text arrive before bytes) and a later same-ID row
+                    # with authoritative ``ImageContent`` is the first
+                    # occurrence of that picture — skipping it because a SEAT
+                    # survived loses the operator's media, while re-appending
+                    # a replay that re-carries the same parts would double it.
+                    # Counting the anchor's mounted images does both: the
+                    # missing tail is adopted, nothing already mounted is
+                    # repeated, and content that OMITS parts keeps the refs
+                    # it had.
+                    replay_images = [
+                        part
+                        for part in (getattr(message, "content", None) or [])
+                        if isinstance(part, ImageContent)
+                    ]
+                    anchored_images = (
+                        sum(
+                            1
+                            for block in transcript.blocks()
+                            if isinstance(block, ImageBlock)
+                            and block.navigation_anchor_id == receipt_id
+                        )
+                        if receipt_id
+                        else 0
+                    )
+                    missing_images = replay_images[anchored_images:]
                     existing = hub_receipts.get(receipt_id) if receipt_id else None
                     if existing is not None:
                         if existing.restate_receipt(body, facts):
                             transcript.restate_quiet_member(existing)
+                            appended = True
+                        if missing_images:
+                            self._append_image_blocks(
+                                missing_images, marker_text=text, fold_width=fold_width
+                            )
                             appended = True
                     else:
                         seat = source_seats.get(receipt_id) if receipt_id else None
@@ -1606,6 +1642,11 @@ def project_settled_rows(
                                 appended = True
                             if receipt_id:
                                 hub_receipts[receipt_id] = seat
+                            if missing_images:
+                                self._append_image_blocks(
+                                    missing_images, marker_text=text, fold_width=fold_width
+                                )
+                                appended = True
                         elif isinstance(seat, UserBlock):
                             # RICHER SAME-ID REPLAY: this row was painted as
                             # the operator's words on an earlier pass and the
@@ -1620,26 +1661,19 @@ def project_settled_rows(
                             if self._replace_block(seat, block):
                                 hub_receipts[receipt_id] = block
                                 appended = True
+                            if missing_images:
+                                self._append_image_blocks(
+                                    missing_images, marker_text=text, fold_width=fold_width
+                                )
+                                appended = True
                         else:
                             block = HubMessageBlock(body, facts, fold_width=fold_width)
                             self._append_block(block)
                             if receipt_id:
                                 hub_receipts[receipt_id] = block
-                            # The row's own pictures ride exactly as they do
-                            # on the human arm below: the marker reclassifies
-                            # the ROW, never its attachments, and dropping
-                            # them was losing visible content (review round 3,
-                            # R3-3). Only the no-seat path appends images: a
-                            # replay of a row whose seat survived never
-                            # re-adds a second copy of its photos.
-                            replay_images = [
-                                part
-                                for part in (getattr(message, "content", None) or [])
-                                if isinstance(part, ImageContent)
-                            ]
-                            if replay_images:
+                            if missing_images:
                                 self._append_image_blocks(
-                                    replay_images, marker_text=text, fold_width=fold_width
+                                    missing_images, marker_text=text, fold_width=fold_width
                                 )
                             appended = True
                     continue

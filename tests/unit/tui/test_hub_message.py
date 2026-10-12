@@ -181,6 +181,57 @@ async def test_same_id_richer_replay_replaces_the_human_seat_in_place() -> None:
 
 
 @pytest.mark.asyncio
+async def test_marked_row_adopts_a_picture_that_arrives_on_a_later_same_id_pass() -> None:
+    """Direct acceptance: a marked row painted WITHOUT a picture, then
+    replayed same-ID WITH authoritative ImageContent, mounts that first
+    picture (adoption by anchor count) — and one more replay re-carrying it
+    adds no second copy."""
+    from local_operator.harness.types import ImageContent
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        message = _marked_steer()
+        app._project_settled_rows([message])
+        await pilot.pause()
+        view = app.query_one(TranscriptView)
+        assert not [block for block in view.blocks() if isinstance(block, ImageBlock)]
+
+        picture = Message.user(message.text, id=message.id)
+        picture.provider_payload = dict(message.provider_payload)
+        picture.content.append(ImageContent(data="QUJD", mime_type="image/png"))
+        app._project_settled_rows([picture])
+        await pilot.pause()
+        images = [block for block in view.blocks() if isinstance(block, ImageBlock)]
+        assert len(images) == 1
+        assert images[0].navigation_anchor_id == message.id
+
+        app._project_settled_rows([picture])
+        await pilot.pause()
+        assert len([block for block in view.blocks() if isinstance(block, ImageBlock)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_stamped_but_invalid_marker_keeps_the_row_human() -> None:
+    """R3-1 acceptance: an invalid marker with wrapper-looking text renders
+    the operator's own row — never a receipt, never a body guess."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        message = Message.user(
+            "<parent-message>\nFocus on retries\n</parent-message>", id="stamped-invalid"
+        )
+        message.provider_payload = {
+            "hub_receipt": {"direction": "sideways", "body": "Focus on retries"}
+        }
+        app._project_settled_rows([message])
+        await pilot.pause()
+        blocks = app.query_one(TranscriptView).blocks()
+        assert not [block for block in blocks if isinstance(block, HubMessageBlock)]
+        assert len([block for block in blocks if isinstance(block, UserBlock)]) == 1
+
+
+@pytest.mark.asyncio
 async def test_marked_image_row_keeps_its_picture_and_never_doubles() -> None:
     """R3-3 (review round 3): the marker reclassifies the ROW, never its
     attachments — a marked row carrying an image keeps its ImageBlock beside
