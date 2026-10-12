@@ -476,11 +476,24 @@ def arm_process_desktop_gates() -> None:
         os.environ[name] = value
 
 
+def scrub_import_time_environment() -> None:
+    """Clear resource destinations before production modules capture them.
+
+    A function-scoped fixture runs after collection: relay imports open_trace
+    while collecting its tests, so clearing the variable in that fixture leaves
+    the already-captured output path live. Match the desktop gates' import-time
+    and configure-time protection without changing production's once-at-import
+    semantics. A tracing test can still opt in afterward in its own subprocess.
+    """
+    os.environ.pop("LOP_OPEN_TRACE", None)
+
+
 # At IMPORT, not only in a hook: a collection-time import (a module-scope helper,
 # a fixture that builds a child env) runs before ``pytest_configure`` in a worker
 # that receives already-collected items, and the whole point of setting it here
 # is that no child can be spawned before it is in the environment.
 arm_process_desktop_gates()
+scrub_import_time_environment()
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -491,6 +504,7 @@ def pytest_configure(config: pytest.Config) -> None:
     session's first test.
     """
     arm_process_desktop_gates()
+    scrub_import_time_environment()
 
 
 @pytest.fixture(scope="session", autouse=True)
