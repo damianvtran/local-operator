@@ -58,7 +58,12 @@ class _Scheduler:
 
 
 def _sessions_launcher(
-    label: str, prompt: str, *, agent: str = "task", effort: str | None = None
+    label: str,
+    prompt: str,
+    *,
+    agent: str = "task",
+    effort: str | None = None,
+    model: str | None = None,
 ) -> str:
     """The surface the sessions builder checks for (createIf rung 3)."""
     return "job-x"

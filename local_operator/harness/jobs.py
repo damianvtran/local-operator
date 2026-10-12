@@ -619,6 +619,10 @@ class AsyncJob(BaseModel):
     # the child had inherited when a pin had in fact been accepted. ``None`` is
     # "not recorded" and the reader falls back to comparing labels.
     owns_model: bool | None = None
+    # The per-run selector is distinct from the resolved label: inherit is a
+    # relationship, whereas a direct pick stays pinned across parent switches.
+    model_selector: str | None = None
+    model_selection_source: str = ""
     # The label the launch's PIN resolved to (a tier or role pin), stamped at
     # REGISTRATION beside ``owns_model`` and NEVER overwritten — the mirror of
     # the attribution stamp for the MODEL. ``model_label`` above is deliberately

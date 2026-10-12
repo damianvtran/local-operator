@@ -59,6 +59,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import math
 import os
 import plistlib
@@ -73,6 +74,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -141,7 +143,11 @@ from local_operator.network.types import (
     trust_state,
 )
 from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
+from local_operator.session import open_trace
 from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, PROTOCOL_VERSION
+from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Defaults, beside their readers (AGENTS.md, "Adding a configuration key")
@@ -210,6 +216,12 @@ ROTATION_LOCK_S = 30.0
 #: The local session catalogue is cached this long, so a sidebar polling every
 #: second does not turn into a scan storm.
 CATALOG_CACHE_S = 2.0
+
+#: How many BUILT open frames one relay process memoizes (see
+#: ``RelayServer._frame_memo_key``). A viewer watches a handful of conversations;
+#: 8 covers them at the page cache's own house scale, at ~128 KB per settled
+#: frame on the reference fixture.
+FRAME_MEMO_ENTRIES = 8
 
 #: The audit log has one writer, and it is this process. The heartbeat reuses the
 #: session runtime's interval so a reader needs ONE freshness rule for every record
@@ -4043,6 +4055,29 @@ def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
     return str(directory.resolve())
 
 
+def warm_open_frame_strip_now() -> None:
+    """Pay the strip's one-time import bill (see ``RelayServer._warm_open_frame_strip``).
+
+    Module-level so a caller without the thread can run it, and so the warm's
+    exact calls are testable without racing a ``start()``: the two predicates
+    the strip's user-row check makes, each forcing the lazy chain ``harness.rows``
+    defers (``is_harness_injection`` -> ``compaction.cutpoint`` ->
+    ``compaction.tokens``; ``is_harness_chrome`` -> ``harness_chrome_prompts`` ->
+    ``harness.loop`` -> ``guard_area`` -> ``tools.builtin`` -> ``session.session``).
+    """
+    try:
+        from local_operator.harness.rows import is_harness_chrome, is_harness_injection
+
+        # An injection check with an empty payload still imports
+        # ``compaction.cutpoint`` (the import precedes the payload read); a
+        # non-empty non-matching string exercises the chrome tuple AND each
+        # producer-side recogniser.
+        is_harness_injection({"role": "user", "provider_payload": {}})
+        is_harness_chrome("warm the open-frame strip")
+    except Exception:  # noqa: BLE001 — a warm that fails is a warm deferred
+        logger.debug("open-frame strip warm failed", exc_info=True)
+
+
 class RelayServer:
     """The listener, the links, the dispatch, and the loopback control surface."""
 
@@ -4091,6 +4126,23 @@ class RelayServer:
         #: dispatched — see PeerLink._handle).
         self._streams: dict[str, _Stream] = {}
         self._streams_lock = threading.Lock()
+        #: THE BUILT-FRAME MEMO. An open frame is a pure function of the journal,
+        #: the index facts and the request, so a REPEAT open of a settled
+        #: conversation re-derived the same answer (the reference fixture: two
+        #: 200-row page reads, the visibility filter, the index join and the
+        #: strip, per open, per viewer). Keyed by the journal's own invalidation
+        #: triple (see :meth:`_frame_memo_key`) and bounded because a relay
+        #: serves a viewer's handful of sessions, not the store. Guarded by its
+        #: own lock: stored reads run on LINK READER THREADS, and two viewers can
+        #: open the same conversation at once. Answers are SHARED: callers must
+        #: not mutate the dict or its nested rows/runs; fitting copies when it
+        #: trims and serializers only read. Eight ordinary capped frames retain
+        #: about 12 MiB of serialized entry payload (8 * OPEN_FRAME_MAX_BYTES),
+        #: plus run facts and Python-object overhead, versus the page cache's
+        #: 24 MiB budget. This is an ENTRY-count bound, not a heap-byte bound:
+        #: build_frame permits one oversized row, so 12 MiB is not a hard ceiling.
+        self._frame_memo: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
+        self._frame_memo_lock = threading.Lock()
         #: req numbers for relay-initiated requests on a link (stream opens).
         #: A separate counter from any other user's, so a reply can never be
         #: matched by the wrong waiter.
@@ -4268,6 +4320,31 @@ class RelayServer:
         self._flush_outboxes()
         self._run_start_hooks()
         self._sweep_approvals_once()
+        self._warm_open_frame_strip()
+
+    def _warm_open_frame_strip(self) -> None:
+        """Pay the strip's one-time import bill BEFORE the first open needs it.
+
+        ``strip_entry``'s user-row check pulls two chains this process does not
+        otherwise touch — ``harness.rows.is_harness_injection`` ->
+        ``compaction.cutpoint`` -> ``compaction.tokens``, and
+        ``harness.rows.is_harness_chrome`` -> ``harness_chrome_prompts`` ->
+        ``harness.loop`` -> ``guard_area`` -> ``tools.builtin`` ->
+        ``session.session`` — and both are LAZY on purpose (their own docstrings
+        carry the measurements: 2.3 ms for the module alone against 308 ms for
+        the module plus ``compaction.cutpoint``). On a cold relay the FIRST open
+        that reached a user row paid them on the LINK READER thread: measured on
+        the S3 fixture, 110-449 ms inside the open against 0.8 ms warm (the
+        isolated probe: 448.7 ms first call, 0.8 ms second). The chain costs the
+        same wherever it lands, so it lands HERE, at serve start, on a daemon
+        thread — startup is the one moment nothing is waiting on a frame.
+        """
+        try:
+            threading.Thread(
+                target=warm_open_frame_strip_now, name="warm-open-strip", daemon=True
+            ).start()
+        except Exception:  # noqa: BLE001 — thread exhaustion defers only the warm
+            logger.debug("open-frame strip warm could not start", exc_info=True)
 
     def _run_start_hooks(self) -> None:
         """Run each slice's one-shot start hook, on its own daemon thread.
@@ -7346,9 +7423,21 @@ class RelayServer:
         cap to hide one in, so the reader degrades to the existing missing-media
         placeholder (design §"Attachments degrade").
         """
+        op_at = time.monotonic()
         session_id = str(frame.get("session_id") or "")
         if not session_id:
             raise MeshRefusal("protocol_error", "net_session_history must name a session_id")
+        if open_trace.enabled():
+            # THE OWNER'S RECEIVE EDGE: the first instant the ask is the owner's.
+            # A's ``a.stored.ask`` window minus this one is the hop and queues
+            # between the two relays, on the same host clock.
+            open_trace.mark(
+                "b.recv",
+                session=session_id,
+                before_id=str(frame.get("before_id") or ""),
+                limit=frame.get("limit"),
+                open_frame=bool(frame.get("open_frame")),
+            )
         directory = self.root / "sessions" / session_id
         if not directory.is_dir():
             raise MeshRefusal(
@@ -7369,12 +7458,26 @@ class RelayServer:
         # request with exactly this page — which is why the client must (and
         # does) tolerate the fields being absent.
         if validate_open_frame(frame.get("open_frame")):
-            return fit_session_history_reply(
-                frame.get("req"),
-                self._open_frame_detail(
-                    directory, session_id=session_id, before_id=before_id, limit=limit
-                ),
+            detail_at = time.monotonic()
+            detail = self._open_frame_detail(
+                directory, session_id=session_id, before_id=before_id, limit=limit
             )
+            if open_trace.enabled():
+                open_trace.mark(
+                    "b.detail",
+                    (time.monotonic() - detail_at) * 1000,
+                    session=session_id,
+                    limit=limit,
+                )
+            fit_at = time.monotonic()
+            reply = fit_session_history_reply(frame.get("req"), detail)
+            if open_trace.enabled():
+                # SPLIT FROM THE BUILD: fitting encodes the reply at least once
+                # (its encoded size is how it is cut), which is the serialization
+                # step between the owner's build and the link write.
+                open_trace.mark("b.fit", (time.monotonic() - fit_at) * 1000, session=session_id)
+                open_trace.mark("b.op.total", (time.monotonic() - op_at) * 1000, session=session_id)
+            return reply
 
         from local_operator.harness.rows import visible_transcript_rows
 
@@ -7404,6 +7507,26 @@ class RelayServer:
                 "has_newer": page.has_newer,
             },
         )
+
+    def _frame_memo_key(
+        self, session_id: str, before_id: str | None, limit: int
+    ) -> tuple[Any, ...] | None:
+        """The built-frame memo's key for one read, or ``None`` when uncacheable.
+
+        THE INVALIDATION IS THE INDEX'S OWN TRIPLE — (inode, size, mtime) of the
+        journal, ``transcript_index._sig_matches``'s rule, adopted verbatim so a
+        frame and the facts it carries can never disagree about which journal
+        they describe: an append changes the size, a compaction's ``os.replace``
+        mints a new inode, and a rewrite that preserves both is the same residual
+        every other cache on this path accepts. ``None`` when the journal cannot
+        be statted: the read below reports that as an ordinary missing page, and
+        a memo must not pin it.
+        """
+        try:
+            st = (self.root / "sessions" / session_id / TRANSCRIPT_FILENAME).stat()
+        except OSError:
+            return None
+        return (session_id, before_id or "", limit, st.st_ino, st.st_size, st.st_mtime)
 
     def _open_frame_detail(
         self,
@@ -7452,12 +7575,32 @@ class RelayServer:
             tail_head_reachable,
         )
 
+        # A REPEAT OPEN IS THE COMMON CASE, and without this memo it re-derived
+        # the whole frame below — two page reads, the visibility filter, the
+        # index join and the strip — for an answer that is a pure function of
+        # rows it had already read. The check is one stat plus a dict lookup
+        # under its own lock, taken before any read; a miss falls through to the
+        # build unchanged.
+        memo_key = self._frame_memo_key(session_id, before_id, limit)
+        cached: dict[str, Any] | None = None
+        if memo_key is not None:
+            with self._frame_memo_lock:
+                cached = self._frame_memo.get(memo_key)
+                if cached is not None:
+                    self._frame_memo.move_to_end(memo_key)
+        if cached is not None:
+            if open_trace.enabled():
+                open_trace.mark("b.memo", session=session_id, hit=True)
+            return cached
+
         collected: list[dict[str, Any]] = []
         has_more = False
         cursor_missing = False
         cursor = before_id
         index: Any = None
+        frame_at = time.monotonic()
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
+            read_at = time.monotonic()
             try:
                 page = self._stored_page_read(
                     directory,
@@ -7470,6 +7613,15 @@ class RelayServer:
                     limit=limit + OPEN_FRAME_MAX_EXTRA_ROWS,
                 )
             except FileNotFoundError:
+                if open_trace.enabled():
+                    open_trace.mark(
+                        "b.page",
+                        (time.monotonic() - read_at) * 1000,
+                        session=session_id,
+                        attempt=attempt,
+                        before_id=cursor or "",
+                        missing=True,
+                    )
                 if collected:
                     break
                 # A journal that does not exist yet: the empty page, and no
@@ -7489,6 +7641,21 @@ class RelayServer:
                     "runs_state": "unsupported",
                     "head_cut": False,
                 }
+            if open_trace.enabled():
+                # PER-ATTEMPT PAGE READ, in milliseconds plus the reader's own
+                # facts: ``entries`` is what the page carried BEFORE this loop's
+                # visibility filter, and attempts 1+ are the head hunt's extra
+                # reads (page_cache marks hit/miss for the same key beside this).
+                open_trace.mark(
+                    "b.page",
+                    (time.monotonic() - read_at) * 1000,
+                    session=session_id,
+                    attempt=attempt,
+                    before_id=cursor or "",
+                    limit=limit + OPEN_FRAME_MAX_EXTRA_ROWS,
+                    entries=len(page.entries),
+                    has_more=page.has_more,
+                )
             if not collected:
                 cursor_missing = page.reconciled
             has_more = page.has_more
@@ -7509,7 +7676,15 @@ class RelayServer:
             # for in bytes. Only a TAIL read consults it: the shortcut is about
             # the journal's END, and a ``before_id`` page is owed its rows.
             if attempt == 0 and index is None and before_id is None:
+                index_at = time.monotonic()
                 index = self._stored_frame_index(session_id)
+                if open_trace.enabled():
+                    open_trace.mark(
+                        "b.index",
+                        (time.monotonic() - index_at) * 1000,
+                        session=session_id,
+                        fresh=index is not None,
+                    )
             if (
                 index is not None
                 and len(paintable_rows) >= limit
@@ -7533,7 +7708,16 @@ class RelayServer:
             if not cursor:
                 break
         if index is None:
+            index_at = time.monotonic()
             index = self._stored_frame_index(session_id)
+            if open_trace.enabled():
+                open_trace.mark(
+                    "b.index",
+                    (time.monotonic() - index_at) * 1000,
+                    session=session_id,
+                    fresh=index is not None,
+                    final=True,
+                )
         kept, reached = align_page(collected, limit)
         result = build_frame(
             kept,
@@ -7578,6 +7762,30 @@ class RelayServer:
         # may then have dropped the oldest rows — the page's user row first — so
         # a page could report ``head_cut: false`` while its oldest run WAS cut.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
+        if memo_key is not None and answer["runs_state"] == "ready":
+            # ONLY A FRAME WITH ITS FACTS COMPLETE IS MEMOIZED. A ``building``
+            # answer (cold index: ``_stored_frame_index`` answered None) is the
+            # one shape that must NOT be pinned — the contract's own follow-up is
+            # that the next read carries the facts, and a memo of the cold answer
+            # would serve "building" until the journal changed. The journal
+            # triple in the key is what makes the store safe: any write to the
+            # journal mints a new key, so this entry can only ever answer for
+            # the rows it was built from.
+            with self._frame_memo_lock:
+                self._frame_memo[memo_key] = answer
+                self._frame_memo.move_to_end(memo_key)
+                while len(self._frame_memo) > FRAME_MEMO_ENTRIES:
+                    self._frame_memo.popitem(last=False)
+        if open_trace.enabled():
+            open_trace.mark(
+                "b.build",
+                (time.monotonic() - frame_at) * 1000,
+                session=session_id,
+                kept=len(kept),
+                collected=len(collected),
+                runs_state=result.runs_state,
+                runs=len(result.runs),
+            )
         return answer
 
     def _stored_frame_index(self, session_id: str) -> Any:
@@ -7615,6 +7823,11 @@ class RelayServer:
 
         index = index_module.fresh_resident(self.root, session_id)
         if index is not None:
+            if open_trace.enabled():
+                # THE READY BRANCH, WHICH IS TWO STATS AND NO SCAN: a trace
+                # showing ``fresh=True`` here means the index was never the
+                # latency, whatever the total says.
+                open_trace.mark("b.frame_index", session=session_id, fresh=True)
             return index
         try:
             with self._page_loop_lock:
@@ -7630,6 +7843,10 @@ class RelayServer:
             scheduled.result(timeout=SESSION_HISTORY_FRAME_INDEX_BOUND_S)
         except Exception:  # noqa: BLE001 — a refresh is an optimisation, not the answer
             pass
+        if open_trace.enabled():
+            # ``fresh=False`` says this read answered ``building``: the page is
+            # served, the facts wait for the client's next frame instead.
+            open_trace.mark("b.frame_index", session=session_id, fresh=False)
         return None
 
     async def _schedule_frame_index_refresh(self, session_id: str) -> None:
@@ -12042,6 +12259,19 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
         exec_start=(
             f"{supervisors.quoted(str(image))} -m local_operator.network.relay " f"--port {port}"
         ),
+        # ``KillMode=process`` IS THE SESSION-SAFETY FIX (2026-10-11), and the
+        # relay is the one unit that must carry it: this device's session
+        # runtimes are children of the relay, so under systemd's default
+        # (``control-group``) ANY relay restart — the manual verb, an update's
+        # roll, the member pass — killed the node's sessions, including the
+        # session that asked. ``process`` kills only the main process and is
+        # macOS parity by design (launchd children survive). A survivor
+        # reparents to ``systemd --user`` and re-attaches when the relay is
+        # back; see ``supervisors.render_systemd_unit`` for the no-reap
+        # decision (an ExecStop reaper would fire on RESTART too and recreate
+        # this defect) and ``refresh_unit_if_stale`` below for the migration
+        # that adds this line to units installed before it existed.
+        kill_mode="process",
         post_lines=[
             f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir()}')}",
             *supervisors.output_redirect_lines(log_path()),
@@ -12129,6 +12359,154 @@ def refresh_plist_if_stale() -> Any:
         from local_operator import launchd
 
         return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
+
+
+def refresh_unit_if_stale() -> Any:
+    """The Linux arm of the daemon-refresh seam: migrate the unit, move a stale relay.
+
+    WHY THIS EXISTS (2026-10-11, the rolling-updates drill): the member pass — and
+    ``lop update``'s own tail, and ``lop services restart`` — all reach
+    ``update.refresh_service_daemons_after_upgrade`` to roll the supervised
+    services onto the build the pointer now names, and on Linux that call was an
+    announced no-op (audit A24): the node's install moved while its relay kept
+    serving the previous build, because a relay advertises the build it RUNS and
+    nothing restarted it. This is the systemd sibling of
+    :func:`refresh_plist_if_stale`, sharing its second staleness question and its
+    outcome vocabulary (``launchd.PlistRefresh``, so ``daemon_report`` parsing
+    and the update report are the same for both platforms).
+
+    THE TWO HALVES, in the order that makes the second one safe:
+
+    1. **Migrate the unit file.** A unit whose content differs from
+       :func:`render_systemd`'s is rewritten and ``daemon-reload``ed. This is
+       also how an installed unit grows ``KillMode=process`` — the
+       session-safety fix every pre-existing unit predates — and it must land
+       BEFORE any restart below: under systemd's default ``control-group`` a
+       restart kills every process left in the unit's cgroup, and the session
+       runtimes live there (``supervisors.render_systemd_unit`` carries the
+       semantics and the no-reap decision). A rewrite that cannot be written or
+       re-read is a ``failed`` outcome and the refresh STOPS — restarting on a
+       unit whose kill semantics are unproven is the exact defect this arm
+       removes, so it is refused rather than risked.
+    2. **Move a provably-stale relay.** ``_managed_service_pid`` plus
+       ``update.stale_generation_of_process`` — the same question the macOS arm
+       asks — and only a PROVEN move restarts, through :func:`service_action`,
+       whose wrapper verifies a new pid actually serves before anything claims
+       a move. A rewrite alone restarts nothing: ``daemon-reload`` makes the
+       new definition effective at the next start, and no summary line is
+       printed for it (the launchd ``repaired`` sentence claims a restart,
+       which would be false here).
+
+    GUARDS, all silent declines: a Linux host with its supervisor; the unit
+    exists; the unit is addressable from this run (a sandboxed ``HOME``
+    declines before any manager is reached); and the unit's image names this
+    install's stable shim (``_unit_image``/``_names_the_shim``) — a unit that
+    would restart through some other tree is not this run's to move, and the
+    shim is exactly the generation axis the build question needs. Every path is
+    no-raise: an upgrade that already succeeded is the only caller.
+    """
+    from local_operator import launchd, update
+
+    name = "network relay"
+    recovery = "lop network install"
+    try:
+        if not (sys.platform.startswith("linux") and is_supported()):
+            return launchd.PlistRefresh(name=name, kind="unsupported")
+        path = systemd_path()
+        if not path.exists():
+            return launchd.PlistRefresh(name=name, kind="not-installed")
+        if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        image = _unit_image()
+        if image is None or not _names_the_shim(image):
+            # NOT THIS RUN'S TO MOVE: the unit's image does not resolve the
+            # generation pointer, so there is no proven move to make and a
+            # rewrite could repoint a tree this refresh does not own. The F10
+            # discipline — an unanswered question declines; it does not guess.
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        rendered = render_systemd(_service_port())
+        try:
+            current = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return launchd.PlistRefresh(
+                name=name,
+                kind="failed",
+                detail=f"could not read {path}: {exc} — run `{recovery}` to reinstall the unit",
+            )
+
+        def reload_unit() -> Any:
+            # DISK-CURRENT IS NOT MANAGER-CURRENT: a prior failed reload leaves
+            # the safe unit on disk but control-group loaded. Another refresh
+            # may also see that disk during a writer's write/reload gap. Each
+            # proven-move caller therefore needs its own successful reload;
+            # neither disk equality nor another caller's attempt proves safety.
+            reloaded = supervisors.systemctl_user("daemon-reload")
+            if reloaded.returncode != 0:
+                return launchd.PlistRefresh(
+                    name=name,
+                    kind="failed",
+                    detail=(
+                        "rewrote the relay unit but systemctl could not re-read it: "
+                        f"{supervisors.translate_systemctl_error(reloaded.stderr)} — "
+                        f"run `{recovery}` to reinstall it"
+                    ),
+                )
+            return None
+
+        if current != rendered:
+            try:
+                path.write_text(rendered, encoding="utf-8")
+            except OSError as exc:
+                return launchd.PlistRefresh(
+                    name=name,
+                    kind="failed",
+                    detail=(
+                        f"could not rewrite {path}: {exc} — run `{recovery}` to reinstall "
+                        "the unit"
+                    ),
+                )
+            failure = reload_unit()
+            if failure is not None:
+                return failure
+        pid = _managed_service_pid()
+        if pid is None:
+            # No running process, no build to compare — a stopped daemon is the
+            # installers' to repair, not this refresh's (same rule as the
+            # macOS arm's "no live pid" decline).
+            return launchd.PlistRefresh(name=name, kind="current")
+        stale = update.stale_generation_of_process(pid)
+        if stale is None:
+            return launchd.PlistRefresh(name=name, kind="current")
+        if current == rendered:
+            # The rewrite arm already reloaded this caller's new definition.
+            # A byte-current unit needs the same loaded-state guarantee, but
+            # only on a proven move: no-move probes still leave it untouched.
+            failure = reload_unit()
+            if failure is not None:
+                return failure
+        result = service_action("restart")
+        if not result.get("ok"):
+            # Same refusal as the macOS arm's, in this platform's words: the
+            # move was proven and did not happen; the sentence names the
+            # installer that can make it.
+            why = "systemctl would not restart it"
+            if str(result.get("reason") or "") == "not_restarted":
+                why = "the restart it accepted did not take"
+            return launchd.build_move_failure(name, recovery, stale, why=why)
+        return launchd.PlistRefresh(
+            name=name,
+            kind="restarted",
+            detail=stale.name,
+            consequence="expect a brief mesh blip",
+        )
+    except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
+        from local_operator import launchd
+
+        return launchd.PlistRefresh(
+            name=name,
+            kind="failed",
+            detail=f"could not refresh the relay unit: {exc} — run `{recovery}` to reinstall it",
+        )
 
 
 def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, Any]:

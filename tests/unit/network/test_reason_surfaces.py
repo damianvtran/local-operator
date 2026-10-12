@@ -108,6 +108,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the arm's machine reason, compared to gate enrichment — never printed",
     ),
+    # The Linux refresh arm's one raw read (2026-10-11, stale-relay memo): the
+    # same wrapper's machine reason, compared — never printed — to pick which
+    # clause the failure sentence carries (``not_restarted`` means the restart
+    # was accepted and replaced nothing, the shape that must not read as a bare
+    # refusal). The read gates the SENTENCE; every sentence rendered from it is
+    # composed by ``launchd.build_move_failure``'s approved family, which never
+    # quotes the token.
+    ("local_operator/network/relay.py", "refresh_unit_if_stale", "reason"): (
+        1,
+        "the wrapper's machine reason, compared to pick the failure clause — never printed",
+    ),
     # The onboarding adapter COPIES the runner's own receipt row into the store's
     # six fields: ``detail`` here was composed by the runner a moment earlier
     # (never a peer's wire value), and this read is the field re-shape itself —

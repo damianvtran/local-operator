@@ -86,7 +86,7 @@ def config_dir(tmp_path, monkeypatch) -> Path:
     return path
 
 
-def _launcher(label, prompt, *, agent="task", effort=None):
+def _launcher(label, prompt, *, agent="task", effort=None, model=None):
     return f"job:{label}:{effort}"
 
 
@@ -470,8 +470,8 @@ def test_zero_tiers_tells_the_model_not_to_pass_effort(config_dir, tmp_path) -> 
     write_tiers(config_dir, None, model_choice=MODEL_CHOICE_MODEL)
     (task,) = create_tools(_context(tmp_path), enabled=["task"])
     assert "No effort tiers are configured" in task.description
-    assert "inherits this session's model and reasoning effort" in task.description
-    assert "do not pass 'effort'" in task.description
+    assert "model=inherit to bypass role pins" in task.description
+    assert "omit effort" in task.description
 
 
 def test_one_tier_is_the_whole_enum_and_names_its_model(config_dir, tmp_path) -> None:
@@ -484,7 +484,7 @@ def test_one_tier_is_the_whole_enum_and_names_its_model(config_dir, tmp_path) ->
     assert _enum(single) == ["hi"]
     assert _enum(item) == ["hi"]
     assert "hi → anthropic/claude-opus-5" in single["description"]
-    assert "Omit to inherit" in single["description"]
+    assert "Omit to keep role defaults" in single["description"]
     # The optional field reaches the wire as its plain enum: ``create_tools``
     # drops pydantic's ``anyOf: [T, null]`` + ``default: null`` scaffolding for
     # an optional property (``tools.registry.collapse_optional_nulls``), and the
@@ -815,7 +815,7 @@ def test_operator_mode_removes_the_field_from_both_task_forms(config_dir, tmp_pa
 def test_operator_mode_tells_the_model_not_to_pass_effort(config_dir, tmp_path) -> None:
     write_tiers(config_dir, THREE, model_choice=MODEL_CHOICE_OPERATOR)
     (task,) = create_tools(_context(tmp_path), enabled=["task"])
-    assert "do not pass 'effort'" in task.description
+    assert "omit effort" in task.description
     # The key is asserted in the spelling the `/settings` page prints and `lop
     # config edit` takes, not the ``values.``-prefixed file path: the page never
     # shows the prefix, and a reader who is told to change a key they cannot
@@ -846,7 +846,7 @@ def test_operator_mode_with_zero_tiers_says_the_same_thing(config_dir, tmp_path)
     (operator_mode,) = create_tools(_context(tmp_path), enabled=["task"])
 
     assert "No effort tiers are yours to choose" in operator_mode.description
-    assert "do not pass 'effort'" in operator_mode.description
+    assert "omit effort" in operator_mode.description
     assert operator_mode.description != with_tiers.description
 
 
@@ -872,7 +872,7 @@ def test_model_mode_names_the_swap_in_its_description(config_dir, tmp_path) -> N
     assert "Swaps this child's MODEL" in prop["description"]
     assert "not its reasoning level" in prop["description"]
     assert "hi → anthropic/claude-opus-5" in prop["description"]
-    assert "Omit to inherit this session's model" in prop["description"]
+    assert "model=inherit skips role pins" in prop["description"]
 
 
 @pytest.mark.asyncio

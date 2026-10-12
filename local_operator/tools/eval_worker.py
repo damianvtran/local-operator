@@ -244,7 +244,7 @@ def _record_tool_failure(name: str, call_id: str, result: dict[str, Any]) -> Non
     _TOOL_FAILURES.append({"name": str(name), "call_id": str(call_id), "text": text})
 
 
-def _call_tool(name: str, **arguments: Any) -> dict[str, Any]:
+def _call_tool(name: str, /, **arguments: Any) -> dict[str, Any]:
     """Execute one approved harness tool and return its structured ToolResult.
 
     Read ``result['is_error']`` and ``result['content']`` before consuming it.
@@ -252,6 +252,9 @@ def _call_tool(name: str, **arguments: Any) -> dict[str, Any]:
     pipeline to project just the fields needed by the next reasoning step.
     Errors remain data exactly as with direct calls. This helper is rebound
     per cell, and reads the current cell identity even through an old alias.
+    The routing name is positional-only: project, agent and secret payloads
+    legitimately carry their own ``name`` argument and must reach dispatch
+    without colliding with this bridge parameter.
     """
     # Only the foreground cell may consume protocol input. A Python thread can
     # outlive its cell and otherwise steal the next cell's request/response or
