@@ -173,6 +173,9 @@ def _responses_output_bytes(items: Sequence[Mapping[str, Any]]) -> int:
         for part in [*(item.get("content") or []), *(item.get("summary") or [])]:
             if isinstance(part, Mapping):
                 size += len(str(part.get("text") or "").encode("utf-8"))
+                # Snapshot-only compatible streams carry refusal under its own
+                # field, not text; repeated snapshots remain separate from deltas.
+                size += len(str(part.get("refusal") or "").encode("utf-8"))
     return size
 
 
@@ -3500,9 +3503,17 @@ class OpenAICompatClient:
                     yield StreamStartEvent(
                         response_id=_stream_id((payload.get("response") or {}).get("id"))
                     )
-                # Encrypted reasoning stays opaque. Complete output items are
-                # retained below; deltas never enter the user-visible transcript.
+                # Reasoning remains invisible here, but plaintext deltas still
+                # consume the shared output envelope BEFORE this opaque skip.
+                # Charging later in the dispatcher is unreachable for this family.
                 if event_type.startswith("response.reasoning"):
+                    if event_type in (
+                        "response.reasoning_text.delta",
+                        "response.reasoning_summary_text.delta",
+                    ):
+                        delta = payload.get("delta")
+                        if delta:
+                            envelope.charge(delta)
                     continue
                 if event_type == "response.output_item.added":
                     item = payload.get("item") or {}
@@ -3551,15 +3562,6 @@ class OpenAICompatClient:
                     if delta:
                         envelope.charge(str(delta))
                         refusal_parts.append(str(delta))
-                elif event_type in (
-                    "response.reasoning_text.delta",
-                    "response.reasoning_summary_text.delta",
-                ):
-                    # These events are not surfaced by this adapter today, but
-                    # they still consume generated-output resources.
-                    delta = payload.get("delta")
-                    if delta:
-                        envelope.charge(delta)
                 elif event_type in ("response.completed", "response.incomplete"):
                     response_obj = payload.get("response") or {}
                     if response_obj.get("id"):
