@@ -105,6 +105,10 @@ def _item(
 
 
 class FakeWire:
+    #: The explicit injected-fixture seam: a fake must NAME its destination
+    #: like a real client (the guard fails closed without one).
+    base_url = "https://qa.invalid/v1"
+
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.items: list[dict[str, Any]] = [_item()]
@@ -368,7 +372,7 @@ async def test_q4_409_conflict_is_terminal_and_not_resent(tmp_path: Path) -> Non
     store, owner = _store_with_owner(tmp_path)
     intent_id = await _intent(tmp_path, owner)
     wire = FakeWire()
-    wire.ack_error = BridgeRefusal("screening_mismatch", "differing verdict", http_status=409)
+    wire.ack_error = BridgeRefusal("invalid_transition", "differing verdict", http_status=409)
     first = await pull.flush_ack(
         owner, intent_id, config_dir=tmp_path, access=_access(), client=wire
     )

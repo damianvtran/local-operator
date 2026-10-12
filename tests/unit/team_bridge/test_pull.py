@@ -29,6 +29,8 @@ def _setup(tmp_path: Path) -> tuple[Store, OwnerSnapshot, OAuthAccess]:
 
 
 class FakeWire:
+    base_url = "https://hub.example"
+
     def __init__(self, *, on_ack: Any = None) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.on_ack = on_ack
