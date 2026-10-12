@@ -10,10 +10,31 @@ import pytest
 
 from local_operator.providers.oauth import meta_muse
 from tests.unit.server.test_desktop_controls import desktop as _desktop_fixture
-from tests.unit.server.test_desktop_controls import wait_for_state
 
 desktop = _desktop_fixture
 KEY = "LLM|1234|fixture_desktop_key"
+
+
+async def wait_for_muse_state(client, operation_id: str):
+    """Real elapsed budget: store/default writes may complete in worker threads.
+
+    Yielding 1000 loop turns can finish before a healthy background write even
+    starts. Poll the same HTTP contract within a monotonic wall-clock bound,
+    retaining a last-state diagnostic rather than waiving a slow success.
+    """
+    last_state = "not observed"
+    try:
+        async with asyncio.timeout(30):
+            while True:
+                data = (await client.get(f"/v1/auth/operations/{operation_id}")).json()["result"]
+                last_state = data["state"]
+                if last_state in ("succeeded", "failed"):
+                    return data
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        pytest.fail(
+            f"Muse login did not settle within 30 elapsed seconds; last state: {last_state}"
+        )
 
 
 @pytest.mark.asyncio
@@ -53,8 +74,11 @@ async def test_meta_device_operation_contract(desktop, monkeypatch, outcome):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as protocol:
 
-        async def login(callbacks, *, signal=None, **_kwargs):
-            return await original(callbacks, signal=signal, http_client=protocol)
+        async def login(callbacks, *, signal=None, open_browser=None, **_kwargs):
+            assert open_browser is not None  # renderer-owned opening must reach the device flow
+            return await original(
+                callbacks, signal=signal, http_client=protocol, open_browser=open_browser
+            )
 
         monkeypatch.setattr(meta_muse, "login_meta_muse", login)
         started = await client.post("/v1/auth/login", json={"provider": "meta-muse"})
@@ -71,7 +95,7 @@ async def test_meta_device_operation_contract(desktop, monkeypatch, outcome):
             assert response.status_code == 200
             settled = response.json()["result"]
         else:
-            settled = await wait_for_state(client, op["id"], "succeeded", "failed")
+            settled = await wait_for_muse_state(client, op["id"])
         assert settled["state"] == (
             "succeeded"
             if outcome == "success"

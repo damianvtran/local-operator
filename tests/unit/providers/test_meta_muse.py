@@ -24,6 +24,12 @@ KEY = "LLM|1234|fixture_subscription_key"
 ACCOUNT_TOKEN = "fixture_account_bearer_no_live_access"
 
 
+@pytest.fixture(autouse=True)
+def _never_launch_a_real_browser(monkeypatch):
+    # Successful device fixtures exercise the opener, never the operator's desk.
+    monkeypatch.setattr("webbrowser.open", lambda *_args, **_kwargs: True)
+
+
 def fixture_transport(mint=None, *, token=None, authorization=None):
     requests = []
 
@@ -75,6 +81,7 @@ async def test_device_mints_distinct_key_and_reports_safe_operation_details():
             LoginCallbacks(
                 on_auth_url=lambda url, instructions=None: urls.append((url, instructions)),
                 on_warning=notices.append,
+                displays_warnings=True,
                 on_flow_details=lambda **value: details.append(value),
             ),
             http_client=http,
@@ -313,3 +320,83 @@ def test_sql_failure_rolls_back_new_sealed_key(tmp_path: Path, monkeypatch):
         assert store._row_matches_key(existing, KEY)
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("failure", ["execute", "commit", "locked-store"])
+def test_failed_logout_preserves_metadata_and_sealed_key(tmp_path: Path, monkeypatch, failure):
+    import sqlite3
+
+    from local_operator.secrets.errors import BrokerUnavailable
+
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        row = seed(store)
+        sibling = seed(store, "5678", "LLM|5678|fixture_sibling_key")
+        if failure == "execute":
+            store._conn.execute(
+                "CREATE TRIGGER fail_muse_logout BEFORE DELETE ON auth_credentials "
+                "BEGIN SELECT RAISE(ABORT, 'fixture metadata failure'); END"
+            )
+            store._conn.commit()
+        with monkeypatch.context() as faults:
+            if failure == "commit":
+
+                def fail_commit():
+                    raise sqlite3.OperationalError("fixture commit failure")
+
+                faults.setattr(store._conn, "commit", fail_commit)
+            elif failure == "locked-store":
+
+                def locked(*_args, **_kwargs):
+                    raise BrokerUnavailable("fixture locked store")
+
+                faults.setattr("local_operator.secrets.access.open_store", locked)
+            with pytest.raises((sqlite3.Error, BrokerUnavailable)):
+                store.delete_credential(row.id)
+        restored = store.get_credential(row.id)
+        assert restored is not None and restored.data == row.data
+        assert store._row_matches_key(restored, KEY)
+        assert store.get_credential(sibling.id) is not None
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("displayed", [False, True])
+async def test_disclosure_capability_and_injected_browser_ownership(displayed, monkeypatch):
+    warnings, urls, injected, global_opens = [], [], [], []
+    monkeypatch.setattr("webbrowser.open", lambda url: global_opens.append(url))
+    transport, _ = fixture_transport()
+    async with httpx.AsyncClient(transport=transport) as http:
+        await meta_muse.login_meta_muse(
+            LoginCallbacks(
+                on_warning=warnings.append,
+                on_auth_url=lambda url, instructions=None: urls.append((url, instructions)),
+                displays_warnings=displayed,
+            ),
+            http_client=http,
+            open_browser=lambda url: injected.append(url),
+        )
+    assert injected == [urls[0][0]] and global_opens == []
+    assert warnings == ([meta_muse.NOTICE] if displayed else [])
+    assert (meta_muse.NOTICE in urls[0][1]) is (not displayed)
+    assert "Enter code: ABCD-EFGH" in urls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_default_local_opener_and_visible_failure_remedy(monkeypatch):
+    opened, warnings = [], []
+
+    def fail_open(url):
+        opened.append(url)
+        return False
+
+    monkeypatch.setattr("webbrowser.open", fail_open)
+    transport, _ = fixture_transport()
+    async with httpx.AsyncClient(transport=transport) as http:
+        await meta_muse.login_meta_muse(
+            LoginCallbacks(on_warning=warnings.append, displays_warnings=True), http_client=http
+        )
+    assert opened == ["https://auth.meta.com/oauth/device/"]
+    assert warnings[0] == meta_muse.NOTICE
+    assert "displayed approval page" in warnings[1]

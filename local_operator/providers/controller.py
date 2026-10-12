@@ -1021,9 +1021,13 @@ class ProviderController:
         callbacks = factory(definition)
         # Desktop hosts hand the URL to their own main-process browser opener.
         # Inject it per flow: changing webbrowser globally would steal another
-        # session's concurrent login. Device flows only publish their URL.
+        # session's concurrent login. Muse's device flow also owns an opener;
+        # its desktop injection must survive this layer to avoid duplicate
+        # browser launches. Other device flows still only publish their URL.
         options: dict[str, Any] = {}
-        if open_browser is not None and definition.callback_port is not None:
+        if open_browser is not None and (
+            definition.callback_port is not None or provider_id == "meta-muse"
+        ):
             options["open_browser"] = open_browser
         # Passed UNCONDITIONALLY, including when it is None, so there is exactly
         # one call shape. Every login callable in the registry takes it: the

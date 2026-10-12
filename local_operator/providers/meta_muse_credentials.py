@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +55,55 @@ def read_key(credential: dict[str, Any], base: Path | None) -> str | None:
         return None
     key = provider_secret_value(ref, base=base)
     return key if key and key.startswith("LLM|") else None
+
+
+@contextmanager
+def reversible_key_deletion(
+    credential: dict[str, Any], base: Path | None, *, restore_if: Callable[[], bool]
+) -> Iterator[None]:
+    """Compensate a failed logout across the two stores, without disk plaintext.
+
+    Auth SQLite rollback cannot undo encrypted-store deletion. Keep the key in
+    process memory until its metadata commit succeeds; execution/commit failure
+    restores the same opaque reference. This is exception compensation, not a
+    promise of crash-atomic transactions across two independent WAL databases.
+    """
+    from local_operator.secrets.access import open_store, session_id
+    from local_operator.secrets.errors import SecretNotFound
+    from local_operator.secrets.store import provider_secret_name
+
+    ref = credential.get(REF_FIELD)
+    if not isinstance(ref, str) or not REF_PATTERN.fullmatch(ref):
+        yield
+        return
+    store = open_store(base)
+    name = provider_secret_name(ref)
+    try:
+        record = store.describe(name, role="provider")
+        value = store.get(name, role="provider", session_id=session_id())
+    except SecretNotFound:
+        # A previously removed key has no value to restore; logout still
+        # removes its unusable metadata, never an unrelated provider secret.
+        yield
+        return
+    try:
+        store.delete(name, role="provider", session_id=session_id())
+        yield
+    except BaseException:
+        if restore_if():
+            try:
+                store.describe(name, role="provider")
+            except SecretNotFound:
+                store.set(
+                    name,
+                    value,
+                    description=record.description,
+                    kind=record.kind,
+                    role="provider",
+                    session_id=session_id(),
+                    origin=record.origin,
+                )
+        raise
 
 
 def delete_key(credential: dict[str, Any], base: Path | None) -> None:
