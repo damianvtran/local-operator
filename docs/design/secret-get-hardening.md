@@ -965,6 +965,17 @@ over-masking is a defect, `redaction_shapes.py:58-70`):
 > stated residuals are the honest remainder: rot13, gzip, a double base64, a
 > per-character shift, a value below the floor (verbatim only), and a spelling
 > longer than its 64 KiB hold.
+>
+> **Amended 2026-10-12.** The "verbatim only" line above no longer holds. A value
+> below the floor now also gets its JSON ESCAPING, when that escaping is at least
+> `_SHORT_ESCAPE_MIN_SPELLING_LEN = 12` characters and decodes back to the value —
+> which is the spelling such a value is actually published in when a tool result
+> carries it (the `\uXXXX` runs a read produces, against a store holding only the
+> verbatim bytes). Every other family stays behind the value floor, and the
+> residual narrows to a value whose escaping is shorter than the spelling bound —
+> a one-character CJK value, six characters of escape. Both bounds, and why they
+> are two numbers rather than one, are documented beside the constants in
+> `local_operator/redaction_shapes.py`.
 
 ### 5.3 Coordination with the open work, checked rather than assumed
 
