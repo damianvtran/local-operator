@@ -400,11 +400,26 @@ def test_cache_fingerprint_covers_envelope_and_revision(tmp_path) -> None:
     changed["sender"]["account_id"] = "acc_attacker"
     out = _run(owner, tmp_path, negative, item=changed)
     assert out.disposition == "hold" and len(negative.calls) == 1
-    # Changed revision misses too (fresh policy revision = fresh admission).
+    # A fresh policy REVISION must come from the trusted publisher first
+    # (a consumer cannot introduce authority); once published, the same-body
+    # cache misses under the new revision and re-screens.
+    store.publish_screening_policy(
+        owner,
+        version=SCREENING_VERSION_V1,
+        template_sha256=SCREENING_TEMPLATE_V1_SHA256,
+        default_model="qa/default-model",
+        revision="rev-2",
+        expected_epoch=1,
+    )
     revised = Policy(admission_revision="rev-2")
     negative2 = Runner("VERDICT: hold\nREASON: context differs.")
     out = _run(owner, tmp_path, negative2, item=_item("bmsg_changed2"), policy=revised)
     assert out.disposition == "hold" and len(negative2.calls) == 1
+    # A consumer presenting an UNPUBLISHED revision holds before any dispatch.
+    stale = Policy(admission_revision="rev-3")
+    never = Runner()
+    out = _run(owner, tmp_path, never, item=_item("bmsg_changed3"), policy=stale)
+    assert out.disposition == "hold" and out.hold_code == "policy_stale" and never.calls == []
 
 
 def test_cached_reject_replays_without_rebill(tmp_path) -> None:

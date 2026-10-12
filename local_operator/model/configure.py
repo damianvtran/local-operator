@@ -3415,6 +3415,8 @@ class SessionStreamFn:
         session_id: str | None,
         cache_lineage_id: str | None = None,
         *,
+        wrap_client: Callable[[Any], Any] | None = None,
+        http_client: Any | None = None,
         _transport: _SessionTransport | None = None,
         _child_request_counter: _ChildModelRequestCounter | None = None,
         _counts_as_child_request: bool = False,
@@ -3459,8 +3461,14 @@ class SessionStreamFn:
         # routing hint and nothing else — in particular it does not share a
         # pinned credential row. Unifying the two would silently make it do so.
         self._cache_lineage_id = cache_lineage_id or session_id
+        # Optional narrow seams for dedicated one-shot streams (H3 screening):
+        # ordinary session callers pass neither, so the default-None contract
+        # keeps them byte-identical. ``http_client`` supplies the dedicated
+        # transport; ``wrap_client`` guards EVERY ``.stream`` the stream fn
+        # makes — the only place nested/resend attempts are visible.
+        self._wrap_client = wrap_client
         self._transport = _transport or _SessionTransport(
-            httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+            http_client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
         )
         self._http = self._transport.http
         self._closed = False
@@ -3609,7 +3617,7 @@ class SessionStreamFn:
     def _client_for(self, spec: ModelSpec) -> WireClient:
         from local_operator.providers.clients import client_for_spec
 
-        return client_for_spec(
+        client = client_for_spec(
             spec,
             http_client=self._http,
             openai_api=_openai_api_mode(self._settings),
@@ -3622,6 +3630,9 @@ class SessionStreamFn:
             # the next client build (the providers section is LIVE).
             openrouter_provider_preferences=_openrouter_provider_preferences(self._settings),
         )
+        # The wrapper sees every attempt, nested ones included; without it
+        # this is the identical client the session path has always built.
+        return self._wrap_client(client) if self._wrap_client is not None else client
 
     def _affinity_enabled(self, request: ChatRequest) -> bool:
         """Whether this request may read or write the cache affinity pin.
@@ -6620,6 +6631,8 @@ def create_stream_fn(
     *,
     session_id: str | None = None,
     cache_lineage_id: str | None = None,
+    wrap_client: Callable[[Any], Any] | None = None,
+    http_client: Any | None = None,
 ) -> SessionStreamFn:
     """Build the ``LoopConfig.stream_fn`` for a session.
 
@@ -6656,7 +6669,14 @@ def create_stream_fn(
             "create_stream_fn called with no session_id: this call's analytics "
             "will be recorded against an empty session id and cannot be attributed"
         )
-    return SessionStreamFn(auth_store, settings, session_id, cache_lineage_id)
+    return SessionStreamFn(
+        auth_store,
+        settings,
+        session_id,
+        cache_lineage_id,
+        wrap_client=wrap_client,
+        http_client=http_client,
+    )
 
 
 def calculate_cost(
