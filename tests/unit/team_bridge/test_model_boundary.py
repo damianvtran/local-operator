@@ -150,7 +150,31 @@ def test_wire_guard_requires_job_and_charges_bound_dispatch(tmp_path) -> None:
         default_model="qa-default",
         revision="rev-1",
     )
-    attempt = store.reserve_screening_attempt(owner, message_id="bmsg_1", fingerprint=None)
+    # R9/Q3-5: a reservation carries the complete registered input; the bind
+    # must compare a REAL job against it (no legacy no-proof bypass).
+    proof = {
+        "owner": (
+            f"{owner.credential_id}|{owner.account_id}|{owner.tenant_id}"
+            f"|{owner.endpoint_id}|{owner.canonical_base_url}|{owner.enrollment_generation}"
+        ),
+        "body": "b" * 64,
+        "template": "t" * 64,
+        "version": "bridge-screen-v1",
+        "provider": "openai",
+        "model": "qa-default",
+        "approved": ["qa-default"],
+        "envelope": "e" * 64,
+        "request": "r" * 64,
+        "display": "d" * 64,
+        "revision": "rev-1",
+        "epoch": 1,
+        "message": "bmsg_1",
+        "tenant": owner.tenant_id,
+        "logical": "rev-1|b|e",
+    }
+    attempt = store.reserve_screening_attempt(
+        owner, message_id="bmsg_1", fingerprint="rev-1|b|e", input_proof=proof
+    )
     turn = store.claim_screen_turn(owner, holder_prefix="qa", now=__import__("time").time(), ttl=90)
     assert turn is not None
     from local_operator.team_bridge.model_boundary import AdmissionJob
@@ -177,7 +201,7 @@ def test_wire_guard_requires_job_and_charges_bound_dispatch(tmp_path) -> None:
         epoch=int((store.current_screening_policy(owner) or {"epoch": 0})["epoch"]),
         turn=turn,
     )
-    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job.digest)
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job.digest, job=job)
     inner = Inner()
     guard = ScreeningWireGuard(
         inner, store=store, owner=owner, message_id="bmsg_1", job_ref={"job": job}
@@ -306,7 +330,7 @@ def test_selected_send_boundary_refuses_foreign_replacement(tmp_path) -> None:
 
     class _StubGuard:
         def __init__(self) -> None:
-            self.proxies: list = []
+            self.proxies: list[object] = []
 
         def route_ok(self, route) -> bool:
             return any(route is proxy for proxy in self.proxies)
@@ -335,7 +359,7 @@ def test_selected_send_boundary_refuses_foreign_replacement(tmp_path) -> None:
     assert hits == []
 
     # An owned proxy routes normally.
-    proxy = _ChargingAsyncTransport(_httpx.MockTransport(_send), None, owner_token=object())
+    proxy = _ChargingAsyncTransport(_httpx.MockTransport(_send), lambda: None, owner_token=object())
     guard.proxies = [proxy]
     client._transport = proxy
     assert client._transport_for_url(_httpx.URL("https://api.openai.com/v1/responses")) is proxy
@@ -346,14 +370,58 @@ def test_one_bind_replays_exactly_and_refuses_a_change(tmp_path) -> None:
     an identical replay is a no-op and a CHANGED pending bind refuses while
     the original binding stays on record."""
 
+    import types as _types
+
     store, owner = _setup(tmp_path)
-    attempt = store.reserve_screening_attempt(owner, message_id="bmsg_1", fingerprint=None)
-    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-A")
-    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-A")
+    proof = {
+        "owner": (
+            f"{owner.credential_id}|{owner.account_id}|{owner.tenant_id}"
+            f"|{owner.endpoint_id}|{owner.canonical_base_url}|{owner.enrollment_generation}"
+        ),
+        "body": "b" * 64,
+        "template": "t" * 64,
+        "version": "bridge-screen-v1",
+        "provider": "openai",
+        "model": "qa-default",
+        "approved": ["qa-default"],
+        "envelope": "e" * 64,
+        "request": "r" * 64,
+        "display": "d" * 64,
+        "revision": "rev-1",
+        "epoch": 0,
+        "message": "bmsg_1",
+        "tenant": owner.tenant_id,
+        "logical": "rev-1|b|e",
+    }
+    attempt = store.reserve_screening_attempt(
+        owner, message_id="bmsg_1", fingerprint="rev-1|b|e", input_proof=proof
+    )
+    stub = _types.SimpleNamespace(
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        hub_url=owner.canonical_base_url,
+        owner_generation=owner.enrollment_generation,
+        body_sha256="b" * 64,
+        envelope_digest="e" * 64,
+        request_digest="r" * 64,
+        display_digest="d" * 64,
+        provider="openai",
+        model="qa-default",
+        template_sha256="t" * 64,
+        template_version="bridge-screen-v1",
+        revision="rev-1",
+        message_id="bmsg_1",
+        approved=("qa-default",),
+        epoch=0,
+    )
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-A", job=stub)
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-A", job=stub)
     from local_operator.team_bridge.store import StoreRefused
 
     with pytest.raises(StoreRefused) as err:
-        store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-B")
+        store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-B", job=stub)
     assert err.value.code == "write_once_conflict"
 
 

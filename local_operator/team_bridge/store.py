@@ -382,8 +382,29 @@ def _input_proof_mismatch(registered: Any, fingerprint: str, job: Any) -> str | 
     recompute. Returns None when the record matches (or when no job is
     supplied for the check, which the legacy packed form uses)."""
 
-    if not isinstance(registered, dict) or job is None:
-        return None if isinstance(registered, dict) else "registered proof is not a mapping"
+    if not isinstance(registered, dict):
+        return "registered proof is not a mapping"
+    if job is None:
+        # A bind WITHOUT the job cannot certify anything (R9/Q3-5): the
+        # registered record exists to be compared against a real job, and a
+        # legacy no-job bind is exactly the bypass that dispatched before.
+        return "a dispatch job is required to certify registered input"
+    owner_expected = registered.get("owner")
+    owner_actual = (
+        f"{getattr(job, 'credential_id', None)}|{getattr(job, 'account_id', None)}|"
+        f"{getattr(job, 'tenant_id', None)}|{getattr(job, 'endpoint_id', None)}|"
+        f"{getattr(job, 'hub_url', None)}|{getattr(job, 'owner_generation', None)}"
+    )
+    if owner_expected != owner_actual:
+        return "dispatch job owner namespace does not match the registered input proof"
+    for key, attr in (
+        ("body", "body_sha256"),
+        ("envelope", "envelope_digest"),
+        ("request", "request_digest"),
+        ("display", "display_digest"),
+    ):
+        if registered.get(key) != getattr(job, attr, None):
+            return f"dispatch job {key} does not match the registered input proof"
     field_checks = {
         "provider": getattr(job, "provider", None),
         "model": getattr(job, "model", None),
@@ -408,10 +429,17 @@ def _input_proof_mismatch(registered: Any, fingerprint: str, job: Any) -> str | 
 
 
 def _bound_digest(raw: Any) -> Any:
-    """The canonical digest of a bound row (strips the bind marker)."""
+    """The canonical digest of a bound row.
+
+    A bound value is ``job:<digest>|proof:<json>`` (R9/Q3-5): the ORIGINAL
+    registration is retained beside the digest so later native checks can
+    compare against it. Only the digest part participates in digest
+    comparisons.
+    """
 
     if isinstance(raw, str) and raw.startswith(_JOB_BOUND_PREFIX):
-        return raw[len(_JOB_BOUND_PREFIX) :]
+        body = raw[len(_JOB_BOUND_PREFIX) :]
+        return body.split("|", 1)[0]
     return raw
 
 
@@ -624,6 +652,36 @@ class Store:
             "schema_unsupported",
             f"state.sqlite3 schema {version!r} != {SCHEMA_VERSION}",
         )
+
+    def owner_consent_receipt(self, owner: OwnerSnapshot) -> dict[str, str] | None:
+        """The COMMITTED human consent receipt for the exact live owner.
+
+        R9/Q3-2: this is the ONLY proof of acceptance — status
+        ``consent.version``/``text`` are the CURRENT served shape, never an
+        acceptance flag. Read from the existing enrollment columns under the
+        native live/generation fence; missing, unreadable or stale rows
+        return None (the caller holds — it never reconstructs consent from
+        served text or auto-reconsents).
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            row = conn.execute(
+                "SELECT consent_version, consent_ref FROM enrollments "
+                "WHERE owner_key = ? AND enrollment_generation = ?",
+                (_owner_key(owner), owner.enrollment_generation),
+            ).fetchone()
+            if row is None:
+                return None
+            version = row["consent_version"]
+            ref = row["consent_ref"]
+            if not isinstance(version, str) or not version:
+                return None
+            if not isinstance(ref, str) or not ref:
+                return None
+            return {"consent_version": version, "consent_ref": ref}
 
     def current_generation_is_live(self, owner: OwnerSnapshot) -> bool:
         """Public fence probe (R6/Q15): is THIS snapshot's enrollment
@@ -1546,14 +1604,23 @@ class Store:
                 if mismatched is not None:
                     raise StoreRefused("attempt_mismatch", mismatched)
                 # The registered row is UNBOUND: fall through to the single
-                # bind below (raw cleared so the bound-state branch skips).
-                raw = None
+                # bind below, RETAINING the original registration beside the
+                # bound digest (R9/Q3-5): later native reservations compare
+                # against the retained record, never a reconstructed one.
+                bound_value = f"{_JOB_BOUND_PREFIX}{fingerprint}" f"|{_PROOF_PREFIX}" + json.dumps(
+                    registered, sort_keys=True, separators=(",", ":")
+                )
+                conn.execute(
+                    "UPDATE screening_attempts SET fingerprint = ? "
+                    "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
+                    (bound_value, attempt_id, _owner_key(owner)),
+                )
+                return
             if isinstance(raw, str) and raw.startswith(_JOB_BOUND_PREFIX):
-                # BOUND ALREADY (R7/Q3): one bind was legitimate; from now
-                # on only the IDENTICAL digest may replay, and a changed
-                # pending bind refuses while the original binding stays on
-                # record (the update below is skipped).
-                if raw == _JOB_BOUND_PREFIX + fingerprint:
+                # BOUND ALREADY: one bind was legitimate; only the IDENTICAL
+                # digest may replay, and a changed pending bind refuses while
+                # the original binding stays on record.
+                if _bound_digest(raw) == fingerprint:
                     return
                 raise StoreRefused(
                     "write_once_conflict", "logical attempt already bound to another job"
@@ -1562,10 +1629,9 @@ class Store:
             # reservation fingerprint (or NULL for a legacy row); the bind
             # marker makes the state explicit so a second bind can tell
             # "packed logical fp" from "bound job digest".
-            conn.execute(
-                "UPDATE screening_attempts SET fingerprint = ? "
-                "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
-                (f"{_JOB_BOUND_PREFIX}{fingerprint}", attempt_id, _owner_key(owner)),
+            raise StoreRefused(
+                "unproved_attempt",
+                "reservation without a registered input proof cannot bind a job",
             )
 
     def reserve_screening_dispatch(
@@ -1614,8 +1680,14 @@ class Store:
                 "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
                 (job.attempt_id, _owner_key(owner)),
             ).fetchone()
-            if logical is None or _bound_digest(logical["fingerprint"]) != job.digest:
+            raw_logical = logical["fingerprint"] if logical is not None else None
+            if logical is None or _bound_digest(raw_logical) != job.digest:
                 raise StoreRefused("unknown_attempt", "logical job binding missing")
+            if not (isinstance(raw_logical, str) and "|proof:" in raw_logical):
+                # Legacy/unproved rows may reconcile historical transport
+                # state, but they cannot certify a NEW dispatch (R9/Q3-5):
+                # no retained registration, no physical authority.
+                raise StoreRefused("unproved_attempt", "registration missing; reconcile only")
             if logical["message_id"] != message_id:
                 raise StoreRefused("attempt_mismatch", "job message mismatch")
             schedule = conn.execute(

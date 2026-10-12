@@ -81,3 +81,44 @@ def test_account_cycle_serializes_competing_holders() -> None:
     schedule = store.screen_schedule(owner)
     assert schedule is not None and schedule["last_sender"] == "a"
     assert schedule["lease_holder"] is None
+
+
+def test_lost_ownership_refuses_a_swallowed_cancellation_result(tmp_path) -> None:
+    """R9/Q3-6: a callback that SUPPRESSES the cancellation can return a
+    value while ownership is already lost — run_once must refuse that
+    result (None) rather than record it under the successor's lease."""
+
+    import asyncio as _asyncio
+
+    from local_operator.team_bridge.scheduler import AccountScreeningCycle
+    from tests.unit.team_bridge.test_screening import _setup
+
+    store, owner = _setup(tmp_path)
+    cycle = AccountScreeningCycle(store=store, owner=owner, holder="w1")
+
+    async def swallowed(items, screen, turn):
+        try:
+            await _asyncio.sleep(5)
+        except _asyncio.CancelledError:
+            # Suppressed on purpose: the OLD code returned this value.
+            return "delivered-anyway"
+        return "delivered"
+
+    cycle._run_body = swallowed  # type: ignore[method-assign]
+
+    async def keeper(turn, work, lost):
+        await _asyncio.sleep(0.05)
+        lost["flag"] = True
+        work.cancel()
+        try:
+            await work
+        except BaseException:
+            pass
+
+    cycle._keep_turn = keeper  # type: ignore[method-assign]
+
+    async def forbidden_screen(_target):
+        raise AssertionError("screen must not run in this control")
+
+    result = _asyncio.run(cycle.run_once([], forbidden_screen))
+    assert result is None
