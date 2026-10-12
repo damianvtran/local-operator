@@ -9,6 +9,7 @@ interface Options {
 	context: () => Context;
 	capabilities: () => Capabilities | null;
 	activate: (namespace: string, locale: string, messages: Record<string, string>) => void;
+	deactivate?: (namespace: string, locale: string) => void;
 	fetch?: typeof fetch;
 	maxEntries?: number;
 	maxBytes?: number;
@@ -48,6 +49,7 @@ async function boundedBody(response: Response): Promise<string> {
 
 export function createWireLoader(options: Options) {
 	const cache = new Map<string, Entry>();
+	const active = new Map<string, { namespace: string; locale: string }>();
 	const pending = new Map<string, { promise: Promise<boolean>; controller: AbortController }>();
 	const fetcher = options.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
 	const limit = Math.max(1, Math.min(options.maxEntries ?? 16, 64));
@@ -63,6 +65,22 @@ export function createWireLoader(options: Options) {
 		for (const item of pending.values()) item.controller.abort();
 		pending.clear();
 	}
+	function invalidateCapabilities(): boolean {
+		const caps = options.capabilities();
+		if (typeof caps?.features?.i18n === "number" && Number.isInteger(caps.features.i18n) && caps.features.i18n >= 1 &&
+			typeof caps.i18n?.catalogues === "number" && Number.isInteger(caps.i18n.catalogues) && caps.i18n.catalogues >= 1) return true;
+		// Withdrawal is an authority change even with unchanged locale/origin.
+		// Drop owned served maps too: they must not outlive the permission to
+		// activate them. Re-enable starts cold, never via an old validator.
+		if (cache.size || pending.size || active.size) {
+			generation++;
+			for (const item of pending.values()) item.controller.abort();
+			pending.clear(); cache.clear();
+			const withdrawn = [...active.values()]; active.clear();
+			for (const item of withdrawn) options.deactivate?.(item.namespace, item.locale);
+		}
+		return false;
+	}
 	function put(key: string, entry: Entry): void {
 		cache.delete(key);
 		if (entry.bytes > byteLimit) return;
@@ -77,10 +95,7 @@ export function createWireLoader(options: Options) {
 	async function request(namespace: string): Promise<boolean> {
 		invalidateContext();
 		const context = options.context();
-		const caps = options.capabilities();
-		if (!NAMESPACE.test(namespace) || !isResolvedLocale(context.locale) ||
-			typeof caps?.features?.i18n !== "number" || !Number.isInteger(caps.features.i18n) || caps.features.i18n < 1 ||
-			typeof caps.i18n?.catalogues !== "number" || !Number.isInteger(caps.i18n.catalogues) || caps.i18n.catalogues < 1) return false;
+		if (!invalidateCapabilities() || !NAMESPACE.test(namespace) || !isResolvedLocale(context.locale)) return false;
 		let origin: string;
 		try { const url = new URL(context.origin); if (!["http:", "https:"].includes(url.protocol) || url.origin !== context.origin) return false; origin = url.origin; }
 		catch { return false; }
@@ -100,7 +115,7 @@ export function createWireLoader(options: Options) {
 						signal: controller.signal, headers: validator ? { "If-None-Match": validator } : {},
 					});
 					invalidateContext();
-					if (generation !== epoch || controller.signal.aborted) return false;
+					if (!invalidateCapabilities() || generation !== epoch || controller.signal.aborted) return false;
 					let entry: Entry | null;
 					if (response.status === 304) {
 						if (!cached || validator !== cached.etag) { validator = void 0; continue; }
@@ -111,8 +126,15 @@ export function createWireLoader(options: Options) {
 						entry = envelope(JSON.parse(await boundedBody(response)), namespace, response.headers.get("etag"));
 					} else return false; // 404/401/offline never create a retry loop
 					invalidateContext();
-					if (!entry || generation !== epoch || controller.signal.aborted) return false;
+					if (!entry || !invalidateCapabilities() || generation !== epoch || controller.signal.aborted) return false;
 					put(key, entry);
+					active.delete(key); active.set(key, { namespace, locale });
+					if (active.size > limit) {
+						const oldest = active.keys().next().value!;
+						const removed = active.get(oldest)!; active.delete(oldest);
+						options.deactivate?.(removed.namespace, removed.locale);
+					}
+					if (!invalidateCapabilities() || generation !== epoch || controller.signal.aborted) return false;
 					options.activate(namespace, locale, entry.messages);
 					return true;
 				}
@@ -135,5 +157,5 @@ export function createWireLoader(options: Options) {
 		pending.set(key, { promise, controller });
 		return promise;
 	}
-	return { request, invalidateContext, size: () => cache.size };
+	return { request, invalidateContext, invalidateCapabilities, size: () => cache.size };
 }

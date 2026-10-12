@@ -27,7 +27,7 @@ export function scanSource(source, path) {
 		}
 		if (ts.isTemplateExpression(node)) {
 			literal(node.head, sink);
-			for (const span of node.templateSpans) literal(span.literal, sink);
+			for (const span of node.templateSpans) { literal(span.expression, sink); literal(span.literal, sink); }
 			return;
 		}
 		if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
@@ -37,6 +37,25 @@ export function scanSource(source, path) {
 		else if (ts.isBinaryExpression(node)) { literal(node.left, sink); literal(node.right, sink); }
 		else if (ts.isParenthesizedExpression(node)) literal(node.expression, sink);
 		else if (ts.isJsxExpression(node)) literal(node.expression, sink);
+		else if (ts.isTypeNode(node)) return;
+		else if (ts.isJsxAttribute(node)) { if (attributes.has(node.name.getText(tree))) literal(node.initializer, sink); }
+		else if (ts.isJsxSpreadAttribute(node)) {
+			if (ts.isObjectLiteralExpression(node.expression)) for (const property of node.expression.properties) {
+				if (ts.isPropertyAssignment(property) && attributes.has(property.name.getText(tree).replace(/^["']|["']$/g, ""))) literal(property.initializer, sink);
+			}
+		}
+		else if (ts.isPropertyAssignment(node)) literal(node.initializer, sink);
+		else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) literal(node.expression, sink);
+		else if (ts.isCallExpression(node)) {
+			literal(node.expression, sink);
+			for (const [index, arg] of node.arguments.entries()) {
+				// A generated translator key is a lookup token, not rendered copy.
+				// This position-specific rule does not exempt arbitrary strings.
+				if (index === 0 && /(?:^|\.)t$/.test(node.expression.getText(tree)) && ts.isStringLiteralLike(arg) && /^(?:relay|wire)(?:\.[a-z][a-z0-9_]*)+$/.test(arg.text)) continue;
+				literal(arg, sink);
+			}
+		}
+		else ts.forEachChild(node, child => literal(child, sink));
 	}
 	function visit(node) {
 		if (ts.isJsxText(node)) literal(node, "jsx:text");
@@ -44,6 +63,13 @@ export function scanSource(source, path) {
 		else if (ts.isJsxExpression(node) && !ts.isJsxAttribute(node.parent)) literal(node.expression, "jsx:expression");
 		else if (ts.isVariableDeclaration(node) && copyName.test(node.name.getText(tree))) literal(node.initializer, `variable:${node.name.getText(tree)}`);
 		else if (ts.isPropertyAssignment(node) && copyName.test(node.name.getText(tree).replace(/^["']|["']$/g, ""))) literal(node.initializer, `property:${node.name.getText(tree)}`);
+		else if (ts.isBinaryExpression(node) && [ts.SyntaxKind.EqualsToken, ts.SyntaxKind.PlusEqualsToken].includes(node.operatorToken.kind)) {
+			const target = node.left;
+			const name = ts.isPropertyAccessExpression(target) ? target.name.text : ts.isElementAccessExpression(target) && ts.isStringLiteralLike(target.argumentExpression) ? target.argumentExpression.text : null;
+			// These are rendered copy sinks, unlike technical lang/dir/class or URL
+			// assignments. A machine-only title still needs a precise reviewed rule.
+			if (name && ["title", "textContent", "innerText", "innerHTML", "placeholder", "alt", "ariaLabel", "ariaDescription"].includes(name)) literal(node.right, `assignment:${name}`);
+		}
 		else if (ts.isReturnStatement(node)) {
 			let owner = node.parent;
 			while (owner && !ts.isFunctionLike(owner)) owner = owner.parent;
@@ -53,6 +79,7 @@ export function scanSource(source, path) {
 		else if (ts.isNewExpression(node) && node.expression.getText(tree) === "Error") for (const arg of node.arguments ?? []) literal(arg, "new:Error");
 		else if (ts.isCallExpression(node)) {
 			const name = node.expression.getText(tree);
+			if (name.endsWith(".setAttribute") && node.arguments.length >= 2 && ts.isStringLiteralLike(node.arguments[0]) && attributes.has(node.arguments[0].text)) literal(node.arguments[1], `attribute:${node.arguments[0].text}`);
 			if (/(?:set(?:Error|Notice|Message|Label)|toast|alert|confirm|\.push)$/.test(name)) for (const arg of node.arguments) literal(arg, `call:${name}`);
 		}
 		ts.forEachChild(node, visit);

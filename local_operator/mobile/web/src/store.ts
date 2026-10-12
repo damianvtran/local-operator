@@ -90,6 +90,7 @@ export const wireCatalogueLoader = createWireLoader({
 	context: () => ({ origin: typeof location === "object" ? location.origin : "", locale: localeSnapshot.backendLocale }),
 	capabilities: () => capabilities,
 	activate: (namespace, locale, messages) => { messageRuntime.registerWire(namespace, locale, messages); },
+	deactivate: (namespace, locale) => { messageRuntime.unregisterWire(namespace, locale); },
 });
 export function initializeLocaleMetadata(): void {
 	if (typeof document === "object") {
@@ -361,6 +362,7 @@ export function retainSessionListStream(): () => void {
 					};
 					sessions = payload.sessions;
 					capabilities = payload.capabilities ?? null;
+					wireCatalogueLoader.invalidateCapabilities();
 					sessionsConnected = true;
 					publishAsksRevision(payload.sessions);
 					/* A frame is the daemon's answer for every row it carries, so a mark
