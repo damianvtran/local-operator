@@ -102,6 +102,11 @@ _EXTRA_ROOTS_ENV = "LOCAL_OPERATOR_SKILL_EXTRA_ROOTS"
 #: shadowed builtin. Not affected by ``LOCAL_OPERATOR_SKILL_EXTRA_ROOTS``,
 #: which replaces only the ecosystem set. Shipped in the wheel via the
 #: ``skills/builtin`` package-data lines in pyproject.toml.
+#:
+#: The bounded walk and the read-time guard reach this SAME value through
+#: :func:`local_operator.skills.discovery.packaged_skill_root` (lazy, because
+#: that module's source is re-executed with ``os.name`` patched by the
+#: platform-gate tests).
 PACKAGED_SKILL_ROOT: Path = Path(__file__).resolve().parent / "builtin"
 
 

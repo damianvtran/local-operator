@@ -297,6 +297,10 @@ class ScriptedWorldClient:
             )
         if stage == 1:
             return self._tool_call(1, "read", {"path": str(episode.world / "allowed.txt")})
+        if stage == 2:
+            # Packaged knowledge is trusted by provenance and must reach the
+            # confined CHILD too (QA round 2, Q5 — it disappeared here).
+            return self._tool_call(2, "read", {"path": "skill://design-qa"})
         joined = "\n".join(rows)
         denied = ("outside it" in joined) or ("Operation not permitted" in joined)
         allowed = WORKSPACE_CANARY in joined
@@ -378,6 +382,9 @@ async def test_the_world_boundary_holds_end_to_end_over_the_real_sdk(
     assert "LO_TEST_API_KEY" not in results, "an ambient credential leaked into the model shell"
     # 6. The child inherited the same boundary and still reached the world.
     assert "child-report denied=True allowed=True" in results, results[-600:]
+    # 6b. Packaged knowledge (trusted by provenance) must reach the CHILD
+    #     too (QA round 2, Q5 — it disappeared from confined children).
+    assert "name: design-qa" in results, "the packaged catalog must resolve in the child"
     # 7. The knowledge boundary, observed from the session: the in-world skill
     #    resolved through the real read tool, and the outer ancestor's twin
     #    produced the unknown-skill answer instead. (The skills LISTING in the
@@ -578,11 +585,12 @@ def test_discovery_roots_clip_at_the_boundary(
     )
 
     clipped_names = {
-        skill.name for skill in discover_skills(default_skill_roots(world, boundary=world))[0]
+        skill.name
+        for skill in discover_skills(default_skill_roots(world, boundary=world), boundary=world)[0]
     }
     assert INNER_SKILL in clipped_names
     assert OUTER_SKILL not in clipped_names, "the clipped walk reached an ancestor"
-    assert "design-qa" in clipped_names, "packaged skills must survive the clip"
+    assert "design-qa" in clipped_names, "packaged skills must survive the clip (Q5)"
 
     # The unclipped walk IS what reaches the ancestor (the clip is the fix,
     # not the layout): assert at the root level so this test never scans the
@@ -654,6 +662,40 @@ def test_discovery_roots_clip_at_the_boundary(
     guard = make_skill_resolver(skills_map, None, boundary=world)
     assert "body" in (guard(f"skill://{INNER_SKILL}") or "")
     assert "Unknown skill" in (guard(f"skill://{OUTER_SKILL}") or "")
+    # A swapped BODY FILE (directory intact) must refuse too — the residual
+    # the directory-level check cannot see (QA round 2, Q6).
+    _shutil.rmtree(inner_dir)
+    inner_dir.mkdir()
+    (inner_dir / "SKILL.md").write_text(
+        _SKILL_TEMPLATE.format(name=INNER_SKILL, description=INNER_GUIDANCE)
+    )
+    assert "body" in (guard(f"skill://{INNER_SKILL}") or "")
+    (inner_dir / "SKILL.md").unlink()
+    os.symlink(
+        base / ".local-operator" / "skills" / OUTER_SKILL / "SKILL.md",
+        inner_dir / "SKILL.md",
+    )
+    body_swapped = guard(f"skill://{INNER_SKILL}") or ""
+    assert "Unknown skill" in body_swapped, "a swapped body file served out-of-world content"
+    assert OUTER_GUIDANCE not in body_swapped
+    # A swapped REFERENCE FILE refuses through the child resolver's own
+    # containment relative to the (in-world) skill directory.
+    refs = inner_dir / "references"
+    refs.mkdir()
+    (refs / "note.md").write_text("INNER-REFERENCE\n")
+    os.unlink(inner_dir / "SKILL.md")
+    (inner_dir / "SKILL.md").write_text(
+        _SKILL_TEMPLATE.format(name=INNER_SKILL, description=INNER_GUIDANCE)
+    )
+    assert "INNER-REFERENCE" in (guard(f"skill://{INNER_SKILL}/references/note.md") or "")
+    (refs / "note.md").unlink()
+    os.symlink(
+        base / ".local-operator" / "skills" / OUTER_SKILL / "SKILL.md",
+        refs / "note.md",
+    )
+    ref_swapped = guard(f"skill://{INNER_SKILL}/references/note.md") or ""
+    assert "escapes the skill directory" in ref_swapped, ref_swapped
+    assert OUTER_GUIDANCE not in ref_swapped
     _shutil.rmtree(inner_dir)
     os.symlink(base / ".local-operator" / "skills" / OUTER_SKILL, inner_dir)
     swapped = guard(f"skill://{INNER_SKILL}") or ""
@@ -665,20 +707,23 @@ def test_discovery_roots_clip_at_the_boundary(
 
 
 def test_controller_state_under_kernel_exposed_trees_is_refused() -> None:
-    """QA round 1, Q3: the common ``tempfile`` layout never gets constructed.
+    """QA round 1, Q3 + round 2, Q7: the exposed-tree layout never constructs.
 
-    ``tempfile.mkdtemp`` puts the layout under ``/private/var/folders`` — a
-    tree the seatbelt profile must expose read-only to shell children (dyld
-    caches and mktemp machinery live there). Measured: a broad allow defeats
-    a specific later DENY in seatbelt in both rule orders, so the profile
-    CANNOT carve the stores back out; accepted, the confined shell read the
-    dummy controller directly AND through a world symlink. The SDK preflight
-    therefore refuses the layout before anything is allocated. Proven the
-    same way the matrix proved the leak: the RAW default ``mkdtemp`` path,
-    no handpicked fixture. A world under the same tree with its stores
-    elsewhere is still accepted — the refusal guards the stores, not the
-    world — and the durable-home session tests above are the supported
-    shape passing end to end.
+    The seatbelt profile must expose ``/private/var/folders`` (dyld caches,
+    mktemp machinery) read-only to shell children. Measured: a broad allow
+    defeats a specific later DENY in seatbelt in both rule orders, so the
+    profile CANNOT carve the stores back out; accepted, the confined shell
+    read the dummy controller directly AND through a world symlink. The SDK
+    preflight therefore refuses the layout before anything is allocated.
+
+    The exposed tree is DERIVED from the backend (``getconf
+    DARWIN_USER_TEMP_DIR``) rather than assumed from ambient ``mkdtemp``
+    placement: under ``env -i`` the temp fallback resolves to ``/private/tmp``
+    — an intentionally supported unexposed control — and the round-1 version
+    of this test built the wrong layout there (QA round 2, Q7). A world under
+    the exposed tree with its stores elsewhere, a ``/private/tmp`` layout
+    (stores included) and the durable-home session tests above all keep their
+    supported behaviour; only the store roots' placement refuses.
     """
     import shutil
     import tempfile
@@ -691,8 +736,27 @@ def test_controller_state_under_kernel_exposed_trees_is_refused() -> None:
         # and the layout is fine.
         pytest.skip("the kernel-exposure refusal is only meaningful on hosts with the sandbox")
 
-    base = Path(tempfile.mkdtemp())
-    durable = Path(tempfile.mkdtemp())
+    # Derive the exposed tree from the backend itself, NOT from ambient
+    # ``tempfile`` placement: with ``env -i`` (the canonical isolated run)
+    # Python's temp fallback resolves to ``/private/tmp``, an intentionally
+    # SUPPORTED unexposed control, so a bare ``mkdtemp()`` built the wrong
+    # layout and the assertion failed for fixture reasons only (QA round 2,
+    # Q7). ``getconf DARWIN_USER_TEMP_DIR`` is the machinery tree the seatbelt
+    # profile actually exposes; ``/usr/bin/getconf`` by absolute path so the
+    # derivation is PATH-independent too.
+    import subprocess
+
+    conf = subprocess.run(
+        ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    exposed_root = Path(conf.stdout.strip()) if conf.returncode == 0 else None
+    if exposed_root is None or not exposed_root.is_dir():
+        pytest.skip("getconf DARWIN_USER_TEMP_DIR is unavailable on this host")
+
+    base = Path(tempfile.mkdtemp(dir=exposed_root))
     try:
         world = base / "world"
         world.mkdir()
@@ -719,7 +783,25 @@ def test_controller_state_under_kernel_exposed_trees_is_refused() -> None:
         shutil.rmtree(d_config.parent, ignore_errors=True)
     finally:
         shutil.rmtree(base, ignore_errors=True)
-        shutil.rmtree(durable, ignore_errors=True)
+
+    # The unexposed controls keep their behaviour: ``/private/tmp`` is NOT one
+    # of the machinery trees, so a layout there — stores included — is
+    # accepted by the preflight (the kernel denies per-world by other means;
+    # QA rows 65–69).
+    tmp_base = Path(tempfile.mkdtemp(dir="/private/tmp"))
+    try:
+        t_world = tmp_base / "world"
+        t_world.mkdir()
+        t_config = tmp_base / "home" / ".local-operator"
+        t_agent = tmp_base / "home" / "agent-home"
+        for directory in (t_config, t_agent):
+            directory.mkdir(parents=True)
+        t_roots = SessionRoots(
+            config_dir=t_config, agent_home=t_agent, cwd=t_world, allow_volatile=True
+        )
+        assert _resolve_world_root(SessionSpec(world_root=t_world), t_roots) == t_world.resolve()
+    finally:
+        shutil.rmtree(tmp_base, ignore_errors=True)
 
 
 class McpSkillScriptedClient(ScriptedWorldClient):
@@ -732,8 +814,10 @@ class McpSkillScriptedClient(ScriptedWorldClient):
     is refused by design.
     """
 
-    #: Armed by the test between the two prompts (see the class docstring).
+    #: Armed by the test between prompts: prompt two reads after the skill
+    #: DIR was swapped; prompt three after only the BODY FILE was (Q6).
     swapped = False
+    body_swapped = False
 
     def _parent_events(self, rows: list[str]) -> list[Any]:
         stage = len(rows)
@@ -742,17 +826,28 @@ class McpSkillScriptedClient(ScriptedWorldClient):
         if stage == 1:
             return self._tool_call(1, "read", {"path": f"skill://{OUTER_SKILL}"})
         if stage == 2:
-            return self._tool_call(2, "read", {"path": f"mcp://{MCP_OUTER_CURSOR}"})
+            # The packaged catalog: trusted by PROVENANCE, so it must resolve
+            # in a bounded session although it lives outside the world
+            # (QA round 2, Q5).
+            return self._tool_call(2, "read", {"path": "skill://design-qa"})
         if stage == 3:
-            return self._tool_call(3, "read", {"path": f"mcp://{MCP_WORLD_FIXTURE}"})
+            return self._tool_call(3, "read", {"path": f"mcp://{MCP_OUTER_CURSOR}"})
         if stage == 4:
+            return self._tool_call(4, "read", {"path": f"mcp://{MCP_WORLD_FIXTURE}"})
+        if stage == 5:
             # Prompt one ends HERE; the test swaps the in-world skill dir and
             # arms ``swapped`` before prompt two, which is where the read of
             # the swapped name happens — the swap must never be observable as
             # a pre-swap read.
             if not self.swapped:
                 return self._text_stop("part one complete", stage)
-            return self._tool_call(4, "read", {"path": f"skill://{INNER_SKILL}"})
+            return self._tool_call(5, "read", {"path": f"skill://{INNER_SKILL}"})
+        if stage == 6:
+            # Prompt two ends HERE; the test swaps ONLY the body file and
+            # arms ``body_swapped`` before prompt three (QA round 2, Q6).
+            if not self.body_swapped:
+                return self._text_stop("part two complete", stage)
+            return self._tool_call(6, "read", {"path": f"skill://{INNER_SKILL}"})
         return self._text_stop("mcp-skill-probe complete", stage)
 
 
@@ -842,13 +937,32 @@ async def test_late_mcp_wiring_and_symlinked_sources_stay_inside_the_world(
         scripted_mcp.swapped = True
         await session.prompt("mcp and skill probe, part two")
 
+        # Prompt three (QA round 2, Q6): restore a REAL in-world directory,
+        # then swap ONLY its SKILL.md for a symlink to the outer file — the
+        # case the directory-level guard cannot see.
+        os.unlink(inner_dir)
+        inner_dir.mkdir()
+        (inner_dir / "SKILL.md").write_text(
+            _SKILL_TEMPLATE.format(name=INNER_SKILL, description=INNER_GUIDANCE)
+        )
+        os.unlink(inner_dir / "SKILL.md")
+        os.symlink(
+            episode.base / ".local-operator" / "skills" / OUTER_SKILL / "SKILL.md",
+            inner_dir / "SKILL.md",
+        )
+        scripted_mcp.body_swapped = True
+        await session.prompt("mcp and skill probe, part three")
+
     texts = scripted_mcp.tool_texts
+    assert "name: design-qa" in "\n".join(
+        texts
+    ), "packaged knowledge (trusted by provenance) must resolve in a bounded session"
     first_inner = next((i for i, t in enumerate(texts) if f"name: {INNER_SKILL}" in t), None)
     first_unknown = next((i for i, t in enumerate(texts) if "Unknown skill" in t), None)
     assert first_inner is not None, "the in-world skill must resolve before any swap"
     assert first_unknown is not None, "the ancestor skill must stay unresolvable"
     assert first_inner < first_unknown, "resolution ordering changed"
-    assert "Unknown skill" in texts[-1], "the swapped skill dir served out-of-world content"
+    assert "Unknown skill" in texts[-1], "the swapped body file served out-of-world content"
     joined = "\n".join(texts)
     assert OUTER_GUIDANCE not in joined, "an ancestor sentinel leaked through a tool result"
     systems = "\n".join(scripted_mcp.system_texts)

@@ -42,11 +42,30 @@ from __future__ import annotations
 import os
 import stat as stat_module
 from collections.abc import Iterator, Sequence
+from functools import cache
 from pathlib import Path, PureWindowsPath
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict
+
+
+@cache
+def packaged_skill_root() -> Path:
+    """The release's packaged catalog — resolved LAZILY, never at import.
+
+    ``skills.api`` holds the constant (its home; the public name
+    ``PACKAGED_SKILL_ROOT`` is unchanged there), and this accessor reads it
+    on first use. It must be lazy because the platform-gate tests RE-EXECUTE
+    this module's source with ``os.name`` patched to ``nt``: on a POSIX
+    interpreter any module-level ``Path(__file__)`` dispatches to
+    ``WindowsPath`` and raises ``NotImplementedError`` before a single test
+    can run (regression caught in review round 2).
+    """
+
+    from local_operator.skills.api import PACKAGED_SKILL_ROOT
+
+    return PACKAGED_SKILL_ROOT
 
 
 class Skill(BaseModel):
@@ -357,9 +376,13 @@ def scan_skills_dir(
     ``include_self`` additionally accepts ``<dir>/SKILL.md`` (the wider
     ecosystem only uses this for Claude-plugin manifests; kept for parity).
     ``boundary``, when set (an already-normalized world root), drops any
-    candidate whose realpath escapes it BEFORE its metadata is read: a
-    symlinked directory inside the tree pointing at a skill outside it is
-    not this tree's skill, however it is spelled (QA round 1, Q2).
+    candidate whose realpath escapes it BEFORE its metadata is read — except
+    entries under the release's own packaged catalog, which is trusted by
+    PROVENANCE (release content, not user content) and legitimately resolves
+    outside the world. Everything else — a symlinked directory inside the
+    tree pointing at a skill outside it — is not this tree's skill, however
+    it is spelled (QA round 1, Q2; the catalog exemption restored in round 2,
+    Q5).
     """
     skills: list[Skill] = []
     if seen is None:
@@ -372,7 +395,7 @@ def scan_skills_dir(
             return
         if real in seen:
             return
-        if boundary is not None and not Path(real).is_relative_to(boundary):
+        if boundary is not None and not _within_boundary(real, boundary):
             return
         skill = _skill_from_file(skill_md, base_dir, source)
         if skill is None:
@@ -399,6 +422,27 @@ def _sort_key(skill: Skill) -> tuple[str, str, str]:
     churning provider prompt caches (matching the established behavior).
     """
     return (skill.name.lower(), skill.name, str(skill.file_path))
+
+
+def _within_boundary(real: str, boundary: Path) -> bool:
+    """Containment for a candidate realpath, release catalog exempt.
+
+    The packaged catalog is release knowledge, not user content: a bounded
+    session keeps it (see ``default_skill_roots``), so its entries legitimately
+    resolve OUTSIDE the world and must not be clipped — dropping them removed
+    every packaged skill from a confined parent and child (QA round 2, Q5).
+    Everything else must stay inside: a symlinked dir escaping the world is
+    not world content, however it is spelled (QA round 1, Q2).
+    """
+
+    candidate = Path(real)
+    if candidate == boundary or candidate.is_relative_to(boundary):
+        return True
+    try:
+        packaged = packaged_skill_root().resolve()
+    except OSError:
+        return False
+    return candidate == packaged or candidate.is_relative_to(packaged)
 
 
 def discover_skills(
