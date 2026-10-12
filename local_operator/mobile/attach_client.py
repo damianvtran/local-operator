@@ -42,6 +42,8 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence
 
+from local_operator.session.runtime.types import JOURNAL_ORDER_CAPABILITY
+
 if TYPE_CHECKING:
     # The engage-and-dial seam takes ANY errand (a prompt, or a queued ask's cold
     # answer), so its parameter is the union rather than ``Any``: a caller that
@@ -1218,6 +1220,8 @@ class AttachClient:
             # declaration of what THIS build can receive, never a grant.
             if SUPPLEMENTS_CAPABILITY in record.capabilities:
                 auth["supplements"] = True
+            if JOURNAL_ORDER_CAPABILITY in record.capabilities:
+                auth["journal_order"] = True
         if self._frontend_state:
             auth["frontend_state"] = True
         if self._display_window and "display-history-window-v1" in record.capabilities:
