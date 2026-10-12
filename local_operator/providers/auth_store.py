@@ -1034,6 +1034,12 @@ class _SerializedConnection:
         with self._lock:
             self._conn.commit()
 
+    def rollback(self) -> None:
+        # Muse seals first, then writes metadata. A failed metadata statement
+        # must leave this connection clean before its sealed key is discarded.
+        with self._lock:
+            self._conn.rollback()
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -1277,8 +1283,7 @@ class AuthStore:
             updated_at=row[7],
         )
 
-    @staticmethod
-    def _oauth_key_fn(provider: str) -> GetApiKeyFn | None:
+    def _oauth_key_fn(self, provider: str) -> GetApiKeyFn | None:
         """The extractor that pulls the WIRE token out of an OAuth row.
 
         Which field is the bearer is a property of the row, and the row belongs
@@ -1291,6 +1296,12 @@ class AuthStore:
         flavour by its own definition would authenticate inference with the
         token the inference endpoint rejects.
         """
+        if self._storage_id(provider) == "meta-muse":
+            from local_operator.providers.meta_muse_credentials import read_key
+
+            # Secret references belong to THIS manager's root, not whichever
+            # HOME happens to be inherited by a desktop worker or mesh child.
+            return lambda creds: read_key(creds, self._config_dir or self._db_path.parent) or ""
         definition = get_provider_definition(provider)
         if definition is not None and definition.get_api_key is not None:
             return definition.get_api_key
@@ -1357,6 +1368,36 @@ class AuthStore:
         return None
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
+        """Seal Muse secrets before metadata serialization; preserve other providers."""
+        if self._storage_id(provider) != "meta-muse":
+            return self._upsert_credential_metadata(provider, credential)
+        from local_operator.providers.meta_muse_credentials import (
+            delete_key,
+            seal_credential,
+        )
+
+        old_rows = self.list_credentials("meta-muse", include_disabled=True)
+        sealed = seal_credential(credential, self._config_dir or self._db_path.parent)
+        try:
+            row = self._upsert_credential_metadata("meta-muse", sealed)
+        except BaseException:
+            self._conn.rollback()
+            # Post-write hooks can fail AFTER SQL committed. Do not destroy a
+            # key that a committed row now owns while surfacing that failure.
+            if not any(
+                row.data.get("access_secret_ref") == sealed["access_secret_ref"]
+                for row in self.list_credentials("meta-muse", include_disabled=True)
+            ):
+                delete_key(sealed, self._config_dir or self._db_path.parent)
+            raise
+        for old in old_rows:
+            if old.id == row.id:
+                delete_key(old.data, self._config_dir or self._db_path.parent)
+        return row
+
+    def _upsert_credential_metadata(
+        self, provider: str, credential: dict[str, Any]
+    ) -> StoredCredential:
         """Insert, or update the row for the same identity (org scope ⇒ rows).
 
         Revives soft-deleted rows for the same identity (re-login), and lifts
@@ -1610,6 +1651,13 @@ class AuthStore:
         self._conn.execute(
             "DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,)
         )
+        row = self.get_credential(credential_id)
+        if row is not None and row.provider == "meta-muse":
+            from local_operator.providers.meta_muse_credentials import delete_key
+
+            # Fail before deleting metadata if the encrypted store is locked;
+            # otherwise logout would orphan a key the user can no longer remove.
+            delete_key(row.data, self._config_dir or self._db_path.parent)
         self._conn.execute("DELETE FROM auth_credentials WHERE id = ?", (credential_id,))
         self._conn.commit()
 
@@ -1617,7 +1665,9 @@ class AuthStore:
         self, provider: str, disabled_cause: str = "logged-out"
     ) -> int:
         """Logout: wipe every credential stored under ``provider``. Returns count."""
-        rows = self.list_credentials(provider)
+        rows = self.list_credentials(
+            provider, include_disabled=self._storage_id(provider) == "meta-muse"
+        )
         for row in rows:
             self.delete_credential(row.id)
         return len(rows)
@@ -2253,7 +2303,7 @@ class AuthStore:
     def _needs_refresh(creds: dict[str, Any], *, force: bool = False) -> bool:
         if force:
             return True
-        access = creds.get("access")
+        access = creds.get("access") or creds.get("access_secret_ref")
         if not access:
             return True
         expires = creds.get("expires")
@@ -2277,6 +2327,10 @@ class AuthStore:
         authorized_at can never rewrite them — identity is fixed at login.
         """
         creds = dict(row.data)
+        if row.provider == "meta-muse" and force:
+            # The account bearer was discarded after mint. A failed static key
+            # cannot be refreshed by silently onboarding (or charging) again.
+            raise CredentialInvalidError("Muse Code key needs a new sign-in; run /login meta-muse.")
         # The IdP's own refusal, persisted on the row, is honoured BEFORE the
         # freshness check and therefore before any POST. The ordering matters: a
         # tombstoned grant is dead whether or not its access token has expired
@@ -4038,8 +4092,7 @@ class AuthStore:
         # them requires pretending here that the fault never happened.
         return False
 
-    @staticmethod
-    def _row_matches_key(row: StoredCredential, api_key: str) -> bool:
+    def _row_matches_key(self, row: StoredCredential, api_key: str) -> bool:
         if row.credential_type == "api_key":
             return row.data.get("key") == api_key
         # Compare against the SAME extractor the cascade used to produce the
@@ -4053,7 +4106,7 @@ class AuthStore:
         # would replace "rotate away from the failing credential" with a crash.
         # The extractor reads fields directly, so fall back to the raw compare
         # when it cannot produce a key.
-        key_fn = AuthStore._oauth_key_fn(row.provider)
+        key_fn = self._oauth_key_fn(row.provider)
         if key_fn is not None:
             try:
                 return key_fn(row.data) == api_key
