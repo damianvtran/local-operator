@@ -230,7 +230,7 @@ def default_status_fetcher(
     config_dir: Path,
     owner: Any,
     transport: Any = None,
-) -> Callable[[], Awaitable[Mapping[str, Any]]]:
+) -> Callable[[], Awaitable[Any]]:
     """The PRODUCTION SDK-status fetcher (R8/Q3).
 
     Calls the H1 client's own ``status`` with the owner's PINNED OAuth
@@ -242,7 +242,7 @@ def default_status_fetcher(
 
     _require_owner_identity(owner)  # fail closed on a missing canonical hub
 
-    async def _fetch() -> Mapping[str, Any]:
+    async def _fetch() -> Any:
         from local_operator.team_bridge.client import BridgeRefusal, TeamBridgeClient
         from local_operator.team_bridge.store import Store
 
@@ -274,7 +274,11 @@ def default_status_fetcher(
             raise BridgeRefusal(
                 "bridge_owner_moved", "the native owner generation moved during the status read"
             )
-        return result if isinstance(result, Mapping) else {}
+        if not isinstance(result, Mapping):
+            from local_operator.team_bridge.client import BridgeRefusal
+
+            raise BridgeRefusal("bridge_owner_mismatch", "the status read returned no mapping")
+        return VerifiedStatus(result)
 
     return _fetch
 
@@ -305,6 +309,46 @@ def _require_access_matches_owner(access: Any, owner: Any) -> None:
         )
 
 
+async def _verify_live_identity(owner: Any, auth_store: Any, config_dir: Any) -> None:
+    """Refuse unless the SUPPORTED AuthStore still resolves the exact enrolled
+    identity (R10/A).
+
+    The capture's own fields prove what WAS verified at mint time; this read
+    proves what the live store serves NOW. Token values are never compared,
+    logged or hashed — only credential/account/canonical-hub identity. A
+    revoked row (logout) or a same-row account switch refuses; a legitimate
+    token refresh under the SAME identity passes.
+    """
+
+    from local_operator.team_bridge.client import (
+        BridgeRefusal,
+        BridgeSignInRequired,
+        TeamBridgeClient,
+    )
+    from local_operator.team_bridge.store import StoreRefused
+
+    client = TeamBridgeClient(
+        config_dir,
+        base_url=owner.canonical_base_url,
+        credential_id=owner.credential_id,
+        store=auth_store,
+    )
+    try:
+        access = await client.current_access()
+    except BridgeSignInRequired as failure:
+        raise StoreRefused(
+            "policy_stale", "the signed-in Radient account is not available"
+        ) from failure
+    except BridgeRefusal as failure:
+        raise StoreRefused("policy_stale", "the signed-in credential was refused") from failure
+    if (
+        access.credential_id != owner.credential_id
+        or access.account_id != owner.account_id
+        or (access.api_endpoint or "").rstrip("/") != str(owner.canonical_base_url).rstrip("/")
+    ):
+        raise StoreRefused("policy_stale", "the signed-in identity is not the enrolled owner")
+
+
 def _owner_frame_digest(owner: Any) -> str:
     """The initiating owner frame digest — reused here so a cached status is
     bound to the exact owner that cached it (R8/Q3)."""
@@ -314,40 +358,79 @@ def _owner_frame_digest(owner: Any) -> str:
     return _digest(owner)
 
 
-def _normalize_accepted_status(
-    status: "Mapping[str, Any]", owner: Any, store: Any
-) -> tuple[str, str]:
-    """Strictly normalize the RAW SDK status DTO against the FROZEN server law.
+@dataclasses.dataclass(frozen=True)
+class AcceptedLaw:
+    """The normalized outcome of one lawful status read: selector identity
+    plus the consent/guidance FLOOR metadata the verified path binds (the
+    served texts themselves are never retained)."""
 
-    The frozen Go DTO (``internal/responses/bridge.go``) is:
-    ``{api_version:"1", available, tenants:[{tenant_id, tenant_name, eligible,
-    endpoint:null|{id,label,state:"active"|"paused"|"disabled"}, counts}],
-    guidance:{version,text}, screening:{version,template}, consent:{version,
-    text}}``. The endpoint lives ONLY on the caller's OWN tenant row: it is
-    ``owner.endpoint_id`` on that row and its state must be exactly
-    ``active``. ``available`` means SOME organization of the account, never
-    the selected owner's grant, so the owner's row is the authority. Served
-    guidance/consent texts are accepted only through the existing bounded
-    :class:`AcceptedTexts` discipline, the screening selector only through
-    the existing local-template comparison, and consent CURRENCY only
-    against the COMMITTED native receipt — never the served version alone.
-    Every miss is a typed ``policy_stale`` refusal before publication, client
-    creation or spend.
+    version: str
+    template_hash: str
+    consent_served_version: str
+    guidance_version: str
+    guidance_sha: str
+    consent_sha: str
+
+
+def _accept_text_floor(
+    store: Any, owner: Any, kind: str, version: Any, text: Any
+) -> tuple[str, str]:
+    """Accept one served text through the DURABLE contentless floor (R10/C).
+
+    The floor (version + sha256 of the bytes, never the text) survives reads
+    and restarts in the native store: a lower version, or the SAME version
+    with different bytes, is refused; identical same-version re-serves and
+    forward moves are accepted and persisted. A fresh in-memory accept set
+    would forget every prior acceptance — the store is what makes the
+    discipline real across processes.
     """
 
-    from local_operator.team_bridge.client import (
-        AcceptedTexts,
-        _api_supported,
-        _screening_is_trusted,
-    )
+    import hashlib as _hashlib
+
+    from local_operator.team_bridge.client import TEXT_CAP_BYTES, version_number
+    from local_operator.team_bridge.store import StoreRefused
+
+    if not isinstance(version, str) or not isinstance(text, str):
+        raise StoreRefused("policy_stale", f"{kind} text has an unsupported shape")
+    number = version_number(version)
+    if number is None:
+        raise StoreRefused("policy_stale", f"{kind} version does not parse")
+    encoded = text.encode("utf-8")
+    if len(encoded) > TEXT_CAP_BYTES:
+        raise StoreRefused("policy_stale", f"{kind} text exceeds the acceptance cap")
+    digest = _hashlib.sha256(encoded).hexdigest()
+    floor = store.text_floor(owner, kind)
+    if floor is not None:
+        prior_number = version_number(floor[0])
+        if prior_number is None or number < prior_number:
+            raise StoreRefused("policy_stale", f"{kind} version moved backwards")
+        if number == prior_number and digest != floor[1]:
+            raise StoreRefused("policy_stale", f"{kind} bytes differ for an accepted version")
+    store.set_text_floor(owner, kind, version, digest)
+    return version, digest
+
+
+def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: Any) -> AcceptedLaw:
+    """Strictly normalize the RAW SDK status DTO against the FROZEN server law.
+
+    The frozen Go DTO is ``{api_version:"1", available, tenants:[{tenant_id,
+    tenant_name, eligible, endpoint:null|{id,label,state}, counts}],
+    guidance:{version,text}, screening:{version,template}, consent:{version,
+    text}}``. The endpoint lives ONLY on the caller's OWN tenant row and must
+    be ``owner.endpoint_id`` with state exactly ``active``; ``available``
+    means SOME organization. Served guidance/consent texts pass the DURABLE
+    contentless floors; the screening selector passes the local-template
+    comparison; consent CURRENCY checks the committed receipt. Every miss is
+    a typed ``policy_stale`` refusal before publication, client creation or
+    spend.
+    """
+
+    from local_operator.team_bridge.client import _api_supported, _screening_is_trusted
     from local_operator.team_bridge.screening import SCREENING_TEMPLATE_V1_SHA256
     from local_operator.team_bridge.store import StoreRefused
 
     if not isinstance(status, Mapping):
         raise StoreRefused("policy_stale", "accepted status is not a mapping")
-    # §6.6 compatibility runs through the ONE existing SDK helper: a future,
-    # older or malformed api_version surfaces "update your client" and this
-    # consumer refuses with it rather than guessing.
     if not _api_supported(status):
         raise StoreRefused("policy_stale", "unsupported api_version in status")
     if status.get("available") is not True:
@@ -361,8 +444,6 @@ def _normalize_accepted_status(
         if isinstance(entry, Mapping) and entry.get("tenant_id") == owner.tenant_id
     ]
     if len(rows) != 1:
-        # EXACTLY one mapping row for the initiating owner tenant; duplicates
-        # or absence are refusals, never a fallback to another organization.
         raise StoreRefused("policy_stale", "owner tenant row missing or duplicated")
     row = rows[0]
     if row.get("eligible") is not True:
@@ -379,33 +460,27 @@ def _normalize_accepted_status(
         raise StoreRefused("policy_stale", "status carries no screening selector")
     version = screening.get("version")
     template = screening.get("template")
-    # The LOCAL embedded selector is the only template authority (selector-
-    # only acceptance, review round 1 R4): the served bytes are compared to
-    # it, never executed, and a mismatch cannot reuse a stale accepted slot.
     if not _screening_is_trusted(version, template):
         raise StoreRefused("policy_stale", "screening selector does not match the local template")
-    # Guidance and consent texts ride the ONE existing bounded acceptance
-    # discipline (2 KiB cap, monotonic versions, idempotent same-version
-    # re-serves, immutable-once-versioned bytes).
-    texts = AcceptedTexts()
     guidance = status.get("guidance")
-    if not isinstance(guidance, Mapping) or (
-        texts.accept("guidance", version=guidance.get("version"), text=guidance.get("text")) is None
-    ):
-        raise StoreRefused("policy_stale", "guidance text was refused by the acceptance caps")
+    if not isinstance(guidance, Mapping):
+        raise StoreRefused("policy_stale", "status carries no guidance section")
+    guidance_version, guidance_sha = _accept_text_floor(
+        store, owner, "guidance", guidance.get("version"), guidance.get("text")
+    )
     consent = status.get("consent")
     if not isinstance(consent, Mapping):
         raise StoreRefused("policy_stale", "status carries no consent section")
-    if texts.accept("consent", version=consent.get("version"), text=consent.get("text")) is None:
-        raise StoreRefused("policy_stale", "consent text was refused by the acceptance caps")
-    # CONSENT CURRENCY (R9/Q3-2): the served version is the CURRENT server
-    # version, NOT proof of acceptance. Acceptance is the COMMITTED native
-    # receipt; currency is that receipt's version matching what the server
-    # serves now. Neither present nor equal -> HOLD (never auto-reconsent).
+    consent_version, consent_sha = _accept_text_floor(
+        store, owner, "consent", consent.get("version"), consent.get("text")
+    )
+    # CONSENT CURRENCY: the served version is the CURRENT server version, NOT
+    # proof of acceptance. Acceptance is the COMMITTED native receipt;
+    # currency is that receipt's version matching what the server serves now.
     receipt = store.owner_consent_receipt(owner)
     if receipt is None:
         raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
-    if receipt["consent_version"] != consent.get("version"):
+    if receipt["consent_version"] != consent_version:
         raise StoreRefused(
             "policy_stale", "committed consent is not current for the served version"
         )
@@ -416,7 +491,14 @@ def _normalize_accepted_status(
         raise StoreRefused(
             "policy_stale", "screening template bytes do not match the local selector"
         )
-    return str(version), digest
+    return AcceptedLaw(
+        version=str(version),
+        template_hash=digest,
+        consent_served_version=consent_version,
+        guidance_version=guidance_version,
+        guidance_sha=guidance_sha,
+        consent_sha=consent_sha,
+    )
 
 
 _CAPTURE_TOKEN = object()
@@ -434,7 +516,23 @@ class AcceptedCapture:
     refused where a capture is required.
     """
 
-    __slots__ = ("version", "template_hash", "owner_frame", "captured_at")
+    __slots__ = (
+        "version",
+        "template_hash",
+        "owner_frame",
+        "captured_at",
+        "credential_id",
+        "account_id",
+        "hub",
+        "owner_generation",
+        "consent_version",
+        "consent_ref",
+        "consent_served_version",
+        "guidance_version",
+        "guidance_sha",
+        "consent_sha",
+        "source",
+    )
 
     def __init__(
         self,
@@ -444,6 +542,17 @@ class AcceptedCapture:
         template_hash: str,
         owner_frame: str,
         captured_at: float,
+        credential_id: Any = None,
+        account_id: Any = None,
+        hub: Any = None,
+        owner_generation: Any = None,
+        consent_version: Any = None,
+        consent_ref: Any = None,
+        consent_served_version: Any = None,
+        guidance_version: Any = None,
+        guidance_sha: Any = None,
+        consent_sha: Any = None,
+        source: Any = None,
     ) -> None:
         if token is not _CAPTURE_TOKEN:
             raise ValueError("AcceptedCapture is minted only by the verified status path")
@@ -451,6 +560,53 @@ class AcceptedCapture:
         self.template_hash = template_hash
         self.owner_frame = owner_frame
         self.captured_at = captured_at
+        # R10/A: the FULL authenticated identity the capture was minted
+        # under. The abbreviated lease frame deliberately omits account/hub
+        # (leases carry a separate account scope); a CAPTURE has no such
+        # second binding, so it must carry the complete namespace itself —
+        # otherwise a same-row account switch would reuse it.
+        self.credential_id = credential_id
+        self.account_id = account_id
+        self.hub = hub
+        self.owner_generation = owner_generation
+        self.consent_version = consent_version
+        self.consent_ref = consent_ref
+        self.consent_served_version = consent_served_version
+        self.guidance_version = guidance_version
+        self.guidance_sha = guidance_sha
+        self.consent_sha = consent_sha
+        self.source = source
+
+
+class VerifiedStatus:
+    """A status payload returned by the VERIFIED production fetcher.
+
+    R10/A: only a fetch that actually performed the OAuth before/after
+    identity verification may mint a trusted capture. A bare Mapping from an
+    arbitrary injected callback is still normalized for adversarial-raw
+    coverage, but it can never acquire capture authority.
+    """
+
+    __slots__ = ("status",)
+
+    def __init__(self, status: "Mapping[str, Any]") -> None:
+        self.status = status
+
+
+def _full_owner_frame(owner: Any) -> str:
+    """The COMPLETE owner frame for capture bindings (identity + hub + gen).
+
+    Deliberately distinct from the abbreviated lease-token frame, which
+    omits account/hub by design (R10/A).
+    """
+
+    material = (
+        f"{owner.credential_id}|{owner.account_id}|{owner.tenant_id}"
+        f"|{owner.endpoint_id}|{owner.canonical_base_url}|{owner.enrollment_generation}"
+    )
+    import hashlib as _hashlib
+
+    return _hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
 
 _STATUS_CAPTURE_TTL = 300.0
@@ -482,7 +638,7 @@ async def run_screening_cycle(
     holder: str = "team-bridge-cycle",
     ttl: float = 120.0,
     accepted_capture: "AcceptedCapture | None" = None,
-    status_fetcher: "Callable[[], Awaitable[Mapping[str, Any]]] | None" = None,
+    status_fetcher: "Callable[[], Awaitable[Any]] | None" = None,
 ) -> Any:
     """The SHIPPED THIN production composition (R6/Q3).
 
@@ -530,12 +686,50 @@ async def run_screening_cycle(
         # a DELIVER, so it is refused here as not-authority.
         raise StoreRefused("policy_stale", "an unverified status mapping is not authority")
     if capture is not None:
-        if (
-            capture.owner_frame != _owner_frame_digest(owner)
+        # R10/A: reuse is authority ONLY while its COMPLETE identity still
+        # holds — full namespace, selector, consent currency and floors —
+        # AND the live supported AuthStore still resolves to the SAME
+        # credential/account/hub. A same-row account switch or a logout
+        # therefore refuses HERE, before any client/POST/spend, even on an
+        # unbilled semantic-cache hit.
+        now = time.time()
+        stale = (
+            not isinstance(capture.captured_at, (int, float))
+            or isinstance(capture.captured_at, bool)
+            or capture.captured_at != capture.captured_at  # NaN
+            or capture.captured_at > now + 5.0
+            or (now - capture.captured_at) > _STATUS_CAPTURE_TTL
+            or capture.owner_frame != _full_owner_frame(owner)
+            or capture.credential_id != owner.credential_id
+            or capture.account_id != owner.account_id
+            or capture.hub != owner.canonical_base_url
+            or capture.owner_generation != owner.enrollment_generation
             or capture.version != SCREENING_VERSION_V1
             or capture.template_hash != SCREENING_TEMPLATE_V1_SHA256
-            or (time.time() - capture.captured_at) > _STATUS_CAPTURE_TTL
-        ):
+        )
+        if not stale:
+            receipt_now = store.owner_consent_receipt(owner)
+            floors_ok = True
+            for kind, ver, sha in (
+                ("guidance", capture.guidance_version, capture.guidance_sha),
+                ("consent", capture.consent_version, capture.consent_sha),
+            ):
+                if not isinstance(ver, str) or not isinstance(sha, str):
+                    floors_ok = False
+                    break
+                floor = store.text_floor(owner, kind)
+                if floor is not None and floor != (ver, sha):
+                    floors_ok = False
+                    break
+            if (
+                receipt_now is None
+                or receipt_now["consent_version"] != capture.consent_served_version
+                or not floors_ok
+            ):
+                stale = True
+        if not stale:
+            await _verify_live_identity(owner, auth_store, config_dir)
+        else:
             capture = None
     if capture is None:
         if status_fetcher is None:
@@ -544,18 +738,40 @@ async def run_screening_cycle(
             # dispatches.
             raise StoreRefused("policy_stale", "no verified status source")
         fetched = await status_fetcher()
-        if not isinstance(fetched, Mapping):
+        verified = isinstance(fetched, VerifiedStatus)
+        raw = fetched.status if verified else fetched
+        if not isinstance(raw, Mapping):
             raise StoreRefused("policy_stale", "status fetch returned no mapping")
-        version, template_hash = _normalize_accepted_status(fetched, owner, store)
+        law = _normalize_accepted_status(raw, owner, store)
         if not store.current_generation_is_live(owner):
             raise StoreRefused("policy_stale", "owner generation lost during the status read")
-        capture = AcceptedCapture(
-            _CAPTURE_TOKEN,
-            version=version,
-            template_hash=template_hash,
-            owner_frame=_owner_frame_digest(owner),
-            captured_at=time.time(),
-        )
+        if verified:
+            # Mint trusted authority ONLY from the verified fetcher: an
+            # arbitrary injected callback is normalized for adversarial
+            # coverage but never mints a capture (R10/A).
+            receipt = store.owner_consent_receipt(owner)
+            if receipt is None:
+                raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
+            capture = AcceptedCapture(
+                _CAPTURE_TOKEN,
+                version=law.version,
+                template_hash=law.template_hash,
+                owner_frame=_full_owner_frame(owner),
+                captured_at=time.time(),
+                credential_id=owner.credential_id,
+                account_id=owner.account_id,
+                hub=owner.canonical_base_url,
+                owner_generation=owner.enrollment_generation,
+                consent_version=receipt["consent_version"],
+                consent_ref=receipt["consent_ref"],
+                consent_served_version=law.consent_served_version,
+                guidance_version=law.guidance_version,
+                guidance_sha=law.guidance_sha,
+                consent_sha=law.consent_sha,
+                source="sdk-verified",
+            )
+    if capture is None:  # both branches above either set it or raised
+        raise StoreRefused("policy_stale", "no verified status source")
     version, template_hash = capture.version, capture.template_hash
     # OWNER PIN (R8/Q3): the awaited fetch may have raced an AuthStore
     # credential-row switch; the owner captured BEFORE the await must still
