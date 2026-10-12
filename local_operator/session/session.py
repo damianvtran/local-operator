@@ -3957,6 +3957,17 @@ class Session:
         # latch both compare against that source, so their annotations must match
         # its arity or a comparison silently degrades.
         self._todo_reminder_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
+        #: The blocked group's IDENTITY latch: (phase, text, status) per blocked item,
+        #: WITHOUT the reason. Deliberately NOT reset per turn (see
+        #: ``_run_turn_pipeline``): a parked set earns exactly ONE reconciliation per
+        #: identity change, across turns, so an unchanged parked set is not re-asserted
+        #: on every wake or quiet end. An empty identity is a change too: it is recorded
+        #: on the silent returns, so an identical re-park is a new identity that earns
+        #: its pass. A reason-only rewrite is bookkeeping, not a new ask — it refreshes
+        #: the rendered assertion's expiry (the full fingerprint rides ``details``) but
+        #: never re-fires one. In-memory on purpose: a process restart re-asks once per
+        #: current set, which is the accepted limit.
+        self._blocked_reminder_fingerprint: tuple[tuple[str, str, str], ...] | None = None
         # The todo fingerprint that was last WRITTEN to the transcript, so the
         # post-turn snapshot only appends when the list actually moved. Seeded
         # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
@@ -14286,11 +14297,14 @@ class Session:
                 note_open(producer_command_id or "")
             except Exception:  # noqa: BLE001 — an instrument never fails a turn
                 logger.debug("could not open the turn journal row", exc_info=True)
-        # Re-arm the todo guardrail: a fresh user message may well be the answer
-        # a stalled list was waiting for, so the latch must not carry over. It is
-        # reset HERE and not in `_run_turn` on purpose — `_run_turn` also runs
-        # post-compaction continuations of this SAME user turn, and re-arming
-        # there would re-nudge an unchanged list the model already declined.
+        # Re-arm the todo guardrail's PENDING branch: a fresh user message may
+        # well be the answer a stalled list was waiting for, so that latch must
+        # not carry over. It is reset HERE and not in `_run_turn` on purpose —
+        # `_run_turn` also runs post-compaction continuations of this SAME user
+        # turn, and re-arming there would re-nudge an unchanged list the model
+        # already declined. The BLOCKED latch is deliberately NOT reset here: it
+        # is cross-turn by design (see `_blocked_reminder_fingerprint`), so an
+        # unchanged parked set is not re-asserted on every wake or quiet end.
         self._todo_reminder_fingerprint = None
         # The project guardrail's latch and its worked-turn counter share this
         # site for twin reasons: the user's next message may be the update the
@@ -18022,34 +18036,58 @@ class Session:
 
         The work set is pending PLUS blocked, and the two are reconciled
         differently on purpose. Pending items may not be left running: they are
-        work the model is asked to resume or honestly resolve. Blocked items are
+        work the model is asked to resume or honestly resolve, and their latch
+        re-arms per turn (reset in ``_run_turn_pipeline``). Blocked items are
         unfinished too — parked on a user decision or an external service — and
         the failure this covers is a session that ended turns for ~14 hours over
         six blocked items while a pending-only guardrail saw an empty work set
-        and let every yield stand. So blocked items are now ACCOUNTED for at the
+        and let every yield stand. So blocked items are ACCOUNTED for at the
         same boundary: the reminder asks whether the condition still holds, whose
-        decision it is, and whether anything is armed to revisit it. The honest
-        stop is preserved — a blocked model may still finish its turn (the
-        paragraph asks it to account, never to invent progress), and, crucially,
-        it is not deferred forever by this hook: one accounting pass is all that
-        is owed (see the latch below). ``done`` and ``dropped`` stay out: they
-        are settled, and re-asserting them would feed the model a claim that is
-        false.
+        decision it is, and whether anything is armed to revisit it.
 
-        Fires only while the list is MOVING. A model that yields twice with a
-        byte-identical list is telling you it cannot proceed — usually it needs
-        a decision only the user can make — and nudging it again would burn the
-        loop's ``max_follow_up_continuations`` budget (its own, and the larger
-        one: 64 against the 8 the steering/aside producers share), end the turn
-        with a continuation-limit notice, and delay the user's answer by up to
-        that many model calls. That latch is also what keeps the blocked
+        The blocked reconciliation fires ONCE PER BLOCKED-IDENTITY CHANGE, on a
+        CROSS-TURN latch (``_blocked_reminder_fingerprint``, deliberately not
+        reset in ``_run_turn_pipeline``). The identity is
+        ``(phase, text, status)`` per blocked item, WITHOUT the reason: a
+        reason-only rewrite is the model re-checking a parked item — its own
+        bookkeeping, not a new ask — so it does not re-fire a reconciliation,
+        though it still expires the stale rendered assertion (the full
+        fingerprint, reason included, rides the reminder's ``details``; see
+        :meth:`_live_todo_reminders`). What this replaces is the measured
+        over-fire: a per-turn re-arm meant an operator session whose open work
+        was ALL blocked — 0 pending, 5-6 parked items — was re-asserted on every
+        turn (every peer wake, every quiet end); across two such sessions ~97 of
+        ~116 quiet-end attempts were overridden by continued model output.
+
+        The honest stop is preserved — a blocked model may still finish its turn
+        (the paragraph asks it to account, never to invent progress), and,
+        crucially, it is not deferred forever by this hook: one accounting pass
+        per identity change is all that is owed (see the latch above). ``done``
+        and ``dropped`` stay out: they are settled, and re-asserting them would
+        feed the model a claim that is false. The latch IS the mechanism — no
+        prompt text, classifier or new tool: a set new or changed since it was
+        last accounted earns one nudge; an unchanged one earns none.
+
+        Fires only while the list is MOVING — for pending, movement since the
+        per-turn re-arm; for blocked, movement of the identity since it was last
+        accounted. A model that yields twice with a byte-identical list is
+        telling you it cannot proceed — usually it needs a decision only the
+        user can make — and nudging it again would burn the loop's
+        ``max_follow_up_continuations`` budget (its own, and the larger one: 64
+        against the 8 the steering/aside producers share), end the turn with a
+        continuation-limit notice, and delay the user's answer by up to that
+        many model calls. That latch is also what keeps the blocked
         reconciliation bounded: blocking is MOVEMENT (it changes the
         fingerprint), so it earns exactly one nudge, and the byte-identical
         yield after the model accounts is released — one pass, not a loop. The
         larger budget is safe precisely because the latch above is what really
         bounds this producer — a chatty parent can no longer spend the allowance
-        a still-moving list needs. Any progress earns another nudge; a fresh
-        user turn re-arms the latch (see ``_run_turn_pipeline``).
+        a still-moving list needs.
+
+        Both latches are IN-MEMORY, and that is the accepted limit: a process
+        restart re-asks once per current set (the first yield after the restart
+        sees fresh latches), which re-founds the same one-pass bound rather than
+        opening a new over-fire path.
 
         The nudge it returns is a point-in-time assertion and stops being sent
         the moment the list moves — see :meth:`_live_todo_reminders`, which
@@ -18067,20 +18105,43 @@ class Session:
         pending = open_todos(self._session_id)
         blocked = blocked_todos(self._session_id)
         if not pending and not blocked:
+            # Nothing parked means the blocked identity IS the empty tuple, and
+            # THAT is still a fact to record: an identity change with nothing to
+            # ask about must still move the ledger, or a set that resolved to
+            # EMPTY and is re-parked identically later would read as "still
+            # accounted" and stay silent forever (round-1 F1).
+            self._blocked_reminder_fingerprint = ()
             return []
         fingerprint = todo_fingerprint(self._session_id)
-        if fingerprint == self._todo_reminder_fingerprint:
+        # The blocked group's IDENTITY — (phase, text, status), no reason — see the
+        # field comment beside `self._blocked_reminder_fingerprint`.
+        blocked_identity = tuple(x[:3] for x in fingerprint if x[2] == "blocked")
+        blocked_changed = blocked_identity != self._blocked_reminder_fingerprint
+        pending_fires = bool(pending) and fingerprint != self._todo_reminder_fingerprint
+        blocked_fires = bool(blocked_identity) and blocked_changed
+        if not (pending_fires or blocked_fires):
+            # An identity change with nothing to ask about — the set resolved to
+            # EMPTY — is still a change: record it here, or an identical set
+            # re-parked later would read as "still accounted" and stay silent
+            # forever (round-1 F1). A non-empty change fires above; the no-work
+            # return records the fully-empty case.
+            if blocked_changed:
+                self._blocked_reminder_fingerprint = blocked_identity
             return []
         self._todo_reminder_fingerprint = fingerprint
+        self._blocked_reminder_fingerprint = blocked_identity
         return [
             CustomMessage(
                 custom_type=TODO_REMINDER_MESSAGE_TYPE,
                 attribution="system",
-                # The fingerprint rides ALONG with the text: it is what the
-                # render path compares to decide the assertion is still true
-                # (see :meth:`_live_todo_reminders`).
+                # The fingerprint rides ALONG with the text: it is what the render
+                # path compares to decide the assertion is still true (see
+                # :meth:`_live_todo_reminders`). Each group's section renders only
+                # when that group is what fired.
                 details={
-                    "text": _todo_reminder_text(pending, blocked),
+                    "text": _todo_reminder_text(
+                        pending if pending_fires else [], blocked if blocked_fires else []
+                    ),
                     "fingerprint": fingerprint,
                 },
             )
