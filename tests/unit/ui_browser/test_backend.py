@@ -125,11 +125,12 @@ async def test_unreachable_copy_names_the_app_and_never_installs_a_bridge(
 
 
 @pytest.mark.asyncio
-async def test_missing_record_says_open_the_app(tmp_path: Path) -> None:
+async def test_missing_record_does_not_infer_the_app_is_closed(tmp_path: Path) -> None:
     with pytest.raises(BridgeUnreachable) as excinfo:
         await backend.UiHostClient(tmp_path).call("status", {})
     message = str(excinfo.value)
-    assert "not running" in message and "Open the desktop app" in message
+    assert "unavailable" in message and "incomplete browser startup" in message
+    assert "does not prove the app is closed" in message
     assert "lop browser install" not in message
 
 
@@ -173,6 +174,95 @@ async def test_a_timeout_after_connect_names_the_app_not_a_restart(
     assert "check the app's browser tab" in message
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", ["401", "409", "connect", "health"])
+async def test_modern_ui_retries_only_changed_record_predelivery_refusals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
+) -> None:
+    first = publish(tmp_path, instance_id="instance-a")
+    counts = {"post": 0, "get": 0}
+    generation = "instance-a"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal generation
+        if request.method == "GET":
+            counts["get"] += 1
+            if refusal == "health" and counts["get"] == 1:
+                generation = "instance-b"
+                publish(tmp_path, instance_id=generation)
+            return httpx.Response(
+                200, json={"host": "ui", "pid": first.pid, "instance_id": generation}
+            )
+        counts["post"] += 1
+        assert request.headers["X-UI-Browser-Instance"] == generation
+        if counts["post"] == 1 and refusal != "health":
+            generation = "instance-b"
+            publish(tmp_path, instance_id=generation)
+            if refusal == "connect":
+                raise httpx.ConnectError("connection refused")
+            if refusal == "409":
+                return httpx.Response(409, json={"detail": "host instance changed"})
+            return httpx.Response(401, json={})
+        body = json.loads(request.content)
+        return httpx.Response(
+            200, json={"id": body["id"], "ok": True, "result": {"generation": generation}}
+        )
+
+    client = _client_with_transport(tmp_path, monkeypatch, handler)
+    assert await client.call("open", {"url": "https://example.test"}) == {
+        "generation": "instance-b"
+    }
+    assert counts == {"get": 2, "post": 1 if refusal == "health" else 2}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.ReadError]
+)
+async def test_modern_ui_never_replays_ambiguous_action_even_after_record_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type[httpx.RequestError]
+) -> None:
+    current = publish(tmp_path, instance_id="instance-a")
+    posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        if request.method == "GET":
+            return httpx.Response(
+                200, json={"host": "ui", "pid": current.pid, "instance_id": "instance-a"}
+            )
+        posts += 1
+        publish(tmp_path, instance_id="instance-b")
+        raise failure("after possible side effect")
+
+    client = _client_with_transport(tmp_path, monkeypatch, handler)
+    with pytest.raises(BridgeUnreachable):
+        await client.call("open", {"url": "https://example.test"})
+    assert posts == 1
+
+
+@pytest.mark.asyncio
+async def test_modern_ui_changed_instance_never_sends_command_to_wrong_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = publish(tmp_path, instance_id="expected-instance")
+    posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        if request.method == "GET":
+            return httpx.Response(
+                200, json={"host": "ui", "pid": current.pid, "instance_id": "wrong-instance"}
+            )
+        posts += 1
+        pytest.fail("command dispatched despite health identity mismatch")
+
+    client = _client_with_transport(tmp_path, monkeypatch, handler)
+    with pytest.raises(BridgeUnreachable, match="no command was sent"):
+        await client.call("open", {"url": "https://example.test"})
+    assert posts == 0
+
+
 # --- availability and the /health acquittal, against a real listener ----------
 
 
@@ -199,6 +289,79 @@ def _listener(body: dict[str, Any]) -> tuple[HTTPServer, int]:
     server = HTTPServer(("127.0.0.1", 0), _Health)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "advertised_instance, reachable", [("instance-a", True), ("instance-b", False)]
+)
+async def test_fresh_modern_record_requires_real_health_generation_match(
+    tmp_path: Path, advertised_instance: str, reachable: bool
+) -> None:
+    server, port = _listener({"host": "ui", "pid": os.getpid(), "instance_id": "instance-a"})
+    try:
+        publish(tmp_path, port=port, instance_id=advertised_instance)
+        assert await backend.ui_browser_reachable(tmp_path) is reachable
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.asyncio
+async def test_real_ui_transport_rotates_once_before_delivery_without_duplicate_side_effect(
+    tmp_path: Path,
+) -> None:
+    """Real HTTP/key/header path; only the page dispatcher is synthetic."""
+    facts: dict[str, Any] = {"instance": "instance-a", "gets": 0, "posts": 0, "effects": 0}
+
+    class RpcHandler(BaseHTTPRequestHandler):
+        def reply(self, status: int, body: dict[str, Any]) -> None:
+            raw = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self) -> None:  # noqa: N802 - stdlib hook
+            facts["gets"] += 1
+            self.reply(200, {"host": "ui", "pid": os.getpid(), "instance_id": facts["instance"]})
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib hook
+            facts["posts"] += 1
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if facts["posts"] == 1:
+                facts["instance"] = "instance-b"
+                publish(tmp_path, port=server.server_address[1], instance_id="instance-b")
+                self.reply(401, {})
+                return
+            assert self.headers["X-UI-Browser-Instance"] == "instance-b"
+            record = state.read(tmp_path)
+            assert record is not None
+            assert self.headers["X-Bridge-Key"] == record.session_key
+            facts["effects"] += 1
+            body = json.loads(raw)
+            self.reply(200, {"id": body["id"], "ok": True, "result": {"created": True}})
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), RpcHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        publish(tmp_path, port=server.server_address[1], instance_id="instance-a")
+        result = await backend.UiHostClient(tmp_path).call("open", {"url": "https://example.test"})
+        assert result == {"created": True}
+        assert facts == {"instance": "instance-b", "gets": 2, "posts": 2, "effects": 1}
+        print(
+            "real UI transport: health=2, POST=2, first=401/pre-delivery, "
+            "second=200/created, side_effects=1"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
 
 
 @pytest.mark.asyncio
@@ -268,7 +431,7 @@ async def test_client_reads_the_ui_namespace_and_not_the_bridge_one(tmp_path: Pa
     assert backend.ui_browser_available(tmp_path) is False
     client = backend.UiHostClient(tmp_path)
     assert client.host == "ui"
-    with pytest.raises(BridgeUnreachable, match="not running"):
+    with pytest.raises(BridgeUnreachable, match="unavailable"):
         await client.call("status", {})
 
 

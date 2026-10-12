@@ -20,13 +20,16 @@ What IS host-specific, and therefore lives here:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import httpx
 
 from local_operator.browser_bridge.backend import (
     HEALTH_PROBE_TIMEOUT_S,
     HOST_UI,
+    BridgeUnreachable,
     HostClient,
+    HostPreDeliveryFailure,
 )
 from local_operator.ui_browser import state as state_store
 
@@ -38,6 +41,45 @@ class UiHostClient(HostClient):
 
     def __init__(self, root: Path | None = None) -> None:
         super().__init__(state_store, root)
+
+    def request_headers(self, current: Any) -> dict[str, str]:
+        headers = super().request_headers(current)
+        if current.instance_id is not None:
+            headers["X-UI-Browser-Instance"] = current.instance_id
+        return headers
+
+    async def preflight(self, current: Any) -> None:
+        # A fresh heartbeat plus a live/reused PID is not process identity. Only
+        # modern records buy this bounded check; legacy UI contracts stay intact.
+        if current.instance_id is not None and not await _health_ok(
+            current.port, current.pid, current.instance_id
+        ):
+            raise HostPreDeliveryFailure(
+                "the desktop browser host is unavailable: its published process generation "
+                "did not answer the bounded health check; no command was sent"
+            )
+
+    async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        current = self._read()
+        if current is None:
+            raise BridgeUnreachable(self.copy_for().no_state)
+        try:
+            return await self.call_once(current, method, params)
+        except HostPreDeliveryFailure:
+            replacement = self._read()
+            if replacement is None or self._record_identity(replacement) == self._record_identity(
+                current
+            ):
+                raise
+            # One fresh-record retry ONLY after a proven pre-delivery failure.
+            # Never replay timeouts, disconnects, or a returned command error.
+            return await self.call_once(replacement, method, params)
+
+    @staticmethod
+    def _record_identity(current: state_store.UiHostState) -> tuple[int, int, str, str | None]:
+        # Includes key rotation inside the same process, but is never logged: the
+        # session key remains secret and identity is not an ownership proof.
+        return (current.port, current.pid, current.session_key, current.instance_id)
 
 
 def ui_browser_available(root: Path | None = None) -> bool:
@@ -87,20 +129,22 @@ async def ui_browser_reachable(
     The same contract as the bridge's, and it exists for the same reason: the
     heartbeat is a proxy that lies in both directions, so ``FRESH`` answers yes
     without a probe, ``ABSENT`` answers no without a probe, and only ``STALE``
-    buys ONE bounded ``/health`` request before the host is condemned.
+    buys ONE bounded ``/health`` request before the host is condemned. Modern
+    instance-labelled records are also probed when fresh: a heartbeat/PID cannot
+    identify a recycled process. File-only tool advertisement stays inexpensive.
     """
     try:
         status, current = classified if classified is not None else state_store.liveness(root)
     except Exception:  # noqa: BLE001 - discovery must never raise at a call site
         return False
-    if status is state_store.Liveness.FRESH:
-        return True
-    if status is not state_store.Liveness.STALE or current is None:
+    if current is None or status not in (state_store.Liveness.FRESH, state_store.Liveness.STALE):
         return False
-    return await _health_ok(current.port, current.pid)
+    if status is state_store.Liveness.FRESH and current.instance_id is None:
+        return True
+    return await _health_ok(current.port, current.pid, current.instance_id)
 
 
-async def _health_ok(port: int, pid: int) -> bool:
+async def _health_ok(port: int, pid: int, instance_id: str | None = None) -> bool:
     """One bounded loopback /health probe; any failure means "not reachable".
 
     The probe requires the answering process to be the pid the FILE named, not
@@ -108,6 +152,10 @@ async def _health_ok(port: int, pid: int) -> bool:
     process would otherwise be acquitted as this host. That is the UI-host
     equivalent of the bridge's ``extension_connected`` requirement in
     :func:`~local_operator.browser_bridge.backend._health_ok`.
+
+    A modern record additionally pins ``instance_id``: a recycled PID/port or a
+    same-version UI restart must not pass as the old process. Legacy records omit
+    it and retain the original PID/host contract.
 
     ``proto`` is reported but deliberately not required to equal
     ``PROTO_VERSION``: a version-skewed host is a REAL host that can explain
@@ -124,6 +172,7 @@ async def _health_ok(port: int, pid: int) -> bool:
             isinstance(body, dict)
             and body.get("host") == state_store.HOST
             and int(body.get("pid", -1)) == pid
+            and (instance_id is None or body.get("instance_id") == instance_id)
         )
     except Exception:  # noqa: BLE001 - unreachable, malformed, or timed out
         return False

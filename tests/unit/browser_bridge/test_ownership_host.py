@@ -349,6 +349,37 @@ async def test_a_ui_record_selects_the_ui_client_and_discovery(
     assert [method for method, _ in ui_client.calls] == ["owner_recover"]
 
 
+@pytest.mark.asyncio
+async def test_same_version_ui_instance_change_invalidates_verdict_not_durable_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    from local_operator.ui_browser import state as ui_state
+
+    current = ui_state.UiHostState(
+        pid=2,
+        port=52133,
+        session_key="k" * 32,
+        proto=1,
+        app_version="0.21.0",
+        instance_id="instance-a",
+    )
+    monkeypatch.setattr(ui_state, "read", lambda root=None: current)
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("ui:100:capability", host="ui")
+    await resource.recover()
+    assert resource.ownership_mode() is True
+    assert resource._peer_identity() == ("0.21.0", 1, "instance-a")
+    durable = resource._load()
+    current = current.model_copy(update={"instance_id": "instance-b"})
+    assert resource.ownership_mode() is None, "same-version restarts must re-probe ownership"
+    assert (
+        resource._load() == durable
+    ), "discovery identity never rewrites durable session ownership"
+    await resource.recover()
+    assert [method for method, _ in ui_client.calls] == ["owner_recover", "owner_recover"]
+
+
 def test_a_legacy_record_without_a_host_falls_back_to_the_bridge(tmp_path: Path) -> None:
     """Fail-safe, not fail-open: a record written before `host` existed names the
     bridge, which is where that session was talking."""
