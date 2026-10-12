@@ -341,6 +341,8 @@ def feature_flags() -> dict[str, Any]:
         # key exists so the NEW renderer can tell whether asking is worthwhile
         # before it sends a flag the old backend ignores.
         "entry_ts": 1,
+        # Viewer opt-in: journal-index ordinals/domain, not publication seq.
+        "journal_order": 1,
         # THE OPEN FRAME. `open_frame=1` on `GET .../{id}` (the snapshot),
         # `GET .../{id}/history` and `GET .../{id}/events` asks for the page in
         # the unit a surface PAINTS: `limit` counts paintable rows, the cut
