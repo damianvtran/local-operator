@@ -126,7 +126,7 @@ def test_set_active_locale_flips_resolution_and_runs_refreshers_once(
     assert resolver(Msg("demo.words.hello", {})) == "Hello"
 
 
-def test_an_unshipped_locale_degrades_to_codes_without_raising(
+def test_a_shipped_locale_missing_its_namespace_falls_back_to_english(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "en").mkdir(parents=True)
@@ -135,6 +135,6 @@ def test_an_unshipped_locale_degrades_to_codes_without_raising(
     )
     monkeypatch.setattr(catalogues, "_CATALOGUES", tmp_path)
     text.set_active_locale("fr")
-    assert text.tr("demo.words")(Msg("demo.words.hello", {})) == "demo.words.hello"
+    assert text.tr("demo.words")(Msg("demo.words.hello", {})) == "Hello"
     text.set_active_locale("en")
     assert text.tr("demo.words")(Msg("demo.words.hello", {})) == "Hello"

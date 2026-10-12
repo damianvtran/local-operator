@@ -48,6 +48,20 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # hands the driver beside the wire shape.
     from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState
 
+    # The owning observation/shutdown surface (``subscribe_requests`` /
+    # ``shutdown_owned_work``), which the runtime implements and a viewer
+    # genuinely cannot — so it lives on its own ``OwningSessionProtocol``
+    # extension, NOT on the shared ``SessionProtocol`` (review round 1, R1:
+    # widening the shared protocol forced every conformer — including the
+    # shared/base FakeSessions the viewer and TUI suites rely on — to grow
+    # stubs it should never have needed). Both signatures name these types, and
+    # importing them at runtime here would pull the session package into the
+    # protocol module for no reader's gain.
+    from local_operator.session.request_observation import (
+        OwnedShutdownResult,
+        RequestObserver,
+    )
+
 
 def unanswered_tail_call_ids(messages: Sequence[Any]) -> set[str]:
     """Calls in the CURRENT turn's latest group that have no result yet.
@@ -588,6 +602,83 @@ class SessionProtocol(Protocol):
 
     # --- lifecycle --------------------------------------------------------
     async def dispose(self) -> None: ...
+
+
+class OwningSessionProtocol(SessionProtocol, Protocol):
+    """The OWNING extension: what a session that runs its own turn loop adds.
+
+    WHY A SEPARATE PROTOCOL (review round 1, R1). A viewer is a facade onto a
+    runtime in another process: it cannot observe that runtime's request-final
+    records and cannot join its cleanup, so the observation/shutdown surface
+    is not a shared ``SessionProtocol`` member. Widening the shared protocol
+    instead forced every structural conformer to grow stubs — including the
+    shared/base FakeSessions the viewer and TUI suites rely on — and turned
+    the whole-tree type gate red. The repository's existing pattern already
+    says this: viewers get their own extension (see
+    :class:`ViewerSessionProtocol`), and the owning surface belongs on its own
+    extension too. Real ``Session`` conforms; a viewer does not, and the SDK's
+    mode-precise overloads make the difference visible statically.
+
+    Not ``runtime_checkable``: a positive structural ``isinstance`` walks
+    every inherited member (see the count note on ``ViewerSessionProtocol``),
+    so a caller that needs to narrow a dynamically-opened session checks the
+    owning capability cheaply (``owns_runtime`` plus the callable methods)
+    rather than via whole-protocol traversal.
+    """
+
+    def subscribe_requests(self, handler: RequestObserver) -> Callable[[], None]:
+        """Observe the ORIGINAL OWNING ROOT TREE's request-final records.
+
+        One typed record per finished provider request — parent turns, helper
+        calls (compaction/naming), and every delegated child/grandchild call —
+        carrying identity, provenance and accounting only (no prompt, tool
+        arguments, credentials or payloads). Effective for requests BEGUN
+        while subscribed: install before ``prompt``; earlier requests are not
+        replayed. Handlers run synchronously on the model loop and must return
+        promptly. Returns an idempotent unsubscribe bound to this one
+        registration.
+
+        ROOT-TREE SCOPE, explicitly: installing through ANY owning session —
+        the root, a child, a grandchild — observes requests from the whole
+        original root tree, INCLUDING ancestors and siblings; ``tree_id`` on
+        every record names that root. A consumer wanting subtree scope filters
+        by session lineage itself.
+        """
+        ...
+
+    async def shutdown_owned_work(
+        self, reason: str, *, timeout_s: float = 30.0
+    ) -> OwnedShutdownResult:
+        """Stop and JOIN every piece of owned work; report truthfully.
+
+        Closes delegation admission, aborts this session's turn, then joins
+        the ONE canonical disposal also used by ordinary ``dispose`` and the
+        SDK context exit (all owned jobs cancelled and awaited, child
+        finalization joining each child's disposal recursively).
+        ``complete=True`` only when that cleanup joined inside ``timeout_s``
+        uncancelled, with every cleanup hook returned, every job settled and
+        no descendant request in flight; a timeout is
+        ``complete=False``/unverified with the cleanup task RETAINED, never a
+        pretend kill. Idempotent, and NOT a change to :meth:`abort` or
+        :meth:`cancel_subagents` (first-Esc child-continuation semantics
+        unchanged).
+        """
+        ...
+
+    def request_graceful_cancel(self, reason: str = "cancelled") -> None:
+        """Ask the loop to stop at the next safe boundary, not mid-tool.
+
+        TYPE-ONLY declaration of the concrete
+        ``Session.request_graceful_cancel``: a viewer cannot steer another
+        process's turn loop, so the method belongs on the owning extension,
+        not the shared ``SessionProtocol`` -- the same segregation as
+        :meth:`subscribe_requests` and :meth:`shutdown_owned_work` (review
+        round 1, R1). Callers holding an owning session get a spelled
+        signature instead of widening it by cast. The request is sticky and
+        honoured at every next-model safe point; the turn then ends as
+        ``aborted`` with completed work intact.
+        """
+        ...
 
 
 @runtime_checkable

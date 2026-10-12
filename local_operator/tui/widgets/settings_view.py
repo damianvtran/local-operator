@@ -56,6 +56,7 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.settings_io import Kind, Section, Setting
+from local_operator.team_bridge import availability as bridge_availability
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import score_command_text_match
 from local_operator.tui.error_text import error_text
@@ -278,8 +279,47 @@ def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _P
         if index:
             line.append((" · ", faint))
         line.append((f"{pending_indent}{part}", muted if part == "proactive" else faint))
+        # ONE indent, FIRST part only (review round 2, R10): without this reset
+        # every part carries the 4 spaces, the line overruns its caller's
+        # ``room - 4`` budget by 4*(parts-1) cells and the tail drops — measured
+        # 28→36 cells with `high` clipped on a populated 4-part facts line.
         pending_indent = ""
     return line
+
+
+def _wrap_cells(text: str, width: int, *, max_lines: int = 2) -> list[str] | None:
+    """Greedy CELL-aware word wrap, bounded to ``max_lines`` — else ``None``.
+
+    For the agent-messages explanation only (design round 1, D1/D4): that
+    sentence is contract copy that must survive a narrow terminal whole, and
+    the detail band can render two rows. ``cell_len`` is the metric, not
+    ``len``, for the reason the rest of this page uses it — a wide glyph
+    counted as one cell overflows a terminal row. ``None`` rather than a
+    clipped list keeps the caller's fallback (a MARKED truncation on one row)
+    in charge when even two rows cannot hold the sentence.
+    """
+
+    if width <= 0 or not text:
+        return None
+    lines: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        candidate = f"{current} {word}" if current else word
+        if cell_len(candidate) <= width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = word
+        else:
+            return None  # a single word wider than the row cannot wrap
+        if len(lines) >= max_lines or cell_len(current) > width:
+            return None
+    if current:
+        lines.append(current)
+    if not lines or len(lines) > max_lines:
+        return None
+    return lines
 
 
 #: One footer hint: the button, its trailing label, and whether a separator
@@ -854,6 +894,12 @@ class SettingsView(Vertical):
         #: path that could disagree with the config.
         self._rows: list[_Row] = []
         self._selected = 0
+        #: Whether the detail band is currently rendering a WRAPPED two-line
+        #: explanation (agent-messages rows on narrow terminals, D4). Tracked
+        #: so the band's padding is touched only when the MODE flips — the
+        #: detail repaints on every cursor move, and an unconditional style
+        #: write would dirty the chrome each time.
+        self._detail_two_line = False
         self._hovered: int | None = None
         #: Key of the row whose enum choices are expanded, or None. One at a
         #: time: two open dropdowns in a vertical list make the second one's
@@ -1164,9 +1210,16 @@ class SettingsView(Vertical):
                 expanded_choices = len(_choices_for(setting))
         return (
             # The registry itself: the queued Hotkeys section adds rows to it,
-            # and the profiling harnesses inflate it.
+            # the profiling harnesses inflate it, and the agent-messages section
+            # is DYNAMICALLY absent until this process has observed an eligible
+            # state (§5.6; see ``team_bridge.availability``) — anything
+            # ``_build_rows`` reads must appear here, and that visibility is
+            # read there.
             len(settings_io.SETTINGS),
             len(settings_io.SECTIONS),
+            bridge_availability.section_visible(
+                bridge_availability.BRIDGE_SECTION, self._manager.config_dir
+            ),
             self._editing,
             self._expanded,
             expanded_choices,
@@ -1213,6 +1266,14 @@ class SettingsView(Vertical):
         """
         rows: list[_Row] = []
         for section in settings_io.SECTIONS:
+            if not bridge_availability.section_visible(section.name, self._manager.config_dir):
+                # §5.6: a dynamically-gated section (agent messages) is ABSENT —
+                # no header, no rows, nothing to land on — until this process
+                # has observed an eligible state. The availability record is
+                # written by the status discipline's boundary reads
+                # (``team_bridge.availability``); a process that never read
+                # shows nothing, which is the fail-closed direction.
+                continue
             rows.append(_Row(kind="header", section=section))
             for setting in settings_io.settings_for(section.name):
                 rows.append(_Row(kind="setting", setting=setting))
@@ -1702,6 +1763,11 @@ class SettingsView(Vertical):
         setting = row.setting
         if setting is None:
             return
+        if self._refuse_locked_bridge(setting):
+            # §5.6 F: the flow cannot resume, so the controls are view-only —
+            # the refusal carries the state sentence. FIRST, because every
+            # kind branch below (bool expansion included) would otherwise act.
+            return
         if setting.kind in (Kind.BOOL, Kind.ENUM):
             # BOOL joins ENUM here (#440 §2.5). The old branch toggled and
             # stored on this keystroke, defending the saved click: "an expansion
@@ -1829,6 +1895,10 @@ class SettingsView(Vertical):
         if row.kind != "setting" or setting is None or setting.kind is not Kind.BOOL:
             self.action_activate()
             return
+        if self._refuse_locked_bridge(setting):
+            # A view-only agent-messages BOOL must not flip either (§5.6 F);
+            # a TEXT row was deferred to `enter` just above and refuses there.
+            return
         # An open editor or an armed delete owns the key first: `space` inside
         # a buffer is a space character, and `action_activate` already routes
         # both. Only a resting BOOL row reaches the toggle.
@@ -1948,6 +2018,10 @@ class SettingsView(Vertical):
         # for the same reason `action_activate` does.
         self._reveal_cursor()
         row = self._current()
+        if row is not None and self._refuse_locked_bridge(row.setting):
+            # §5.6 F: `r` deletes a stored key, so it is an editing key like
+            # `enter`/`space` and refuses on a view-only agent-messages row.
+            return
         # A CHOICE row resets the setting that OWNS it. `r` is advertised there
         # whenever it would act (see `_reset_applies`), and the footer and the
         # key have to agree: refusing here would light a hint that does nothing,
@@ -3772,6 +3846,13 @@ class SettingsView(Vertical):
         # dim, so the config's actual shape is visible at a glance — which is
         # the state a user needs before they can decide what to reset.
         value_style = fg if changed else dim
+        if setting.section == bridge_availability.BRIDGE_SECTION:
+            # DESIGN ROUND 1, D1: the agent-messages rows carry the consent /
+            # default-off explanation, and `dim` measures 3.77:1 on the light
+            # theme's paper — under the 4.5:1 floor for normal text — where
+            # `muted` is 7.18:1 light / 8.62:1 dark. Scoped to these rows;
+            # `faint`/`dim` stay the rungs everywhere else.
+            value_style = fg if changed else muted
         if setting.kind is Kind.READONLY or self._gated_off(setting):
             # A value under a switched-off master is INERT and reads as such:
             # the READONLY ink, whatever the value (design round 1, D1). The
@@ -4256,7 +4337,24 @@ class SettingsView(Vertical):
         # rung and `dim` (4.55:1) is the one design round 1's D2 moved this class
         # of sentence off.
         alert = Style(color=theme_mod.semantic_color("warning"))
+        # The accessible rung the agent-messages explanations take (design
+        # round 1, D1): 8.62:1 dark / 7.18:1 light, where `faint` is 1.97:1
+        # dark and `dim` 3.77:1 light. Every other row keeps the established
+        # faint/dim ladder; this is the H1 surface's own ink, not a token
+        # change. Resolved LAZILY: the bridge rows are its only consumers, and
+        # an unconditional resolve here would add one semantic_color lookup to
+        # EVERY detail paint — exactly the per-paint cost the repaint guards
+        # bound.
+        bridge_ink: Style | None = None
+
+        def _bridge_ink() -> Style:
+            nonlocal bridge_ink
+            if bridge_ink is None:
+                bridge_ink = Style(color=theme_mod.semantic_color("muted"))
+            return bridge_ink
+
         text = Text(no_wrap=True, overflow="ellipsis")
+        wrap_used = False
         row = self._current()
         question, contract = self._confirm_parts()
         if self._too_short:
@@ -4439,6 +4537,17 @@ class SettingsView(Vertical):
             text.append("enter, then type: <chain-key> <provider>/<model>", style=faint)
         elif row.kind == "hop_add":
             text.append("enter, then type: <provider>/<model>", style=faint)
+        elif row.setting is not None and self._bridge_lock_note(row.setting) is not None:
+            # §5.6 F on the section's OWN rows (review round 1, Q3 / design
+            # round 1, D3): the flow cannot resume, so the row's explanation
+            # is the STATE — the contract's own sentence, in the accessible
+            # ink — not the generic prerequisites help, which would describe
+            # an edit that cannot happen. The refusal path paints the same
+            # sentence when a locked row turns a key press away, so the
+            # sentence is what the user reads either way.
+            lock_note = self._bridge_lock_note(row.setting)
+            # 8.62:1 dark / 7.18:1 light — the readable rung for the F note.
+            text.append(truncate_cells(lock_note or "", self._detail_width()), style=_bridge_ink())
         elif row.setting is not None:
             # The clause SHEDS rather than being clipped (#440 §4.4). Half of
             # a sentence cut mid-clause reads as a rendering fault (D4, D8).
@@ -4463,6 +4572,13 @@ class SettingsView(Vertical):
                 if clause == "not saved until enter"
                 else Style(color=theme_mod.semantic_color("dim"))
             )
+            bridge_row = row.setting.section == bridge_availability.BRIDGE_SECTION
+            if bridge_row:
+                # The `default: —` clause shares the line with the H1
+                # explanation when both fit, so it rides the same accessible
+                # rung (D1) instead of reintroducing the low-contrast ink the
+                # finding names.
+                clause_style = _bridge_ink()
             width = self._detail_width()
             help_text = row.setting.help
             if row.setting.hotkey_scope == "desktop":
@@ -4505,7 +4621,13 @@ class SettingsView(Vertical):
             # ranks legible: the warning is danger ink, the how-to help
             # stays faint, so a HARD routing cost can never be mistaken for
             # a SOFT note.
-            help_part = (help_text, faint, False)
+            # DESIGN ROUND 1, D1: the H1 explanation (the wake/empty=badge-only
+            # sentence, the default-off prerequisite) takes `muted` — 8.62:1
+            # dark / 7.18:1 light — where `faint` measures 1.97:1 dark and
+            # 2.08:1 light, both under the 4.5:1 normal-text floor. Scoped to
+            # these rows only.
+            help_style = _bridge_ink() if bridge_row else faint
+            help_part = (help_text, help_style, False)
             # THE HELP ALONE TAKES `dim`, NOT `faint` (design round 2, D5). The
             # rule is stated eight lines up for the state clause — a clause that
             # is the ONLY text on the line takes the `dim` rung (4.55:1), never
@@ -4520,7 +4642,9 @@ class SettingsView(Vertical):
             help_alone_part = (help_text, Style(color=theme_mod.semantic_color("dim")), False)
             clause_part = (clause, clause_style, False)
             key_part = (key_suffix.strip(), key_style, True)
-            base_rungs: list[list[tuple[str, Style, bool]]] = []
+            #: A ``None`` rung is the WRAP slot (bridge rows only): render the
+            #: explanation across the band's two rows when one cannot hold it.
+            base_rungs: list[list[tuple[str, Style, bool]] | None] = []
             if row.setting.hotkey_scope == "desktop":
                 # SENTENCE FIRST on desktop rows. Same shed mechanics, same
                 # floor and same warning pinning below — only the rung ORDER
@@ -4538,6 +4662,20 @@ class SettingsView(Vertical):
                     ]
                 else:
                     base_rungs = [[help_part, key_part], [help_alone_part]]
+            elif clause and bridge_row:
+                # AGENT-MESSAGES PRIORITY (design round 1, D1): the sentence is
+                # the consent explanation, so it outranks the `default:`
+                # recital and the key path — an off-default CoS used to shed the
+                # entire wake/empty=badge-only explanation in favour of
+                # `default: —   team_bridge.session`.
+                base_rungs = [
+                    [help_part, clause_part, key_part],
+                    [help_part, clause_part],
+                    [help_part, key_part],
+                    None,
+                    [clause_part, key_part],
+                    [clause_part],
+                ]
             elif clause:
                 base_rungs = [
                     [help_part, clause_part, key_part],
@@ -4547,20 +4685,45 @@ class SettingsView(Vertical):
                     [help_part, key_part],
                     [help_alone_part],
                 ]
+            elif bridge_row:
+                base_rungs = [[help_part, key_part], None]
             else:
                 base_rungs = [[help_part, key_part], [help_alone_part]]
             warning = row.setting.warning
             if warning:
+                # (Bridge rows carry no warning; the comprehension skips the
+                # wrap slot defensively so this pinning stays total.)
                 # Pinned first at every rung, with `[warning]` alone as the
                 # floor: the consequence outlives the help, the clause and
                 # the key path, so it is on screen in every state the row
                 # can be in — including the stored-value state that made it
                 # true. The floor still degrades to a visible `…` below.
                 warn_part = (warning, error, False)
-                rungs = [[warn_part, *rung] for rung in base_rungs] + [[warn_part]]
+                rungs = [[warn_part, *rung] for rung in base_rungs if rung is not None] + [
+                    [warn_part]
+                ]
             else:
                 rungs = base_rungs
             for rung in rungs:
+                if rung is None:
+                    # THE WRAP RUNG (design round 1, D1/D4): the explanation
+                    # must survive the narrow widths — 60x20 used to truncate
+                    # the default-off helper mid-clause and lose "eligible
+                    # organization" — so it renders across the detail band's
+                    # two rows while it needs both. The band keeps its total
+                    # height; only the blank top row yields (see
+                    # `_apply_detail_padding`). A sentence that cannot fit
+                    # even wrapped falls through to the rungs below, whose
+                    # truncation carries its own visible mark.
+                    lines = _wrap_cells(help_text, width, max_lines=2)
+                    if lines:
+                        text.append(lines[0], style=help_style)
+                        if len(lines) == 2:
+                            text.append("\n")
+                            text.append(lines[1], style=help_style)
+                            wrap_used = True
+                        break
+                    continue
                 rendered = self._join_detail(rung)
                 if cell_len(rendered.plain) <= width:
                     text.append_text(rendered)
@@ -4581,6 +4744,7 @@ class SettingsView(Vertical):
                     # long string is ugly rather than silently broken.
                     text.append(truncate_cells(rendered.plain, width), style=rung[0][1])
                     break
+        self._apply_detail_padding(wrap_used)
         self._detail_text = text
         # The one surface that legitimately changes on every move (it describes
         # the cursor row), so this elides nothing in the common case — it is
@@ -4665,6 +4829,24 @@ class SettingsView(Vertical):
             if cell_len(rung) <= width:
                 return Text(rung, style=style)
         return Text(truncate_cells(floor, width), style=style)
+
+    def _apply_detail_padding(self, two_line: bool) -> None:
+        """Release the detail band's blank top row while a wrap needs both rows.
+
+        The band is `height: 2` with a deliberate blank first row (its own
+        chrome budget). A two-line agent-messages explanation needs BOTH rows,
+        so the padding is dropped exactly while one is rendered and restored
+        the moment it is not — the band's total height never changes, so
+        nothing below it moves and no cursor move re-lays the page (design
+        round 1, D4). Touched only when the MODE flips: this runs on every
+        paint, and an unconditional style write would dirty the chrome each
+        time.
+        """
+
+        if two_line == self._detail_two_line:
+            return
+        self._detail_two_line = two_line
+        self._detail.styles.padding = (0, 0, 0, 0) if two_line else (1, 0, 0, 0)
 
     @staticmethod
     def _join_detail(parts: list[tuple[str, Style, bool]]) -> Text:
@@ -5393,16 +5575,55 @@ class SettingsView(Vertical):
         self._paint_hints()
 
     def _current_is_readonly(self) -> bool:
-        """Is the highlighted row a retired setting that no key can act on?
+        """Is the highlighted row one no editing key can act on?
 
-        Only while nothing is in progress: an open editor or an armed delete
-        owns the footer's wording (it teaches `enter save` / `esc cancel`), and
-        neither state can be entered from a read-only row anyway.
+        Retired settings, and the agent-messages rows while this process holds
+        a §5.6 F reading: the flow cannot resume, so those controls are
+        presented view-only and the footer must not advertise `enter`/`r`
+        (design round 1, D3). Only while nothing is in progress: an open
+        editor or an armed delete owns the footer's wording (it teaches
+        `enter save` / `esc cancel`), and neither state can be entered from
+        such a row anyway.
         """
         if self._editing is not None or self._confirm_delete is not None:
             return False
         row = self._current()
-        return row is not None and row.setting is not None and row.setting.kind is Kind.READONLY
+        if row is None or row.setting is None:
+            return False
+        if row.setting.kind is Kind.READONLY:
+            return True
+        return self._bridge_lock_note(row.setting) is not None
+
+    def _bridge_lock_note(self, setting: Setting | None) -> str | None:
+        """The §5.6 F sentence while the bridge's flow cannot resume, else None.
+
+        Read from the process-local availability record — the ONE place a
+        status boundary writes — so the page renders what THIS process last
+        observed and never fetches around the read discipline (§5.1). ``None``
+        covers both "not a bridge row" and "no F reading": the two cases a
+        caller treats identically (nothing to explain).
+        """
+        if setting is None or setting.section != bridge_availability.BRIDGE_SECTION:
+            return None
+        observed = bridge_availability.observed(self._manager.config_dir)
+        if observed is None or not observed.get("read_only"):
+            return None
+        note = observed.get("note")
+        return note if isinstance(note, str) and note else None
+
+    def _refuse_locked_bridge(self, setting: Setting | None) -> bool:
+        """Refuse an editing key on a view-only agent-messages row (§5.6 F).
+
+        Mirrors the retired-row refusal's shape — the page's established
+        answer to "why did my key do nothing" — with the contract's own F
+        sentence as the reason (review round 1, Q3 / design round 1, D3).
+        """
+        note = self._bridge_lock_note(setting)
+        if note is None:
+            return False
+        self._error = note
+        self._repaint()
+        return True
 
     def _reset_applies(self) -> bool:
         """Would ``r`` actually do something on the highlighted row?

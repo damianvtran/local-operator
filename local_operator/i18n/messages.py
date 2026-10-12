@@ -17,11 +17,14 @@ goes red.
 from __future__ import annotations
 
 import functools
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from . import catalogues
+from . import catalogues, resolve
 from . import runtime as _runtime
+
+_logger = logging.getLogger(__name__)
 
 
 #: Resolution is FILE-derived, not string-derived: §2.2 keys are
@@ -100,7 +103,7 @@ def envelope(
     function free of configuration reads, so callers on hot paths choose when
     to pay for resolution. A caller that already knows the resolved locale
     passes it; anything unshipped or unknown renders from ``en``, which
-    :func:`render` enforces by loading the ``en`` catalogue for absent locales.
+    :func:`render` enforces through the generated shipped set.
     """
     params = dict(params or {})
     text = render(code, params, locale=locale)
@@ -112,14 +115,22 @@ def render(code: str, params: Mapping[str, Any], *, locale: str | None = None) -
     namespace = _namespace_for(str(catalogues.catalogue_root()), code)
     if namespace is None:
         return code
-    requested = locale or "en"
+    requested = resolve.eligible_locale(locale)
+    source_locale = requested
     source = _lookup(requested, namespace, code)
     if source is None and requested != "en":
         source = _lookup("en", namespace, code)
+        source_locale = "en"
     if source is None:
         return code
+    if source_locale != requested:
+        _logger.debug(
+            "i18n fallback code=%s requested=%s source=%s", code, requested, source_locale
+        )
+    # Formatting follows the source: Russian rules on English copy select
+    # "one" for 21, producing "21 job" instead of the English "21 jobs".
     try:
-        return _runtime.render_message(source, params, requested)
+        return _runtime.render_message(source, params, source_locale)
     except _runtime.MessageError:
         # A catalogue that does not render is a build-time defect (the parity
         # check parses every message); at RUN time the additive contract wins —

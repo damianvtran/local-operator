@@ -1,0 +1,367 @@
+[
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "B",
+    "size": [
+      80,
+      24
+    ],
+    "theme_requested": "dark",
+    "theme_effective": "dark",
+    "muted": "#b5afa2",
+    "faint": "#4a4539",
+    "dim": "#837c6d",
+    "surface": "#1e1a14",
+    "contrast_muted_surface": 7.929074698978415,
+    "contrast_faint_surface": 1.8148269685744147,
+    "app_size": [
+      80,
+      24
+    ],
+    "body_size": [
+      76,
+      8
+    ],
+    "body_virtual_size": [
+      75,
+      259
+    ],
+    "rows": 259,
+    "scroll_y": 245,
+    "config_session": "",
+    "selected": "team_bridge.enabled",
+    "detail_plain": "Off by default. Also needs a Radient sign-in and an eligible organization.",
+    "detail_two_line": false,
+    "row_value": "  \u203a Enabled on this machine       off \u25b8",
+    "readonly": false
+  },
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "B",
+    "size": [
+      80,
+      24
+    ],
+    "theme_requested": "light",
+    "theme_effective": "light",
+    "muted": "#565147",
+    "faint": "#b3ab98",
+    "dim": "#837c6d",
+    "surface": "#efeae0",
+    "contrast_muted_surface": 6.575814517598682,
+    "contrast_faint_surface": 1.9048455578626857,
+    "app_size": [
+      80,
+      24
+    ],
+    "body_size": [
+      76,
+      8
+    ],
+    "body_virtual_size": [
+      75,
+      259
+    ],
+    "rows": 259,
+    "scroll_y": 245,
+    "config_session": "",
+    "selected": "team_bridge.enabled",
+    "detail_plain": "Off by default. Also needs a Radient sign-in and an eligible organization.",
+    "detail_two_line": false,
+    "row_value": "  \u203a Enabled on this machine       off \u25b8",
+    "readonly": false
+  },
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "B",
+    "size": [
+      80,
+      24
+    ],
+    "theme_requested": "dark",
+    "theme_effective": "dark",
+    "muted": "#b5afa2",
+    "faint": "#4a4539",
+    "dim": "#837c6d",
+    "surface": "#1e1a14",
+    "contrast_muted_surface": 7.929074698978415,
+    "contrast_faint_surface": 1.8148269685744147,
+    "app_size": [
+      80,
+      24
+    ],
+    "body_size": [
+      76,
+      8
+    ],
+    "body_virtual_size": [
+      75,
+      259
+    ],
+    "rows": 259,
+    "scroll_y": 246,
+    "config_session": "synthetic-cos-session-with-long-identifier-0000000000000000000000000000000000000000",
+    "selected": "team_bridge.session",
+    "detail_plain": "Session that may be woken for new messages; empty = badge only.",
+    "detail_two_line": false,
+    "row_value": "  \u203a CoS session                   synthetic-cos-session-with-long-identifier-0000000000000000000000000000000000000000",
+    "readonly": false
+  },
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "B",
+    "size": [
+      60,
+      20
+    ],
+    "theme_requested": "dark",
+    "theme_effective": "dark",
+    "muted": "#b5afa2",
+    "faint": "#4a4539",
+    "dim": "#837c6d",
+    "surface": "#1e1a14",
+    "contrast_muted_surface": 7.929074698978415,
+    "contrast_faint_surface": 1.8148269685744147,
+    "app_size": [
+      60,
+      20
+    ],
+    "body_size": [
+      56,
+      4
+    ],
+    "body_virtual_size": [
+      55,
+      259
+    ],
+    "rows": 259,
+    "scroll_y": 249,
+    "config_session": "",
+    "selected": "team_bridge.enabled",
+    "detail_plain": "Off by default. Also needs a Radient sign-in and an\neligible organization.",
+    "detail_two_line": true,
+    "row_value": "  \u203a Enabled on this machine       off \u25b8",
+    "readonly": false
+  },
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "B",
+    "size": [
+      60,
+      20
+    ],
+    "theme_requested": "light",
+    "theme_effective": "light",
+    "muted": "#565147",
+    "faint": "#b3ab98",
+    "dim": "#837c6d",
+    "surface": "#efeae0",
+    "contrast_muted_surface": 6.575814517598682,
+    "contrast_faint_surface": 1.9048455578626857,
+    "app_size": [
+      60,
+      20
+    ],
+    "body_size": [
+      56,
+      4
+    ],
+    "body_virtual_size": [
+      55,
+      259
+    ],
+    "rows": 259,
+    "scroll_y": 249,
+    "config_session": "",
+    "selected": "team_bridge.enabled",
+    "detail_plain": "Off by default. Also needs a Radient sign-in and an\neligible organization.",
+    "detail_two_line": true,
+    "row_value": "  \u203a Enabled on this machine       off \u25b8",
+    "readonly": false
+  },
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "F_unknown",
+    "size": [
+      80,
+      24
+    ],
+    "theme_requested": "dark",
+    "theme_effective": "dark",
+    "muted": "#b5afa2",
+    "faint": "#4a4539",
+    "dim": "#837c6d",
+    "surface": "#1e1a14",
+    "contrast_muted_surface": 7.929074698978415,
+    "contrast_faint_surface": 1.8148269685744147,
+    "app_size": [
+      80,
+      24
+    ],
+    "body_size": [
+      76,
+      8
+    ],
+    "body_virtual_size": [
+      75,
+      259
+    ],
+    "rows": 259,
+    "scroll_y": 245,
+    "config_session": "",
+    "selected": "team_bridge.enabled",
+    "detail_plain": "Agent messages are turned off",
+    "detail_two_line": false,
+    "row_value": "  \u203a Enabled on this machine       off \u25b8",
+    "readonly": true,
+    "space_enabled_before_after": [
+      false,
+      false
+    ],
+    "editing_after_space": "None"
+  },
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "F_unknown",
+    "size": [
+      80,
+      24
+    ],
+    "theme_requested": "light",
+    "theme_effective": "light",
+    "muted": "#565147",
+    "faint": "#b3ab98",
+    "dim": "#837c6d",
+    "surface": "#efeae0",
+    "contrast_muted_surface": 6.575814517598682,
+    "contrast_faint_surface": 1.9048455578626857,
+    "app_size": [
+      80,
+      24
+    ],
+    "body_size": [
+      76,
+      8
+    ],
+    "body_virtual_size": [
+      75,
+      259
+    ],
+    "rows": 259,
+    "scroll_y": 245,
+    "config_session": "",
+    "selected": "team_bridge.enabled",
+    "detail_plain": "Agent messages are turned off",
+    "detail_two_line": false,
+    "row_value": "  \u203a Enabled on this machine       off \u25b8",
+    "readonly": true
+  },
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "F_unknown",
+    "size": [
+      60,
+      20
+    ],
+    "theme_requested": "dark",
+    "theme_effective": "dark",
+    "muted": "#b5afa2",
+    "faint": "#4a4539",
+    "dim": "#837c6d",
+    "surface": "#1e1a14",
+    "contrast_muted_surface": 7.929074698978415,
+    "contrast_faint_surface": 1.8148269685744147,
+    "app_size": [
+      60,
+      20
+    ],
+    "body_size": [
+      56,
+      4
+    ],
+    "body_virtual_size": [
+      55,
+      259
+    ],
+    "rows": 259,
+    "scroll_y": 249,
+    "config_session": "",
+    "selected": "team_bridge.enabled",
+    "detail_plain": "Agent messages are turned off",
+    "detail_two_line": false,
+    "row_value": "  \u203a Enabled on this machine       off \u25b8",
+    "readonly": true
+  },
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "F_kill",
+    "size": [
+      80,
+      24
+    ],
+    "theme_requested": "dark",
+    "theme_effective": "dark",
+    "muted": "#b5afa2",
+    "faint": "#4a4539",
+    "dim": "#837c6d",
+    "surface": "#1e1a14",
+    "contrast_muted_surface": 7.929074698978415,
+    "contrast_faint_surface": 1.8148269685744147,
+    "app_size": [
+      80,
+      24
+    ],
+    "body_size": [
+      76,
+      8
+    ],
+    "body_virtual_size": [
+      75,
+      259
+    ],
+    "rows": 259,
+    "scroll_y": 245,
+    "config_session": "",
+    "selected": "team_bridge.enabled",
+    "detail_plain": "Agent messages are turned off",
+    "detail_two_line": false,
+    "row_value": "  \u203a Enabled on this machine       off \u25b8",
+    "readonly": true,
+    "space_enabled_before_after": [
+      false,
+      false
+    ],
+    "editing_after_space": "None"
+  },
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "absent",
+    "size": [
+      80,
+      24
+    ],
+    "theme_requested": "dark",
+    "theme_effective": "dark",
+    "muted": "#b5afa2",
+    "faint": "#4a4539",
+    "dim": "#837c6d",
+    "surface": "#1e1a14",
+    "contrast_muted_surface": 7.929074698978415,
+    "contrast_faint_surface": 1.8148269685744147,
+    "app_size": [
+      80,
+      24
+    ],
+    "body_size": [
+      76,
+      8
+    ],
+    "body_virtual_size": [
+      75,
+      256
+    ],
+    "rows": 256,
+    "scroll_y": 0.0,
+    "config_session": ""
+  }
+]

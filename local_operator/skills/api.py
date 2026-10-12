@@ -102,6 +102,11 @@ _EXTRA_ROOTS_ENV = "LOCAL_OPERATOR_SKILL_EXTRA_ROOTS"
 #: shadowed builtin. Not affected by ``LOCAL_OPERATOR_SKILL_EXTRA_ROOTS``,
 #: which replaces only the ecosystem set. Shipped in the wheel via the
 #: ``skills/builtin`` package-data lines in pyproject.toml.
+#:
+#: The bounded walk and the read-time guard reach this SAME value through
+#: :func:`local_operator.skills.discovery.packaged_skill_root` (lazy, because
+#: that module's source is re-executed with ``os.name`` patched by the
+#: platform-gate tests).
 PACKAGED_SKILL_ROOT: Path = Path(__file__).resolve().parent / "builtin"
 
 
@@ -121,7 +126,7 @@ def _ecosystem_roots(home: Path) -> list[Path]:
     return [candidate for candidate in candidates if candidate.is_dir()]
 
 
-def default_skill_roots(cwd: Path | None = None) -> list[Path]:
+def default_skill_roots(cwd: Path | None = None, *, boundary: Path | None = None) -> list[Path]:
     """Compute the default discovery roots for a working directory.
 
     Walks up from ``cwd`` to the filesystem root collecting
@@ -136,26 +141,58 @@ def default_skill_roots(cwd: Path | None = None) -> list[Path]:
     gives project-local roots priority over global ones, and native roots
     priority over ecosystem ones, matching the collision rule in
     :func:`discover_skills`.
+
+    ``boundary`` is the world boundary a bounded caller validated (the
+    benchmark's SDK world — see ``SessionSpec.world_root``). When set, the
+    walk stops AT the boundary: the ancestors above it (the operator's or
+    controller's trees) are not this world's project scope, and an isolated
+    ``HOME`` does not stop the unclipped walk from finding real operator
+    libraries through cwd ancestors (measured — see the canary in the
+    world-boundary change). Home and ecosystem candidates join only when they
+    lie inside the boundary, and the packaged catalog stays: it is the
+    release's own knowledge, not user content. ``None`` is every ordinary
+    call and keeps the historical behaviour exactly.
     """
     start = (cwd or Path.cwd()).resolve()
-    home = Path.home().resolve()
 
     candidates: list[Path] = []
-    # Walk cwd → filesystem root; every ancestor gets a candidate, so
-    # project-local roots work even outside $HOME.
-    current = start
-    while True:
-        candidates.append(current / _SKILLS_SUBDIR)
-        if current.parent == current:  # reached "/"
-            break
-        current = current.parent
-    # Global native root, then ecosystem roots: the deepest project root
-    # wins collisions, and native beats imported.
-    candidates.append(home / _SKILLS_SUBDIR)
-    candidates.extend(_ecosystem_roots(home))
-    # Appended LAST = weakest: it is the only root the user did not author,
-    # so a same-named copy in any earlier root wins (and is warned about).
-    candidates.append(PACKAGED_SKILL_ROOT)
+    if boundary is not None:
+        world = Path(boundary).expanduser().resolve()
+        if not (start == world or start.is_relative_to(world)):
+            raise ValueError(
+                f"cwd {start} is not inside the boundary {world}; a world boundary "
+                "only clips a walk that starts inside it"
+            )
+        # Walk cwd → boundary INCLUSIVE; every root above the world is outside it.
+        current = start
+        while True:
+            candidates.append(current / _SKILLS_SUBDIR)
+            if current == world:
+                break
+            current = current.parent
+        home = Path.home().resolve()
+        if home == world or home.is_relative_to(world):
+            candidates.append(home / _SKILLS_SUBDIR)
+            candidates.extend(_ecosystem_roots(home))
+        # Appended LAST = weakest, exactly as in the unclipped walk.
+        candidates.append(PACKAGED_SKILL_ROOT)
+    else:
+        home = Path.home().resolve()
+        # Walk cwd → filesystem root; every ancestor gets a candidate, so
+        # project-local roots work even outside $HOME.
+        current = start
+        while True:
+            candidates.append(current / _SKILLS_SUBDIR)
+            if current.parent == current:  # reached "/"
+                break
+            current = current.parent
+        # Global native root, then ecosystem roots: the deepest project root
+        # wins collisions, and native beats imported.
+        candidates.append(home / _SKILLS_SUBDIR)
+        candidates.extend(_ecosystem_roots(home))
+        # Appended LAST = weakest: it is the only root the user did not author,
+        # so a same-named copy in any earlier root wins (and is warned about).
+        candidates.append(PACKAGED_SKILL_ROOT)
 
     seen: set[str] = set()
     roots: list[Path] = []
@@ -202,6 +239,8 @@ def _refresh_if_changed(
     skills: MutableMapping[str, Skill],
     roots: Sequence[Path],
     state: _RefreshState,
+    *,
+    boundary: Path | None = None,
 ) -> None:
     """Rescan the roots into ``skills`` when the tree changed.
 
@@ -267,7 +306,15 @@ def _refresh_if_changed(
         if fingerprint == state.fingerprint:
             return
         try:
-            discovered, _warnings = discover_skills(roots)
+            # The boundary kwarg joins the call only when there IS one: the
+            # ordinary path must keep the byte-identical two-argument shape
+            # every existing caller and stub was written against (the None
+            # promise is behavioural, and a reduced fake that only knows the
+            # historical signature is exactly how these seams get tested).
+            if boundary is None:
+                discovered, _warnings = discover_skills(roots)
+            else:
+                discovered, _warnings = discover_skills(roots, boundary=boundary)
         except OSError:
             # Do NOT commit the fingerprint here. See point 3 above.
             return
@@ -281,6 +328,8 @@ def _refresh_if_changed(
 def make_skill_resolver(
     skills: Mapping[str, Skill],
     roots: Sequence[Path] | None = None,
+    *,
+    boundary: Path | None = None,
 ) -> Callable[[str], str | None]:
     """Build the ``SkillResolver`` adapter for the ``read`` tool.
 
@@ -307,8 +356,20 @@ def make_skill_resolver(
     ``roots=None`` is the default so every existing caller -- and the parallel
     guide resolver, whose resources are packaged and cannot change at runtime
     -- keeps today's behaviour exactly.
+
+    ``boundary``, when set, is the world boundary the session was validated
+    with. It travels BOTH ways through this adapter: the miss-path rescan
+    clips to it (``_refresh_if_changed``), and every resolution is guarded at
+    READ time -- a resource whose directory resolves outside the boundary is
+    reported as unknown, so a skill directory replaced by an escaping symlink
+    after discovery cannot be read through a stale mapping entry. ``None`` is
+    every ordinary call, unchanged.
     """
     state = _RefreshState()
+    # Normalized ONCE at construction: the guard below runs on every read and
+    # must not pay (or vary on) a second resolution, and the SDK already
+    # resolved this path before the session existed.
+    world_boundary = Path(boundary).expanduser().resolve() if boundary is not None else None
     # Narrowed ONCE here rather than re-tested inside the closure, so the hot
     # path carries no type checks. Only a MutableMapping can be refreshed in
     # place: callers pass a plain dict, the read-only ``Mapping`` annotation
@@ -325,7 +386,7 @@ def make_skill_resolver(
         if not url.startswith("skill://"):
             return None
         try:
-            return resolve_skill_url(url, skills)
+            return resolve_skill_url(url, skills, boundary=world_boundary)
         except ValueError as exc:
             message = str(exc)
             if (
@@ -347,7 +408,7 @@ def make_skill_resolver(
                 # at any depth) is never made resolvable by rescanning, so the
                 # work is pure waste on attacker-chosen input.
                 return message
-            _refresh_if_changed(refresh_target, refresh_roots, state)
+            _refresh_if_changed(refresh_target, refresh_roots, state, boundary=world_boundary)
             # ALWAYS re-resolve, whatever the refresh did or did not do. The
             # only question that matters here is "is the name resolvable NOW",
             # and the mapping is shared: a concurrent reader may have populated
@@ -357,7 +418,7 @@ def make_skill_resolver(
             # on the refresh's own outcome is what made the losing thread of a
             # race report ``Unknown skill`` for a skill already in the dict.
             try:
-                return resolve_skill_url(url, skills)
+                return resolve_skill_url(url, skills, boundary=world_boundary)
             except ValueError as retry_exc:
                 message = str(retry_exc)
             except OSError as retry_exc:

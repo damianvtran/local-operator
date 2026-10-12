@@ -2055,6 +2055,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "set.remove(tool_call_id)",
     ),
     (
+        # The durable-row observer stores callbacks in _commit_handlers, a
+        # list[Callable]. Unsubscribing removes only that in-memory callback;
+        # the receiver cannot name a path or remove a session directory.
+        "local_operator/session/transcript.py::Transcript.subscribe_commits.unsubscribe",
+        "<path>.remove",
+        "self._commit_handlers: list[Callable].remove(handler), never a filesystem path",
+    ),
+    (
         "local_operator/session/transcript.py::Transcript.subscribe_admitted_commands.unsubscribe",
         "<path>.remove",
         "list.remove",

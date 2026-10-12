@@ -42,6 +42,10 @@ vi.mock("./api", () => ({
 	getHistory: vi.fn(async () => ({ entries: [], has_more: false })),
 	getSubagentHistory: vi.fn(async () => ({ entries: [], has_more: false })),
 	imageUrl: vi.fn((_pid: string, entryId: string, index: number) => `img:${entryId}:${index}`),
+	attachmentUrl: vi.fn(
+		(_pid: string, entryId: string, index: number, kind: string) =>
+			`att:${entryId}:${index}:${kind}`,
+	),
 	sendCommand: vi.fn(async () => ({ ok: true, detail: "" })),
 }));
 
@@ -637,5 +641,56 @@ describe("video", () => {
 		);
 		expect(screen.getByText("already finished")).toBeTruthy();
 		expect(screen.queryByText("failed")).toBeNull();
+	});
+
+	it("done: a video artifact ref mounts the player, and the line stays `video ready`", () => {
+		/* The player is the done body's mount for a REAL ref — src built by
+		   `attachmentUrl` (mocked to a formatter here; the component's own
+		   suite pins the real URL shape). */
+		render(
+			<Transcript
+				pid="9"
+				entries={[
+					video({
+						tool_state: "done",
+						videos: [{ index: 0, mime_type: "video/mp4", duration_s: 1 }],
+					}),
+				]}
+			/>,
+		);
+		const el = document.querySelector("video");
+		expect(el).toBeTruthy();
+		expect(el!.getAttribute("src")).toBe("att:e1:0:video");
+		expect(el!.getAttribute("preload")).toBe("metadata");
+		expect(el!.hasAttribute("controls")).toBe(true);
+		expect(screen.getByText("video ready")).toBeTruthy();
+	});
+
+	it("no player before the done state, and none to dream up from absent refs", () => {
+		/* NO FETCH BEFORE MOUNT: the element is the only fetcher, so every
+		   pre-done face (and the done-without-refs reduced state) must show
+		   none. */
+		const running = render(
+			<Transcript
+				pid="9"
+				entries={[
+					video({
+						tool_state: "running",
+						videos: [{ index: 0, mime_type: "video/mp4" }],
+					}),
+				]}
+			/>,
+		);
+		expect(document.querySelector("video")).toBeNull();
+		running.unmount();
+
+		render(
+			<Transcript
+				pid="9"
+				entries={[video({ tool_state: "done" })]}
+			/>,
+		);
+		expect(document.querySelector("video")).toBeNull();
+		expect(screen.getByText("video ready")).toBeTruthy();
 	});
 });

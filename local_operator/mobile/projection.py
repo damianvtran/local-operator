@@ -484,8 +484,10 @@ def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
     store rather than in ``data``. ``daemon._image_bytes`` walks the same
     pair — the index is the whole contract between producer and consumer, so
     both sides change together or not at all. Artifacts of other kinds do NOT
-    count: no player endpoint exists for them yet, and counting one would
-    shift every later index onto the wrong bytes.
+    count HERE: a video artifact rides its own parallel family
+    (``_video_refs_for_content`` / ``daemon._attachment_bytes(kind="video")``)
+    with its own index space, and counting one here would shift every later
+    image index onto the wrong bytes.
     """
     content = getattr(message, "content", None)
     return _image_refs_for_content(content if isinstance(content, list) else None)
@@ -512,6 +514,48 @@ def _image_refs_for_content(content: list[Any] | None) -> list[dict[str, Any]]:
         elif isinstance(block, AttachmentContent) and block.kind == "image":
             refs.append({"index": image_index, "mime_type": block.content_type or "image/png"})
             image_index += 1
+    return refs
+
+
+def _video_refs(message: AgentMessage) -> list[dict[str, Any]]:
+    """Video artifact references on a transcript message — the parallel
+    family to :func:`_image_refs`, never folded into it.
+
+    The row carries only ``{index, mime_type, duration_s?}``; the bytes come
+    from the Range-capable attachment route
+    (``/api/sessions/{pid}/attachment?entry=<id>&i=<index>&kind=video``),
+    which phone Safari needs because it will not play a <video> served as a
+    full-body 200.
+    """
+    content = getattr(message, "content", None)
+    return _video_refs_for_content(content if isinstance(content, list) else None)
+
+
+def _video_refs_for_content(content: list[Any] | None) -> list[dict[str, Any]]:
+    """The video family's walk — ``daemon._attachment_bytes(kind="video")``
+    was built to resolve exactly this walk, one index space per family.
+
+    Only store-backed ``AttachmentContent`` blocks of kind ``video`` count:
+    the vocabulary has no inline video block, a video artifact carries a
+    digest rather than bytes, and the entry id plus this index is the
+    entire reference. ``duration_s`` rides when the artifact carried one —
+    the player does not need it, but the ref is the row's whole account of
+    the artifact and a later surface may.
+    """
+    if not content:
+        return []
+    refs: list[dict[str, Any]] = []
+    video_index = 0
+    for block in content:
+        if isinstance(block, AttachmentContent) and block.kind == "video":
+            ref: dict[str, Any] = {
+                "index": video_index,
+                "mime_type": block.content_type or "video/mp4",
+            }
+            if block.duration_s is not None:
+                ref["duration_s"] = block.duration_s
+            refs.append(ref)
+            video_index += 1
     return refs
 
 
@@ -723,6 +767,7 @@ def _frame_skips_measurement(projection: SessionProjection) -> bool:
         total += _wire_charge(entry.error) + _wire_charge(entry.tool_name)
         total += _wire_charge(entry.tool_call_id) + _wire_charge(entry.intent)
         total += sum(_wire_charge(str(ref)) for ref in entry.images)
+        total += sum(_wire_charge(str(ref)) for ref in entry.videos)
         for value in entry.details.values():
             total += _wire_charge(str(value))
         if total > budget:
@@ -1712,12 +1757,18 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
                 # Output-artifact media rides the row as REFERENCES (index +
                 # mime), the same lazy contract user attachments use: bytes
-                # are fetched from the image endpoint on demand, never re-sent
-                # per projection repaint. Set only when non-empty, so a result
-                # with no media leaves the row shape unchanged.
+                # are fetched from the attachment endpoints on demand, never
+                # re-sent per projection repaint. Set only when non-empty, so
+                # a result with no media leaves the row shape unchanged. The
+                # video family rides beside the images on its own index
+                # (``_video_refs_for_content``); each walk is its own
+                # endpoint's contract.
                 refs = _image_refs(message)
                 if refs:
                     entry.images = refs
+                video_refs = _video_refs(message)
+                if video_refs:
+                    entry.videos = video_refs
                 # The expansion flag is set on the CALL and must survive the
                 # result settling the row.
                 if entry.details.get("user_run"):
@@ -2263,11 +2314,18 @@ class ProjectionFold:
             # ``_image_refs_for_content``), so a phone watching live shows
             # a generated image the moment the call settles — and after a
             # reconnect the replayed row shows the identical references.
+            # The video family rides beside it on its own index, which is
+            # what the card's player fetches through the attachment route.
             refs = _image_refs_for_content(
                 result.content if isinstance(result.content, list) else None
             )
             if refs:
                 row.images = refs
+            video_refs = _video_refs_for_content(
+                result.content if isinstance(result.content, list) else None
+            )
+            if video_refs:
+                row.videos = video_refs
             row.details = self._tool_details(
                 self._tool_args.pop(event.tool_call_id, {}), result.text, result.details
             )

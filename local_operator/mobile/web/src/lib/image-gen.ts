@@ -30,7 +30,7 @@
  * fabricated number. Numbers that ARE carried are never rounded, clamped or
  * extrapolated into a claim the feed did not make.
  */
-import type { TranscriptEntry, TranscriptImageRef } from "../types";
+import type { TranscriptEntry, TranscriptImageRef, TranscriptVideoRef } from "../types";
 
 /**
  * The detection set — the ONE exported detection point per surface.
@@ -126,6 +126,10 @@ export interface ImageGenView {
 	errorType: string;
 	/** Finished artifact refs, in the entry's image index space. */
 	images: TranscriptImageRef[];
+	/** Video artifact refs — the parallel family, its own index space. The
+	    card's player mounts one per ref in the done body; bytes come from the
+	    Range-capable attachment route (see AttachmentVideo). */
+	videos: TranscriptVideoRef[];
 	/**
 	 * The ONE material fact, read from the entry's own tool name: which noun
 	 * the done line wears (`video ready` vs `image ready`) and whether the
@@ -373,6 +377,20 @@ export function imageGenView(
 			)
 		: [];
 
+	/* Video artifact refs — the parallel family, own index space, read with
+	   the same tolerance as `images`. They are what the card's player mounts
+	   in the done body; their bytes come from the Range-capable attachment
+	   route rather than the image route. */
+	const rawVideos = entry.videos;
+	const videos = Array.isArray(rawVideos)
+		? rawVideos.filter(
+				(ref): ref is TranscriptVideoRef =>
+					ref != null &&
+					typeof ref.index === "number" &&
+					typeof ref.mime_type === "string",
+			)
+		: [];
+
 	return {
 		state,
 		generating,
@@ -382,6 +400,7 @@ export function imageGenView(
 		error,
 		errorType,
 		images,
+		videos,
 		material,
 	};
 }

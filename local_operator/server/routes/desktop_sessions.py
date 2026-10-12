@@ -3142,6 +3142,11 @@ async def snapshot(
     request: Request,
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
     supplements: int = Query(default=0, ge=0),
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
@@ -3195,6 +3200,7 @@ async def snapshot(
             await bridge.snapshot(
                 entry_times=bool(entry_ts),
                 open_frame=bool(open_frame),
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 **supplement_read_options(bool(supplements)),
             )
         )
@@ -3249,6 +3255,11 @@ async def history(
     limit: int = Query(default=100, ge=1, le=500),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
     supplements: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
@@ -3291,6 +3302,7 @@ async def history(
                 limit=limit,
                 entry_times=bool(entry_ts),
                 open_frame=bool(open_frame),
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 **supplement_read_options(bool(supplements)),
             )
         )
@@ -5338,6 +5350,11 @@ async def events(
     frontend_replace: int = Query(default=0, ge=0),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
     supplements: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
@@ -5364,7 +5381,9 @@ async def events(
             # themselves are journaled either way; this gates the live carriage,
             # not the record.
             sub = bridge.subscribe(
-                frontend_replace=bool(frontend_replace), supplements=bool(supplements)
+                frontend_replace=bool(frontend_replace),
+                supplements=bool(supplements),
+                journal_order=bool(journal_order),
             )
         except LegacySubscriberDuringMove as error:
             await context.__aexit__(None, None, None)
@@ -5424,6 +5443,7 @@ async def events(
                     after_seq=after_seq,
                     entry_times=bool(entry_ts),
                     open_frame=bool(open_frame),
+                    **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 )
             ) as frames:
                 try:
