@@ -23224,9 +23224,10 @@ class Session:
           ``/model default`` change, an agent profile edit, a ``--hosting``
           flag). The new selection owes the user a fresh start on the model
           they actually chose, not a detour recorded against the old one.
-        - the fallback selector equals the current selection → the user
-          adopted the fallback as their model; a pin would be a no-op that
-          still repainted the band with a spurious fallback marker.
+        - the fallback selector equals the current selection AND its effort
+          is absent/identical → the user adopted the route; a pin would be a
+          no-op that still repainted the band with a spurious fallback marker.
+          A distinct depth or explicit reset is still a real same-model route.
 
         Restores quietly (no event, no notice): construction runs before any
         front end subscribes, so hosts read ``effective_model`` when they build
@@ -23246,10 +23247,14 @@ class Session:
         persisted_primary = str(details.get("primary") or "")
         if persisted_primary and persisted_primary != current:
             return
-        if selector == current:
-            return
         raw_effort = active.get("effort")
         effort = str(raw_effort) if isinstance(raw_effort, str) and raw_effort else None
+        # Match the chain expansion's selector+effort identity, not just the
+        # model: a same-selector reset/different depth must re-pin on resume.
+        # Compare configured intent rather than resolved target defaults; auto
+        # may resolve to the primary's fixed depth but still clears its override.
+        if selector == current and effort in (None, self._model.reasoning_effort):
+            return
         raw_reason = details.get("reason")
         if isinstance(raw_reason, str) and raw_reason:
             # Older rows predate the key; a restored session keeps the reason
