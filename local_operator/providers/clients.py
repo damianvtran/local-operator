@@ -2302,13 +2302,22 @@ def _tools_to_openai(tools: Sequence[AgentTool]) -> list[dict[str, Any]]:
 
 
 def _tools_to_openai_responses(tools: Sequence[AgentTool]) -> list[dict[str, Any]]:
-    """Responses tools are flat; chat-completions nests fields under ``function``."""
+    """Keep the harness's optional arguments optional on both Responses routes.
+
+    Unlike Chat Completions, Responses attempts strict schema normalization
+    when ``strict`` is omitted. That promotes optional properties to required
+    ones, forcing empty values into mutually exclusive tool operations (send a
+    message versus switch a model, or list sessions versus spawn one). Our
+    schemas and executors already validate the intended required fields; opt
+    out explicitly rather than changing omission semantics at the wire boundary.
+    """
     return [
         {
             "type": "function",
             "name": tool.name,
             "description": tool.description,
             "parameters": tool.parameters or {"type": "object", "properties": {}},
+            "strict": False,
         }
         for tool in tools
     ]
