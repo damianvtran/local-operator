@@ -27,6 +27,14 @@ _PREAMBLES = {text: kind for kind, text in TO_CHILD_INSTRUCTIONS.items()}
 HUB_RECEIPT_MARKER_KEY = "hub_receipt"
 
 
+#: The producer's own directions. A marker MUST name one of these to be a
+#: receipt: a body with no / null / numeric / unknown direction is not
+#: provenance — reading it as one would classify a human row as an inbound
+#: delivery on nothing but a non-empty string (review round 3, R3-1; QA
+#: Q-child-1). "Unknown direction, stay human" is the contract.
+_KNOWN_DIRECTIONS = ("to_child", "to_parent")
+
+
 def hub_receipt_marker(message: object) -> dict[str, Any] | None:
     """The typed hub facts a producer stored on a user-role row, or ``None``.
 
@@ -35,6 +43,14 @@ def hub_receipt_marker(message: object) -> dict[str, Any] | None:
     when a producer had them). Display surfaces classify on this marker rather
     than re-parsing the model envelope; the envelope-parsing path remains only
     for rows written before the marker existed.
+
+    VALIDATION IS THE CONTRACT (review round 3, R3-1): a valid marker needs a
+    known producer direction, a non-empty string body, and typed flags that
+    are either booleans or UNKNOWN — normalised to ``None``, never guessed
+    from the body or from any other field. Anything short of that is ``None``
+    and the caller keeps its ordinary user handling; the marker programme's
+    whole promise is that classification comes from positive provenance, so a
+    half-stamped row must not be promoted on inference.
     """
     if isinstance(message, Mapping):
         # The TUI child fold works on ENCODED transcript payloads (dicts), not
@@ -47,10 +63,23 @@ def hub_receipt_marker(message: object) -> dict[str, Any] | None:
     marker = payload.get(HUB_RECEIPT_MARKER_KEY)
     if not isinstance(marker, Mapping):
         return None
+    if marker.get("direction") not in _KNOWN_DIRECTIONS:
+        return None
     body = marker.get("body")
     if not isinstance(body, str) or not body.strip():
         return None
-    return dict(marker)
+    normalized = dict(marker)
+    # Present flags are normalised, never guessed: a non-boolean flag reads as
+    # UNKNOWN (``None``) rather than being truthy-cast, and an absent one is
+    # unknown by construction. The producer always writes booleans, so this
+    # only shapes rows a foreign or older writer left half-typed.
+    for flag in ("expects_reply", "steer"):
+        value = normalized.get(flag)
+        normalized[flag] = value if isinstance(value, bool) else None
+    for advisory in ("label", "job_id"):
+        if advisory in normalized and not isinstance(normalized[advisory], str):
+            normalized.pop(advisory)
+    return normalized
 
 
 def hub_receipt_fields(details: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:

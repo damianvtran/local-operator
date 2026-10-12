@@ -619,6 +619,8 @@ class ReplayTarget(Protocol):
         fold_width: int = 0,
     ) -> list[ImageBlock]: ...
 
+    def _replace_block(self, old: Any, block: Any) -> bool: ...
+
     def _painted_tool_card(self, call_id: str) -> Any: ...
 
     def _settle_painted_tool_card(self, card: Any, result: Any) -> None: ...
@@ -674,6 +676,23 @@ class PreparedReplay(ReplayState):
             navigation_visible=False,
             fold_width=fold_width,
         )
+
+    def _replace_block(self, old: Any, block: Any) -> bool:
+        """Swap a seat in the offscreen run, keeping its position and coords.
+
+        The prepared replay's counterpart of ``TranscriptView.replace_block``:
+        the collected list is the mount order, so the replacement goes back to
+        ``old``'s index and inherits its source anchor/part — the same
+        coordinates the source row carried (review round 3, R3-2).
+        """
+        for index, candidate in enumerate(self.blocks):
+            if candidate is old:
+                if old.navigation_anchor_id and not block.navigation_anchor_id:
+                    block.navigation_anchor_id = old.navigation_anchor_id
+                    block.navigation_anchor_part = old.navigation_anchor_part
+                self.blocks[index] = block
+                return True
+        return False
 
     def _painted_tool_card(self, call_id: str) -> None:
         return None
@@ -1210,6 +1229,17 @@ def project_settled_rows(
         for block in transcript.blocks()
         if isinstance(block, HubMessageBlock) and block.navigation_anchor_id
     }
+    # The source-row seats a richer same-ID replay may have to UPGRADE: a row
+    # already painted as the operator's words (or as a receipt under another
+    # spelling) is the same delivery the marker now describes, so the receipt
+    # takes that seat rather than appending beside it (review round 3, R3-2).
+    # Only human/receipt rows are seats — image blocks and notices have their
+    # own anchors/parts and are never replaced.
+    source_seats = {
+        block.navigation_anchor_id: block
+        for block in transcript.blocks()
+        if isinstance(block, (UserBlock, HubMessageBlock)) and block.navigation_anchor_id
+    }
     with batch:
         for message in history:
             self._projection_message_id = str(getattr(message, "id", ""))
@@ -1566,11 +1596,52 @@ def project_settled_rows(
                             transcript.restate_quiet_member(existing)
                             appended = True
                     else:
-                        block = HubMessageBlock(body, facts, fold_width=fold_width)
-                        self._append_block(block)
-                        if receipt_id:
-                            hub_receipts[receipt_id] = block
-                        appended = True
+                        seat = source_seats.get(receipt_id) if receipt_id else None
+                        if isinstance(seat, HubMessageBlock):
+                            # A receipt under a different anchor spelling: the
+                            # same row, so correct it in place rather than
+                            # mounting a second card.
+                            if seat.restate_receipt(body, facts):
+                                transcript.restate_quiet_member(seat)
+                                appended = True
+                            if receipt_id:
+                                hub_receipts[receipt_id] = seat
+                        elif isinstance(seat, UserBlock):
+                            # RICHER SAME-ID REPLAY: this row was painted as
+                            # the operator's words on an earlier pass and the
+                            # marker teaches provenance it did not have then.
+                            # It is the SAME delivery, so the receipt takes the
+                            # seat — replacing the stale human row at its own
+                            # position — and never mounts beside it. The seat
+                            # is only ever a UserBlock here, so no quiet-group
+                            # membership is disturbed by the swap (a mounted
+                            # receipt would have been found by id above).
+                            block = HubMessageBlock(body, facts, fold_width=fold_width)
+                            if self._replace_block(seat, block):
+                                hub_receipts[receipt_id] = block
+                                appended = True
+                        else:
+                            block = HubMessageBlock(body, facts, fold_width=fold_width)
+                            self._append_block(block)
+                            if receipt_id:
+                                hub_receipts[receipt_id] = block
+                            # The row's own pictures ride exactly as they do
+                            # on the human arm below: the marker reclassifies
+                            # the ROW, never its attachments, and dropping
+                            # them was losing visible content (review round 3,
+                            # R3-3). Only the no-seat path appends images: a
+                            # replay of a row whose seat survived never
+                            # re-adds a second copy of its photos.
+                            replay_images = [
+                                part
+                                for part in (getattr(message, "content", None) or [])
+                                if isinstance(part, ImageContent)
+                            ]
+                            if replay_images:
+                                self._append_image_blocks(
+                                    replay_images, marker_text=text, fold_width=fold_width
+                                )
+                            appended = True
                     continue
                 # The live path never paints harness chrome as a user row
                 # (LOOP_PROMPT is registered as a pending echo and consumed;

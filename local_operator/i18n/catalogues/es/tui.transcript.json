@@ -8,5 +8,12 @@
   "tui.transcript.queued.newest": "· en cola para el próximo runtime — esc lo recupera",
   "tui.transcript.queued.older": "· en cola para el próximo runtime",
   "tui.transcript.sender.pid": "pid {pid}",
-  "tui.transcript.sender.unknown": "otra sesión"
+  "tui.transcript.sender.unknown": "otra sesión",
+  "tui.transcript.group.messages": "mensajes · {count}",
+  "tui.transcript.group.actions": "{count, plural, one {{label} acción} many {{label} acciones} other {{label} acciones}}",
+  "tui.transcript.group.reply_requested": "{count, plural, one {{label} solicitud de respuesta} many {{label} solicitudes de respuesta} other {{label} solicitudes de respuesta}}",
+  "tui.transcript.group.steered": "{count, plural, one {{label} redirección} many {{label} redirecciones} other {{label} redirecciones}}",
+  "tui.transcript.hub.reply_requested": "Respuesta solicitada",
+  "tui.transcript.hub.steered": "Redirigido",
+  "tui.transcript.hub.from": "De {identity}"
 }

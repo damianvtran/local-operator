@@ -66,8 +66,9 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import ACTIVITY_THINKING
+from local_operator.i18n.format import format_number
 from local_operator.i18n.keys import tui_transcript
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import active_locale, tr
 from local_operator.mobile.peer_model import TERMINAL_SENDER
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.composer_focus import (
@@ -3203,7 +3204,13 @@ class PeerMessageBlock(ExpandableActionBlock):
             row.append(" " * indent, style=dim)
         row.append(icon + " ", style=dim)
         row.append(name + " ", style=muted)
-        row.append(summary, style=dim)
+        # The identity/attention/preview run takes the META ink (`muted`), not
+        # the separator `dim`: measured on the card's own grounds, `dim` sits
+        # at 4.18:1 collapsed / 3.97:1 expanded — under the normal-text floor
+        # for the 13px preview — while `muted` clears it (7.53:1 expanded) and
+        # is the ramp step the receipt header already speaks (design D2, round
+        # 1: use the existing metadata role, no palette change).
+        row.append(summary, style=muted)
         if slot:
             used = cell_len(row.plain)
             pad = max(1, width - used - cell_len(slot))
@@ -3375,8 +3382,11 @@ class HubMessageBlock(PeerMessageBlock):
         return " · ".join(
             word
             for flag, word in (
-                (self.hub_details.get("expects_reply") is True, "Reply requested"),
-                (self.hub_details.get("steer") is True, "Steered"),
+                (
+                    self.hub_details.get("expects_reply") is True,
+                    _t(tui_transcript.hub_reply_requested()),
+                ),
+                (self.hub_details.get("steer") is True, _t(tui_transcript.hub_steered())),
             )
             if flag
         )
@@ -3384,7 +3394,12 @@ class HubMessageBlock(PeerMessageBlock):
     def _summary(self) -> tuple[str, str]:
         identity, snippet = super()._summary()
         intent = self._intent()
-        return " · ".join(part for part in (f"From {identity}", intent) if part), snippet
+        return (
+            " · ".join(
+                part for part in (_t(tui_transcript.hub_from(identity=identity)), intent) if part
+            ),
+            snippet,
+        )
 
     def _header(self, width: int | None = None) -> str:
         # Direction and job are advisory display facts, never chronology or a
@@ -3589,6 +3604,13 @@ class QuietGroupBlock(ExpandableActionBlock):
         """A receipt's band: the same dim the wake and monitor rows use."""
         return "dim"
 
+    @staticmethod
+    def _count_label(count: int) -> str:
+        # Existing EN frames used raw decimal counts and must stay byte-stable.
+        # Other locales follow the shared formatter, not that compatibility pin.
+        locale = active_locale()
+        return str(count) if locale == "en" else format_number(count, locale)
+
     def _summary_text(self) -> str:
         """The bar's one sentence: ``messages · 12`` (``12+`` when cut).
 
@@ -3597,14 +3619,36 @@ class QuietGroupBlock(ExpandableActionBlock):
         ``messages · 12`` — so the phrase is not repeated on the row. The
         count carries the shared minimum marker when the head is cut.
         """
-        count = f"{self.group.count}+" if self.partial else str(self.group.count)
-        parts = [f"messages · {count}"]
+        count = self._count_label(self.group.count) + ("+" if self.partial else "")
+        parts = [_t(tui_transcript.group_messages(count=count))]
+        # ICU selects the locale's noun form with the number, but the count label
+        # stays the existing raw decimal text; formatting that selector would add
+        # thousands separators and change already-reviewed English frame bytes.
         if self.group.mixed_actions:
-            parts.append(f"{self.group.actions} actions")
+            parts.append(
+                _t(
+                    tui_transcript.group_actions(
+                        count=self.group.actions, label=self._count_label(self.group.actions)
+                    )
+                )
+            )
         if self.group.reply_requested:
-            parts.append(f"{self.group.reply_requested} reply requested")
+            parts.append(
+                _t(
+                    tui_transcript.group_reply_requested(
+                        count=self.group.reply_requested,
+                        label=self._count_label(self.group.reply_requested),
+                    )
+                )
+            )
         if self.group.steered:
-            parts.append(f"{self.group.steered} steered")
+            parts.append(
+                _t(
+                    tui_transcript.group_steered(
+                        count=self.group.steered, label=self._count_label(self.group.steered)
+                    )
+                )
+            )
         return " · ".join(parts)
 
     def _build_row(self, width: int) -> Text:
@@ -6435,6 +6479,43 @@ class TranscriptView(ScrollableContainer):
                 continue
             self._apply_gap(self._anchor_before(offset), following)
             return
+
+    def replace_block(self, old: TranscriptBlock, new: TranscriptBlock) -> bool:
+        """Swap one mounted block for its successor AT THE SAME POSITION.
+
+        The provenance-upgrade seam (review round 3, R3-2): a row a later,
+        richer replay teaches the page was a hub delivery is the SAME delivery,
+        not a second one, so the receipt takes the old row's seat instead of
+        mounting beside it. Position IS source order here — the new block
+        returns to ``old``'s index — and the quiet-group fold is offered the
+        newcomer exactly as an append would offer it, so a receipt landing
+        between receipts can still join the run.
+
+        Returns whether the swap happened; ``False`` means ``old`` was not
+        mounted, and the caller decides what to do about that.
+        """
+        if old not in self._blocks:
+            return False
+        index = self._blocks.index(old)
+        self.remove_block(old)
+        next_block = self._blocks[index] if index < len(self._blocks) else None
+        self._apply_gap(self._anchor_before(index), new)
+        self._blocks.insert(index, new)
+        if hasattr(new, "tool_name"):
+            self._widen_name_col(new)
+        # A held batch mounts in append order; this block belongs BEFORE some
+        # of the held rows in general (the seat may sit mid-transcript), and
+        # the mount seam has no positional-hold arm — so flush and mount it
+        # against its real neighbour, the same shape `append_block` uses for a
+        # block that has to go before a specific widget.
+        if self._pending_mounts is not None:
+            pending, self._pending_mounts = self._pending_mounts, []
+            self._mount_batch(pending)
+        self.mount(new, before=next_block if next_block in self._blocks else None)
+        self.call_after_refresh(self._settle_gap, new)
+        self._remeasure_empty_state()
+        self.note_quiet_append(new)
+        return True
 
     def blocks(self) -> list[TranscriptBlock]:
         """Blocks in append order (live and finalized)."""

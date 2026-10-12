@@ -37562,6 +37562,32 @@ class OperatorApp(App[None]):
         if not ends_empty_state:
             self._sync_boot_layout()
 
+    def _replace_block(self, old: Any, block: Any) -> bool:
+        """Swap a seat for its successor at the same position (ReplayTarget).
+
+        The provenance-upgrade counterpart of :meth:`_append_block`: a
+        same-ID row whose replay learned richer facts is corrected IN PLACE,
+        never appended beside the stale one. Source coordinates carry over
+        from the seat, so a receipt that replaced a human row keeps that row's
+        id/part for every later same-ID replay to find again. The collected
+        page and the mounted view take the same shape.
+        """
+        if old.navigation_anchor_id and not block.navigation_anchor_id:
+            block.navigation_anchor_id = old.navigation_anchor_id
+            block.navigation_anchor_part = old.navigation_anchor_part
+        if self._block_sink is not None:
+            try:
+                index = self._block_sink.index(old)
+            except ValueError:
+                return False
+            self._block_sink[index] = block
+            return True
+        transcript = self._transcript_view()
+        for candidate in transcript.blocks():
+            if candidate is old:
+                return transcript.replace_block(old, block)
+        return False
+
     def _append_image_blocks(
         self,
         images: list[ImageContent],

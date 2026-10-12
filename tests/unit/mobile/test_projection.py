@@ -1992,6 +1992,38 @@ def test_a_malformed_marker_keeps_the_rows_legacy_treatment() -> None:
     assert (entries[0].kind, entries[0].text) == ("parent_message", "Focus on retries")
 
 
+def test_marker_rows_keep_their_source_image_refs_durable_and_live() -> None:
+    """R3-3 relay half (review round 3): reclassifying a marked row as a
+    receipt keeps its image references — original index/mime — on BOTH folds,
+    exactly as the unmarked control beside it does."""
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    control = Message.user(
+        "with a shot", [ImageContent(data="AAAA", mime_type="image/png")], id="control-1"
+    )
+    control_entry = fold_messages_to_entries([control])[0]
+    assert control_entry.images == [{"index": 0, "mime_type": "image/png"}]
+
+    def marked_with_image() -> Message:
+        message = _marked_steer()
+        message.content.append(ImageContent(data="AAAA", mime_type="image/png"))
+        return message
+
+    entries = fold_messages_to_entries([marked_with_image()])
+    assert entries[0].kind == "parent_message"
+    assert entries[0].images == [{"index": 0, "mime_type": "image/png"}]
+
+    fold = make_fold()
+    fold.fold_history([marked_with_image()])
+    assert fold.projection.transcript[-1].images == [{"index": 0, "mime_type": "image/png"}]
+
+    live = make_fold()
+    assert live.absorb_user_event(marked_with_image()) is True
+    live_row = live.projection.transcript[-1]
+    assert live_row.kind == "parent_message"
+    assert live_row.images == [{"index": 0, "mime_type": "image/png"}]
+
+
 def test_a_phone_typed_envelope_reconciles_its_echo_instead_of_doubling() -> None:
     """A message the phone sent that happens to carry the envelope shape must
     reconcile against its optimistic echo, not append beside it.

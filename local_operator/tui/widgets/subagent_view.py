@@ -75,6 +75,7 @@ from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_K
 from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import FAULT_KEY, INTERRUPTED_FAULTS
+from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
 from local_operator.session.page_cache import load_transcript_page
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
@@ -89,6 +90,7 @@ from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_f
 from local_operator.tui.narration import is_intermediate_narration
 from local_operator.tui.widgets import tool_card
 from local_operator.tui.widgets.assistant import AssistantBlock
+from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.subagent_panel import (
     SPINNER_FRAMES,
     SPINNER_INTERVAL_S,
@@ -461,7 +463,16 @@ class SubagentEntry:
     """
 
     key: str
-    kind: Literal["prompt", "user", "text", "tool", "notice", "parent_message", "subagent_message"]
+    kind: Literal[
+        "prompt",
+        "user",
+        "text",
+        "tool",
+        "notice",
+        "parent_message",
+        "subagent_message",
+        "attachment",
+    ]
     text: str = ""
     notice_kind: NoticeKind = "info"
     tool_name: str = ""
@@ -492,6 +503,14 @@ class SubagentEntry:
     #: page's in-place reconciliation exists to remove. The stream carries the
     #: fact; it was only being discarded at the fold.
     complete: bool = False
+    #: Picture bytes (base64) for an ``attachment`` row — the images a marked
+    #: hub row carried, preserved with their original source id and content
+    #: index. ``None`` means the bytes are unresolvable (an externalised
+    #: digest whose store read failed); the ImageBlock then paints its own
+    #: unavailable receipt, so the fact an image was here survives.
+    att_data: str | None = None
+    att_mime: str = "image/png"
+    att_label: str = ""
     #: Is this a MID-TURN PROGRESS row — the prose a child's model call streamed
     #: before it finalized into tool calls — rather than an answer? Classified by
     #: the fold from the message's own two fields with the SHARED rule
@@ -554,10 +573,47 @@ def _supersedes(new: SubagentEntry, old: SubagentEntry) -> bool:
     return False
 
 
+def _marked_row_attachments(
+    payload: Mapping[str, Any], store: AttachmentStore | None
+) -> list[tuple[int, str | None, str]]:
+    """The image parts of one marked user row, in content order.
+
+    Returns ``(content index, base64 data or None, mime)`` per image so the
+    child page can mount the same pictures the row carries — original source
+    id and index intact (review round 3, R3-3; the operator's attachment
+    acceptance). Only raw image blocks are read: artifact blocks (``kind``)
+    and audio have no picture to mount here. An externalised reference (a
+    digest the encoder moved into the content-addressed store) is resolved
+    through the store the transcript directory's config dir owns — the same
+    store the main transcript's tool rows read — and degrades to ``None``
+    (ImageBlock's unavailable receipt) when a digest no longer resolves,
+    exactly like every other media read on this surface.
+    """
+    out: list[tuple[int, str | None, str]] = []
+    for index, part in enumerate(payload.get("content") or ()):
+        if not isinstance(part, Mapping):
+            continue
+        if part.get("kind") is not None or part.get("type") == "audio":
+            continue
+        data = part.get("data")
+        digest = part.get("attachment")
+        mime = str(part.get("mime_type") or "image/png")
+        if isinstance(data, str) and data:
+            out.append((index, data, mime))
+        elif isinstance(digest, str) and digest:
+            resolved = store.get(digest) if store is not None else None
+            if resolved is not None:
+                out.append((index, resolved[0], resolved[1]))
+            else:
+                out.append((index, None, mime))
+    return out
+
+
 def fold_transcript_entries(
     entries: Sequence[TranscriptEntry],
     *,
     tool_results: dict[str, tuple[str, bool, dict[str, Any] | None, float | None]] | None = None,
+    attachments: AttachmentStore | None = None,
 ) -> list[SubagentEntry]:
     """Fold durable transcript rows into the viewer's stable row model.
 
@@ -727,19 +783,44 @@ def fold_transcript_entries(
             if marker is not None:
                 # Positive producer provenance on a persisted user-role row:
                 # body and typed facts come from the marker, never from
-                # re-reading the model envelope. The id/body correlation
-                # suppresses it when its communication fact is in the window,
-                # exactly like the legacy arm below.
+                # re-reading the model envelope. Correlation is by IDENTITY
+                # only — the legacy body budget below belongs to UNMARKED
+                # historical rows without usable provenance; a positively
+                # marked row whose prose happens to match some other source's
+                # fact is not that delivery, so it is neither suppressed nor
+                # charged by body text (review round 3, R3-4), and the same
+                # rule keeps two same-bodied sources rendering as two rows.
                 receipt_body, facts = hub_receipt_fields({**marker, "text": text})
                 if entry.id in communication_ids:
                     continue
-                budget = strip_control_sequences(str(receipt_body)).strip()
-                if budget and communication_bodies[budget]:
-                    communication_bodies[budget] -= 1
-                    continue
                 folded.append(
-                    SubagentEntry(entry.id, "parent_message", text=receipt_body, details=facts)
+                    SubagentEntry(
+                        entry.id,
+                        (
+                            "subagent_message"
+                            if facts.get("direction") == "to_parent"
+                            else "parent_message"
+                        ),
+                        text=receipt_body,
+                        details=facts,
+                    )
                 )
+                # The row's own pictures ride the fold the same way the
+                # durable fold carries them (review round 3, R3-3 + the
+                # operator's attachment acceptance): one attachment entry per
+                # image, keyed by the ORIGINAL source id and content index so
+                # replay reconciliation can never double-mount them.
+                atts = _marked_row_attachments(payload, attachments)
+                for ordinal, (att_index, att_data, att_mime) in enumerate(atts):
+                    folded.append(
+                        SubagentEntry(
+                            f"{entry.id}:attach:{att_index}",
+                            "attachment",
+                            att_data=att_data,
+                            att_mime=att_mime,
+                            att_label=f"#{ordinal + 1}" if len(atts) > 1 else "",
+                        )
+                    )
                 continue
             parent_message = extract_parent_message(text)
             if parent_message is not None:
@@ -1327,6 +1408,15 @@ def entry_block(
         # passed unconditionally rather than guarded here: two spellings of
         # "no width" in one function is how the two drift apart.
         return InstructionBlock(entry.text, fold_width=fold_width)
+    if entry.kind == "attachment":
+        # The picture a marked hub row carried: the SAME ImageBlock the main
+        # transcript mounts for prompt media, built from the row's own bytes
+        # (or its unavailable receipt when the bytes no longer resolve). The
+        # quiet-group mapping already treats an image after a hub receipt as
+        # ``inside`` — it sits in the group and splits nothing.
+        return ImageBlock(
+            entry.att_data, entry.att_mime, label=entry.att_label, fold_width=fold_width
+        )
     if entry.kind in ("parent_message", "subagent_message"):
         # A hub delivery (or the child's own recorded reply), not the
         # operator: the child page paints the SAME receipt block the main
@@ -1429,6 +1519,11 @@ def update_entry_block(
     """
     if entry.kind != previous.kind:
         return False  # a row that changed shape is a different row
+    if entry.kind == "attachment":
+        # Pictures are immutable once folded — bytes and resolvability were
+        # fixed at fold time — so an equal row repaints nothing and an
+        # UNEQUAL one is a genuinely different row and is rebuilt.
+        return entry == previous
     if entry.kind in ("text", "subagent_message"):
         if not isinstance(block, AssistantBlock):
             return False
@@ -2684,7 +2779,18 @@ class SubagentView(Vertical):
         # source does not change the user-selected paging growth class.
         self._history_tool_results = {}
         self._history_entries = fold_transcript_entries(
-            self._history_rows, tool_results=self._history_tool_results
+            self._history_rows,
+            tool_results=self._history_tool_results,
+            # The store that OWNED this journal (derived from the session dir,
+            # not the reader's config): an externalised image digest resolves
+            # to the same bytes the main transcript would show, and a digest
+            # that no longer resolves becomes the ImageBlock's unavailable
+            # receipt rather than an error.
+            attachments=(
+                store_for_transcript_dir(self._history_directory)
+                if self._history_directory
+                else None
+            ),
         )
         self._history_cursor = rows[0].id if rows else self._history_cursor
         self._history_exhausted = not page.has_more
@@ -3141,6 +3247,13 @@ class SubagentView(Vertical):
                 break
             if not update_entry_block(body_blocks[common], now, was, settled=settled):
                 break
+            if was != now and now.kind in ("parent_message", "subagent_message"):
+                # A richer same-ID receipt corrected facts the mounted bar's
+                # summary derives from. Restate the containing quiet group so
+                # its sender / reply / steer facts re-read the latest member
+                # data; membership, disclosure and row order are kept (review
+                # round 3, R3-5). The main path makes the same call.
+                self._body.restate_quiet_member(body_blocks[common])
             common += 1
 
         for block in reversed(body_blocks[common:]):

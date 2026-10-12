@@ -1579,6 +1579,14 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                         ),
                         text=body,
                         details=facts,
+                        # The row's own attachments ride the receipt the same
+                        # way they ride an unmarked prompt row: references
+                        # with their ORIGINAL message id and index, resolved
+                        # lazily by the client. Classifying the row as a
+                        # receipt must never drop media the row carries
+                        # (review round 3, R3-3) — the unmarked-image control
+                        # beside it already does exactly this.
+                        images=_image_refs(message),
                     )
                 )
                 continue
@@ -2621,6 +2629,11 @@ class ProjectionFold:
                     text=marker_body,
                     details=marker_facts,
                     final=True,
+                    # Same rule as the durable fold above and the echoed row
+                    # beside it: the receipt keeps the source's image refs
+                    # (original id/index) rather than dropping them on
+                    # reclassification (review round 3, R3-3).
+                    images=refs,
                 )
             )
             return True
