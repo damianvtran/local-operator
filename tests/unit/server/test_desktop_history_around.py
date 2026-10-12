@@ -489,3 +489,81 @@ async def test_peer_order_never_uses_receiver_index(tmp_path: Path, monkeypatch)
     assert known["journal_generation"] == "owner-domain"
     assert known["journal_ordinals"] == {"owner-row": 7}
     await bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_in_replay", [False, True])
+async def test_off_page_order_correction_survives_snapshot_cutover(
+    tmp_path, monkeypatch, already_in_replay
+):
+    import asyncio
+
+    from local_operator.session import transcript_index as ti
+    from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
+
+    ti._reset_for_tests()
+    async with _Harness(tmp_path) as harness:
+        ids = [f"{index:012x}" for index in range(205)]
+        _seed_order_journal(tmp_path / "sessions" / harness.session_id, ids)
+        task, _ = ti.start_refresh(tmp_path, harness.session_id)
+        await task
+        index = ti.fresh_resident(tmp_path, harness.session_id)
+        assert index is not None
+        async with harness.pool.session(harness.session_id, read=True, allow_draft=True) as bridge:
+            sub = bridge.subscribe(journal_order=True)
+            legacy = bridge.subscribe()
+            payload = {
+                "type": JOURNAL_ORDER_EVENT,
+                "journal_generation": index.journal_generation,
+                "rows": [{"id": ids[0], "journal_seq": 0, "role": "user"}],
+            }
+            if already_in_replay:
+                bridge.publish("event", payload)
+
+            async def attention_glance():
+                # Only this decorative wait is controlled; snapshot/history and
+                # the pre-open cutover are production. The old ID is off-page.
+                if not already_in_replay:
+                    bridge.publish("event", payload)
+                await asyncio.sleep(0)
+
+            monkeypatch.setattr(
+                bridge, "_shared_attention_refresh", lambda: asyncio.create_task(attention_glance())
+            )
+            stream = bridge.events(sub, epoch=bridge.epoch, after_seq=0, journal_order=True)
+            try:
+                assert (await anext(stream))["type"] == "open"
+                received = []
+                while True:
+                    frame = await asyncio.wait_for(anext(stream), timeout=2)
+                    if frame["type"] == "snapshot":
+                        snapshot = frame["payload"]["history"]
+                        break
+                    received.append(frame)
+                assert len(snapshot["entries"]) == 100
+                assert ids[0] not in {row["id"] for row in snapshot["entries"]}
+                assert ids[0] not in snapshot.get("journal_ordinals", {})
+                assert snapshot["journal_generation"] == index.journal_generation
+                if not already_in_replay:
+                    received.append(await asyncio.wait_for(anext(stream), timeout=2))
+                corrections = [
+                    frame
+                    for frame in received
+                    if frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
+                ]
+                assert len(corrections) == 1
+                assert corrections[0]["payload"] == payload
+                assert legacy.queue.empty()
+                # Ordinary watch/attention frames are independent of this
+                # metadata proof. Only a duplicate of the same published
+                # correction (not any subsequent frame) would violate cutover.
+                while True:
+                    try:
+                        extra = await asyncio.wait_for(anext(stream), timeout=0.05)
+                    except asyncio.TimeoutError:
+                        break
+                    assert extra["seq"] != corrections[0]["seq"], extra
+            finally:
+                await stream.aclose()
+        await harness.pool.close()
+    ti._reset_for_tests()

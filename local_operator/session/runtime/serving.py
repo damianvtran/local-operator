@@ -3154,18 +3154,23 @@ class ServingSessionHandle(SessionHandle):
                         return
                     continue
                 rows = []
+                reconcile = False
                 for id_, (descriptor, source) in list(pending.items()):
                     pending.pop(id_, None)
                     # A later append preserves this prefix; a replaced writer
                     # inode or a same-size changed source does not. Never label
                     # a late old-file notification with a rebuilt domain.
                     if index.sig.get("inode") != source[0] or index.sig.get("size", -1) < source[1]:
+                        reconcile = True
                         continue
                     if index.sig.get("size") == source[1] and index.sig.get("mtime") != source[2]:
+                        reconcile = True
                         continue
                     seq = index.journal_rows.get(id_)
                     if seq is not None:
                         rows.append({**descriptor, "journal_seq": seq})
+                    else:
+                        reconcile = True
                 for at in range(0, len(rows), 128):
                     on_event(
                         {
@@ -3174,6 +3179,13 @@ class ServingSessionHandle(SessionHandle):
                             "rows": rows[at : at + 128],
                         }
                     )
+
+                if reconcile:
+                    # Refusing stale provenance is not recovery by itself. A
+                    # quiet send must still learn the new source without a
+                    # next token/read. One signal per rejected batch; never
+                    # relabel old-file descriptors with the rebuilt domain.
+                    on_event({"type": JOURNAL_ORDER_EVENT, "reconcile": True})
 
         def committed(rows: tuple[Any, ...], source: tuple[int, int, float]) -> None:
             nonlocal correction

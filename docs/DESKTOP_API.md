@@ -2822,6 +2822,16 @@ runs per token or synchronously in the bridge event relay. Desktop subscribers
 also opt in, for live and replay alike. Cold page indexes issue the same late
 metadata correction; a raced/unavailable source requests authoritative reconcile.
 
+Order metadata is NOT frontend state: a snapshot's sequence watermark cannot
+supersede an off-page correction absent from its bounded page/ID lookup. The
+pre-open drain preserves negotiated corrections after the snapshot unless the
+same published frame was already delivered in initial replay. Rejected writer
+provenance (including a real compaction while the index builds) or missing
+mapping emits one coalesced reconcile per batch, never an old-file coordinate
+labeled with the rebuilt domain. Safe old page-cache degradation after a
+same-inode/same-size rewrite remains unchanged: it omits authority until a
+fresh page is served; this contract does not refactor that cache.
+
 Consumers use one transitive ordering policy: confirmed same-domain source
 positions are distinct from explicit provisional admission/anchor blocks.
 Do not compare by ordinal for one pair and by time for another (that creates
