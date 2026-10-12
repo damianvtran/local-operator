@@ -1683,12 +1683,9 @@ async def test_upload_agent_to_radient_error(test_app_client, dummy_registry: Ag
 
     assert response.status_code == 400 or response.status_code == 500
     data = response.json()
-    # Both alternatives read the SAME migrated shape: `detail` is the RFC
-    # §2.6 envelope now, so the sentence lives in `text` — checking a
-    # clause against the dict itself matched KEYS, not text, and was
-    # vacuously false (R1-1, #2256 review round 1).
-    detail = data["detail"]["text"]
-    assert "Error uploading agent to Radient" in detail or "Upload failed" in detail
+    # A prefix-only OR accepts a lost exception tail. Pin the full sentence
+    # so moving the error into envelope params cannot silently discard it.
+    assert data["detail"]["text"] == "Error uploading agent to Radient: Upload failed"
 
 
 @pytest.mark.asyncio
@@ -1820,9 +1817,8 @@ async def test_download_agent_from_radient_error(test_app_client, dummy_registry
 
     assert response.status_code == 400 or response.status_code == 500
     data = response.json()
-    # Same migrated-shape fix as the upload twin above (R1-1).
-    detail = data["detail"]["text"]
-    assert "Error downloading agent from Radient" in detail or "Download failed" in detail
+    # The download twin must also reject a preserved prefix with a lost tail.
+    assert data["detail"]["text"] == "Error downloading agent from Radient: Download failed"
 
 
 @pytest.mark.asyncio
