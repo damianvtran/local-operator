@@ -18,8 +18,9 @@ Two entry points, one wire:
 - **`lop send`** — the shell command for HUMANS at a terminal (further below).
   Mailbox by default; `--wake` opts in to waking.
 
-They share the same target resolution and delivery semantics; the only
-difference is the default and who runs them.
+They share target resolution and wire delivery semantics. Their defaults and
+callers differ; the tool also reuses bounded, confirmed same-turn receipts
+(described below), while separate human CLI invocations remain separate acts.
 
 > **Agents: use the `send` tool. Never `bash` a `lop send`.** Three reasons,
 > and they are why the rule is worth remembering rather than looking up. The
