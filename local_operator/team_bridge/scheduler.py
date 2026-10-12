@@ -21,6 +21,7 @@ Two pieces:
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import contextmanager
@@ -191,6 +192,8 @@ async def run_screening_cycle(
     settings: Any = None,
     holder: str = "team-bridge-cycle",
     ttl: float = 120.0,
+    accepted_status: "Mapping[str, Any] | None" = None,
+    status_fetcher: "Callable[[], Awaitable[Mapping[str, Any]]] | None" = None,
 ) -> Any:
     """The SHIPPED THIN production composition (R6/Q3).
 
@@ -220,12 +223,47 @@ async def run_screening_cycle(
     selection = resolve_default_selection(config_dir)
     if selection is None:
         return None
+    # ACCEPTED STATUS (R7/Q3): the owner-pinned SDK status is received
+    # through the normal accepted-status seam (an injected controlled fetcher
+    # or an explicit mapping in proof; no service/vendor call from here).
+    # The SECURITY template selector stays LOCAL: a status whose version or
+    # template hash differs from the embedded selector is a TYPED REFUSAL —
+    # never silently accepted — and the previously published authority is
+    # retained untouched.
+    status: "Mapping[str, Any]"
+    if status_fetcher is not None:
+        fetched = await status_fetcher()
+        status = fetched if isinstance(fetched, Mapping) else {}
+    elif accepted_status is not None:
+        status = accepted_status
+    else:
+        status = {}
+    version = str(status.get("screening_version") or SCREENING_VERSION_V1)
+    template_hash = str(status.get("template_sha256") or SCREENING_TEMPLATE_V1_SHA256)
+    if version != SCREENING_VERSION_V1 or template_hash != SCREENING_TEMPLATE_V1_SHA256:
+        raise StoreRefused(
+            "policy_stale",
+            "accepted screening status does not match the local embedded selector",
+        )
+    # ONE capture: provider/model/approvals come from the SAME resolver the
+    # factory uses, and the canonical revision DIGEST binds version, hash,
+    # provider, model and approved map — so a same-version different-SHA
+    # status, or a same-model provider/map change, advances the authority
+    # and can never reuse an old proof (R7/Q3).
+    revision = (
+        "accepted:"
+        + hashlib.sha256(
+            (
+                f"{version}|{template_hash}|{selection.provider}|{selection.model_id}|"
+                + ",".join(sorted(selection.approved_identities))
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+    )
     store = Store(config_dir)
-    revision = "accepted-status-v1"
     current = store.current_screening_policy(owner)
     expected = (
-        SCREENING_VERSION_V1,
-        SCREENING_TEMPLATE_V1_SHA256,
+        version,
+        template_hash,
         selection.model_id,
         revision,
     )
@@ -243,8 +281,8 @@ async def run_screening_cycle(
         try:
             store.publish_screening_policy(
                 owner,
-                version=SCREENING_VERSION_V1,
-                template_sha256=SCREENING_TEMPLATE_V1_SHA256,
+                version=version,
+                template_sha256=template_hash,
                 default_model=selection.model_id,
                 revision=revision,
                 expected_epoch=None if current is None else int(current["epoch"]),
@@ -256,8 +294,8 @@ async def run_screening_cycle(
             # the eligibility decision).
             return None
     policy = _CyclePolicy(
-        screening_version=SCREENING_VERSION_V1,
-        template_sha256=SCREENING_TEMPLATE_V1_SHA256,
+        screening_version=version,
+        template_sha256=template_hash,
         default_model=selection.model_id,
         admission_revision=revision,
         approved_serving_identities=tuple(sorted(selection.approved_identities)),

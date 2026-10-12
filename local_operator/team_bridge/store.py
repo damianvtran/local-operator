@@ -25,6 +25,7 @@ returns after :meth:`Store.invalidate` cannot commit under the new run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -341,6 +342,63 @@ def _version_rank(version: str) -> tuple[int, str]:
 
     digits = "".join(ch for ch in version if ch.isdigit())
     return (int(digits) if digits else -1, version)
+
+
+def _owner_frame_digest(owner: OwnerSnapshot) -> str:
+    """Digest of the INITIATING owner frame (identity + gen), embedded in
+    lease tokens so another live owner on the same account cannot borrow
+    them (R7/Q15-6)."""
+
+    material = (
+        f"{owner.credential_id}|{owner.tenant_id}|{owner.endpoint_id}"
+        f"|{owner.enrollment_generation}"
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def _owner_frame_ok(turn: str, owner: OwnerSnapshot) -> bool:
+    """The presented token must carry THIS caller's own frame digest."""
+
+    return _turn_frame(turn) == _owner_frame_digest(owner)
+
+
+def _turn_frame(turn: str) -> str:
+    return turn.rsplit(":", 1)[-1] if ":" in turn else ""
+
+
+#: Marker that separates the SINGLE job bind from the packed logical
+#: reservation fingerprint in the one available attempts column (R7/Q3):
+#: pre-bind the row holds the logical fp; after the one legal bind it holds
+#: "job:<canonical digest>", and any second bind must replay it EXACTLY.
+_JOB_BOUND_PREFIX = "job:"
+
+
+def _bound_digest(raw: Any) -> Any:
+    """The canonical digest of a bound row (strips the bind marker)."""
+
+    if isinstance(raw, str) and raw.startswith(_JOB_BOUND_PREFIX):
+        return raw[len(_JOB_BOUND_PREFIX) :]
+    return raw
+
+
+def _decode_categories_text(raw: Any) -> list[str]:
+    """Decode persisted categories JSON for COMPARISON or consumption.
+
+    EMPTY SQL TEXT (or invalid JSON, or a non-list) is DAMAGED proof, not an
+    empty tuple (R7/Q2): it was never written by this codebase, so nothing
+    may silently coalesce it to [] and admit the row. Callers surface the
+    typed refusal; only a valid JSON array — "[]" included — passes.
+    """
+
+    if not isinstance(raw, str) or raw.strip() == "":
+        raise StoreRefused("proof_corrupt", "empty categories text")
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise StoreRefused("proof_corrupt", "categories decode failed") from error
+    if not isinstance(decoded, list):
+        raise StoreRefused("proof_corrupt", "categories not a list")
+    return decoded
 
 
 def _owner_key(owner: OwnerSnapshot) -> str:
@@ -958,7 +1016,8 @@ class Store:
                     and existing["prompt_version"] == receipt.prompt_version
                     and existing["template_sha256"] == receipt.template_sha256
                     and existing["body_sha256"] == receipt.body_sha256
-                    and json.loads(existing["categories"]) == sorted(receipt.categories)
+                    and _decode_categories_text(existing["categories"])
+                    == sorted(receipt.categories)
                     and existing["client_ref"] == client_ref
                 )
                 if same:
@@ -1397,20 +1456,27 @@ class Store:
             if row is None:
                 raise StoreRefused("unknown_attempt", attempt_id)
             if row["committed_message_id"] is not None:
-                # WRITE-ONCE (R6/Q3): a committed attempt is sealed — no
-                # rebinding of any kind. The pre-commit `fingerprint` column
-                # holds the LOGICAL reservation fingerprint (written at
-                # attempt creation) and is overwritten once by the job
-                # digest at bind; a single column cannot distinguish those
-                # two writers, so the stricter "fingerprint changed" rule
-                # was REJECTED — the per-attempt turn token and the full
-                # job digest at reservation already fence cross-attempt
-                # rebinding, and the commit flag is the write-once fence.
+                # A committed attempt is sealed: no rebinding of any kind.
                 raise StoreRefused("write_once_conflict", "attempt already committed")
+            raw = row["fingerprint"]
+            if isinstance(raw, str) and raw.startswith(_JOB_BOUND_PREFIX):
+                # BOUND ALREADY (R7/Q3): one bind was legitimate; from now
+                # on only the IDENTICAL digest may replay, and a changed
+                # pending bind refuses while the original binding stays on
+                # record (the update below is skipped).
+                if raw == _JOB_BOUND_PREFIX + fingerprint:
+                    return
+                raise StoreRefused(
+                    "write_once_conflict", "logical attempt already bound to another job"
+                )
+            # FIRST bind only: the row still holds the packed logical
+            # reservation fingerprint (or NULL for a legacy row); the bind
+            # marker makes the state explicit so a second bind can tell
+            # "packed logical fp" from "bound job digest".
             conn.execute(
                 "UPDATE screening_attempts SET fingerprint = ? "
                 "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
-                (fingerprint, attempt_id, _owner_key(owner)),
+                (f"{_JOB_BOUND_PREFIX}{fingerprint}", attempt_id, _owner_key(owner)),
             )
 
     def reserve_screening_dispatch(
@@ -1459,7 +1525,7 @@ class Store:
                 "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
                 (job.attempt_id, _owner_key(owner)),
             ).fetchone()
-            if logical is None or logical["fingerprint"] != job.digest:
+            if logical is None or _bound_digest(logical["fingerprint"]) != job.digest:
                 raise StoreRefused("unknown_attempt", "logical job binding missing")
             if logical["message_id"] != message_id:
                 raise StoreRefused("attempt_mismatch", "job message mismatch")
@@ -1548,8 +1614,12 @@ class Store:
                     or int(row["creator_generation"]) != owner.enrollment_generation
                 ):
                     return None
+                # EMPTY SQL TEXT is damaged proof, not an empty tuple
+                # (R7/Q2): coalescing it to [] would admit a receipt whose
+                # categories were never written. Only valid JSON survives —
+                # "[]" is the only legitimate empty.
                 try:
-                    decoded = json.loads(row["categories"] or "[]")
+                    decoded = _decode_categories_text(row["categories"])
                 except (TypeError, ValueError) as error:
                     # A MATCHED row whose metadata cannot be decoded is
                     # DAMAGED authority, not an absent proof: refusing (hold)
@@ -1607,6 +1677,7 @@ class Store:
         retry_at: float | None = None,
         verify: Any = None,
         admission_revision: str | None = None,
+        turn: str | None = None,
     ) -> None:
         """Commit ONE logical outcome, fenced on every binding that matters.
 
@@ -1634,6 +1705,19 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            if turn is not None:
+                # ATOMIC final admission (R7/Q15-6): the turn/frame fence
+                # runs INSIDE this same write transaction, so a successor
+                # releasing/claiming between the caller's last check and
+                # this commit can never let the old pipeline admit — the
+                # receipt is atomic with ownership. The initiating frame
+                # must match the token's own frame digest.
+                row = conn.execute(
+                    "SELECT lease_holder FROM screening_schedule WHERE owner_key = ?",
+                    (self._account_scope(owner),),
+                ).fetchone()
+                if row is None or row["lease_holder"] != turn or not _owner_frame_ok(turn, owner):
+                    raise StoreRefused("turn_lost", "account turn moved before commit")
             if verify is not None and not verify():
                 # The live source moved between the caller's last check and
                 # this transaction: nothing commits (A2/A3 bridge — the live
@@ -1653,7 +1737,7 @@ class Store:
             if (
                 attempt["kind"] != "logical"
                 or attempt["message_id"] != message_id
-                or attempt["fingerprint"] != fingerprint
+                or _bound_digest(attempt["fingerprint"]) != fingerprint
             ):
                 # One reserved ID is bound to ONE message/policy tuple; it
                 # cannot commit another message or a differently-fingerprinted
@@ -1679,7 +1763,7 @@ class Store:
                         and existing["prompt_version"] == receipt.prompt_version
                         and existing["template_sha256"] == receipt.template_sha256
                         and existing["body_sha256"] == receipt.body_sha256
-                        and tuple(sorted(json.loads(existing["categories"])))
+                        and tuple(sorted(_decode_categories_text(existing["categories"])))
                         == tuple(sorted(receipt.categories))
                         and existing["envelope_digest"] == envelope_digest
                     )
@@ -1784,7 +1868,12 @@ class Store:
         """
 
         ttl = max(ttl, self._MIN_TURN_TTL)
-        token = f"{holder_prefix}:{uuid.uuid4()}"
+        # The token binds the INITIATING frame (credential/tenant/endpoint/
+        # generation), not just hub/account (R7/Q15-6): release/renew/match
+        # re-derive the caller's frame and compare it to the token's, so a
+        # DIFFERENT but LIVE owner on the same account holding this exact
+        # string still cannot borrow, release or renew the turn.
+        token = f"{holder_prefix}:{uuid.uuid4()}:{_owner_frame_digest(owner)}"
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
@@ -1816,6 +1905,11 @@ class Store:
             # only a snapshot whose enrollment generation is still LIVE may.
             if self._live_generation(conn, owner) != owner.enrollment_generation:
                 return False
+            # Initiating-frame fence (R7/Q15-6): the token must carry THIS
+            # caller's own frame — a different live owner given the token
+            # string cannot borrow it.
+            if not _owner_frame_ok(turn, owner):
+                return False
             row = conn.execute(
                 "SELECT lease_holder, lease_expires FROM screening_schedule WHERE owner_key = ?",
                 (self._account_scope(owner),),
@@ -1831,6 +1925,8 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return False
+            if not _owner_frame_ok(turn, owner):
                 return False
             row = conn.execute(
                 "SELECT lease_holder FROM screening_schedule WHERE owner_key = ?",
@@ -1853,6 +1949,8 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return False
+            if not _owner_frame_ok(turn, owner):
                 return False
             row = conn.execute(
                 "SELECT lease_holder FROM screening_schedule WHERE owner_key = ?",

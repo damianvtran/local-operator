@@ -282,3 +282,94 @@ def test_successor_owner_snapshot_cannot_release_new_turn(tmp_path) -> None:
     assert store.release_screen_turn(owner, turn=turn) is False
     assert store.renew_screen_turn(owner, turn=turn, now=_time.time(), ttl=90) is False
     assert store.screen_turn_matches(owner, turn=turn, now=_time.time()) is False
+
+
+def test_selected_send_boundary_refuses_foreign_replacement(tmp_path) -> None:
+    """R7/Q14: the DEDICATED client's transport SELECTION is validated — a
+    primary replaced after installation is refused at the selection point
+    itself (before any I/O), even though the outer stream check already ran.
+    """
+
+    store, owner = _setup(tmp_path)
+    from local_operator.team_bridge.model_boundary import (
+        _ChargingAsyncTransport,
+        _guarded_screening_client,
+    )
+
+    hits: list[str] = []
+
+    def _send(request):
+        import httpx as _httpx
+
+        hits.append("send")
+        return _httpx.Response(200, content=b"x")
+
+    class _StubGuard:
+        def __init__(self) -> None:
+            self.proxies: list = []
+
+        def route_ok(self, route) -> bool:
+            return any(route is proxy for proxy in self.proxies)
+
+        def route_error(self):
+            from local_operator.providers.failover import ProviderError
+
+            return ProviderError(
+                409,
+                "screening selected route is not this job's guard",
+                retryable=False,
+                kind="request",
+                request_sent=False,
+                fail_closed=True,
+            )
+
+    import httpx as _httpx
+
+    client = _guarded_screening_client(transport=_httpx.MockTransport(_send))
+    guard = _StubGuard()
+    client._tb_guard = guard
+
+    # The foreign transport is not OUR route: refused AT SELECTION, no send.
+    with pytest.raises(Exception):
+        client._transport_for_url(_httpx.URL("https://api.openai.com/v1/responses"))
+    assert hits == []
+
+    # An owned proxy routes normally.
+    proxy = _ChargingAsyncTransport(_httpx.MockTransport(_send), None, owner_token=object())
+    guard.proxies = [proxy]
+    client._transport = proxy
+    assert client._transport_for_url(_httpx.URL("https://api.openai.com/v1/responses")) is proxy
+
+
+def test_one_bind_replays_exactly_and_refuses_a_change(tmp_path) -> None:
+    """R7/Q3: the packed logical reservation binds to the job digest ONCE;
+    an identical replay is a no-op and a CHANGED pending bind refuses while
+    the original binding stays on record."""
+
+    store, owner = _setup(tmp_path)
+    attempt = store.reserve_screening_attempt(owner, message_id="bmsg_1", fingerprint=None)
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-A")
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-A")
+    from local_operator.team_bridge.store import StoreRefused
+
+    with pytest.raises(StoreRefused) as err:
+        store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-B")
+    assert err.value.code == "write_once_conflict"
+
+
+def test_live_owner_with_token_from_another_frame_cannot_release(tmp_path) -> None:
+    """R7/Q15-6: a DIFFERENT but LIVE owner snapshot on the same account,
+    handed the CURRENT token string, cannot release, renew or match it —
+    the token carries the initiating frame digest."""
+
+    import dataclasses as _dataclasses
+    import time as _time
+
+    store, owner = _setup(tmp_path)
+    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    assert turn is not None
+    other = _dataclasses.replace(owner, tenant_id="tnt_other")
+    assert store.release_screen_turn(other, turn=turn) is False
+    assert store.renew_screen_turn(other, turn=turn, now=_time.time(), ttl=90) is False
+    assert store.screen_turn_matches(other, turn=turn, now=_time.time()) is False
+    assert store.renew_screen_turn(owner, turn=turn, now=_time.time(), ttl=90) is True

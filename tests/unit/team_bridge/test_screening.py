@@ -811,3 +811,86 @@ def test_loop_lock_table_is_loop_owned_not_weak_key_retained(tmp_path) -> None:
     _asyncio.run(use())
     # No weak-key entry was created: nothing retains the finished loop.
     assert len(_screening._ACCOUNT_LOCKS) == before
+
+
+def test_empty_categories_sql_text_is_corrupt_not_cached(tmp_path) -> None:
+    """R7/Q2: matched proof whose categories column is EMPTY SQL TEXT is
+    damaged — consume refuses (proof_corrupt), never coalesces it to []."""
+
+    import sqlite3 as _sqlite3
+
+    from local_operator.team_bridge.store import StoreRefused, _owner_key
+
+    store, owner = _setup(tmp_path)
+    epoch = store.publish_screening_policy(
+        owner,
+        version=SCREENING_VERSION_V1,
+        template_sha256=SCREENING_TEMPLATE_V1_SHA256,
+        default_model="qa/default-model",
+        revision="rev-1",
+    )
+    conn = _sqlite3.connect(state_db_path(tmp_path))
+    try:
+        conn.execute(
+            "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
+            "template_sha256, prompt_version, model, verdict, categories, "
+            "envelope_digest, admission_revision, policy_epoch, creator_generation, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                _owner_key(owner),
+                "bmsg_e",
+                "b" * 64,
+                SCREENING_TEMPLATE_V1_SHA256,
+                SCREENING_VERSION_V1,
+                "qa/default-model",
+                "allow",
+                "",
+                "e" * 64,
+                "rev-1",
+                epoch,
+                owner.enrollment_generation,
+                0.0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    with pytest.raises(StoreRefused) as err:
+        store.consume_screening_receipt(
+            owner,
+            body_sha256="b" * 64,
+            template_sha256=SCREENING_TEMPLATE_V1_SHA256,
+            model="qa/default-model",
+            admission_revision="rev-1",
+            envelope_digest="e" * 64,
+        )
+    assert err.value.code == "proof_corrupt"
+
+
+def test_accepted_status_mismatch_is_a_typed_refusal(tmp_path) -> None:
+    """R7/Q3: a same-version DIFFERENT-SHA accepted status is refused with a
+    typed error and the published authority is left untouched."""
+
+    from local_operator.team_bridge import scheduler as _scheduler
+    from local_operator.team_bridge.store import StoreRefused
+
+    store, owner = _setup(tmp_path)
+    (tmp_path / "config.yml").write_text("values:\n  hosting: openai\n  model_name: gpt-5.4\n")
+    import asyncio as _asyncio
+
+    async def drive():
+        await _scheduler.run_screening_cycle(
+            config_dir=tmp_path,
+            owner=owner,
+            items=[],
+            auth_store=None,
+            accepted_status={
+                "screening_version": SCREENING_VERSION_V1,
+                "template_sha256": "f" * 64,
+            },
+        )
+
+    with pytest.raises(StoreRefused) as err:
+        _asyncio.run(drive())
+    assert err.value.code == "policy_stale"
+    assert store.current_screening_policy(owner) is None  # nothing published
