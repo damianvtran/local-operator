@@ -460,6 +460,8 @@ def server_own_turn_only(cfg: Any) -> bool:
 
 def load_all_mcp_configs(
     cwd: str | os.PathLike[str],
+    *,
+    boundary: Path | None = None,
 ) -> tuple[dict[str, MCPServerConfig], dict[str, str]]:
     """Load every MCP server config visible from ``cwd``.
 
@@ -483,9 +485,28 @@ def load_all_mcp_configs(
     ``enabledServers``, which wins over a config's own ``enabled: false``.
     Suppressed (disabled) servers are dropped from the result entirely — they
     must not shadow lower-priority sources.
+
+    ``boundary`` is the world boundary a bounded caller validated (the
+    benchmark's SDK world — see ``SessionSpec.world_root``). When set, the
+    HOME-relative sources (items 4, 6 and 8) join only when they lie inside
+    the boundary: a world must not silently inherit the controller home's or
+    the operator home's server declarations. The cwd-scoped sources and the
+    isolated config dir's own ``mcp.json`` are kept — the first are world
+    content, the second is the explicitly scoped controller source the
+    episode's action declaration lives in (see ``evaluation.session_arm``).
+    ``None`` is every ordinary call, unchanged.
     """
     root = Path(cwd).expanduser()
     home = Path.home()
+    world: Path | None = None
+    if boundary is not None:
+        world = Path(boundary).expanduser().resolve()
+        cwd_root = Path(cwd).expanduser().resolve()
+        if not (cwd_root == world or cwd_root.is_relative_to(world)):
+            raise ValueError(
+                f"cwd {cwd_root} is not inside the boundary {world}; a world boundary "
+                "only clips discovery that starts inside it"
+            )
 
     project_path = root / ".local-operator" / "mcp.json"
     project_dot_path = root / ".mcp.json"
@@ -516,6 +537,25 @@ def load_all_mcp_configs(
         # User scope only; Codex project-scoped config is out of scope here.
         (home / ".codex" / "config.toml", _read_toml, ("mcp_servers",)),
     ]
+
+    if world is not None:
+        # Only the HOME-relative sources are clipped: the cwd-scoped entries
+        # are world content by construction, and ``user_path`` is the isolated
+        # config dir's own file — the explicitly scoped controller source.
+        home_relative = {
+            home / ".claude.json",
+            home / ".cursor" / "mcp.json",
+            home / ".codex" / "config.toml",
+        }
+
+        def _in_world(path: Path) -> bool:
+            try:
+                canonical = path.expanduser().resolve()
+            except OSError:
+                return False
+            return canonical == world or canonical.is_relative_to(world)
+
+        candidates = [row for row in candidates if row[0] not in home_relative or _in_world(row[0])]
 
     claude_path = home / ".claude.json"
     # First pass: collect every candidate per name (priority order) and the

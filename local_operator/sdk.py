@@ -535,7 +535,9 @@ def _make_refuse_gate(error_type: type[Exception]) -> Callable[..., Any]:
 # ---------------------------------------------------------------------------
 
 
-async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -> Any:
+async def _build_session(
+    spec: SessionSpec, roots: SessionRoots, *, mode: str, world_root: Path | None = None
+) -> Any:
     """Build one session from ``spec`` — construction plus post-open attachment.
 
     The sequence mirrors ``exec_session.run_session``'s call into
@@ -587,6 +589,7 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
             agent_registry,
             has_ui=(mode == "attach"),
             cwd=str(roots.cwd_path),
+            world_root=world_root,
         )
     except HostingNotConfiguredError as error:
         if mode != "attach":
@@ -697,6 +700,60 @@ def _assert_session_dir_under_root(session: Any, roots: SessionRoots) -> None:
         )
 
 
+def _resolve_world_root(spec: SessionSpec, roots: SessionRoots) -> Path | None:
+    """Normalize and validate ``spec.world_root`` ONCE, before construction.
+
+    The world boundary is a two-sided contract, and this preflight is where
+    both sides are checked — before discovery walks a tree, before a provider
+    is configured, before anything can be allocated:
+
+    * the model's working directory must lie INSIDE the world (the world is
+      the project scope the model may see);
+    * the store roots (``config_dir``, ``agent_home``) must lie OUTSIDE it —
+      they carry controller state (credentials, transcripts, the isolated
+      registries) — and the refusal names both directions, because a world
+      nested inside controller state is the same defect wearing the other
+      spelling;
+    * the world is resolved (symlinks, ``..``) exactly like every other root
+      so no comparison can be fooled by a path spelling — the same rule
+      ``SessionRoots`` states for its own fields.
+
+    ``None`` returns ``None`` without touching the filesystem: the default
+    path ordinary sessions take must stay side-effect-free.
+    """
+    if spec.world_root is None:
+        return None
+    world = Path(spec.world_root).expanduser().resolve()
+
+    def _inside(candidate: Path, root: Path) -> bool:
+        return candidate == root or candidate.is_relative_to(root)
+
+    if world == Path(world.anchor):
+        raise SessionSpecError("world_root must not be a filesystem root")
+    cwd = roots.cwd_path
+    if not _inside(cwd, world):
+        raise SessionSpecError(
+            f"world_root {world} does not contain the session's cwd {cwd}; the world is "
+            "the model's project scope and its cwd must live inside it"
+        )
+    for label, path in (("config_dir", roots.config_path), ("agent_home", roots.agent_home_path)):
+        if _inside(path, world):
+            raise SessionSpecError(
+                f"world_root {world} contains the {label} {path}; controller state must "
+                "stay outside the model's world"
+            )
+        if _inside(world, path):
+            raise SessionSpecError(
+                f"world_root {world} sits inside the {label} {path}; the world must be a "
+                "scope of its own, not a folder inside controller state"
+            )
+    try:
+        world.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as error:
+        raise SessionSpecError(f"world_root {world} is not usable: {error}") from error
+    return world
+
+
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
@@ -739,10 +796,15 @@ async def open_session(
         _guard_agent_shell()
 
     roots.assert_durable()
+    # Preflight the world boundary BEFORE the live-root/scoped-env scopes and
+    # anything they construct: a refused layout must fail before discovery,
+    # before the provider, before a single byte is generated (see
+    # ``_resolve_world_root``).
+    world_root = _resolve_world_root(spec, roots)
     with _live_root(roots, allow_multi_root=allow_multi_root):
         with _scoped_process_env(roots):
             _check_resolved_roots(roots)
-            session = await _build_session(spec, roots, mode=mode)
+            session = await _build_session(spec, roots, mode=mode, world_root=world_root)
             try:
                 if mode == "own":
                     _assert_session_dir_under_root(session, roots)
@@ -777,6 +839,7 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
             ("name", spec.name),
             ("goal", spec.goal),
             ("birth_effort", spec.birth_effort),
+            ("world_root", spec.world_root),
         )
         if value is not None
     ]
@@ -837,6 +900,7 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
             ("tools", spec.tools),
             ("name", spec.name),
             ("goal", spec.goal),
+            ("world_root", spec.world_root),
         )
         if value not in (None, False)
     ]

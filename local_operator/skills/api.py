@@ -121,7 +121,7 @@ def _ecosystem_roots(home: Path) -> list[Path]:
     return [candidate for candidate in candidates if candidate.is_dir()]
 
 
-def default_skill_roots(cwd: Path | None = None) -> list[Path]:
+def default_skill_roots(cwd: Path | None = None, *, boundary: Path | None = None) -> list[Path]:
     """Compute the default discovery roots for a working directory.
 
     Walks up from ``cwd`` to the filesystem root collecting
@@ -136,26 +136,58 @@ def default_skill_roots(cwd: Path | None = None) -> list[Path]:
     gives project-local roots priority over global ones, and native roots
     priority over ecosystem ones, matching the collision rule in
     :func:`discover_skills`.
+
+    ``boundary`` is the world boundary a bounded caller validated (the
+    benchmark's SDK world — see ``SessionSpec.world_root``). When set, the
+    walk stops AT the boundary: the ancestors above it (the operator's or
+    controller's trees) are not this world's project scope, and an isolated
+    ``HOME`` does not stop the unclipped walk from finding real operator
+    libraries through cwd ancestors (measured — see the canary in the
+    world-boundary change). Home and ecosystem candidates join only when they
+    lie inside the boundary, and the packaged catalog stays: it is the
+    release's own knowledge, not user content. ``None`` is every ordinary
+    call and keeps the historical behaviour exactly.
     """
     start = (cwd or Path.cwd()).resolve()
-    home = Path.home().resolve()
 
     candidates: list[Path] = []
-    # Walk cwd → filesystem root; every ancestor gets a candidate, so
-    # project-local roots work even outside $HOME.
-    current = start
-    while True:
-        candidates.append(current / _SKILLS_SUBDIR)
-        if current.parent == current:  # reached "/"
-            break
-        current = current.parent
-    # Global native root, then ecosystem roots: the deepest project root
-    # wins collisions, and native beats imported.
-    candidates.append(home / _SKILLS_SUBDIR)
-    candidates.extend(_ecosystem_roots(home))
-    # Appended LAST = weakest: it is the only root the user did not author,
-    # so a same-named copy in any earlier root wins (and is warned about).
-    candidates.append(PACKAGED_SKILL_ROOT)
+    if boundary is not None:
+        world = Path(boundary).expanduser().resolve()
+        if not (start == world or start.is_relative_to(world)):
+            raise ValueError(
+                f"cwd {start} is not inside the boundary {world}; a world boundary "
+                "only clips a walk that starts inside it"
+            )
+        # Walk cwd → boundary INCLUSIVE; every root above the world is outside it.
+        current = start
+        while True:
+            candidates.append(current / _SKILLS_SUBDIR)
+            if current == world:
+                break
+            current = current.parent
+        home = Path.home().resolve()
+        if home == world or home.is_relative_to(world):
+            candidates.append(home / _SKILLS_SUBDIR)
+            candidates.extend(_ecosystem_roots(home))
+        # Appended LAST = weakest, exactly as in the unclipped walk.
+        candidates.append(PACKAGED_SKILL_ROOT)
+    else:
+        home = Path.home().resolve()
+        # Walk cwd → filesystem root; every ancestor gets a candidate, so
+        # project-local roots work even outside $HOME.
+        current = start
+        while True:
+            candidates.append(current / _SKILLS_SUBDIR)
+            if current.parent == current:  # reached "/"
+                break
+            current = current.parent
+        # Global native root, then ecosystem roots: the deepest project root
+        # wins collisions, and native beats imported.
+        candidates.append(home / _SKILLS_SUBDIR)
+        candidates.extend(_ecosystem_roots(home))
+        # Appended LAST = weakest: it is the only root the user did not author,
+        # so a same-named copy in any earlier root wins (and is warned about).
+        candidates.append(PACKAGED_SKILL_ROOT)
 
     seen: set[str] = set()
     roots: list[Path] = []

@@ -446,6 +446,26 @@ class SessionSpec:
     output_schema: OutputSchemaValue = None
     #: Max retries after a rejected final response (0-5; default 2).
     output_retries: int | None = None
+    #: The model's WORLD ROOT when a caller needs a hard boundary between the
+    #: model's own reach and the controller that opened it — the benchmark
+    #: episode caller is the first such caller (its scratch tree carries
+    #: controller credentials a model must never read). ``None`` (default)
+    #: leaves ordinary exec/TUI/mobile/server sessions byte-identical: no
+    #: extra scan, no extra prompt, nothing to normalize.
+    #:
+    #: When set, the SDK normalizes and validates the boundary ONCE, before
+    #: any construction: ``roots.cwd`` must lie inside ``world_root`` and the
+    #: store roots (``config_dir``, ``agent_home``) must lie outside it — a
+    #: contradictory layout is refused before discovery or any provider call.
+    #: The boundary then rides the existing factory construction plan: it is
+    #: installed as the very ``confinement_root`` the ``Session`` constructor
+    #: already accepts (local tools confined at construction, children inherit
+    #: it), and it clips the project-discovery ancestor walks (skills, repo
+    #: guidance, MCP source enumeration) so nothing above the world — the
+    #: operator's or controller's trees — is silently inherited. See
+    #: ``local_operator.tools.confinement`` for the filesystem mechanism and
+    #: its stated limits, and ``open_session`` for the preflight.
+    world_root: str | Path | None = None
 
     def __post_init__(self) -> None:
         if self.agent_name and self.agent_id:
@@ -489,6 +509,11 @@ class SessionSpec:
             or not 0 <= self.output_retries <= 5
         ):
             raise SessionSpecError("output_retries must be between 0 and 5")
+        if self.world_root is not None and not str(self.world_root).strip():
+            # Cheap and stdlib-only, like the checks above; the CONTAINMENT
+            # checks need the roots and live in ``sdk.open_session``, where
+            # they run once before any construction.
+            raise SessionSpecError("world_root must be a non-empty path when set")
 
     def to_namespace(self) -> argparse.Namespace:
         """The narrow session-factory namespace, field-for-field as exec builds it.
