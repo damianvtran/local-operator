@@ -709,6 +709,29 @@
         "class": null
       }
     ],
+    "qa-tester": [
+      {
+        "sha": "3e10f8effc4870c1fa7cb3f313e427b54524ce2b",
+        "version": "1.0.0",
+        "instructions_sha256": "cb6bad7e5ebc0966e16fb8a9311b22810a5408529c49c6baf7032011178ce40a",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      }
+    ],
     "reviewer": [
       {
         "sha": "e1b6adb6bd2a2b234dda49b4b91ffa09d4c07b4f",
