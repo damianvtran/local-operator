@@ -5714,6 +5714,67 @@ def _durable_row(entry_id: str, payload: dict[str, Any], entry_type: str = ENTRY
     return TranscriptEntry(id=entry_id, ts=1.0, type=entry_type, payload=payload)
 
 
+def test_a_marked_row_adopts_attachments_from_a_later_same_id_row() -> None:
+    """Direct acceptance (review round 3 delta): a marked row first folded
+    WITHOUT a picture and a later same-ID row carrying authoritative
+    ImageContent must fold the attachment — adoption on later arrival — not
+    keep the bare receipt."""
+    text = [{"type": "text", "text": "<parent-message>\nFocus on retries\n</parent-message>"}]
+    marker = {
+        "hub_receipt": {
+            "direction": "to_child",
+            "expects_reply": False,
+            "steer": True,
+            "body": "Focus on retries",
+        }
+    }
+    no_image = _durable_row(
+        "late-image",
+        {"kind": "message", "role": "user", "content": text, "provider_payload": marker},
+    )
+    with_image = _durable_row(
+        "late-image",
+        {
+            "kind": "message",
+            "role": "user",
+            "content": [*text, {"data": "QUJD", "mime_type": "image/png"}],
+            "provider_payload": marker,
+        },
+    )
+    folded = fold_transcript_entries([no_image, with_image])
+    kinds = [(entry.key, entry.kind) for entry in folded]
+    assert ("late-image", "parent_message") in kinds
+    assert ("late-image:attach:1", "attachment") in kinds
+    attachments = [entry for entry in folded if entry.kind == "attachment"]
+    assert [entry.att_data for entry in attachments] == ["QUJD"]
+
+
+def test_a_stamped_but_invalid_marker_is_not_re_guessed_from_its_envelope() -> None:
+    """R3-1 acceptance: the legacy wrapper parse is for rows the modern
+    producer never stamped. An INVALID marker on an envelope-looking row
+    keeps it the parent's own row; the identical text with NO stamp still
+    takes the legacy parse."""
+    envelope = [{"type": "text", "text": _steer_envelope("Focus on retries")}]
+    invalid = _durable_row(
+        "stamped-invalid",
+        {
+            "kind": "message",
+            "role": "user",
+            "content": envelope,
+            "provider_payload": {
+                "hub_receipt": {"direction": "sideways", "body": "Focus on retries"}
+            },
+        },
+    )
+    legacy = _durable_row(
+        "legacy-unstamped", {"kind": "message", "role": "user", "content": envelope}
+    )
+    folded = fold_transcript_entries([invalid, legacy])
+    kinds = {entry.key: entry.kind for entry in folded}
+    assert kinds["stamped-invalid"] == "user"
+    assert kinds["legacy-unstamped"] == "parent_message"
+
+
 def test_a_marker_row_correlates_by_id_only_never_by_body_text() -> None:
     """R3-4 (review round 3): a communication fact for a DIFFERENT source id
     and a positively marked row carrying the same body are TWO deliveries.

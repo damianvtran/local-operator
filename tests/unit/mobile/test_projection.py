@@ -1981,15 +1981,48 @@ def test_marker_first_folds_keep_kind_body_and_typed_facts() -> None:
     assert "<parent-message>" not in live_row.text
 
 
-def test_a_malformed_marker_keeps_the_rows_legacy_treatment() -> None:
-    """A marker with no real body is not a receipt; the row keeps the legacy
-    envelope classification rather than being dropped or reclassified."""
+def test_a_malformed_marker_is_not_re_guessed_from_its_envelope() -> None:
+    """A present marker that fails validation is still the modern producer's
+    stamp on the row, so the row stays a human row — never the legacy
+    envelope classification, which is the inference the marker programme
+    deletes (review round 3, R3-1 acceptance). Unstamped rows keep the legacy
+    parse; that half is pinned beside this test."""
     from local_operator.mobile.projection import fold_messages_to_entries
 
     message = Message.user(_steer_envelope("Focus on retries"), id="steer-legacy-1")
     message.provider_payload = {"hub_receipt": {"steer": True}}
     entries = fold_messages_to_entries([message])
-    assert (entries[0].kind, entries[0].text) == ("parent_message", "Focus on retries")
+    assert entries[0].kind == "user"
+
+
+def test_a_stamped_but_invalid_marker_is_not_re_guessed_from_its_envelope() -> None:
+    """R3-1 acceptance on the relay's two folds: an INVALID modern marker on
+    an envelope-looking row stays a user row on BOTH the durable and live
+    paths; the identical UNSTAMPED text keeps the legacy parent parse."""
+    envelope = _steer_envelope("Focus on retries")
+    invalid = Message.user(envelope, id="stamped-invalid")
+    invalid.provider_payload = {
+        "hub_receipt": {"direction": "sideways", "body": "Focus on retries"}
+    }
+    legacy = Message.user(envelope, id="legacy-unstamped")
+
+    fold = make_fold()
+    fold.fold_history([invalid, legacy])
+    by_id = {entry.id: entry for entry in fold.projection.transcript}
+    assert by_id["stamped-invalid"].kind == "user"
+    assert (by_id["legacy-unstamped"].kind, by_id["legacy-unstamped"].text) == (
+        "parent_message",
+        "Focus on retries",
+    )
+
+    live = make_fold()
+    live.absorb_user_event(invalid)
+    assert live.projection.transcript[-1].kind == "user"
+    live.absorb_user_event(legacy)
+    legacy_rows = [
+        entry for entry in live.projection.transcript if entry.id == "legacy-unstamped"
+    ]
+    assert legacy_rows and legacy_rows[-1].kind == "parent_message"
 
 
 def test_marker_rows_keep_their_source_image_refs_durable_and_live() -> None:
