@@ -1,7 +1,7 @@
 """Hindi-only split: held Chinese bytes must be absent, not merely unlisted.
 
-No runtime policy is changed here. Public wire messages already fall back to
-English; direct TUI ``tr`` intentionally yields the code for missing groups.
+No runtime policy is changed here. The current main's public wire and TUI
+entrypoints enforce eligibility and fall back to English for held locales.
 The complete candidate remains on a remote-held ref for future audit work.
 """
 
@@ -11,8 +11,9 @@ import json
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 
-from local_operator.i18n import catalogues, resolve, text
+from local_operator.i18n import catalogues, resolve, runtime, text
 from local_operator.i18n.messages import Msg, envelope
 
 
@@ -49,13 +50,50 @@ def test_direct_tr_never_exposes_held_copy_fresh_or_cached(key: str) -> None:
     render = text.tr(namespace)
     previous = text.active_locale()
     try:
-        # Do not invent an English fallback in direct-tr as part of a data
-        # split. Its documented missing-group degradation is the key itself.
+        # The upstream eligibility/fallback fix normalizes held tags at the
+        # direct entrypoint too. Preserve that landed policy during convergence,
+        # rather than restoring this branch's older message-code degradation.
         text.set_active_locale("zh-CN")
-        assert render(message) == key
-        assert render(message) == key
-        # Normal product selection resolves the held tag before using tr.
+        assert text.active_locale() == "en"
+        english = message.envelope(locale="en")["text"]
+        assert english != key
+        assert render(message) == english
+        assert render(message) == english
+        # Normal product selection also resolves the held tag before using tr.
         text.set_active_locale(resolve.resolve_language("zh-CN", environ={}, system="Linux"))
         assert render(message) == message.envelope(locale="en")["text"]
     finally:
         text.set_active_locale(previous)
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    (
+        "team_bridge.description",
+        "team_bridge.title",
+        "team_bridge_enabled.help",
+        "team_bridge_enabled.label",
+        "team_bridge_session.help",
+        "team_bridge_session.label",
+    ),
+)
+def test_hindi_team_bridge_delta_uses_audited_copy_not_english_fallback(suffix: str) -> None:
+    # The landed English source gained these six keys after the old 755-key
+    # audit. Check the public consumer, not only JSON parity: a missing Hindi
+    # value would otherwise silently render English while locale selection works.
+    key = f"wire.settings.{suffix}"
+    hindi = catalogues.load_catalogue("hi", "wire.settings")[key]
+    english = catalogues.load_catalogue("en", "wire.settings")[key]
+    rendered = Msg(key).envelope(locale="hi")["text"]
+    assert rendered == hindi
+    assert rendered != english
+    assert runtime.message_arguments(hindi) == ()
+    if suffix.endswith(".label"):
+        # Use the real row budget; help and description have no authored cap.
+        from local_operator.tui.widgets.settings_view import _LABEL_BUDGET
+
+        assert cell_len(rendered) <= _LABEL_BUDGET
+    if suffix == "team_bridge_enabled.help":
+        assert "Radient" in rendered
+    if suffix == "team_bridge_session.label":
+        assert "CoS" in rendered
