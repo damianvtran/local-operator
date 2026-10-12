@@ -30,6 +30,7 @@ from local_operator.team_bridge import pull
 from local_operator.team_bridge.client import BridgeRefusal
 from local_operator.team_bridge.store import (
     ACK_CONFIRMED,
+    ACK_CONFLICT,
     ACK_PENDING,
     OwnerReceipt,
     Store,
@@ -136,22 +137,26 @@ class _PausingStore(Store):
             yield _Proxy()
 
 
-def _b_during_pause(tmp_path: Path, owner: OwnerSnapshot, message_id: str) -> bool:
-    """Try the invalidate+reclaim during the pause. True if it COMPLETED.
+def _lock_held_during_pause(tmp_path: Path) -> bool:
+    """Deterministic lock evidence: does the paused txn hold the write lock?
 
-    On the fixed head the resumed operation holds the write lock, so this
-    raises ``busy`` after the busy timeout; on the pre-fix head it completes
-    (no lock), which is the defect the successor assertions then catch.
+    A RAW short-timeout connection tries ``BEGIN IMMEDIATE``: it fails fast
+    (``database is locked``) exactly when the paused store operation holds the
+    write lock. The store's own 2 s busy handler is avoided on purpose — in
+    this WAL setup a competing writer WAITS for the lock rather than erroring,
+    so a store-level probe would block until the pause ends and report
+    "completed" on both heads (a timing artefact, not a signal).
     """
 
-    store2 = Store(tmp_path)
+    conn = sqlite3.connect(state_db_path(tmp_path), timeout=0.2)
     try:
-        store2.invalidate(owner)
-    except StoreRefused as refusal:
-        assert refusal.code == "busy"
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ROLLBACK")
         return False
-    store2.claim(_owner(2), message_id, "session-new", "new-token", expiry=time.time() + 60)
-    return True
+    except sqlite3.OperationalError:
+        return True
+    finally:
+        conn.close()
 
 
 def _retry_reclaim(tmp_path: Path, owner: OwnerSnapshot, message_id: str) -> None:
@@ -214,13 +219,12 @@ def test_q6r2_stale_lease_operation_cannot_touch_successor(tmp_path: Path, opera
     thread = threading.Thread(target=old_operation)
     thread.start()
     assert pausing.paused.wait(timeout=5)
-    b_completed_in_pause = _b_during_pause(tmp_path, owner, "bmsg_1")
+    # Fixed: the old operation's transaction holds the write lock while it is
+    # paused mid-check/write, so a competing writer cannot interleave.
+    assert _lock_held_during_pause(tmp_path) is True
     pausing.resume.set()
     thread.join(timeout=10)
     assert not thread.is_alive()
-    # Fixed: the second connection could NOT complete while the old operation
-    # held its write lock, so the reclaim had to be retried afterwards.
-    assert b_completed_in_pause is False
 
     # The successor must survive whatever the old operation concluded.
     _retry_reclaim(tmp_path, owner, "bmsg_1")
@@ -247,19 +251,13 @@ def test_q5r2_invalidation_cannot_interleave_page_commit(tmp_path: Path) -> None
     thread = threading.Thread(target=old_merge)
     thread.start()
     assert pausing.paused.wait(timeout=5)
-    b_completed_in_pause = _b_during_pause(tmp_path, owner, "bmsg_1")
+    # Fixed: the page's check+write transaction holds the write lock across
+    # the whole window, so no invalidator can commit inside it.
+    assert _lock_held_during_pause(tmp_path) is True
     pausing.resume.set()
     thread.join(timeout=10)
     assert not thread.is_alive()
     _retry_reclaim(tmp_path, owner, "bmsg_1")
-
-    # Fixed: the page commit serialized BEFORE the invalidation (the second
-    # connection's attempt had to be retried after the pause) — a generation-2
-    # adoption of the generation-1 checkpoint can never be observed.
-    assert b_completed_in_pause is False, (
-        "invalidation completed inside the page's check/write window "
-        f"(old merge outcome: {outcome['result']})"
-    )
     # And the old snapshot can no longer commit anything at all.
     with pytest.raises(StoreRefused) as refusal:
         store.merge_page(owner, [_ref("bmsg_2")], None)
@@ -415,3 +413,81 @@ async def test_nit_base_url_less_wire_refused(tmp_path: Path) -> None:
             client=cast(pull.WireClient, _NoDestination()),
         )
     assert refusal.value.code == "no_destination_evidence"
+
+
+# ---------------------------------------------------------------------------
+# R3 Q5 — the ACK outcome COMMIT must carry the authority fence in-txn
+# ---------------------------------------------------------------------------
+
+
+def test_q5r3_stale_mark_cannot_confirm_under_new_generation(tmp_path: Path) -> None:
+    """QA R3's exact defect: a g1 intent confirmed at active generation 2.
+
+    Pre-fix, ``mark_ack_result`` took the write lock but never checked the
+    caller's generation, so a completion whose post-await check passed a
+    moment earlier could still commit AFTER an invalidation. The fence now
+    lives INSIDE the same transaction, so the stale completion refuses and
+    the old intent keeps its exact pending tuple/ref.
+    """
+
+    store, owner = _store_with_owner(tmp_path)
+    receipt = ScreeningReceipt(
+        "allow", "qa/model", "bridge-screen-v1", "b" * 64, "c" * 64, ("link",)
+    )
+    intent_id = store.record_ack_intent(owner, "bmsg_1", "read", receipt, "stable-ref")
+    store.invalidate(owner)  # generation 1 -> 2
+
+    with pytest.raises(StoreRefused) as refusal:
+        store.mark_ack_result(owner, intent_id, state=ACK_CONFIRMED, error_code=None)
+    assert refusal.value.code == "stale_generation"
+
+    intent = store.ack_intent(owner, intent_id)
+    assert intent is not None and intent["state"] == ACK_PENDING
+    assert intent["client_ref"] == "stable-ref"
+    assert intent["receipt"] is not None and intent["receipt"]["body_sha256"] == "c" * 64
+    conn = sqlite3.connect(state_db_path(tmp_path))
+    try:
+        assert conn.execute(
+            "SELECT state FROM ack_intents WHERE intent_id = ?", (intent_id,)
+        ).fetchone() == (ACK_PENDING,)
+    finally:
+        conn.close()
+
+    # Clear/normal control: a FRESH intent under the current generation
+    # confirms normally (the fence refuses staleness, not progress).
+    live = store.active_owner(credential_id=7)
+    assert live is not None and live.enrollment_generation == 2
+    fresh = store.record_ack_intent(live, "bmsg_2", "read", receipt, "stable-ref-2")
+    store.mark_ack_result(live, fresh, state=ACK_CONFIRMED, error_code=None)
+    confirmed = store.ack_intent(live, fresh)
+    assert confirmed is not None and confirmed["state"] == ACK_CONFIRMED
+    with pytest.raises(StoreRefused) as refusal:
+        store.mark_ack_result(live, fresh, state=ACK_CONFLICT, error_code="late")
+    assert refusal.value.code == "already_confirmed"
+
+
+@pytest.mark.asyncio
+async def test_q5r3_flush_surfaces_stale_commit_as_stale_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flush surface: a fenced commit is translated, never swallowed."""
+
+    store, owner = _store_with_owner(tmp_path)
+    intent_id = await _pending_intent(tmp_path, owner)
+    wire = FakeAckWire()
+
+    def fenced(self: Store, owner_snapshot: OwnerSnapshot, intent: str, **kwargs: Any) -> None:
+        raise StoreRefused("stale_generation", "owner changed")
+
+    monkeypatch.setattr(Store, "mark_ack_result", fenced)
+    with pytest.raises(pull.PullRefused) as refusal:
+        await pull.flush_ack(
+            owner,
+            intent_id,
+            config_dir=tmp_path,
+            access=_access(),
+            client=cast(pull.WireClient, wire),
+        )
+    assert refusal.value.code == "stale_generation"
+    intent = store.ack_intent(owner, intent_id)
+    assert intent is not None and intent["state"] == ACK_PENDING

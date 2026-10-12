@@ -828,6 +828,14 @@ class Store:
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
+            # The write lock only SERIALIZES the write; authority must also be
+            # checked INSIDE this same transaction, against the caller's OWN
+            # snapshot (its generation is the fence): a post-await check that
+            # passed moments earlier cannot vouch for the state now, so an
+            # invalidated generation's completion must refuse here and leave
+            # the intent exactly as it was — PENDING, stable tuple/ref — for
+            # explicit reconciliation under the new generation (QA R3 H2-Q5).
+            self._require_live(conn, owner)
             row = conn.execute(
                 "SELECT state FROM ack_intents WHERE owner_key = ? AND intent_id = ?",
                 (_owner_key(owner), intent_id),

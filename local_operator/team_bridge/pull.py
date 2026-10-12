@@ -381,6 +381,29 @@ async def flush_ack(
     receipt = intent["receipt"]
     if receipt is None:
         raise PullRefused("no_intent", "intent carries no screening tuple; hold")
+
+    def _commit_result(
+        *, state: str, error_code: str | None, retry_after: float | None = None
+    ) -> None:
+        """Record ONE outcome; a fence refusal is a STALE completion, surfaced.
+
+        The store checks the caller's generation inside its own write
+        transaction (QA R3 H2-Q5), so this translation is the only path a
+        post-await invalidation can take — the intent stays pending, and the
+        caller must reconcile under the new generation explicitly.
+        """
+
+        try:
+            store.mark_ack_result(
+                owner, intent_id, state=state, error_code=error_code, retry_after=retry_after
+            )
+        except StoreRefused as failure:
+            if failure.code in ("stale_generation", "not_enrolled"):
+                raise PullRefused(
+                    "stale_generation", "owner changed before the ack result could commit"
+                ) from failure
+            raise
+
     wire = _client_for(config_dir, client)
     _guard_destination(owner, wire)
     try:
@@ -408,18 +431,12 @@ async def flush_ack(
             # tuple (disagreeing verdict, illegal move, wrong party) that
             # replaying can never converge. A 409 carrying a code this client
             # does not know is NOT proven terminal (QA R2 H2-Q4).
-            store.mark_ack_result(owner, intent_id, state=ACK_CONFLICT, error_code=str(code))
+            _commit_result(state=ACK_CONFLICT, error_code=str(code))
             return AckOutcome(intent_id, ACK_CONFLICT, None, str(code), retry_after)
         # Everything else is AMBIGUITY, not a verdict: transport failure,
         # sign-in refusal, 429/503 — keep the exact pending intent replayable,
         # retaining the error code and retry hint.
-        store.mark_ack_result(
-            owner,
-            intent_id,
-            state=ACK_PENDING,
-            error_code=str(code),
-            retry_after=retry_after,
-        )
+        _commit_result(state=ACK_PENDING, error_code=str(code), retry_after=retry_after)
         return AckOutcome(intent_id, ACK_PENDING, None, str(code), retry_after)
     delivery = result.get("delivery") if isinstance(result, Mapping) else None
     delivery_state = (
@@ -437,9 +454,9 @@ async def flush_ack(
         # the transition (QA R2 H2-Q4), and a missing state proves nothing
         # either. Both keep the intent replayable; no fabricated read/done.
         code = "malformed_ack" if delivery_state not in DELIVERY_STATES else "result_mismatch"
-        store.mark_ack_result(owner, intent_id, state=ACK_PENDING, error_code=code)
+        _commit_result(state=ACK_PENDING, error_code=code)
         return AckOutcome(intent_id, ACK_PENDING, None, code, None)
-    store.mark_ack_result(owner, intent_id, state=ACK_CONFIRMED, error_code=None)
+    _commit_result(state=ACK_CONFIRMED, error_code=None)
     return AckOutcome(intent_id, ACK_CONFIRMED, delivery_state, None, None)
 
 
