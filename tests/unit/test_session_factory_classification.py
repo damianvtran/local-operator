@@ -502,7 +502,7 @@ def _session_management_tools() -> list[Any]:
     from local_operator.tools.registry import create_tools
 
     context = ToolContext(
-        subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
+        subagent_launcher=lambda label, prompt, *, agent="task", **kwargs: "job-x",
         subagent_comms=_StubComms(),
         jobs=_StubJobs(),
     )
@@ -569,7 +569,7 @@ def test_the_generate_image_row_is_appended_last_and_membership_gated(
     )
     held = create_tools(
         ToolContext(
-            subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
+            subagent_launcher=lambda label, prompt, *, agent="task", **kwargs: "job-x",
             subagent_comms=_StubComms(),
             jobs=_StubJobs(),
         ),
@@ -602,7 +602,7 @@ def test_the_generate_image_row_is_appended_last_and_membership_gated(
     )
     without = create_tools(
         ToolContext(
-            subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
+            subagent_launcher=lambda label, prompt, *, agent="task", **kwargs: "job-x",
             subagent_comms=_StubComms(),
             jobs=_StubJobs(),
         ),

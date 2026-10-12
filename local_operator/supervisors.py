@@ -336,6 +336,7 @@ def render_systemd_unit(
     post_lines: Sequence[str] = (),
     restart: str = "on-failure",
     restart_sec: int = 5,
+    kill_mode: str | None = None,
     separate_sections: bool = True,
     wanted_by: str = "default.target",
 ) -> str:
@@ -349,6 +350,11 @@ def render_systemd_unit(
     spinning against an empty index), ``WantedBy=default.target`` so
     ``enable`` gives start-at-login.
 
+    ``kill_mode`` is emitted only when a daemon names one, so every unit that
+    predates the parameter renders byte-identically; the relay is its one
+    caller today, and the reasoning for its value lives at the use site
+    (``network/relay.render_systemd``) and beside the emit below.
+
     ``separate_sections=False`` exists for the tunnel unit, whose layout
     predates this function; blank lines between sections are cosmetic to
     systemd, and rewriting a unit that is already correct is the thing worth
@@ -361,6 +367,24 @@ def render_systemd_unit(
         lines.append("")
     lines += ["[Service]", *pre_lines, f"ExecStart={exec_start}", f"Restart={restart}"]
     lines.append(f"RestartSec={restart_sec}")
+    if kill_mode is not None:
+        # RESTART-VS-STOP SEMANTICS, stated here so nobody "fixes" the line
+        # below into the defect it removes. ``KillMode=process`` kills only the
+        # unit's MAIN process; everything else left in its cgroup survives.
+        # The relay's children are the device's session runtimes, and
+        # systemd's default (``control-group``) made every relay restart kill
+        # them — sessions included the command that asked for the restart.
+        # Under ``process`` a survivor reparents to ``systemd --user`` and
+        # re-attaches at the relay's next start, which is macOS parity (a
+        # launchd job's children survive it) and the concrete meaning of the
+        # never-forced rule: the relay's lifecycle never owns session death.
+        #
+        # DELIBERATELY NO ExecStop/ExecStopPost REAPER, recorded so nobody adds
+        # one later: those hooks fire on RESTART too, so a reaper there would
+        # kill the runtimes on every refresh — recreating exactly the defect
+        # this line removes. A stop/kill leaves the runtimes alive by design;
+        # sessions are ended through their own verbs.
+        lines.append(f"KillMode={kill_mode}")
     lines += list(post_lines)
     if separate_sections:
         lines.append("")

@@ -679,7 +679,7 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
             cwd=".",
             wake_scheduler=_FakeSchedulerForBlocks(),
             monitor_scheduler=_FakeMonitorSchedulerForBlocks(),
-            subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
+            subagent_launcher=lambda label, prompt, *, agent="task", **kwargs: "job-x",
             jobs=_FakeJobsForBlocks(),
             subagent_comms=_FakeCommsForBlocks(),
             # `ask` is createIf-gated on the HOOK that answers it, and on that
@@ -738,7 +738,7 @@ def test_inventory_names_monitor_only_when_a_scheduler_is_attached() -> None:
 
     base: dict[str, Any] = {
         "cwd": ".",
-        "subagent_launcher": lambda label, prompt, *, agent="task", effort=None: "job-x",
+        "subagent_launcher": lambda label, prompt, *, agent="task", **kwargs: "job-x",
         "jobs": _FakeJobsForBlocks(),
         "subagent_comms": _FakeCommsForBlocks(),
     }

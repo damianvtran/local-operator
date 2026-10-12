@@ -2667,6 +2667,17 @@ class SessionRow(NamedTuple):
     #: section heading only claims what this flag plus ``reachable`` prove.
     placement_stale: bool = False
 
+    #: When the person last sent this session a message, as an epoch — the
+    #: desktop sidebar's RUNNING-order clock (``session/last_user.py`` is the
+    #: reading; the same unit as ``mtime``/``created_at``). ``None`` is NO CLAIM:
+    #: the local half computes it for running rows only, and the remote producer
+    #: carries the peer's claim number-or-absent (``session/peer_rows.py``), so
+    #: a reader's fallback chain — ``created_at``, then catalogue order — runs
+    #: exactly where the value is absent or null. Appended LAST and defaulted so
+    #: every existing construction site keeps working (the file's rule for a new
+    #: field), and never re-derived here: it is a claim that travels.
+    last_user_at: float | None = None
+
     @property
     def is_remote(self) -> bool:
         """Whether this row is provably a session on ANOTHER device.

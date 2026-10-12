@@ -3194,6 +3194,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #:   because then two rows differing only here are not the same row on
     #:   screen. Its desktop consumer is a separate renderer with its own
     #:   refresh, not this signature.
+    #: * `last_user_at` is the sidebar's RUNNING-order clock — the desktop list
+    #:   orders running rows by it, falling back to `created_at`. It CAN change
+    #:   under an open list (a send moves it; a poll can bring a peer's new
+    #:   claim) and it is still excluded here because nothing on THIS screen
+    #:   paints or orders by it: the results list reads `mtime`. Comparing it
+    #:   would repaint the resume list on a change no pixel reflects. THE DAY A
+    #:   TUI SURFACE RENDERS IT, it moves into `_SIGNATURE_FIELDS` — the rule
+    #:   `degraded`'s entry above states.
     #: * `opened_by` is the one excluded field that is IMMUTABLE BY CONSTRUCTION:
     #:   it is read from the session's `origin.json`, which is written once when
     #:   the directory is created (`agent_shell.stamp_agent_shell_session`) and
@@ -3205,7 +3213,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #:   that changes nothing here: this signature decides whether the RESULTS
     #:   list repaints, and the pane is repainted from the selected row on
     #:   every cursor move regardless.
-    _SIGNATURE_EXCLUDED = ("mtime", "created_at", "heartbeat_age_s", "degraded", "opened_by")
+    _SIGNATURE_EXCLUDED = (
+        "mtime",
+        "created_at",
+        "heartbeat_age_s",
+        "degraded",
+        "last_user_at",
+        "opened_by",
+    )
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form
     # checked only that every signature NAME is a real field, which catches a
