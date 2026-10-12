@@ -340,6 +340,7 @@ local_operator = [
     "mobile/web/src/components/*.tsx",
     "mobile/web/src/components/ui/*.tsx",
     "mobile/web/src/lib/*.ts",
+    "mobile/web/src/i18n/*.ts",
     "mobile/web/src/screens/*.tsx",
     "mobile/web/src/styles/*.css",
     "mobile/web/src/themes/*.ts",

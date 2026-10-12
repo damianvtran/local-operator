@@ -722,6 +722,9 @@ export interface SttCapability {
     dict and stays `unknown` here so a reader cannot invent its keys. */
 export interface Capabilities {
 	features?: Record<string, unknown>;
+	/** Separate routing capability: core features.i18n alone does not mean the
+	    relay app serves catalogues. Consumers must require both bits. */
+	i18n?: { catalogues: number };
 	stt?: SttCapability;
 }
 
