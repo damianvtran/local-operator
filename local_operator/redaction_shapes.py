@@ -5276,16 +5276,31 @@ _TRANSFORM_MIN_VALUE_LEN = 12
 #:
 #: A second bound rather than a lowering of the first, because it answers a
 #: different question. ``_TRANSFORM_MIN_VALUE_LEN`` is about a PERMUTATION of the
-#: value colliding with ordinary output; this one is about the escaping being long
-#: enough that the sequence cannot be a chance substring of something else. One
-#: escape is a plausible run inside any JSON body (``\\u00e9`` is six characters),
-#: so it never qualifies on its own; twelve characters is two escapes at minimum.
+#: value colliding with ordinary output; this one is about how much escaped text a
+#: collision would have to be before it is a plausible run in someone else's
+#: document. One escape is a plausible run inside any JSON body (``\\u00e9`` is six
+#: characters), so it never qualifies on its own; twelve characters is two escapes
+#: at minimum, which is the shortest and weakest spelling this admits.
+#:
+#: **A bound is not a guarantee, and the collision it still admits is measured
+#: rather than reasoned away.** These are VALUE-SPECIFIC sequences, so a collision
+#: means ordinary output carrying THIS value's escaping — negligible above the
+#: bound, but measurable AT it (a two-character value, a 12-character spelling):
+#: against synthetic escaped-JSON documents, 0/2000 over a uniform CJK source and
+#: 96/2000 (4.80%) over a 64-character "common characters" source, with 0/2000 for
+#: a three-escape needle against either. It is reachable on the real path — a
+#: two-character registered value masked an unrelated escaped document, one marker
+#: where the unpatched base produced none. That is OVER-masking, never a release,
+#: and it is strictly narrower than what the same value already had: its verbatim
+#: spelling has no floor at all, so two adjacent characters of ordinary text were
+#: already being rewritten before this family existed.
 #:
 #: The bound is on the SPELLING, not on the value, and the two are far apart: an
-#: eight-character CJK value escapes to forty-eight characters. The residual it
-#: leaves is correspondingly narrow and stated rather than implied: a value whose
-#: escaping is shorter than this keeps its verbatim spelling alone, so a
-#: one-character CJK value (``\\u79d8``, six characters) is still unclosed here.
+#: eight-character CJK value escapes to forty-eight characters. The COVERAGE
+#: residual it leaves is stated rather than implied: a value whose escaping is
+#: shorter than this keeps its verbatim spelling alone, so a one-character CJK
+#: value (``\\u79d8``, six characters) is still unclosed here. The OVER-MASKING
+#: residual is the at-the-bound collision above.
 _SHORT_ESCAPE_MIN_SPELLING_LEN = 12
 
 #: The separators a "characters spread out" spelling may be built from.
@@ -5423,10 +5438,13 @@ def _below_floor_forms(value: str) -> tuple[str, ...]:
     newline, a quote — arriving in a tool result as a ``\\uXXXX`` run while the
     session holds only the verbatim bytes.
 
-    Two bounds keep that from widening into over-masking: only a spelling of at
-    least :data:`_SHORT_ESCAPE_MIN_SPELLING_LEN` characters is offered, and each
-    one must decode back to the value (:func:`_json_escape_spellings`). The
-    verbatim spelling is always masked, unchanged.
+    Two bounds hold that widening back, neither of them a guarantee: only a
+    spelling of at least :data:`_SHORT_ESCAPE_MIN_SPELLING_LEN` characters is
+    offered, and each one must decode back to the value
+    (:func:`_json_escape_spellings`). What the spelling bound still admits — an
+    unrelated document carrying this value's escaping — is measured beside that
+    constant rather than claimed away. The verbatim spelling is always masked,
+    unchanged.
     """
     forms = [value]
     forms += [
