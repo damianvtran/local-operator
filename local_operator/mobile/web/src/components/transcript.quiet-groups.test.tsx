@@ -62,6 +62,20 @@ const peer = (id: string, body: string) => entry(id, "peer_message", body);
 const bash = (id: string) => entry(id, "tool", "", { tool_name: "bash", summary: "echo hi" });
 
 describe("the quiet-group bar", () => {
+	it("keeps one structured hub receipt within three actual tools with full body on demand", () => {
+		const body = "  first paragraph\n\nsecond paragraph  ";
+		const hub = entry("h1", "parent_message", body, {details: {body, direction: "to_child", label: "worker", expects_reply: true}});
+		render(<Transcript pid="synthetic" entries={[bash("t1"), hub, bash("t2"), bash("t3")]} />);
+		expect(screen.getByText("· 3 actions")).toBeTruthy();
+		expect(screen.getByText("· 1 reply requested")).toBeTruthy();
+		expect(screen.queryByText("first paragraph")).toBeNull();
+		fireEvent.click(screen.getByText("Peer messages").closest("button")!);
+		const receipt = screen.getByText("Hub · From worker · Reply requested");
+		fireEvent.click(receipt.closest("button")!);
+		expect(screen.getByText((_, node) => node?.tagName === "P" && node.textContent === body)).toBeTruthy();
+		expect(screen.getAllByText("echo hi")).toHaveLength(3);
+	});
+
 	it("folds consecutive receipts into one bar, and the press lists them with their actions", () => {
 		render(
 			<Transcript pid="s1" entries={[peer("p1", "first"), bash("t1"), peer("p2", "second")]} />,
