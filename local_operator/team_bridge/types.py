@@ -57,9 +57,9 @@ _EVENT_TYPES = (
 )
 #: The only subject-ref kinds a feed event may carry (bridge.go BridgeEventIDs).
 _EVENT_ID_KINDS = ("message_id", "request_id", "thread_id")
+#: The frozen §7.2 delivery-state set, defined ONCE at its source.
 DELIVERY_STATES = ("unread", "read", "working", "done", "blocked")
 _VERDICTS = ("allow", "reject")
-DELIVERY_STATES = ("unread", "read", "working", "done", "blocked")
 
 
 class TeamBridgeTypeError(ValueError):

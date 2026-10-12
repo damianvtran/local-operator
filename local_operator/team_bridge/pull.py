@@ -73,6 +73,10 @@ class WireClient(Protocol):
     machinery into every test.
     """
 
+    #: The concrete dispatch destination. REQUIRED: the Q1 guard refuses a
+    #: wire without it rather than silently skipping the destination check.
+    base_url: str
+
     async def inbox(self, **kwargs: Any) -> dict[str, Any]: ...
 
     async def message(self, message_id: str, **kwargs: Any) -> dict[str, Any]: ...
@@ -92,11 +96,21 @@ __all__ = [
     "flush_ack",
     "inbox",
     "message",
+    "recover_ack",
 ]
 
 #: Server caps the inbox page at 100; 50 is the contract default. A caller
 #: may go lower, never higher.
 _MAX_PAGE = 100
+
+#: The ACK route's KNOWN terminal 409 codes, derived from the frozen server
+#: (internal/controllers/messaging_ack.go @ 24b0067a: "screening_required …
+#: or invalid_transition (regression, illegal jump, a disagreeing repeat
+#: verdict, or a sender acking)" — both are business refusals of THIS exact
+#: tuple; replaying it cannot converge). Any OTHER 409 code is additive and
+#: unproven: it must stay PENDING for explicit reconciliation, never be
+#: promoted to a permanent conflict (QA R2 H2-Q4).
+_KNOWN_TERMINAL_ACK_409 = ("invalid_transition", "screening_required")
 
 
 class PullRefused(RuntimeError):
@@ -165,7 +179,11 @@ def _guard_destination(owner: OwnerSnapshot, wire: WireClient) -> None:
 
     wire_base = getattr(wire, "base_url", None)
     if not isinstance(wire_base, str) or not wire_base:
-        return
+        # FAIL CLOSED (QA R2 nit): a wire that cannot name its destination has
+        # no evidence to compare against the committed hub — it must not
+        # dispatch on trust. The injected-test seam is explicit: fixtures
+        # carry the owner's hub as their base_url like a real client does.
+        raise PullRefused("no_destination_evidence", "wire client exposes no base_url")
     owner_url = urlsplit(owner.canonical_base_url)
     wire_url = urlsplit(wire_base)
     if (owner_url.scheme.lower(), owner_url.netloc.lower()) != (
@@ -385,9 +403,11 @@ async def flush_ack(
             raise PullRefused(
                 "stale_generation", "owner changed while the ack was in flight"
             ) from failure
-        if http_status == 409:
-            # The ONLY terminal arm: the server holds a differing write-once
-            # verdict; replaying this tuple can never converge.
+        if http_status == 409 and str(code) in _KNOWN_TERMINAL_ACK_409:
+            # The ONLY terminal arm: a KNOWN business refusal of this exact
+            # tuple (disagreeing verdict, illegal move, wrong party) that
+            # replaying can never converge. A 409 carrying a code this client
+            # does not know is NOT proven terminal (QA R2 H2-Q4).
             store.mark_ack_result(owner, intent_id, state=ACK_CONFLICT, error_code=str(code))
             return AckOutcome(intent_id, ACK_CONFLICT, None, str(code), retry_after)
         # Everything else is AMBIGUITY, not a verdict: transport failure,
@@ -409,14 +429,54 @@ async def flush_ack(
     )
     if not _generation_intact(store, owner):
         raise PullRefused("stale_generation", "owner changed while the ack was in flight")
-    if delivery_state not in DELIVERY_STATES:
-        # A 200 without a valid delivery state cannot PROVE the transition
-        # (QA's `{}` case): keep the intent replayable rather than inventing
-        # a confirmation.
-        store.mark_ack_result(owner, intent_id, state=ACK_PENDING, error_code="malformed_ack")
-        return AckOutcome(intent_id, ACK_PENDING, None, "malformed_ack", None)
+    if delivery_state != intent["target"]:
+        # The frozen §7.2 machine answers a 200 for THIS ack only with the
+        # target itself (the move, or a same-state no-op repeat; anything
+        # else is a 409). An enum-valid but different state — e.g. `unread`
+        # answering a requested `read` — is CONTRADICTORY: it cannot prove
+        # the transition (QA R2 H2-Q4), and a missing state proves nothing
+        # either. Both keep the intent replayable; no fabricated read/done.
+        code = "malformed_ack" if delivery_state not in DELIVERY_STATES else "result_mismatch"
+        store.mark_ack_result(owner, intent_id, state=ACK_PENDING, error_code=code)
+        return AckOutcome(intent_id, ACK_PENDING, None, code, None)
     store.mark_ack_result(owner, intent_id, state=ACK_CONFIRMED, error_code=None)
     return AckOutcome(intent_id, ACK_CONFIRMED, delivery_state, None, None)
+
+
+async def recover_ack(
+    owner: OwnerSnapshot,
+    message_id: str,
+    target: AckTarget,
+    *,
+    config_dir: Path,
+    access: OAuthAccess | None,
+    client_ref: str | None = None,
+    client: WireClient | None = None,
+) -> AckOutcome:
+    """Resume a PENDING intent whose id the caller never received (R5/Q7).
+
+    The crash window this closes: ``record_ack_intent`` committed but the
+    process died before ``ack`` returned the id, so a plain re-ack with the
+    default auto-UUID ref would be refused as a write-once conflict and the
+    row would be unreachable. Lookup is by the exact-owner namespace plus
+    (message, target); the STORED tuple and STORED ref are replayed — there
+    is no path that re-screens or mutates the immutable intent. A caller that
+    names a DIFFERENT ref is refused: silently swapping the ref would make
+    one intent carry two identities.
+    """
+
+    store = Store(config_dir)
+    _guard_owner(store, owner, access)
+    intent = store.find_pending_intent(owner, message_id, target)
+    if intent is None:
+        raise PullRefused("no_intent", "no pending intent for this message+target; hold")
+    if client_ref is not None and client_ref != intent["client_ref"]:
+        raise PullRefused(
+            "ref_mismatch", "the stored intent's ref is immutable; a different ref is refused"
+        )
+    return await flush_ack(
+        owner, intent["intent_id"], config_dir=config_dir, access=access, client=client
+    )
 
 
 async def events(

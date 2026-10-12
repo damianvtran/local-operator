@@ -209,6 +209,27 @@ class Store:
     def __init__(self, config_dir: Path) -> None:
         self._path = state_db_path(config_dir)
 
+    def _begin_write(self, conn: sqlite3.Connection) -> None:
+        """Take the write lock BEFORE any read a generation fence depends on.
+
+        Every mutating path runs its authority check and its writes inside ONE
+        immediate transaction: a deferred read-then-write let another
+        connection invalidate between the two (QA R2 H2-Q5/Q6), so a stale
+        operation could still alter the new generation's rows. BEGIN IMMEDIATE
+        serializes check+write; contention beyond the busy timeout is a typed
+        refusal, never a silent retry."""
+
+        if conn.in_transaction:
+            # _init's fresh-schema stamp can leave an implicit DEFERRED
+            # transaction open; it holds no user data (schema bootstrap only),
+            # so committing it is safe and lets the authority check take the
+            # write lock now rather than inheriting a deferred one.
+            conn.commit()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as error:
+            raise StoreRefused("busy", str(error)) from error
+
     # -- connection / schema -------------------------------------------------
 
     @contextmanager
@@ -395,6 +416,7 @@ class Store:
             raise StoreRefused("invalid_receipt", "consent receipt must name version + ref")
         with self._connect() as conn:
             self._init(conn)
+            self._begin_write(conn)
             existing = conn.execute(
                 "SELECT enrollment_generation, state FROM enrollments WHERE owner_key = ?",
                 (_owner_key(owner),),
@@ -443,6 +465,7 @@ class Store:
 
         with self._connect() as conn:
             self._init(conn)
+            self._begin_write(conn)
             self._require_live(conn, owner)
             new_generation = owner.enrollment_generation + 1
             conn.execute(
@@ -490,6 +513,7 @@ class Store:
 
         with self._connect() as conn:
             self._init(conn)
+            self._begin_write(conn)
             self._require_live(conn, owner)
             for ref in refs:
                 if ref.tenant_id != owner.tenant_id:
@@ -547,6 +571,7 @@ class Store:
 
         with self._connect() as conn:
             self._init(conn)
+            self._begin_write(conn)
             self._require_live(conn, owner)
             current = conn.execute(
                 "SELECT pending_resync FROM sync WHERE owner_key = ?", (_owner_key(owner),)
@@ -587,6 +612,7 @@ class Store:
 
         with self._connect() as conn:
             self._init(conn)
+            self._begin_write(conn)
             self._require_live(conn, owner)
             row = conn.execute(
                 "SELECT pending_resync, walk_terminal FROM sync WHERE owner_key = ?",
@@ -656,6 +682,7 @@ class Store:
         intent_id = str(uuid.uuid4())
         with self._connect() as conn:
             self._init(conn)
+            self._begin_write(conn)
             self._require_live(conn, owner)
             existing = conn.execute(
                 "SELECT * FROM ack_intents WHERE owner_key = ? AND message_id = ? AND target = ?",
@@ -702,6 +729,32 @@ class Store:
             )
             return intent_id
 
+    @staticmethod
+    def _intent_dict(row: sqlite3.Row) -> dict[str, Any]:
+        """The ONE read shape for an ack intent (shared by every lookup)."""
+
+        return {
+            "intent_id": row["intent_id"],
+            "message_id": row["message_id"],
+            "target": row["target"],
+            "client_ref": row["client_ref"],
+            "receipt": (
+                {
+                    "verdict": row["verdict"],
+                    "model": row["model"],
+                    "prompt_version": row["prompt_version"],
+                    "template_sha256": row["template_sha256"],
+                    "body_sha256": row["body_sha256"],
+                    "categories": json.loads(row["categories"]),
+                }
+                if row["verdict"] is not None
+                else None
+            ),
+            "state": row["state"],
+            "error_code": row["error_code"],
+            "retry_after": row["retry_after"],
+        }
+
     def ack_intent(self, owner: OwnerSnapshot, intent_id: str) -> dict[str, Any] | None:
         """Read one intent (recovery). ``None`` means NOT reconstructable."""
 
@@ -714,29 +767,50 @@ class Store:
                 ).fetchone()
                 if row is None:
                     return None
-                return {
-                    "intent_id": row["intent_id"],
-                    "message_id": row["message_id"],
-                    "target": row["target"],
-                    "client_ref": row["client_ref"],
-                    "receipt": (
-                        {
-                            "verdict": row["verdict"],
-                            "model": row["model"],
-                            "prompt_version": row["prompt_version"],
-                            "template_sha256": row["template_sha256"],
-                            "body_sha256": row["body_sha256"],
-                            "categories": json.loads(row["categories"]),
-                        }
-                        if row["verdict"] is not None
-                        else None
-                    ),
-                    "state": row["state"],
-                    "error_code": row["error_code"],
-                    "retry_after": row["retry_after"],
-                }
+                return self._intent_dict(row)
         except sqlite3.Error:
             return None
+
+    def find_pending_intent(
+        self, owner: OwnerSnapshot, message_id: str, target: str
+    ) -> dict[str, Any] | None:
+        """The namespace-bound recovery lookup (reviewer R5 / QA Q7-recovery).
+
+        A crash between ``record_ack_intent`` and the caller receiving the
+        intent id (the store call committed, the process died before the
+        return) leaves a PENDING row that ``flush_ack`` cannot be pointed at.
+        This finds it by the SAME exact-owner namespace plus the (message,
+        target) the caller was performing, so recovery replays the STORED
+        tuple and the STORED ref — never a fresh screening round. Confirmed
+        and conflict intents are terminal and deliberately invisible here.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                row = conn.execute(
+                    "SELECT * FROM ack_intents WHERE owner_key = ? AND message_id = ? "
+                    "AND target = ? AND state = ?",
+                    (_owner_key(owner), message_id, target, ACK_PENDING),
+                ).fetchone()
+                return None if row is None else self._intent_dict(row)
+        except sqlite3.Error:
+            return None
+
+    def list_pending_intents(self, owner: OwnerSnapshot) -> list[dict[str, Any]]:
+        """Every PENDING intent for this exact owner, oldest first (drain)."""
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                rows = conn.execute(
+                    "SELECT * FROM ack_intents WHERE owner_key = ? AND state = ? "
+                    "ORDER BY created_at, intent_id",
+                    (_owner_key(owner), ACK_PENDING),
+                ).fetchall()
+                return [self._intent_dict(row) for row in rows]
+        except sqlite3.Error:
+            return []
 
     def mark_ack_result(
         self,
@@ -753,6 +827,7 @@ class Store:
             raise StoreRefused("invalid_state", state)
         with self._connect() as conn:
             self._init(conn)
+            self._begin_write(conn)
             row = conn.execute(
                 "SELECT state FROM ack_intents WHERE owner_key = ? AND intent_id = ?",
                 (_owner_key(owner), intent_id),
@@ -789,14 +864,11 @@ class Store:
             raise StoreRefused("expired_lease", "expiry must be in the future")
         with self._connect() as conn:
             self._init(conn)
-            try:
-                # BEGIN IMMEDIATE takes the write lock BEFORE the read: the
-                # SELECT-then-write window QA's scheduler interleaved across
-                # two connections (H2-Q6) cannot exist — the second contender
-                # waits on the lock, then reads the winner's committed row.
-                conn.execute("BEGIN IMMEDIATE")
-            except sqlite3.OperationalError as error:
-                raise StoreRefused("busy", str(error)) from error
+            # BEGIN IMMEDIATE takes the write lock BEFORE the read: the
+            # SELECT-then-write window QA's scheduler interleaved across two
+            # connections (H2-Q6) cannot exist — the second contender waits
+            # on the lock, then reads the winner's committed row.
+            self._begin_write(conn)
             self._require_live(conn, owner)
             row = conn.execute(
                 "SELECT * FROM claims WHERE owner_key = ? AND message_id = ?",
@@ -839,6 +911,7 @@ class Store:
             raise StoreRefused("expired_lease", "expiry must be in the future")
         with self._connect() as conn:
             self._init(conn)
+            self._begin_write(conn)
             self._require_live(conn, owner)
             row = conn.execute(
                 "SELECT * FROM claims WHERE owner_key = ? AND message_id = ?",
@@ -850,10 +923,17 @@ class Store:
                 raise StoreRefused("stale_generation", "claim was minted under a fenced generation")
             if float(row["expires_at"]) <= now:
                 raise StoreRefused("expired_claim", "an expired claim cannot be renewed")
-            conn.execute(
-                "UPDATE claims SET expires_at = ? WHERE owner_key = ? AND message_id = ?",
-                (expiry, _owner_key(owner), message_id),
+            # The UPDATE re-states the SAME fences: even if this transaction's
+            # view were somehow raced by another writer (it cannot be, under
+            # BEGIN IMMEDIATE), the row predicate — exact token, held state,
+            # exact generation — is what gates the write (QA R2 H2-Q6).
+            updated = conn.execute(
+                "UPDATE claims SET expires_at = ? WHERE owner_key = ? AND message_id = ? "
+                "AND token = ? AND state = 'held' AND generation = ?",
+                (expiry, _owner_key(owner), message_id, lease_token, owner.enrollment_generation),
             )
+            if updated.rowcount != 1:
+                raise StoreRefused("not_holder", "renew refused: holder changed under the write")
 
     def release_claim(self, owner: OwnerSnapshot, message_id: str, lease_token: str) -> None:
         """Conditional release: only the LIVE holder's exact token may release.
@@ -864,6 +944,7 @@ class Store:
 
         with self._connect() as conn:
             self._init(conn)
+            self._begin_write(conn)
             row = conn.execute(
                 "SELECT token, state, generation FROM claims "
                 "WHERE owner_key = ? AND message_id = ?",
@@ -875,10 +956,16 @@ class Store:
                 raise StoreRefused("not_holder", "release refused: token is not the live holder")
             if int(row["generation"]) != owner.enrollment_generation:
                 raise StoreRefused("stale_generation", "claim was minted under a fenced generation")
-            conn.execute(
-                "UPDATE claims SET state = 'released' WHERE owner_key = ? AND message_id = ?",
-                (_owner_key(owner), message_id),
+            # Fenced conditional write (QA R2 H2-Q6): a successor's row cannot
+            # match the old token+generation predicate, so a stale release can
+            # never touch it even if evaluation were to interleave.
+            updated = conn.execute(
+                "UPDATE claims SET state = 'released' WHERE owner_key = ? AND message_id = ? "
+                "AND token = ? AND state = 'held' AND generation = ?",
+                (_owner_key(owner), message_id, lease_token, owner.enrollment_generation),
             )
+            if updated.rowcount != 1:
+                raise StoreRefused("not_holder", "release refused: holder changed under the write")
 
     def drain_feed_refs(self, owner: OwnerSnapshot, upto_seq: int) -> list[str]:
         """Refs durably recorded at or before ``upto_seq``, for the H4 drainer.
@@ -905,6 +992,7 @@ class Store:
 
         with self._connect() as conn:
             self._init(conn)
+            self._begin_write(conn)
             self._require_live(conn, owner)
             for ref in refs:
                 if ref.tenant_id != owner.tenant_id:
