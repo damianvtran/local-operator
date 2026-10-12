@@ -56,6 +56,7 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.settings_io import Kind, Section, Setting
+from local_operator.team_bridge import availability as bridge_availability
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import score_command_text_match
 from local_operator.tui.error_text import error_text
@@ -1164,9 +1165,16 @@ class SettingsView(Vertical):
                 expanded_choices = len(_choices_for(setting))
         return (
             # The registry itself: the queued Hotkeys section adds rows to it,
-            # and the profiling harnesses inflate it.
+            # the profiling harnesses inflate it, and the agent-messages section
+            # is DYNAMICALLY absent until this process has observed an eligible
+            # state (§5.6; see ``team_bridge.availability``) — anything
+            # ``_build_rows`` reads must appear here, and that visibility is
+            # read there.
             len(settings_io.SETTINGS),
             len(settings_io.SECTIONS),
+            bridge_availability.section_visible(
+                bridge_availability.BRIDGE_SECTION, self._manager.config_dir
+            ),
             self._editing,
             self._expanded,
             expanded_choices,
@@ -1213,6 +1221,14 @@ class SettingsView(Vertical):
         """
         rows: list[_Row] = []
         for section in settings_io.SECTIONS:
+            if not bridge_availability.section_visible(section.name, self._manager.config_dir):
+                # §5.6: a dynamically-gated section (agent messages) is ABSENT —
+                # no header, no rows, nothing to land on — until this process
+                # has observed an eligible state. The availability record is
+                # written by the status discipline's boundary reads
+                # (``team_bridge.availability``); a process that never read
+                # shows nothing, which is the fail-closed direction.
+                continue
             rows.append(_Row(kind="header", section=section))
             for setting in settings_io.settings_for(section.name):
                 rows.append(_Row(kind="setting", setting=setting))

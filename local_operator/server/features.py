@@ -257,6 +257,18 @@ def feature_flags() -> dict[str, Any]:
         # attempting an operation whose failure it cannot classify,
         # while everything else keeps working and is not gated on this.
         "radient_org": 1,
+        # Agent messages (Team Bridge, RFC §5.4): the desktop routes over
+        # `/v1/desktop/team-bridge/...` -- status, settings read/write and the
+        # allowlist. Its OWN key rather than a bump, by the rule `radient_org`
+        # states above: a renderer that does not see it is talking to a
+        # backend whose messaging routes do not exist, so the Inbox/settings
+        # surfaces must say "update the backend" instead of mounting an
+        # affordance whose every call 404s. NOTHING is gated on the number
+        # itself: with the server dark (BRIDGE_ENABLED off) the routes answer
+        # 503 `messaging_unavailable`, which the status route renders as a
+        # state, not an error -- the capability advertises that the routes
+        # EXIST, never that the deployment carries traffic.
+        "team_bridge": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key

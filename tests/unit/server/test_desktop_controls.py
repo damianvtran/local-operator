@@ -36,6 +36,37 @@ TOKEN = "desktop-contract-test-token"
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _reset_bridge_availability():
+    """The agent-messages section's §5.6 visibility is PROCESS-global state.
+
+    Cleared around every test so one test's observation cannot decide whether
+    another's projection carries the section. The three census tests below
+    record a visible observation themselves, because they assert about the
+    projection of a FULLY-visible registry; the gate's own behaviour is pinned
+    in ``test_server_settings_visibility.py``.
+    """
+
+    from local_operator.team_bridge import availability
+
+    availability.clear()
+    yield
+    availability.clear()
+
+
+def _show_dynamic_sections(app: Any) -> None:
+    """Make dynamically-gated sections render for a census assertion."""
+
+    from local_operator.team_bridge import availability
+
+    availability.record(
+        app.state.config_manager.config_dir,
+        visible=True,
+        state="ready",
+        checked_at=1.0,
+    )
+
+
 @pytest_asyncio.fixture
 async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
@@ -603,6 +634,7 @@ async def test_the_cors_echo_follows_the_admitted_set(tmp_path: Path, monkeypatc
 
 async def test_settings_census_typed_writes_reset_and_secret_exclusion(desktop):
     client, app = desktop
+    _show_dynamic_sections(app)
     manager = app.state.config_manager
     manager.set_config_value("private_secret", "never-serialize-me")
     data = (await client.get("/v1/settings")).json()["result"]
@@ -737,6 +769,7 @@ async def test_settings_projection_serves_the_registry_authored_annotations(desk
     cannot grow a second opinion about a key's consequence).
     """
     client, _app = desktop
+    _show_dynamic_sections(_app)
     rows = {
         row["key"]: row for row in (await client.get("/v1/settings")).json()["result"]["settings"]
     }
@@ -771,6 +804,7 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
     actually present so the assertion cannot pass on all-empties.
     """
     client, _app = desktop
+    _show_dynamic_sections(_app)
     rows = {
         row["key"]: row for row in (await client.get("/v1/settings")).json()["result"]["settings"]
     }

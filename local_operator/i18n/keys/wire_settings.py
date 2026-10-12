@@ -2612,6 +2612,30 @@ def supplements_timeouts_label() -> Msg:
     return Msg("wire.settings.supplements_timeouts.label", {})
 
 
+def team_bridge_description() -> Msg:
+    return Msg("wire.settings.team_bridge.description", {})
+
+
+def team_bridge_title() -> Msg:
+    return Msg("wire.settings.team_bridge.title", {})
+
+
+def team_bridge_enabled_help() -> Msg:
+    return Msg("wire.settings.team_bridge_enabled.help", {})
+
+
+def team_bridge_enabled_label() -> Msg:
+    return Msg("wire.settings.team_bridge_enabled.label", {})
+
+
+def team_bridge_session_help() -> Msg:
+    return Msg("wire.settings.team_bridge_session.help", {})
+
+
+def team_bridge_session_label() -> Msg:
+    return Msg("wire.settings.team_bridge_session.label", {})
+
+
 def tool_approval_mode_choice_ask_description() -> Msg:
     return Msg("wire.settings.tool_approval_mode.choice.ask.description", {})
 
