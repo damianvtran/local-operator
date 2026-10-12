@@ -37,6 +37,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "extensions",
         "failover",
         "highlights",
+        "i18n",
         "image-generation",
         "mcp",
         "mobile",
