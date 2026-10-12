@@ -470,6 +470,25 @@ substituted where it exists:
    `types.py:794-801`), bounded at ~60 s. **Busy runtimes are left where they
    are** and retire at their own next idle boundary; the receipt says how many,
    honestly.
+
+   **On Linux, a relay restart no longer takes session runtimes with it, and
+   the stage can finally move the relay (2026-10-11).** The relay's systemd
+   unit now carries `KillMode=process`: under systemd's default a restart kills
+   every process left in the unit's cgroup — and the device's session runtimes
+   are children of the relay — so any restart, including the one a pass asks
+   for, used to end every session on the node. Under `process` the runtimes are
+   left alone; they reparent to `systemd --user` and re-attach at the relay's
+   next start. Network stop/kill does not kill session runtimes, by design —
+   that is the never-forced rule in practice — and sessions are ended through
+   their own verbs, never by the relay's lifecycle. With that invariant in
+   place, the daemon-refresh stage gains its Linux arm: it migrates an
+   installed unit (which is how existing nodes grow `KillMode=process`) and
+   then restarts the relay only on a proven build move, printing the same
+   "expect a brief mesh blip" line the macOS roll prints. One bootstrap note:
+   the running relay executes its own roll, so the arm self-applies only once a
+   relay is already serving the fix build — after the fix installs, one manual
+   `lop network restart` per Linux node (session-safe under the invariant
+   above), then every subsequent move is automatic.
 5. **Re-engage and verify.** Re-engage the snapshot's sessions — this is the
    half the fleet README says "nothing else performs for unwatched sessions" —
    with a truthful one-line nudge (a session whose runtime was only idle-retired
@@ -500,7 +519,8 @@ mobility's "each retry is a fresh idle probe"; `mobility.py:87-94`.)
   **retry-eligible**; the generation layout guarantees the member is still on
   its old, working build.
 - **Relay-restart failure** answers `failed` with the existing remedy sentence
-  (`lop network install`). Sessions are unaffected.
+  (`lop network install`). Sessions are unaffected — on Linux this now rests on
+  the relay unit's `KillMode=process` (see the §4.2 note), not on hope.
 - **One at a time on the member too**: a single update lock (pid-carrying,
   file-locked like the approvals store, `approvals.py:218-222`), stale-supersede
   after the `STALE_RUN_AFTER_S`-shaped bound (`approvals.py:148-162`) so a
