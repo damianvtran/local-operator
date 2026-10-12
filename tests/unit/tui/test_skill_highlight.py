@@ -226,22 +226,32 @@ def _ink_on(segments: list[tuple[str, str | None]], needle: str) -> str | None:
 
 
 @pytest.mark.usefixtures("skill_root")
+@pytest.mark.parametrize("inherited_theme", ["light", "dark"])
 @pytest.mark.asyncio
-async def test_a_resolved_token_takes_the_signal_ink() -> None:
+async def test_a_resolved_token_takes_the_signal_ink(inherited_theme: str) -> None:
     """The must-have: `$research` is not indistinguishable from the prose.
 
     Read off the FINISHED strip, and both halves asserted: the token carries
-    the structured-token ink and the words beside it are untouched.
+    the structured-token ink and the words beside it are untouched. A previous
+    app's ramp must not determine the expectation for this app's default ramp.
+    The caret stays native and focused: its separate cell is not token ink.
     """
-    signal = theme_mod.semantic_color("signal").lower()
-    prose = theme_mod.semantic_color("fg").lower()
-
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 30)) as pilot:
-        editor = await _draft(app, pilot, "$research fix this")
-        segments = _segment_inks(editor)
-    assert _ink_on(segments, "$research") == signal, segments
-    assert _ink_on(segments, " fix this") == prose, segments
+    previous_theme = theme_mod.current_theme()
+    try:
+        theme_mod.set_theme(inherited_theme)
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        # Construction activates this app's ramp. Reading these beforehand
+        # records the previous app's colours (light signal #2b6ea8 versus dark
+        # #6ea8d8), even though the finished strip correctly uses this app's.
+        signal = theme_mod.semantic_color("signal").lower()
+        prose = theme_mod.semantic_color("fg").lower()
+        async with app.run_test(size=(100, 30)) as pilot:
+            editor = await _draft(app, pilot, "$research fix this")
+            segments = _segment_inks(editor)
+        assert _ink_on(segments, "$research") == signal, segments
+        assert _ink_on(segments, " fix this") == prose, segments
+    finally:
+        theme_mod.set_theme(previous_theme)
 
 
 @pytest.mark.usefixtures("skill_root")

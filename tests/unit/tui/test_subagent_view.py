@@ -5032,9 +5032,10 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
         assert "durable row" in " ".join(view.rendered_rows())
 
 
+@pytest.mark.parametrize("refresh_during_append", [False, True])
 @pytest.mark.asyncio
 async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, refresh_during_append: bool
 ) -> None:
     """Recovering from a failed probe must not become the retry storm.
 
@@ -5050,9 +5051,13 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
     session.jobs = _fake_jobs(job)
     child_dir = tmp_path / "child"
     child_dir.mkdir()
-    session._subagent_comms = type(
-        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
-    )()
+    # The mounted app also projects the roster through the runtime handle.
+    # A session_dir_of-only double breaks that subscription before this test
+    # reaches the history seam; keep the real protocol and pin only its path.
+    comms = SubagentComms(cast(Session, session))
+    comms.record_launch(job.id, job.label)
+    monkeypatch.setattr(comms, "session_dir_of", lambda _job_id: child_dir)
+    session._subagent_comms = comms
 
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
@@ -5071,9 +5076,6 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
         view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
 
-        transcript = Transcript(child_dir)
-        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
-
         reads = 0
 
         async def always_fails(*args, **kwargs):
@@ -5081,7 +5083,25 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
             reads += 1
             raise OSError("permission denied")
 
+        # The append yields AFTER making the file visible. A timer refresh in
+        # that await can perform a successful probe and exhaust the page before
+        # the failing seam is installed. Pin failure first: the initial empty
+        # read has completed, and every subsequent look must test this path.
         monkeypatch.setattr(subagent_view, "load_transcript_page", always_fails)
+        transcript = Transcript(child_dir)
+        if refresh_during_append:
+            append = transcript.append_message
+
+            async def append_with_refresh(message: Message) -> None:
+                await append(message)
+                # Reproduce the timer's legal interleaving deterministically:
+                # the file is visible but append has not returned to its caller.
+                # Moving the failure seam back below append must fail this arm.
+                app._refresh_subagent_view(view.job_id)
+                await _wait_history(pilot, view)
+
+            monkeypatch.setattr(transcript, "append_message", append_with_refresh)
+        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
 
         footers = set()
         for _ in range(20):
@@ -5098,6 +5118,7 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
         #
         # The storm this excludes is the one an error-guard fix would create:
         # unbounded growth with the EVENT rate rather than the refresh rate.
+        assert reads > 0, "the failing probe was never exercised"
         assert reads <= 2 * 20, f"probe storm: {reads} reads over 20 refreshes"
 
         # The bound above is necessary but NOT sufficient: the rejected
